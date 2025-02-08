@@ -9,7 +9,7 @@ A Discord bot built using Discord.py that integrates with Ollama, Redis, Premium
 
 ## Available Tools
 
-### Below are the tools available to you. Simply ask the Tater to perform these tasks, no slash commands or specific key terms are required:
+**Below are the tools available to you. Simply ask the Tater to perform these tasks, no slash commands or specific key terms are required:**
 
 - **YouTube Video Summaries:** Extracts YouTube video IDs, fetches summaries, and sends formatted responses.
 - **Web Summaries:** Summarizes webpages or articles.
