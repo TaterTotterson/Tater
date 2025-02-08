@@ -1,0 +1,20 @@
+# Discord bot token
+DISCORD_TOKEN=your_token
+
+# Ollama (AI model) settings
+OLLAMA_HOST=127.0.0.1
+OLLAMA_PORT=11434
+OLLAMA_MODEL=mistral-small:24b
+
+# Redis database settings
+REDIS_HOST=127.0.0.1
+REDIS_PORT=6379
+
+# Discord channel ID for responses
+RESPONSE_CHANNEL_ID=your_channel_id
+
+# Automatic API endpoint
+AUTOMATIC_URL=http://127.0.0.1:7860
+
+# Premiumize.me token
+PREMIUMIZE_API_KEY=your_token
