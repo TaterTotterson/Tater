@@ -13,7 +13,7 @@ A Discord bot built using Discord.py that integrates with Ollama, Redis, Premium
 
 - **YouTube Video Summaries:** Extracts YouTube video IDs, fetches summaries, and sends formatted responses.
 - **Web Summaries:** Summarizes webpages or articles.
-- **Image Generation:** Generates images based on text prompts.
+- **Image Generation:** Generates images based on text prompts. (Automatic1111/SD.Next)
 - **Premiumize.me Integration:**
   - Checks if a given URL is cached on Premiumize.me and retrieves download links.
   - Processes torrent files to extract the torrent hash, checks cache status, and retrieves download links.
