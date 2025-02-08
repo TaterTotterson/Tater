@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+
+  bot:
+    build:
+      context: .
+    container_name: tater-bot
+    depends_on:
+      - redis
+    environment:
+      DISCORD_TOKEN: "your_discord_token_here"
+      OLLAMA_HOST: "your_ollama_host"
+      OLLAMA_PORT: "11434"
+      OLLAMA_MODEL: "eas/dolphin-2.2-yi:latest"
+      REDIS_HOST: "redis"
+      REDIS_PORT: "6379"
+      RESPONSE_CHANNEL_ID: "your_channel_id"
+      API_ENDPOINT: "http://your_api_endpoint_here"
+    volumes:
+      - .:/app
+    command: ["poetry", "run", "python", "main.py"]
+
+volumes:
+  redis-data:
