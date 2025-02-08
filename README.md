@@ -5,8 +5,7 @@ A Discord bot built using Discord.py that integrates with Ollama, Redis, Premium
 ## Features
 
 - **Conversation Continuity:** Maintains context using Redis.
-- **Ollama Integration:** Uses Ollama to generate AI responses, waiting messages, and friendly error messages.
-           Note: You must use an Ollama model that supports tools. For more details, see [Ollama Tools](https://ollama.com/search?c=tools).
+- **Ollama Integration:** Uses Ollama to generate AI responses, waiting messages, and friendly error messages.<br> Note: You must use an Ollama model that supports tools. For more details, see [Ollama Tools](https://ollama.com/search?c=tools).
 - **YouTube Video Summaries:** Extracts YouTube video IDs, fetches summaries, and sends formatted responses.
 - **Web Summaries:** Summarizes webpages or articles.
 - **Image Generation:** Generates images based on text prompts.
