@@ -32,7 +32,7 @@ A Discord bot built using Discord.py that integrates with Ollama, Redis, Premium
 1. **Clone the Repository**
 
 ```bash
-git clone <repository_url>
+git clone https://github.com/MasterPhooey/Tater.git
 ```
 
 2. **Navigate to the Project Directory**
@@ -58,6 +58,7 @@ OLLAMA_PORT=11434
 REDIS_HOST=127.0.0.1
 REDIS_PORT=6379
 OLLAMA_MODEL=llama3.2
+AUTOMATIC_URL=http://127.0.0.1:7860
 PREMIUMIZE_API_KEY=your_premiumize_api_key
 ```
 
