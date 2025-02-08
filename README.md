@@ -53,6 +53,7 @@ Create a `.env` file in the root directory with the following variables:
 
 ```bash
 DISCORD_TOKEN=your_discord_token
+RESPONSE_CHANNEL_ID=your_channel_id
 OLLAMA_HOST=127.0.0.1
 OLLAMA_PORT=11434
 REDIS_HOST=127.0.0.1
@@ -82,29 +83,9 @@ docker build -t tater .
 docker run -d --name tater_bot tater
 ```
 
-## Configuration
-
-- **Logging:**  
-  Adjust the logging level in your code by changing the line:
-  
-  ```bash
-  logging.basicConfig(level=logging.DEBUG)
-  ```
-  
-  to a less verbose level (e.g., `logging.INFO`) for production.
-  
-- **Redis:**  
-  Used to store and retrieve conversation history for maintaining context.
-  
-- **Ollama:**  
-  The bot uses Ollama’s API to generate AI responses, waiting messages, and friendly error messages.
-  
-- **Premiumize.me:**  
-  Integrates with Premiumize.me to check for cached files (both URL and torrent-based) and to retrieve download links.
-
 ## Usage
 
-When the bot is running, it listens for messages in a designated channel or when it’s mentioned. Based on the JSON response from Ollama, the bot will execute one of the following tools:
+When the bot is running, it listens for messages in a designated channel. Based on the JSON response from Ollama, the bot will execute one of the following tools:
 
 - **YouTube Summary:** Request a summary of a YouTube video.
 - **Web Summary:** Request a summary of a webpage.
