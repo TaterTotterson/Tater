@@ -4,9 +4,11 @@ A Discord bot built using Discord.py that integrates with Ollama, Redis, Premium
 
 ## Features
 
-- **Conversation Continuity:** Maintains context using Redis.
-- **Ollama Integration:** Uses Ollama to generate AI responses, waiting messages, and friendly error messages.<br> Note: You must use an Ollama model that supports tools. For more details, see [Ollama Tools](https://ollama.com/search?c=tools).
-
+- **Conversation Continuity**: Maintains context using Redis and an embedding model for improved memory retrieval.
+- **Ollama Integration**: Uses Ollama to generate AI responses, waiting messages, and friendly error messages.
+  - **Note**: You must use an Ollama model that supports tools. For more details, see [Ollama Tools](#).
+- **Embedding Model**: Uses an Ollama embedding model to enhance chat history recall and provide more relevant responses.
+  - **Note**: You must use an Ollama embedding model. See available models here: [Ollama Embeddings](https://ollama.com/search?c=embedding).
 ## Available Tools
 
 **Below are the tools available to you. Simply ask the Tater to perform these tasks, no slash commands or specific key terms are required:**
@@ -56,9 +58,10 @@ DISCORD_TOKEN=your_discord_token
 RESPONSE_CHANNEL_ID=your_channel_id
 OLLAMA_HOST=127.0.0.1
 OLLAMA_PORT=11434
+OLLAMA_MODEL=mistral-small:24b
+OLLAMA_EMB_MODEL=nomic-embed-text
 REDIS_HOST=127.0.0.1
 REDIS_PORT=6379
-OLLAMA_MODEL=llama3.2
 AUTOMATIC_URL=http://127.0.0.1:7860
 PREMIUMIZE_API_KEY=your_premiumize_api_key
 ```
