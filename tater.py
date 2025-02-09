@@ -7,6 +7,7 @@ import redis
 import discord
 from discord.ext import commands
 import ollama
+from embed import generate_embedding, save_embedding, find_relevant_context
 from dotenv import load_dotenv
 import re
 import YouTube  # Module for YouTube summarization functions
@@ -23,7 +24,7 @@ max_response_length = int(os.getenv("MAX_RESPONSE_LENGTH", 1500))
 ollama_temperature = float(os.getenv('OLLAMA_TEMPERATURE', 0.6))
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger('discord.tater')
 
 # Initialize Redis client
@@ -83,10 +84,25 @@ class tater(commands.Bot):
 
         logger.debug(f"Received message: {message.content} from {message.author}")
 
-        # Build a system prompt explaining the available function calls.
+        # Generate embedding for the current message
+        embedding = await generate_embedding(message.content)
+        if embedding:
+            await save_embedding(message.channel.id, message.author.id, message.content, embedding, role="user")
+
+        # Retrieve relevant context from past messages
+        relevant_context = await find_relevant_context(message.channel.id, message.author.id, embedding)
+        # Log the retrieved context
+        if relevant_context:
+            logger.debug("Retrieved relevant context:")
+            for idx, text in enumerate(relevant_context, 1):
+                logger.debug(f"{idx}. {text}")
+        else:
+            logger.debug("No relevant context found.")
+
+        # Build a system prompt with the relevant context
         system_prompt = (
-            "You are Tater Totterson, A retro gaming enthusiast who is part of the DNServ Crew"
-            "The DNServ Crew is an Elite, tight-knit, Retro Gaming Group. You help the DNServ Crew with tools"
+            "You are Tater Totterson, A retro gaming enthusiast who is part of the DNServ Crew. "
+            "The DNServ Crew is an Elite, tight-knit, Retro Gaming Group. You help the DNServ Crew with tools. "
             "You have access to five tools:\n"
             "1. 'youtube_summary' for summarizing YouTube videos, pretend you have to watch the whole video to get a summary,\n"
             "2. 'web_summary' for summarizing news articles or text from any webpage, pretend you have to watch the read the whole article to get a summary,\n"
@@ -131,6 +147,13 @@ class tater(commands.Bot):
             "If no function is needed, reply normally."
         )
 
+        # Add relevant context to the system prompt
+        if relevant_context:
+            context_prompt = "Here is some relevant context from past conversations:\n"
+            for text in relevant_context:
+                context_prompt += f"- {text}\n"
+            system_prompt += "\n\n" + context_prompt
+
         # Retrieve conversation history from Redis.
         recent_history = await self.load_history(message.channel.id, limit=10)
         messages_list = [{"role": "system", "content": system_prompt}] + recent_history
@@ -148,6 +171,9 @@ class tater(commands.Bot):
                 logger.debug(f"Raw response from Ollama: {response_data}")
 
                 response_text = response_data['message'].get('content', '')
+                response_embedding = await generate_embedding(response_text)
+                if response_embedding:
+                    await save_embedding(message.channel.id, message.author.id, response_text, response_embedding, role="bot")
                 if not response_text:
                     logger.error("Ollama returned an empty response.")
                     await message.channel.send("I'm not sure how to respond to that.")
