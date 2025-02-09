@@ -5,9 +5,12 @@ A Discord bot built using Discord.py that integrates with Ollama, Redis, Premium
 ## Features
 
 - **Conversation Continuity**: Maintains context using Redis and an embedding model for improved memory retrieval.
-- **Embedding Model**: Uses an Ollama embedding model to enhance chat history recall and provide more relevant responses.
-- **Ollama Integration**: Uses Ollama to generate AI responses, waiting messages, and friendly error messages.
-  - **Note**: You must use an Ollama model that supports tools. For more details, see [Ollama Tools](#).
+- **Ollama Integration**: Utilizes Ollama for AI responses, conversation memory, and embedding-based recall.
+  - **Chat Responses**: Generates AI responses, waiting messages, and friendly error messages.
+  - **Embedding Model**: Enhances chat history recall and provides more relevant responses by storing and retrieving past conversations.
+  - **Requirements**:
+    - You must use an **Ollama model that supports tools**. For more details, see [Ollama Tools](https://ollama.com/search?c=tools).
+    - You must use an **Ollama embedding model**. See available models here: [Ollama Embeddings](https://ollama.com/search?c=embedding).
 
 ## Embedding Model
 
