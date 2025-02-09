@@ -12,23 +12,6 @@ A Discord bot built using Discord.py that integrates with Ollama, Redis, Premium
     - You must use an **Ollama model that supports tools**. For more details, see [Ollama Tools](https://ollama.com/search?c=tools).
     - You must use an **Ollama embedding model**. See available models here: [Ollama Embeddings](https://ollama.com/search?c=embedding).
 
-## Embedding Model
-
-This bot uses an **embedding model** to improve conversation memory and context awareness.  
-Embeddings allow the bot to store and retrieve relevant past messages by converting text into a vector representation, making it easier to recall related discussions.
-
-### How It Works:
-1. When a user sends a message, the bot generates an **embedding** (a numerical representation of the message).
-2. The embedding is stored in **Redis** along with the original text.
-3. When responding, the bot retrieves the most relevant past messages based on similarity to the current message.
-4. This improves **conversation continuity**, allowing the bot to remember past interactions even across multiple messages.
-
-### Requirements:
-- You must use an Ollama **embedding model** for this feature to work.  
-  See available models here: [Ollama Embeddings](https://ollama.com/search?c=embedding).
-
-By leveraging embeddings, the bot provides **more intelligent responses** and avoids repeating irrelevant information.
-
 ## Available Tools
 
 **Below are the tools available to you. Simply ask the Tater to perform these tasks, no slash commands or specific key terms are required:**
