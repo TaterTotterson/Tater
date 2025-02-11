@@ -1,6 +1,6 @@
 <div align="center"> <img src="https://raw.githubusercontent.com/MasterPhooey/Tater-Discord-AI/refs/heads/main/tater.png" alt="Tater Discord Bot" width="200"/> <h1>Tater Discord AI</h1> </div>
 
-A Discord bot built using Discord.py that integrates with Ollama, Redis, Premiumize.me, YouTube, and Web summarization services to provide a variety of tools to users.
+A Discord bot that integrates with Ollama to provide a variety of tools to users.
 
 ## Features
 
