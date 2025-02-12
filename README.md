@@ -117,13 +117,3 @@ docker build -t tater .
 ```bash
 docker run -d --name tater_bot tater
 ```
-
-## Usage
-
-When the bot is running, it listens for messages in a designated channel. Based on the JSON response from Ollama, the bot will execute one of the following tools:
-
-- **YouTube Summary:** Request a summary of a YouTube video.
-- **Web Summary:** Request a summary of a webpage.
-- **Image Generation:** Generate an image from a text prompt.
-- **Premiumize Download Check:** Check if a URL is cached on Premiumize.me and, if so, provide download links.
-- **Premiumize Torrent Check:** Process an attached torrent file to check if it’s cached on Premiumize.me and provide download links.
