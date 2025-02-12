@@ -26,7 +26,7 @@ The bot uses an **embedding model** to store and retrieve past messages, improvi
 - If running on a **low-RAM system**, you can enable memory limits by modifying `embed.py`:
   ```python
   # Uncomment the following line in embed.py to limit storage to the last 100 messages (saves RAM)
-  # redis_client.ltrim(embedding_key, -100, -1)
+  # redis_client.ltrim(global_key, -100, -1)
   ```
   - **Uncommenting this line** will ensure only the **last 100 embeddings** are kept in memory.
   - This helps prevent excessive memory usage on systems with limited resources.
