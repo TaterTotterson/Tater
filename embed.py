@@ -4,7 +4,12 @@ import os
 import json
 import redis
 import ollama
+import logging
 from dotenv import load_dotenv
+
+# Set up logging
+logger = logging.getLogger("discord.tater")
+logger.setLevel(logging.INFO)  # Ensure INFO logs are shown
 
 # Load environment variables
 load_dotenv()
@@ -27,64 +32,46 @@ async def generate_embedding(text: str):
     try:
         response = await ollama_emb_client.embeddings(
             model=ollama_emb_model,
-            prompt=text
+            prompt=text,
+            keep_alive=-1
         )
         return response['embedding']
     except Exception as e:
-        print(f"Error generating embedding: {e}")
+        logger.error(f"Error generating embedding: {e}")  # Use logger instead of print
         return None
 
-async def save_embedding(channel_id: int, user_id: int, text: str, embedding, role="user"):
+async def save_embedding(text: str, embedding, min_length=30):
     """
-    Save embeddings to both user-specific and global history.
+    Save embeddings globally, but only if the text is long enough to be useful.
     """
-    user_key = f"tater:channel:{channel_id}:user:{user_id}:embeddings"
-    global_key = f"tater:global:embeddings"
+    if len(text.strip()) < min_length:
+        logger.info(f"Message NOT saved (too short)")
+        return  # Skip storing short messages
 
-    embedding_data = {
-        "text": text,
-        "embedding": json.dumps(embedding),
-        "role": role
-    }
+    global_key = "tater:global:embeddings"
+    redis_client.rpush(embedding_key, json.dumps(embedding_data))
 
-    redis_client.rpush(user_key, json.dumps(embedding_data))
-    redis_client.ltrim(user_key, -100, -1)  # Limit per-user storage
+    # Uncomment the line below if you want to limit stored embeddings to the last 100 entries.
+    # This is useful for low RAM environments to prevent excessive memory usage.
+    # redis_client.ltrim(embedding_key, -100, -1)  # Keep the last 100 embeddings
+    
+    logger.info(f"Message saved")
 
-    redis_client.rpush(global_key, json.dumps(embedding_data))
-    redis_client.ltrim(global_key, -500, -1)  # Limit shared history to 500
-
-async def load_embeddings(channel_id: int, user_id: int, limit=100):
+async def find_relevant_context(query_embedding, top_n=3):
     """
-    Load the embeddings for a specific user in a channel from Redis.
+    Find relevant context from globally stored embeddings.
     """
-    embedding_key = f"tater:channel:{channel_id}:user:{user_id}:embeddings"
-    embeddings = redis_client.lrange(embedding_key, -limit, -1)
-    return [json.loads(entry) for entry in embeddings]
-
-async def find_relevant_context(channel_id: int, user_id: int, query_embedding, top_n=3, role_filter=None):
-    """
-    Find the most relevant past messages based on query embedding.
-    Prioritizes the same user and recent messages.
-    """
-    user_embeddings = await load_embeddings(channel_id, user_id)
-    global_embeddings = redis_client.lrange("tater:global:embeddings", -500, -1)
-
-    embeddings = user_embeddings + [json.loads(entry) for entry in global_embeddings]
+    global_embeddings = redis_client.lrange("tater:global:embeddings", 0, -1)  # Search full global storage
     similarities = []
 
-    for emb_data in embeddings:
-        if role_filter and emb_data['role'] != role_filter:
-            continue  # Skip non-matching roles
-
-        emb = json.loads(emb_data['embedding'])
+    for emb_data in global_embeddings:
+        emb_data = json.loads(emb_data)
+        emb = json.loads(emb_data["embedding"])
         similarity = cosine_similarity(query_embedding, emb)
-        recency_weight = 1.0  # Can be adjusted based on timestamps
-        user_bonus = 1.2 if emb_data['role'] == "user" else 1.0  # Favor user inputs
-
-        similarities.append((emb_data['text'], similarity * recency_weight * user_bonus, emb_data['role']))
+        similarities.append((emb_data["text"], similarity))
 
     similarities.sort(key=lambda x: x[1], reverse=True)
-    return [text for text, _, _ in similarities[:top_n]]
+    return [text for text, _ in similarities[:top_n]]
 
 def cosine_similarity(vec1, vec2):
     """
@@ -93,4 +80,4 @@ def cosine_similarity(vec1, vec2):
     dot_product = sum(a * b for a, b in zip(vec1, vec2))
     magnitude1 = sum(a * a for a in vec1) ** 0.5
     magnitude2 = sum(a * a for a in vec2) ** 0.5
-    return dot_product / (magnitude1 * magnitude2)
+    return dot_product / (magnitude1 * magnitude2) if magnitude1 and magnitude2 else 0.0
