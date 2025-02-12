@@ -19,3 +19,6 @@ AUTOMATIC_URL=http://127.0.0.1:7860
 
 # Premiumize.me token
 PREMIUMIZE_API_KEY=your_token
+
+# Admin User ID For Wipe
+ADMIN_USER_ID=1234567891234567891
