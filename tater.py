@@ -24,7 +24,7 @@ max_response_length = int(os.getenv("MAX_RESPONSE_LENGTH", 1500))
 ollama_temperature = float(os.getenv('OLLAMA_TEMPERATURE', 0.6))
 
 # Configure logging
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('discord.tater')
 
 # Initialize Redis client
@@ -82,15 +82,20 @@ class tater(commands.Bot):
         if not should_respond:
             return
 
-        logger.debug(f"Received message: {message.content} from {message.author}")
+        # Ensure embedding is always initialized before use
+        embedding = None  
 
-        # Generate embedding for the current message
-        embedding = await generate_embedding(message.content)
-        if embedding:
-            await save_embedding(message.channel.id, message.author.id, message.content, embedding, role="user")
+        # Check if message length is at least 30 characters before storing
+        if len(message.content.strip()) >= 30:
+            embedding = await generate_embedding(message.content)
+            if embedding:
+                await save_embedding(message.content, embedding)
+        # Retrieve relevant context from past messages (Global Storage)
+        if embedding is not None:  # Ensure embedding exists before searching context
+            relevant_context = await find_relevant_context(embedding)
+        else:
+            relevant_context = []  # No context if no valid embedding
 
-        # Retrieve relevant context from past messages
-        relevant_context = await find_relevant_context(message.channel.id, message.author.id, embedding)
         # Log the retrieved context
         if relevant_context:
             logger.debug("Retrieved relevant context:")
@@ -101,16 +106,18 @@ class tater(commands.Bot):
 
         # Build a system prompt with the relevant context
         system_prompt = (
-            "You are Tater Totterson, A helpful discord chat AI. "
-            "You help users with tools."
-            "You have access to five tools:\n"
-            "1. 'youtube_summary' for summarizing YouTube videos, pretend you have to watch the whole video to get a summary,\n"
-            "2. 'web_summary' for summarizing news articles or text from any webpage, pretend you have to watch the read the whole article to get a summary,\n"
-            "3. 'draw_picture' for generating images, pretend you are actually drawing the picture yourself,\n"
-            "4. 'premiumize_download' for checking if a URL is cached on Premiumize.me and retrieving download links, and\n"
+            "You are Tater Totterson, a retro gaming enthusiast who is part of the DNServ Crew. "
+            "The DNServ Crew is an elite, tight-knit Retro Gaming group. You help the DNServ Crew with various tools. "
+            "You have access to the following tools:\n\n"
+            "1. 'youtube_summary' for summarizing YouTube videos. Pretend you have to watch the entire video to produce an accurate summary.\n\n"
+            "2. 'web_summary' for summarizing news articles or webpage text. Pretend you have to read the whole article to create a proper summary.\n\n"
+            "3. 'draw_picture' for generating images. Pretend you are drawing the picture yourself with care.\n\n"
+            "4. 'premiumize_download' for checking if a URL is cached on Premiumize.me and retrieving download links.\n\n"
             "5. 'premiumize_torrent' for checking if a torrent file is cached on Premiumize.me and retrieving download links.\n\n"
-            "When a user asks for a summary, image generation, or Premiumize file check, reply ONLY with a JSON object in one "
-            "of the following formats (and nothing else):\n\n"
+            "6. 'watch_feed' for adding a new RSS feed to monitor. When a new article appears in the feed, the bot will summarize it and announce the news.\n\n"
+            "7. 'unwatch_feed' for stopping the monitoring of an RSS feed.\n\n"
+            "8. 'list_feeds' for listing all currently watched RSS feeds.\n\n"
+            "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
             "For YouTube videos:\n"
             "{\n"
             '  "function": "youtube_summary",\n'
@@ -144,12 +151,31 @@ class tater(commands.Bot):
             '  "function": "premiumize_torrent",\n'
             '  "arguments": { }\n'
             "}\n\n"
+            "For adding an RSS feed to watch:\n"
+            "{\n"
+            '  "function": "watch_feed",\n'
+            '  "arguments": {\n'
+            '      "feed_url": "<RSS feed URL>"\n'
+            "  }\n"
+            "}\n\n"
+            "For stopping the watch on an RSS feed:\n"
+            "{\n"
+            '  "function": "unwatch_feed",\n'
+            '  "arguments": {\n'
+            '      "feed_url": "<RSS feed URL>"\n'
+            "  }\n"
+            "}\n\n"
+            "For listing all watched RSS feeds:\n"
+            "{\n"
+            '  "function": "list_feeds",\n'
+            '  "arguments": { }\n'
+            "}\n\n"
             "If no function is needed, reply normally."
         )
 
-        # Add relevant context to the system prompt
+        # Add relevant context from stored global knowledge
         if relevant_context:
-            context_prompt = "Here is some relevant context from past conversations:\n"
+            context_prompt = "Here is some relevant information retrieved from previously stored knowledge:\n"
             for text in relevant_context:
                 context_prompt += f"- {text}\n"
             system_prompt += "\n\n" + context_prompt
@@ -170,14 +196,21 @@ class tater(commands.Bot):
                 )
                 logger.debug(f"Raw response from Ollama: {response_data}")
 
-                response_text = response_data['message'].get('content', '')
-                response_embedding = await generate_embedding(response_text)
-                if response_embedding:
-                    await save_embedding(message.channel.id, message.author.id, response_text, response_embedding, role="bot")
+                response_text = response_data['message'].get('content', '').strip()
+
                 if not response_text:
                     logger.error("Ollama returned an empty response.")
                     await message.channel.send("I'm not sure how to respond to that.")
                     return
+
+                # Generate embedding for bot response, but only store if it's useful
+                if len(response_text) >= 30:  # Ensures only meaningful bot responses are stored
+                    response_embedding = await generate_embedding(response_text)
+                    if response_embedding:
+                        await save_embedding(response_text, response_embedding)
+                        logger.info(f"Bot response saved: {response_text}")
+                else:
+                    logger.info(f"Bot response NOT saved (too short): {response_text}")
 
                 # Try to parse the AI response as JSON for a function call.
                 try:
@@ -197,7 +230,7 @@ class tater(commands.Bot):
                             if video_id:
                                 waiting_prompt = (
                                     f"Generate a brief message to {message.author.mention} telling them to wait a moment while you watch "
-                                    "this boring YouTube video for them, and that you will provide a summary in a moment so they don't have to watch it. Do not respond to this message."
+                                    "this boring YouTube video for them, and that you will provide a summary in a moment so they don't have to watch it. Only generate the message. Do not respond to this message."
                                 )
                                 waiting_response = await self.ollama.chat(
                                     model=self.model,
@@ -245,7 +278,7 @@ class tater(commands.Bot):
                         if webpage_url:
                             waiting_prompt = (
                                 f"Generate a brief message to {message.author.mention} telling them to wait a moment while you read "
-                                "this boring article for them, and that you will provide a summary shortly. Do not respond to this message."
+                                "this boring article for them, and that you will provide a summary shortly. Only generate the message. Do not respond to this message."
                             )
                             waiting_response = await self.ollama.chat(
                                 model=self.model,
@@ -273,11 +306,11 @@ class tater(commands.Bot):
                                 for chunk in message_chunks:
                                     await message.channel.send(chunk)
                             else:
-                                prompt = f"Generate a error message to {message.author.mention} explaining that I was unable to retrieve the summary from the webpage. Do not respond to this message."
+                                prompt = f"Generate a error message to {message.author.mention} explaining that I was unable to retrieve the summary from the webpage. Only generate the message. Do not respond to this message."
                                 error_msg = await self.generate_error_message(prompt, "Failed to retrieve the summary from the webpage.", message)
                                 await message.channel.send(error_msg)
                         else:
-                            prompt = f"Generate a error message to {message.author.mention} explaining that no webpage URL was provided in the function call. Do not respond to this message."
+                            prompt = f"Generate a error message to {message.author.mention} explaining that no webpage URL was provided in the function call. Only generate the message. Do not respond to this message."
                             error_msg = await self.generate_error_message(prompt, "No webpage URL provided in the function call.", message)
                             await message.channel.send(error_msg)
 
@@ -287,7 +320,7 @@ class tater(commands.Bot):
                         prompt_text = args.get("prompt")
                         if prompt_text:
                             waiting_prompt = (
-                                f"Generate a brief message to {message.author.mention} telling them to wait a moment while I create that picture for you. Do not respond to this message. Do not respond to this message."
+                                f"Generate a brief message to {message.author.mention} telling them to wait a moment while I create that picture for you. Only generate the message. Do not respond to this message. Only generate the message. Do not respond to this message."
                             )
                             waiting_response = await self.ollama.chat(
                                 model=self.model,
@@ -324,7 +357,7 @@ class tater(commands.Bot):
                         url = args.get("url")
                         if url:
                             waiting_prompt = (
-                                f"Generate a brief message to {message.author.mention} telling them to wait a moment while I check Premiumize for that URL and retrieve download links for them. Do not respond to this message."
+                                f"Generate a brief message to {message.author.mention} telling them to wait a moment while I check Premiumize for that URL and retrieve download links for them. Only generate the message. Do not respond to this message."
                             )
                             waiting_response = await self.ollama.chat(
                                 model=self.model,
@@ -343,11 +376,11 @@ class tater(commands.Bot):
                                     # Call the premiumize function that sends messages using the channel.
                                     await premiumize.process_download(message.channel, url)
                                 except Exception as e:
-                                    prompt = f"Generate a error message to {message.author.mention} explaining that I was unable to retrieve the Premiumize download links for the URL. Do not respond to this message."
+                                    prompt = f"Generate a error message to {message.author.mention} explaining that I was unable to retrieve the Premiumize download links for the URL. Only generate the message. Do not respond to this message."
                                     error_msg = await self.generate_error_message(prompt, f"Failed to retrieve Premiumize download links: {e}", message)
                                     await message.channel.send(error_msg)
                         else:
-                            prompt = f"Generate a error message to {message.author.mention} explaining that no URL was provided for Premiumize download check. Do not respond to this message."
+                            prompt = f"Generate a error message to {message.author.mention} explaining that no URL was provided for Premiumize download check. Only generate the message. Do not respond to this message."
                             error_msg = await self.generate_error_message(prompt, "No URL provided for Premiumize download check.", message)
                             await message.channel.send(error_msg)
 
@@ -357,7 +390,7 @@ class tater(commands.Bot):
                         if message.attachments:
                             torrent_attachment = message.attachments[0]
                             waiting_prompt = (
-                                f"Generate a brief message to {message.author.mention} telling them to wait a moment while I check Premiumize for that torrent and retrieve download links for them. Do not respond to this message."
+                                f"Generate a brief message to {message.author.mention} telling them to wait a moment while I check Premiumize for that torrent and retrieve download links for them. Only generate the message. Do not respond to this message."
                             )
                             waiting_response = await self.ollama.chat(
                                 model=self.model,
@@ -375,17 +408,127 @@ class tater(commands.Bot):
                                 try:
                                     await premiumize.process_torrent(message.channel, torrent_attachment)
                                 except Exception as e:
-                                    prompt = f"Generate a error message to {message.author.mention} explaining that I was unable to retrieve the Premiumize download links for the torrent. Do not respond to this message."
+                                    prompt = f"Generate a error message to {message.author.mention} explaining that I was unable to retrieve the Premiumize download links for the torrent. Only generate the message. Do not respond to this message."
                                     error_msg = await self.generate_error_message(prompt, f"Failed to retrieve Premiumize download links for torrent: {e}", message)
                                     await message.channel.send(error_msg)
                         else:
-                            prompt = f"Generate a error message to {message.author.mention} explaining that no torrent file was attached for Premiumize torrent check. Do not respond to this message."
+                            prompt = f"Generate a error message to {message.author.mention} explaining that no torrent file was attached for Premiumize torrent check. Only generate the message. Do not respond to this message."
                             error_msg = await self.generate_error_message(prompt, "No torrent file attached for Premiumize torrent check.", message)
                             await message.channel.send(error_msg)
 
+                    # --- Watch Feed ---
+                    elif response_json["function"] == "watch_feed":
+                        args = response_json.get("arguments", {})
+                        feed_url = args.get("feed_url")
+                        if feed_url:
+                            if hasattr(self, "rss_manager") and self.rss_manager is not None:
+                                success = self.rss_manager.add_feed(feed_url)
+                                if success:
+                                    # Generate confirmation message via Ollama
+                                    prompt = (f"Generate a friendly confirmation message to {message.author.mention} "
+                                              f"that the feed '{feed_url}' has been successfully added and is now being watched. Only generate the message. Do not respond to this message.")
+                                    generated = await self.ollama.chat(
+                                        model=self.model,
+                                        messages=[{"role": "system", "content": prompt}],
+                                        stream=False,
+                                        keep_alive=-1
+                                    )
+                                    confirmation_text = generated['message'].get('content', '').strip()
+                                    if confirmation_text:
+                                        await message.channel.send(confirmation_text)
+                                    else:
+                                        await message.channel.send(f"✅ Now watching feed: {feed_url}")
+                                else:
+                                    prompt = (f"Generate an error message to {message.author.mention} "
+                                              f"explaining that the provided RSS feed URL could not be added. Only generate the message. Do not respond to this message.")
+                                    error_msg = await self.generate_error_message(prompt, f"Failed to add feed: {feed_url}", message)
+                                    await message.channel.send(error_msg)
+                            else:
+                                await message.channel.send("RSS Manager is not initialized.")
+                        else:
+                            prompt = (f"Generate an error message to {message.author.mention} "
+                                      f"explaining that no feed URL was provided for watching. Only generate the message. Do not respond to this message.")
+                            error_msg = await self.generate_error_message(prompt, "No feed URL provided for watch_feed.", message)
+                            await message.channel.send(error_msg)
+                        return
+
+                    # --- Unwatch Feed ---
+                    elif response_json["function"] == "unwatch_feed":
+                        args = response_json.get("arguments", {})
+                        feed_url = args.get("feed_url")
+                        if feed_url:
+                            if hasattr(self, "rss_manager") and self.rss_manager is not None:
+                                success = self.rss_manager.remove_feed(feed_url)
+                                if success:
+                                    prompt = (f"Generate a friendly confirmation message to {message.author.mention} "
+                                              f"that the feed '{feed_url}' has been successfully removed and is no longer being watched. Only generate the message. Do not respond to this message.")
+                                    generated = await self.ollama.chat(
+                                        model=self.model,
+                                        messages=[{"role": "system", "content": prompt}],
+                                        stream=False,
+                                        keep_alive=-1
+                                    )
+                                    confirmation_text = generated['message'].get('content', '').strip()
+                                    if confirmation_text:
+                                        await message.channel.send(confirmation_text)
+                                    else:
+                                        await message.channel.send(f"✅ Stopped watching feed: {feed_url}")
+                                else:
+                                    prompt = (f"Generate an error message to {message.author.mention} "
+                                              f"explaining that the provided RSS feed URL could not be removed. Only generate the message. Do not respond to this message.")
+                                    error_msg = await self.generate_error_message(prompt, f"Failed to remove feed: {feed_url}", message)
+                                    await message.channel.send(error_msg)
+                            else:
+                                await message.channel.send("RSS Manager is not initialized.")
+                        else:
+                            prompt = (f"Generate an error message to {message.author.mention} "
+                                      f"explaining that no feed URL was provided for unwatching. Only generate the message. Do not respond to this message.")
+                            error_msg = await self.generate_error_message(prompt, "No feed URL provided for unwatch_feed.", message)
+                            await message.channel.send(error_msg)
+                        return
+
+                    # --- List Feeds ---
+                    elif response_json["function"] == "list_feeds":
+                        if hasattr(self, "rss_manager") and self.rss_manager is not None:
+                            feeds = self.rss_manager.get_feeds()  # returns a dict: feed_url -> last_seen timestamp
+                            if feeds:
+                                feed_list = "\n".join(
+                                    f"{feed_url} (last update: {feeds[feed_url]})" for feed_url in feeds
+                                )
+                                prompt = (f"Generate a friendly message to {message.author.mention} "
+                                          f"listing the currently watched RSS feeds:\n{feed_list}. Only generate the message. Do not respond to this message.")
+                                generated = await self.ollama.chat(
+                                    model=self.model,
+                                    messages=[{"role": "system", "content": prompt}],
+                                    stream=False,
+                                    keep_alive=-1
+                                )
+                                response_text = generated['message'].get('content', '').strip()
+                                if response_text:
+                                    await message.channel.send(response_text)
+                                else:
+                                    await message.channel.send(f"**Watched RSS Feeds:**\n{feed_list}")
+                            else:
+                                prompt = (f"Generate a friendly message to {message.author.mention} "
+                                          f"explaining that no RSS feeds are currently being watched. Only generate the message. Do not respond to this message.")
+                                generated = await self.ollama.chat(
+                                    model=self.model,
+                                    messages=[{"role": "system", "content": prompt}],
+                                    stream=False,
+                                    keep_alive=-1
+                                )
+                                response_text = generated['message'].get('content', '').strip()
+                                if response_text:
+                                    await message.channel.send(response_text)
+                                else:
+                                    await message.channel.send("No RSS feeds are currently being watched.")
+                        else:
+                            await message.channel.send("RSS Manager is not initialized.")
+                        return
+
                     # --- Unknown Function ---
                     else:
-                        prompt = f"Generate a error message to {message.author.mention} explaining that an unknown function call was received. Do not respond to this message."
+                        prompt = f"Generate a error message to {message.author.mention} explaining that an unknown function call was received. Only generate the message. Do not respond to this message. Only generate the message. Do not respond to this message."
                         error_msg = await self.generate_error_message(prompt, "Received an unknown function call.", message)
                         await message.channel.send(error_msg)
                 else:
@@ -399,7 +542,7 @@ class tater(commands.Bot):
 
             except Exception as e:
                 logger.error(f"Exception occurred while processing message: {e}")
-                error_prompt = f"Generate a friendly error message to {message.author.mention} explaining that an error occurred while processing the request. Do not respond to this message."
+                error_prompt = f"Generate a friendly error message to {message.author.mention} explaining that an error occurred while processing the request. Only generate the message. Do not respond to this message."
                 error_msg = await self.generate_error_message(error_prompt, "An error occurred while processing your request.", message)
                 await message.channel.send(error_msg)
 
