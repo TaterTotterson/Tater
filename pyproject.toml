@@ -1,8 +1,8 @@
 [tool.poetry]
 name = "tater"
 version = "0.2.0"
-description = "A Discord bot that uses Ollama, Redis, SFTPGo, and Discord.py for conversation continuity and character-based responses."
-authors = ["Your Name <your.email@example.com>"]
+description = "A Discord bot that uses Ollama"
+authors = ["MasterPhooey"]
 license = "MIT"
 readme = "README.md"
 
@@ -17,9 +17,10 @@ requests = "^2.31.0"               # For synchronous HTTP requests (YouTube API)
 beautifulsoup4 = "^4.12.2"         # For parsing HTML (BeautifulSoup)
 youtube_transcript_api = "^0.6.0"  # For fetching YouTube transcripts
 bencodepy = "^0.9.5"               # For handling bencoded data in premiumize functions
+feedparser = "^6.0.10"             # For parsing RSS feeds
 
 [tool.poetry.dev-dependencies]
-pytest = "^7.2.0"               # For testing if needed
+pytest = "^7.2.0"                # For testing if needed
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
