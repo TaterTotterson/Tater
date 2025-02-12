@@ -45,17 +45,17 @@ async def save_embedding(text: str, embedding, min_length=30):
     Save embeddings globally, but only if the text is long enough to be useful.
     """
     if len(text.strip()) < min_length:
-        logger.info(f"Message NOT saved (too short)")
+        logger.info("Message NOT saved (too short)")
         return  # Skip storing short messages
 
     global_key = "tater:global:embeddings"
-    redis_client.rpush(embedding_key, json.dumps(embedding_data))
+    redis_client.rpush(global_key, json.dumps({"text": text, "embedding": json.dumps(embedding)}))
+    
+    logger.info("Message saved")  # No text to reduce console spam
 
     # Uncomment the line below if you want to limit stored embeddings to the last 100 entries.
     # This is useful for low RAM environments to prevent excessive memory usage.
-    # redis_client.ltrim(embedding_key, -100, -1)  # Keep the last 100 embeddings
-    
-    logger.info(f"Message saved")
+    # redis_client.ltrim(global_key, -100, -1)  # Keep the last 100 embeddings
 
 async def find_relevant_context(query_embedding, top_n=3):
     """
