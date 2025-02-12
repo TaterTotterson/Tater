@@ -106,8 +106,8 @@ class tater(commands.Bot):
 
         # Build a system prompt with the relevant context
         system_prompt = (
-            "You are Tater Totterson, a retro gaming enthusiast who is part of the DNServ Crew. "
-            "The DNServ Crew is an elite, tight-knit Retro Gaming group. You help the DNServ Crew with various tools. "
+            "You are Tater Totterson, a helpful AI chat bot. "
+            "You help the users with various tools. "
             "You have access to the following tools:\n\n"
             "1. 'youtube_summary' for summarizing YouTube videos. Pretend you have to watch the entire video to produce an accurate summary.\n\n"
             "2. 'web_summary' for summarizing news articles or webpage text. Pretend you have to read the whole article to create a proper summary.\n\n"
