@@ -73,15 +73,32 @@ class tater(commands.Bot):
         return fallback
 
     async def on_message(self, message: discord.Message):
-        # Ignore messages from the bot itself.
+        # 1) Ignore messages from the bot itself.
         if message.author == self.user:
             return
 
-        # Process only if the message is in the designated channel or if the bot is mentioned.
-        should_respond = message.channel.id == response_channel_id or self.user.mentioned_in(message)
-        if not should_respond:
-            return
-
+        # 2) Check if we're in a DM (private message).
+        #    - If yes and the user is not admin, ignore the message.
+        #    - If yes and the user is admin, respond.
+        #    - Otherwise, fall back to channel-based logic.
+        if isinstance(message.channel, discord.DMChannel):
+            # This is a direct message
+            if message.author.id == int(os.getenv("ADMIN_USER_ID", 0)):
+                # Admin in DMs => respond without needing a mention
+                should_respond = True
+            else:
+                # Non-admin in DMs => ignore
+                return
+        else:
+            # Not a DM, so do the existing logic:
+            # - respond if in RESPONSE_CHANNEL_ID or bot is mentioned
+            should_respond = (
+                message.channel.id == response_channel_id
+                or self.user.mentioned_in(message)
+            )
+            if not should_respond:
+                return
+        
         # Ensure embedding is always initialized before use
         embedding = None  
 
@@ -90,11 +107,12 @@ class tater(commands.Bot):
             embedding = await generate_embedding(message.content)
             if embedding:
                 await save_embedding(message.content, embedding)
-        # Retrieve relevant context from past messages (Global Storage)
-        if embedding is not None:  # Ensure embedding exists before searching context
+
+        # Retrieve relevant context from past messages
+        if embedding is not None:
             relevant_context = await find_relevant_context(embedding)
         else:
-            relevant_context = []  # No context if no valid embedding
+            relevant_context = []
 
         # Log the retrieved context
         if relevant_context:
@@ -106,8 +124,8 @@ class tater(commands.Bot):
 
         # Build a system prompt with the relevant context
         system_prompt = (
-            "You are Tater Totterson, a helpful AI chat bot. "
-            "You help the users with various tools. "
+            "You are Tater Totterson, a retro gaming enthusiast who is part of the DNServ Crew. "
+            "The DNServ Crew is an elite, tight-knit Retro Gaming group. You help the DNServ Crew with various tools. "
             "You have access to the following tools:\n\n"
             "1. 'youtube_summary' for summarizing YouTube videos. Pretend you have to watch the entire video to produce an accurate summary.\n\n"
             "2. 'web_summary' for summarizing news articles or webpage text. Pretend you have to read the whole article to create a proper summary.\n\n"
@@ -208,9 +226,9 @@ class tater(commands.Bot):
                     response_embedding = await generate_embedding(response_text)
                     if response_embedding:
                         await save_embedding(response_text, response_embedding)
-                        logger.info(f"Bot response saved: {response_text}")
+                        logger.info(f"Bot response saved")
                 else:
-                    logger.info(f"Bot response NOT saved (too short): {response_text}")
+                    logger.info(f"Bot response NOT saved (too short)")
 
                 # Try to parse the AI response as JSON for a function call.
                 try:
