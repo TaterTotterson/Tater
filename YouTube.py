@@ -13,6 +13,7 @@ OLLAMA_HOST = os.getenv("OLLAMA_HOST", "127.0.0.1").strip()
 OLLAMA_PORT = os.getenv("OLLAMA_PORT", "11434").strip()
 OLLAMA_SERVER = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "mistral-small:24b")
+context_length = int(os.getenv("CONTEXT_LENGTH", 10000))
 
 def extract_video_id(youtube_url):
     """Extract the video ID from a YouTube URL."""
@@ -71,7 +72,8 @@ def chat_ollama(prompt):
                 "model": OLLAMA_MODEL,
                 "prompt": prompt,
                 "stream": False,
-                "keep_alive": -1
+                "keep_alive": -1,
+                "options": {"num_ctx": context_length}
             }
         )
         response.raise_for_status()
