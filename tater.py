@@ -21,7 +21,8 @@ response_channel_id = int(os.getenv("RESPONSE_CHANNEL_ID", 0))
 redis_host = os.getenv('REDIS_HOST', '127.0.0.1')
 redis_port = int(os.getenv('REDIS_PORT', 6379))
 max_response_length = int(os.getenv("MAX_RESPONSE_LENGTH", 1500))
-ollama_temperature = float(os.getenv('OLLAMA_TEMPERATURE', 0.6))
+context_length = int(os.getenv("CONTEXT_LENGTH", 10000))
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -63,7 +64,8 @@ class tater(commands.Bot):
                 model=self.model,
                 messages=[{"role": "system", "content": prompt}],
                 stream=False,
-                keep_alive=-1
+                keep_alive=-1,
+                options={"num_ctx": context_length}
             )
             error_text = error_response['message'].get('content', '').strip()
             if error_text:
@@ -124,8 +126,8 @@ class tater(commands.Bot):
 
         # Build a system prompt with the relevant context
         system_prompt = (
-            "You are Tater Totterson, A helpful Discord AI chat Bot. "
-            "You help users with various tools. "
+            "You are Tater Totterson, a retro gaming enthusiast who is part of the DNServ Crew. "
+            "The DNServ Crew is an elite, tight-knit Retro Gaming group. You help the DNServ Crew with various tools. "
             "You have access to the following tools:\n\n"
             "1. 'youtube_summary' for summarizing YouTube videos. Pretend you have to watch the entire video to produce an accurate summary.\n\n"
             "2. 'web_summary' for summarizing news articles or webpage text. Pretend you have to read the whole article to create a proper summary.\n\n"
@@ -210,7 +212,8 @@ class tater(commands.Bot):
                     model=self.model,
                     messages=messages_list,
                     stream=False,
-                    keep_alive=-1
+                    keep_alive=-1,
+                    options={"num_ctx": context_length}
                 )
                 logger.debug(f"Raw response from Ollama: {response_data}")
 
@@ -254,7 +257,8 @@ class tater(commands.Bot):
                                     model=self.model,
                                     messages=[{"role": "system", "content": waiting_prompt}],
                                     stream=False,
-                                    keep_alive=-1
+                                    keep_alive=-1,
+                                    options={"num_ctx": context_length}
                                 )
                                 waiting_text = waiting_response['message'].get('content', '')
                                 if waiting_text:
@@ -302,7 +306,8 @@ class tater(commands.Bot):
                                 model=self.model,
                                 messages=[{"role": "system", "content": waiting_prompt}],
                                 stream=False,
-                                keep_alive=-1
+                                keep_alive=-1,
+                                options={"num_ctx": context_length}
                             )
                             waiting_text = waiting_response['message'].get('content', '')
                             if waiting_text:
@@ -344,7 +349,8 @@ class tater(commands.Bot):
                                 model=self.model,
                                 messages=[{"role": "system", "content": waiting_prompt}],
                                 stream=False,
-                                keep_alive=-1
+                                keep_alive=-1,
+                                options={"num_ctx": context_length}
                             )
                             waiting_text = waiting_response['message'].get('content', '')
                             if waiting_text:
@@ -381,7 +387,8 @@ class tater(commands.Bot):
                                 model=self.model,
                                 messages=[{"role": "system", "content": waiting_prompt}],
                                 stream=False,
-                                keep_alive=-1
+                                keep_alive=-1,
+                                options={"num_ctx": context_length}
                             )
                             waiting_text = waiting_response['message'].get('content', '')
                             if waiting_text:
@@ -414,7 +421,8 @@ class tater(commands.Bot):
                                 model=self.model,
                                 messages=[{"role": "system", "content": waiting_prompt}],
                                 stream=False,
-                                keep_alive=-1
+                                keep_alive=-1,
+                                options={"num_ctx": context_length}
                             )
                             waiting_text = waiting_response['message'].get('content', '')
                             if waiting_text:
@@ -449,7 +457,8 @@ class tater(commands.Bot):
                                         model=self.model,
                                         messages=[{"role": "system", "content": prompt}],
                                         stream=False,
-                                        keep_alive=-1
+                                        keep_alive=-1,
+                                        options={"num_ctx": context_length}
                                     )
                                     confirmation_text = generated['message'].get('content', '').strip()
                                     if confirmation_text:
@@ -484,7 +493,8 @@ class tater(commands.Bot):
                                         model=self.model,
                                         messages=[{"role": "system", "content": prompt}],
                                         stream=False,
-                                        keep_alive=-1
+                                        keep_alive=-1,
+                                        options={"num_ctx": context_length}
                                     )
                                     confirmation_text = generated['message'].get('content', '').strip()
                                     if confirmation_text:
@@ -519,7 +529,8 @@ class tater(commands.Bot):
                                     model=self.model,
                                     messages=[{"role": "system", "content": prompt}],
                                     stream=False,
-                                    keep_alive=-1
+                                    keep_alive=-1,
+                                    options={"num_ctx": context_length}
                                 )
                                 response_text = generated['message'].get('content', '').strip()
                                 if response_text:
@@ -533,7 +544,8 @@ class tater(commands.Bot):
                                     model=self.model,
                                     messages=[{"role": "system", "content": prompt}],
                                     stream=False,
-                                    keep_alive=-1
+                                    keep_alive=-1,
+                                    options={"num_ctx": context_length}
                                 )
                                 response_text = generated['message'].get('content', '').strip()
                                 if response_text:

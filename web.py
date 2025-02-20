@@ -12,6 +12,7 @@ ollama_host = os.getenv("OLLAMA_HOST", "127.0.0.1").strip()
 ollama_port = os.getenv("OLLAMA_PORT", "11434").strip()
 ollama_url = f"http://{ollama_host}:{ollama_port}"  # Custom endpoint for Ollama
 ollama_model = os.getenv("OLLAMA_MODEL", "llama3.2").strip()  # e.g., "mistral-small:24b"
+context_length = int(os.getenv("CONTEXT_LENGTH", 10000))
 
 def extract_article_text(webpage_url):
     """
@@ -56,7 +57,9 @@ def fetch_web_summary(webpage_url, model=ollama_model):
         response = client.chat(
             model=model,
             messages=[{"role": "user", "content": prompt}],
-            stream=False
+            stream=False,
+            keep_alive=-1,
+            options={"num_ctx": context_length}
         )
         summary = response['message'].get('content', '')
         return summary
