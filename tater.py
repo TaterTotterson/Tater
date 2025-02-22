@@ -128,7 +128,7 @@ class tater(commands.Bot):
         # Build a system prompt with the relevant context
         system_prompt = (
             "You are Tater Totterson, A helpful Discord AI chat Bot. "
-            "You help users with various tools. If you need real-time access to the internet use the web_search tool..\n\n"
+            "You help users with various tools. If you need real-time access to the internet or don't have any information about what the user is asking use the 'web_search' tool, Dont ask to use a tool just use it.\n\n"
             "You have access to the following tools:\n\n"
             "1. 'youtube_summary' for summarizing YouTube videos. Pretend you have to watch the entire video to produce an accurate summary.\n\n"
             "2. 'web_summary' for summarizing news articles or webpage text. Pretend you have to read the whole article to create a proper summary.\n\n"
@@ -139,7 +139,7 @@ class tater(commands.Bot):
             "7. 'unwatch_feed' for stopping the monitoring of an RSS feed.\n\n"
             "8. 'list_feeds' for listing all currently watched RSS feeds.\n\n"
             "9. 'web_search' for searching the web when additional or up-to-date information is needed to answer a user's question. If you are unsure of the answer, lack sufficient context, or your internal knowledge is outdated, use this tool to retrieve current information from the web.\n\n"
-            "When you determine that additional context or information is required to fully answer the user's question—even if the user did not explicitly request it—respond ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
+            "When a user requests one of these actions or you need real-time access to the internet, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
             "For YouTube videos:\n"
             "{\n"
             '  "function": "youtube_summary",\n'
@@ -631,7 +631,6 @@ class tater(commands.Bot):
                                 try:
                                     choice_json = json.loads(choice_text)
                                 except json.JSONDecodeError:
-                                    # If direct parsing fails, try to extract the JSON substring.
                                     json_start = choice_text.find('{')
                                     json_end = choice_text.rfind('}')
                                     if json_start != -1 and json_end != -1:
@@ -644,7 +643,9 @@ class tater(commands.Bot):
                                         choice_json = None
 
                                 if not choice_json:
-                                    await message.channel.send("Failed to parse the search result choice.")
+                                    prompt = f"Generate a friendly error message to {message.author.mention} explaining that I failed to parse the search result choice."
+                                    error_msg = await self.generate_error_message(prompt, "Failed to parse the search result choice.", message)
+                                    await message.channel.send(error_msg)
                                     return
 
                                 if choice_json.get("function") == "web_fetch":
@@ -683,19 +684,31 @@ class tater(commands.Bot):
                                                 else:
                                                     await message.channel.send(final_answer)
                                             else:
-                                                await message.channel.send("Failed to generate a final answer from the detailed info.")
+                                                prompt = f"Generate a friendly error message to {message.author.mention} explaining that I failed to generate a final answer from the detailed info."
+                                                error_msg = await self.generate_error_message(prompt, "Failed to generate a final answer from the detailed info.", message)
+                                                await message.channel.send(error_msg)
                                         else:
-                                            await message.channel.send("Failed to extract information from the selected webpage.")
+                                            prompt = f"Generate a friendly error message to {message.author.mention} explaining that I failed to extract information from the selected webpage."
+                                            error_msg = await self.generate_error_message(prompt, "Failed to extract information from the selected webpage.", message)
+                                            await message.channel.send(error_msg)
                                     else:
-                                        await message.channel.send("No link provided to fetch web info.")
+                                        prompt = f"Generate a friendly error message to {message.author.mention} explaining that no link was provided to fetch web info."
+                                        error_msg = await self.generate_error_message(prompt, "No link provided to fetch web info.", message)
+                                        await message.channel.send(error_msg)
                                     return
                                 else:
-                                    await message.channel.send("No valid function call for fetching web info was returned.")
+                                    prompt = f"Generate a friendly error message to {message.author.mention} explaining that no valid function call for fetching web info was returned."
+                                    error_msg = await self.generate_error_message(prompt, "No valid function call for fetching web info was returned.", message)
+                                    await message.channel.send(error_msg)
                                     return
                             else:
-                                await message.channel.send("I couldn't find any relevant search results.")
+                                prompt = f"Generate a friendly error message to {message.author.mention} explaining that I couldn't find any relevant search results."
+                                error_msg = await self.generate_error_message(prompt, "I couldn't find any relevant search results.", message)
+                                await message.channel.send(error_msg)
                         else:
-                            await message.channel.send("No search query provided.")
+                            prompt = f"Generate a friendly error message to {message.author.mention} explaining that no search query was provided."
+                            error_msg = await self.generate_error_message(prompt, "No search query provided.", message)
+                            await message.channel.send(error_msg)
                         return
 
                     # --- Unknown Function ---
