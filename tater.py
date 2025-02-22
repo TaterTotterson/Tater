@@ -128,7 +128,7 @@ class tater(commands.Bot):
         # Build a system prompt with the relevant context
         system_prompt = (
             "You are Tater Totterson, A helpful Discord AI chat Bot. "
-            "You help users with various tools. If you do not know what the user is talking about use the web_search tool.\n\n"
+            "You help users with various tools. If you need real-time access to the internet use the web_search tool..\n\n"
             "You have access to the following tools:\n\n"
             "1. 'youtube_summary' for summarizing YouTube videos. Pretend you have to watch the entire video to produce an accurate summary.\n\n"
             "2. 'web_summary' for summarizing news articles or webpage text. Pretend you have to read the whole article to create a proper summary.\n\n"
