@@ -13,6 +13,7 @@ import re
 import YouTube  # Module for YouTube summarization functions
 import web      # Module for webpage summarization functions
 import premiumize  # Module for Premiumize-related functions
+from search import search_web, format_search_results
 
 # Load environment variables
 load_dotenv()
@@ -127,7 +128,7 @@ class tater(commands.Bot):
         # Build a system prompt with the relevant context
         system_prompt = (
             "You are Tater Totterson, A helpful Discord AI chat Bot. "
-            "You help users with various tools. "
+            "You help users with various tools. If you do not know what the user is talking about use the web_search tool.\n\n"
             "You have access to the following tools:\n\n"
             "1. 'youtube_summary' for summarizing YouTube videos. Pretend you have to watch the entire video to produce an accurate summary.\n\n"
             "2. 'web_summary' for summarizing news articles or webpage text. Pretend you have to read the whole article to create a proper summary.\n\n"
@@ -137,7 +138,8 @@ class tater(commands.Bot):
             "6. 'watch_feed' for adding a new RSS feed to monitor. When a new article appears in the feed, the bot will summarize it and announce the news.\n\n"
             "7. 'unwatch_feed' for stopping the monitoring of an RSS feed.\n\n"
             "8. 'list_feeds' for listing all currently watched RSS feeds.\n\n"
-            "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
+            "9. 'web_search' for searching the web when additional or up-to-date information is needed to answer a user's question. If you are unsure of the answer, lack sufficient context, or your internal knowledge is outdated, use this tool to retrieve current information from the web.\n\n"
+            "When you determine that additional context or information is required to fully answer the user's question—even if the user did not explicitly request it—respond ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
             "For YouTube videos:\n"
             "{\n"
             '  "function": "youtube_summary",\n'
@@ -190,6 +192,13 @@ class tater(commands.Bot):
             '  "function": "list_feeds",\n'
             '  "arguments": { }\n'
             "}\n\n"
+            "{\n"
+            '  "function": "web_search",\n'
+            '  "arguments": {\n'
+            '      "query": "<search query>"\n'
+            "  }\n"
+            "}\n\n"
+
             "If no function is needed, reply normally."
         )
 
@@ -229,15 +238,25 @@ class tater(commands.Bot):
                     response_embedding = await generate_embedding(response_text)
                     if response_embedding:
                         await save_embedding(response_text, response_embedding)
-                        logger.info(f"Bot response saved")
+                        logger.info("Bot response saved")
                 else:
-                    logger.info(f"Bot response NOT saved (too short)")
+                    logger.info("Bot response NOT saved (too short)")
 
                 # Try to parse the AI response as JSON for a function call.
                 try:
                     response_json = json.loads(response_text)
                 except json.JSONDecodeError:
-                    response_json = None
+                    # Attempt to extract JSON substring if there is extra text
+                    json_start = response_text.find('{')
+                    json_end = response_text.rfind('}')
+                    if json_start != -1 and json_end != -1:
+                        json_str = response_text[json_start:json_end+1]
+                        try:
+                            response_json = json.loads(json_str)
+                        except Exception as e:
+                            response_json = None
+                    else:
+                        response_json = None
 
                 if response_json and isinstance(response_json, dict) and "function" in response_json:
                     # --- YouTube Summary ---
@@ -554,6 +573,129 @@ class tater(commands.Bot):
                                     await message.channel.send("No RSS feeds are currently being watched.")
                         else:
                             await message.channel.send("RSS Manager is not initialized.")
+                        return
+
+                    # --- Web Search ---
+                    elif response_json and response_json.get("function") == "web_search":
+                        args = response_json.get("arguments", {})
+                        query = args.get("query")
+                        if query:
+                            # Send a waiting prompt to the user.
+                            waiting_prompt = (
+                                f"Generate a brief message to {message.author.mention} telling them to wait a moment while I search the web for additional information. Only generate the message. Do not respond to this message."
+                            )
+                            waiting_response = await self.ollama.chat(
+                                model=self.model,
+                                messages=[{"role": "system", "content": waiting_prompt}],
+                                stream=False,
+                                keep_alive=-1,
+                                options={"num_ctx": context_length}
+                            )
+                            waiting_text = waiting_response['message'].get('content', '').strip()
+                            if waiting_text:
+                                await message.channel.send(waiting_text)
+                            else:
+                                await message.channel.send("Please wait a moment while I search the web...")
+
+                            # Search the web using our tool.
+                            results = search_web(query)
+                            if results:
+                                formatted_results = format_search_results(results)
+                                # Build the choice prompt with actual values filled in.
+                                choice_prompt = (
+                                    f"You are looking for more information on '{query}' because the user asked: '{message.content}'.\n\n"
+                                    f"Here are the top search results:\n\n"
+                                    f"{formatted_results}\n\n"
+                                    "Please choose the most relevant link. Use the following tool for fetching web details and insert the chosen link. "
+                                    "Respond ONLY with a valid JSON object in the following exact format (and nothing else):\n\n"
+                                    "For fetching web details:\n"
+                                    "{\n"
+                                    '  "function": "web_fetch",\n'
+                                    '  "arguments": {\n'
+                                    '      "link": "<chosen link>",\n'
+                                    f'      "query": "{query}",\n'
+                                    f'      "user_question": "{message.content}"\n'
+                                    "  }\n"
+                                    "}"
+                                )
+                                # Call the model with the new prompt.
+                                choice_response = await self.ollama.chat(
+                                    model=self.model,
+                                    messages=[{"role": "system", "content": choice_prompt}],
+                                    stream=False,
+                                    keep_alive=-1,
+                                    options={"num_ctx": context_length}
+                                )
+                                choice_text = choice_response['message'].get('content', '').strip()
+                                # Attempt to parse the response JSON.
+                                try:
+                                    choice_json = json.loads(choice_text)
+                                except json.JSONDecodeError:
+                                    # If direct parsing fails, try to extract the JSON substring.
+                                    json_start = choice_text.find('{')
+                                    json_end = choice_text.rfind('}')
+                                    if json_start != -1 and json_end != -1:
+                                        json_str = choice_text[json_start:json_end+1]
+                                        try:
+                                            choice_json = json.loads(json_str)
+                                        except Exception as e:
+                                            choice_json = None
+                                    else:
+                                        choice_json = None
+
+                                if not choice_json:
+                                    await message.channel.send("Failed to parse the search result choice.")
+                                    return
+
+                                if choice_json.get("function") == "web_fetch":
+                                    # Process the web_fetch immediately.
+                                    args = choice_json.get("arguments", {})
+                                    link = args.get("link")
+                                    original_query = args.get("query")
+                                    user_question = args.get("user_question")
+                                    if link:
+                                        import web  # Assuming web.py is in the same project
+                                        summary = await asyncio.to_thread(web.fetch_web_summary, link)
+                                        if summary:
+                                            # Build a new prompt instructing the model to use the detailed info to answer the original query.
+                                            info_prompt = (
+                                                f"Using the detailed information from the selected page below, please provide a clear and concise answer to the original query.\n\n"
+                                                f"Original Query: '{original_query}'\n"
+                                                f"User Question: '{user_question}'\n\n"
+                                                f"Detailed Information:\n{summary}\n\n"
+                                                "Answer:"
+                                            )
+                                            # Call the model to generate the final answer.
+                                            final_response = await self.ollama.chat(
+                                                model=self.model,
+                                                messages=[{"role": "system", "content": info_prompt}],
+                                                stream=False,
+                                                keep_alive=-1,
+                                                options={"num_ctx": context_length}
+                                            )
+                                            final_answer = final_response['message'].get('content', '').strip()
+                                            if final_answer:
+                                                # Split the final answer if it's too long.
+                                                if len(final_answer) > max_response_length:
+                                                    chunks = web.split_message(final_answer, chunk_size=max_response_length)
+                                                    for chunk in chunks:
+                                                        await message.channel.send(chunk)
+                                                else:
+                                                    await message.channel.send(final_answer)
+                                            else:
+                                                await message.channel.send("Failed to generate a final answer from the detailed info.")
+                                        else:
+                                            await message.channel.send("Failed to extract information from the selected webpage.")
+                                    else:
+                                        await message.channel.send("No link provided to fetch web info.")
+                                    return
+                                else:
+                                    await message.channel.send("No valid function call for fetching web info was returned.")
+                                    return
+                            else:
+                                await message.channel.send("I couldn't find any relevant search results.")
+                        else:
+                            await message.channel.send("No search query provided.")
                         return
 
                     # --- Unknown Function ---
