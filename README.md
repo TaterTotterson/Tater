@@ -54,6 +54,9 @@ The bot uses an **embedding model** to store and retrieve past messages, improvi
   - **Unwatch Feed:** Remove an RSS feed from monitoring.  
   - **List Feeds:** List all currently watched RSS feeds.
 
+- **Web Search:**  
+  Searches the web for additional or up-to-date information when needed. If the AI determines that it lacks sufficient knowledge or context to answer a query, it can trigger a web search to retrieve current information and use it to generate a final, accurate answer.
+
 ## Installation
 
 ### Prerequisites
