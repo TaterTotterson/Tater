@@ -643,7 +643,7 @@ class tater(commands.Bot):
                                         choice_json = None
 
                                 if not choice_json:
-                                    prompt = f"Generate a friendly error message to {message.author.mention} explaining that I failed to parse the search result choice."
+                                    prompt = f"Generate a friendly error message to {message.author.mention} explaining that I failed to parse the search result choice. Only generate the message. Do not respond to this message"
                                     error_msg = await self.generate_error_message(prompt, "Failed to parse the search result choice.", message)
                                     await message.channel.send(error_msg)
                                     return
@@ -684,29 +684,29 @@ class tater(commands.Bot):
                                                 else:
                                                     await message.channel.send(final_answer)
                                             else:
-                                                prompt = f"Generate a friendly error message to {message.author.mention} explaining that I failed to generate a final answer from the detailed info."
+                                                prompt = f"Generate a friendly error message to {message.author.mention} explaining that I failed to generate a final answer from the detailed info. Only generate the message. Do not respond to this message"
                                                 error_msg = await self.generate_error_message(prompt, "Failed to generate a final answer from the detailed info.", message)
                                                 await message.channel.send(error_msg)
                                         else:
-                                            prompt = f"Generate a friendly error message to {message.author.mention} explaining that I failed to extract information from the selected webpage."
+                                            prompt = f"Generate a friendly error message to {message.author.mention} explaining that I failed to extract information from the selected webpage. Only generate the message. Do not respond to this message"
                                             error_msg = await self.generate_error_message(prompt, "Failed to extract information from the selected webpage.", message)
                                             await message.channel.send(error_msg)
                                     else:
-                                        prompt = f"Generate a friendly error message to {message.author.mention} explaining that no link was provided to fetch web info."
+                                        prompt = f"Generate a friendly error message to {message.author.mention} explaining that no link was provided to fetch web info. Only generate the message. Do not respond to this message"
                                         error_msg = await self.generate_error_message(prompt, "No link provided to fetch web info.", message)
                                         await message.channel.send(error_msg)
                                     return
                                 else:
-                                    prompt = f"Generate a friendly error message to {message.author.mention} explaining that no valid function call for fetching web info was returned."
+                                    prompt = f"Generate a friendly error message to {message.author.mention} explaining that no valid function call for fetching web info was returned. Only generate the message. Do not respond to this message"
                                     error_msg = await self.generate_error_message(prompt, "No valid function call for fetching web info was returned.", message)
                                     await message.channel.send(error_msg)
                                     return
                             else:
-                                prompt = f"Generate a friendly error message to {message.author.mention} explaining that I couldn't find any relevant search results."
+                                prompt = f"Generate a friendly error message to {message.author.mention} explaining that I couldn't find any relevant search results. Only generate the message. Do not respond to this message"
                                 error_msg = await self.generate_error_message(prompt, "I couldn't find any relevant search results.", message)
                                 await message.channel.send(error_msg)
                         else:
-                            prompt = f"Generate a friendly error message to {message.author.mention} explaining that no search query was provided."
+                            prompt = f"Generate a friendly error message to {message.author.mention} explaining that no search query was provided. Only generate the message. Do not respond to this message"
                             error_msg = await self.generate_error_message(prompt, "No search query provided.", message)
                             await message.channel.send(error_msg)
                         return
