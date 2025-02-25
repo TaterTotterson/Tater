@@ -11,7 +11,7 @@ A Discord bot that integrates with Ollama to provide a variety of tools to users
   - **Chat Responses**: Generates AI responses, waiting messages, and friendly error messages.
   - **Embedding Model**: Enhances chat history recall and provides more relevant responses by storing and retrieving past conversations.
   - **Requirements**:
-    - You must use an **Ollama model that supports tools**. For more details, see [Ollama Tools](https://ollama.com/search?c=tools).
+    - You must use an **Ollama model that supports tools (command-r:latest is excellent)**. For more details, see [Ollama Tools](https://ollama.com/search?c=tools).
     - You must use an **Ollama embedding model**. See available models here: [Ollama Embeddings](https://ollama.com/search?c=embedding).
 
 ## Embedding System (Memory & Context Retrieval)
@@ -93,7 +93,7 @@ DISCORD_TOKEN=your_discord_token
 RESPONSE_CHANNEL_ID=your_channel_id
 OLLAMA_HOST=127.0.0.1
 OLLAMA_PORT=11434
-OLLAMA_MODEL=mistral-small:24b
+OLLAMA_MODEL=command-r:latest
 OLLAMA_EMB_MODEL=nomic-embed-text
 CONTEXT_LENGTH=10000
 REDIS_HOST=127.0.0.1
