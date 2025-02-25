@@ -127,12 +127,12 @@ class tater(commands.Bot):
 
         # Build a system prompt with the relevant context
         system_prompt = (
-            "You are Tater Totterson, A helpful Discord AI chat Bot. "
-            "You help users with various tools. If you need real-time access to the internet or don't have any information about what the user is asking use the 'web_search' tool, Dont ask to use a tool just use it.\n\n"
+            "You are Tater Totterson, a retro gaming enthusiast who is part of the DNServ Crew.\n\n"
+            "The DNServ Crew is an elite, tight-knit Retro Gaming group. You help the DNServ Crew with various tools. If you need real-time access to the internet or don't have any information about what the user is asking use the 'web_search' tool, Dont ask to use a tool just use it.\n\n"
             "You have access to the following tools:\n\n"
             "1. 'youtube_summary' for summarizing YouTube videos. Pretend you have to watch the entire video to produce an accurate summary.\n\n"
             "2. 'web_summary' for summarizing news articles or webpage text. Pretend you have to read the whole article to create a proper summary.\n\n"
-            "3. 'draw_picture' for generating images. Pretend you are drawing the picture yourself with care.\n\n"
+            "3. 'draw_picture' for generating images. If a user asks you to draw a picture, use this tool and pretend you are drawing the picture yourself.\n\n"
             "4. 'premiumize_download' for checking if a URL is cached on Premiumize.me and retrieving download links.\n\n"
             "5. 'premiumize_torrent' for checking if a torrent file is cached on Premiumize.me and retrieving download links.\n\n"
             "6. 'watch_feed' for adding a new RSS feed to monitor. When a new article appears in the feed, the bot will summarize it and announce the news.\n\n"
@@ -210,9 +210,9 @@ class tater(commands.Bot):
             system_prompt += "\n\n" + context_prompt
 
         # Retrieve conversation history from Redis.
-        recent_history = await self.load_history(message.channel.id, limit=10)
+        recent_history = await self.load_history(message.channel.id, limit=20)
         messages_list = [{"role": "system", "content": system_prompt}] + recent_history
-        messages_list.append({"role": "user", "content": message.content})
+        messages_list.append({"role": "user", "content": f"{message.author.name}: {message.content}"})
 
         async with message.channel.typing():
             try:
@@ -643,7 +643,7 @@ class tater(commands.Bot):
                                         choice_json = None
 
                                 if not choice_json:
-                                    prompt = f"Generate a friendly error message to {message.author.mention} explaining that I failed to parse the search result choice. Only generate the message. Do not respond to this message"
+                                    prompt = f"Generate a friendly error message to {message.author.mention} explaining that I failed to parse the search result choice. Only generate the message. Do not respond to this message."
                                     error_msg = await self.generate_error_message(prompt, "Failed to parse the search result choice.", message)
                                     await message.channel.send(error_msg)
                                     return
@@ -684,36 +684,36 @@ class tater(commands.Bot):
                                                 else:
                                                     await message.channel.send(final_answer)
                                             else:
-                                                prompt = f"Generate a friendly error message to {message.author.mention} explaining that I failed to generate a final answer from the detailed info. Only generate the message. Do not respond to this message"
+                                                prompt = f"Generate a friendly error message to {message.author.mention} explaining that I failed to generate a final answer from the detailed info. Only generate the message. Do not respond to this message."
                                                 error_msg = await self.generate_error_message(prompt, "Failed to generate a final answer from the detailed info.", message)
                                                 await message.channel.send(error_msg)
                                         else:
-                                            prompt = f"Generate a friendly error message to {message.author.mention} explaining that I failed to extract information from the selected webpage. Only generate the message. Do not respond to this message"
+                                            prompt = f"Generate a friendly error message to {message.author.mention} explaining that I failed to extract information from the selected webpage. Only generate the message. Do not respond to this message."
                                             error_msg = await self.generate_error_message(prompt, "Failed to extract information from the selected webpage.", message)
                                             await message.channel.send(error_msg)
                                     else:
-                                        prompt = f"Generate a friendly error message to {message.author.mention} explaining that no link was provided to fetch web info. Only generate the message. Do not respond to this message"
+                                        prompt = f"Generate a friendly error message to {message.author.mention} explaining that no link was provided to fetch web info. Only generate the message. Do not respond to this message."
                                         error_msg = await self.generate_error_message(prompt, "No link provided to fetch web info.", message)
                                         await message.channel.send(error_msg)
                                     return
                                 else:
-                                    prompt = f"Generate a friendly error message to {message.author.mention} explaining that no valid function call for fetching web info was returned. Only generate the message. Do not respond to this message"
+                                    prompt = f"Generate a friendly error message to {message.author.mention} explaining that no valid function call for fetching web info was returned. Only generate the message. Do not respond to this message."
                                     error_msg = await self.generate_error_message(prompt, "No valid function call for fetching web info was returned.", message)
                                     await message.channel.send(error_msg)
                                     return
                             else:
-                                prompt = f"Generate a friendly error message to {message.author.mention} explaining that I couldn't find any relevant search results. Only generate the message. Do not respond to this message"
+                                prompt = f"Generate a friendly error message to {message.author.mention} explaining that I couldn't find any relevant search results."
                                 error_msg = await self.generate_error_message(prompt, "I couldn't find any relevant search results.", message)
                                 await message.channel.send(error_msg)
                         else:
-                            prompt = f"Generate a friendly error message to {message.author.mention} explaining that no search query was provided. Only generate the message. Do not respond to this message"
+                            prompt = f"Generate a friendly error message to {message.author.mention} explaining that no search query was provided. Only generate the message. Do not respond to this message."
                             error_msg = await self.generate_error_message(prompt, "No search query provided.", message)
                             await message.channel.send(error_msg)
                         return
 
                     # --- Unknown Function ---
                     else:
-                        prompt = f"Generate a error message to {message.author.mention} explaining that an unknown function call was received. Only generate the message. Do not respond to this message. Only generate the message. Do not respond to this message."
+                        prompt = f"Generate a error message to {message.author.mention} explaining that an unknown function call was received. Only generate the message. Do not respond to this message."
                         error_msg = await self.generate_error_message(prompt, "Received an unknown function call.", message)
                         await message.channel.send(error_msg)
                 else:
@@ -722,8 +722,8 @@ class tater(commands.Bot):
                         await message.channel.send(chunk)
 
                 # Save the conversation to Redis.
-                await self.save_message(message.channel.id, "user", message.content)
-                await self.save_message(message.channel.id, "assistant", response_text)
+                await self.save_message(message.channel.id, "user", message.author.name, message.content)
+                await self.save_message(message.channel.id, "assistant", "assistant", response_text)
 
             except Exception as e:
                 logger.error(f"Exception occurred while processing message: {e}")
@@ -731,16 +731,26 @@ class tater(commands.Bot):
                 error_msg = await self.generate_error_message(error_prompt, "An error occurred while processing your request.", message)
                 await message.channel.send(error_msg)
 
-    async def save_message(self, channel_id, role, content):
-        message_data = {"role": role, "content": content}
+    async def save_message(self, channel_id, role, username, content):
+        message_data = {"role": role, "username": username, "content": content}
         history_key = f"tater:channel:{channel_id}:history"
         redis_client.rpush(history_key, json.dumps(message_data))
         redis_client.ltrim(history_key, -20, -1)
 
     async def load_history(self, channel_id, limit=20):
         history_key = f"tater:channel:{channel_id}:history"
-        history = redis_client.lrange(history_key, -limit, -1)
-        return [json.loads(entry) for entry in history]
+        raw_history = redis_client.lrange(history_key, -limit, -1)
+        formatted_history = []
+        for entry in raw_history:
+            data = json.loads(entry)
+            role = data.get("role", "user")
+            sender = data.get("username", role)
+            if role == "assistant":
+                formatted_message = data["content"]
+            else:
+                formatted_message = f"{sender}: {data['content']}"
+            formatted_history.append({"role": role, "content": formatted_message})
+        return formatted_history
 
 async def setup_commands(client: commands.Bot):
     print("Commands setup complete.")
