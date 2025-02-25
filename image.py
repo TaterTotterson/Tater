@@ -22,10 +22,12 @@ def generate_image(prompt: str) -> bytes:
     payload = {
         "prompt": prompt,
         # Optional: adjust these parameters as needed:
-        "steps": 20,
-        "cfg_scale": 7.0,
-        "width": 512,
-        "height": 512,
+        "steps": 4,
+        "cfg_scale": 1,
+        "width": 896,
+        "height": 1152,
+        "sampler_name": "DPM++ 2M",
+        "scheduler": "Simple",
     }
     response = requests.post(endpoint, json=payload)
     if response.status_code == 200:
