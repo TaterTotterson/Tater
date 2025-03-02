@@ -33,15 +33,12 @@ def extract_article_text(webpage_url):
         return None
 
 def fetch_web_summary(webpage_url, model=ollama_model):
-    """
-    Extracts and summarizes article text from a webpage.
-    Also schedules the summary to be embedded and saved.
-    """
     article_text = extract_article_text(webpage_url)
     if not article_text:
         return None
 
     prompt = f"Please summarize the following article. Give it a title and use bullet points when necessary:\n\n{article_text}"
+
     try:
         client = ollama.Client(host=ollama_url)
         response = client.chat(
@@ -54,12 +51,12 @@ def fetch_web_summary(webpage_url, model=ollama_model):
         summary = response['message'].get('content', '')
         
         # Schedule storing the summary embedding asynchronously.
-        if article:
+        if summary:
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
                 loop = asyncio.get_event_loop()
-            loop.create_task(_store_summary_embedding(article))
+            loop.create_task(_store_summary_embedding(summary))
             
         return summary
     except Exception as e:
