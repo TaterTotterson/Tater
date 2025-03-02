@@ -4,7 +4,8 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import ollama
 import asyncio  # <-- added
-from embed import generate_embedding, save_embedding  # <-- make sure these are imported
+from embed import generate_embedding, save_embedding
+import logging
 
 # Load environment variables
 load_dotenv()
@@ -15,8 +16,11 @@ ollama_url = f"http://{ollama_host}:{ollama_port}"
 ollama_model = os.getenv("OLLAMA_MODEL", "llama3.2").strip()
 context_length = int(os.getenv("CONTEXT_LENGTH", 10000))
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger('discord.tater')
+
 def extract_article_text(webpage_url):
-    # ... (existing code)
     try:
         response = requests.get(webpage_url, timeout=10)
         if response.status_code != 200:
@@ -65,15 +69,18 @@ def fetch_web_summary(webpage_url, model=ollama_model):
         return None
 
 async def _store_summary_embedding(summary):
+    logger.info("Starting embedding generation for summary")
     embedding = await generate_embedding(summary)
     if embedding:
+        logger.info(f"Embedding generated: {embedding}")
         await save_embedding(summary, embedding)
+    else:
+        logger.info("Embedding generation failed")
 
 def format_summary_for_discord(summary):
     return summary.replace("### ", "# ")
 
 def split_message(message_content, chunk_size=1500):
-    # ... (existing code)
     message_parts = []
     while len(message_content) > chunk_size:
         split_point = message_content.rfind('\n', 0, chunk_size)
