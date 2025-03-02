@@ -95,8 +95,10 @@ def generate_article(transcript, target_lang=None):
 def fetch_youtube_summary(video_id, target_lang=None):
     transcript = get_transcript(video_id, target_lang)
     if not transcript:
-        error_prompt = ("Please generate a friendly error message explaining that there was an error processing "
-                        "the request because no transcript is available, and do not respond further.")
+        error_prompt = (
+            "Please generate a friendly error message explaining that there was an error processing "
+            "the request because no transcript is available, and do not respond further."
+        )
         return chat_ollama(error_prompt)
     article = generate_article(transcript, target_lang)
     
@@ -105,7 +107,8 @@ def fetch_youtube_summary(video_id, target_lang=None):
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
         loop.create_task(_store_summary_embedding(article))
     
     return article

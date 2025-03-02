@@ -55,7 +55,8 @@ def fetch_web_summary(webpage_url, model=ollama_model):
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
-                loop = asyncio.get_event_loop()
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
             loop.create_task(_store_summary_embedding(summary))
             
         return summary
