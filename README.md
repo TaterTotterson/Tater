@@ -16,10 +16,10 @@ A Discord bot that integrates with Ollama to provide a variety of tools to users
 
 ## Embedding System (Memory & Context Retrieval)
 
-The bot uses an **embedding model** to store and retrieve past messages, improving chat continuity and memory recall. Instead of relying solely on chat history, it:
-- **Generates an embedding (vector representation) of each message.**
+The bot uses an **embedding model** to store and retrieve summaries, improving chat continuity and memory recall. Instead of relying solely on chat history, it:
+- **Generates an embedding (vector representation) of each summary.**
 - **Stores embeddings in Redis** for fast retrieval.
-- **Finds relevant past messages** when users bring up similar topics.
+- **Finds relevant past summaries** when users bring up similar topics.
 
 ### **Low RAM Mode (Optional)**
 - By default, the bot **stores all embeddings indefinitely**, allowing it to recall long-term conversations.
