@@ -103,13 +103,7 @@ class tater(commands.Bot):
                 return
         
         # Ensure embedding is always initialized before use
-        embedding = None  
-
-        # Check if message length is at least 30 characters before storing
-        if len(message.content.strip()) >= 30:
-            embedding = await generate_embedding(message.content)
-            if embedding:
-                await save_embedding(message.content, embedding)
+        embedding = None
 
         # Retrieve relevant context from past messages
         if embedding is not None:
@@ -232,15 +226,6 @@ class tater(commands.Bot):
                     logger.error("Ollama returned an empty response.")
                     await message.channel.send("I'm not sure how to respond to that.")
                     return
-
-                # Generate embedding for bot response, but only store if it's useful
-                if len(response_text) >= 30:  # Ensures only meaningful bot responses are stored
-                    response_embedding = await generate_embedding(response_text)
-                    if response_embedding:
-                        await save_embedding(response_text, response_embedding)
-                        logger.info("Bot response saved")
-                else:
-                    logger.info("Bot response NOT saved (too short)")
 
                 # Try to parse the AI response as JSON for a function call.
                 try:
