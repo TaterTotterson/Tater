@@ -93,27 +93,14 @@ def generate_article(transcript, target_lang=None):
     return chat_ollama(prompt)
 
 def fetch_youtube_summary(video_id, target_lang=None):
+    """
+    Fetches a YouTube video summary by obtaining the transcript and generating an article.
+    """
     transcript = get_transcript(video_id, target_lang)
     if not transcript:
-        error_prompt = (
-            "Please generate a friendly error message explaining that there was an error processing "
-            "the request because no transcript is available, and do not respond further."
-        )
+        # Build an error prompt and generate an error message via Ollama.
+        error_prompt = ("Please generate a friendly error message explaining that there was an error processing "
+                        "the request because no transcript is available, and do not respond further.")
         return chat_ollama(error_prompt)
     article = generate_article(transcript, target_lang)
-    
-    # Schedule storing the summary embedding asynchronously.
-    if article:
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        loop.create_task(_store_summary_embedding(article))
-    
     return article
-
-async def _store_summary_embedding(summary):
-    embedding = await generate_embedding(summary)
-    if embedding:
-        await save_embedding(summary, embedding)
