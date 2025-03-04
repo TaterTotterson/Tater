@@ -655,7 +655,6 @@ class tater(commands.Bot):
                                     original_query = args.get("query")
                                     user_question = args.get("user_question")
                                     if link:
-                                        import web  # Assuming web.py is in the same project
                                         summary = await asyncio.to_thread(web.fetch_web_summary, link)
                                         if summary:
                                             # Build a new prompt instructing the model to use the detailed info to answer the original query.
