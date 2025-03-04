@@ -18,7 +18,7 @@ context_length = int(os.getenv("CONTEXT_LENGTH", 10000))
 def extract_video_id(youtube_url):
     """Extract the video ID from a YouTube URL."""
     parsed_url = urlparse(youtube_url)
-    if parsed_url.hostname in ['www.youtube.com', 'youtube.com']:
+    if parsed_url.hostname in ['www.youtube.com', 'youtube.com', 'm.youtube.com']:
         query_params = parse_qs(parsed_url.query)
         return query_params.get('v', [None])[0]
     elif parsed_url.hostname == 'youtu.be':
