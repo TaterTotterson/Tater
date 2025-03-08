@@ -9,6 +9,7 @@ import discord
 from discord import ButtonStyle, ui
 from dotenv import load_dotenv
 import logging
+import tempfile
 
 load_dotenv()
 
@@ -164,7 +165,7 @@ class PaginatedLinks(ui.View):
             await interaction.response.edit_message(content=self.get_page_content(), view=self)
 
 #############################
-# Command Processing Functions (Updated to use a Channel)
+# Discord Command Processing Functions
 #############################
 
 async def process_download(channel: discord.TextChannel, url: str, max_response_length=2000):
@@ -249,3 +250,66 @@ async def process_torrent(channel: discord.TextChannel, torrent_attachment: disc
         if os.path.exists(file_path):
             os.remove(file_path)
             logger.debug(f"Deleted torrent file {file_path} from disk.")
+
+#############################
+# Web UI Processing Functions
+#############################
+
+async def process_download_web(url: str, max_response_length=2000) -> str:
+    """
+    Process a Premiumize download request for the web UI.
+    Returns a plain text (or markdown) message with download links.
+    """
+    logger.debug(f"Processing web download for URL: {url}")
+    download_links = await get_premiumize_download_links(url)
+    if download_links:
+        links_message = f"**Download Links for `{url}`:**\n"
+        for file in download_links:
+            encoded_filename = encode_filename(file['path'])
+            encoded_link = file['link'].replace(file['path'], encoded_filename)
+            new_line = f"- [{file['path']}]({encoded_link})\n"
+            if len(links_message) + len(new_line) > max_response_length:
+                break
+            links_message += new_line
+        return links_message
+    else:
+        return f"The URL `{url}` is not cached on Premiumize.me."
+
+async def process_torrent_web(torrent_bytes: bytes, filename: str, max_response_length=2000) -> str:
+    """
+    Process a Premiumize torrent request for the web UI.
+    Accepts torrent file bytes and the filename, and returns a message with download links.
+    """
+    logger.debug(f"Processing web torrent for file: {filename}")
+    with tempfile.NamedTemporaryFile(delete=False, suffix=filename) as tmp_file:
+        tmp_file.write(torrent_bytes)
+        tmp_file_path = tmp_file.name
+    try:
+        torrent_hash = extract_torrent_hash(tmp_file_path)
+        if not torrent_hash:
+            return "Failed to extract torrent hash from the file."
+        cached, cached_filename = await check_premiumize_cache(torrent_hash)
+        if cached:
+            magnet_link = create_magnet_link(torrent_hash)
+            download_links = await get_premiumize_download_links(magnet_link)
+            if download_links:
+                links_message = f"**Download Links for `{cached_filename}`:**\n"
+                for file in download_links:
+                    encoded_filename = encode_filename(file['path'])
+                    encoded_link = file['link'].replace(file['path'], encoded_filename)
+                    new_line = f"- [{file['path']}]({encoded_link})\n"
+                    if len(links_message) + len(new_line) > max_response_length:
+                        break
+                    links_message += new_line
+                return links_message
+            else:
+                return "Failed to fetch download links."
+        else:
+            return f"The torrent `{filename}` is not cached on Premiumize.me."
+    except Exception as e:
+        return f"An error occurred while processing the torrent file: {e}"
+    finally:
+        import os
+        if os.path.exists(tmp_file_path):
+            os.remove(tmp_file_path)
+            logger.debug(f"Deleted temporary file {tmp_file_path} from disk.")

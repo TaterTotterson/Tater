@@ -1,0 +1,13 @@
+aiohttp
+beautifulsoup4
+bencodepy
+discord.py
+duckduckgo_search
+feedparser
+ollama
+Pillow
+python-dotenv
+requests
+streamlit
+youtube_transcript_api
+redis
