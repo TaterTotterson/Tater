@@ -160,3 +160,28 @@ docker build -t tater .
 ```bash
 docker run -d --name tater_bot -p 8501:8501 tater
 ```
+
+## Redis Persistence
+
+If you're running Redis directly, you can ensure data persistence by configuring Redis's built-in persistence mechanisms. Redis supports two primary methods:
+
+# 1. **RDB Snapshots:**  
+   Redis periodically saves snapshots of your dataset to a file (typically named `dump.rdb`). You can control this behavior in your `redis.conf` file using `save` directives. For example:
+   ```bash
+   # Save a snapshot every 900 seconds if at least 1 key changed.
+   save 900 1
+
+   # Save a snapshot every 300 seconds if at least 10 keys changed.
+   save 300 10
+
+   # Save a snapshot every 60 seconds if at least 10000 keys changed.
+   save 60 10000
+   ```
+# 2. Append Only File (AOF):
+  Redis can log every write operation to an AOF file, which can be replayed to reconstruct the dataset.
+  To enable AOF, add the following lines to your redis.conf:
+
+```bash
+appendonly yes
+appendfilename "appendonly.aof"
+```
