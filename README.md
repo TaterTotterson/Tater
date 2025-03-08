@@ -1,8 +1,17 @@
-<div align="center"> <img src="https://raw.githubusercontent.com/MasterPhooey/Tater-Discord-AI/refs/heads/main/tater.png" alt="Tater Discord Bot" width="200"/> <h1>Tater Discord AI</h1> </div>
+<div align="center">
+  <img src="https://raw.githubusercontent.com/MasterPhooey/Tater-Discord-WebUI/refs/heads/main/images/tater.png" alt="Tater Discord Bot" width="200"/>
+  <h1>Tater Discord AI & Web UI</h1>
+</div>
 
-# Tater - A Discord Bot Powered by Ollama
+# Tater - A Discord Bot & Web UI Powered by Ollama
 
-A Discord bot that integrates with Ollama to provide a variety of tools to users.
+Tater is a Discord bot that integrates with Ollama to provide a variety of AI-powered tools, and now it also comes with a web UI for interactive chat. Whether you're on Discord or using the web interface, Tater uses advanced memory and context retrieval with embeddings to deliver improved, continuous conversations.
+
+<div align="center">
+  <img src="https://raw.githubusercontent.com/MasterPhooey/Tater-Discord-WebUI/refs/heads/main/images/webui.png" alt="Tater Discord Bot" width="200"/>
+  <h1>Tater Discord AI & Web UI</h1>
+</div>
+
 
 ## Features
 
@@ -11,24 +20,36 @@ A Discord bot that integrates with Ollama to provide a variety of tools to users
   - **Chat Responses**: Generates AI responses, waiting messages, and friendly error messages.
   - **Embedding Model**: Enhances chat history recall and provides more relevant responses by storing and retrieving past conversations.
   - **Requirements**:
-    - You must use an **Ollama model that supports tools (command-r:35b is excellent)**. For more details, see [Ollama Tools](https://ollama.com/search?c=tools).
-    - You must use an **Ollama embedding model**. See available models here: [Ollama Embeddings](https://ollama.com/search?c=embedding).
+    - Use an **Ollama model that supports tools** (e.g., `command-r:35b` is excellent). For more details, see [Ollama Tools](https://ollama.com/search?c=tools).
+    - Use an **Ollama embedding model**. See available models here: [Ollama Embeddings](https://ollama.com/search?c=embedding).
+
+- **Web UI Integration**: 
+  - Interact with Tater via a Streamlit-based web interface.
+  - Chat history, file attachments, and tool function calls are all supported.
+  - Customize your user avatar and settings directly from the web UI.
+
+- **RSS Feed Management** (Discord-only):
+  - **Watch Feeds**: Add an RSS feed to the watch list.
+  - **Unwatch Feeds**: Remove an RSS feed.
+  - **List Feeds**: List all currently watched RSS feeds.
+  - (RSS feed announcements post to a dedicated Discord channel.)
 
 ## Embedding System (Memory & Context Retrieval)
 
-The bot uses an **embedding model** to store and retrieve chat, improving chat continuity and memory recall. Instead of relying solely on chat history, it:
-- **Generates an embedding (vector representation) of each message.**
-- **Stores embeddings in Redis** for fast retrieval.
-- **Finds relevant past messages** when users bring up similar topics.
+Tater uses an embedding model to store and retrieve chat context, which improves chat continuity and memory recall. Instead of relying solely on the raw chat history, Tater:
+
+- **Generates an embedding** (a vector representation) of each message.
+- **Stores embeddings in Redis** for fast and efficient retrieval.
+- **Retrieves relevant past messages** when a user revisits a topic, ensuring the AI's responses are informed by context.
 
 ### **Low RAM Mode (Optional)**
 - By default, the bot **stores all embeddings indefinitely**, allowing it to recall long-term conversations.
 - If running on a **low-RAM system**, you can enable memory limits by modifying `embed.py`:
   ```python
   # Uncomment the following line in embed.py to limit storage to the last 100 messages (saves RAM)
-  # redis_client.ltrim(global_key, -100, -1)
+  # redis_client.ltrim(global_key, -1000, -1)
   ```
-  - **Uncommenting this line** will ensure only the **last 100 embeddings** are kept in memory.
+  - **Uncommenting this line** will ensure only the **last 1000 embeddings** are kept in memory.
   - This helps prevent excessive memory usage on systems with limited resources.
 
 ## Available Tools
@@ -62,7 +83,6 @@ The bot uses an **embedding model** to store and retrieve chat, improving chat c
 ### Prerequisites
 - Python 3.11
 - Docker (optional, for containerized deployment)
-- Poetry (for dependency management)
 
 ### Setting Up Locally
 
@@ -75,13 +95,15 @@ git clone https://github.com/MasterPhooey/Tater.git
 2. **Navigate to the Project Directory**
 
 ```bash
-cd tater
+cd Tater
 ```
 
 3. **Install Dependencies**
 
+Using pip, run:
+
 ```bash
-poetry install
+pip install -r requirements.txt
 ```
 
 4. **Configure Environment Variables**
@@ -89,8 +111,6 @@ poetry install
 Create a `.env` file in the root directory with the following variables:
 
 ```bash
-DISCORD_TOKEN=your_discord_token
-RESPONSE_CHANNEL_ID=your_channel_id
 OLLAMA_HOST=127.0.0.1
 OLLAMA_PORT=11434
 OLLAMA_MODEL=command-r:latest
@@ -100,13 +120,14 @@ REDIS_HOST=127.0.0.1
 REDIS_PORT=6379
 AUTOMATIC_URL=http://127.0.0.1:7860
 PREMIUMIZE_API_KEY=your_premiumize_api_key
-ADMIN_USER_ID=1234567891234567891
 ```
 
-5. **Run the Bot**
+5. **Run the Web UI**
+
+Launch the web UI using Streamlit:
 
 ```bash
-poetry run python main.py
+streamlit run webui.py
 ```
 
 ### Running with Docker
@@ -120,5 +141,5 @@ docker build -t tater .
 2. **Run the Container**
 
 ```bash
-docker run -d --name tater_bot tater
+docker run -d --name tater_bot -p 8501:8501 tater
 ```
