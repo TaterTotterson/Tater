@@ -106,13 +106,13 @@ Tater uses an embedding model to store and retrieve chat context, which improves
 1. **Clone the Repository**
 
 ```bash
-git clone https://github.com/MasterPhooey/Tater.git
+git clone https://github.com/MasterPhooey/Tater-Discord-WebUI.git
 ```
 
 2. **Navigate to the Project Directory**
 
 ```bash
-cd Tater
+cd Tater-Discord-WebUI
 ```
 
 3. **Install Dependencies**
