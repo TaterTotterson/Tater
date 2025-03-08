@@ -23,10 +23,27 @@ Tater is a Discord bot that integrates with Ollama to provide a variety of AI-po
     - Use an **Ollama model that supports tools** (e.g., `command-r:35b` is excellent). For more details, see [Ollama Tools](https://ollama.com/search?c=tools).
     - Use an **Ollama embedding model**. See available models here: [Ollama Embeddings](https://ollama.com/search?c=embedding).
 
-- **Web UI Integration**: 
-  - Interact with Tater via a Streamlit-based web interface.
-  - Chat history, file attachments, and tool function calls are all supported.
-  - Customize your user avatar and settings directly from the web UI.
+## Web UI Integration
+
+The web UI provides a Streamlit-based interface to interact with Tater. Key features include:
+
+- **Interactive Chat:**  
+  Engage with Tater via an intuitive chat interface that supports chat history, file attachments, and tool function calls.
+
+- **Discord Bot Settings:**  
+  Configure Discord-related settings directly from the UI. In the sidebar, under the "Discord Settings" expander, you can set:
+  - **DISCORD_TOKEN**: Your bot's token.
+  - **ADMIN_USER_ID**: The Discord ID of the admin.
+  - **RESPONSE_CHANNEL_ID**: The channel ID where Tater sends responses.
+  - **RSS_CHANNEL_ID**: The channel ID for RSS feed announcements.
+
+- **Chat Settings:**  
+  Customize your user avatar and username. These settings allow you to personalize your experience and are stored persistently in Redis.
+
+- **File Attachments:**  
+  Upload files or images directly from the sidebar, which are then processed accordingly by Tater (for example, torrent files for Premiumize functions).
+
+This unified interface lets you manage both chat interactions and Discord settings in one place, making it easy to deploy and maintain Tater across both platforms.
 
 - **RSS Feed Management** (Discord-only):
   - **Watch Feeds**: Add an RSS feed to the watch list.
