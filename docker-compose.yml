@@ -1,32 +1,31 @@
-version: '3.8'
+version: "3.9"
 
 services:
+  tater:
+    build: .
+    container_name: tater_app
+    ports:
+      - "8501:8501"  # Streamlit web UI
+    environment:
+      OLLAMA_HOST: ${OLLAMA_HOST}
+      OLLAMA_PORT: ${OLLAMA_PORT}
+      OLLAMA_MODEL: ${OLLAMA_MODEL}
+      OLLAMA_EMB_MODEL: ${OLLAMA_EMB_MODEL}
+      CONTEXT_LENGTH: ${CONTEXT_LENGTH}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      AUTOMATIC_URL: ${AUTOMATIC_URL}
+      PREMIUMIZE_API_KEY: ${PREMIUMIZE_API_KEY}
+    depends_on:
+      - redis
+
   redis:
     image: redis:alpine
-    container_name: redis
+    container_name: tater_redis
     ports:
       - "6379:6379"
     volumes:
-      - redis-data:/data
-
-  bot:
-    build:
-      context: .
-    container_name: tater-bot
-    depends_on:
-      - redis
-    environment:
-      DISCORD_TOKEN: "your_discord_token_here"
-      OLLAMA_HOST: "your_ollama_host"
-      OLLAMA_PORT: "11434"
-      OLLAMA_MODEL: "eas/dolphin-2.2-yi:latest"
-      REDIS_HOST: "redis"
-      REDIS_PORT: "6379"
-      RESPONSE_CHANNEL_ID: "your_channel_id"
-      API_ENDPOINT: "http://your_api_endpoint_here"
-    volumes:
-      - .:/app
-    command: ["poetry", "run", "python", "main.py"]
+      - redis_data:/data
 
 volumes:
-  redis-data:
+  redis_data:
