@@ -14,8 +14,9 @@ import YouTube  # Module for YouTube summarization functions
 import web      # Module for webpage summarization functions
 import premiumize  # Module for Premiumize-related functions
 from search import search_web, format_search_results
+from rss import setup_rss_manager
 
-# Load environment variables
+# Load environment variables from .env.
 load_dotenv()
 ollama_model = os.getenv('OLLAMA_MODEL', 'llama3.2').strip()
 response_channel_id = int(os.getenv("RESPONSE_CHANNEL_ID", 0))
@@ -24,36 +25,45 @@ redis_port = int(os.getenv('REDIS_PORT', 6379))
 max_response_length = int(os.getenv("MAX_RESPONSE_LENGTH", 1500))
 context_length = int(os.getenv("CONTEXT_LENGTH", 10000))
 
-
-# Configure logging
+# Configure logging.
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('discord.tater')
 
-# Initialize Redis client
+# Initialize Redis client (using db=0 for global embeddings).
 redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
 
-def clear_redis():
-    """Clear all keys in Redis."""
+def clear_channel_history(channel_id):
+    """Clear chat history for the given channel only."""
+    key = f"tater:channel:{channel_id}:history"
     try:
-        redis_client.flushdb()
-        logger.info("Where am I?!? What happened?!?")
+        redis_client.delete(key)
+        logger.info(f"Cleared chat history for channel {channel_id}.")
     except Exception as e:
-        logger.error(f"Error clearing Redis: {e}")
+        logger.error(f"Error clearing chat history for channel {channel_id}: {e}")
         raise
 
 class tater(commands.Bot):
-    def __init__(self, ollama_client, *args, **kwargs):
+    def __init__(self, ollama_client, admin_user_id, response_channel_id, rss_channel_id, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.ollama = ollama_client
         self.model = ollama_model
+        self.admin_user_id = admin_user_id
+        self.response_channel_id = response_channel_id
+        self.rss_channel_id = rss_channel_id  # New
+        self.max_response_length = max_response_length
+        self.context_length = context_length
 
     async def setup_hook(self):
         await setup_commands(self)
 
     async def on_ready(self):
-        activity = discord.Activity(name='tater', state='Ask me anything!', type=discord.ActivityType.custom)
+        activity = discord.Activity(name='tater', state='Totterson', type=discord.ActivityType.custom)
         await self.change_presence(activity=activity)
-        logger.info('Bot is ready and active.')
+        logger.info(f"Bot is ready. Admin: {self.admin_user_id}, Response Channel: {self.response_channel_id}, RSS Channel: {self.rss_channel_id}")
+        
+        # Initialize the RSS Manager if it hasn't been created yet.
+        if not hasattr(self, "rss_manager"):
+            self.rss_manager = setup_rss_manager(self, self.rss_channel_id)
 
     async def generate_error_message(self, prompt: str, fallback: str, message: discord.Message):
         """
@@ -66,7 +76,7 @@ class tater(commands.Bot):
                 messages=[{"role": "system", "content": prompt}],
                 stream=False,
                 keep_alive=-1,
-                options={"num_ctx": context_length}
+                options={"num_ctx": self.context_length}
             )
             error_text = error_response['message'].get('content', '').strip()
             if error_text:
@@ -75,141 +85,134 @@ class tater(commands.Bot):
             logger.error(f"Error generating error message: {e}")
         return fallback
 
+    # NEW: Add load_history as a method of the tater class.
+    async def load_history(self, channel_id, limit=20):
+        history_key = f"tater:channel:{channel_id}:history"
+        raw_history = redis_client.lrange(history_key, -limit, -1)
+        formatted_history = []
+        for entry in raw_history:
+            data = json.loads(entry)
+            role = data.get("role", "user")
+            sender = data.get("username", role)
+            if role == "assistant":
+                formatted_message = data["content"]
+            else:
+                formatted_message = f"{sender}: {data['content']}"
+            formatted_history.append({"role": role, "content": formatted_message})
+        return formatted_history
+
+    # NEW: Add save_message as a method.
+    async def save_message(self, channel_id, role, username, content):
+        message_data = {"role": role, "username": username, "content": content}
+        history_key = f"tater:channel:{channel_id}:history"
+        redis_client.rpush(history_key, json.dumps(message_data))
+        redis_client.ltrim(history_key, -20, -1)
+
     async def on_message(self, message: discord.Message):
-        # 1) Ignore messages from the bot itself.
+        # Always ignore messages from the bot itself.
         if message.author == self.user:
             return
 
-        # 2) Check if we're in a DM (private message).
-        #    - If yes and the user is not admin, ignore the message.
-        #    - If yes and the user is admin, respond.
-        #    - Otherwise, fall back to channel-based logic.
-        if isinstance(message.channel, discord.DMChannel):
-            # This is a direct message
-            if message.author.id == int(os.getenv("ADMIN_USER_ID", 0)):
-                # Admin in DMs => respond without needing a mention
-                should_respond = True
-            else:
-                # Non-admin in DMs => ignore
-                return
-        else:
-            # Not a DM, so do the existing logic:
-            # - respond if in RESPONSE_CHANNEL_ID or bot is mentioned
-            should_respond = (
-                message.channel.id == response_channel_id
-                or self.user.mentioned_in(message)
-            )
-            if not should_respond:
-                return
-        
-        # Ensure embedding is always initialized before use
-        embedding = None  
+        embedding = None
 
-        # Check if message length is at least 30 characters before storing
+        # Always store the message embedding (if message is long enough)
         if len(message.content.strip()) >= 30:
             embedding = await generate_embedding(message.content)
-            if embedding:
-                await save_embedding(message.content, embedding)
+            if embedding is not None:
+                await save_embedding(message.content, embedding, message.author.name)
 
-        # Retrieve relevant context from past messages
-        if embedding is not None:
+        # Determine whether to respond:
+        if isinstance(message.channel, discord.DMChannel):
+            if message.author.id == self.admin_user_id:
+                should_respond = True
+            else:
+                return
+        else:
+            should_respond = (message.channel.id == self.response_channel_id or self.user.mentioned_in(message))
+            if not should_respond:
+                return
+
+        # Retrieve context only if we successfully got an embedding.
+        if len(message.content.strip()) >= 30 and embedding is not None:
             relevant_context = await find_relevant_context(embedding)
         else:
             relevant_context = []
 
-        # Log the retrieved context
         if relevant_context:
             logger.debug("Retrieved relevant context:")
             for idx, text in enumerate(relevant_context, 1):
-                logger.debug(f"{idx}. {text}")
+                logger.info(f"{idx}. {text}")
         else:
             logger.debug("No relevant context found.")
 
-        # Build a system prompt with the relevant context
+        # Build system prompt, load recent history, and append the user's message.
         system_prompt = (
-            "You are Tater Totterson, a Discord AI Assitant.\n\n"
-            "You help the users with various tools. If you need real-time access to the internet or don't have any information about what the user is asking use the 'web_search' tool, Dont ask to use a tool just use it.\n\n"
-            "You have access to the following tools:\n\n"
-            "1. 'youtube_summary' for summarizing YouTube videos. Pretend you have to watch the entire video to produce an accurate summary.\n\n"
-            "2. 'web_summary' for summarizing news articles or webpage text. Pretend you have to read the whole article to create a proper summary.\n\n"
-            "3. 'draw_picture' for generating images. If a user asks you to draw a picture, use this tool and pretend you are drawing the picture yourself.\n\n"
-            "4. 'premiumize_download' for checking if a URL is cached on Premiumize.me and retrieving download links.\n\n"
-            "5. 'premiumize_torrent' for checking if a torrent file is cached on Premiumize.me and retrieving download links.\n\n"
-            "6. 'watch_feed' for adding a new RSS feed to monitor. When a new article appears in the feed, the bot will summarize it and announce the news.\n\n"
-            "7. 'unwatch_feed' for stopping the monitoring of an RSS feed.\n\n"
-            "8. 'list_feeds' for listing all currently watched RSS feeds.\n\n"
-            "9. 'web_search' for searching the web when additional or up-to-date information is needed to answer a user's question. If you are unsure of the answer, lack sufficient context, or your internal knowledge is outdated, use this tool to retrieve current information from the web.\n\n"
-            "When a user requests one of these actions or you need real-time access to the internet, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
-            "For YouTube videos:\n"
-            "{\n"
-            '  "function": "youtube_summary",\n'
-            '  "arguments": {\n'
-            '      "video_url": "<YouTube URL>"\n'
-            "  }\n"
-            "}\n\n"
-            "For webpages:\n"
-            "{\n"
-            '  "function": "web_summary",\n'
-            '  "arguments": {\n'
-            '      "url": "<Webpage URL>"\n'
-            "  }\n"
-            "}\n\n"
-            "For drawing images:\n"
-            "{\n"
-            '  "function": "draw_picture",\n'
-            '  "arguments": {\n'
-            '      "prompt": "<Text prompt for the image>"\n'
-            "  }\n"
-            "}\n\n"
-            "For Premiumize URL download check:\n"
-            "{\n"
-            '  "function": "premiumize_download",\n'
-            '  "arguments": {\n'
-            '      "url": "<URL to check on Premiumize.me>"\n'
-            "  }\n"
-            "}\n\n"
-            "For Premiumize torrent check:\n"
-            "{\n"
-            '  "function": "premiumize_torrent",\n'
-            '  "arguments": { }\n'
-            "}\n\n"
-            "For adding an RSS feed to watch:\n"
-            "{\n"
-            '  "function": "watch_feed",\n'
-            '  "arguments": {\n'
-            '      "feed_url": "<RSS feed URL>"\n'
-            "  }\n"
-            "}\n\n"
-            "For stopping the watch on an RSS feed:\n"
-            "{\n"
-            '  "function": "unwatch_feed",\n'
-            '  "arguments": {\n'
-            '      "feed_url": "<RSS feed URL>"\n'
-            "  }\n"
-            "}\n\n"
-            "For listing all watched RSS feeds:\n"
-            "{\n"
-            '  "function": "list_feeds",\n'
-            '  "arguments": { }\n'
-            "}\n\n"
-            "{\n"
-            '  "function": "web_search",\n'
-            '  "arguments": {\n'
-            '      "query": "<search query>"\n'
-            "  }\n"
-            "}\n\n"
-
-            "If no function is needed, reply normally."
-        )
-
-        # Add relevant context from stored global knowledge
+                "You are Tater Totterson, the DNServ Crew Assistant. DNServ (Dumb Name Server) is a tight knit retro gaming group with no outsiders. "
+                "You are old and grumpy and have worked for the DNServ Crew for years. Stay in character and never reveal you are an AI. \n\n"
+                "You help the crew with various tools. If you need real-time access to the internet or lack sufficient information, use the 'web_search' tool. \n\n"
+                "You have access to the following tools:\n\n"
+                "1. 'youtube_summary' for summarizing YouTube videos.\n\n"
+                "2. 'web_summary' for summarizing webpage text.\n\n"
+                "3. 'draw_picture' for generating images.\n\n"
+                "4. 'premiumize_download' for checking if a file download link is cached and retrieving download links from Premiumize.me.\n\n"
+                "5. 'premiumize_torrent' for checking if a .torrent file is cached and retrieving torrent download links from Premiumize.me.\n\n"
+                "6. 'watch_feed' for adding an RSS feed.\n\n"
+                "7. 'unwatch_feed' for removing an RSS feed.\n\n"
+                "8. 'list_feeds' for listing watched RSS feeds.\n\n"
+                "9. 'web_search' for searching the web when additional or up-to-date information is needed to answer a user's question.\n\n"
+                "When a user requests one of these actions or you need internet access, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
+                "For YouTube videos:\n"
+                "{\n"
+                '  "function": "youtube_summary",\n'
+                '  "arguments": {"video_url": "<YouTube URL>"}\n'
+                "}\n\n"
+                "For webpages:\n"
+                "{\n"
+                '  "function": "web_summary",\n'
+                '  "arguments": {"url": "<Webpage URL>"}\n'
+                "}\n\n"
+                "For drawing images:\n"
+                "{\n"
+                '  "function": "draw_picture",\n'
+                '  "arguments": {"prompt": "<Text prompt for the image>"}\n'
+                "}\n\n"
+                "For Premiumize URL download check:\n"
+                "{\n"
+                '  "function": "premiumize_download",\n'
+                '  "arguments": {"url": "<URL to check>"}\n'
+                "}\n\n"
+                "For Premiumize torrent check:\n"
+                "{\n"
+                '  "function": "premiumize_torrent",\n'
+                '  "arguments": {}\n'
+                "}\n\n"
+                "For adding an RSS feed:\n"
+                "{\n"
+                '  "function": "watch_feed",\n'
+                '  "arguments": {"feed_url": "<RSS feed URL>"}\n'
+                "}\n\n"
+                "For removing an RSS feed:\n"
+                "{\n"
+                '  "function": "unwatch_feed",\n'
+                '  "arguments": {"feed_url": "<RSS feed URL>"}\n'
+                "}\n\n"
+                "For listing RSS feeds:\n"
+                "{\n"
+                '  "function": "list_feeds",\n'
+                '  "arguments": {}\n'
+                "}\n\n"
+                "{\n"
+                '  "function": "web_search",\n'
+                '  "arguments": {"query": "<search query>"}\n'
+                "}\n\n"
+                "If no function is needed, reply normally."
+            )
         if relevant_context:
             context_prompt = "Here is some relevant information retrieved from previously stored knowledge:\n"
             for text in relevant_context:
                 context_prompt += f"- {text}\n"
             system_prompt += "\n\n" + context_prompt
 
-        # Retrieve conversation history from Redis.
         recent_history = await self.load_history(message.channel.id, limit=20)
         messages_list = [{"role": "system", "content": system_prompt}] + recent_history
         messages_list.append({"role": "user", "content": f"{message.author.name}: {message.content}"})
@@ -222,31 +225,25 @@ class tater(commands.Bot):
                     messages=messages_list,
                     stream=False,
                     keep_alive=-1,
-                    options={"num_ctx": context_length}
+                    options={"num_ctx": self.context_length}
                 )
                 logger.debug(f"Raw response from Ollama: {response_data}")
-
                 response_text = response_data['message'].get('content', '').strip()
-
                 if not response_text:
                     logger.error("Ollama returned an empty response.")
                     await message.channel.send("I'm not sure how to respond to that.")
                     return
-
-                # Generate embedding for bot response, but only store if it's useful
-                if len(response_text) >= 30:  # Ensures only meaningful bot responses are stored
+                if len(response_text) >= 30:
                     response_embedding = await generate_embedding(response_text)
                     if response_embedding:
-                        await save_embedding(response_text, response_embedding)
+                        await save_embedding(message.content, embedding, message.author.name)
                         logger.info("Bot response saved")
                 else:
                     logger.info("Bot response NOT saved (too short)")
 
-                # Try to parse the AI response as JSON for a function call.
                 try:
                     response_json = json.loads(response_text)
                 except json.JSONDecodeError:
-                    # Attempt to extract JSON substring if there is extra text
                     json_start = response_text.find('{')
                     json_end = response_text.rfind('}')
                     if json_start != -1 and json_end != -1:
@@ -297,8 +294,14 @@ class tater(commands.Bot):
                                 if article:
                                     formatted_article = YouTube.format_article_for_discord(article)
                                     message_chunks = YouTube.split_message(formatted_article, chunk_size=max_response_length)
+                                    final_response = "\n".join(message_chunks)
                                     for chunk in message_chunks:
                                         await message.channel.send(chunk)
+                                    # Generate and store an embedding for the final combined response.
+                                    if len(final_response.strip()) >= 30:
+                                        response_embedding = await generate_embedding(final_response)
+                                        if response_embedding:
+                                            await save_embedding(final_response, response_embedding, "assistant")
                                 else:
                                     prompt = f"Generate a error message to {message.author.mention} explaining that I was unable to retrieve the summary from the YouTube video."
                                     error_msg = await self.generate_error_message(prompt, "Failed to retrieve the summary from YouTube.", message)
@@ -345,8 +348,14 @@ class tater(commands.Bot):
                             if summary:
                                 formatted_summary = web.format_summary_for_discord(summary)
                                 message_chunks = web.split_message(formatted_summary, chunk_size=max_response_length)
+                                final_response = "\n".join(message_chunks)
                                 for chunk in message_chunks:
                                     await message.channel.send(chunk)
+                                # Generate and store an embedding for the final combined response.
+                                if len(final_response.strip()) >= 30:
+                                    response_embedding = await generate_embedding(final_response)
+                                    if response_embedding:
+                                        await save_embedding(final_response, response_embedding, "assistant")
                             else:
                                 prompt = f"Generate a error message to {message.author.mention} explaining that I was unable to retrieve the summary from the webpage. Only generate the message. Do not respond to this message."
                                 error_msg = await self.generate_error_message(prompt, "Failed to retrieve the summary from the webpage.", message)
@@ -460,119 +469,104 @@ class tater(commands.Bot):
                             prompt = f"Generate a error message to {message.author.mention} explaining that no torrent file was attached for Premiumize torrent check. Only generate the message. Do not respond to this message."
                             error_msg = await self.generate_error_message(prompt, "No torrent file attached for Premiumize torrent check.", message)
                             await message.channel.send(error_msg)
-
+ 
                     # --- Watch Feed ---
                     elif response_json["function"] == "watch_feed":
-                        args = response_json.get("arguments", {})
+                        waiting_prompt = (
+                            f"Generate a brief message to {message.author.mention} telling them to wait a moment while I add the RSS feed to the watch list. Only generate the message. Do not respond to this message."
+                        )
+                        waiting_response = await self.ollama.chat(
+                            model=self.model,
+                            messages=[{"role": "system", "content": waiting_prompt}],
+                            stream=False,
+                            keep_alive=-1,
+                            options={"num_ctx": context_length}
+                        )
+                        waiting_text = waiting_response['message'].get('content', '').strip()
+                        if waiting_text:
+                            await message.channel.send(waiting_text)
+                        else:
+                            await message.channel.send("Please wait a moment while I add the RSS feed...")
+
                         feed_url = args.get("feed_url")
                         if feed_url:
-                            if hasattr(self, "rss_manager") and self.rss_manager is not None:
-                                success = self.rss_manager.add_feed(feed_url)
-                                if success:
-                                    # Generate confirmation message via Ollama
-                                    prompt = (f"Generate a friendly confirmation message to {message.author.mention} "
-                                              f"that the feed '{feed_url}' has been successfully added and is now being watched. Only generate the message. Do not respond to this message.")
-                                    generated = await self.ollama.chat(
-                                        model=self.model,
-                                        messages=[{"role": "system", "content": prompt}],
-                                        stream=False,
-                                        keep_alive=-1,
-                                        options={"num_ctx": context_length}
-                                    )
-                                    confirmation_text = generated['message'].get('content', '').strip()
-                                    if confirmation_text:
-                                        await message.channel.send(confirmation_text)
-                                    else:
-                                        await message.channel.send(f"✅ Now watching feed: {feed_url}")
-                                else:
-                                    prompt = (f"Generate an error message to {message.author.mention} "
-                                              f"explaining that the provided RSS feed URL could not be added. Only generate the message. Do not respond to this message.")
-                                    error_msg = await self.generate_error_message(prompt, f"Failed to add feed: {feed_url}", message)
-                                    await message.channel.send(error_msg)
+                            import feedparser, time
+                            parsed_feed = feedparser.parse(feed_url)
+                            if parsed_feed.bozo:
+                                final_message = f"Failed to parse feed: {feed_url}"
                             else:
-                                await message.channel.send("RSS Manager is not initialized.")
+                                last_ts = 0.0
+                                if parsed_feed.entries:
+                                    for entry in parsed_feed.entries:
+                                        if 'published_parsed' in entry:
+                                            entry_ts = time.mktime(entry.published_parsed)
+                                            if entry_ts > last_ts:
+                                                last_ts = entry_ts
+                                else:
+                                    last_ts = time.time()
+                                redis_client.hset("rss:feeds", feed_url, last_ts)
+                                final_message = f"Now watching feed: {feed_url}"
                         else:
-                            prompt = (f"Generate an error message to {message.author.mention} "
-                                      f"explaining that no feed URL was provided for watching. Only generate the message. Do not respond to this message.")
-                            error_msg = await self.generate_error_message(prompt, "No feed URL provided for watch_feed.", message)
-                            await message.channel.send(error_msg)
+                            final_message = "No feed URL provided for watching."
+
+                        await message.channel.send(final_message)
                         return
 
                     # --- Unwatch Feed ---
                     elif response_json["function"] == "unwatch_feed":
-                        args = response_json.get("arguments", {})
+                        waiting_prompt = (
+                            f"Generate a brief message to {message.author.mention} telling them to wait a moment while I remove the RSS feed from the watch list. Only generate the message. Do not respond to this message."
+                        )
+                        waiting_response = await self.ollama.chat(
+                            model=self.model,
+                            messages=[{"role": "system", "content": waiting_prompt}],
+                            stream=False,
+                            keep_alive=-1,
+                            options={"num_ctx": context_length}
+                        )
+                        waiting_text = waiting_response['message'].get('content', '').strip()
+                        if waiting_text:
+                            await message.channel.send(waiting_text)
+                        else:
+                            await message.channel.send("Please wait a moment while I remove the RSS feed...")
+
                         feed_url = args.get("feed_url")
                         if feed_url:
-                            if hasattr(self, "rss_manager") and self.rss_manager is not None:
-                                success = self.rss_manager.remove_feed(feed_url)
-                                if success:
-                                    prompt = (f"Generate a friendly confirmation message to {message.author.mention} "
-                                              f"that the feed '{feed_url}' has been successfully removed and is no longer being watched. Only generate the message. Do not respond to this message.")
-                                    generated = await self.ollama.chat(
-                                        model=self.model,
-                                        messages=[{"role": "system", "content": prompt}],
-                                        stream=False,
-                                        keep_alive=-1,
-                                        options={"num_ctx": context_length}
-                                    )
-                                    confirmation_text = generated['message'].get('content', '').strip()
-                                    if confirmation_text:
-                                        await message.channel.send(confirmation_text)
-                                    else:
-                                        await message.channel.send(f"✅ Stopped watching feed: {feed_url}")
-                                else:
-                                    prompt = (f"Generate an error message to {message.author.mention} "
-                                              f"explaining that the provided RSS feed URL could not be removed. Only generate the message. Do not respond to this message.")
-                                    error_msg = await self.generate_error_message(prompt, f"Failed to remove feed: {feed_url}", message)
-                                    await message.channel.send(error_msg)
+                            removed = redis_client.hdel("rss:feeds", feed_url)
+                            if removed:
+                                final_message = f"Stopped watching feed: {feed_url}"
                             else:
-                                await message.channel.send("RSS Manager is not initialized.")
+                                final_message = f"Feed {feed_url} was not found in the watch list."
                         else:
-                            prompt = (f"Generate an error message to {message.author.mention} "
-                                      f"explaining that no feed URL was provided for unwatching. Only generate the message. Do not respond to this message.")
-                            error_msg = await self.generate_error_message(prompt, "No feed URL provided for unwatch_feed.", message)
-                            await message.channel.send(error_msg)
+                            final_message = "No feed URL provided for unwatching."
+                        await message.channel.send(final_message)
                         return
 
                     # --- List Feeds ---
                     elif response_json["function"] == "list_feeds":
-                        if hasattr(self, "rss_manager") and self.rss_manager is not None:
-                            feeds = self.rss_manager.get_feeds()  # returns a dict: feed_url -> last_seen timestamp
-                            if feeds:
-                                feed_list = "\n".join(
-                                    f"{feed_url} (last update: {feeds[feed_url]})" for feed_url in feeds
-                                )
-                                prompt = (f"Generate a friendly message to {message.author.mention} "
-                                          f"listing the currently watched RSS feeds:\n{feed_list}. Only generate the message. Do not respond to this message.")
-                                generated = await self.ollama.chat(
-                                    model=self.model,
-                                    messages=[{"role": "system", "content": prompt}],
-                                    stream=False,
-                                    keep_alive=-1,
-                                    options={"num_ctx": context_length}
-                                )
-                                response_text = generated['message'].get('content', '').strip()
-                                if response_text:
-                                    await message.channel.send(response_text)
-                                else:
-                                    await message.channel.send(f"**Watched RSS Feeds:**\n{feed_list}")
-                            else:
-                                prompt = (f"Generate a friendly message to {message.author.mention} "
-                                          f"explaining that no RSS feeds are currently being watched. Only generate the message. Do not respond to this message.")
-                                generated = await self.ollama.chat(
-                                    model=self.model,
-                                    messages=[{"role": "system", "content": prompt}],
-                                    stream=False,
-                                    keep_alive=-1,
-                                    options={"num_ctx": context_length}
-                                )
-                                response_text = generated['message'].get('content', '').strip()
-                                if response_text:
-                                    await message.channel.send(response_text)
-                                else:
-                                    await message.channel.send("No RSS feeds are currently being watched.")
+                        waiting_prompt = (
+                            f"Generate a brief message to {message.author.mention} telling them to wait a moment while I list all currently watched RSS feeds. Only generate the message. Do not respond to this message."
+                        )
+                        waiting_response = await self.ollama.chat(
+                            model=self.model,
+                            messages=[{"role": "system", "content": waiting_prompt}],
+                            stream=False,
+                            keep_alive=-1,
+                            options={"num_ctx": context_length}
+                        )
+                        waiting_text = waiting_response['message'].get('content', '').strip()
+                        if waiting_text:
+                            await message.channel.send(waiting_text)
                         else:
-                            await message.channel.send("RSS Manager is not initialized.")
+                            await message.channel.send("Please wait a moment while I list the RSS feeds...")
+
+                        feeds = redis_client.hgetall("rss:feeds")
+                        if feeds:
+                            feed_list = "\n".join(f"{feed_url} (last update: {feeds[feed_url]})" for feed_url in feeds)
+                            final_message = f"Currently watched feeds:\n{feed_list}"
+                        else:
+                            final_message = "No RSS feeds are currently being watched."
+                        await message.channel.send(final_message)
                         return
 
                     # --- Web Search ---
@@ -736,20 +730,20 @@ class tater(commands.Bot):
         redis_client.rpush(history_key, json.dumps(message_data))
         redis_client.ltrim(history_key, -20, -1)
 
-    async def load_history(self, channel_id, limit=20):
-        history_key = f"tater:channel:{channel_id}:history"
-        raw_history = redis_client.lrange(history_key, -limit, -1)
-        formatted_history = []
-        for entry in raw_history:
-            data = json.loads(entry)
-            role = data.get("role", "user")
-            sender = data.get("username", role)
-            if role == "assistant":
-                formatted_message = data["content"]
-            else:
-                formatted_message = f"{sender}: {data['content']}"
-            formatted_history.append({"role": role, "content": formatted_message})
-        return formatted_history
+async def load_history(client, channel_id, limit=20):
+    history_key = f"tater:channel:{channel_id}:history"
+    raw_history = redis_client.lrange(history_key, -limit, -1)
+    formatted_history = []
+    for entry in raw_history:
+        data = json.loads(entry)
+        role = data.get("role", "user")
+        sender = data.get("username", role)
+        if role == "assistant":
+            formatted_message = data["content"]
+        else:
+            formatted_message = f"{sender}: {data['content']}"
+        formatted_history.append({"role": role, "content": formatted_message})
+    return formatted_history
 
 async def setup_commands(client: commands.Bot):
     print("Commands setup complete.")

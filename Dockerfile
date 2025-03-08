@@ -1,36 +1,27 @@
-# Use an official Python runtime as a parent image
+# Use an official Python runtime as a parent image.
 FROM python:3.11-slim
 
-# Set environment variables to prevent Python from writing .pyc files and enable unbuffered logging
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-
-# Install system dependencies
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    build-essential \
-    libffi-dev \
-    libssl-dev \
-    curl \
-    git \
-    python3-dev \
-    libpq-dev && \
-    rm -rf /var/lib/apt/lists/*
-
-# Install Poetry for dependency management
-RUN pip install --no-cache-dir poetry
-
-# Set the working directory
+# Set the working directory in the container.
 WORKDIR /app
 
-# Copy only pyproject.toml and poetry.lock if available to leverage Docker cache
-COPY pyproject.toml poetry.lock* ./
+# Install system dependencies (if your project requires any C libraries)
+RUN apt-get update && apt-get install -y build-essential libpq-dev wget && rm -rf /var/lib/apt/lists/*
 
-# Install dependencies without installing the project itself
-RUN poetry install --no-root --only main
+# Copy the requirements file into the container.
+COPY requirements.txt .
 
-# Copy the entire project directory to /app
+# Upgrade pip and install Python dependencies.
+RUN pip install --upgrade pip && pip install -r requirements.txt
+
+# Copy the rest of your application code into the container.
 COPY . .
 
-# Command to run the bot
-CMD ["poetry", "run", "python", "main.py"]
+# Expose the port Streamlit will run on.
+EXPOSE 8501
+
+# Set environment variables for Streamlit if needed
+ENV STREAMLIT_SERVER_PORT=8501
+ENV STREAMLIT_SERVER_ENABLECORS=false
+
+# Command to run your Streamlit web UI.
+CMD ["streamlit", "run", "webui.py"]

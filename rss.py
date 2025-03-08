@@ -19,14 +19,9 @@ max_response_length = int(os.getenv("MAX_RESPONSE_LENGTH", 1500))
 POLL_INTERVAL = int(os.getenv("RSS_POLL_INTERVAL", 60))  # seconds between polls
 
 class RSSManager:
-    """
-    Manages RSS feeds:
-      - Maintains a Redis hash (key "rss:feeds") that maps feed URLs to their last seen published timestamp.
-      - Polls each feed periodically; for new entries, it fetches a summary and posts an announcement.
-    """
-    def __init__(self, bot: discord.Client):
+    def __init__(self, bot: discord.Client, rss_channel_id: int):
         self.bot = bot
-        self.response_channel_id = response_channel_id
+        self.rss_channel_id = rss_channel_id  # Use this channel for RSS announcements.
         self.redis = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
         self.feeds_key = "rss:feeds"  # Redis hash: feed_url -> last processed timestamp
 
@@ -109,7 +104,7 @@ class RSSManager:
         try:
             channel = self.bot.get_channel(self.response_channel_id)
             if channel is None:
-                channel = await self.bot.fetch_channel(self.response_channel_id)
+                channel = self.bot.get_channel(self.rss_channel_id)
             for chunk in chunks:
                 await channel.send(chunk)
         except Exception as e:
@@ -148,7 +143,7 @@ class RSSManager:
                     logger.error(f"Error processing feed {feed_url}: {e}")
             await asyncio.sleep(POLL_INTERVAL)
 
-def setup_rss_manager(bot: discord.Client) -> RSSManager:
-    rss_manager = RSSManager(bot)
+def setup_rss_manager(bot: discord.Client, rss_channel_id: int) -> RSSManager:
+    rss_manager = RSSManager(bot, rss_channel_id)
     asyncio.create_task(rss_manager.poll_feeds())
     return rss_manager
