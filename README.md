@@ -8,7 +8,7 @@
 Tater is a Discord bot that integrates with Ollama to provide a variety of AI-powered tools, and now it also comes with a web UI for interactive chat. Whether you're on Discord or using the web interface, Tater uses advanced memory and context retrieval with embeddings to deliver improved, continuous conversations.
 
 <div align="center">
-  <img src="https://raw.githubusercontent.com/MasterPhooey/Tater-Discord-WebUI/refs/heads/main/images/webui.png" alt="Tater Discord Bot" width="200"/>
+  <img src="https://raw.githubusercontent.com/MasterPhooey/Tater-Discord-WebUI/refs/heads/main/images/webui.png" alt="Tater Discord Bot" width="600"/>
   <h1>Tater Discord AI & Web UI</h1>
 </div>
 
