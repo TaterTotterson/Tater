@@ -185,3 +185,8 @@ If you're running Redis directly, you can ensure data persistence by configuring
 appendonly yes
 appendfilename "appendonly.aof"
 ```
+### Alternatively, you can launch Redis with these persistence settings directly from the terminal (without modifying your redis.conf):
+```bash
+redis-server --save "900 1" --save "300 10" --save "60 10000" --appendonly yes --appendfilename "appendonly.aof"
+```
+
