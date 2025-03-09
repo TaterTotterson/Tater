@@ -102,9 +102,10 @@ class RSSManager:
         # Split the announcement if it exceeds Discord's message length limits
         chunks = web.split_message(announcement, chunk_size=max_response_length)
         try:
-            channel = self.bot.get_channel(self.response_channel_id)
+            channel = self.bot.get_channel(self.rss_channel_id)
             if channel is None:
-                channel = self.bot.get_channel(self.rss_channel_id)
+                logger.error("RSS channel not found.")
+                return
             for chunk in chunks:
                 await channel.send(chunk)
         except Exception as e:
