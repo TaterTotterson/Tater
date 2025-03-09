@@ -147,19 +147,58 @@ Launch the web UI using Streamlit:
 streamlit run webui.py
 ```
 
-### Running with Docker
+## Using the Prebuilt Docker Image
 
-1. **Build the Docker Image**
+For users who prefer not to build the Docker image locally, a prebuilt image is available on Docker Hub.
 
-```bash
-docker build -t tater .
-```
+### 1. Pull the Image
 
-2. **Run the Container**
+Pull the prebuilt image with the following command:
 
 ```bash
-docker run -d --name tater_bot -p 8501:8501 tater
+docker pull masterphooey/tater-webui
 ```
+
+### 2. Run the Container
+
+Run the container with the following command. This example maps port 8501 on your host to port 8501 in the container (where the Streamlit web UI runs):
+
+```bash
+docker run -d --name tater_webui -p 8501:8501 masterphooey/tater-webui
+```
+
+### 3. Configuring Environment Variables
+
+Ensure you supply the required environment variables. You can pass these using the `-e` flag when starting the container. For example:
+
+```bash
+docker run -d --name tater_webui \
+  -p 8501:8501 \
+  -e DISCORD_TOKEN=your_discord_token \
+  -e RESPONSE_CHANNEL_ID=your_response_channel_id \
+  -e RSS_CHANNEL_ID=your_rss_channel_id \
+  -e ADMIN_USER_ID=your_admin_user_id \
+  -e OLLAMA_HOST=127.0.0.1 \
+  -e OLLAMA_PORT=11434 \
+  -e OLLAMA_MODEL=command-r:latest \
+  -e OLLAMA_EMB_MODEL=nomic-embed-text \
+  -e CONTEXT_LENGTH=10000 \
+  -e REDIS_HOST=redis \
+  -e REDIS_PORT=6379 \
+  -e AUTOMATIC_URL=http://127.0.0.1:7860 \
+  -e PREMIUMIZE_API_KEY=your_premiumize_api_key \
+  masterphooey/tater-webui
+```
+
+### 4. Access the Web UI
+
+Once the container is running, open your browser and navigate to:
+
+[http://localhost:8501](http://localhost:8501)
+
+The Streamlit-based web UI will be available for interacting with Tater.
+
+
 
 ## Redis Persistence
 
