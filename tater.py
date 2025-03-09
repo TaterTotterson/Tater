@@ -156,9 +156,9 @@ class tater(commands.Bot):
                 "3. 'draw_picture' for generating images.\n\n"
                 "4. 'premiumize_download' for checking if a file download link is cached and retrieving download links from Premiumize.me.\n\n"
                 "5. 'premiumize_torrent' for checking if a .torrent file is cached and retrieving torrent download links from Premiumize.me.\n\n"
-                "6. 'watch_feed' for adding an RSS feed.\n\n"
-                "7. 'unwatch_feed' for removing an RSS feed.\n\n"
-                "8. 'list_feeds' for listing watched RSS feeds.\n\n"
+                "6. 'watch_feed' for adding an RSS feed to the watch list, add a rss link to the watch list when aa user asks.\n\n"
+                "7. 'unwatch_feed' for removing an RSS feed to from the watch list, remove a rss link from the watch list when aa user asks.\n\n"
+                "8. 'list_feeds' for listing RSS feeds that are currently on the watch list.\n\n"
                 "9. 'web_search' for searching the web when additional or up-to-date information is needed to answer a user's question.\n\n"
                 "When a user requests one of these actions or you need internet access, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
                 "For YouTube videos:\n"
@@ -514,6 +514,7 @@ class tater(commands.Bot):
 
                     # --- Unwatch Feed ---
                     elif response_json["function"] == "unwatch_feed":
+                        args = response_json.get("arguments", {})  # Add this line
                         waiting_prompt = (
                             f"Generate a brief message to {message.author.mention} telling them to wait a moment while I remove the RSS feed from the watch list. Only generate the message. Do not respond to this message."
                         )
