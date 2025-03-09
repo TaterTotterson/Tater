@@ -174,10 +174,6 @@ Ensure you supply the required environment variables. You can pass these using t
 ```bash
 docker run -d --name tater_webui \
   -p 8501:8501 \
-  -e DISCORD_TOKEN=your_discord_token \
-  -e RESPONSE_CHANNEL_ID=your_response_channel_id \
-  -e RSS_CHANNEL_ID=your_rss_channel_id \
-  -e ADMIN_USER_ID=your_admin_user_id \
   -e OLLAMA_HOST=127.0.0.1 \
   -e OLLAMA_PORT=11434 \
   -e OLLAMA_MODEL=command-r:latest \
