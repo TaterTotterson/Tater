@@ -187,7 +187,6 @@ class PaginatedLinks(ui.View):
 class PremiumizeTorrentPlugin(ToolPlugin):
     name = "premiumize_torrent"
     usage = (
-        "For Premiumize torrent check:\n"
         "{\n"
         '  "function": "premiumize_torrent",\n'
         '  "arguments": {}\n'

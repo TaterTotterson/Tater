@@ -34,7 +34,6 @@ assistant_avatar = load_image_from_url("https://raw.githubusercontent.com/Master
 class ListFeedsPlugin(ToolPlugin):
     name = "list_feeds"
     usage = (
-        "For listing RSS feeds:\n"
         "{\n"
         '  "function": "list_feeds",\n'
         '  "arguments": {}\n'

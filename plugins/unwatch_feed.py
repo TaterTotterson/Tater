@@ -34,7 +34,6 @@ assistant_avatar = load_image_from_url("https://raw.githubusercontent.com/Master
 class UnwatchFeedPlugin(ToolPlugin):
     name = "unwatch_feed"
     usage = (
-        "For removing an RSS feed:\n"
         "{\n"
         '  "function": "unwatch_feed",\n'
         '  "arguments": {"feed_url": "<RSS feed URL>"}\n'

@@ -63,7 +63,6 @@ def fetch_web_summary(webpage_url, model=OLLAMA_MODEL):
 class WebSearchPlugin(ToolPlugin):
     name = "web_search"
     usage = (
-        "For searching the web:\n"
         "{\n"
         '  "function": "web_search",\n'
         '  "arguments": {"query": "<search query>"}\n'

@@ -147,7 +147,6 @@ class PaginatedLinks(ui.View):
 class PremiumizeDownloadPlugin(ToolPlugin):
     name = "premiumize_download"
     usage = (
-        "For Premiumize URL download check:\n"
         "{\n"
         '  "function": "premiumize_download",\n'
         '  "arguments": {"url": "<URL to check>"}\n'
