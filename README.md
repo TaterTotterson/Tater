@@ -21,7 +21,7 @@ Tater is a Discord bot that integrates with Ollama to provide a variety of AI-po
   - **Requirements**:
     - Use an **Ollama model that supports tools** (e.g., `command-r:35b` is excellent). For more details, see [Ollama Tools](https://ollama.com/search?c=tools).
     
-## Available Tools
+## Available Tools (Plugins)
 
 **Below are the tools available to you. Simply ask Tater to perform these tasks—no slash commands or specific key terms are required:**
 
@@ -205,3 +205,9 @@ appendfilename "appendonly.aof"
 redis-server --save "900 1" --save "300 10" --save "60 10000" --appendonly yes --appendfilename "appendonly.aof"
 ```
 
+## Plugins:  
+
+For a detailed example on how to create your own plugin, check out the [plugin template](https://github.com/MasterPhooey/Tater-Discord-WebUI/blob/main/examples/plugin-template.py).
+
+**Note:**  
+After creating a plugin, remember to add it to the `plugin_registry.py` file so that Tater can load and use it.
