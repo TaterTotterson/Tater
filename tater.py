@@ -7,7 +7,6 @@ import redis
 import discord
 from discord.ext import commands
 import ollama
-from embed import generate_embedding, save_embedding, find_relevant_context
 from dotenv import load_dotenv
 import re
 import YouTube  # Module for YouTube summarization functions
