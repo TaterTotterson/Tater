@@ -19,7 +19,6 @@ import requests
 from PIL import Image
 from io import BytesIO
 from search import search_web, format_search_results  # Import search functions
-from embed import generate_embedding, save_embedding, find_relevant_context  # Import embedding functions
 
 dotenv.load_dotenv()
 
@@ -52,6 +51,7 @@ def save_message(role, username, content):
     # Store only the raw content and username.
     message_data = {"role": role, "content": content, "username": username}
     redis_client.rpush(CHAT_HISTORY_KEY, json.dumps(message_data))
+    # Optionally, you can trim the history here if desired.
 
 def clear_chat_history():
     redis_client.delete(CHAT_HISTORY_KEY)
@@ -147,7 +147,7 @@ SYSTEM_PROMPT = (
     "4. 'premiumize_download' for retrieving download links from Premiumize.me.\n\n"
     "5. 'premiumize_torrent' for retrieving torrent download links from Premiumize.me.\n\n"
     "6. 'watch_feed' for adding an RSS feed to the watch list, add a rss link to the watch list when aa user asks.\n\n"
-    "7. 'unwatch_feed' for removing an RSS feed to from the watch list, remove a rss link from the watch list when aa user asks.\n\n"
+    "7. 'unwatch_feed' for removing an RSS feed from the watch list, remove a rss link from the watch list when aa user asks.\n\n"
     "8. 'list_feeds' for listing RSS feeds that are currently on the watch list.\n\n"
     "9. 'web_search' for searching the web when additional or up-to-date information is needed to answer a user's question.\n\n"
     "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
@@ -200,27 +200,16 @@ SYSTEM_PROMPT = (
 
 # ----------------- PROCESSING FUNCTIONS -----------------
 async def process_message(user_name, message_content):
-    # Generate embedding for the user's message if long enough.
-    embedding = None
-    relevant_context = []
-    if len(message_content.strip()) >= 30:
-        embedding = await generate_embedding(message_content)
-        if embedding:
-            await save_embedding(message_content, embedding, user_name)
-            relevant_context = await find_relevant_context(embedding, top_n=10)
-    
+    # No embedding is generated; use the static system prompt.
     final_system_prompt = SYSTEM_PROMPT
-    if relevant_context:
-        context_prompt = "Here is some relevant information retrieved from previously stored knowledge:\n"
-        for text in relevant_context:
-            context_prompt += f"- {text}\n"
-        final_system_prompt += "\n\n" + context_prompt
 
+    # Load the last 20 messages from chat history.
     history = load_chat_history()[-20:]
     messages_list = [{"role": "system", "content": final_system_prompt}]
     for msg in history:
         messages_list.append({"role": msg["role"], "content": msg["content"]})
     messages_list.append({"role": "user", "content": message_content})
+    
     response = await ollama_client.chat(
         model=ollama_model,
         messages=messages_list,
@@ -229,12 +218,6 @@ async def process_message(user_name, message_content):
         options={"num_ctx": context_length}
     )
     response_text = response['message'].get('content', '').strip()
-    
-    if len(response_text.strip()) >= 30:
-        bot_embedding = await generate_embedding(response_text)
-        if bot_embedding:
-            await save_embedding(response_text, bot_embedding, "assistant")
-    
     return response_text
 
 async def process_function_call(response_json, user_question=""):
@@ -256,11 +239,6 @@ async def process_function_call(response_json, user_question=""):
                     formatted_article = YouTube.format_article_for_discord(article)
                     chunks = YouTube.split_message(formatted_article)
                     final_response = "\n".join(chunks)
-                    # Store embedding for the final combined response.
-                    if len(final_response.strip()) >= 30:
-                        response_embedding = await generate_embedding(final_response)
-                        if response_embedding:
-                            await save_embedding(final_response, response_embedding, "assistant")
                     return final_response
                 else:
                     return "Failed to retrieve summary from YouTube."
@@ -277,11 +255,6 @@ async def process_function_call(response_json, user_question=""):
                 formatted_summary = web.format_summary_for_discord(summary)
                 chunks = web.split_message(formatted_summary)
                 final_response = "\n".join(chunks)
-                # Store embedding for the final combined response.
-                if len(final_response.strip()) >= 30:
-                    response_embedding = await generate_embedding(final_response)
-                    if response_embedding:
-                        await save_embedding(final_response, response_embedding, "assistant")
                 return final_response
             else:
                 return "Failed to retrieve summary from the webpage."
@@ -304,14 +277,12 @@ async def process_function_call(response_json, user_question=""):
             return result
         else:
             return "No URL provided for Premiumize download check."
-
     elif func == "watch_feed":
         await send_waiting_message(
             f"Generate a brief message to {username} telling them to wait a moment while you add the RSS feed to the watch list. Only generate the message. Do not respond to this message."
         )
         feed_url = args.get("feed_url")
         if feed_url:
-            # Attempt to parse the feed to get the last published timestamp
             parsed_feed = feedparser.parse(feed_url)
             if parsed_feed.bozo:
                 return f"Failed to parse feed: {feed_url}"
@@ -324,12 +295,10 @@ async def process_function_call(response_json, user_question=""):
                             last_ts = entry_ts
             else:
                 last_ts = time.time()
-            # Store the feed in Redis under "rss:feeds"
             redis_client.hset("rss:feeds", feed_url, last_ts)
             return f"Now watching feed: {feed_url}"
         else:
             return "No feed URL provided for watching."
-
     elif func == "unwatch_feed":
         await send_waiting_message(
             f"Generate a brief message to {username} telling them to wait a moment while you remove the RSS feed. Only generate the message. Do not respond to this message."
@@ -343,7 +312,6 @@ async def process_function_call(response_json, user_question=""):
                 return f"Feed {feed_url} was not found in the watch list."
         else:
             return "No feed URL provided for unwatching."
-
     elif func == "list_feeds":
         await send_waiting_message(
             f"Generate a brief message to {username} telling them to wait a moment while you list all currently watched feeds. Only generate the message. Do not respond to this message."
@@ -354,7 +322,6 @@ async def process_function_call(response_json, user_question=""):
             return f"Currently watched feeds:\n{feed_list}"
         else:
             return "No RSS feeds are currently being watched."
-
     elif func == "web_search":
         await send_waiting_message(f"Generate a brief message to {username} telling them to wait a moment while you search the internet for more information. Only generate the message. Do not respond to this message.")
         query = args.get("query")
