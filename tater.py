@@ -116,13 +116,6 @@ class tater(commands.Bot):
         # Always save the incoming message in the channel's history.
         await self.save_message(message.channel.id, "user", message.author.name, message.content)
 
-        # (Optional) Generate and save an embedding if the message is long enough.
-        embedding = None
-        if len(message.content.strip()) >= 30:
-            embedding = await generate_embedding(message.content)
-            if embedding is not None:
-                await save_embedding(message.content, embedding, message.author.name)
-
         # Determine whether to respond:
         if isinstance(message.channel, discord.DMChannel):
             if message.author.id == self.admin_user_id:
@@ -134,20 +127,10 @@ class tater(commands.Bot):
             if not should_respond:
                 return
 
-        # Retrieve context only if we successfully got an embedding.
-        if len(message.content.strip()) >= 30 and embedding is not None:
-            relevant_context = await find_relevant_context(embedding)
-        else:
-            relevant_context = []
+        # Since embedding is removed, we set relevant_context to an empty list.
+        relevant_context = []
 
-        if relevant_context:
-            logger.debug("Retrieved relevant context:")
-            for idx, text in enumerate(relevant_context, 1):
-                logger.info(f"{idx}. {text}")
-        else:
-            logger.debug("No relevant context found.")
-
-        # Build system prompt, load recent history, and append the user's message.
+        # Build system prompt without any retrieved context.
         system_prompt = (
             "You are Tater Totterson, a helpful AI assistant with access to various tools.\n\n"
             "If you need real-time access to the internet or lack sufficient information, use the 'web_search' tool. \n\n"
@@ -157,8 +140,8 @@ class tater(commands.Bot):
             "3. 'draw_picture' for generating images.\n\n"
             "4. 'premiumize_download' for retrieving download links from Premiumize.me.\n\n"
             "5. 'premiumize_torrent' for retrieving torrent download links from Premiumize.me.\n\n"
-            "6. 'watch_feed' for adding an RSS feed to the watch list, add a rss link to the watch list when aa user asks.\n\n"
-            "7. 'unwatch_feed' for removing an RSS feed to from the watch list, remove a rss link from the watch list when aa user asks.\n\n"
+            "6. 'watch_feed' for adding an RSS feed to the watch list, add a rss link to the watch list when a user asks.\n\n"
+            "7. 'unwatch_feed' for removing an RSS feed from the watch list, remove a rss link from the watch list when a user asks.\n\n"
             "8. 'list_feeds' for listing RSS feeds that are currently on the watch list.\n\n"
             "9. 'web_search' for searching the web when additional or up-to-date information is needed to answer a user's question.\n\n"
             "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
@@ -210,12 +193,7 @@ class tater(commands.Bot):
             "If no function is needed, reply normally."
         )
 
-        if relevant_context:
-            context_prompt = "Here is some relevant information retrieved from previously stored knowledge:\n"
-            for text in relevant_context:
-                context_prompt += f"- {text}\n"
-            system_prompt += "\n\n" + context_prompt
-
+        # Load the last 20 messages from the channel's history.
         recent_history = await self.load_history(message.channel.id, limit=20)
         messages_list = [{"role": "system", "content": system_prompt}] + recent_history
         messages_list.append({"role": "user", "content": f"{message.author.name}: {message.content}"})
@@ -236,14 +214,8 @@ class tater(commands.Bot):
                     logger.error("Ollama returned an empty response.")
                     await message.channel.send("I'm not sure how to respond to that.")
                     return
-                if len(response_text) >= 30:
-                    response_embedding = await generate_embedding(response_text)
-                    if response_embedding:
-                        await save_embedding(response_text, response_embedding, "assistant")
-                        logger.info("Bot response saved")
-                else:
-                    logger.info("Bot response NOT saved (too short)")
 
+                # Attempt to parse response JSON (if applicable).
                 try:
                     response_json = json.loads(response_text)
                 except json.JSONDecodeError:
@@ -300,11 +272,6 @@ class tater(commands.Bot):
                                     final_response = "\n".join(message_chunks)
                                     for chunk in message_chunks:
                                         await message.channel.send(chunk)
-                                    # Generate and store an embedding for the final combined response.
-                                    if len(final_response.strip()) >= 30:
-                                        response_embedding = await generate_embedding(final_response)
-                                        if response_embedding:
-                                            await save_embedding(final_response, response_embedding, "assistant")
                                 else:
                                     prompt = f"Generate a error message to {message.author.mention} explaining that I was unable to retrieve the summary from the YouTube video."
                                     error_msg = await self.generate_error_message(prompt, "Failed to retrieve the summary from YouTube.", message)
@@ -354,11 +321,6 @@ class tater(commands.Bot):
                                 final_response = "\n".join(message_chunks)
                                 for chunk in message_chunks:
                                     await message.channel.send(chunk)
-                                # Generate and store an embedding for the final combined response.
-                                if len(final_response.strip()) >= 30:
-                                    response_embedding = await generate_embedding(final_response)
-                                    if response_embedding:
-                                        await save_embedding(final_response, response_embedding, "assistant")
                             else:
                                 prompt = f"Generate a error message to {message.author.mention} explaining that I was unable to retrieve the summary from the webpage. Only generate the message. Do not respond to this message."
                                 error_msg = await self.generate_error_message(prompt, "Failed to retrieve the summary from the webpage.", message)
@@ -374,7 +336,7 @@ class tater(commands.Bot):
                         prompt_text = args.get("prompt")
                         if prompt_text:
                             waiting_prompt = (
-                                f"Generate a brief message to {message.author.mention} telling them to wait a moment while I create that picture for you. Only generate the message. Do not respond to this message. Only generate the message. Do not respond to this message."
+                                f"Generate a brief message to {message.author.mention} telling them to wait a moment while I create that picture for you. Only generate the message. Do not respond to this message."
                             )
                             waiting_response = await self.ollama.chat(
                                 model=self.model,
@@ -429,7 +391,6 @@ class tater(commands.Bot):
                             
                             async with message.channel.typing():
                                 try:
-                                    # Call the premiumize function that sends messages using the channel.
                                     await premiumize.process_download(message.channel, url)
                                 except Exception as e:
                                     prompt = f"Generate a error message to {message.author.mention} explaining that I was unable to retrieve the Premiumize download links for the URL. Only generate the message. Do not respond to this message."
@@ -442,7 +403,6 @@ class tater(commands.Bot):
 
                     # --- Premiumize Torrent ---
                     elif response_json["function"] == "premiumize_torrent":
-                        # For torrent requests, we expect an attached torrent file.
                         if message.attachments:
                             torrent_attachment = message.attachments[0]
                             waiting_prompt = (
@@ -472,7 +432,7 @@ class tater(commands.Bot):
                             prompt = f"Generate a error message to {message.author.mention} explaining that no torrent file was attached for Premiumize torrent check. Only generate the message. Do not respond to this message."
                             error_msg = await self.generate_error_message(prompt, "No torrent file attached for Premiumize torrent check.", message)
                             await message.channel.send(error_msg)
- 
+
                     # --- Watch Feed ---
                     elif response_json["function"] == "watch_feed":
                         waiting_prompt = (
@@ -517,7 +477,7 @@ class tater(commands.Bot):
 
                     # --- Unwatch Feed ---
                     elif response_json["function"] == "unwatch_feed":
-                        args = response_json.get("arguments", {})  # Add this line
+                        args = response_json.get("arguments", {})
                         waiting_prompt = (
                             f"Generate a brief message to {message.author.mention} telling them to wait a moment while I remove the RSS feed from the watch list. Only generate the message. Do not respond to this message."
                         )
@@ -578,7 +538,6 @@ class tater(commands.Bot):
                         args = response_json.get("arguments", {})
                         query = args.get("query")
                         if query:
-                            # Send a waiting prompt to the user.
                             waiting_prompt = (
                                 f"Generate a brief message to {message.author.mention} telling them to wait a moment while I search the web for additional information. Only generate the message. Do not respond to this message."
                             )
@@ -595,11 +554,9 @@ class tater(commands.Bot):
                             else:
                                 await message.channel.send("Please wait a moment while I search the web...")
 
-                            # Search the web using our tool.
                             results = search_web(query)
                             if results:
                                 formatted_results = format_search_results(results)
-                                # Build the choice prompt with actual values filled in.
                                 choice_prompt = (
                                     f"You are looking for more information on '{query}' because the user asked: '{message.content}'.\n\n"
                                     f"Here are the top search results:\n\n"
@@ -616,7 +573,6 @@ class tater(commands.Bot):
                                     "  }\n"
                                     "}"
                                 )
-                                # Call the model with the new prompt.
                                 choice_response = await self.ollama.chat(
                                     model=self.model,
                                     messages=[{"role": "system", "content": choice_prompt}],
@@ -625,7 +581,6 @@ class tater(commands.Bot):
                                     options={"num_ctx": context_length}
                                 )
                                 choice_text = choice_response['message'].get('content', '').strip()
-                                # Attempt to parse the response JSON.
                                 try:
                                     choice_json = json.loads(choice_text)
                                 except json.JSONDecodeError:
@@ -647,7 +602,6 @@ class tater(commands.Bot):
                                     return
 
                                 if choice_json.get("function") == "web_fetch":
-                                    # Process the web_fetch immediately.
                                     args = choice_json.get("arguments", {})
                                     link = args.get("link")
                                     original_query = args.get("query")
@@ -655,15 +609,13 @@ class tater(commands.Bot):
                                     if link:
                                         summary = await asyncio.to_thread(web.fetch_web_summary, link)
                                         if summary:
-                                            # Build a new prompt instructing the model to use the detailed info to answer the original query.
                                             info_prompt = (
                                                 f"Using the detailed information from the selected page below, please provide a clear and concise answer to the original query.\n\n"
                                                 f"Original Query: '{original_query}'\n"
-                                                f"User Question: '{user_question}'\n\n"
+                                                f"User Question: '{message.content}'\n\n"
                                                 f"Detailed Information:\n{summary}\n\n"
                                                 "Answer:"
                                             )
-                                            # Call the model to generate the final answer.
                                             final_response = await self.ollama.chat(
                                                 model=self.model,
                                                 messages=[{"role": "system", "content": info_prompt}],
@@ -673,7 +625,6 @@ class tater(commands.Bot):
                                             )
                                             final_answer = final_response['message'].get('content', '').strip()
                                             if final_answer:
-                                                # Split the final answer if it's too long.
                                                 if len(final_answer) > max_response_length:
                                                     chunks = web.split_message(final_answer, chunk_size=max_response_length)
                                                     for chunk in chunks:
@@ -708,7 +659,6 @@ class tater(commands.Bot):
                             await message.channel.send(error_msg)
                         return
 
-                    # --- Unknown Function ---
                     else:
                         prompt = f"Generate a error message to {message.author.mention} explaining that an unknown function call was received. Only generate the message. Do not respond to this message."
                         error_msg = await self.generate_error_message(prompt, "Received an unknown function call.", message)
@@ -718,7 +668,7 @@ class tater(commands.Bot):
                     for chunk in [response_text[i:i + max_response_length] for i in range(0, len(response_text), max_response_length)]:
                         await message.channel.send(chunk)
 
-                # Save the conversation to Redis.
+                # Save the assistant's response in the chat history.
                 await self.save_message(message.channel.id, "assistant", "assistant", response_text)
 
             except Exception as e:
