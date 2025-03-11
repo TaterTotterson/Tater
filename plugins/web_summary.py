@@ -111,8 +111,8 @@ def extract_article_text(webpage_url):
         html = response.text
         soup = BeautifulSoup(html, "html.parser")
         # Remove unwanted elements.
-        for element in soup(["script", "style", "header", "footer", "nav", "aside"]):
-            element.decompose()
+        #for element in soup(["script", "style", "header", "footer", "nav", "aside"]):
+        #    element.decompose()
         text = soup.get_text(separator="\n")
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         article_text = "\n".join(lines)
