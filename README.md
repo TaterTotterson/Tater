@@ -15,14 +15,12 @@ Tater is a Discord bot that integrates with Ollama to provide a variety of AI-po
 
 ## Features
 
-- **Conversation Continuity**: Maintains context using Redis and an embedding model for improved memory retrieval.
-- **Ollama Integration**: Utilizes Ollama for AI responses, conversation memory, and embedding-based recall.
+- **Conversation Continuity**: Maintains context using Redis.
+- **Ollama Integration**: Utilizes Ollama for AI responses.
   - **Chat Responses**: Generates AI responses, waiting messages, and friendly error messages.
-  - **Embedding Model**: Enhances chat history recall and provides more relevant responses by storing and retrieving past conversations.
   - **Requirements**:
     - Use an **Ollama model that supports tools** (e.g., `command-r:35b` is excellent). For more details, see [Ollama Tools](https://ollama.com/search?c=tools).
-    - Use an **Ollama embedding model**. See available models here: [Ollama Embeddings](https://ollama.com/search?c=embedding).
-    - 
+    
 ## Available Tools
 
 **Below are the tools available to you. Simply ask Tater to perform these tasks—no slash commands or specific key terms are required:**
@@ -76,24 +74,6 @@ This unified interface lets you manage both chat interactions and Discord settin
   - **Unwatch Feeds**: Remove an RSS feed.
   - **List Feeds**: List all currently watched RSS feeds.
   - (RSS feed announcements post to a dedicated Discord channel.)
-
-## Embedding System (Memory & Context Retrieval)
-
-Tater uses an embedding model to store and retrieve chat context, which improves chat continuity and memory recall. Instead of relying solely on the raw chat history, Tater:
-
-- **Generates an embedding** (a vector representation) of each message.
-- **Stores embeddings in Redis** for fast and efficient retrieval.
-- **Retrieves relevant past messages** when a user revisits a topic, ensuring the AI's responses are informed by context.
-
-### **Low RAM Mode (Optional)**
-- By default, the bot **stores all embeddings indefinitely**, allowing it to recall long-term conversations.
-- If running on a **low-RAM system**, you can enable memory limits by modifying `embed.py`:
-  ```python
-  # Uncomment the following line in embed.py to limit storage to the last 100 messages (saves RAM)
-  # redis_client.ltrim(global_key, -1000, -1)
-  ```
-  - **Uncommenting this line** will ensure only the **last 1000 embeddings** are kept in memory.
-  - This helps prevent excessive memory usage on systems with limited resources.
 
 ## Installation
 
