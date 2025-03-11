@@ -266,7 +266,7 @@ async def process_function_call(response_json, user_question=""):
         if prompt_text:
             image_bytes = await asyncio.to_thread(image.generate_image, prompt_text)
             st.image(image_bytes, caption="Generated Image")
-            return "Image generated."
+            return "Nailed It!"
         else:
             return "No prompt provided for drawing a picture."
     elif func == "premiumize_download":
