@@ -36,26 +36,28 @@ def extract_json(text):
 
 def fetch_web_summary(webpage_url, model=OLLAMA_MODEL):
     """
-    Fetch the webpage and extract a basic summary.
-    This example uses BeautifulSoup to try and extract the main textual content.
+    Fetch the webpage and extract a cleaned text.
+    This function uses BeautifulSoup to remove unwanted elements,
+    then attempts to extract content from <article> tags or falls back to <p> tags.
+    Returns the full cleaned text for summarization.
     """
     try:
         response = requests.get(webpage_url, timeout=10)
         if response.status_code != 200:
             return None
-        soup = BeautifulSoup(response.text, 'html.parser')
-        # Try to extract from <article> or <p> tags
+        html = response.text
+        soup = BeautifulSoup(html, "html.parser")
+        # Remove unwanted elements like scripts, styles, headers, footers, navigation, and asides.
+        for element in soup(["script", "style", "header", "footer", "nav", "aside"]):
+            element.decompose()
+        # Try extracting text from an <article> tag first.
         article = soup.find('article')
         if article:
             text = article.get_text(separator="\n").strip()
         else:
             paragraphs = soup.find_all('p')
             text = "\n".join(p.get_text() for p in paragraphs).strip()
-        # Return first 300 characters as a summary
-        if text:
-            return text[:300] + "..."
-        else:
-            return None
+        return text if text else None
     except Exception as e:
         logging.error(f"Error in fetch_web_summary: {e}")
         return None
