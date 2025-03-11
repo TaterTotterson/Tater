@@ -36,7 +36,6 @@ assistant_avatar = load_image_from_url("https://raw.githubusercontent.com/Master
 class WatchFeedPlugin(ToolPlugin):
     name = "watch_feed"
     usage = (
-        "For adding an RSS feed:\n"
         "{\n"
         '  "function": "watch_feed",\n'
         '  "arguments": {"feed_url": "<RSS feed URL>"}\n'

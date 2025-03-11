@@ -31,7 +31,6 @@ assistant_avatar = load_image_from_url("https://raw.githubusercontent.com/Master
 class WebSummaryPlugin(ToolPlugin):
     name = "web_summary"
     usage = (
-        "For webpages:\n"
         "{\n"
         '  "function": "web_summary",\n'
         '  "arguments": {"url": "<Webpage URL>"}\n'

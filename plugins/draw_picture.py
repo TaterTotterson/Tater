@@ -36,7 +36,6 @@ assistant_avatar = load_image_from_url("https://raw.githubusercontent.com/Master
 class DrawPicturePlugin(ToolPlugin):
     name = "draw_picture"
     usage = (
-        "For drawing images:\n"
         "{\n"
         '  "function": "draw_picture",\n'
         '  "arguments": {"prompt": "<Text prompt for the image>"}\n'
@@ -46,8 +45,6 @@ class DrawPicturePlugin(ToolPlugin):
     platforms = ["discord", "webui"]
 
     async def handle_webui(self, args, ollama_client, context_length):
-        username = args.get("username", "User")
-        # In webui, we assume a waiting message is sent by the main code
         prompt_text = args.get("prompt")
         if not prompt_text:
             return "No prompt provided for drawing a picture."
