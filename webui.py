@@ -51,7 +51,7 @@ def save_message(role, username, content):
     # Store only the raw content and username.
     message_data = {"role": role, "content": content, "username": username}
     redis_client.rpush(CHAT_HISTORY_KEY, json.dumps(message_data))
-    # Optionally, you can trim the history here if desired.
+    redis_client.ltrim(CHAT_HISTORY_KEY, -20, -1)
 
 def clear_chat_history():
     redis_client.delete(CHAT_HISTORY_KEY)
@@ -140,10 +140,11 @@ def load_avatar_image(avatar_b64):
 SYSTEM_PROMPT = (
     "You are Tater Totterson, a helpful AI assistant with access to various tools.\n\n"
     "If you need real-time access to the internet or lack sufficient information, use the 'web_search' tool. \n\n"
-    "Use the tools to help users with various tasks. You have access to the following tools:\n\n"
+    "If a user asks you to draw a picture, always use the draw tool.\n\n"
+    "Always use a tool if needed. You have access to the following tools:\n\n"
     "1. 'youtube_summary' for summarizing YouTube videos.\n\n"
     "2. 'web_summary' for summarizing webpage text.\n\n"
-    "3. 'draw_picture' for generating images.\n\n"
+    "3. 'draw_picture' for drawing pictures and generate images for users.\n\n"
     "4. 'premiumize_download' for retrieving download links from Premiumize.me.\n\n"
     "5. 'premiumize_torrent' for retrieving torrent download links from Premiumize.me.\n\n"
     "6. 'watch_feed' for adding an RSS feed to the watch list, add a rss link to the watch list when aa user asks.\n\n"
@@ -266,7 +267,7 @@ async def process_function_call(response_json, user_question=""):
         if prompt_text:
             image_bytes = await asyncio.to_thread(image.generate_image, prompt_text)
             st.image(image_bytes, caption="Generated Image")
-            return "Nailed It!"
+            return ""
         else:
             return "No prompt provided for drawing a picture."
     elif func == "premiumize_download":

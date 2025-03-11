@@ -136,7 +136,7 @@ class tater(commands.Bot):
             "Use the tools to help users with various tasks. You have access to the following tools:\n\n"
             "1. 'youtube_summary' for summarizing YouTube videos.\n\n"
             "2. 'web_summary' for summarizing webpage text.\n\n"
-            "3. 'draw_picture' for generating images.\n\n"
+            "3. 'draw_picture' for drawing pictures and generate images for users.\n\n"
             "4. 'premiumize_download' for retrieving download links from Premiumize.me.\n\n"
             "5. 'premiumize_torrent' for retrieving torrent download links from Premiumize.me.\n\n"
             "6. 'watch_feed' for adding an RSS feed to the watch list, add a rss link to the watch list when a user asks.\n\n"
