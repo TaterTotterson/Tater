@@ -8,6 +8,7 @@ import redis
 import discord
 import requests
 from dotenv import load_dotenv
+from bs4 import BeautifulSoup
 
 logger = logging.getLogger("discord.rss")
 logger.setLevel(logging.DEBUG)
@@ -29,17 +30,25 @@ redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_respon
 #############################
 # Helper Functions
 #############################
+
 def fetch_web_summary(webpage_url, model=OLLAMA_MODEL):
     """
-    Extract article text from a webpage and summarize it.
-    For demonstration, returns the first 300 characters of the page.
+    Extract the main textual content from a webpage URL using requests and BeautifulSoup.
+    Cleans the HTML by removing unwanted elements and returns the cleaned article text.
     """
     try:
         response = requests.get(webpage_url, timeout=10)
         if response.status_code != 200:
             return None
-        # For demonstration, simply return the first 300 characters.
-        return response.text[:300] + "..."
+        html = response.text
+        soup = BeautifulSoup(html, "html.parser")
+        # Remove unwanted elements.
+        for element in soup(["script", "style", "header", "footer", "nav", "aside"]):
+            element.decompose()
+        text = soup.get_text(separator="\n")
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        article_text = "\n".join(lines)
+        return article_text
     except Exception as e:
         logger.error(f"Error in fetch_web_summary: {e}")
         return None
