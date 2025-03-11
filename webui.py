@@ -1,3 +1,4 @@
+# webui.py
 import streamlit as st
 import redis
 import os
@@ -9,16 +10,14 @@ import dotenv
 import ollama
 import feedparser
 from discord_control import connect_discord, disconnect_discord
-import YouTube
-import web      # your existing module for webpage summarization/search
-import premiumize  # your existing module for Premiumize functions
-import image
 import logging
 import base64
 import requests
 from PIL import Image
 from io import BytesIO
-from search import search_web, format_search_results  # Import search functions
+
+# Import plugin registry
+from plugin_registry import plugin_registry
 
 dotenv.load_dotenv()
 
@@ -40,7 +39,7 @@ CHAT_HISTORY_KEY = "webui:chat_history"
 
 st.set_page_config(
     page_title="Tater Chat",
-    page_icon=":material/tooltip_2:"  # can be a URL or a local file path tooltip_2
+    page_icon=":material/tooltip_2:"  # can be a URL or a local file path
 )
 
 def load_chat_history():
@@ -137,71 +136,24 @@ def load_avatar_image(avatar_b64):
         return None
 
 # ----------------- SYSTEM PROMPT -----------------
-SYSTEM_PROMPT = (
+def build_system_prompt(base_prompt):
+    tool_instructions = "\n\n".join(
+        f"{plugin.usage}\nDescription: {getattr(plugin, 'description', 'No description provided.')}"
+        for plugin in plugin_registry.values()
+        if "discord" in plugin.platforms or "both" in plugin.platforms
+    )
+    return base_prompt + "\n\n" + tool_instructions
+
+BASE_PROMPT = (
     "You are Tater Totterson, a helpful AI assistant with access to various tools.\n\n"
-    "If you need real-time access to the internet or lack sufficient information, use the 'web_search' tool. \n\n"
-    "If a user asks you to draw a picture, always use the draw tool.\n\n"
-    "Always use a tool if needed. You have access to the following tools:\n\n"
-    "1. 'youtube_summary' for summarizing YouTube videos.\n\n"
-    "2. 'web_summary' for summarizing webpage text.\n\n"
-    "3. 'draw_picture' for drawing pictures and generate images for users.\n\n"
-    "4. 'premiumize_download' for retrieving download links from Premiumize.me.\n\n"
-    "5. 'premiumize_torrent' for retrieving torrent download links from Premiumize.me.\n\n"
-    "6. 'watch_feed' for adding an RSS feed to the watch list, add a rss link to the watch list when aa user asks.\n\n"
-    "7. 'unwatch_feed' for removing an RSS feed from the watch list, remove a rss link from the watch list when aa user asks.\n\n"
-    "8. 'list_feeds' for listing RSS feeds that are currently on the watch list.\n\n"
-    "9. 'web_search' for searching the web when additional or up-to-date information is needed to answer a user's question.\n\n"
-    "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
-    "For YouTube videos:\n"
-    "{\n"
-    '  "function": "youtube_summary",\n'
-    '  "arguments": {"video_url": "<YouTube URL>"}\n'
-    "}\n\n"
-    "For webpages:\n"
-    "{\n"
-    '  "function": "web_summary",\n'
-    '  "arguments": {"url": "<Webpage URL>"}\n'
-    "}\n\n"
-    "For drawing images:\n"
-    "{\n"
-    '  "function": "draw_picture",\n'
-    '  "arguments": {"prompt": "<Text prompt for the image>"}\n'
-    "}\n\n"
-    "For Premiumize URL download check:\n"
-    "{\n"
-    '  "function": "premiumize_download",\n'
-    '  "arguments": {"url": "<URL to check>"}\n'
-    "}\n\n"
-    "For Premiumize torrent check:\n"
-    "{\n"
-    '  "function": "premiumize_torrent",\n'
-    '  "arguments": {}\n'
-    "}\n\n"
-    "For adding an RSS feed:\n"
-    "{\n"
-    '  "function": "watch_feed",\n'
-    '  "arguments": {"feed_url": "<RSS feed URL>"}\n'
-    "}\n\n"
-    "For removing an RSS feed:\n"
-    "{\n"
-    '  "function": "unwatch_feed",\n'
-    '  "arguments": {"feed_url": "<RSS feed URL>"}\n'
-    "}\n\n"
-    "For listing RSS feeds:\n"
-    "{\n"
-    '  "function": "list_feeds",\n'
-    '  "arguments": {}\n'
-    "}\n\n"
-    "{\n"
-    '  "function": "web_search",\n'
-    '  "arguments": {"query": "<search query>"}\n'
-    "}\n\n"
-    "If no function is needed, reply normally."
+    "If you need real-time access to the internet or lack sufficient information, use the 'web_search' tool\n\n."
+    "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else), If no function is needed, reply normally:\n\n"
 )
+SYSTEM_PROMPT = build_system_prompt(BASE_PROMPT)
 
 # ----------------- PROCESSING FUNCTIONS -----------------
 async def process_message(user_name, message_content):
-    # No embedding is generated; use the static system prompt.
+    # Use the dynamically built SYSTEM_PROMPT.
     final_system_prompt = SYSTEM_PROMPT
 
     # Load the last 20 messages from chat history.
@@ -227,179 +179,13 @@ async def process_function_call(response_json, user_question=""):
     # Retrieve the username from chat settings.
     chat_settings = get_chat_settings()
     username = chat_settings["username"]
-    
-    if func == "youtube_summary":
-        await send_waiting_message(f"Generate a brief message to {username} telling them to wait a moment while you summarize the YouTube video. Only generate the message. Do not respond to this message.")
-        video_url = args.get("video_url")
-        target_lang = args.get("target_lang", "en")
-        if video_url:
-            video_id = YouTube.extract_video_id(video_url)
-            if video_id:
-                article = await asyncio.to_thread(YouTube.fetch_youtube_summary, video_id, target_lang)
-                if article:
-                    formatted_article = YouTube.format_article_for_discord(article)
-                    chunks = YouTube.split_message(formatted_article)
-                    final_response = "\n".join(chunks)
-                    return final_response
-                else:
-                    return "Failed to retrieve summary from YouTube."
-            else:
-                return "Invalid YouTube URL."
-        else:
-            return "No YouTube URL provided."
-    elif func == "web_summary":
-        await send_waiting_message(f"Generate a brief message to {username} telling them to wait a moment while you read this boring article for them, and that you will provide a summary shortly. Only generate the message. Do not respond to this message.")
-        webpage_url = args.get("url")
-        if webpage_url:
-            summary = await asyncio.to_thread(web.fetch_web_summary, webpage_url)
-            if summary:
-                formatted_summary = web.format_summary_for_discord(summary)
-                chunks = web.split_message(formatted_summary)
-                final_response = "\n".join(chunks)
-                return final_response
-            else:
-                return "Failed to retrieve summary from the webpage."
-        else:
-            return "No webpage URL provided."
-    elif func == "draw_picture":
-        await send_waiting_message(f"Generate a brief message to {username} telling them to wait a moment while you draw them a masterpiece. Only generate the message. Do not respond to this message.")
-        prompt_text = args.get("prompt")
-        if prompt_text:
-            image_bytes = await asyncio.to_thread(image.generate_image, prompt_text)
-            st.image(image_bytes, caption="Generated Image")
-            return ""
-        else:
-            return "No prompt provided for drawing a picture."
-    elif func == "premiumize_download":
-        await send_waiting_message(f"Generate a brief message to {username} telling them to wait a moment while you check if the linked file is cached. Only generate the message. Do not respond to this message.")
-        url = args.get("url")
-        if url:
-            result = await premiumize.process_download_web(url)
-            return result
-        else:
-            return "No URL provided for Premiumize download check."
-    elif func == "watch_feed":
-        await send_waiting_message(
-            f"Generate a brief message to {username} telling them to wait a moment while you add the RSS feed to the watch list. Only generate the message. Do not respond to this message."
-        )
-        feed_url = args.get("feed_url")
-        if feed_url:
-            parsed_feed = feedparser.parse(feed_url)
-            if parsed_feed.bozo:
-                return f"Failed to parse feed: {feed_url}"
-            last_ts = 0.0
-            if parsed_feed.entries:
-                for entry in parsed_feed.entries:
-                    if 'published_parsed' in entry:
-                        entry_ts = time.mktime(entry.published_parsed)
-                        if entry_ts > last_ts:
-                            last_ts = entry_ts
-            else:
-                last_ts = time.time()
-            redis_client.hset("rss:feeds", feed_url, last_ts)
-            return f"Now watching feed: {feed_url}"
-        else:
-            return "No feed URL provided for watching."
-    elif func == "unwatch_feed":
-        await send_waiting_message(
-            f"Generate a brief message to {username} telling them to wait a moment while you remove the RSS feed. Only generate the message. Do not respond to this message."
-        )
-        feed_url = args.get("feed_url")
-        if feed_url:
-            removed = redis_client.hdel("rss:feeds", feed_url)
-            if removed:
-                return f"Stopped watching feed: {feed_url}"
-            else:
-                return f"Feed {feed_url} was not found in the watch list."
-        else:
-            return "No feed URL provided for unwatching."
-    elif func == "list_feeds":
-        await send_waiting_message(
-            f"Generate a brief message to {username} telling them to wait a moment while you list all currently watched feeds. Only generate the message. Do not respond to this message."
-        )
-        feeds = redis_client.hgetall("rss:feeds")
-        if feeds:
-            feed_list = "\n".join(f"{feed} (last update: {feeds[feed]})" for feed in feeds)
-            return f"Currently watched feeds:\n{feed_list}"
-        else:
-            return "No RSS feeds are currently being watched."
-    elif func == "web_search":
-        await send_waiting_message(f"Generate a brief message to {username} telling them to wait a moment while you search the internet for more information. Only generate the message. Do not respond to this message.")
-        query = args.get("query")
-        if query:
-            results = search_web(query)
-            if results:
-                formatted_results = format_search_results(results)
-                choice_prompt = (
-                    f"You are looking for more information on '{query}' because the user asked: '{user_question}'.\n\n"
-                    f"Here are the top search results:\n\n"
-                    f"{formatted_results}\n\n"
-                    "Please choose the most relevant link. Use the following tool for fetching web details and insert the chosen link. "
-                    "Respond ONLY with a valid JSON object in the following exact format (and nothing else):\n\n"
-                    "For fetching web details:\n"
-                    "{\n"
-                    '  "function": "web_fetch",\n'
-                    '  "arguments": {\n'
-                    '      "link": "<chosen link>",\n'
-                    f'      "query": "{query}",\n'
-                    f'      "user_question": "{user_question}"\n'
-                    "  }\n"
-                    "}"
-                )
-                choice_response = await ollama_client.chat(
-                    model=ollama_model,
-                    messages=[{"role": "system", "content": choice_prompt}],
-                    stream=False,
-                    keep_alive=-1,
-                    options={"num_ctx": context_length}
-                )
-                choice_text = choice_response['message'].get('content', '').strip()
-                try:
-                    choice_json = json.loads(choice_text)
-                except Exception:
-                    json_str = extract_json(choice_text)
-                    if json_str:
-                        try:
-                            choice_json = json.loads(json_str)
-                        except Exception:
-                            choice_json = None
-                    else:
-                        choice_json = None
-                if not choice_json:
-                    final_answer = "Failed to parse the search result choice."
-                elif choice_json.get("function") == "web_fetch":
-                    args_choice = choice_json.get("arguments", {})
-                    link = args_choice.get("link")
-                    original_query = args_choice.get("query", query)
-                    if link:
-                        summary = await asyncio.to_thread(web.fetch_web_summary, link)
-                        if summary:
-                            info_prompt = (
-                                f"Using the detailed information from the selected page below, please provide a clear and concise answer to the original query.\n\n"
-                                f"Original Query: '{original_query}'\n"
-                                f"User Question: '{user_question}'\n\n"
-                                f"Detailed Information:\n{summary}\n\n"
-                                "Answer:"
-                            )
-                            final_response = await ollama_client.chat(
-                                model=ollama_model,
-                                messages=[{"role": "system", "content": info_prompt}],
-                                stream=False,
-                                keep_alive=-1,
-                                options={"num_ctx": context_length}
-                            )
-                            final_answer = final_response['message'].get('content', '').strip()
-                            if not final_answer:
-                                final_answer = "Failed to generate a final answer from the detailed info."
-                        else:
-                            final_answer = "Failed to extract information from the selected webpage."
-                    else:
-                        final_answer = "No link provided to fetch web info."
-                else:
-                    final_answer = "No valid function call for fetching web info was returned."
-            else:
-                final_answer = "I couldn't find any relevant search results."
-            return final_answer
+
+    # Dispatch to the appropriate plugin based on the function name.
+    from plugin_registry import plugin_registry
+    if func in plugin_registry:
+        plugin = plugin_registry[func]
+        result = await plugin.handle_webui(args, ollama_client, context_length)
+        return result
     else:
         return "Received an unknown function call."
 
