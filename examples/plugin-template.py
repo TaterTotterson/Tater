@@ -36,7 +36,6 @@ class MyCustomPlugin(ToolPlugin):
     # Plugin metadata used by the framework.
     name = "my_custom_plugin"
     usage = (
-        "Usage:\n"
         "{\n"
         '  "function": "my_custom_plugin",\n'
         '  "arguments": { "key": "value" }\n'
