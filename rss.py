@@ -43,8 +43,8 @@ def fetch_web_summary(webpage_url, model=OLLAMA_MODEL):
         html = response.text
         soup = BeautifulSoup(html, "html.parser")
         # Remove unwanted elements.
-        #for element in soup(["script", "style", "header", "footer", "nav", "aside"]):
-        #    element.decompose()
+        for element in soup(["script", "style", "header", "footer", "nav", "aside"]):
+            element.decompose()
         text = soup.get_text(separator="\n")
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         article_text = "\n".join(lines)
@@ -135,22 +135,41 @@ class RSSManager:
 
     async def process_entry(self, feed_title: str, entry: dict):
         """
-        For a given feed entry, generate a summary and then send an announcement.
+        For a given feed entry, scrape the article, send it to Ollama for summarization,
+        format the summary, and then send an announcement to Discord.
         """
         entry_title = entry.get("title", "No Title")
         link = entry.get("link", "")
         logger.info(f"Processing entry: {entry_title} from {feed_title}")
+        
+        # First, scrape the full article text.
         loop = asyncio.get_running_loop()
-        try:
-            # Run summarization in an executor
-            summary = await loop.run_in_executor(None, fetch_web_summary, link, OLLAMA_MODEL)
-            if summary:
-                formatted_summary = format_summary_for_discord(summary)
-            else:
-                formatted_summary = "Could not retrieve a summary for this article."
-        except Exception as e:
-            logger.error(f"Error summarizing article {link}: {e}")
-            formatted_summary = f"Error summarizing article: {e}"
+        article_text = await loop.run_in_executor(None, fetch_web_summary, link, OLLAMA_MODEL)
+        
+        if not article_text:
+            summary_text = "Could not retrieve a summary for this article."
+        else:
+            # Now, send the article text to Ollama for summarization.
+            summarization_prompt = (
+                f"Please summarize the following article:\n\n{article_text}\n\nSummary:"
+            )
+            try:
+                summarization_response = await ollama_client.chat(  # Make sure you pass in your Ollama client
+                    model=OLLAMA_MODEL,
+                    messages=[{"role": "system", "content": summarization_prompt}],
+                    stream=False,
+                    keep_alive=-1,
+                    options={"num_ctx": context_length}
+                )
+                summary_text = summarization_response['message'].get('content', '').strip()
+                if not summary_text:
+                    summary_text = "Failed to generate a summary from the article."
+            except Exception as e:
+                logger.error(f"Error summarizing article {link}: {e}")
+                summary_text = f"Error summarizing article: {e}"
+
+        # Format the summary for Discord.
+        formatted_summary = format_summary_for_discord(summary_text)
 
         announcement = (
             f"📰 **New article from {feed_title}**\n"
@@ -159,7 +178,7 @@ class RSSManager:
             f"{formatted_summary}"
         )
 
-        # Split the announcement if it exceeds Discord's message length limits
+        # Split the announcement if it exceeds Discord's message length limits.
         chunks = split_message(announcement, chunk_size=max_response_length)
         try:
             channel = self.bot.get_channel(self.rss_channel_id)
