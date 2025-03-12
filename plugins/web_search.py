@@ -43,8 +43,8 @@ def fetch_web_summary(webpage_url, model=OLLAMA_MODEL):
         html = response.text
         logging.debug(f"Fetched HTML for {webpage_url} (length {len(html)})")
         soup = BeautifulSoup(html, "html.parser")
-        #for element in soup(["script", "style", "header", "footer", "nav", "aside"]):
-        #    element.decompose()
+        for element in soup(["script", "style", "header", "footer", "nav", "aside"]):
+            element.decompose()
         article = soup.find('article')
         if article:
             text = article.get_text(separator="\n").strip()
