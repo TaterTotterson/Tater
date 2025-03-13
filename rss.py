@@ -9,6 +9,7 @@ import discord
 import requests
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
+import ollama
 
 logger = logging.getLogger("discord.rss")
 logger.setLevel(logging.DEBUG)
