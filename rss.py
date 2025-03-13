@@ -21,8 +21,11 @@ response_channel_id = int(os.getenv("RESPONSE_CHANNEL_ID", 0))
 max_response_length = int(os.getenv("MAX_RESPONSE_LENGTH", 1500))
 POLL_INTERVAL = int(os.getenv("RSS_POLL_INTERVAL", 60))  # seconds between polls
 
-# We'll need OLLAMA_MODEL if used in helper functions; if not, you can remove it.
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "127.0.0.1").strip()
+OLLAMA_PORT = os.getenv("OLLAMA_PORT", "11434").strip()
+OLLAMA_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2").strip()
+context_length = int(os.getenv("CONTEXT_LENGTH", 10000))
 
 # Create a Redis client
 redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
