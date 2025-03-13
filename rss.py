@@ -25,7 +25,7 @@ POLL_INTERVAL = int(os.getenv("RSS_POLL_INTERVAL", 60))  # seconds between polls
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "127.0.0.1").strip()
 OLLAMA_PORT = os.getenv("OLLAMA_PORT", "11434").strip()
 OLLAMA_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2").strip()
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.3:70b").strip()
 context_length = int(os.getenv("CONTEXT_LENGTH", 10000))
 
 # Create a Redis client
