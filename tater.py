@@ -16,7 +16,7 @@ from plugin_registry import plugin_registry
 
 # Load environment variables from .env.
 load_dotenv()
-ollama_model = os.getenv('OLLAMA_MODEL', 'llama3.2').strip()
+ollama_model = os.getenv('OLLAMA_MODEL', 'llama3.3:70b').strip()
 response_channel_id = int(os.getenv("RESPONSE_CHANNEL_ID", 0))
 redis_host = os.getenv('REDIS_HOST', '127.0.0.1')
 redis_port = int(os.getenv('REDIS_PORT', 6379))
