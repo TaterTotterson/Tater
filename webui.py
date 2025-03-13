@@ -161,7 +161,6 @@ async def process_message(user_name, message_content):
     messages_list = [{"role": "system", "content": final_system_prompt}]
     for msg in history:
         messages_list.append({"role": msg["role"], "content": msg["content"]})
-    messages_list.append({"role": "user", "content": message_content})
     
     response = await ollama_client.chat(
         model=ollama_model,
