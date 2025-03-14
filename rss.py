@@ -25,7 +25,7 @@ POLL_INTERVAL = int(os.getenv("RSS_POLL_INTERVAL", 60))  # seconds between polls
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "127.0.0.1").strip()
 OLLAMA_PORT = os.getenv("OLLAMA_PORT", "11434").strip()
 OLLAMA_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.3:70b").strip()
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2").strip()
 context_length = int(os.getenv("CONTEXT_LENGTH", 10000))
 
 # Create a Redis client
@@ -83,11 +83,12 @@ def split_message(message_content, chunk_size=1500):
 # RSS Manager Class
 #############################
 class RSSManager:
-    def __init__(self, bot: discord.Client, rss_channel_id: int):
+    def __init__(self, bot: discord.Client, rss_channel_id: int, ollama_client):
         self.bot = bot
-        self.rss_channel_id = rss_channel_id  # Use this channel for RSS announcements.
+        self.rss_channel_id = rss_channel_id
+        self.ollama_client = ollama_client
         self.redis = redis_client
-        self.feeds_key = "rss:feeds"  # Redis hash: feed_url -> last processed timestamp
+        self.feeds_key = "rss:feeds"
 
     def add_feed(self, feed_url: str) -> bool:
         """Attempts to parse the feed and adds it. Sets its last processed timestamp to avoid reprocessing old entries."""
@@ -158,7 +159,7 @@ class RSSManager:
                 f"Please summarize the following article:\n\n{article_text}\n\nSummary:"
             )
             try:
-                summarization_response = await ollama_client.chat(  # Make sure you pass in your Ollama client
+                summarization_response = await self.ollama_client.chat(
                     model=OLLAMA_MODEL,
                     messages=[{"role": "system", "content": summarization_prompt}],
                     stream=False,
