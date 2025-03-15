@@ -1,121 +1,60 @@
+# plugins/<plugin_name>.py
 import os
-import logging
-from dotenv import load_dotenv
+import asyncio
 from plugin_base import ToolPlugin
-import streamlit as st          # For WebUI output
-from PIL import Image           # For loading avatar images
-from io import BytesIO
-import requests                 # For fetching images or data
+from helpers import send_waiting_message, load_image_from_url
 
-# Load environment variables (if any)
-load_dotenv()
+# Optionally load environment variables if needed.
+# load_dotenv() if required.
 
-# Set up logging (optional)
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
-
-# Set any required configuration variables.
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "127.0.0.1").strip()
-OLLAMA_PORT = os.getenv("OLLAMA_PORT", "11434").strip()
-OLLAMA_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2").strip()
-context_length = int(os.getenv("CONTEXT_LENGTH", 10000))
-
-# Example: Loading an avatar image from a URL (used in WebUI messages)
-def load_image_from_url(url):
-    response = requests.get(url)
-    response.raise_for_status()
-    return Image.open(BytesIO(response.content))
-
-assistant_avatar = load_image_from_url("https://example.com/your-avatar.png")
-
-# ---------------------------
-# Plugin Template
-# ---------------------------
-class MyCustomPlugin(ToolPlugin):
-    # Plugin metadata used by the framework.
-    name = "my_custom_plugin"
+class <PluginName>Plugin(ToolPlugin):
+    name = "<plugin_name>"
     usage = (
         "{\n"
-        '  "function": "my_custom_plugin",\n'
-        '  "arguments": { "key": "value" }\n'
+        '  "function": "<plugin_name>",\n'
+        '  "arguments": { ... }\n'
         "}\n"
     )
-    description = "A brief description of what your plugin does."
-    platforms = ["discord", "webui"]  # List of supported platforms
+    description = "Description of what the <plugin_name> plugin does."
+    platforms = ["discord", "webui"]
+    waiting_prompt_template = (
+        "Generate a brief message to {mention} telling them to wait while I process your <plugin_name> request. Only generate the message. Do not respond to this message."
+    )
 
-    # WebUI handler
-    async def handle_webui(self, args, ollama_client, context_length):
-        """
-        This method handles the plugin for the web UI.
-        'args' is a dict containing the arguments provided by the user.
-        'ollama_client' is used to call the model for generating messages.
-        'context_length' is used for controlling prompt size.
-        """
-        # Generate and output a waiting message:
-        waiting_prompt = (
-            "Generate a brief message to User telling them to wait a moment while your plugin processes the request. Only generate the message. Do not respond to this message."
+    # --- Helper Functions as Static Methods ---
+    @staticmethod
+    def some_helper_function(param):
+        # Implement helper logic
+        return param
+
+    # --- Discord Handler ---
+    async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
+        # Validate input from args.
+        # Format waiting prompt with message.author.mention.
+        waiting_prompt = self.waiting_prompt_template.format(mention=message.author.mention)
+        await send_waiting_message(
+            ollama_client=ollama_client,
+            prompt_text=waiting_prompt,
+            save_callback=lambda text: None,
+            send_callback=lambda text: message.channel.send(text)
         )
-        waiting_response = await ollama_client.chat(
-            model=OLLAMA_MODEL,
-            messages=[{"role": "system", "content": waiting_prompt}],
-            stream=False,
-            keep_alive=-1,
-            options={"num_ctx": context_length}
-        )
-        waiting_text = waiting_response['message'].get('content', '').strip()
-        if waiting_text:
-            st.chat_message("assistant", avatar=assistant_avatar).write(waiting_text)
-        else:
-            st.chat_message("assistant", avatar=assistant_avatar).write("Please wait...")
-
-        # Process arguments (replace 'key' with your parameter name)
-        value = args.get("key")
-        if not value:
-            final_message = "No value provided."
-        else:
-            # Insert your custom plugin logic here.
-            final_message = f"Processed value: {value}"
-
-        # Output the final message to the web UI.
-        # (Remove one of the outputs if your framework auto-displays return values.)
-        st.chat_message("assistant", avatar=assistant_avatar).write(final_message)
-        return final_message  # Or return an empty string if the message was already displayed
-
-    # Discord handler
-    async def handle_discord(self, message, args, ollama, context_length, max_response_length):
-        """
-        This method handles the plugin for Discord.
-        'message' is the Discord message object.
-        'args' is a dict containing the arguments.
-        'ollama' is used for model interactions.
-        'context_length' and 'max_response_length' help manage prompt sizes.
-        """
-        waiting_prompt = (
-            f"Generate a brief message to {message.author.mention} telling them to wait a moment while your plugin processes the request. Only generate the message. Do not respond to this message."
-        )
-        waiting_response = await ollama.chat(
-            model=OLLAMA_MODEL,
-            messages=[{"role": "system", "content": waiting_prompt}],
-            stream=False,
-            keep_alive=-1,
-            options={"num_ctx": context_length}
-        )
-        waiting_text = waiting_response['message'].get('content', '').strip()
-        if waiting_text:
-            await message.channel.send(waiting_text)
-        else:
-            await message.channel.send("Please wait...")
-
-        value = args.get("key")
-        if not value:
-            final_message = "No value provided."
-        else:
-            # Insert your custom Discord plugin logic here.
-            final_message = f"Processed value: {value}"
-
-        await message.channel.send(final_message)
+        # Perform plugin-specific work.
+        result = await asyncio.to_thread(self.some_helper_function, args.get("param"))
+        # Send result (or split into chunks if needed).
+        await message.channel.send(result)
         return ""
 
-# Export the plugin instance.
-plugin = MyCustomPlugin()
+    # --- Web UI Handler ---
+    async def handle_webui(self, args, ollama_client, context_length):
+        waiting_prompt = self.waiting_prompt_template.format(mention="User")
+        await send_waiting_message(
+            ollama_client=ollama_client,
+            prompt_text=waiting_prompt,
+            save_callback=lambda text: None,
+            send_callback=lambda text: print("WebUI:", text)
+        )
+        result = await asyncio.to_thread(self.some_helper_function, args.get("param"))
+        return result
+
+# Export an instance.
+plugin = <PluginName>Plugin()
