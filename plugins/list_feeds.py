@@ -31,7 +31,7 @@ class ListFeedsPlugin(ToolPlugin):
         '  "arguments": {}\n'
         "}\n"
     )
-    description = "Lists all RSS feeds currently on the watch list."
+    description = "Lists the RSS feeds currently being watched."
     waiting_prompt_template = (
         "Generate a brief message to {mention} telling them to wait a moment while I grab the current watched feeds. Only generate the message. Do not respond to this message."
     )

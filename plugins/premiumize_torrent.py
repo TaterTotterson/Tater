@@ -6,20 +6,19 @@ import bencodepy
 from urllib.parse import quote
 import discord
 from discord import ui, ButtonStyle
-from dotenv import load_dotenv
 import logging
 import asyncio
 from plugin_base import ToolPlugin
+import requests
+import streamlit as st
+from io import BytesIO
 
-load_dotenv()
+# No need to call load_dotenv here since settings are handled via the WebUI.
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2").strip()
-PREMIUMIZE_API_KEY = os.getenv("PREMIUMIZE_API_KEY")
-context_length = int(os.getenv("CONTEXT_LENGTH", 10000))
-
-from helpers import send_waiting_message
+# Import helper functions and shared redis_client from helpers.py.
+from helpers import send_waiting_message, redis_client
 
 class PremiumizeTorrentPlugin(ToolPlugin):
     name = "premiumize_torrent"
@@ -29,31 +28,57 @@ class PremiumizeTorrentPlugin(ToolPlugin):
         '  "arguments": {}\n'
         "}\n"
     )
-    description = "Checks if a torrent file provided by the user is cached on premiumize.me."
-    platforms = ["discord"]
+    description = "Checks if a torrent file provided by the user is cached on Premiumize.me."
+    settings_category = "Premiumize"
+    required_settings = {
+        "PREMIUMIZE_API_KEY": {
+            "label": "Premiumize API Key",
+            "type": "password",
+            "default": "",
+            "description": "Your Premiumize.me API key."
+        }
+    }
     waiting_prompt_template = (
         "Generate a brief message to {mention} telling them to wait a moment while I check Premiumize for that torrent and retrieve download links. Only generate the message. Do not respond to this message."
     )
+    platforms = ["discord", "webui"]
 
     @staticmethod
     async def check_premiumize_cache(item: str):
+        """
+        Check if an item (a URL or torrent hash) is cached on Premiumize.me.
+        Returns a tuple: (True, filename) if cached; otherwise, (False, None).
+        Retrieves the API key from Redis under "plugin_settings:Premiumize".
+        """
+        key = "plugin_settings:Premiumize"
+        settings = redis_client.hgetall(key)
+        api_key = settings.get("PREMIUMIZE_API_KEY", "")
+        if not api_key:
+            logger.error("Premiumize API key not configured.")
+            return False, None
+
         api_url = "https://www.premiumize.me/api/cache/check"
-        params = {"apikey": PREMIUMIZE_API_KEY, "items[]": item}
+        params = {"apikey": api_key, "items[]": item}
         logger.debug(f"Checking cache for item: {item} with params: {params}")
         async with aiohttp.ClientSession() as session:
             async with session.get(api_url, params=params) as response:
                 logger.debug(f"Cache check response status: {response.status}")
                 if response.status == 200:
                     data = await response.json()
+                    logger.debug(f"Cache check response: {data}")
                     if data.get("status") == "success" and data.get("response") and data["response"][0]:
                         filename = data.get("filename", [None])[0] if data.get("filename") else None
                         return True, filename
                     return False, None
-                logger.error(f"Cache check failed: {response.status}")
-                return False, None
+                else:
+                    logger.error(f"Cache check failed: {response.status}")
+                    return False, None
 
     @staticmethod
     def extract_torrent_hash(file_path: str) -> str:
+        """
+        Extract the torrent hash (SHA-1 in uppercase hex) from a torrent file.
+        """
         try:
             with open(file_path, "rb") as f:
                 torrent_data = f.read()
@@ -75,8 +100,19 @@ class PremiumizeTorrentPlugin(ToolPlugin):
 
     @staticmethod
     async def get_premiumize_download_links(item: str):
+        """
+        Fetch download links for an item (URL or magnet link) from Premiumize.me.
+        Retrieves the API key from Redis under "plugin_settings:Premiumize".
+        """
+        key = "plugin_settings:Premiumize"
+        settings = redis_client.hgetall(key)
+        api_key = settings.get("PREMIUMIZE_API_KEY", "")
+        if not api_key:
+            logger.error("Premiumize API key not configured.")
+            return None
+
         api_url = "https://www.premiumize.me/api/transfer/directdl"
-        payload = {"apikey": PREMIUMIZE_API_KEY, "src": item}
+        payload = {"apikey": api_key, "src": item}
         async with aiohttp.ClientSession() as session:
             async with session.post(api_url, data=payload) as response:
                 if response.status == 200:
@@ -119,8 +155,12 @@ class PremiumizeTorrentPlugin(ToolPlugin):
             logger.error(f"Error processing torrent: {e}")
             await channel.send(content="An error occurred while processing the torrent file.")
         finally:
-            if os.path.exists(file_path):
-                os.remove(file_path)
+            try:
+                import os
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+            except Exception:
+                pass
         return ""
 
     async def process_torrent_web(self, file_content: bytes, filename: str, max_response_length=2000):
@@ -151,8 +191,12 @@ class PremiumizeTorrentPlugin(ToolPlugin):
             logger.error(f"Error processing torrent: {e}")
             return "An error occurred while processing the torrent file."
         finally:
-            if os.path.exists(file_path):
-                os.remove(file_path)
+            try:
+                import os
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+            except Exception:
+                pass
 
     class PaginatedLinks(ui.View):
         def __init__(self, links, title, page_size=10):
@@ -195,16 +239,9 @@ class PremiumizeTorrentPlugin(ToolPlugin):
                 self.update_buttons()
                 await interaction.response.edit_message(content=self.get_page_content(), view=self)
 
-    async def handle_webui(self, args, ollama_client, context_length):
-        file_content = args.get("torrent_content")
-        filename = args.get("filename")
-        if file_content and filename:
-            return await self.process_torrent_web(file_content, filename)
-        return "No torrent file content provided."
-
     async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
-        if message.attachments:
-            torrent_attachment = message.attachments[0]
+        url = args.get("url")
+        if url:
             waiting_prompt = self.waiting_prompt_template.format(mention=message.author.mention)
             await send_waiting_message(
                 ollama_client=ollama_client,
@@ -213,17 +250,33 @@ class PremiumizeTorrentPlugin(ToolPlugin):
                 send_callback=lambda text: message.channel.send(text)
             )
             async with message.channel.typing():
-                result = await self.process_torrent(message.channel, torrent_attachment, max_response_length)
-                return result
+                try:
+                    result = await self.process_torrent(message.channel, message.attachments[0], max_response_length)
+                    return result
+                except Exception as e:
+                    prompt = f"Generate an error message to {message.author.mention} explaining that I was unable to retrieve the Premiumize torrent info. Only generate the message. Do not respond to this message."
+                    error_msg = await self.generate_error_message(prompt, f"Failed to retrieve Premiumize torrent info: {e}", message)
+                    return error_msg
         else:
-            prompt = (
-                f"Generate an error message to {message.author.mention} explaining that no torrent file was attached for Premiumize torrent check. Only generate the message. Do not respond to this message."
-            )
+            prompt = f"Generate an error message to {message.author.mention} explaining that no torrent file was attached for Premiumize torrent check. Only generate the message. Do not respond to this message."
             error_msg = await self.generate_error_message(prompt, "No torrent file attached for Premiumize torrent check.", message)
             return error_msg
+
+    async def handle_webui(self, args, ollama_client, context_length):
+        waiting_prompt = self.waiting_prompt_template.format(mention="User")
+        await send_waiting_message(
+            ollama_client=ollama_client,
+            prompt_text=waiting_prompt,
+            save_callback=lambda text: None,
+            send_callback=lambda text: st.chat_message("assistant", avatar=assistant_avatar).write(text)
+        )
+        url = args.get("url")
+        if not url:
+            return "No URL provided for Premiumize torrent check."
+        result = await self.process_torrent_web(url, args.get("filename", "torrent_file.torrent"))
+        return result
 
     async def generate_error_message(self, prompt, fallback, message):
         return fallback
 
-# Export an instance.
 plugin = PremiumizeTorrentPlugin()
