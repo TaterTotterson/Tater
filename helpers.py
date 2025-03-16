@@ -6,6 +6,7 @@ import requests
 from PIL import Image
 from io import BytesIO
 import nest_asyncio
+import redis
 nest_asyncio.apply()
 
 DEFAULT_OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "command-r:35B")
@@ -71,4 +72,12 @@ class OllamaClientWrapper(ollama.AsyncClient):
         self.host = host  # Store the host for later use.
         self.model = model
         self.context_length = context_length
+
+redis_client = redis.Redis(
+    host=os.getenv('REDIS_HOST', '127.0.0.1'),
+    port=int(os.getenv('REDIS_PORT', 6379)),
+    db=0,
+    decode_responses=True
+)
+
 

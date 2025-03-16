@@ -108,6 +108,44 @@ def load_avatar_image(avatar_b64):
     except Exception as e:
         return None
 
+# ----------------- PLUGIN SETTINGS -----------------
+def get_plugin_settings(category):
+    key = f"plugin_settings:{category}"
+    return redis_client.hgetall(key)
+
+def save_plugin_settings(category, settings_dict):
+    key = f"plugin_settings:{category}"
+    redis_client.hset(key, mapping=settings_dict)
+
+# Gather distinct plugin settings categories from the plugin registry.
+plugin_categories = {}
+for plugin in plugin_registry.values():
+    if hasattr(plugin, "settings_category") and hasattr(plugin, "required_settings"):
+        cat = plugin.settings_category
+        if cat not in plugin_categories:
+            plugin_categories[cat] = {}
+        # Merge required settings for plugins sharing the same category.
+        plugin_categories[cat].update(plugin.required_settings)
+
+# Display an expander for each plugin settings category.
+for category, settings in plugin_categories.items():
+    with st.sidebar.expander(f"{category} Settings", expanded=False):
+        st.subheader(f"{category} Settings")
+        current_settings = get_plugin_settings(category)
+        new_settings = {}
+        for key, info in settings.items():
+            default_value = current_settings.get(key, info.get("default", ""))
+            input_type = info.get("type", "text")  # default to text if not specified
+            if input_type == "password":
+                new_value = st.text_input(info.get("label", key), value=default_value, help=info.get("description", ""), type="password")
+            else:
+                new_value = st.text_input(info.get("label", key), value=default_value, help=info.get("description", ""))
+            new_settings[key] = new_value
+        if st.button(f"Save {category} Settings", key=f"save_{category}"):
+            save_plugin_settings(category, new_settings)
+            st.success(f"{category} settings saved.")
+
+
 # ----------------- SYSTEM PROMPT -----------------
 def build_system_prompt(base_prompt):
     tool_instructions = "\n\n".join(
