@@ -4,7 +4,6 @@ import aiohttp
 import logging
 import asyncio
 from urllib.parse import quote
-from dotenv import load_dotenv
 from plugin_base import ToolPlugin
 from discord import ui, ButtonStyle
 from io import BytesIO
@@ -12,22 +11,13 @@ import requests
 import streamlit as st
 from PIL import Image
 
-load_dotenv()
+# Import helper functions and shared redis client from helpers.py.
+from helpers import load_image_from_url, send_waiting_message, redis_client
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-# Retrieve Premiumize API key.
-PREMIUMIZE_API_KEY = os.getenv("PREMIUMIZE_API_KEY")
-
-# Import helper functions from helpers.py.
-from helpers import load_image_from_url, send_waiting_message
-assistant_avatar = load_image_from_url()  # Uses default URL from helpers.py
-
-# --- Redis client setup ---
-import redis
-redis_host = os.getenv('REDIS_HOST', '127.0.0.1')
-redis_port = int(os.getenv('REDIS_PORT', 6379))
-redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
+# Remove local load_dotenv; we'll rely on plugin settings from Redis.
 
 class PremiumizeDownloadPlugin(ToolPlugin):
     name = "premiumize_download"
@@ -38,22 +28,32 @@ class PremiumizeDownloadPlugin(ToolPlugin):
         "}\n"
     )
     description = "Checks if a file link provided by the user is cached on Premiumize.me."
-    platforms = ["discord", "webui"]
-    # Waiting prompt template with a placeholder for the user mention.
+    settings_category = "Premiumize"
+    required_settings = {
+        "PREMIUMIZE_API_KEY": {
+            "label": "Premiumize API Key",
+            "type": "password",
+            "default": "",
+            "description": "Your Premiumize.me API key."
+        }
+    }
     waiting_prompt_template = (
         "Generate a brief message to {mention} telling them to wait a moment while I check Premiumize for that URL and retrieve download links. Only generate the message. Do not respond to this message."
     )
+    platforms = ["discord", "webui"]
 
-    # --- Helper Functions as Static Methods ---
+    # Use the default assistant avatar loaded from helpers.
+    assistant_avatar = load_image_from_url()  # Uses default URL from helpers.py
+
     @staticmethod
-    async def get_premiumize_download_links(item: str):
+    async def get_premiumize_download_links(item: str, api_key: str):
         """
         Fetch download links for an item (URL or magnet link) from Premiumize.me.
         Returns a list of file dictionaries if successful; otherwise, returns None.
         """
         api_url = "https://www.premiumize.me/api/transfer/directdl"
         payload = {
-            "apikey": PREMIUMIZE_API_KEY,
+            "apikey": api_key,
             "src": item
         }
         logger.debug(f"Fetching download links for item: {item} with payload: {payload}")
@@ -82,8 +82,14 @@ class PremiumizeDownloadPlugin(ToolPlugin):
         Process a Premiumize download request for the Web UI.
         Returns a text message with download links.
         """
+        # Retrieve API key from plugin settings in Redis.
+        key = "plugin_settings:Premiumize"
+        settings = redis_client.hgetall(key)
+        api_key = settings.get("PREMIUMIZE_API_KEY", "")
+        if not api_key:
+            return "Premiumize API key not configured."
         logger.debug(f"Processing web download for URL: {url}")
-        download_links = await cls.get_premiumize_download_links(url)
+        download_links = await cls.get_premiumize_download_links(url, api_key)
         if download_links:
             links_message = f"**Download Links for `{url}`:**\n"
             for file in download_links:
@@ -103,8 +109,14 @@ class PremiumizeDownloadPlugin(ToolPlugin):
         Process a Premiumize download request for Discord.
         Sends download links to the provided channel.
         """
+        key = "plugin_settings:Premiumize"
+        settings = redis_client.hgetall(key)
+        api_key = settings.get("PREMIUMIZE_API_KEY", "")
+        if not api_key:
+            await channel.send("Premiumize API key not configured.")
+            return
         logger.debug(f"Processing download for URL: {url}")
-        download_links = await cls.get_premiumize_download_links(url)
+        download_links = await cls.get_premiumize_download_links(url, api_key)
         if download_links:
             if len(download_links) > 10:
                 view = cls.PaginatedLinks(download_links, f"Download Links for `{url}`")
@@ -122,7 +134,6 @@ class PremiumizeDownloadPlugin(ToolPlugin):
         else:
             await channel.send(content=f"The URL `{url}` is not cached on Premiumize.me.")
 
-    # --- Paginated View for Discord ---
     class PaginatedLinks(ui.View):
         def __init__(self, links, title, page_size=10):
             super().__init__()
@@ -164,7 +175,6 @@ class PremiumizeDownloadPlugin(ToolPlugin):
                 self.update_buttons()
                 await interaction.response.edit_message(content=self.get_page_content(), view=self)
 
-    # --- Discord Handler ---
     async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
         url = args.get("url")
         if url:
@@ -188,7 +198,6 @@ class PremiumizeDownloadPlugin(ToolPlugin):
             error_msg = await self.generate_error_message(prompt, "No URL provided for Premiumize download check.", message)
             return error_msg
 
-    # --- Web UI Handler ---
     async def handle_webui(self, args, ollama_client, context_length):
         waiting_prompt = self.waiting_prompt_template.format(mention="User")
         await send_waiting_message(
@@ -206,5 +215,4 @@ class PremiumizeDownloadPlugin(ToolPlugin):
     async def generate_error_message(self, prompt, fallback, message):
         return fallback
 
-# Export an instance of the plugin.
 plugin = PremiumizeDownloadPlugin()

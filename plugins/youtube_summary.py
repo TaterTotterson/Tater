@@ -26,11 +26,11 @@ class YouTubeSummaryPlugin(ToolPlugin):
         "}\n"
     )
     description = "Summarizes a YouTube Video from a URL provided by the user."
-    platforms = ["discord", "webui"]
     # Waiting prompt template with a placeholder.
     waiting_prompt_template = (
         "Generate a brief message to {mention} telling them to wait a moment while I watch this boring video and summarize it. Only generate the message. Do not respond to this message."
     )
+    platforms = ["discord", "webui"]
 
     # --- Helper Functions as Static Methods ---
     @staticmethod
