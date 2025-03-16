@@ -16,7 +16,6 @@ from rss import setup_rss_manager
 from plugin_registry import plugin_registry
 
 load_dotenv()
-response_channel_id = int(os.getenv("RESPONSE_CHANNEL_ID", 0))
 redis_host = os.getenv('REDIS_HOST', '127.0.0.1')
 redis_port = int(os.getenv('REDIS_PORT', 6379))
 max_response_length = int(os.getenv("MAX_RESPONSE_LENGTH", 1500))
