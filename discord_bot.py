@@ -4,15 +4,14 @@ import threading
 import os
 import discord
 from tater import tater  # your bot class
-import ollama
+# Import our OllamaClientWrapper from helpers.py
+from helpers import OllamaClientWrapper
 
 # Global variables to store the event loop and task.
 _bot_loop = None
 _bot_task = None
 
 def start_discord_bot(discord_token, admin_user_id, response_channel_id, rss_channel_id):
-    # Use the rss_channel_id as needed when starting the bot.
-    # For example, pass it to your run_discord_bot function.
     global _bot_loop, _bot_task
     if _bot_task is None or _bot_task.done():
         _bot_loop = asyncio.new_event_loop()
@@ -21,7 +20,6 @@ def start_discord_bot(discord_token, admin_user_id, response_channel_id, rss_cha
             asyncio.set_event_loop(loop)
             loop.run_forever()
 
-        import threading
         thread = threading.Thread(target=run_loop, args=(_bot_loop,), daemon=True)
         thread.start()
 
@@ -36,7 +34,8 @@ async def run_discord_bot(discord_token, admin_user_id, response_channel_id, rss
     intents.message_content = True
     ollama_host = os.getenv('OLLAMA_HOST', '127.0.0.1')
     ollama_port = int(os.getenv('OLLAMA_PORT', 11434))
-    ollama_client = ollama.AsyncClient(host=f'http://{ollama_host}:{ollama_port}')
+    # Create our Ollama client using the wrapper; defaults are automatically set.
+    ollama_client = OllamaClientWrapper(host=f'http://{ollama_host}:{ollama_port}')
     client = tater(
         ollama_client=ollama_client,
         admin_user_id=admin_user_id,

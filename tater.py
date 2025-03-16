@@ -6,6 +6,7 @@ import logging
 import redis
 import discord
 from discord.ext import commands
+from discord import app_commands
 import ollama
 from dotenv import load_dotenv
 import re
@@ -14,14 +15,11 @@ from rss import setup_rss_manager
 # Import plugin registry
 from plugin_registry import plugin_registry
 
-# Load environment variables from .env.
 load_dotenv()
-ollama_model = os.getenv('OLLAMA_MODEL', 'llama3.2').strip()
 response_channel_id = int(os.getenv("RESPONSE_CHANNEL_ID", 0))
 redis_host = os.getenv('REDIS_HOST', '127.0.0.1')
 redis_port = int(os.getenv('REDIS_PORT', 6379))
 max_response_length = int(os.getenv("MAX_RESPONSE_LENGTH", 1500))
-context_length = int(os.getenv("CONTEXT_LENGTH", 10000))
 
 # Configure logging.
 logging.basicConfig(level=logging.INFO)
@@ -40,10 +38,11 @@ def clear_channel_history(channel_id):
         logger.error(f"Error clearing chat history for channel {channel_id}: {e}")
         raise
 
-# Build the system prompt dynamically based on plugins for Discord.
 def build_system_prompt(base_prompt):
     tool_instructions = "\n\n".join(
-        f"{plugin.usage}\nDescription: {getattr(plugin, 'description', 'No description provided.')}"
+        f"Tool: {plugin.name}\n"
+        f"Description: {getattr(plugin, 'description', 'No description provided.')}\n"
+        f"{plugin.usage}"
         for plugin in plugin_registry.values()
         if "discord" in plugin.platforms or "both" in plugin.platforms
     )
@@ -51,46 +50,47 @@ def build_system_prompt(base_prompt):
 
 BASE_PROMPT = (
     "You are Tater Totterson, a helpful AI assistant with access to various tools.\n\n"
-    "If you need real-time access to the internet or lack sufficient information, use the 'web_search' tool."
-    "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else), If no function is needed, reply normally:\n\n"
+    "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else). "
+    "If no function is needed, reply normally:\n\n"
 )
 SYSTEM_PROMPT = build_system_prompt(BASE_PROMPT)
 
 class tater(commands.Bot):
     def __init__(self, ollama_client, admin_user_id, response_channel_id, rss_channel_id, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.ollama = ollama_client
-        self.model = ollama_model
+        self.ollama = ollama_client  # This client now includes .model and .context_length defaults.
         self.admin_user_id = admin_user_id
         self.response_channel_id = response_channel_id
         self.rss_channel_id = rss_channel_id
         self.max_response_length = max_response_length
-        self.context_length = context_length
 
     async def setup_hook(self):
         await setup_commands(self)
+        # Load admin commands cog.
+        await self.add_cog(AdminCommands(self))
+        # Sync application commands.
+        try:
+            synced = await self.tree.sync()
+            logger.info(f"Synced {len(synced)} app commands.")
+        except Exception as e:
+            logger.error(f"Failed to sync app commands: {e}")
 
     async def on_ready(self):
         activity = discord.Activity(name='tater', state='Totterson', type=discord.ActivityType.custom)
         await self.change_presence(activity=activity)
         logger.info(f"Bot is ready. Admin: {self.admin_user_id}, Response Channel: {self.response_channel_id}, RSS Channel: {self.rss_channel_id}")
         
-        # Initialize the RSS Manager if not already created.
         if not hasattr(self, "rss_manager"):
-            self.rss_manager = setup_rss_manager(self, self.rss_channel_id)
+            self.rss_manager = setup_rss_manager(self, self.rss_channel_id, self.ollama)
 
     async def generate_error_message(self, prompt: str, fallback: str, message: discord.Message):
-        """
-        Uses Ollama to generate a friendly error message based on a prompt.
-        Returns the generated message or the fallback text if generation fails.
-        """
         try:
             error_response = await self.ollama.chat(
-                model=self.model,
+                model=self.ollama.model,
                 messages=[{"role": "system", "content": prompt}],
                 stream=False,
                 keep_alive=-1,
-                options={"num_ctx": self.context_length}
+                options={"num_ctx": self.ollama.context_length}
             )
             error_text = error_response['message'].get('content', '').strip()
             if error_text:
@@ -121,14 +121,11 @@ class tater(commands.Bot):
         redis_client.ltrim(history_key, -20, -1)
 
     async def on_message(self, message: discord.Message):
-        # Ignore messages from the bot itself.
         if message.author == self.user:
             return
 
-        # Save the incoming message in channel history.
         await self.save_message(message.channel.id, "user", message.author.name, message.content)
 
-        # Determine whether to respond.
         if isinstance(message.channel, discord.DMChannel):
             if message.author.id == self.admin_user_id:
                 should_respond = True
@@ -139,14 +136,7 @@ class tater(commands.Bot):
             if not should_respond:
                 return
 
-        # No embedding is used; relevant_context is empty.
-        relevant_context = []
-
-        # Build system prompt.
-        # (For Discord, we could add extra instructions if needed.)
         system_prompt = SYSTEM_PROMPT
-
-        # Load the last 20 messages from history.
         recent_history = await self.load_history(message.channel.id, limit=20)
         messages_list = [{"role": "system", "content": system_prompt}] + recent_history
 
@@ -154,11 +144,11 @@ class tater(commands.Bot):
             try:
                 logger.debug(f"Sending request to Ollama with messages: {messages_list}")
                 response_data = await self.ollama.chat(
-                    model=self.model,
+                    model=self.ollama.model,
                     messages=messages_list,
                     stream=False,
                     keep_alive=-1,
-                    options={"num_ctx": self.context_length}
+                    options={"num_ctx": self.ollama.context_length}
                 )
                 logger.debug(f"Raw response from Ollama: {response_data}")
                 response_text = response_data['message'].get('content', '').strip()
@@ -167,7 +157,6 @@ class tater(commands.Bot):
                     await message.channel.send("I'm not sure how to respond to that.")
                     return
 
-                # Try to parse response JSON.
                 try:
                     response_json = json.loads(response_text)
                 except json.JSONDecodeError:
@@ -183,14 +172,13 @@ class tater(commands.Bot):
                         response_json = None
 
                 if response_json and isinstance(response_json, dict) and "function" in response_json:
-                    # Dispatch the function call to the appropriate plugin.
                     from plugin_registry import plugin_registry
                     func = response_json.get("function")
                     args = response_json.get("arguments", {})
                     if func in plugin_registry:
                         plugin = plugin_registry[func]
                         result = await plugin.handle_discord(
-                            message, args, self.ollama, self.context_length, self.max_response_length
+                            message, args, self.ollama, self.ollama.context_length, self.max_response_length
                         )
                         if result is not None and result != "":
                             response_text = result
@@ -203,11 +191,9 @@ class tater(commands.Bot):
                         await message.channel.send(error_text)
                         return
                 else:
-                    # No function call detected; send plain text in chunks.
                     for chunk in [response_text[i:i+self.max_response_length] for i in range(0, len(response_text), self.max_response_length)]:
                         await message.channel.send(chunk)
 
-                # Save the assistant's response to history.
                 await self.save_message(message.channel.id, "assistant", "assistant", response_text)
 
             except Exception as e:
@@ -217,7 +203,6 @@ class tater(commands.Bot):
                 await message.channel.send(error_msg)
 
     async def on_reaction_add(self, reaction, user):
-        # Ignore reactions from bots.
         if user.bot:
             return
         potato_emoji = "🥔"
@@ -226,20 +211,19 @@ class tater(commands.Bot):
         except Exception as e:
             logger.error(f"Failed to add potato reaction: {e}")
 
-async def load_history(client, channel_id, limit=20):
-    history_key = f"tater:channel:{channel_id}:history"
-    raw_history = redis_client.lrange(history_key, -limit, -1)
-    formatted_history = []
-    for entry in raw_history:
-        data = json.loads(entry)
-        role = data.get("role", "user")
-        sender = data.get("username", role)
-        if role == "assistant":
-            formatted_message = data["content"]
-        else:
-            formatted_message = f"{sender}: {data['content']}"
-        formatted_history.append({"role": role, "content": formatted_message})
-    return formatted_history
+# Define a separate cog for admin commands, including /wipe.
+class AdminCommands(commands.Cog):
+    def __init__(self, bot: tater):
+        self.bot = bot
+
+    @app_commands.command(name="wipe", description="Clear chat history for this channel.")
+    async def wipe(self, interaction: discord.Interaction):
+        try:
+            clear_channel_history(interaction.channel.id)
+            await interaction.response.send_message("🧠 Wait What!?! What Just Happened!?!😭")
+        except Exception as e:
+            await interaction.response.send_message("Failed to clear channel history.")
+            logger.error(f"Error in /wipe command: {e}")
 
 async def setup_commands(client: commands.Bot):
     print("Commands setup complete.")
