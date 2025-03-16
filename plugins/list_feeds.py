@@ -8,28 +8,20 @@ import streamlit as st
 from PIL import Image
 from io import BytesIO
 import requests
+import asyncio
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "127.0.0.1").strip()
-OLLAMA_PORT = os.getenv("OLLAMA_PORT", "11434").strip()
-OLLAMA_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2").strip()
-context_length = int(os.getenv("CONTEXT_LENGTH", 10000))
+# Import helper functions from helpers.py.
+from helpers import load_image_from_url, send_waiting_message
+assistant_avatar = load_image_from_url()  # Uses default avatar URL from helpers.py
 
-# Create a Redis client
+# Create a Redis client.
 redis_host = os.getenv('REDIS_HOST', '127.0.0.1')
 redis_port = int(os.getenv('REDIS_PORT', 6379))
 redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
-
-def load_image_from_url(url):
-    response = requests.get(url)
-    response.raise_for_status()
-    return Image.open(BytesIO(response.content))
-
-assistant_avatar = load_image_from_url("https://raw.githubusercontent.com/MasterPhooey/Tater-Discord-WebUI/refs/heads/main/images/tater.png")
 
 class ListFeedsPlugin(ToolPlugin):
     name = "list_feeds"
@@ -39,49 +31,21 @@ class ListFeedsPlugin(ToolPlugin):
         '  "arguments": {}\n'
         "}\n"
     )
-    description = "Lists all rss feeds currently on the watch list."
+    description = "Lists all RSS feeds currently on the watch list."
+    waiting_prompt_template = (
+        "Generate a brief message to {mention} telling them to wait a moment while I grab the current watched feeds. Only generate the message. Do not respond to this message."
+    )
     platforms = ["discord", "webui"]
 
-    async def handle_webui(self, args, ollama_client, context_length):
-        # Send a waiting message to the user in the web UI.
-        waiting_prompt = (
-            "Generate a brief message to User telling them to wait a moment while you grab the current watched feeds for them. Only generate the message. Do not respond to this message."
+    # --- Discord Handler ---
+    async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
+        waiting_prompt = self.waiting_prompt_template.format(mention=message.author.mention)
+        await send_waiting_message(
+            ollama_client=ollama_client,
+            prompt_text=waiting_prompt,
+            save_callback=lambda text: None,
+            send_callback=lambda text: message.channel.send(text)
         )
-        waiting_response = await ollama_client.chat(
-            model=OLLAMA_MODEL,
-            messages=[{"role": "system", "content": waiting_prompt}],
-            stream=False,
-            keep_alive=-1,
-            options={"num_ctx": context_length}
-        )
-        waiting_text = waiting_response['message'].get('content', '').strip()
-        if waiting_text:
-            st.chat_message("assistant", avatar=assistant_avatar).write(waiting_text)
-        else:
-            st.chat_message("assistant", avatar=assistant_avatar).write("Please wait a moment while I grab the current watched feeds for them...")
-        feeds = redis_client.hgetall("rss:feeds")
-        if feeds:
-            feed_list = "\n".join(f"{feed} (last update: {feeds[feed]})" for feed in feeds)
-            return f"Currently watched feeds:\n{feed_list}"
-        else:
-            return "No RSS feeds are currently being watched."
-
-    async def handle_discord(self, message, args, ollama, context_length, max_response_length):
-        waiting_prompt = (
-            f"Generate a brief message to {message.author.mention} telling them to wait a moment while you grab the current watched feeds for them. Only generate the message. Do not respond to this message."
-        )
-        waiting_response = await ollama.chat(
-            model=OLLAMA_MODEL,
-            messages=[{"role": "system", "content": waiting_prompt}],
-            stream=False,
-            keep_alive=-1,
-            options={"num_ctx": context_length}
-        )
-        waiting_text = waiting_response['message'].get('content', '').strip()
-        if waiting_text:
-            await message.channel.send(waiting_text)
-        else:
-            await message.channel.send("Please wait a moment while I list the RSS feeds...")
         feeds = redis_client.hgetall("rss:feeds")
         if feeds:
             feed_list = "\n".join(f"{feed} (last update: {feeds[feed]})" for feed in feeds)
@@ -90,6 +54,22 @@ class ListFeedsPlugin(ToolPlugin):
             final_message = "No RSS feeds are currently being watched."
         await message.channel.send(final_message)
         return ""
+
+    # --- Web UI Handler ---
+    async def handle_webui(self, args, ollama_client, context_length):
+        waiting_prompt = self.waiting_prompt_template.format(mention="User")
+        await send_waiting_message(
+            ollama_client=ollama_client,
+            prompt_text=waiting_prompt,
+            save_callback=lambda text: None,
+            send_callback=lambda text: st.chat_message("assistant", avatar=assistant_avatar).write(text)
+        )
+        feeds = redis_client.hgetall("rss:feeds")
+        if feeds:
+            feed_list = "\n".join(f"{feed} (last update: {feeds[feed]})" for feed in feeds)
+            return f"Currently watched feeds:\n{feed_list}"
+        else:
+            return "No RSS feeds are currently being watched."
 
 # Export the plugin instance.
 plugin = ListFeedsPlugin()
