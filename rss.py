@@ -156,7 +156,9 @@ class RSSManager:
         else:
             # Now, send the article text to Ollama for summarization.
             summarization_prompt = (
-                f"Please summarize the following article:\n\n{article_text}\n\nSummary:"
+                "Please summarize the following article in a clear and engaging format for Discord. "
+                "Include a title and use bullet points for the main takeaways:\n\n"
+                f"{article_text}\n\nSummary:"
             )
             try:
                 summarization_response = await self.ollama_client.chat(
