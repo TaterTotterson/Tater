@@ -12,6 +12,3 @@ streamlit
 youtube_transcript_api
 redis
 nest_asyncio
-playwright
-crawl4ai
-pydantic
