@@ -13,6 +13,7 @@ import streamlit as st
 from PIL import Image
 from io import BytesIO
 from duckduckgo_search import DDGS  # Updated import for search
+import requests
 
 load_dotenv()
 
