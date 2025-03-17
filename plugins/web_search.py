@@ -4,6 +4,7 @@ import json
 import asyncio
 import logging
 import re
+from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 import ollama
@@ -22,16 +23,6 @@ assistant_avatar = load_image_from_url()  # Uses default avatar URL from helpers
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-# Import Crawl4AI classes and pydantic for schema
-from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode, LLMConfig
-from crawl4ai.extraction_strategy import LLMExtractionStrategy
-from pydantic import BaseModel, Field
-
-# Define a sample schema for the extracted article.
-class ArticleSchema(BaseModel):
-    title: str = Field(..., description="The article title.")
-    content: str = Field(..., description="The main article text.")
-
 class WebSearchPlugin(ToolPlugin):
     name = "web_search"
     usage = (
@@ -47,7 +38,6 @@ class WebSearchPlugin(ToolPlugin):
     )
     platforms = ["discord", "webui"]
 
-
     # --- Helper Functions as Static Methods ---
     @staticmethod
     def extract_json(text):
@@ -57,6 +47,10 @@ class WebSearchPlugin(ToolPlugin):
         return None
 
     def search_web(self, query, num_results=10):
+        """
+        Search the web using DuckDuckGo and return the top `num_results` results.
+        Each result is a dict with keys like 'title', 'href', and 'body'.
+        """
         try:
             with DDGS() as ddgs:
                 results = ddgs.text(query, max_results=num_results)
@@ -66,6 +60,9 @@ class WebSearchPlugin(ToolPlugin):
             return []
 
     def format_search_results(self, results):
+        """
+        Format the search results into a string suitable for inclusion in a prompt.
+        """
         formatted = ""
         for idx, result in enumerate(results, start=1):
             title = result.get("title", "No Title")
@@ -90,37 +87,47 @@ class WebSearchPlugin(ToolPlugin):
         message_parts.append(message_content)
         return message_parts
 
-    # --- New: Fetch Web Summary Using Crawl4AI Exclusively ---
+    # --- New: fetch_web_summary as a static method ---
     @staticmethod
-    async def fetch_web_summary_with_crawl4ai(webpage_url, ollama_client):
+    def fetch_web_summary(webpage_url, model):
         """
-        Uses Crawl4AI with an LLM extraction strategy to extract structured article content
-        from the given webpage URL. It uses the model from the ollama_client as part of the provider string
-        and sets base_url to ollama_client.host.
+        Extract the main textual content from a webpage URL using requests and BeautifulSoup.
+        Cleans the HTML by removing unwanted elements and returns the cleaned article text.
         """
-        # Configure the LLM extraction strategy.
-        llm_config = LLMConfig(
-            provider=f"ollama/{ollama_client.model}",
-            api_token="no-token",
-            base_url=ollama_client.host
-        )
-        browser_config = BrowserConfig(verbose=False)
-        run_config = CrawlerRunConfig(
-            word_count_threshold=100,
-            extraction_strategy=LLMExtractionStrategy(
-                llm_config=llm_config,
-                schema=ArticleSchema.schema(),
-                extraction_type="schema",
-                instruction="Extract the article title and main content."
-            ),
-            cache_mode=CacheMode.BYPASS,
-        )
-        async with AsyncWebCrawler(config=browser_config) as crawler:
-            result = await crawler.arun(url=webpage_url, config=run_config)
-            # result.extracted_content should follow ArticleSchema.
-            return result.extracted_content
+        try:
+            response = requests.get(webpage_url, timeout=10)
+            if response.status_code != 200:
+                logger.error(f"Request failed with status: {response.status_code} for URL: {webpage_url}")
+                return None
+            html = response.text
+            logger.debug(f"Fetched HTML for {webpage_url} (length {len(html)})")
+            soup = BeautifulSoup(html, "html.parser")
+            # Remove unwanted elements.
+            for element in soup(["script", "style", "header", "footer", "nav", "aside"]):
+                element.decompose()
+            # Try to find an <article> tag.
+            article = soup.find('article')
+            if article:
+                text = article.get_text(separator="\n").strip()
+            else:
+                # If no article tag, try to get all paragraphs.
+                paragraphs = soup.find_all('p')
+                if paragraphs:
+                    text = "\n".join(p.get_text() for p in paragraphs).strip()
+                else:
+                    # Fallback: get all the text from the page.
+                    text = soup.get_text(separator="\n").strip()
+            if text:
+                logger.info(f"Extracted text (first 100 chars): {text[:100]}")
+            else:
+                logger.error("No text found after extraction.")
+            return text if text else None
+        except Exception as e:
+            logger.error(f"Error in fetch_web_summary: {e}")
+            return None
 
     async def generate_error_message(self, prompt, fallback, message):
+        # Stub: simply return fallback text.
         return fallback
 
     # --- Discord Handler ---
@@ -180,14 +187,8 @@ class WebSearchPlugin(ToolPlugin):
                 link = args_choice.get("link")
                 original_query = args_choice.get("query", query)
                 if link:
-                    structured = await self.fetch_web_summary_with_crawl4ai(link, ollama_client)
-                    if structured and isinstance(structured, dict):
-                        summary = f"Title: {structured.get('title', '')}\nContent: {structured.get('content', '')}"
-                    elif structured:
-                        summary = structured
-                    else:
-                        summary = "Failed to extract structured information using Crawl4AI."
-
+                    # Use the static fetch_web_summary method.
+                    summary = await asyncio.to_thread(WebSearchPlugin.fetch_web_summary, link, ollama_client.model)
                     if summary:
                         info_prompt = (
                             f"Using the detailed information from the selected page below, please provide a clear and concise answer to the original query.\n\n"
@@ -274,14 +275,7 @@ class WebSearchPlugin(ToolPlugin):
                 link = args_choice.get("link")
                 original_query = args_choice.get("query", query)
                 if link:
-                    structured = await self.fetch_web_summary_with_crawl4ai(link, ollama_client)
-                    if structured and isinstance(structured, dict):
-                        summary = f"Title: {structured.get('title', '')}\nContent: {structured.get('content', '')}"
-                    elif structured:
-                        summary = structured
-                    else:
-                        summary = "Failed to extract structured information using Crawl4AI."
-
+                    summary = await asyncio.to_thread(WebSearchPlugin.fetch_web_summary, link, ollama_client.model)
                     if summary:
                         info_prompt = (
                             f"Using the detailed information from the selected page below, please provide a clear and concise answer to the original query.\n\n"
