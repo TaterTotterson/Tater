@@ -230,7 +230,7 @@ class RSSManager:
                     logger.error(f"Error processing feed {feed_url}: {e}")
             await asyncio.sleep(POLL_INTERVAL)
 
-def setup_rss_manager(bot: discord.Client, rss_channel_id: int) -> RSSManager:
-    rss_manager = RSSManager(bot, rss_channel_id)
+def setup_rss_manager(bot: discord.Client, rss_channel_id: int, ollama_client) -> RSSManager:
+    rss_manager = RSSManager(bot, rss_channel_id, ollama_client)
     asyncio.create_task(rss_manager.poll_feeds())
     return rss_manager
