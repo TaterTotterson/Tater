@@ -20,6 +20,8 @@ Tater is a Discord bot that integrates with Ollama to provide a variety of AI-po
   - **Chat Responses**: Generates AI responses, waiting messages, and friendly error messages.
   - **Note**:
     - You DO NOT need to use a model that is tagged with tools to use this, test different models if the one you are using isnt trigging the plugins, but it does not need to be under Ollama model with tools support list.
+    - I currently recommend using gemma3:27b
+
     
 ## Available Tools (Plugins)
 
@@ -156,13 +158,10 @@ docker run -d --name tater_webui \
   -p 8501:8501 \
   -e OLLAMA_HOST=127.0.0.1 \
   -e OLLAMA_PORT=11434 \
-  -e OLLAMA_MODEL=command-r:latest \
-  -e OLLAMA_EMB_MODEL=nomic-embed-text \
+  -e OLLAMA_MODEL=gemma3:27b \
   -e CONTEXT_LENGTH=10000 \
   -e REDIS_HOST=redis \
   -e REDIS_PORT=6379 \
-  -e AUTOMATIC_URL=http://127.0.0.1:7860 \
-  -e PREMIUMIZE_API_KEY=your_premiumize_api_key \
   masterphooey/tater-webui
 ```
 
