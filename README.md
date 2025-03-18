@@ -19,7 +19,7 @@ Tater is a Discord bot that integrates with Ollama to provide a variety of AI-po
 - **Ollama Integration**: Utilizes Ollama for AI responses.
   - **Chat Responses**: Generates AI responses, waiting messages, and friendly error messages.
   - **Requirements**:
-    - Use an **Ollama model that supports tools** (e.g., `command-r:35b` is excellent). For more details, see [Ollama Tools](https://ollama.com/search?c=tools).
+    - You DO NOT need to use a Ollama model tagged with tools to use this
     
 ## Available Tools (Plugins)
 
