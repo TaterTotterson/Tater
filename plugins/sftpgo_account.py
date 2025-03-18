@@ -1,0 +1,233 @@
+import os
+import asyncio
+import discord
+import aiohttp
+import base64
+import redis
+import secrets
+import string
+from plugin_base import ToolPlugin
+from helpers import send_waiting_message, load_image_from_url
+
+def get_sftpgo_settings():
+    """
+    Retrieve SFTPGo settings from Redis for the 'SFTPGo' settings category.
+    Fallback defaults are used if settings are missing.
+    If the provided API URL does not contain "/api/v2", it is appended.
+    """
+    redis_host = os.getenv('REDIS_HOST', '127.0.0.1')
+    redis_port = int(os.getenv('REDIS_PORT', 6379))
+    redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
+    key = "plugin_settings:SFTPGo"
+    settings = redis_client.hgetall(key)
+    defaults = {
+        "SFTPGO_API_URL": "https://localhost",
+        "SFTPGO_USERNAME": "username",
+        "SFTPGO_PASSWORD": "password",
+        "SFTPGO_GROUP_NAME": "DNServ",
+        "DEFAULT_HOME_DIR": ""
+    }
+    for k, default_value in defaults.items():
+        if k not in settings or not settings[k]:
+            settings[k] = default_value
+
+    api_url = settings["SFTPGO_API_URL"].rstrip("/")
+    if "/api/v2" not in api_url:
+        api_url += "/api/v2"
+    settings["SFTPGO_API_URL"] = api_url
+    return settings
+
+async def get_jwt_token():
+    settings = get_sftpgo_settings()
+    auth_header = base64.b64encode(f"{settings['SFTPGO_USERNAME']}:{settings['SFTPGO_PASSWORD']}".encode("utf-8")).decode("ascii")
+    # Always disable SSL verification.
+    connector = aiohttp.TCPConnector(ssl=False)
+    try:
+        async with aiohttp.ClientSession(connector=connector) as session:
+            async with session.get(
+                f"{settings['SFTPGO_API_URL']}/token",
+                headers={"Authorization": f"Basic {auth_header}"}
+            ) as response:
+                if response.status == 200:
+                    json_response = await response.json()
+                    return json_response.get("access_token")
+                else:
+                    print(f"Failed to obtain JWT token. Status code: {response.status}")
+                    return None
+    except Exception as e:
+        print(f"An error occurred while obtaining JWT token: {e}")
+        return None
+
+def generate_random_password(length=12):
+    """Generate a secure random password of given length."""
+    alphabet = string.ascii_letters + string.digits + string.punctuation
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
+
+async def create_sftp_account(username, password, message_obj):
+    settings = get_sftpgo_settings()
+    jwt_token = await get_jwt_token()
+    connector = aiohttp.TCPConnector(ssl=False)  # Always disable SSL verification.
+
+    async def safe_send(channel, content):
+        if len(content) > 2000:
+            content = content[:1990] + " [truncated]"
+        await channel.send(content)
+
+    if jwt_token is None:
+        await safe_send(message_obj.channel, "Failed to obtain JWT token.")
+        return "token_error"
+
+    async with aiohttp.ClientSession(connector=connector) as session:
+        # Check if the user already exists.
+        async with session.get(
+            f"{settings['SFTPGO_API_URL']}/users/{username}",
+            headers={"Authorization": f"Bearer {jwt_token}"}
+        ) as user_check_response:
+            if user_check_response.status == 200:
+                return "exists"
+
+        # Create the new user account.
+        async with session.post(
+            f"{settings['SFTPGO_API_URL']}/users",
+            headers={"Authorization": f"Bearer {jwt_token}"},
+            json={
+                "username": username,
+                "password": password,
+                "status": 1,
+                "permissions": {"/": ["list", "download", "upload", "create_dirs", "rename"]},
+                "home_dir": settings["DEFAULT_HOME_DIR"],
+                "groups": [{"name": settings["SFTPGO_GROUP_NAME"], "type": 1}]
+            }
+        ) as response:
+            if response.status == 201:
+                welcome_message = (
+                    f"Welcome '{username}'\n"
+                    f"Your account has been created.\n"
+                    f"Login: {username}\n"
+                    f"Password: {password}\n"
+                    "You now have access to the server."
+                )
+                try:
+                    # Send the welcome message as a DM.
+                    await message_obj.author.send(welcome_message)
+                except Exception as e:
+                    print(f"Failed to send DM to {username}: {e}")
+                return "created"
+            else:
+                error_text = await response.text()
+                await safe_send(message_obj.channel, f"Failed to create user. Status code: {response.status}, Error: {error_text}")
+                return "error"
+
+
+    async with aiohttp.ClientSession(connector=connector) as session:
+        response = await session.post(
+            f"{settings['SFTPGO_API_URL']}/users",
+            headers={"Authorization": f"Bearer {jwt_token}"},
+            json={
+                "username": username,
+                "password": password,
+                "status": 1,
+                "permissions": {"/": ["list", "download", "upload", "create_dirs", "rename"]},
+                "home_dir": settings["DEFAULT_HOME_DIR"],
+                "groups": [{"name": settings["SFTPGO_GROUP_NAME"], "type": 1}]
+            }
+        )
+        if response.status == 201:
+            welcome_message = (
+                f"Welcome '{username}'\n"
+                f"Your account has been created.\n"
+                f"Login: {username}\n"
+                f"Password: {password}\n"
+                "You now have access to the server."
+            )
+            try:
+                await message_obj.author.send(welcome_message)
+            except Exception as e:
+                print(f"Failed to send DM to {username}: {e}")
+            return "created"
+        else:
+            print(f"Failed to create user. Status code: {response.status}")
+            await safe_send(message_obj.channel, "Failed to create user due to an error.")
+            return "error"
+
+class SFTPGoAccountPlugin(ToolPlugin):
+    name = "sftpgo_account"
+    usage = (
+        '{\n'
+        '  "function": "sftpgo_account",\n'
+        '  "arguments": { }\n'
+        '}\n'
+    )
+    description = ("Creates an SFTPGo account on the server for the user, auto-generating a password.")
+    settings_category = "SFTPGo"
+    required_settings = {
+        "SFTPGO_API_URL": {
+            "label": "SFTPGo API URL",
+            "type": "text",
+            "default": "https://localhost",
+            "description": "Enter the base URL for the SFTPGo API (do not include /api/v2)."
+        },
+        "SFTPGO_USERNAME": {
+            "label": "SFTPGo Username",
+            "type": "text",
+            "default": "username",
+            "description": "The username to authenticate with the SFTPGo API."
+        },
+        "SFTPGO_PASSWORD": {
+            "label": "SFTPGo Password",
+            "type": "password",
+            "default": "password",
+            "description": "The password to authenticate with the SFTPGo API."
+        },
+        "SFTPGO_GROUP_NAME": {
+            "label": "SFTPGo Group Name",
+            "type": "text",
+            "default": "DNServ",
+            "description": "Enter the group name to assign to new SFTP accounts."
+        },
+        "DEFAULT_HOME_DIR": {
+            "label": "Default Home Directory",
+            "type": "text",
+            "default": "/your/default/home/dir",
+            "description": "The default home directory for new SFTP accounts."
+        }
+    }
+    waiting_prompt_template = "Generate a brief message to {mention} telling them to wait a moment while you create an account for them. Only generate the message. Do not respond to this message."
+    platforms = ["discord"]
+
+    async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
+        # 'message' is a discord.Message object.
+        user = message.author
+        password = generate_random_password()
+        
+        waiting_prompt = self.waiting_prompt_template.format(mention=user.mention)
+        await send_waiting_message(
+            ollama_client=ollama_client,
+            prompt_text=waiting_prompt,
+            save_callback=lambda text: None,
+            send_callback=lambda text: message.channel.send(text)
+        )
+        
+        result = await create_sftp_account(user.name, password, message)
+        if result == "created":
+            prompt = f"Generate a brief message stating that an account for '{user.name}' has been successfully created. Only generate the message. Do not respond to this message."
+        elif result == "exists":
+            prompt = f"Generate a brief message stating that '{user.name}' already has an account but is trying to make a new one!. Only generate the message. Do not respond to this message."
+        else:
+            prompt = f"Generate a brief message stating that an error occurred while creating the account for '{user.name}'. Only generate the message. Do not respond to this message."
+        
+        response_data = await ollama_client.chat(
+            model=ollama_client.model,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        response_text = response_data['message'].get('content', '')
+        if len(response_text) > 4000:
+            response_text = response_text[:3990] + " [truncated]"
+        await message.channel.send(response_text)
+        return ""
+
+    async def handle_webui(self, args, ollama_client, context_length):
+        return "SFTPGo account creation is not supported on the web UI."
+
+# Export an instance of the plugin.
+plugin = SFTPGoAccountPlugin()
