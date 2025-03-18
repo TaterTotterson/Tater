@@ -240,8 +240,7 @@ class PremiumizeTorrentPlugin(ToolPlugin):
                 await interaction.response.edit_message(content=self.get_page_content(), view=self)
 
     async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
-        url = args.get("url")
-        if url:
+        if message.attachments:
             waiting_prompt = self.waiting_prompt_template.format(mention=message.author.mention)
             await send_waiting_message(
                 ollama_client=ollama_client,
