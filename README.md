@@ -34,7 +34,7 @@ Tater is a Discord bot that integrates with Ollama to provide a variety of AI-po
   Summarizes webpages or articles.
 
 - **Image Generation:**  
-  Generates images based on text prompts using Automatic111/SD.Next.
+  Generates images based on text prompts using Automatic111/ComfyUI.
 
 - **Premiumize.me Integration:**  
   - Checks if a given URL is cached on Premiumize.me and retrieves download links.  
