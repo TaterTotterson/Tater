@@ -12,3 +12,4 @@ streamlit
 youtube_transcript_api
 redis
 nest_asyncio
+websocket-client
