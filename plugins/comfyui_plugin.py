@@ -6,7 +6,7 @@ import urllib.request
 import urllib.parse
 import asyncio
 import time
-import websocket  # pip install websocket-client
+import websocket
 from io import BytesIO
 from plugin_base import ToolPlugin
 import discord
@@ -14,69 +14,6 @@ import streamlit as st
 from helpers import redis_client, send_waiting_message, load_image_from_url
 
 client_id = str(uuid.uuid4())
-
-def get_server_address():
-    settings = redis_client.hgetall("plugin_settings:ComfyUI")
-    url = settings.get("COMFYUI_URL", "").strip()
-    if not url:
-        return "localhost:8188"
-    # Remove scheme if present
-    if url.startswith("http://"):
-        return url[len("http://"):]
-    elif url.startswith("https://"):
-        return url[len("https://"):]
-    else:
-        return url
-
-def queue_prompt(prompt):
-    server_address = get_server_address()
-    p = {"prompt": prompt, "client_id": client_id}
-    data = json.dumps(p).encode("utf-8")
-    req = urllib.request.Request("http://{}/prompt".format(server_address), data=data, headers={"Content-Type": "application/json"})
-    return json.loads(urllib.request.urlopen(req).read())
-
-def get_image(filename, subfolder, folder_type):
-    server_address = get_server_address()
-    data = {"filename": filename, "subfolder": subfolder, "type": folder_type}
-    url_values = urllib.parse.urlencode(data)
-    with urllib.request.urlopen("http://{}/view?{}".format(server_address, url_values)) as response:
-        return response.read()
-
-def get_history(prompt_id):
-    server_address = get_server_address()
-    with urllib.request.urlopen("http://{}/history/{}".format(server_address, prompt_id)) as response:
-        return json.loads(response.read())
-
-def get_images(ws, prompt):
-    prompt_id = queue_prompt(prompt)["prompt_id"]
-    output_images = {}
-    while True:
-        out = ws.recv()
-        if isinstance(out, str):
-            message = json.loads(out)
-            if message["type"] == "executing":
-                data = message["data"]
-                if data["node"] is None and data["prompt_id"] == prompt_id:
-                    break  # Execution is done
-        else:
-            continue  # skip binary data
-    history = get_history(prompt_id)[prompt_id]
-    for node_id in history["outputs"]:
-        node_output = history["outputs"][node_id]
-        images_output = []
-        if "images" in node_output:
-            for image in node_output["images"]:
-                image_data = get_image(image["filename"], image["subfolder"], image["type"])
-                images_output.append(image_data)
-        output_images[node_id] = images_output
-    return output_images
-
-def get_workflow_template():
-    settings = redis_client.hgetall("plugin_settings:ComfyUI")
-    workflow_str = settings.get("COMFYUI_WORKFLOW", "").strip()
-    if not workflow_str:
-        raise Exception("No workflow template set in COMFYUI_WORKFLOW. Please provide a valid JSON template.")
-    return json.loads(workflow_str)
 
 class ComfyUIPlugin(ToolPlugin):
     name = "comfyui_plugin"
@@ -86,7 +23,7 @@ class ComfyUIPlugin(ToolPlugin):
         '  "arguments": {"prompt": "<Text prompt for the image>"}\n'
         "}\n"
     )
-    description = "Generates a image using ComfyUI."
+    description = "Generates an image using ComfyUI."
     settings_category = "ComfyUI"
     required_settings = {
         "COMFYUI_URL": {
@@ -97,7 +34,7 @@ class ComfyUIPlugin(ToolPlugin):
         },
         "COMFYUI_WORKFLOW": {
             "label": "Workflow Template (JSON)",
-            "type": "file",  # Changed from "text" to "file"
+            "type": "file",  # Using file upload in webui; stored as JSON string in Redis.
             "default": "",
             "description": "Upload your JSON workflow template file. This field is required."
         }
@@ -107,16 +44,87 @@ class ComfyUIPlugin(ToolPlugin):
     assistant_avatar = load_image_from_url()
 
     @staticmethod
+    def get_server_address():
+        settings = redis_client.hgetall("plugin_settings:ComfyUI")
+        url = settings.get("COMFYUI_URL", "").strip()
+        if not url:
+            return "localhost:8188"
+        # Remove scheme if present
+        if url.startswith("http://"):
+            return url[len("http://"):]
+        elif url.startswith("https://"):
+            return url[len("https://"):]
+        else:
+            return url
+
+    @staticmethod
+    def queue_prompt(prompt):
+        server_address = ComfyUIPlugin.get_server_address()
+        p = {"prompt": prompt, "client_id": client_id}
+        data = json.dumps(p).encode("utf-8")
+        req = urllib.request.Request("http://{}/prompt".format(server_address),
+                                     data=data,
+                                     headers={"Content-Type": "application/json"})
+        return json.loads(urllib.request.urlopen(req).read())
+
+    @staticmethod
+    def get_image(filename, subfolder, folder_type):
+        server_address = ComfyUIPlugin.get_server_address()
+        data = {"filename": filename, "subfolder": subfolder, "type": folder_type}
+        url_values = urllib.parse.urlencode(data)
+        with urllib.request.urlopen("http://{}/view?{}".format(server_address, url_values)) as response:
+            return response.read()
+
+    @staticmethod
+    def get_history(prompt_id):
+        server_address = ComfyUIPlugin.get_server_address()
+        with urllib.request.urlopen("http://{}/history/{}".format(server_address, prompt_id)) as response:
+            return json.loads(response.read())
+
+    @staticmethod
+    def get_images(ws, prompt):
+        prompt_id = ComfyUIPlugin.queue_prompt(prompt)["prompt_id"]
+        output_images = {}
+        while True:
+            out = ws.recv()
+            if isinstance(out, str):
+                message = json.loads(out)
+                if message["type"] == "executing":
+                    data = message["data"]
+                    if data["node"] is None and data["prompt_id"] == prompt_id:
+                        break  # Execution is done
+            else:
+                continue  # skip binary data
+        history = ComfyUIPlugin.get_history(prompt_id)[prompt_id]
+        for node_id in history["outputs"]:
+            node_output = history["outputs"][node_id]
+            images_output = []
+            if "images" in node_output:
+                for image in node_output["images"]:
+                    image_data = ComfyUIPlugin.get_image(image["filename"], image["subfolder"], image["type"])
+                    images_output.append(image_data)
+            output_images[node_id] = images_output
+        return output_images
+
+    @staticmethod
+    def get_workflow_template():
+        settings = redis_client.hgetall("plugin_settings:ComfyUI")
+        workflow_str = settings.get("COMFYUI_WORKFLOW", "").strip()
+        if not workflow_str:
+            raise Exception("No workflow template set in COMFYUI_WORKFLOW. Please provide a valid JSON template.")
+        return json.loads(workflow_str)
+
+    @staticmethod
     def process_prompt(user_prompt: str) -> bytes:
-        # Retrieve the workflow template from settings instead of using a static default
-        workflow = get_workflow_template()
+        # Retrieve the workflow template from settings
+        workflow = ComfyUIPlugin.get_workflow_template()
         # Update positive prompt (node 6)
         workflow["6"]["inputs"]["text"] = user_prompt
         workflow["6"]["widgets_values"] = [user_prompt]
         ws = websocket.WebSocket()
-        server_address = get_server_address()
+        server_address = ComfyUIPlugin.get_server_address()
         ws.connect("ws://{}/ws?clientId={}".format(server_address, client_id))
-        images = get_images(ws, workflow)
+        images = ComfyUIPlugin.get_images(ws, workflow)
         ws.close()
         # Return the first image found
         for node_id, imgs in images.items():
