@@ -138,13 +138,26 @@ for category, settings in plugin_categories.items():
             input_type = info.get("type", "text")  # default to text if not specified
             if input_type == "password":
                 new_value = st.text_input(info.get("label", key), value=default_value, help=info.get("description", ""), type="password")
+            elif input_type == "file":
+                # Use file uploader for file type settings (expects a JSON file)
+                uploaded_file = st.file_uploader(info.get("label", key), type=["json"], key=f"{category}_{key}")
+                if uploaded_file is not None:
+                    try:
+                        file_content = uploaded_file.read().decode("utf-8")
+                        # Validate the JSON
+                        json.loads(file_content)
+                        new_value = file_content
+                    except Exception as e:
+                        st.error(f"Error in uploaded file for {key}: {e}")
+                        new_value = default_value
+                else:
+                    new_value = default_value
             else:
                 new_value = st.text_input(info.get("label", key), value=default_value, help=info.get("description", ""))
             new_settings[key] = new_value
         if st.button(f"Save {category} Settings", key=f"save_{category}"):
             save_plugin_settings(category, new_settings)
             st.success(f"{category} settings saved.")
-
 
 # ----------------- SYSTEM PROMPT -----------------
 def build_system_prompt(base_prompt):
