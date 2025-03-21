@@ -13,23 +13,37 @@ import discord
 import streamlit as st
 from helpers import redis_client, send_waiting_message, load_image_from_url
 
-# Global settings for our example
-server_address = "127.0.0.1:8188"
 client_id = str(uuid.uuid4())
 
+def get_server_address():
+    settings = redis_client.hgetall("plugin_settings:ComfyUI")
+    url = settings.get("COMFYUI_URL", "").strip()
+    if not url:
+        return "localhost:8188"
+    # Remove scheme if present
+    if url.startswith("http://"):
+        return url[len("http://"):]
+    elif url.startswith("https://"):
+        return url[len("https://"):]
+    else:
+        return url
+
 def queue_prompt(prompt):
+    server_address = get_server_address()
     p = {"prompt": prompt, "client_id": client_id}
     data = json.dumps(p).encode("utf-8")
     req = urllib.request.Request("http://{}/prompt".format(server_address), data=data, headers={"Content-Type": "application/json"})
     return json.loads(urllib.request.urlopen(req).read())
 
 def get_image(filename, subfolder, folder_type):
+    server_address = get_server_address()
     data = {"filename": filename, "subfolder": subfolder, "type": folder_type}
     url_values = urllib.parse.urlencode(data)
     with urllib.request.urlopen("http://{}/view?{}".format(server_address, url_values)) as response:
         return response.read()
 
 def get_history(prompt_id):
+    server_address = get_server_address()
     with urllib.request.urlopen("http://{}/history/{}".format(server_address, prompt_id)) as response:
         return json.loads(response.read())
 
@@ -72,7 +86,7 @@ class ComfyUIPlugin(ToolPlugin):
         '  "arguments": {"prompt": "<Text prompt for the image>"}\n'
         "}\n"
     )
-    description = "Generates a image using ComyUI."
+    description = "Generates a image using ComfyUI."
     settings_category = "ComfyUI"
     required_settings = {
         "COMFYUI_URL": {
@@ -88,7 +102,6 @@ class ComfyUIPlugin(ToolPlugin):
             "description": "Upload your JSON workflow template file. This field is required."
         }
     }
-
     waiting_prompt_template = "Generate a message telling the user to please wait a moment while you create them a Masterpiece! Only generate the message. Do not respond to this message."
     platforms = ["discord", "webui"]
     assistant_avatar = load_image_from_url()
@@ -100,9 +113,8 @@ class ComfyUIPlugin(ToolPlugin):
         # Update positive prompt (node 6)
         workflow["6"]["inputs"]["text"] = user_prompt
         workflow["6"]["widgets_values"] = [user_prompt]
-        # (Optionally update node 3's seed if needed)
-        # workflow["3"]["inputs"]["seed"] = 5
         ws = websocket.WebSocket()
+        server_address = get_server_address()
         ws.connect("ws://{}/ws?clientId={}".format(server_address, client_id))
         images = get_images(ws, workflow)
         ws.close()
