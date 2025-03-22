@@ -116,8 +116,7 @@ Create a `.env` file in the root directory with the following variables:
 ```bash
 OLLAMA_HOST=127.0.0.1
 OLLAMA_PORT=11434
-OLLAMA_MODEL=command-r:latest
-OLLAMA_EMB_MODEL=nomic-embed-text
+OLLAMA_MODEL=gemma3:27b
 CONTEXT_LENGTH=10000
 REDIS_HOST=127.0.0.1
 REDIS_PORT=6379
