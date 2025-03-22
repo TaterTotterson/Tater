@@ -48,6 +48,10 @@ Tater is a Discord bot that integrates with Ollama to provide a variety of AI-po
 
 - **Web Search:**  
   Searches the web for additional or up-to-date information when needed. If the AI determines that it lacks sufficient knowledge or context to answer a query, it can trigger a web search to retrieve current information and use it to generate a final, accurate answer.
+
+## Plugins:  
+
+For a detailed example on how to create your own plugin, check out the [plugin template](https://github.com/MasterPhooey/Tater-Discord-WebUI/blob/main/examples/plugin-template.py).
   
 ## Web UI Integration
 
@@ -203,10 +207,3 @@ appendfilename "appendonly.aof"
 ```bash
 redis-server --save "900 1" --save "300 10" --save "60 10000" --appendonly yes --appendfilename "appendonly.aof"
 ```
-
-## Plugins:  
-
-For a detailed example on how to create your own plugin, check out the [plugin template](https://github.com/MasterPhooey/Tater-Discord-WebUI/blob/main/examples/plugin-template.py).
-
-**Note:**  
-After creating a plugin, remember to add it to the `plugin_registry.py` file so that Tater can load and use it.
