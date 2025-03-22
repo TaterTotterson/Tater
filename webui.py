@@ -108,6 +108,16 @@ def load_avatar_image(avatar_b64):
     except Exception as e:
         return None
 
+def get_plugin_enabled(plugin_name):
+    # Try to get the state from Redis; default to False (disabled) if not set.
+    enabled = redis_client.hget("plugin_enabled", plugin_name)
+    if enabled is None:
+        return False
+    return enabled.lower() == "true"
+
+def set_plugin_enabled(plugin_name, enabled):
+    redis_client.hset("plugin_enabled", plugin_name, "true" if enabled else "false")
+
 # ----------------- PLUGIN SETTINGS -----------------
 def get_plugin_settings(category):
     key = f"plugin_settings:{category}"
@@ -117,9 +127,12 @@ def save_plugin_settings(category, settings_dict):
     key = f"plugin_settings:{category}"
     redis_client.hset(key, mapping=settings_dict)
 
-# Gather distinct plugin settings categories from the plugin registry.
+# Updated: Gather distinct plugin settings categories from the plugin registry,
+# only including plugins that are enabled.
 plugin_categories = {}
 for plugin in plugin_registry.values():
+    if not get_plugin_enabled(plugin.name):  # Skip disabled plugins.
+        continue
     if hasattr(plugin, "settings_category") and hasattr(plugin, "required_settings"):
         cat = plugin.settings_category
         if cat not in plugin_categories:
@@ -139,13 +152,11 @@ for category, settings in plugin_categories.items():
             if input_type == "password":
                 new_value = st.text_input(info.get("label", key), value=default_value, help=info.get("description", ""), type="password")
             elif input_type == "file":
-                # Use file uploader for file type settings (expects a JSON file)
                 uploaded_file = st.file_uploader(info.get("label", key), type=["json"], key=f"{category}_{key}")
                 if uploaded_file is not None:
                     try:
                         file_content = uploaded_file.read().decode("utf-8")
-                        # Validate the JSON
-                        json.loads(file_content)
+                        json.loads(file_content)  # Validate the JSON
                         new_value = file_content
                     except Exception as e:
                         st.error(f"Error in uploaded file for {key}: {e}")
@@ -166,14 +177,13 @@ def build_system_prompt(base_prompt):
         f"Description: {getattr(plugin, 'description', 'No description provided.')}\n"
         f"{plugin.usage}"
         for plugin in plugin_registry.values()
-        if "discord" in plugin.platforms or "both" in plugin.platforms
+        if ("webui" in plugin.platforms or "both" in plugin.platforms) and get_plugin_enabled(plugin.name)
     )
-    return base_prompt + "\n\n" + tool_instructions
+    return base_prompt + "\n\n" + tool_instructions + "\n\nIf no function is needed, reply normally."
 
 BASE_PROMPT = (
     "You are Tater Totterson, a helpful AI assistant with access to various tools.\n\n"
-    "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else). "
-    "If no function is needed, reply normally:\n\n"
+    "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else).:\n\n"
 )
 SYSTEM_PROMPT = build_system_prompt(BASE_PROMPT)
 
@@ -213,6 +223,15 @@ async def process_function_call(response_json, user_question=""):
         return "Received an unknown function call."
 
 # ------------------ SIDEBAR EXPANDERS ------------------
+with st.sidebar.expander("Plugin Settings", expanded=False):
+    st.subheader("Enable/Disable Plugins")
+    # Iterate over plugins in the registry and create a toggle for each.
+    for plugin_name in plugin_registry.keys():
+        current_state = get_plugin_enabled(plugin_name)
+        toggle_state = st.toggle(plugin_name, value=current_state, key=f"plugin_toggle_{plugin_name}")
+        # Save the state back to redis whenever it is toggled.
+        set_plugin_enabled(plugin_name, toggle_state)
+
 with st.sidebar.expander("Discord Settings", expanded=False):
     st.subheader("Discord Bot Settings")
     current_settings = get_discord_settings()
