@@ -121,8 +121,6 @@ OLLAMA_EMB_MODEL=nomic-embed-text
 CONTEXT_LENGTH=10000
 REDIS_HOST=127.0.0.1
 REDIS_PORT=6379
-AUTOMATIC_URL=http://127.0.0.1:7860
-PREMIUMIZE_API_KEY=your_premiumize_api_key
 ```
 
 5. **Run the Web UI**
