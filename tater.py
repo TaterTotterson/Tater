@@ -27,6 +27,14 @@ logger = logging.getLogger('discord.tater')
 # Initialize Redis client.
 redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
 
+# ------------------ HELPER FUNCTION FOR PLUGIN ENABLED STATE ------------------
+def get_plugin_enabled(plugin_name):
+    # Try to get the state from Redis; default to False (disabled) if not set.
+    enabled = redis_client.hget("plugin_enabled", plugin_name)
+    if enabled is None:
+        return False
+    return enabled.lower() == "true"
+
 def clear_channel_history(channel_id):
     """Clear chat history for the given channel only."""
     key = f"tater:channel:{channel_id}:history"
@@ -43,14 +51,13 @@ def build_system_prompt(base_prompt):
         f"Description: {getattr(plugin, 'description', 'No description provided.')}\n"
         f"{plugin.usage}"
         for plugin in plugin_registry.values()
-        if "discord" in plugin.platforms or "both" in plugin.platforms
+        if (("discord" in plugin.platforms or "both" in plugin.platforms) and get_plugin_enabled(plugin.name))
     )
-    return base_prompt + "\n\n" + tool_instructions
+    return base_prompt + "\n\n" + tool_instructions + "\n\nIf no function is needed, reply normally."
 
 BASE_PROMPT = (
     "You are Tater Totterson, a helpful AI assistant with access to various tools.\n\n"
-    "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else). "
-    "If no function is needed, reply normally:\n\n"
+    "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
 )
 SYSTEM_PROMPT = build_system_prompt(BASE_PROMPT)
 
@@ -174,7 +181,8 @@ class tater(commands.Bot):
                     from plugin_registry import plugin_registry
                     func = response_json.get("function")
                     args = response_json.get("arguments", {})
-                    if func in plugin_registry:
+                    # Only execute the plugin if it exists and is enabled.
+                    if func in plugin_registry and get_plugin_enabled(func):
                         plugin = plugin_registry[func]
                         result = await plugin.handle_discord(
                             message, args, self.ollama, self.ollama.context_length, self.max_response_length
@@ -183,8 +191,8 @@ class tater(commands.Bot):
                             response_text = result
                     else:
                         error_text = await self.generate_error_message(
-                            f"Unknown function call: {func}.",
-                            f"Received an unknown function call: {func}.",
+                            f"Unknown or disabled function call: {func}.",
+                            f"Received an unknown or disabled function call: {func}.",
                             message
                         )
                         await message.channel.send(error_text)
