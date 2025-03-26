@@ -41,9 +41,9 @@ class VisionDescriberPlugin(ToolPlugin):
         '  }\n'
         '}\n'
     )
-    description = "Describes an image using Ollama's vision model from Discord."
+    description = "Describes an image from a URL or user attachment."
     platforms = ["discord"]
-    settings_category = "Ollama Vision Settings"
+    settings_category = "Vision"
     required_settings = {
         "ollama_server_address": {
             "label": "Ollama Server Address",
