@@ -1,4 +1,3 @@
-# helpers.py
 import os
 import asyncio
 import ollama
@@ -7,10 +6,12 @@ from PIL import Image
 from io import BytesIO
 import nest_asyncio
 import redis
+
 nest_asyncio.apply()
 
 DEFAULT_OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "command-r:35B")
 DEFAULT_CONTEXT_LENGTH = int(os.getenv("CONTEXT_LENGTH", 10000))
+DEFAULT_KEEP_ALIVE = -1
 DEFAULT_ASSISTANT_AVATAR_URL = "https://raw.githubusercontent.com/MasterPhooey/Tater-Discord-WebUI/refs/heads/main/images/tater.png"
 
 def load_image_from_url(url: str = DEFAULT_ASSISTANT_AVATAR_URL) -> Image.Image:
@@ -46,12 +47,14 @@ async def send_waiting_message(
         model = getattr(ollama_client, "model", os.getenv("OLLAMA_MODEL", "command-r:35B"))
     if context_length is None:
         context_length = getattr(ollama_client, "context_length", int(os.getenv("CONTEXT_LENGTH", 10000)))
+    # Read keep_alive from the client; default to -1 if not set.
+    keep_alive = getattr(ollama_client, "keep_alive", DEFAULT_KEEP_ALIVE)
     
     waiting_response = await ollama_client.chat(
         model=model,
         messages=[{"role": "system", "content": prompt_text}],
         stream=False,
-        keep_alive=-1,
+        keep_alive=keep_alive,
         options={"num_ctx": context_length}
     )
     waiting_text = waiting_response["message"].get("content", "").strip()
@@ -65,13 +68,14 @@ async def send_waiting_message(
             await ret
     return waiting_text
 
-# Also include the OllamaClientWrapper definition here if needed.
+# Also include the OllamaClientWrapper definition here.
 class OllamaClientWrapper(ollama.AsyncClient):
-    def __init__(self, host, model=DEFAULT_OLLAMA_MODEL, context_length=DEFAULT_CONTEXT_LENGTH, **kwargs):
+    def __init__(self, host, model=DEFAULT_OLLAMA_MODEL, context_length=DEFAULT_CONTEXT_LENGTH, keep_alive=DEFAULT_KEEP_ALIVE, **kwargs):
         super().__init__(host=host, **kwargs)
         self.host = host  # Store the host for later use.
         self.model = model
         self.context_length = context_length
+        self.keep_alive = keep_alive
 
 redis_client = redis.Redis(
     host=os.getenv('REDIS_HOST', '127.0.0.1'),
@@ -79,5 +83,3 @@ redis_client = redis.Redis(
     db=0,
     decode_responses=True
 )
-
-
