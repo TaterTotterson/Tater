@@ -9,6 +9,7 @@ from plugins.watch_feed import plugin as watch_feed_plugin
 from plugins.unwatch_feed import plugin as unwatch_feed_plugin
 from plugins.list_feeds import plugin as list_feeds_plugin
 from plugins.sftpgo_account import plugin as sftpgo_account_plugin
+from plugins.vision_describer import plugin as vision_describer_plugin
 
 plugin_registry = {
     youtube_plugin.name: youtube_plugin,
@@ -23,4 +24,5 @@ plugin_registry = {
     unwatch_feed_plugin.name: unwatch_feed_plugin,
     list_feeds_plugin.name: list_feeds_plugin,
     sftpgo_account_plugin.name: sftpgo_account_plugin,
+    vision_describer_plugin.name: vision_describer_plugin,
 }

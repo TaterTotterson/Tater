@@ -315,60 +315,83 @@ for msg in load_chat_history():
 
 user_input = st.chat_input("Chat with Tater...")
 
-# Check for disallowed attachments (only allow torrent files)
 if uploaded_files:
+    allowed_extensions = [".torrent", ".png", ".jpg", ".jpeg", ".gif"]
+    # Check for disallowed attachments.
     for uploaded_file in uploaded_files:
-        if not uploaded_file.name.lower().endswith(".torrent"):
+        if not any(uploaded_file.name.lower().endswith(ext) for ext in allowed_extensions):
             error_response = run_async(
                 ollama_client.chat(
                     model=ollama_client.model,
-                    messages=[{"role": "system", "content": "Tell the user, Only torrent files are allowed. Only tell the user do not respond to this message"}],
+                    messages=[{
+                        "role": "system",
+                        "content": "Tell the user, Only torrent files and image files are allowed. Only tell the user do not respond to this message"
+                    }],
                     stream=False,
                     keep_alive=-1,
                     options={"num_ctx": ollama_client.context_length}
                 )
             )
-            error_text = error_response['message'].get('content', '').strip()
-            save_message("assistant", "assistant", error_text)
-            st.chat_message("assistant", avatar=assistant_avatar).write(error_text)
-            if "uploader_key" in st.session_state:
-                st.session_state.pop("uploader_key")
-            st.stop()
-
-# Check if a torrent file is attached.
-torrent_file = None
-if uploaded_files:
+            st.stop()  # Stop further processing.
+    
+    # If we reach here, all files are allowed.
+    torrent_file = None
+    image_file = None
     for uploaded_file in uploaded_files:
-        if uploaded_file.name.lower().endswith(".torrent"):
+        lower_name = uploaded_file.name.lower()
+        if lower_name.endswith(".torrent"):
             torrent_file = uploaded_file
-            break
+            break  # Prioritize torrent files if present.
+        elif lower_name.endswith((".png", ".jpg", ".jpeg", ".gif")):
+            image_file = uploaded_file
 
-if torrent_file:
-    st.chat_message("user", avatar=user_avatar if user_avatar else "🦖").write(f"[Torrent attachment: {torrent_file.name}]")
-    save_message("user", chat_settings["username"], f"[Torrent attachment: {torrent_file.name}]")
-    
-    run_async(
-        send_waiting_message(
-            ollama_client=ollama_client,
-            prompt_text=f"Generate a brief message to {chat_settings['username']} telling them to wait a moment while you check if the torrent file is cached. Only generate the message. Do not respond to this message.",
-            save_callback=lambda text: save_message("assistant", "assistant", text),
-            send_callback=lambda text: st.chat_message("assistant", avatar=assistant_avatar).write(text)
+    if torrent_file:
+        st.chat_message("user", avatar=user_avatar if user_avatar else "🦖").write(f"[Torrent attachment: {torrent_file.name}]")
+        save_message("user", chat_settings["username"], f"[Torrent attachment: {torrent_file.name}]")
+        
+        run_async(
+            send_waiting_message(
+                ollama_client=ollama_client,
+                prompt_text="Please wait while I check if the torrent file is cached. Only generate the waiting message.",
+                save_callback=lambda text: save_message("assistant", "assistant", text),
+                send_callback=lambda text: st.chat_message("assistant", avatar=assistant_avatar).write(text)
+            )
         )
-    )
+        
+        premiumize_plugin = plugin_registry.get("premiumize_torrent")
+        if premiumize_plugin:
+            torrent_result = run_async(premiumize_plugin.process_torrent_web(torrent_file.read(), torrent_file.name))
+        else:
+            torrent_result = "Error: premiumize plugin not available."
+        
+        if "uploader_key" in st.session_state:
+            st.session_state.pop("uploader_key")
+        save_message("assistant", "assistant", torrent_result)
+        st.chat_message("assistant", avatar=assistant_avatar).write(torrent_result)
     
-    premiumize_plugin = plugin_registry.get("premiumize_torrent")
-    if premiumize_plugin:
-        torrent_result = run_async(
-            premiumize_plugin.process_torrent_web(torrent_file.read(), torrent_file.name)
+    elif image_file:
+        st.chat_message("user", avatar=user_avatar if user_avatar else "🦖").write(f"[Image attachment: {image_file.name}]")
+        save_message("user", chat_settings["username"], f"[Image attachment: {image_file.name}]")
+        
+        run_async(
+            send_waiting_message(
+                ollama_client=ollama_client,
+                prompt_text="Please wait while I analyze the image and generate a description. Only generate the waiting message.",
+                save_callback=lambda text: save_message("assistant", "assistant", text),
+                send_callback=lambda text: st.chat_message("assistant", avatar=assistant_avatar).write(text)
+            )
         )
-    else:
-        torrent_result = "Error: premiumize plugin not available."
-    
-    if "uploader_key" in st.session_state:
-        st.session_state.pop("uploader_key")
-    
-    save_message("assistant", "assistant", torrent_result)
-    st.chat_message("assistant", avatar=assistant_avatar).write(torrent_result)
+        
+        vision_plugin = plugin_registry.get("vision_describer")
+        if vision_plugin:
+            image_result = run_async(vision_plugin.process_image_web(image_file.read(), image_file.name))
+        else:
+            image_result = "Error: vision plugin not available."
+        
+        if "uploader_key" in st.session_state:
+            st.session_state.pop("uploader_key")
+        save_message("assistant", "assistant", image_result)
+        st.chat_message("assistant", avatar=assistant_avatar).write(image_result)
 
 elif user_input:
     chat_settings = get_chat_settings()
