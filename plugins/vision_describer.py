@@ -59,7 +59,7 @@ class VisionDescriberPlugin(ToolPlugin):
         }
     }
     waiting_prompt_template = (
-        "Generate a brief message to {mention} telling them to wait a moment while I analyze the image and generate a description. Only generate the message. Do not respond to this message."
+        "Generate a brief message to {mention} telling them to wait a moment while you use your magnifying glass to inspect their image in detail. Only generate the message. Do not respond to this message."
     )
     
     def get_vision_settings(self):
