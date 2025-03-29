@@ -56,7 +56,7 @@ def build_system_prompt(base_prompt):
     return base_prompt + "\n\n" + tool_instructions + "\n\nIf no function is needed, reply normally."
 
 BASE_PROMPT = (
-    "You are Tater Totterson, a helpful AI assistant with access to various tools.\n\n"
+    "You are Tater Totterson, a helpful AI assistant with access to various tools and plugins.\n\n"
     "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
 )
 SYSTEM_PROMPT = build_system_prompt(BASE_PROMPT)
