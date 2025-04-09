@@ -52,8 +52,8 @@ Automatically monitors RSS feeds for new articles and announces summaries to RES
 - **Unwatch Feed:** Remove an RSS feed from monitoring.  
 - **List Feeds:** List all currently watched RSS feeds.
 
-**SFTPgo Status Plugin:**  
-Provides real-time status updates and file transfer statistics from your SFTPgo server.
+**SFTPgo Account Creation & Status Plugin:**  
+Creates accounts an Provides real-time status updates and file transfer statistics from your SFTPgo server.
 
 **Web Search:**  
 Searches the web for additional or up-to-date information when needed. If the AI determines that it lacks sufficient knowledge or context to answer a query, it can trigger a web search to retrieve current information and generate a final, accurate answer.
