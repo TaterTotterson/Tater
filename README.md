@@ -27,8 +27,8 @@ Tater is a Discord bot that integrates with Ollama to provide a variety of AI-po
 
 **Below are the tools available to you. Simply ask Tater to perform these tasks—no slash commands or specific key terms are required:**
 
-**YouTube Video Summaries:**  
-Extracts YouTube video IDs, fetches summaries, and sends formatted responses.
+- **YouTube Video Summaries:**  
+- Extracts YouTube video IDs, fetches summaries, and sends formatted responses.
 
 **Web Summaries:**  
 Summarizes webpages or articles.
