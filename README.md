@@ -25,29 +25,39 @@ Tater is a Discord bot that integrates with Ollama to provide a variety of AI-po
     
 ## Available Tools (Plugins)
 
-**Below are the tools available to you. Simply ask Tater to perform these tasks—no slash commands or specific key terms are required:**
+** Below are the tools available to you. Simply ask Tater to perform these tasks—no slash commands or specific key terms are required:**
 
-- **YouTube Video Summaries:**  
-  Extracts YouTube video IDs, fetches summaries, and sends formatted responses.
+**YouTube Video Summaries:**  
+Extracts YouTube video IDs, fetches summaries, and sends formatted responses.
 
-- **Web Summaries:**  
-  Summarizes webpages or articles.
+**Web Summaries:**  
+Summarizes webpages or articles.
 
-- **Image Generation:**  
-  Generates images based on text prompts using Automatic111/ComfyUI.
+**Image Generation:**  
+Generates images based on text prompts using Automatic111/ComfyUI.
 
-- **Premiumize.me Integration:**  
-  - Checks if a given URL is cached on Premiumize.me and retrieves download links.  
-  - Processes torrent files to extract the torrent hash, checks cache status, and retrieves download links.
+**Audio Generation:**  
+Generates custom audio masterpieces based on your prompts using our new Audio Plugin—enjoy exclusive tunes directly in Discord or via the web interface.
 
-- **RSS Feed Monitoring:**  
-  Automatically monitors RSS feeds for new articles and announces summaries to RESPONSE_CHANNEL when new articles are published. This integration includes three tools:  
-  - **Watch Feed:** Add an RSS feed to be monitored.  
-  - **Unwatch Feed:** Remove an RSS feed from monitoring.  
-  - **List Feeds:** List all currently watched RSS feeds.
+**Vision Plugin:**  
+Processes visual inputs to generate descriptive insights or creative interpretations from images.
 
-- **Web Search:**  
-  Searches the web for additional or up-to-date information when needed. If the AI determines that it lacks sufficient knowledge or context to answer a query, it can trigger a web search to retrieve current information and use it to generate a final, accurate answer.
+**Premiumize.me Integration:**  
+- Checks if a given URL is cached on Premiumize.me and retrieves download links.  
+- Processes torrent files to extract the torrent hash, checks cache status, and retrieves download links.
+
+**RSS Feed Monitoring:**  
+Automatically monitors RSS feeds for new articles and announces summaries to RESPONSE_CHANNEL when new articles are published. This integration includes three tools:  
+- **Watch Feed:** Add an RSS feed to be monitored.  
+- **Unwatch Feed:** Remove an RSS feed from monitoring.  
+- **List Feeds:** List all currently watched RSS feeds.
+
+**SFTPgo Status Plugin:**  
+Provides real-time status updates and file transfer statistics from your SFTPgo server.
+
+**Web Search:**  
+Searches the web for additional or up-to-date information when needed. If the AI determines that it lacks sufficient knowledge or context to answer a query, it can trigger a web search to retrieve current information and generate a final, accurate answer.
+
 
 ## Plugins:  
 
