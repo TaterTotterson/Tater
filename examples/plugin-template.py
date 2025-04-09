@@ -32,6 +32,7 @@ class <PluginName>Plugin(ToolPlugin):
         "Generate a brief message to {mention} telling them to wait while I process your <plugin_name> request. Only generate the message. Do not respond to this message."
     )
     platforms = ["discord", "webui"]
+    assistant_avatar = load_image_from_url()
 
     # --- Helper Functions as Static Methods ---
     @staticmethod
