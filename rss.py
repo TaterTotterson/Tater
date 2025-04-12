@@ -204,7 +204,8 @@ class RSSManager:
             for feed_url, last_ts_str in feeds.items():
                 try:
                     last_ts = float(last_ts_str) if last_ts_str else 0.0
-                    parsed_feed = feedparser.parse(feed_url)
+                    # Use asyncio.to_thread to offload feed parsing to a separate thread.
+                    parsed_feed = await asyncio.to_thread(feedparser.parse, feed_url)
                     if parsed_feed.bozo:
                         logger.error(f"Error parsing feed {feed_url}: {parsed_feed.bozo_exception}")
                         continue
