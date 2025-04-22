@@ -67,9 +67,7 @@ Launch the web UI using Streamlit:
 streamlit run webui.py
 ```
 
-## Using the Prebuilt Docker Image
-
-For users who prefer not to build the Docker image locally, a prebuilt image is available on Docker Hub.
+## Docke
 
 ### 1. Pull the Image
 
