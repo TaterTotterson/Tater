@@ -154,15 +154,7 @@ Pull the prebuilt image with the following command:
 docker pull masterphooey/tater-webui
 ```
 
-### 2. Run the Container
-
-Run the container with the following command. This example maps port 8501 on your host to port 8501 in the container (where the Streamlit web UI runs):
-
-```bash
-docker run -d --name tater_webui -p 8501:8501 masterphooey/tater-webui
-```
-
-### 3. Configuring Environment Variables
+### 2. Configuring Environment Variables
 
 Ensure you supply the required environment variables. You can pass these using the `-e` flag when starting the container. For example:
 
@@ -178,7 +170,7 @@ docker run -d --name tater_webui \
   masterphooey/tater-webui
 ```
 
-### 4. Access the Web UI
+### 3. Access the Web UI
 
 Once the container is running, open your browser and navigate to:
 
