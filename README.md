@@ -67,7 +67,7 @@ Launch the web UI using Streamlit:
 streamlit run webui.py
 ```
 
-## Docke
+## Docker
 
 ### 1. Pull the Image
 
