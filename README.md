@@ -95,6 +95,8 @@ This unified interface lets you manage both chat interactions and Discord settin
 
 ### Prerequisites
 - Python 3.11
+- **Redis-Stack**
+- Ollama
 - Docker (optional, for containerized deployment)
 
 ### Setting Up Locally
