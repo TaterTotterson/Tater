@@ -13,8 +13,8 @@ Tater is a Discord bot that integrates with Ollama to provide a variety of AI-po
 </div>
 
 **Note**:
-    - You DO NOT need to use a model that is tagged with tools, test different models if the one you are using isnt trigging the plugins.
-    - Tater currently recommends using gemma3:27b
+- You DO NOT need to use a model that is tagged with tools, test different models if the one you are using isnt trigging the plugins.
+- Tater currently recommends using gemma3:27b
 
 ## Installation
 
