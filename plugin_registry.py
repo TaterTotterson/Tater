@@ -4,6 +4,7 @@ from plugins.web_search import plugin as web_search_plugin
 from plugins.comfyui_plugin import plugin as comfyui_plugin
 from plugins.comfyui_audio_plugin import plugin as comfyui_audio_plugin
 from plugins.comfyui_video_plugin import plugin as comfyui_video_plugin
+from plugins.comfyui_image_video_plugin import plugin as comfyui_image_video_plugin
 from plugins.automatic_plugin import plugin as automatic_plugin
 from plugins.premiumize_download import plugin as premiumize_download_plugin
 from plugins.premiumize_torrent import plugin as premiumize_torrent_plugin
@@ -21,6 +22,7 @@ plugin_registry = {
     comfyui_plugin.name: comfyui_plugin,
     comfyui_audio_plugin.name: comfyui_audio_plugin,
     comfyui_video_plugin.name: comfyui_video_plugin,
+    comfyui_image_video_plugin.name: comfyui_image_video_plugin,
     automatic_plugin.name: automatic_plugin,
     sftpgo_account_plugin.name: sftpgo_account_plugin,
     premiumize_download_plugin.name: premiumize_download_plugin,
