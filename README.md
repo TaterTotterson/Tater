@@ -3,8 +3,6 @@
   <h1>Tater Ollama Discord Bot & Web UI</h1>
 </div>
 
-# Tater - A Ollama Discord Bot & Web UI
-
 Tater is a Discord bot that integrates with Ollama to provide a variety of AI-powered tools, and has a web UI for setup amd internal private chat. Whether you're on Discord or using the WebUI, Tater is at your service.
 
 <div align="center">
