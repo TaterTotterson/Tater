@@ -54,7 +54,7 @@ Create a `.env` file in the root directory with the following variables:
 OLLAMA_HOST=127.0.0.1
 OLLAMA_PORT=11434
 OLLAMA_MODEL=gemma3:27b
-CONTEXT_LENGTH=10000
+CONTEXT_LENGTH=5000
 REDIS_HOST=127.0.0.1
 REDIS_PORT=6379
 ```
