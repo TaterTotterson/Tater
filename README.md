@@ -5,11 +5,6 @@
 
 Tater is a Discord bot that integrates with Ollama to provide a variety of AI-powered tools, and has a web UI for setup amd internal private chat. Whether you're on Discord or using the WebUI, Tater is at your service.
 
-<div align="center">
-  <img src="https://raw.githubusercontent.com/MasterPhooey/Tater-Discord-WebUI/refs/heads/main/images/webui.png" alt="Tater Discord Bot" width="600"/>
-  <h1>Tater Discord AI & Web UI</h1>
-</div>
-
 **Note**:
 - You DO NOT need to use a model that is tagged with tools, test different models if the one you are using isnt trigging the plugins.
 - Tater currently recommends using gemma3:27b
