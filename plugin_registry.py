@@ -14,6 +14,7 @@ from plugins.list_feeds import plugin as list_feeds_plugin
 from plugins.sftpgo_account import plugin as sftpgo_account_plugin
 from plugins.sftpgo_activity import plugin as sftpgo_activity_plugin
 from plugins.vision_describer import plugin as vision_describer_plugin
+from plugins.ftp_browser import plugin as ftp_browser_plugin
 
 plugin_registry = {
     youtube_plugin.name: youtube_plugin,
@@ -33,4 +34,5 @@ plugin_registry = {
     sftpgo_account_plugin.name: sftpgo_account_plugin,
     sftpgo_activity_plugin.name: sftpgo_activity_plugin,
     vision_describer_plugin.name: vision_describer_plugin,
+    ftp_browser_plugin.name: ftp_browser_plugin,
 }
