@@ -7,9 +7,13 @@ import logging
 import redis
 import discord
 import requests
+import html
+import re
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 import ollama
+from plugin_registry import plugin_registry
+from plugin_settings import get_plugin_enabled, get_plugin_settings
 
 logger = logging.getLogger("discord.rss")
 logger.setLevel(logging.DEBUG)
@@ -187,15 +191,45 @@ class RSSManager:
 
         # Split the announcement if it exceeds Discord's message length limits.
         chunks = split_message(announcement, chunk_size=max_response_length)
+
         try:
             channel = self.bot.get_channel(self.rss_channel_id)
-            if channel is None:
-                logger.error("RSS channel not found.")
-                return
-            for chunk in chunks:
-                await channel.send(chunk)
+            if channel:
+                for chunk in chunks:
+                    await channel.send(chunk)
+            else:
+                logger.warning("RSS Discord channel not found. Skipping Discord post.")
         except Exception as e:
             logger.error(f"Error sending announcement for article {link}: {e}")
+
+        # Also send to Telegram if plugin enabled
+        if get_plugin_enabled("telegram_notifier"):
+            settings = get_plugin_settings("Telegram")
+            bot_token = settings.get("telegram_bot_token")
+            chat_id = settings.get("telegram_chat_id")
+            if bot_token and chat_id:
+                try:
+                    import re  # Add this at the top of rss.py if not already imported
+
+                    telegram_message = announcement
+
+                    # Replace all pairs of **bold** with <b>bold</b>
+                    telegram_message = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", telegram_message)
+
+                    # Escape HTML-sensitive characters (preserve our <b> tags)
+                    telegram_message = html.escape(telegram_message, quote=False)
+                    telegram_message = telegram_message.replace("&lt;b&gt;", "<b>").replace("&lt;/b&gt;", "</b>")
+
+                    telegram_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+                    payload = {
+                        "chat_id": chat_id,
+                        "text": telegram_message,
+                        "parse_mode": "HTML",
+                        "disable_web_page_preview": False
+                    }
+                    requests.post(telegram_url, json=payload, timeout=10)
+                except Exception as e:
+                    logger.warning(f"Failed to send Telegram message: {e}")
 
     async def poll_feeds(self):
         logger.info("Starting RSS feed polling...")
