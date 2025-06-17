@@ -7,28 +7,28 @@ Tater is a Discord bot that integrates with Ollama to provide a variety of AI-po
 
 ## 🧩 Tater Plugin Overview
 
-| Plugin Name              | Description                                                                 | Type              | Trigger         |
+| Plugin Name              | Description                                                                 | Type              | Platform         |
 |--------------------------|-----------------------------------------------------------------------------|-------------------|------------------|
-| `youtube_summary`        | Summarizes YouTube videos using transcript API (with `yt-dlp` fallback)     | AI Summarization  | AI-triggered     |
-| `web_summary`            | Summarizes content from a provided URL                                      | AI Summarization  | AI-triggered     |
-| `web_search`             | Performs web search and returns summarized results                          | AI Search         | AI-triggered     |
-| `emoji_ai_responder`     | Picks a relevant emoji based on a message when someone reacts to it         | AI Utility        | Event-triggered  |
-| `vision_describer`       | Analyzes uploaded images and returns AI-generated descriptions              | AI Vision         | AI-triggered     |
-| `automatic_plugin`       | Generates images using AUTOMATIC1111 API based on user prompt               | Image Generation  | AI-triggered     |
-| `comfyui_plugin`         | Generates images with ComfyUI using custom workflow templates               | Image Generation  | AI-triggered     |
-| `comfyui_image_video`    | Animates images into WebP loops using ComfyUI + WanImageToVideo             | Animation         | AI-triggered     |
-| `comfyui_video_plugin`   | Creates videos from prompts using ComfyUI and video workflows               | Video Generation  | AI-triggered     |
-| `comfyui_audio_plugin`   | Generates music/audio from prompts using ComfyUI                            | Audio Generation  | AI-triggered     |
-| `ftp_browser`            | Allows users to browse FTP servers via Discord                              | File Access       | AI-triggered     |
-| `sftpgo_account`         | Lists and manages SFTPGo user accounts and their credentials                | File Access       | AI-triggered     |
-| `sftpgo_activity`        | Views SFTPGo user activity like file transfers and sessions                 | File Access       | AI-triggered     |
-| `premiumize_torrent`     | Checks if a torrent is cached on Premiumize and returns download links      | Cloud Utility     | AI-triggered     |
-| `premiumize_download`    | Checks Premiumize for cached file links and returns downloads               | Cloud Utility     | AI-triggered     |
-| `telegram_notifier`      | Posts formatted messages to a Telegram channel                              | Notifier          | Plugin-triggered |
-| `wordpress_poster`       | Posts summaries/announcements to WordPress via REST API                     | Publisher         | Plugin-triggered |
-| `list_feeds`             | Lists all RSS feeds being monitored                                         | RSS Management    | Manual/AI        |
-| `watch_feed`             | Adds a feed to the RSS watchlist                                            | RSS Management    | Manual           |
-| `unwatch_feed`           | Removes a feed from the watchlist                                           | RSS Management    | Manual           |
+| `youtube_summary`        | Summarizes YouTube videos using transcript API (with `yt-dlp` fallback)     | AI Summarization  | discord           |
+| `web_summary`            | Summarizes content from a provided URL                                      | AI Summarization  | discord, webui    |
+| `web_search`             | Performs web search and returns summarized results                          | AI Search         | discord, webui    |
+| `emoji_ai_responder`     | Picks a relevant emoji based on a message when someone reacts to it         | AI Utility        | discord           |
+| `vision_describer`       | Analyzes uploaded images and returns AI-generated descriptions              | AI Vision         | discord           |
+| `automatic_plugin`       | Generates images using AUTOMATIC1111 API based on user prompt               | Image Generation  | discord, webui    |
+| `comfyui_plugin`         | Generates images with ComfyUI using custom workflow templates               | Image Generation  | discord, webui    |
+| `comfyui_image_video`    | Animates images into WebP loops using ComfyUI + WanImageToVideo             | Animation         | discord           |
+| `comfyui_video_plugin`   | Creates videos from prompts using ComfyUI and video workflows               | Video Generation  | discord, webui    |
+| `comfyui_audio_plugin`   | Generates music/audio from prompts using ComfyUI                            | Audio Generation  | discord, webui    |
+| `ftp_browser`            | Allows users to browse FTP servers via Discord                              | File Access       | discord           |
+| `sftpgo_account`         | Lists and manages SFTPGo user accounts and their credentials                | File Access       | discord           |
+| `sftpgo_activity`        | Views SFTPGo user activity like file transfers and sessions                 | File Access       | discord           |
+| `premiumize_torrent`     | Checks if a torrent is cached on Premiumize and returns download links      | Cloud Utility     | discord, webui    |
+| `premiumize_download`    | Checks Premiumize for cached file links and returns downloads               | Cloud Utility     | discord, webui    |
+| `telegram_notifier`      | Posts formatted messages to a Telegram channel                              | Notifier          | plugin-triggered  |
+| `wordpress_poster`       | Posts summaries/announcements to WordPress via REST API                     | Publisher         | plugin-triggered  |
+| `list_feeds`             | Lists all RSS feeds being monitored                                         | RSS Management    | discord, webui    |
+| `watch_feed`             | Adds a feed to the RSS watchlist                                            | RSS Management    | discord, webui    |
+| `unwatch_feed`           | Removes a feed from the watchlist                                           | RSS Management    | discord, webui    |
 
 **Note**:
 - You don't have to use a model that is tagged with tools, test different models if the one you are using isnt trigging the plugins.
