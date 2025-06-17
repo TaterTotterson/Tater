@@ -9,7 +9,7 @@ Tater is a Discord bot that integrates with Ollama to provide a variety of AI-po
 
 | Plugin Name              | Description                                                                 | Type              | Platform         |
 |--------------------------|-----------------------------------------------------------------------------|-------------------|------------------|
-| `youtube_summary`        | Summarizes YouTube videos using transcript API (with `yt-dlp` fallback)     | AI Summarization  | discord           |
+| `youtube_summary`        | Summarizes YouTube videos using transcript API (with `yt-dlp` fallback)     | AI Summarization  | discord, webui    |
 | `web_summary`            | Summarizes content from a provided URL                                      | AI Summarization  | discord, webui    |
 | `web_search`             | Performs web search and returns summarized results                          | AI Search         | discord, webui    |
 | `emoji_ai_responder`     | Picks a relevant emoji based on a message when someone reacts to it         | AI Utility        | discord           |
