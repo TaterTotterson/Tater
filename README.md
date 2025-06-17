@@ -24,11 +24,20 @@ Tater is a Discord bot that integrates with Ollama to provide a variety of AI-po
 | `sftpgo_activity`        | Views SFTPGo user activity like file transfers and sessions                 | File Access       | discord           |
 | `premiumize_torrent`     | Checks if a torrent is cached on Premiumize and returns download links      | Cloud Utility     | discord, webui    |
 | `premiumize_download`    | Checks Premiumize for cached file links and returns downloads               | Cloud Utility     | discord, webui    |
-| `telegram_notifier`      | Posts formatted messages to a Telegram channel                              | Notifier          | plugin-triggered  |
-| `wordpress_poster`       | Posts summaries/announcements to WordPress via REST API                     | Publisher         | plugin-triggered  |
-| `list_feeds`             | Lists all RSS feeds being monitored                                         | RSS Management    | discord, webui    |
-| `watch_feed`             | Adds a feed to the RSS watchlist                                            | RSS Management    | discord, webui    |
-| `unwatch_feed`           | Removes a feed from the watchlist                                           | RSS Management    | discord, webui    |
+
+### 📡 RSS Feed Watcher (Built-in)
+
+This system runs in the background and posts RSS feed updates. The following plugins enhance or interact with this watcher:
+
+| Plugin Name              | Description                                                                 | Type              | Platform         |
+|--------------------------|-----------------------------------------------------------------------------|-------------------|------------------|
+| `discord` *(built-in)*   | Posts RSS updates directly to a configured Discord channel                  | RSS Notifier      | discord           |
+| `telegram_notifier`      | Sends RSS updates to a Telegram channel using the internal feed watcher     | RSS Notifier      | plugin-triggered  |
+| `wordpress_poster`       | Posts RSS updates to WordPress using the internal feed watcher              | RSS Publisher     | plugin-triggered  |
+| `list_feeds`             | Lists all RSS feeds being watched by the internal feed watcher              | RSS Management    | discord, webui    |
+| `watch_feed`             | Adds a feed to the internal RSS watcher                                     | RSS Management    | discord, webui    |
+| `unwatch_feed`           | Removes a feed from the internal RSS watcher                                | RSS Management    | discord, webui    |
+
 
 **Note**:
 - You don't have to use a model that is tagged with tools, test different models if the one you are using isnt trigging the plugins.
