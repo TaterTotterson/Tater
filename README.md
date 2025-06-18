@@ -5,6 +5,9 @@
 
 Tater is a Discord bot that integrates with Ollama to provide a variety of AI-powered tools, Tater has a web UI for setup and internal private chat. Whether you're on Discord or using the WebUI, Tater is at your service.
 
+The following plugins can be triggerd simple by asking Tater, ex: Tater summarize this youtube video http://youtube.com/watch?v=000000
+
+
 ## 🧩 Tater Plugin Overview
 
 | Plugin Name              | Description                                                                 | Type              | Platform         |
