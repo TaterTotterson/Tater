@@ -134,6 +134,7 @@ The Streamlit-based web UI will be available for interacting with Tater.
 
 
 ## Redis Persistence
+NOTE: this should be enabled by default in Redis-Stack
 
 If you're running Redis directly, you can ensure data persistence by configuring Redis's built-in persistence mechanisms. Redis supports two primary methods:
 
