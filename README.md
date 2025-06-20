@@ -36,7 +36,7 @@ This system runs in the background and posts summarized RSS feed updates. The fo
 |--------------------------|-----------------------------------------------------------------------------|-------------------|------------------|
 | `discord_notifier`       | Posts RSS updates directly to a configured Discord channel                  | RSS Notifier      | plugin-triggered  |
 | `telegram_notifier`      | Sends RSS updates to a Telegram channel using the internal feed watcher     | RSS Notifier      | plugin-triggered  |
-| `wordpress_poster`       | Posts RSS updates to WordPress using the internal feed watcher              | RSS Publisher     | plugin-triggered  |
+| `wordpress_poster`       | Posts RSS updates to WordPress using the internal feed watcher              | RSS Notifier      | plugin-triggered  |
 | `list_feeds`             | Lists all RSS feeds being watched by the internal feed watcher              | RSS Management    | discord, webui    |
 | `watch_feed`             | Adds a feed to the internal RSS watcher                                     | RSS Management    | discord, webui    |
 | `unwatch_feed`           | Removes a feed from the internal RSS watcher                                | RSS Management    | discord, webui    |
