@@ -1,173 +1,170 @@
 import os
 import re
 import asyncio
-import tempfile
-import json
 import requests
 from urllib.parse import urlparse, parse_qs
-from plugin_base import ToolPlugin
 from dotenv import load_dotenv
-from yt_dlp import YoutubeDL
 import streamlit as st
+
+from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound
+
+from plugin_base import ToolPlugin
 from helpers import load_image_from_url, send_waiting_message
 
 load_dotenv()
 assistant_avatar = load_image_from_url()
 
+
 class YouTubeSummaryPlugin(ToolPlugin):
     name = "youtube_summary"
     usage = (
-        "{\n"
+        '{\n'
         '  "function": "youtube_summary",\n'
-        '  "arguments": {"video_url": "<YouTube URL>", "target_lang": "<language code (optional)>"}\n'
-        "}\n"
+        '  "arguments": {\n'
+        '    "video_url": "<YouTube URL>"\n'
+        '  }\n'
+        '}'
     )
-    description = "Summarizes a YouTube Video from a URL provided by the user."
+    description = "Summarizes a YouTube video using its transcript."
+    platforms = ["discord", "webui"]
     waiting_prompt_template = (
         "Generate a brief message to {mention} telling them to wait a moment while I watch this boring video and summarize it. Only generate the message. Do not respond to this message."
     )
-    platforms = ["discord", "webui"]
 
     @staticmethod
     def extract_video_id(youtube_url):
-        parsed_url = urlparse(youtube_url)
-        if parsed_url.hostname in ['www.youtube.com', 'youtube.com', 'm.youtube.com']:
-            query_params = parse_qs(parsed_url.query)
-            return query_params.get('v', [None])[0]
-        elif parsed_url.hostname == 'youtu.be':
-            return parsed_url.path.lstrip('/')
+        parsed = urlparse(youtube_url)
+        if parsed.hostname in ['www.youtube.com', 'youtube.com', 'm.youtube.com']:
+            return parse_qs(parsed.query).get('v', [None])[0]
+        elif parsed.hostname == 'youtu.be':
+            return parsed.path.lstrip('/')
         return None
 
     @staticmethod
-    def format_article_for_discord(article):
-        return article.replace("### ", "# ")
+    def split_text_into_chunks(text, max_tokens=1200):
+        chunks = []
+        words = text.split()
+        chunk = []
+        current_len = 0
 
-    @staticmethod
-    def split_message(message_content, chunk_size=1500):
-        message_parts = []
-        while len(message_content) > chunk_size:
-            split_point = message_content.rfind('\n', 0, chunk_size)
-            if split_point == -1:
-                split_point = message_content.rfind(' ', 0, chunk_size)
-            if split_point == -1:
-                split_point = chunk_size
-            message_parts.append(message_content[:split_point])
-            message_content = message_content[split_point:].strip()
-        message_parts.append(message_content)
-        return message_parts
+        for word in words:
+            chunk.append(word)
+            current_len += 1
+            if current_len >= max_tokens:
+                chunks.append(" ".join(chunk))
+                chunk = []
+                current_len = 0
 
-    @staticmethod
-    def get_transcript_ytdlp(video_url, target_lang='en'):
-        ydl_opts = {
-            'skip_download': True,
-            'writesubtitles': True,
-            'writeautomaticsub': True,
-            'quiet': True,
-            'no_warnings': True,
-        }
+        if chunk:
+            chunks.append(" ".join(chunk))
+        return chunks
 
-        with YoutubeDL(ydl_opts) as ydl:
-            try:
-                info = ydl.extract_info(video_url, download=False)
-                # Try exact subtitle match
-                subtitles = info.get("subtitles", {}) or {}
-                auto_subs = info.get("automatic_captions", {}) or {}
-
-                # Look for manual or auto subs in preferred language
-                for source in [subtitles, auto_subs]:
-                    if target_lang in source:
-                        formats = source[target_lang]
-                        # Prefer vtt or first format
-                        sub_url = next((f['url'] for f in formats if f['ext'] == 'vtt'), formats[0]['url'])
-
-                        return YouTubeSummaryPlugin.fetch_vtt_text(sub_url), target_lang
-
-                # Fallback: first available language
-                for source in [subtitles, auto_subs]:
-                    for lang, formats in source.items():
-                        sub_url = next((f['url'] for f in formats if f['ext'] == 'vtt'), formats[0]['url'])
-                        return YouTubeSummaryPlugin.fetch_vtt_text(sub_url), lang
-            except Exception as e:
-                print(f"[yt-dlp error] {e}")
-        return None, None
-
-    @staticmethod
-    def fetch_vtt_text(url):
+    def get_transcript_api(self, video_id):
         try:
-            resp = requests.get(url, timeout=10)
-            if resp.status_code == 200:
-                lines = resp.text.splitlines()
-                text_lines = [line.strip() for line in lines if line and not line.startswith("WEBVTT") and not re.match(r"^\d\d:\d\d:\d\d\.\d\d\d", line)]
-                return " ".join(text_lines)
+            transcript = YouTubeTranscriptApi.get_transcript(video_id)
+            return " ".join([seg["text"] for seg in transcript])
+        except NoTranscriptFound:
+            return None
         except Exception as e:
-            print(f"[vtt fetch error] {e}")
-        return ""
+            print(f"[YouTubeTranscriptApi error] {e}")
+            return None
 
-
-    async def async_fetch_youtube_summary(self, video_url, target_lang, ollama_client):
-        transcript, transcript_lang = await asyncio.to_thread(self.get_transcript_ytdlp, video_url, target_lang)
-        if not transcript or transcript.strip() == "":
-            return "Sorry, no transcript could be retrieved from this video."
-
-        if transcript_lang != target_lang:
+    async def summarize_chunks(self, chunks, ollama_client):
+        partial_summaries = []
+        for chunk in chunks:
             prompt = (
-                f"The following transcript is in {transcript_lang}. "
-                f"Please summarize the following transcript in {target_lang}. Give it a title and use bullet points:\n\n{transcript}"
+                "You are summarizing part of a longer YouTube video transcript. "
+                "Write a brief summary of this portion using bullet points:\n\n" + chunk
             )
-        else:
-            prompt = (
-                "Please summarize the following transcript. Give it a title and use bullet points:\n\n" + transcript
+            resp = await ollama_client.chat(
+                model=ollama_client.model,
+                messages=[{"role": "system", "content": prompt}],
+                stream=False,
+                keep_alive=-1,
+                options={"num_ctx": ollama_client.context_length}
             )
+            partial_summaries.append(resp["message"]["content"].strip())
 
-        response = await ollama_client.chat(
+        # Combine into final summary
+        full_prompt = (
+            "This is a set of bullet point summaries from different sections of a YouTube video. "
+            "Combine them into a single summary with a title and final bullet points:\n\n" + "\n\n".join(partial_summaries)
+        )
+        final = await ollama_client.chat(
             model=ollama_client.model,
-            messages=[{"role": "system", "content": prompt}],
+            messages=[{"role": "system", "content": full_prompt}],
             stream=False,
             keep_alive=-1,
             options={"num_ctx": ollama_client.context_length}
         )
-        return response['message'].get('content', '').strip()
+        return final["message"]["content"].strip()
+
+    def format_article(self, article):
+        return article.replace("### ", "# ")
+
+    def split_message(self, text, chunk_size=1500):
+        parts = []
+        while len(text) > chunk_size:
+            split = text.rfind("\n", 0, chunk_size)
+            if split == -1:
+                split = text.rfind(" ", 0, chunk_size)
+            if split == -1:
+                split = chunk_size
+            parts.append(text[:split])
+            text = text[split:].strip()
+        parts.append(text)
+        return parts
+
+    async def async_fetch_summary(self, video_url, ollama_client):
+        video_id = self.extract_video_id(video_url)
+        transcript = self.get_transcript_api(video_id)
+        if not transcript:
+            return "Sorry, this video does not have a transcript available, or it may be restricted."
+
+        chunks = self.split_text_into_chunks(transcript)
+        return await self.summarize_chunks(chunks, ollama_client)
 
     async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
         video_url = args.get("video_url")
-        target_lang = args.get("target_lang", "en")
         if not video_url:
             return "No YouTube URL provided."
-        if not self.extract_video_id(video_url):
-            return "Invalid YouTube URL."
 
-        waiting_prompt = self.waiting_prompt_template.format(mention=message.author.mention)
+        prompt = f"Generate a brief message to {message.author.mention} telling them to wait a moment while I summarize this video."
         await send_waiting_message(
             ollama_client=ollama_client,
-            prompt_text=waiting_prompt,
-            save_callback=lambda text: None,
-            send_callback=lambda text: message.channel.send(text)
+            prompt_text=prompt,
+            save_callback=lambda _: None,
+            send_callback=lambda text: asyncio.create_task(self.safe_send(message.channel, text))
         )
 
-        summary = await self.async_fetch_youtube_summary(video_url, target_lang, ollama_client)
-        formatted_article = self.format_article_for_discord(summary)
-        for chunk in self.split_message(formatted_article, chunk_size=max_response_length):
-            await message.channel.send(chunk)
+        summary = await self.async_fetch_summary(video_url, ollama_client)
+        formatted = self.format_article(summary)
+        for part in self.split_message(formatted, max_response_length):
+            await self.safe_send(message.channel, part)
         return ""
 
     async def handle_webui(self, args, ollama_client, context_length):
         video_url = args.get("video_url")
-        target_lang = args.get("target_lang", "en")
         if not video_url:
             return "No YouTube URL provided."
-        if not self.extract_video_id(video_url):
-            return "Invalid YouTube URL."
 
-        waiting_prompt = self.waiting_prompt_template.format(mention="User")
+        prompt = self.waiting_prompt_template.format(mention="User")
         await send_waiting_message(
             ollama_client=ollama_client,
-            prompt_text=waiting_prompt,
-            save_callback=lambda text: None,
+            prompt_text=prompt,
+            save_callback=lambda _: None,
             send_callback=lambda text: st.chat_message("assistant", avatar=assistant_avatar).write(text)
         )
 
-        summary = await self.async_fetch_youtube_summary(video_url, target_lang, ollama_client)
-        formatted_article = self.format_article_for_discord(summary)
-        return "\n".join(self.split_message(formatted_article))
+        summary = await self.async_fetch_summary(video_url, ollama_client)
+        return "\n".join(self.split_message(self.format_article(summary)))
+
+    async def safe_send(self, channel, content):
+        if len(content) <= 2000:
+            await channel.send(content)
+        else:
+            for chunk in self.split_message(content, 1900):
+                await channel.send(chunk)
+
 
 plugin = YouTubeSummaryPlugin()
