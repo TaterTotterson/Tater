@@ -14,4 +14,3 @@ redis
 nest_asyncio
 websocket-client
 aioftp
-yt-dlp

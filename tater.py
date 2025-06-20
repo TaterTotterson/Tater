@@ -10,7 +10,6 @@ from discord import app_commands
 import ollama
 from dotenv import load_dotenv
 import re
-from rss import setup_rss_manager
 
 # Import plugin registry
 from plugin_registry import plugin_registry
@@ -45,29 +44,38 @@ def clear_channel_history(channel_id):
         logger.error(f"Error clearing chat history for channel {channel_id}: {e}")
         raise
 
+from datetime import datetime
+
 def build_system_prompt(base_prompt):
+    now = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
+
     tool_instructions = "\n\n".join(
         f"Tool: {plugin.name}\n"
         f"Description: {getattr(plugin, 'description', 'No description provided.')}\n"
         f"{plugin.usage}"
         for plugin in plugin_registry.values()
-        if (("discord" in plugin.platforms or "both" in plugin.platforms) and get_plugin_enabled(plugin.name))
+        if ("discord" in plugin.platforms or "both" in plugin.platforms) and get_plugin_enabled(plugin.name)
     )
-    return base_prompt + "\n\n" + tool_instructions + "\n\nIf no function is needed, reply normally."
+
+    return (
+        f"Current Date and Time is: {now}\n\n"
+        f"{base_prompt}\n\n"
+        f"{tool_instructions}\n\n"
+        "If no function is needed, reply normally."
+    )
 
 BASE_PROMPT = (
-    "You are Tater Totterson, a helpful AI assistant with access to various tools.\n\n"
+    "You are Tater Totterson, a helpful AI assistant with access to various tools and plugins.\n\n"
     "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
 )
 SYSTEM_PROMPT = build_system_prompt(BASE_PROMPT)
 
 class tater(commands.Bot):
-    def __init__(self, ollama_client, admin_user_id, response_channel_id, rss_channel_id, *args, **kwargs):
+    def __init__(self, ollama_client, admin_user_id, response_channel_id, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.ollama = ollama_client  # This client now includes .model and .context_length defaults.
         self.admin_user_id = admin_user_id
         self.response_channel_id = response_channel_id
-        self.rss_channel_id = rss_channel_id
         self.max_response_length = max_response_length
 
     async def setup_hook(self):
@@ -84,10 +92,7 @@ class tater(commands.Bot):
     async def on_ready(self):
         activity = discord.Activity(name='tater', state='Totterson', type=discord.ActivityType.custom)
         await self.change_presence(activity=activity)
-        logger.info(f"Bot is ready. Admin: {self.admin_user_id}, Response Channel: {self.response_channel_id}, RSS Channel: {self.rss_channel_id}")
-        
-        if not hasattr(self, "rss_manager"):
-            self.rss_manager = setup_rss_manager(self, self.rss_channel_id, self.ollama)
+        logger.info(f"Bot is ready. Admin: {self.admin_user_id}, Response Channel: {self.response_channel_id}")
 
     async def generate_error_message(self, prompt: str, fallback: str, message: discord.Message):
         try:
@@ -212,11 +217,12 @@ class tater(commands.Bot):
     async def on_reaction_add(self, reaction, user):
         if user.bot:
             return
-        potato_emoji = "🥔"
-        try:
-            await reaction.message.add_reaction(potato_emoji)
-        except Exception as e:
-            logger.error(f"Failed to add potato reaction: {e}")
+        for plugin in plugin_registry.values():
+            if hasattr(plugin, "on_reaction_add"):
+                try:
+                    await plugin.on_reaction_add(reaction, user)
+                except Exception as e:
+                    logger.error(f"[{plugin.name}] Error in on_reaction_add: {e}")
 
 # Define a separate cog for admin commands, including /wipe.
 class AdminCommands(commands.Cog):

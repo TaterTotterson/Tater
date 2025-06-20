@@ -9,8 +9,6 @@ import redis
 
 nest_asyncio.apply()
 
-DEFAULT_OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "command-r:35B")
-DEFAULT_CONTEXT_LENGTH = int(os.getenv("CONTEXT_LENGTH", 10000))
 DEFAULT_KEEP_ALIVE = -1
 DEFAULT_ASSISTANT_AVATAR_URL = "https://raw.githubusercontent.com/MasterPhooey/Tater-Discord-WebUI/refs/heads/main/images/tater.png"
 
@@ -69,10 +67,14 @@ async def send_waiting_message(
     return waiting_text
 
 # Also include the OllamaClientWrapper definition here.
+DEFAULT_ASSISTANT_AVATAR_URL = "https://raw.githubusercontent.com/MasterPhooey/Tater-Discord-WebUI/refs/heads/main/images/tater.png"
+
 class OllamaClientWrapper(ollama.AsyncClient):
-    def __init__(self, host, model=DEFAULT_OLLAMA_MODEL, context_length=DEFAULT_CONTEXT_LENGTH, keep_alive=DEFAULT_KEEP_ALIVE, **kwargs):
+    def __init__(self, host, model=None, context_length=None, keep_alive=-1, **kwargs):
+        model = model or os.getenv("OLLAMA_MODEL", "command-r:35B")
+        context_length = context_length or int(os.getenv("CONTEXT_LENGTH", 10000))
         super().__init__(host=host, **kwargs)
-        self.host = host  # Store the host for later use.
+        self.host = host
         self.model = model
         self.context_length = context_length
         self.keep_alive = keep_alive

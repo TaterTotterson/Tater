@@ -11,13 +11,19 @@ import feedparser
 import logging
 import base64
 import requests
+from datetime import datetime
 from PIL import Image
 from io import BytesIO
 from plugin_registry import plugin_registry
 from helpers import send_waiting_message, OllamaClientWrapper, load_image_from_url, run_async, set_main_loop
 from discord_control import connect_discord, disconnect_discord
+from rss import RSSManager
+import threading
 
 dotenv.load_dotenv()
+
+if "discord_bot_started" not in st.session_state:
+    st.session_state["discord_bot_started"] = False
 
 # Redis configuration for the web UI (using a separate DB)
 redis_host = os.getenv('REDIS_HOST', '127.0.0.1')
@@ -66,16 +72,14 @@ def get_discord_settings():
     return {
         "discord_token": settings.get("discord_token", "0"),
         "admin_user_id": settings.get("admin_user_id", "0"),
-        "response_channel_id": settings.get("response_channel_id", "0"),
-        "rss_channel_id": settings.get("rss_channel_id", "0")
+        "response_channel_id": settings.get("response_channel_id", "0")
     }
 
-def save_discord_settings(discord_token, admin_user_id, response_channel_id, rss_channel_id, username):
+def save_discord_settings(discord_token, admin_user_id, response_channel_id, username):
     redis_client.hset("discord_settings", mapping={
         "discord_token": discord_token,
         "admin_user_id": admin_user_id,
         "response_channel_id": response_channel_id,
-        "rss_channel_id": rss_channel_id,
         "username": username
     })
 
@@ -142,7 +146,7 @@ for plugin in plugin_registry.values():
 
 # Display an expander for each plugin settings category.
 for category, settings in plugin_categories.items():
-    with st.sidebar.expander(f"{category} Settings", expanded=False):
+    with st.sidebar.expander(category, expanded=False):
         st.subheader(f"{category} Settings")
         current_settings = get_plugin_settings(category)
         new_settings = {}
@@ -172,6 +176,8 @@ for category, settings in plugin_categories.items():
 
 # ----------------- SYSTEM PROMPT -----------------
 def build_system_prompt(base_prompt):
+    now = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
+    # We include the full string directly here
     tool_instructions = "\n\n".join(
         f"Tool: {plugin.name}\n"
         f"Description: {getattr(plugin, 'description', 'No description provided.')}\n"
@@ -179,10 +185,16 @@ def build_system_prompt(base_prompt):
         for plugin in plugin_registry.values()
         if ("webui" in plugin.platforms or "both" in plugin.platforms) and get_plugin_enabled(plugin.name)
     )
-    return base_prompt + "\n\n" + tool_instructions + "\n\nIf no function is needed, reply normally."
+
+    return (
+        f"Current Date and Time is: {now}\n\n"
+        f"{base_prompt}\n\n"
+        f"{tool_instructions}\n\n"
+        "If no function is needed, reply normally."
+    )
 
 BASE_PROMPT = (
-    "You are Tater Totterson, a helpful AI assistant with access to various tools.\n\n"
+    "You are Tater Totterson, a helpful AI assistant with access to various tools and plugins.\n\n"
     "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else).:\n\n"
 )
 SYSTEM_PROMPT = build_system_prompt(BASE_PROMPT)
@@ -238,7 +250,6 @@ with st.sidebar.expander("Discord Settings", expanded=False):
     discord_token = st.text_input("DISCORD_TOKEN", value=current_settings["discord_token"], type="password")
     admin_user_id_str = st.text_input("ADMIN_USER_ID", value=current_settings["admin_user_id"])
     response_channel_id_str = st.text_input("RESPONSE_CHANNEL_ID", value=current_settings["response_channel_id"])
-    rss_channel_id_str = st.text_input("RSS_CHANNEL_ID", value=current_settings.get("rss_channel_id", "0"))
     
     try:
         admin_user_id = int(admin_user_id_str)
@@ -248,31 +259,31 @@ with st.sidebar.expander("Discord Settings", expanded=False):
         response_channel_id = int(response_channel_id_str)
     except ValueError:
         response_channel_id = 0
-    try:
-        rss_channel_id = int(rss_channel_id_str)
-    except ValueError:
-        rss_channel_id = 0
     
-    save_discord_settings(discord_token, admin_user_id, response_channel_id, rss_channel_id, current_settings.get("username", "User"))
+    save_discord_settings(discord_token, admin_user_id, response_channel_id, current_settings.get("username", "User"))
     
     current_state = get_discord_connection_state()
-    default_toggle = True if current_state == "connected" else False
     if "discord_connected" not in st.session_state:
-        st.session_state["discord_connected"] = default_toggle
+        st.session_state["discord_connected"] = get_discord_connection_state() == "connected"
 
-    if st.session_state["discord_connected"] and not st.session_state.get("discord_auto_started", False):
-        connect_discord(discord_token, admin_user_id, response_channel_id, rss_channel_id)
-        st.session_state["discord_auto_started"] = True
+    if st.session_state["discord_connected"] and not st.session_state["discord_bot_started"]:
+        connect_discord(discord_token, admin_user_id, response_channel_id)
+        st.session_state["discord_bot_started"] = True
         st.success("Discord bot auto‑connected.")
 
     discord_connected = st.toggle("Discord Connection", value=st.session_state["discord_connected"], key="discord_toggle")
     if discord_connected and not st.session_state["discord_connected"]:
-        connect_discord(discord_token, admin_user_id, response_channel_id, rss_channel_id)
+        if not st.session_state["discord_bot_started"]:
+            connect_discord(discord_token, admin_user_id, response_channel_id)
+            st.session_state["discord_bot_started"] = True
+            st.success("Discord bot connected.")
+        else:
+            st.warning("Discord bot is already running.")
         st.session_state["discord_connected"] = True
         set_discord_connection_state("connected")
-        st.success("Discord bot connected.")
     elif not discord_connected and st.session_state["discord_connected"]:
         disconnect_discord()
+        st.session_state["discord_bot_started"] = False
         st.session_state["discord_connected"] = False
         set_discord_connection_state("disconnected")
         st.success("Discord bot disconnected.")
@@ -299,6 +310,17 @@ uploaded_files = st.sidebar.file_uploader(
     accept_multiple_files=True, 
     key=st.session_state["uploader_key"]
 )
+
+if "rss_started" not in st.session_state:
+    st.session_state["rss_started"] = True
+
+    def start_rss_background():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        rss_manager = RSSManager(ollama_client=ollama_client)
+        loop.run_until_complete(rss_manager.poll_feeds())
+
+    threading.Thread(target=start_rss_background, daemon=True).start()
 
 st.title("Tater Chat Web UI")
 
