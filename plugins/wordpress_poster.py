@@ -100,7 +100,7 @@ class WordPressPosterPlugin(ToolPlugin):
         if not get_plugin_enabled(self.name):
             return
 
-        settings = get_plugin_settings("WordPress")
+        settings = get_plugin_settings(self.settings_category)
         site_url = settings.get("wordpress_site_url", "").rstrip("/")
         username = settings.get("wordpress_username")
         password = settings.get("wordpress_app_password")
