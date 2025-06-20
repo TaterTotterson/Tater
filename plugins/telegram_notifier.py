@@ -44,7 +44,7 @@ class TelegramNotifierPlugin(ToolPlugin):
             return url
 
     def post_to_telegram(self, message: str):
-        settings = get_plugin_settings("Telegram")
+        settings = get_plugin_settings(self.settings_category)
         bot_token = settings.get("telegram_bot_token")
         chat_id = settings.get("telegram_chat_id")
 

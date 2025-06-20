@@ -45,7 +45,7 @@ class DiscordNotifierPlugin(ToolPlugin):
         return text
 
     async def notify(self, title: str, content: str):
-        settings = get_plugin_settings("Discord Notifier")
+        settings = get_plugin_settings(self.settings_category)
         webhook_url = settings.get("discord_webhook_url")
 
         if not webhook_url:
