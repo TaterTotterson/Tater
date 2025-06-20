@@ -193,8 +193,7 @@ class RSSManager:
                             await self.process_entry(feed_title, entry)
                             if entry_ts > new_last_ts:
                                 new_last_ts = entry_ts
-                    if new_last_ts > last_ts:
-                        self.redis.hset(self.feeds_key, feed_url, new_last_ts)
+                                self.redis.hset(self.feeds_key, feed_url, new_last_ts)
                 except Exception as e:
                     logger.error(f"Error processing feed {feed_url}: {e}")
             await asyncio.sleep(POLL_INTERVAL)
