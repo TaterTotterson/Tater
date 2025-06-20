@@ -30,7 +30,7 @@ The following plugins can be triggerd simple by asking Tater after you enable th
 
 ### 📡 RSS Feed Watcher (Built-in)
 
-This system runs in the background and posts RSS feed updates. The following plugins enhance or interact with this watcher:
+This system runs in the background and posts summarized RSS feed updates. The following plugins enhance or interact with this watcher:
 
 | Plugin Name              | Description                                                                 | Type              | Platform         |
 |--------------------------|-----------------------------------------------------------------------------|-------------------|------------------|
