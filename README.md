@@ -23,7 +23,7 @@ The following plugins can be triggerd simple by asking Tater after you enable th
 | `comfyui_video_plugin`   | Creates videos from prompts using ComfyUI and video workflows               | Video Generation  | discord, webui    |
 | `comfyui_audio_plugin`   | Generates music/audio from prompts using ComfyUI                            | Audio Generation  | discord, webui    |
 | `ftp_browser`            | Allows users to browse FTP servers via Discord                              | File Access       | discord           |
-| `sftpgo_account`         | Lists and manages SFTPGo user accounts and their credentials                | File Access       | discord           |
+| `sftpgo_account`         | Creates SFTPGo user accounts and their credentials                          | File Access       | discord           |
 | `sftpgo_activity`        | Views SFTPGo user activity like file transfers and sessions                 | File Access       | discord           |
 | `premiumize_torrent`     | Checks if a torrent is cached on Premiumize and returns download links      | Cloud Utility     | discord, webui    |
 | `premiumize_download`    | Checks Premiumize for cached file links and returns downloads               | Cloud Utility     | discord, webui    |
