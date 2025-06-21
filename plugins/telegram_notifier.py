@@ -59,16 +59,20 @@ class TelegramNotifierPlugin(ToolPlugin):
             for line in lines:
                 line = line.strip()
 
-                # Convert **bold** to <b>
+                # Convert Discord-style **bold**
                 line = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", line)
 
-                # Convert * bullets to • bullets
-                if line.startswith("* "):
-                    line = f"• {line[2:].strip()}"
-                elif line.startswith("•"):
-                    line = f"• {line[1:].strip()}"
+                # Convert ## Header to bold
+                if line.startswith("##"):
+                    line = f"<b>{html.escape(line.lstrip('#').strip())}</b>"
+                    cleaned_lines.append(line)
+                    continue
 
-                # Convert bare links to <a href> with UTM stripping
+                # Handle bullets: *, -, • → •
+                if line.startswith(("* ", "- ", "• ")):
+                    line = f"• {line[2:].strip()}"
+
+                # Convert bare URLs to links with stripped UTM
                 if re.fullmatch(r"https?://\S+", line):
                     url = self.strip_utm(line)
                     escaped_url = html.escape(url)
