@@ -134,15 +134,21 @@ def save_plugin_settings(category, settings_dict):
 # Updated: Gather distinct plugin settings categories from the plugin registry,
 # only including plugins that are enabled.
 plugin_categories = {}
+
 for plugin in plugin_registry.values():
-    if not get_plugin_enabled(plugin.name):  # Skip disabled plugins.
+    if not get_plugin_enabled(plugin.name):
         continue
-    if hasattr(plugin, "settings_category") and hasattr(plugin, "required_settings"):
-        cat = plugin.settings_category
-        if cat not in plugin_categories:
-            plugin_categories[cat] = {}
-        # Merge required settings for plugins sharing the same category.
-        plugin_categories[cat].update(plugin.required_settings)
+
+    cat = getattr(plugin, "settings_category", None)
+    settings = getattr(plugin, "required_settings", None)
+
+    if not cat or not settings:
+        continue  # Skip plugins with no settings UI
+
+    if cat not in plugin_categories:
+        plugin_categories[cat] = {}
+
+    plugin_categories[cat].update(settings)
 
 # Display an expander for each plugin settings category.
 for category, settings in plugin_categories.items():
