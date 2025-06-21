@@ -19,7 +19,7 @@ The following plugins can be triggerd simple by asking Tater after you enable th
 | `vision_describer`       | Analyzes uploaded images and returns AI-generated descriptions              | AI Vision         | discord           |
 | `automatic_plugin`       | Generates images using AUTOMATIC1111 API based on user prompt               | Image Generation  | discord, webui    |
 | `comfyui_plugin`         | Generates images with ComfyUI using custom workflow templates               | Image Generation  | discord, webui    |
-| `comfyui_image_video`    | Animates images into WebP loops using ComfyUI + WanImageToVideo             | Animation         | discord           |
+| `comfyui_image_video`    | Animates images into WebP loops using ComfyUI.                              | Animation         | discord           |
 | `comfyui_video_plugin`   | Creates videos from prompts using ComfyUI and video workflows               | Video Generation  | discord, webui    |
 | `comfyui_audio_plugin`   | Generates music/audio from prompts using ComfyUI                            | Audio Generation  | discord, webui    |
 | `ftp_browser`            | Allows users to browse FTP servers via Discord                              | File Access       | discord           |
