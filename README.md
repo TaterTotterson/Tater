@@ -3,30 +3,30 @@
   <h1>Tater - A Ollama Discord Bot & Web UI with Plugins</h1>
 </div>
 
-Tater is a Discord bot that integrates with Ollama to provide a variety of AI-powered tools, Tater has a web UI for setup and internal private chat. Whether you're on Discord or using the WebUI, Tater is at your service.
+Tater is a AI Assistant that integrates with Ollama to provide a variety of AI-powered tools, Tater has a web UI for setup and internal private chat. Whether you're on Discord, IRC or using the WebUI, Tater is at your service.
 
 The following plugins can be triggerd simple by asking Tater after you enable them, ex: ``` Tater summarize this youtube video http://youtube.com/watch?v=000000 ```
 
 
 ## 🧩 Tater Plugin Overview
 
-| Plugin Name              | Description                                                                 | Type              | Platform         |
-|--------------------------|-----------------------------------------------------------------------------|-------------------|------------------|
-| `youtube_summary`        | Summarizes YouTube videos.                                                  | AI Summarization  | discord, webui    |
-| `web_summary`            | Summarizes content from a provided URL                                      | AI Summarization  | discord, webui    |
-| `web_search`             | Performs web search to help answer user questions                           | AI Search         | discord, webui    |
-| `emoji_ai_responder`     | Picks a relevant emoji based on a message when someone reacts to it         | AI Utility        | discord           |
-| `vision_describer`       | Analyzes uploaded images and returns AI-generated descriptions              | AI Vision         | discord           |
-| `automatic_plugin`       | Generates images using AUTOMATIC1111 API based on user prompt               | Image Generation  | discord, webui    |
-| `comfyui_plugin`         | Generates images with ComfyUI using custom workflow templates               | Image Generation  | discord, webui    |
-| `comfyui_image_video`    | Animates images into WebP loops using ComfyUI.                              | Animation         | discord           |
-| `comfyui_video_plugin`   | Creates videos from prompts using ComfyUI and video workflows               | Video Generation  | discord, webui    |
-| `comfyui_audio_plugin`   | Generates music/audio from prompts using ComfyUI                            | Audio Generation  | discord, webui    |
-| `ftp_browser`            | Allows users to browse FTP servers via Discord                              | File Access       | discord           |
-| `sftpgo_account`         | Creates SFTPGo user accounts and their credentials                          | File Access       | discord           |
-| `sftpgo_activity`        | Views SFTPGo user activity like file transfers and sessions                 | File Access       | discord           |
-| `premiumize_torrent`     | Checks if a torrent is cached on Premiumize and returns download links      | Cloud Utility     | discord, webui    |
-| `premiumize_download`    | Checks Premiumize for cached file links and returns downloads               | Cloud Utility     | discord, webui    |
+| Plugin Name              | Description                                                                 | Platform              |
+|--------------------------|-----------------------------------------------------------------------------|------------------------|
+| `youtube_summary`        | Summarizes YouTube videos.                                                  | discord, webui, irc    |
+| `web_summary`            | Summarizes content from a provided URL                                      | discord, webui         |
+| `web_search`             | Performs web search to help answer user questions                           | discord, webui, irc    |
+| `emoji_ai_responder`     | Picks a relevant emoji based on a message when someone reacts to it         | discord                |
+| `vision_describer`       | Analyzes uploaded images and returns AI-generated descriptions              | discord                |
+| `automatic_plugin`       | Generates images using AUTOMATIC1111 API based on user prompt               | discord, webui         |
+| `comfyui_plugin`         | Generates images with ComfyUI using custom workflow templates               | discord, webui         |
+| `comfyui_image_video`    | Animates images into WebP loops using ComfyUI.                              | discord                |
+| `comfyui_video_plugin`   | Creates videos from prompts using ComfyUI and video workflows               | discord, webui         |
+| `comfyui_audio_plugin`   | Generates music/audio from prompts using ComfyUI                            | discord, webui         |
+| `ftp_browser`            | Allows users to browse FTP servers via Discord                              | discord                |
+| `sftpgo_account`         | Creates SFTPGo user accounts and their credentials                          | discord                |
+| `sftpgo_activity`        | Views SFTPGo user activity like file transfers and sessions                 | discord                |
+| `premiumize_torrent`     | Checks if a torrent is cached on Premiumize and returns download links      | discord, webui         |
+| `premiumize_download`    | Checks Premiumize for cached file links and returns downloads               | discord, webui         |
 
 ### 📡 RSS Feed Watcher (Built-in)
 
