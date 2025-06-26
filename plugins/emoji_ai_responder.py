@@ -16,7 +16,7 @@ OLLAMA_PORT = os.getenv("OLLAMA_PORT", "11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 OLLAMA_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
 
-logger = logging.getLogger("discord")
+logger = logging.getLogger("emoji_ai_responder")
 
 class EmojiAIResponderPlugin(ToolPlugin):
     name = "emoji_ai_responder"
@@ -24,14 +24,18 @@ class EmojiAIResponderPlugin(ToolPlugin):
     platforms = []
 
     async def on_reaction_add(self, reaction, user):
-        if user.bot or reaction.message.author.bot:
+        logger.debug(f"[emoji_ai_responder] on_reaction_add fired: {user.name} reacted to '{reaction.message.content[:80]}'")
+
+        if user.bot:
             return
 
         if not get_plugin_enabled(self.name):
+            logger.debug("[emoji_ai_responder] Plugin not enabled.")
             return
 
         message_content = reaction.message.content.strip()
         if not message_content:
+            logger.debug("[emoji_ai_responder] No message content to analyze.")
             return
 
         system_prompt = (
@@ -51,21 +55,18 @@ class EmojiAIResponderPlugin(ToolPlugin):
             response = await ollama.chat(
                 model=OLLAMA_MODEL,
                 base_url=OLLAMA_URL,
-                messages=[
-                    {"role": "system", "content": system_prompt}
-                ],
+                messages=[{"role": "system", "content": system_prompt}],
                 function_call="auto"
             )
 
             ai_reply = response.get("message", {}).get("content", "").strip()
+            logger.debug(f"[emoji_ai_responder] Ollama reply: {ai_reply}")
             if not ai_reply:
                 return
 
-            # Attempt to extract function call from string
             try:
                 parsed = json.loads(ai_reply)
             except json.JSONDecodeError:
-                # Fallback: extract JSON-looking content if wrapped in extra text
                 json_start = ai_reply.find('{')
                 json_end = ai_reply.rfind('}')
                 if json_start != -1 and json_end != -1:
@@ -79,6 +80,7 @@ class EmojiAIResponderPlugin(ToolPlugin):
             if parsed and parsed.get("function") == "suggest_emoji":
                 emoji = parsed.get("arguments", {}).get("emoji", "").strip()
                 if emoji:
+                    logger.debug(f"[emoji_ai_responder] Adding emoji: {emoji}")
                     await reaction.message.add_reaction(emoji)
 
         except Exception as e:

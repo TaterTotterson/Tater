@@ -137,39 +137,82 @@ class ComfyUIVideoPlugin(ToolPlugin):
         user_prompt = args.get("prompt")
         if not user_prompt:
             return "No prompt provided for ComfyUI Video."
+
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=self.waiting_prompt_template,
             save_callback=lambda x: None,
             send_callback=lambda x: message.channel.send(x)
         )
+
         try:
             video_bytes = await asyncio.to_thread(ComfyUIVideoPlugin.process_prompt, user_prompt)
-            # Note the filename remains ".webp" so the animation is preserved.
             file = discord.File(BytesIO(video_bytes), filename="generated_video.webp")
             await message.channel.send(file=file)
+
+            # Friendly follow-up message
+            safe_prompt = user_prompt[:300].strip()
+            system_msg = f'The user has just been shown a looping animated video based on the prompt: "{safe_prompt}".'
+            followup = await ollama_client.chat(
+                model=ollama_client.model,
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": "Give them a short, fun message celebrating the video."}
+                ],
+                stream=False,
+                keep_alive=ollama_client.keep_alive,
+                options={"num_ctx": context_length}
+            )
+            followup_text = followup["message"].get("content", "").strip() or "🎬 Here's your animated video!"
+            await message.channel.send(followup_text)
+
         except Exception as e:
-            await message.channel.send(f"Failed to queue prompt: {e}")
+            return f"Failed to queue prompt: {e}"
+
         return ""
 
     async def handle_webui(self, args, ollama_client, context_length):
         user_prompt = args.get("prompt")
         if not user_prompt:
             return "No prompt provided for ComfyUI Video."
+
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=self.waiting_prompt_template,
             save_callback=lambda x: None,
             send_callback=lambda x: st.chat_message("assistant", avatar=self.assistant_avatar).write(x)
         )
+
         try:
             video_bytes = await asyncio.to_thread(ComfyUIVideoPlugin.process_prompt, user_prompt)
-            # Encode the animated WebP into a base64 string
+
+            # Encode video (animated WebP) into base64
             b64_video = base64.b64encode(video_bytes).decode("utf-8")
-            # Build an HTML image element using a data URL. Make sure to label it as "image/webp".
-            html_img = f'<img src="data:image/webp;base64,{b64_video}" alt="Generated Video" style="max-width:100%;">'
-            st.markdown(html_img, unsafe_allow_html=True)
-            return ""
+            image_data = {
+                "type": "image",
+                "name": "generated_video.webp",
+                "data": b64_video,
+                "mimetype": "image/webp"
+            }
+
+            # Friendly follow-up
+            safe_prompt = user_prompt[:300].strip()
+            system_msg = f'The user has just been shown a looping animated video based on the prompt: "{safe_prompt}".'
+            followup = await ollama_client.chat(
+                model=ollama_client.model,
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": "Give them a short, fun message celebrating the video."}
+                ],
+                stream=False,
+                keep_alive=ollama_client.keep_alive,
+                options={"num_ctx": context_length}
+            )
+            message_text = followup["message"].get("content", "").strip() or "🎬 Here's your animated video!"
+
+            # Return both image and follow-up for WebUI
+            return [image_data, message_text]
+
         except Exception as e:
             return f"Failed to queue prompt: {e}"
 

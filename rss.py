@@ -37,25 +37,48 @@ redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_respon
 #############################
 
 def fetch_web_summary(webpage_url, model=OLLAMA_MODEL, retries=3, backoff=2):
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Referer": "https://www.google.com/",
+        "DNT": "1",
+    }
+
     for attempt in range(1, retries + 1):
         try:
-            response = requests.get(webpage_url, timeout=10)
+            response = requests.get(webpage_url, headers=headers, timeout=10)
             if response.status_code != 200:
-                logger.warning(f"Non-200 status code on attempt {attempt}: {response.status_code}")
+                logger.warning(f"[fetch_web_summary] Non-200 status code on attempt {attempt}: {response.status_code}")
                 continue
-            html = response.text
-            soup = BeautifulSoup(html, "html.parser")
+
+            soup = BeautifulSoup(response.text, "html.parser")
             for element in soup(["script", "style", "header", "footer", "nav", "aside"]):
                 element.decompose()
-            text = soup.get_text(separator="\n")
+
+            container = soup.find("article") or soup.find("main") or soup.body
+            if not container:
+                return None
+
+            text = container.get_text(separator="\n")
             lines = [line.strip() for line in text.splitlines() if line.strip()]
             article_text = "\n".join(lines)
+
+            if len(article_text.split()) > 3000:
+                article_text = " ".join(article_text.split()[:3000])
+
+            logger.info(f"[fetch_web_summary] Extracted {len(article_text)} characters from {webpage_url}")
             return article_text
+
         except Exception as e:
-            logger.warning(f"Attempt {attempt} failed for {webpage_url}: {e}")
+            logger.warning(f"[fetch_web_summary] Attempt {attempt} failed for {webpage_url}: {e}")
             if attempt < retries:
                 time.sleep(backoff ** attempt)
-    logger.error(f"Error in fetch_web_summary after {retries} attempts: {webpage_url}")
+
+    logger.error(f"[fetch_web_summary] All {retries} attempts failed: {webpage_url}")
     return None
 
 #############################

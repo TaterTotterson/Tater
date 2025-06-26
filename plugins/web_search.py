@@ -10,9 +10,8 @@ from dotenv import load_dotenv
 import streamlit as st
 from duckduckgo_search import DDGS
 import requests
-
 from plugin_base import ToolPlugin
-from helpers import load_image_from_url, send_waiting_message
+from helpers import load_image_from_url, send_waiting_message, format_irc, extract_json
 
 load_dotenv()
 assistant_avatar = load_image_from_url()
@@ -32,12 +31,7 @@ class WebSearchPlugin(ToolPlugin):
     waiting_prompt_template = (
         "Generate a brief message to {mention} telling them to wait a moment while I search the web for additional information. Only generate the message. Do not respond to this message."
     )
-    platforms = ["discord", "webui"]
-
-    @staticmethod
-    def extract_json(text):
-        match = re.search(r'(\{.*\})', text, re.DOTALL)
-        return match.group(1) if match else None
+    platforms = ["discord", "webui", "irc"]
 
     def search_web(self, query, num_results=10):
         try:
@@ -60,7 +54,19 @@ class WebSearchPlugin(ToolPlugin):
 
     @staticmethod
     def fetch_web_summary(webpage_url, model):
-        headers = {'User-Agent': 'Mozilla/5.0 (TaterBot WebSearch)'}
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/114.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.google.com/",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1"
+        }
+
         try:
             resp = requests.get(webpage_url, headers=headers, timeout=10)
             if resp.status_code != 200:
@@ -154,7 +160,7 @@ class WebSearchPlugin(ToolPlugin):
         try:
             choice_json = json.loads(choice_text)
         except:
-            json_str = self.extract_json(choice_text)
+            json_str = extract_json(choice_text)
             choice_json = json.loads(json_str) if json_str else None
 
         if not choice_json or choice_json.get("function") != "web_fetch":
@@ -241,7 +247,7 @@ class WebSearchPlugin(ToolPlugin):
         try:
             choice_json = json.loads(choice_text)
         except:
-            json_str = self.extract_json(choice_text)
+            json_str = extract_json(choice_text)
             choice_json = json.loads(json_str) if json_str else None
 
         if not choice_json or choice_json.get("function") != "web_fetch":
@@ -274,5 +280,90 @@ class WebSearchPlugin(ToolPlugin):
         )
 
         return final_response['message'].get('content', '').strip()
+
+    async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
+        from helpers import format_irc  # Reuse our formatter
+
+        query = args.get("query")
+
+        if not query:
+            await bot.privmsg(channel, f"{user}: No search query provided.")
+            return
+
+        await bot.privmsg(channel, f"{user}: Searching the web for \"{query}\"...")
+
+        results = self.search_web(query)
+        if not results:
+            await bot.privmsg(channel, f"{user}: No results found.")
+            return
+
+        formatted_results = self.format_search_results(results)
+        user_question = raw_message
+
+        choice_prompt = (
+            f"Your name is Tater Totterson, you are researching the topic '{query}' because the user asked: '{user_question}'.\n\n"
+            f"Here are search results:\n\n{formatted_results}\n\n"
+            "Respond with:\n"
+            "{\n"
+            '  "function": "web_fetch",\n'
+            '  "arguments": {\n'
+            '    "link": "<chosen link>",\n'
+            f'    "query": "{query}",\n'
+            f'    "user_question": "{user_question}"\n'
+            "  }\n"
+            "}"
+        )
+
+        response = await ollama_client.chat(
+            model=ollama_client.model,
+            messages=[{"role": "system", "content": choice_prompt}],
+            stream=False,
+            keep_alive=-1,
+            options={"num_ctx": ollama_client.context_length}
+        )
+
+        content = response["message"].get("content", "").strip()
+        try:
+            choice_json = json.loads(content)
+        except:
+            from helpers import extract_json
+            json_str = extract_json(content)
+            choice_json = json.loads(json_str) if json_str else None
+
+        if not choice_json or choice_json.get("function") != "web_fetch":
+            await bot.privmsg(channel, f"{user}: Failed to parse search response.")
+            return
+
+        link = choice_json["arguments"].get("link")
+        if not link:
+            await bot.privmsg(channel, f"{user}: No link selected.")
+            return
+
+        summary = await asyncio.to_thread(self.fetch_web_summary, link, ollama_client.model)
+        if not summary:
+            await bot.privmsg(channel, f"{user}: Couldn't extract content from selected link.")
+            return
+
+        info_prompt = (
+            f"Your name is Tater Totterson. Answer the user's question using this content.\n\n"
+            f"Query: {query}\n"
+            f"User Question: {user_question}\n\n"
+            f"Content:\n{summary}\n\n"
+            "Do not introduce yourself. Only answer:"
+        )
+
+        final = await ollama_client.chat(
+            model=ollama_client.model,
+            messages=[{"role": "system", "content": info_prompt}],
+            stream=False,
+            keep_alive=-1,
+            options={"num_ctx": ollama_client.context_length}
+        )
+
+        answer = final["message"].get("content", "").strip()
+        irc_answer = format_irc(answer)
+
+        for chunk in self.split_message(irc_answer, 400):
+            await bot.privmsg(channel, chunk)
 
 plugin = WebSearchPlugin()

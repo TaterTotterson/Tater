@@ -15,10 +15,17 @@ from datetime import datetime
 from PIL import Image
 from io import BytesIO
 from plugin_registry import plugin_registry
-from helpers import send_waiting_message, OllamaClientWrapper, load_image_from_url, run_async, set_main_loop
-from discord_control import connect_discord, disconnect_discord
 from rss import RSSManager
+from platform_registry import platform_registry
 import threading
+from helpers import (
+    send_waiting_message,
+    OllamaClientWrapper,
+    load_image_from_url,
+    run_async,
+    set_main_loop,
+    parse_function_json
+)
 
 dotenv.load_dotenv()
 
@@ -46,52 +53,27 @@ st.set_page_config(
     page_icon=":material/tooltip_2:"  # can be a URL or a local file path
 )
 
+def save_message(role, username, content):
+    message_data = {
+        "role": role,
+        "username": username,
+        "content": content  # can be string or dict
+    }
+    redis_client.rpush("webui:chat_history", json.dumps(message_data))
+    redis_client.ltrim("webui:chat_history", -20, -1)
+    st.session_state.pop("chat_history_cache", None)  # Invalidate cache
+
 def load_chat_history():
-    history = redis_client.lrange(CHAT_HISTORY_KEY, 0, -1)
+    history = redis_client.lrange("webui:chat_history", 0, -1)
     return [json.loads(msg) for msg in history]
 
-def save_message(role, username, content):
-    message_data = {"role": role, "content": content, "username": username}
-    redis_client.rpush(CHAT_HISTORY_KEY, json.dumps(message_data))
-    redis_client.ltrim(CHAT_HISTORY_KEY, -20, -1)
-
 def clear_chat_history():
-    redis_client.delete(CHAT_HISTORY_KEY)
-
-def extract_json(text):
-    match = re.search(r'(\{.*\})', text, re.DOTALL)
-    if match:
-        return match.group(1)
-    return None
+    redis_client.delete("webui:chat_history")
+    st.session_state.pop("chat_history_cache", None)
 
 assistant_avatar = load_image_from_url()
 
 # ----------------- SETTINGS HELPER FUNCTIONS -----------------
-def get_discord_settings():
-    settings = redis_client.hgetall("discord_settings")
-    return {
-        "discord_token": settings.get("discord_token", "0"),
-        "admin_user_id": settings.get("admin_user_id", "0"),
-        "response_channel_id": settings.get("response_channel_id", "0")
-    }
-
-def save_discord_settings(discord_token, admin_user_id, response_channel_id, username):
-    redis_client.hset("discord_settings", mapping={
-        "discord_token": discord_token,
-        "admin_user_id": admin_user_id,
-        "response_channel_id": response_channel_id,
-        "username": username
-    })
-
-def get_discord_connection_state():
-    state = redis_client.get("discord_connected")
-    if state is None:
-        return "disconnected"
-    return state
-
-def set_discord_connection_state(state):
-    redis_client.set("discord_connected", state)
-
 def get_chat_settings():
     settings = redis_client.hgetall("chat_settings")
     return {
@@ -122,6 +104,70 @@ def get_plugin_enabled(plugin_name):
 def set_plugin_enabled(plugin_name, enabled):
     redis_client.hset("plugin_enabled", plugin_name, "true" if enabled else "false")
 
+def start_platform_thread(category_key):
+    def platform_runner():
+        import importlib
+        try:
+            module_path = category_key if category_key.startswith("platforms.") else f"platforms.{category_key}"
+            module = importlib.import_module(module_path)
+            print(f"✅ Imported module: {module_path}")
+            if hasattr(module, "run"):
+                module.run()
+            else:
+                print(f"⚠️ No `run()` entry point found in module '{module_path}'")
+        except ModuleNotFoundError:
+            print(f"❌ Module '{module_path}' not found.")
+        except Exception as e:
+            print(f"❌ Error loading platform '{module_path}': {e}")
+            import traceback
+            traceback.print_exc()
+    threading.Thread(target=platform_runner, daemon=True).start()
+
+def render_plugin_controls(plugin_name):
+    current_state = get_plugin_enabled(plugin_name)
+    toggle_state = st.toggle(plugin_name, value=current_state, key=f"plugin_toggle_{plugin_name}")
+    set_plugin_enabled(plugin_name, toggle_state)
+
+def render_platform_controls(platform, redis_client):
+    category = platform["label"]  
+    key = platform["key"]
+    required = platform["required"]
+
+    short_name = category.replace(" Settings", "").strip()  # e.g. "Discord"
+
+    toggle_key = f"{category}_toggle"
+    state_key = f"{key}_running"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = redis_client.get(state_key) == "true"
+
+    is_enabled = st.toggle(f"Enable {short_name}", value=st.session_state[state_key], key=toggle_key)
+    if is_enabled and not st.session_state[state_key]:
+        start_platform_thread(key)
+        st.session_state[state_key] = True
+        redis_client.set(state_key, "true")
+        st.session_state["platform_states"][key] = True
+        st.success(f"{short_name} started.")
+    elif not is_enabled and st.session_state[state_key]:
+        st.warning(f"{short_name} will stop on next restart.")
+        st.session_state[state_key] = False
+        redis_client.set(state_key, "false")
+
+    # Settings form
+    redis_key = f"{key}_settings"
+    current_settings = redis_client.hgetall(redis_key)
+    new_settings = {}
+    for setting_key, setting in required.items():
+        default = current_settings.get(setting_key, setting.get("default", ""))
+        new_settings[setting_key] = st.text_input(
+            setting["label"],
+            value=default,
+            help=setting.get("description", ""),
+            key=f"{category}_{setting_key}"
+        )
+    if st.button(f"Save {short_name} Settings", key=f"save_{category}_unique"):
+        redis_client.hset(redis_key, mapping=new_settings)
+        st.success(f"{short_name} settings saved.")
+
 # ----------------- PLUGIN SETTINGS -----------------
 def get_plugin_settings(category):
     key = f"plugin_settings:{category}"
@@ -151,7 +197,7 @@ for plugin in plugin_registry.values():
     plugin_categories[cat].update(settings)
 
 # Display an expander for each plugin settings category.
-for category, settings in plugin_categories.items():
+for category, settings in sorted(plugin_categories.items()):
     with st.sidebar.expander(category, expanded=False):
         st.subheader(f"{category} Settings")
         current_settings = get_plugin_settings(category)
@@ -176,7 +222,7 @@ for category, settings in plugin_categories.items():
             else:
                 new_value = st.text_input(info.get("label", key), value=default_value, help=info.get("description", ""))
             new_settings[key] = new_value
-        if st.button(f"Save {category} Settings", key=f"save_{category}"):
+        if st.button(f"Save {category} Settings", key=f"save_{category}_unique"):
             save_plugin_settings(category, new_settings)
             st.success(f"{category} settings saved.")
 
@@ -200,7 +246,7 @@ def build_system_prompt(base_prompt):
     )
 
 BASE_PROMPT = (
-    "You are Tater Totterson, a helpful AI assistant with access to various tools and plugins.\n\n"
+    "You are Tater Totterson, An AI assistant with access to various tools and plugins.\n\n"
     "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else).:\n\n"
 )
 SYSTEM_PROMPT = build_system_prompt(BASE_PROMPT)
@@ -210,13 +256,27 @@ async def process_message(user_name, message_content):
     final_system_prompt = SYSTEM_PROMPT
     history = load_chat_history()[-20:]
     messages_list = [{"role": "system", "content": final_system_prompt}]
+
     for msg in history:
-        if msg["role"] == "user":
-            formatted = f"{msg['username']}: {msg['content']}"
+        content = msg.get("content")
+
+        if isinstance(content, str):
+            # Normal text message
+            formatted = f"{msg['username']}: {content}" if msg["role"] == "user" else content
+        elif isinstance(content, dict):
+            # Fallback for image/audio/etc.
+            content_type = content.get("type", "non-text")
+            placeholder = f"[{content_type} content]"
+            formatted = f"{msg['username']}: {placeholder}" if msg["role"] == "user" else placeholder
         else:
-            formatted = msg["content"]
+            # Unknown type — be safe
+            formatted = "[unsupported content]"
+
         messages_list.append({"role": msg["role"], "content": formatted})
-    
+
+    # Add the current user message
+    messages_list.append({"role": "user", "content": f"{user_name}: {message_content}"})
+
     response = await ollama_client.chat(
         model=ollama_client.model,
         messages=messages_list,
@@ -224,75 +284,32 @@ async def process_message(user_name, message_content):
         keep_alive=-1,
         options={"num_ctx": ollama_client.context_length}
     )
-    response_text = response['message'].get('content', '').strip()
-    return response_text
+
+    return response["message"].get("content", "").strip()
 
 async def process_function_call(response_json, user_question=""):
     func = response_json.get("function")
     args = response_json.get("arguments", {})
-    chat_settings = get_chat_settings()
-    username = chat_settings["username"]
     from plugin_registry import plugin_registry
     if func in plugin_registry:
         plugin = plugin_registry[func]
         result = await plugin.handle_webui(args, ollama_client, ollama_client.context_length)
-        return result
+        return result  # Can be string or dict
     else:
         return "Received an unknown function call."
 
 # ------------------ SIDEBAR EXPANDERS ------------------
+st.sidebar.markdown("---")
+
 with st.sidebar.expander("Plugin Settings", expanded=False):
     st.subheader("Enable/Disable Plugins")
-    # Iterate over plugins in the registry and create a toggle for each.
-    for plugin_name in plugin_registry.keys():
-        current_state = get_plugin_enabled(plugin_name)
-        toggle_state = st.toggle(plugin_name, value=current_state, key=f"plugin_toggle_{plugin_name}")
-        # Save the state back to redis whenever it is toggled.
-        set_plugin_enabled(plugin_name, toggle_state)
+    for plugin_name in sorted(plugin_registry.keys(), key=lambda n: n.lower()):
+        render_plugin_controls(plugin_name)
 
-with st.sidebar.expander("Discord Settings", expanded=False):
-    st.subheader("Discord Bot Settings")
-    current_settings = get_discord_settings()
-    discord_token = st.text_input("DISCORD_TOKEN", value=current_settings["discord_token"], type="password")
-    admin_user_id_str = st.text_input("ADMIN_USER_ID", value=current_settings["admin_user_id"])
-    response_channel_id_str = st.text_input("RESPONSE_CHANNEL_ID", value=current_settings["response_channel_id"])
-    
-    try:
-        admin_user_id = int(admin_user_id_str)
-    except ValueError:
-        admin_user_id = 0
-    try:
-        response_channel_id = int(response_channel_id_str)
-    except ValueError:
-        response_channel_id = 0
-    
-    save_discord_settings(discord_token, admin_user_id, response_channel_id, current_settings.get("username", "User"))
-    
-    current_state = get_discord_connection_state()
-    if "discord_connected" not in st.session_state:
-        st.session_state["discord_connected"] = get_discord_connection_state() == "connected"
-
-    if st.session_state["discord_connected"] and not st.session_state["discord_bot_started"]:
-        connect_discord(discord_token, admin_user_id, response_channel_id)
-        st.session_state["discord_bot_started"] = True
-        st.success("Discord bot auto‑connected.")
-
-    discord_connected = st.toggle("Discord Connection", value=st.session_state["discord_connected"], key="discord_toggle")
-    if discord_connected and not st.session_state["discord_connected"]:
-        if not st.session_state["discord_bot_started"]:
-            connect_discord(discord_token, admin_user_id, response_channel_id)
-            st.session_state["discord_bot_started"] = True
-            st.success("Discord bot connected.")
-        else:
-            st.warning("Discord bot is already running.")
-        st.session_state["discord_connected"] = True
-        set_discord_connection_state("connected")
-    elif not discord_connected and st.session_state["discord_connected"]:
-        disconnect_discord()
-        st.session_state["discord_bot_started"] = False
-        st.session_state["discord_connected"] = False
-        set_discord_connection_state("disconnected")
-        st.success("Discord bot disconnected.")
+for platform in sorted(platform_registry, key=lambda p: p["category"].lower()):
+    label = platform["label"]
+    with st.sidebar.expander(label, expanded=False):
+        render_platform_controls(platform, redis_client)
 
 with st.sidebar.expander("Chat Settings", expanded=False):
     st.subheader("User Settings")
@@ -309,6 +326,7 @@ with st.sidebar.expander("Chat Settings", expanded=False):
         clear_chat_history()
         st.success("Chat history cleared.")
 
+# One-time file upload handler
 if "uploader_key" not in st.session_state:
     st.session_state["uploader_key"] = f"sidebar_uploader_{int(time.time())}"
 uploaded_files = st.sidebar.file_uploader(
@@ -317,6 +335,7 @@ uploaded_files = st.sidebar.file_uploader(
     key=st.session_state["uploader_key"]
 )
 
+# ------------------ RSS ------------------
 if "rss_started" not in st.session_state:
     st.session_state["rss_started"] = True
 
@@ -328,6 +347,22 @@ if "rss_started" not in st.session_state:
 
     threading.Thread(target=start_rss_background, daemon=True).start()
 
+# ------------------ PLATFORM MANAGEMENT ------------------
+if "platform_states" not in st.session_state:
+    st.session_state["platform_states"] = {}
+
+for platform in platform_registry:
+    key = platform["key"]  # e.g. irc_platform
+    state_key = f"{key}_running"
+
+    if state_key not in st.session_state:
+        st.session_state[state_key] = redis_client.get(state_key) == "true"
+
+    if st.session_state[state_key] and not st.session_state["platform_states"].get(key, False):
+        start_platform_thread(key)
+        st.session_state["platform_states"][key] = True
+        st.success(f"{platform['category']} auto-connected.")
+
 st.title("Tater Chat Web UI")
 
 chat_settings = get_chat_settings()
@@ -335,11 +370,27 @@ user_avatar = None
 if chat_settings.get("avatar"):
     user_avatar = load_avatar_image(chat_settings["avatar"])
 
-for msg in load_chat_history():
-    if msg["role"] == "user":
-        st.chat_message("user", avatar=user_avatar if user_avatar else "🦖").write(msg["content"])
-    else:
-        st.chat_message("assistant", avatar=assistant_avatar).write(msg["content"])
+if "chat_history_cache" not in st.session_state:
+    st.session_state["chat_history_cache"] = load_chat_history()
+
+for msg in st.session_state["chat_history_cache"]:
+    role = msg["role"]
+    avatar = user_avatar if role == "user" else assistant_avatar
+    content = msg["content"]
+
+    with st.chat_message(role, avatar=avatar):
+        if isinstance(content, dict) and "type" in content:
+            media_type = content["type"]
+            if media_type == "image":
+                image_bytes = base64.b64decode(content["data"])
+                st.image(Image.open(BytesIO(image_bytes)), caption=content.get("name", ""))
+            elif media_type == "audio":
+                audio_bytes = base64.b64decode(content["data"])
+                st.audio(audio_bytes, format=content.get("mimetype", "audio/mpeg"))
+            else:
+                st.warning(f"[Unsupported media type: {media_type}]")
+        else:
+            st.write(content)
 
 user_input = st.chat_input("Chat with Tater...")
 
@@ -423,26 +474,39 @@ if uploaded_files:
 
 elif user_input:
     chat_settings = get_chat_settings()
-    save_message("user", chat_settings["username"], user_input)
+    username = chat_settings["username"]
+
+    # Show and save user input
     st.chat_message("user", avatar=user_avatar if user_avatar else "🦖").write(user_input)
-    
-    response_text = run_async(process_message(chat_settings["username"], user_input))
-    
-    response_json = None
-    try:
-        response_json = json.loads(response_text)
-    except json.JSONDecodeError:
-        json_str = extract_json(response_text)
-        if json_str:
-            try:
-                response_json = json.loads(json_str)
-            except Exception:
-                response_json = None
+    save_message("user", username, user_input)
 
-    if response_json and isinstance(response_json, dict) and "function" in response_json:
+    # Run model
+    response_text = run_async(process_message(username, user_input))
+
+    # ✅ Parse for function call using shared helper
+    response_json = parse_function_json(response_text)
+
+    if response_json:
         func_response = run_async(process_function_call(response_json, user_question=user_input))
-        if func_response:
-            response_text = func_response
 
-    save_message("assistant", "assistant", response_text)
-    st.chat_message("assistant", avatar=assistant_avatar).write(response_text)
+        # ✅ Loop through responses if it's a list
+        responses = func_response if isinstance(func_response, list) else [func_response]
+
+        for item in responses:
+            save_message("assistant", "assistant", item)
+            with st.chat_message("assistant", avatar=assistant_avatar):
+                if isinstance(item, dict) and "type" in item:
+                    if item["type"] == "image":
+                        image_bytes = base64.b64decode(item["data"])
+                        st.image(Image.open(BytesIO(image_bytes)), caption=item.get("name", ""))
+                    elif item["type"] == "audio":
+                        audio_bytes = base64.b64decode(item["data"])
+                        st.audio(audio_bytes, format=item.get("mimetype", "audio/mpeg"))
+                    else:
+                        st.warning(f"[Unsupported content type: {item.get('type')}]")
+                else:
+                    st.write(item)
+    else:
+        # Normal text response
+        save_message("assistant", "assistant", response_text)
+        st.chat_message("assistant", avatar=assistant_avatar).write(response_text)

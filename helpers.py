@@ -6,6 +6,11 @@ from PIL import Image
 from io import BytesIO
 import nest_asyncio
 import redis
+from dotenv import load_dotenv
+import re
+import json
+
+load_dotenv()
 
 nest_asyncio.apply()
 
@@ -85,3 +90,69 @@ redis_client = redis.Redis(
     db=0,
     decode_responses=True
 )
+
+def extract_json(text):
+    """
+    Attempts to extract the first valid JSON object from a given text string.
+    Strips markdown code fences and ignores surrounding non-JSON text.
+    """
+    text = text.strip()
+
+    # Remove triple backticks (e.g. ```json ... ```)
+    if text.startswith("```") and text.endswith("```"):
+        text = re.sub(r"^```(?:json)?\n?|```$", "", text, flags=re.MULTILINE).strip()
+
+    # Look for the first JSON object using a balanced brace match
+    stack = []
+    start_idx = None
+    for i, char in enumerate(text):
+        if char == '{':
+            if not stack:
+                start_idx = i
+            stack.append('{')
+        elif char == '}':
+            if stack:
+                stack.pop()
+                if not stack and start_idx is not None:
+                    candidate = text[start_idx:i+1]
+                    try:
+                        json.loads(candidate)  # validate
+                        return candidate
+                    except json.JSONDecodeError:
+                        continue
+
+    return None  # No valid JSON found
+
+def parse_function_json(response_text):
+    """
+    Tries to return a parsed JSON dict with a 'function' key from the response.
+    Returns None if not valid or missing 'function'.
+    """
+    try:
+        # Try direct parsing first
+        response_json = json.loads(response_text)
+    except json.JSONDecodeError:
+        json_str = extract_json(response_text)
+        if json_str:
+            try:
+                response_json = json.loads(json_str)
+            except Exception:
+                return None
+        else:
+            return None
+
+    if isinstance(response_json, dict) and "function" in response_json:
+        return response_json
+    return None
+
+def format_irc(text):
+    import re
+    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)       # Bold
+    text = re.sub(r"\*(.*?)\*", r"\1", text)           # Italic
+    text = re.sub(r"_([^_]+)_", r"\1", text)           # Underscore italic
+    text = re.sub(r"`([^`]+)`", r"\1", text)           # Inline code
+    text = re.sub(r"#+\s*", "", text)                  # Headings
+    text = re.sub(r"\n{3,}", "\n\n", text)             # Collapse multiple newlines
+    text = re.sub(r"^- ", "* ", text, flags=re.MULTILINE)  # Bullet points
+    text = re.sub(r"\n\s*\n", "\n\n", text)            # Normalize spacing
+    return text.strip()

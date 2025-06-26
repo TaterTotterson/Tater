@@ -11,6 +11,7 @@ from plugin_base import ToolPlugin
 import discord
 import streamlit as st
 from helpers import redis_client, send_waiting_message, load_image_from_url
+import base64
 
 # Generate a unique client ID for this plugin instance.
 client_id = str(uuid.uuid4())
@@ -139,42 +140,82 @@ class ComfyUIAudioPlugin(ToolPlugin):
         user_prompt = args.get("prompt")
         if not user_prompt:
             return "No prompt provided for ComfyUI Audio."
+
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=self.waiting_prompt_template,
             save_callback=lambda x: None,
             send_callback=lambda x: message.channel.send(x)
         )
+
         try:
             audio_bytes = await asyncio.to_thread(ComfyUIAudioPlugin.process_prompt, user_prompt)
-            # Create a Discord file from the audio bytes. Adjust filename and extension as needed.
             file = discord.File(BytesIO(audio_bytes), filename="generated_audio.mp3")
             await message.channel.send(file=file)
+
+            # Optional AI follow-up message
+            safe_prompt = user_prompt[:300].strip()
+            system_msg = f'The user just received an AI-generated audio clip based on this prompt: "{safe_prompt}".'
+            final_response = await ollama_client.chat(
+                model=ollama_client.model,
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": "Send a short and friendly sentence about the generated audio."}
+                ],
+                stream=False,
+                keep_alive=ollama_client.keep_alive,
+                options={"num_ctx": context_length}
+            )
+
+            message_text = final_response["message"].get("content", "").strip() or "Enjoy your track!"
+            await message.channel.send(message_text)
+
         except Exception as e:
             await message.channel.send(f"Failed to generate audio: {e}")
+
         return ""
 
     async def handle_webui(self, args, ollama_client, context_length):
         user_prompt = args.get("prompt")
         if not user_prompt:
             return "No prompt provided for ComfyUI Audio."
-            
+
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=self.waiting_prompt_template,
-            save_callback=lambda x: None,
-            send_callback=lambda text: st.chat_message("assistant", avatar=self.assistant_avatar).write(text)
+            save_callback=None,
+            send_callback=lambda x: st.chat_message("assistant", avatar=self.assistant_avatar).write(x)
         )
+
         try:
             audio_bytes = await asyncio.to_thread(ComfyUIAudioPlugin.process_prompt, user_prompt)
-            
-            # Write the audio file to disk so it can be played (mimicking Discord approach)
-            file_path = "generated_audio.mp3"
-            with open(file_path, "wb") as audio_file:
-                audio_file.write(audio_bytes)
-                
-            st.audio(file_path, format="audio/mpeg")
-            return ""
+
+            # Return base64-encoded audio for WebUI
+            audio_data = {
+                "type": "audio",
+                "name": "generated_audio.mp3",
+                "data": base64.b64encode(audio_bytes).decode("utf-8"),
+                "mimetype": "audio/mpeg"
+            }
+
+            # Friendly follow-up from Ollama
+            safe_prompt = user_prompt[:300].strip()
+            system_msg = f'The user just received an AI-generated audio clip based on this prompt: "{safe_prompt}".'
+            final_response = await ollama_client.chat(
+                model=ollama_client.model,
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": "Send a short and friendly sentence about the generated audio."}
+                ],
+                stream=False,
+                keep_alive=ollama_client.keep_alive,
+                options={"num_ctx": context_length}
+            )
+
+            message_text = final_response["message"].get("content", "").strip() or "Enjoy your track!"
+
+            return [audio_data, message_text]
+
         except Exception as e:
             return f"Failed to generate audio: {e}"
 
