@@ -14,6 +14,8 @@ services:
       CONTEXT_LENGTH: ${CONTEXT_LENGTH}
       REDIS_HOST: redis
       REDIS_PORT: 6379
+      AUTOMATIC_URL: ${AUTOMATIC_URL}
+      PREMIUMIZE_API_KEY: ${PREMIUMIZE_API_KEY}
     depends_on:
       - redis
 

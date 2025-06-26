@@ -1,4 +1,4 @@
-# tater.py
+# discord_platform.py
 import os
 import json
 import asyncio
@@ -11,8 +11,9 @@ import ollama
 from dotenv import load_dotenv
 import re
 from datetime import datetime
-
 from plugin_registry import plugin_registry
+from helpers import OllamaClientWrapper, parse_function_json
+import logging
 
 load_dotenv()
 redis_host = os.getenv('REDIS_HOST', '127.0.0.1')
@@ -20,9 +21,33 @@ redis_port = int(os.getenv('REDIS_PORT', 6379))
 max_response_length = int(os.getenv("MAX_RESPONSE_LENGTH", 1500))
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger('discord.tater')
+logger = logging.getLogger('discord')
 
 redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
+
+PLATFORM_SETTINGS = {
+    "category": "Discord Settings",
+    "required": {
+        "discord_token": {
+            "label": "Discord Bot Token",
+            "type": "string",
+            "default": "",
+            "description": "Your Discord bot token"
+        },
+        "admin_user_id": {
+            "label": "Admin User ID",
+            "type": "string",
+            "default": "",
+            "description": "User ID allowed to DM the bot"
+        },
+        "response_channel_id": {
+            "label": "Response Channel ID",
+            "type": "string",
+            "default": "",
+            "description": "Channel where Tater replies"
+        }
+    }
+}
 
 def get_plugin_enabled(plugin_name):
     enabled = redis_client.hget("plugin_enabled", plugin_name)
@@ -42,11 +67,11 @@ async def safe_send(channel, content, max_length=2000):
         await channel.send(content[i:i+max_length])
 
 BASE_PROMPT = (
-    "You are Tater Totterson, a helpful AI assistant with access to various tools and plugins.\n\n"
+    "You are Tater Totterson, a Discord-savvy AI assistant with access to various tools and plugins.\n\n"
     "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
 )
 
-class tater(commands.Bot):
+class discord_platform(commands.Bot):
     def __init__(self, ollama_client, admin_user_id, response_channel_id, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.ollama = ollama_client
@@ -148,14 +173,9 @@ class tater(commands.Bot):
                     await message.channel.send("I'm not sure how to respond to that.")
                     return
 
-                try:
-                    response_json = json.loads(response_text)
-                except json.JSONDecodeError:
-                    json_start, json_end = response_text.find('{'), response_text.rfind('}')
-                    json_str = response_text[json_start:json_end+1] if json_start != -1 and json_end != -1 else None
-                    response_json = json.loads(json_str) if json_str else None
+                response_json = parse_function_json(response_text)
 
-                if response_json and isinstance(response_json, dict) and "function" in response_json:
+                if response_json:
                     func = response_json.get("function")
                     args = response_json.get("arguments", {})
                     if func in plugin_registry and get_plugin_enabled(func):
@@ -166,7 +186,7 @@ class tater(commands.Bot):
                         if result:
                             await safe_send(message.channel, result, self.max_response_length)
                             await self.save_message(message.channel.id, "assistant", "assistant", result)
-                        return  # ✅ This avoids falling through
+                        return  # ✅ Prevent fallback
                     else:
                         error = await self.generate_error_message(
                             f"Unknown or disabled function call: {func}.",
@@ -197,7 +217,7 @@ class tater(commands.Bot):
                     logger.error(f"[{plugin.name}] Error in on_reaction_add: {e}")
 
 class AdminCommands(commands.Cog):
-    def __init__(self, bot: tater):
+    def __init__(self, bot: discord_platform):
         self.bot = bot
 
     @app_commands.command(name="wipe", description="Clear chat history for this channel.")
@@ -211,3 +231,32 @@ class AdminCommands(commands.Cog):
 
 async def setup_commands(client: commands.Bot):
     logger.info("Commands setup complete.")
+
+def run():
+    # Load settings from Redis
+    redis_client = redis.Redis(
+        host=os.getenv('REDIS_HOST', '127.0.0.1'),
+        port=int(os.getenv('REDIS_PORT', 6379)),
+        decode_responses=True
+    )
+
+    token = redis_client.hget("discord_platform_settings", "discord_token")
+    admin_id = redis_client.hget("discord_platform_settings", "admin_user_id")
+    channel_id = redis_client.hget("discord_platform_settings", "response_channel_id")
+
+    # ✅ Correct Ollama setup
+    ollama_host = os.getenv("OLLAMA_HOST", "127.0.0.1")
+    ollama_port = os.getenv("OLLAMA_PORT", "11434")
+    ollama_client = OllamaClientWrapper(host=f"http://{ollama_host}:{ollama_port}")
+
+    if token and admin_id and channel_id:
+        client = discord_platform(
+            ollama_client=ollama_client,
+            admin_user_id=int(admin_id),
+            response_channel_id=int(channel_id),
+            command_prefix="!",
+            intents=discord.Intents.all()
+        )
+        client.run(token)
+    else:
+        print("⚠️ Missing Discord settings in Redis. Bot not started.")

@@ -16,16 +16,14 @@ client_id = str(uuid.uuid4())
 class ComfyUIImageVideoPlugin(ToolPlugin):
     name = "comfyui_image_video"
     usage = (
-        "{\n"
+        '{\n'
         '  "function": "comfyui_image_video",\n'
         '  "arguments": {\n'
-        '     "prompt": "<Text prompt for the animation>",\n'
-        '     "filename": "<original filename.png>",\n'
-        '     "image_bytes": "<base64-encoded-bytes>"\n'
+        '     "prompt": "<Text prompt for the animation>"\n'
         '  }\n'
-        "}\n"
+        '}'
     )
-    description = "Animate a user-provided image into a looping WebP."
+    description = "Animates images into a looping WebP."
     settings_category = "ComfyUI Animate Image"
     required_settings = {
         "COMFYUI_VIDEO_URL": {
@@ -146,45 +144,91 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
         finally:
             ws.close()
 
-    async def handle_discord(
-        self, message, args, ollama_client, ctx_length, max_response_length
-    ):
+    # Updated section inside handle_discord()
+    async def handle_discord(self, message, args, ollama_client, ctx_length, max_response_length):
         image_bytes = None
         filename = None
+
+        # 1. Attachments in current message
         if message.attachments:
             for att in message.attachments:
                 if att.content_type and att.content_type.startswith("image/"):
                     image_bytes = await att.read()
                     filename = att.filename
                     break
+
+        # 2. Base64 input
         if not image_bytes and args.get("image_bytes"):
             try:
                 image_bytes = base64.b64decode(args["image_bytes"])
                 filename = args.get("filename", "input.png")
             except Exception:
                 return "❌ Couldn’t decode `image_bytes`. Provide valid Base64."
+
+        # 3. Search recent messages
         if not image_bytes:
-            return (
-                "❌ No image found. Attach an image or supply `image_bytes` + `filename`."
+            async for previous in message.channel.history(limit=10, oldest_first=False):
+                if previous.id == message.id:
+                    continue
+                for att in previous.attachments:
+                    if att.content_type and att.content_type.startswith("image/"):
+                        image_bytes = await att.read()
+                        filename = att.filename
+                        break
+                if image_bytes:
+                    break
+
+        if not image_bytes:
+            fallback_prompt = (
+                f"Generate a message telling {message.author.mention} that no image was found. "
+                "Mention they can attach an image or use base64. Only generate the message."
             )
+            await send_waiting_message(
+                ollama_client=ollama_client,
+                prompt_text=fallback_prompt,
+                save_callback=lambda _: None,
+                send_callback=lambda msg: message.channel.send(msg)
+            )
+            return ""
+
         prompt = args.get("prompt", "").strip()
         if not prompt:
-            return "❌ Please include a `prompt` describing the animation."
+            prompt = "A gentle animation of the provided image."
+
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=self.waiting_prompt_template,
             save_callback=lambda _: None,
-            send_callback=lambda txt: message.channel.send(txt)
+            send_callback=lambda msg: message.channel.send(msg)
         )
+
         try:
             animated = await asyncio.to_thread(
                 self.process_prompt, prompt, image_bytes, filename
             )
+            await message.channel.send(
+                file=discord.File(BytesIO(animated), filename="animated.webp")
+            )
+
+            # Friendly follow-up
+            safe_prompt = prompt[:300].strip()
+            system_msg = f'The user has just been shown an animated image based on the prompt: "{safe_prompt}".'
+            followup = await ollama_client.chat(
+                model=ollama_client.model,
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": "Give them a short, friendly sentence acknowledging the generated animation."}
+                ],
+                stream=False,
+                keep_alive=ollama_client.keep_alive,
+                options={"num_ctx": ctx_length}
+            )
+            followup_text = followup["message"].get("content", "").strip() or "Here's your animated image!"
+            await message.channel.send(followup_text)
+
         except Exception as e:
             return f"❌ Failed to generate animation: {e}"
-        await message.channel.send(
-            file=discord.File(BytesIO(animated), filename="animated.webp")
-        )
+
         return ""
 
     async def handle_webui(self, args, ollama_client, ctx_length):
