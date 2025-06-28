@@ -235,7 +235,6 @@ async def setup_commands(client: commands.Bot):
     logger.info("Commands setup complete.")
 
 def run():
-    # Load settings from Redis
     redis_client = redis.Redis(
         host=os.getenv('REDIS_HOST', '127.0.0.1'),
         port=int(os.getenv('REDIS_PORT', 6379)),
@@ -246,19 +245,22 @@ def run():
     admin_id = redis_client.hget("discord_platform_settings", "admin_user_id")
     channel_id = redis_client.hget("discord_platform_settings", "response_channel_id")
 
-    # ✅ Correct Ollama setup
     ollama_host = os.getenv("OLLAMA_HOST", "127.0.0.1")
     ollama_port = os.getenv("OLLAMA_PORT", "11434")
     ollama_client = OllamaClientWrapper(host=f"http://{ollama_host}:{ollama_port}")
 
-    if token and admin_id and channel_id:
-        client = discord_platform(
-            ollama_client=ollama_client,
-            admin_user_id=int(admin_id),
-            response_channel_id=int(channel_id),
-            command_prefix="!",
-            intents=discord.Intents.all()
-        )
-        client.run(token)
-    else:
-        print("⚠️ Missing Discord settings in Redis. Bot not started.")
+    try:
+        if token and admin_id and channel_id:
+            client = discord_platform(
+                ollama_client=ollama_client,
+                admin_user_id=int(admin_id),
+                response_channel_id=int(channel_id),
+                command_prefix="!",
+                intents=discord.Intents.all()
+            )
+            client.run(token)
+        else:
+            print("⚠️ Missing Discord settings in Redis. Bot not started.")
+    finally:
+        # Clear the Redis lock so the bot can restart cleanly next time
+        redis_client.delete("tater:platform:discord_platform:lock")

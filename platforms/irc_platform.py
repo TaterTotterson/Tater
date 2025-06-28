@@ -197,5 +197,9 @@ def run():
         config["username"] = IRC_USERNAME
         config["password"] = IRC_PASSWORD
 
-    bot = irc3.IrcBot(**config)
-    bot.run(forever=True)
+    try:
+        bot = irc3.IrcBot(**config)
+        bot.run(forever=True)
+    finally:
+        # 🛠️ Make sure the correct lock key is cleared for IRC
+        redis_client.delete("tater:platform:irc_platform:lock")
