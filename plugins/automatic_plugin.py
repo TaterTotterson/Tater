@@ -10,7 +10,8 @@ from plugin_base import ToolPlugin
 import streamlit as st
 from PIL import Image
 import discord
-from helpers import load_image_from_url, send_waiting_message, redis_client
+from helpers import load_image_from_url, redis_client
+from chat_helpers import send_waiting_message, save_assistant_message
 
 # Make sure to load environment variables if needed.
 load_dotenv()
@@ -151,48 +152,102 @@ class AutomaticPlugin(ToolPlugin):
         else:
             raise Exception(f"Image description failed (status {response.status_code}): {response.text}")
 
+    # --- Discord Handler ---
     async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
         prompt_text = args.get("prompt")
         if not prompt_text:
             return "No prompt provided for Automatic111."
+
         waiting_prompt = self.waiting_prompt_template.format(mention=message.author.mention)
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=waiting_prompt,
-            save_callback=lambda text: None,
+            save_callback=lambda text: asyncio.create_task(save_assistant_message(message.channel.id, text)),
             send_callback=lambda text: message.channel.send(text)
         )
+
         async with message.channel.typing():
             try:
-                # Note: fixed the class reference from AutomaticPicturePlugin to AutomaticPlugin.
                 image_bytes = await asyncio.to_thread(AutomaticPlugin.generate_image, prompt_text)
                 image_file = discord.File(BytesIO(image_bytes), filename="generated_image.png")
                 await message.channel.send(file=image_file)
+                await save_assistant_message(message.channel.id, "🖼️")
+
+                # Friendly follow-up message
+                safe_prompt = prompt_text[:300].strip()
+                system_msg = f'The user has just been shown an image based on this prompt: "{safe_prompt}".'
+                final_response = await ollama_client.chat(
+                    model=ollama_client.model,
+                    messages=[
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": "Send a short, friendly response to accompany the image."}
+                    ],
+                    stream=False,
+                    keep_alive=ollama_client.keep_alive,
+                    options={"num_ctx": context_length}
+                )
+                reply = final_response["message"].get("content", "").strip() or "Here's your image!"
+                await message.channel.send(reply)
+                await save_assistant_message(message.channel.id, reply)
+
             except Exception as e:
                 err_prompt = f"Generate an error message to {message.author.mention} explaining that I was unable to create the image."
                 error_msg = await self.generate_error_message(err_prompt, f"Failed to generate image: {e}", message)
                 await message.channel.send(error_msg)
+                await save_assistant_message(message.channel.id, error_msg)
+
         return ""
 
+    # --- WebUI Handler ---
     async def handle_webui(self, args, ollama_client, context_length):
         prompt_text = args.get("prompt")
         if not prompt_text:
             return "No prompt provided for Automatic111."
-        waiting_prompt = self.waiting_prompt_template.format(mention="User")
+
+        import streamlit as st
+
         await send_waiting_message(
             ollama_client=ollama_client,
-            prompt_text=waiting_prompt,
-            save_callback=lambda text: None,
+            prompt_text=self.waiting_prompt_template.format(mention="User"),
+            save_callback=lambda text: asyncio.create_task(save_assistant_message("webui", text)),
             send_callback=lambda text: st.chat_message("assistant", avatar=self.assistant_avatar).write(text)
         )
+
         try:
             image_bytes = await asyncio.to_thread(AutomaticPlugin.generate_image, prompt_text)
-            st.image(image_bytes, caption="Generated Image")
-        except Exception as e:
-            return f"Failed to generate image: {e}"
-        return ""
 
-    async def generate_error_message(self, prompt, fallback, message):
-        return fallback
+            image_data = {
+                "type": "image",
+                "name": "generated_image.png",
+                "data": base64.b64encode(image_bytes).decode("utf-8"),
+                "mimetype": "image/png"
+            }
+
+            safe_prompt = prompt_text[:300].strip()
+            system_msg = f'The user has just been shown an image based on this prompt: "{safe_prompt}".'
+            final_response = await ollama_client.chat(
+                model=ollama_client.model,
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": "Send a short, friendly response to accompany the image."}
+                ],
+                stream=False,
+                keep_alive=ollama_client.keep_alive,
+                options={"num_ctx": context_length}
+            )
+
+            message_text = final_response["message"].get("content", "").strip() or "Here's your image!"
+            await save_assistant_message("webui", message_text)
+
+            return [image_data, message_text]
+
+        except Exception as e:
+            error = f"Failed to generate image: {e}"
+            await save_assistant_message("webui", error)
+            return error
+
+    # --- IRC Handler ---
+    async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
+        await bot.privmsg(channel, f"{user}: ❌ This plugin only works in Discord or the WebUI.")
 
 plugin = AutomaticPlugin()

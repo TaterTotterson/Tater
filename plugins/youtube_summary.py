@@ -1,15 +1,18 @@
+# plugin/youtube_summary.py
 import os
 import re
+import time
 import asyncio
+import subprocess
 import requests
+import redis
 from urllib.parse import urlparse, parse_qs
 from dotenv import load_dotenv
 import streamlit as st
-from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound
+from youtube_transcript_api import YouTubeTranscriptApi
 from plugin_base import ToolPlugin
-from helpers import load_image_from_url, send_waiting_message, format_irc
-import subprocess
-import time
+from helpers import load_image_from_url, format_irc
+from chat_helpers import send_waiting_message, save_assistant_message
 
 load_dotenv()
 assistant_avatar = load_image_from_url()
@@ -27,26 +30,37 @@ class YouTubeSummaryPlugin(ToolPlugin):
     )
     description = "Summarizes a YouTube video using its transcript."
     platforms = ["discord", "webui", "irc"]
-    waiting_prompt_template = (
-        "Generate a brief message to {mention} telling them to wait a moment while I watch this boring video and summarize it. Only generate the message. Do not respond to this message."
-    )
-    last_update_check = 0
+    last_update_check_key = "yt_api_last_check"
 
-    def maybe_update_transcript_api(self):
-        now = time.time()
-        if now - YouTubeSummaryPlugin.last_update_check < 86400:
-            return
+    def __init__(self):
+        self.check_and_update_youtube_api()
 
-        YouTubeSummaryPlugin.last_update_check = now
-        try:
-            print("🔍 Checking for youtube-transcript-api updates...")
-            subprocess.run(
-                ["pip", "install", "--quiet", "--disable-pip-version-check", "--upgrade", "youtube-transcript-api"],
-                check=True
-            )
-            print("✅ youtube-transcript-api updated (if needed).")
-        except Exception as e:
-            print(f"⚠️ Failed to update youtube-transcript-api: {e}")
+    def check_and_update_youtube_api(self):
+        redis_host = os.getenv("REDIS_HOST", "127.0.0.1")
+        redis_port = int(os.getenv("REDIS_PORT", 6379))
+        redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
+
+        now = int(time.time())
+        last_check = redis_client.get(self.last_update_check_key)
+
+        if not last_check or now - int(last_check) > 86400:
+            try:
+                result = subprocess.run(
+                    ["pip", "list", "--outdated", "--format=json"],
+                    capture_output=True, text=True, check=True
+                )
+                if '"youtube-transcript-api"' in result.stdout:
+                    subprocess.run(
+                        ["pip", "install", "--quiet", "--disable-pip-version-check", "--upgrade", "youtube-transcript-api"],
+                        check=True
+                    )
+                    print("✅ youtube-transcript-api updated")
+                else:
+                    print("✅ youtube-transcript-api already up to date")
+
+                redis_client.set(self.last_update_check_key, now)
+            except Exception as e:
+                print(f"❌ youtube-transcript-api update check failed: {e}")
 
     @staticmethod
     def extract_video_id(youtube_url):
@@ -59,34 +73,18 @@ class YouTubeSummaryPlugin(ToolPlugin):
 
     @staticmethod
     def split_text_into_chunks(text, context_length):
-        # Reserve part of the context for the prompt and response (~20%)
         max_tokens = int(context_length * 0.8)
-        chunks = []
         words = text.split()
-        chunk = []
-        current_len = 0
-
+        chunks, chunk = [], []
         for word in words:
             chunk.append(word)
-            current_len += 1
-            if current_len >= max_tokens:
+            if len(chunk) >= max_tokens:
                 chunks.append(" ".join(chunk))
                 chunk = []
-                current_len = 0
-
         if chunk:
             chunks.append(" ".join(chunk))
         return chunks
-    
-    def strip_markdown_for_irc(self, text):
-        text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)  # bold
-        text = re.sub(r"\*(.*?)\*", r"\1", text)      # italic
-        text = re.sub(r"`(.*?)`", r"\1", text)        # inline code
-        text = re.sub(r"^- ", "* ", text, flags=re.MULTILINE)
-        text = re.sub(r"•", "*", text)
-        text = re.sub(r"#+ ", "", text)               # headers
-        return text.strip()
-    
+
     async def safe_send(self, channel, content):
         if len(content) <= 2000:
             await channel.send(content)
@@ -98,8 +96,6 @@ class YouTubeSummaryPlugin(ToolPlugin):
         try:
             transcript = YouTubeTranscriptApi.get_transcript(video_id)
             return " ".join([seg["text"] for seg in transcript])
-        except NoTranscriptFound:
-            return None
         except Exception as e:
             print(f"[YouTubeTranscriptApi error] {e}")
             return None
@@ -120,14 +116,14 @@ class YouTubeSummaryPlugin(ToolPlugin):
             )
             partial_summaries.append(resp["message"]["content"].strip())
 
-        # Combine into final summary
-        full_prompt = (
+        final_prompt = (
             "This is a set of bullet point summaries from different sections of a YouTube video. "
-            "Combine them into a single summary with a title and final bullet points:\n\n" + "\n\n".join(partial_summaries)
+            "Combine them into a single summary with a title and final bullet points:\n\n"
+            + "\n\n".join(partial_summaries)
         )
         final = await ollama_client.chat(
             model=ollama_client.model,
-            messages=[{"role": "system", "content": full_prompt}],
+            messages=[{"role": "system", "content": final_prompt}],
             stream=False,
             keep_alive=-1,
             options={"num_ctx": ollama_client.context_length}
@@ -155,77 +151,88 @@ class YouTubeSummaryPlugin(ToolPlugin):
         transcript = self.get_transcript_api(video_id)
         if not transcript:
             return "Sorry, this video does not have a transcript available, or it may be restricted."
-
         chunks = self.split_text_into_chunks(transcript, ollama_client.context_length)
         return await self.summarize_chunks(chunks, ollama_client)
 
     async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
-        self.maybe_update_transcript_api()
         video_url = args.get("video_url")
         if not video_url:
             return "No YouTube URL provided."
 
-        prompt = f"Generate a brief message to {message.author.mention} telling them to wait a moment while I summarize this video."
+        prompt = (
+            f"Generate a brief message to {message.author.mention} telling them to wait a moment "
+            "while I watch this boring video and summarize it. Only generate the message. Do not respond to this message."
+        )
+
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=prompt,
-            save_callback=lambda _: None,
+            save_callback=lambda text: save_assistant_message(message.channel.id, text),
             send_callback=lambda text: asyncio.create_task(self.safe_send(message.channel, text))
         )
 
         summary = await self.async_fetch_summary(video_url, ollama_client)
-        formatted = self.format_article(summary)
-        for part in self.split_message(formatted, max_response_length):
+        for part in self.split_message(self.format_article(summary), max_response_length):
             await self.safe_send(message.channel, part)
+
+        save_assistant_message(message.channel.id, summary)
         return ""
 
     async def handle_webui(self, args, ollama_client, context_length):
-        self.maybe_update_transcript_api()
         video_url = args.get("video_url")
         if not video_url:
             return "No YouTube URL provided."
 
-        prompt = self.waiting_prompt_template.format(mention="User")
+        prompt = (
+            "Generate a brief message to User telling them to wait a moment while I watch this boring video "
+            "and summarize it. Only generate the message. Do not respond to this message."
+        )
+
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=prompt,
-            save_callback=lambda _: None,
+            save_callback=lambda text: save_assistant_message("webui:chat_history", text),
             send_callback=lambda text: st.chat_message("assistant", avatar=assistant_avatar).write(text)
         )
 
         summary = await self.async_fetch_summary(video_url, ollama_client)
+        save_assistant_message("webui:chat_history", summary)
         return "\n".join(self.split_message(self.format_article(summary)))
 
     async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
-        from helpers import format_irc  # Make sure this exists and is imported
-
-        self.maybe_update_transcript_api()
         video_url = args.get("video_url")
         nick = user
 
         if not video_url:
             return f"{nick}: No YouTube URL provided."
 
-        # Waiting message with nick included
+        prompt = (
+            f"Generate a brief message to {nick} telling them to wait a moment while I watch this boring "
+            "video and summarize it. Only generate the message. Do not respond to this message."
+        )
+
+        # Send and save IRC waiting message
+        async def send_and_save_waiting(text):
+            save_assistant_message(channel, text)
+            bot.privmsg(channel, text)
+
         await send_waiting_message(
             ollama_client=ollama_client,
-            prompt_text=self.waiting_prompt_template.format(mention=nick),
-            save_callback=lambda _: None,
-            send_callback=lambda text: bot.privmsg(channel, text)
+            prompt_text=prompt,
+            save_callback=lambda text: save_assistant_message(channel, text),
+            send_callback=send_and_save_waiting
         )
 
         summary = await self.async_fetch_summary(video_url, ollama_client)
         if not summary:
             return f"{nick}: Could not generate summary."
 
-        formatted = self.strip_markdown_for_irc(self.format_article(summary))
-        irc_output = format_irc(formatted)
-
-        for part in self.split_message(irc_output, chunk_size=350):
+        irc_output = format_irc(self.format_article(summary))
+        for part in self.split_message(irc_output, 350):
             bot.privmsg(channel, part)
             await asyncio.sleep(0.1)
 
+        save_assistant_message(channel, summary)
         return ""
-
 
 plugin = YouTubeSummaryPlugin()

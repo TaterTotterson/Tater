@@ -8,7 +8,8 @@ import redis
 import secrets
 import string
 from plugin_base import ToolPlugin
-from helpers import send_waiting_message, load_image_from_url
+from helpers import load_image_from_url, format_irc
+from chat_helpers import send_waiting_message, save_assistant_message
 
 class SFTPGoAccountPlugin(ToolPlugin):
     name = "sftpgo_account"
@@ -166,18 +167,18 @@ class SFTPGoAccountPlugin(ToolPlugin):
                     return "error"
 
     async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
-        # 'message' is a discord.Message object.
+
         user = message.author
         password = self.generate_random_password()
-        
+
         waiting_prompt = self.waiting_prompt_template.format(mention=user.mention)
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=waiting_prompt,
-            save_callback=lambda text: None,
+            save_callback=lambda text: asyncio.create_task(save_assistant_message(message.channel.id, text)),
             send_callback=lambda text: message.channel.send(text)
         )
-        
+
         result = await self.create_sftp_account(user.name, password, message)
         if result == "created":
             prompt = f"Generate a brief message stating that an account for '{user.name}' has been successfully created. Only generate the message. Do not respond to this message."
@@ -185,19 +186,59 @@ class SFTPGoAccountPlugin(ToolPlugin):
             prompt = f"Generate a brief message stating that '{user.name}' already has an account but is trying to make a new one!. Only generate the message. Do not respond to this message."
         else:
             prompt = f"Generate a brief message stating that an error occurred while creating the account for '{user.name}'. Only generate the message. Do not respond to this message."
-        
+
         response_data = await ollama_client.chat(
             model=ollama_client.model,
             messages=[{"role": "user", "content": prompt}]
         )
+
         response_text = response_data['message'].get('content', '')
         if len(response_text) > 4000:
             response_text = response_text[:3990] + " [truncated]"
+
         await message.channel.send(response_text)
+        await save_assistant_message(message.channel.id, response_text)
         return ""
 
     async def handle_webui(self, args, ollama_client, context_length):
         return "SFTPGo account creation is not supported on the web UI."
+
+    async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
+
+        password = self.generate_random_password()
+        mention = user
+
+        # Send waiting message to the channel
+        waiting_prompt = self.waiting_prompt_template.format(mention=mention)
+        await send_waiting_message(
+            ollama_client=ollama_client,
+            prompt_text=waiting_prompt,
+            save_callback=lambda text: asyncio.create_task(save_assistant_message(channel, f"{mention}: {text}")),
+            send_callback=lambda text: bot.privmsg(channel, f"{mention}: {text}")
+        )
+
+        result = await self.create_sftp_account(user, password, None)
+        if result == "created":
+            prompt = f"Generate a brief message stating that an account for '{user}' has been successfully created. Only generate the message. Do not respond to this message."
+        elif result == "exists":
+            prompt = f"Generate a brief message stating that '{user}' already has an account but is trying to make a new one!. Only generate the message. Do not respond to this message."
+        else:
+            prompt = f"Generate a brief message stating that an error occurred while creating the account for '{user}'. Only generate the message. Do not respond to this message."
+
+        response_data = await ollama_client.chat(
+            model=ollama_client.model,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        response_text = format_irc(response_data['message'].get("content", "").strip())
+
+        # Send AI response to the channel
+        for chunk in [response_text[i:i + 400] for i in range(0, len(response_text), 400)]:
+            await bot.privmsg(channel, f"{mention}: {chunk}")
+            await save_assistant_message(channel, f"{mention}: {chunk}")
+
+        # Privately send the generated password to the user
+        await bot.privmsg(user, f"{mention}, your SFTPGo password is: {password}")
+        await save_assistant_message(user, f"{mention}, your SFTPGo password is: {password}")
 
 # Export an instance of the plugin.
 plugin = SFTPGoAccountPlugin()

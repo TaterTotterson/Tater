@@ -11,7 +11,8 @@ from io import BytesIO
 from plugin_base import ToolPlugin
 import discord
 import streamlit as st
-from helpers import redis_client, send_waiting_message, load_image_from_url
+from helpers import redis_client, load_image_from_url, format_irc
+from chat_helpers import send_waiting_message, save_assistant_message
 import base64
 
 client_id = str(uuid.uuid4())
@@ -141,7 +142,7 @@ class ComfyUIPlugin(ToolPlugin):
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=self.waiting_prompt_template,
-            save_callback=lambda x: None,
+            save_callback=lambda x: asyncio.create_task(save_assistant_message(message.channel.id, x)),
             send_callback=lambda x: message.channel.send(x)
         )
 
@@ -150,7 +151,10 @@ class ComfyUIPlugin(ToolPlugin):
             file = discord.File(BytesIO(image_bytes), filename="generated_comfyui.png")
             await message.channel.send(file=file)
 
-            # Generate friendly follow-up message via Ollama
+            # Save indicator to Redis for AI history
+            await save_assistant_message(message.channel.id, "🖼️")
+
+            # Friendly follow-up message
             safe_prompt = user_prompt[:300].strip()
             system_msg = f'The user has just been shown an AI-generated image based on the prompt: "{safe_prompt}".'
             final_response = await ollama_client.chat(
@@ -166,10 +170,13 @@ class ComfyUIPlugin(ToolPlugin):
 
             message_text = final_response["message"].get("content", "").strip() or "Here's your generated image!"
             await message.channel.send(message_text)
+            await save_assistant_message(message.channel.id, message_text)
 
         except Exception as e:
-            await message.channel.send(f"Failed to queue prompt: {e}")
-        
+            error_msg = f"Failed to queue prompt: {e}"
+            await message.channel.send(error_msg)
+            await save_assistant_message(message.channel.id, error_msg)
+
         return ""
 
     async def handle_webui(self, args, ollama_client, context_length):
@@ -180,14 +187,12 @@ class ComfyUIPlugin(ToolPlugin):
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=self.waiting_prompt_template,
-            save_callback=None,
+            save_callback=lambda x: asyncio.create_task(save_assistant_message("webui", x)),
             send_callback=lambda x: st.chat_message("assistant", avatar=self.assistant_avatar).write(x)
         )
 
         try:
             image_bytes = await asyncio.to_thread(ComfyUIPlugin.process_prompt, user_prompt)
-
-            # Return image data so WebUI can save & show it
             image_data = {
                 "type": "image",
                 "name": "generated_comfyui.png",
@@ -195,7 +200,7 @@ class ComfyUIPlugin(ToolPlugin):
                 "mimetype": "image/png"
             }
 
-            # Generate friendly follow-up
+            # Follow-up message
             safe_prompt = user_prompt[:300].strip()
             system_msg = f'The user has just been shown an AI-generated image based on the prompt: "{safe_prompt}".'
             final_response = await ollama_client.chat(
@@ -210,12 +215,20 @@ class ComfyUIPlugin(ToolPlugin):
             )
 
             message_text = final_response["message"].get("content", "").strip() or "Here's your generated image!"
-
-            # ✅ WebUI will store and render both
+            await save_assistant_message("webui", message_text)
             return [image_data, message_text]
 
         except Exception as e:
-            return f"Failed to queue prompt: {e}"
+            error_msg = f"Failed to queue prompt: {e}"
+            await save_assistant_message("webui", error_msg)
+            return error_msg
+
+    async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
+        # Dummy handler
+        response = "This plugin is only supported on Discord and WebUI."
+        formatted = format_irc(response)
+        await bot.privmsg(channel, f"{user}: {formatted}")
+        await save_assistant_message(channel, f"{user}: {formatted}")
 
     async def generate_error_message(self, prompt, fallback, message):
         return fallback
