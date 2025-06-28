@@ -29,8 +29,24 @@ class YouTubeSummaryPlugin(ToolPlugin):
         '}'
     )
     description = "Summarizes a YouTube video using its transcript."
+    settings_category = "YouTube Summary"
+    required_settings = {
+        "update_transcript_api": {
+            "type": "button",
+            "label": "Update YouTubeTranscriptApi",
+            "description": "Manually check and install the latest version of the transcript API."
+        }
+    }
     platforms = ["discord", "webui", "irc"]
 
+    def handle_setting_button(self, key):
+        if key == "update_transcript_api":
+            try:
+                subprocess.run(["pip", "install", "--upgrade", "youtube-transcript-api"], check=True)
+                return "Successfully updated youtube-transcript-api."
+            except subprocess.CalledProcessError as e:
+                return f"Failed to update: {e}"
+                
     @staticmethod
     def extract_video_id(youtube_url):
         parsed = urlparse(youtube_url)
