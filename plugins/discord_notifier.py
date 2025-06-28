@@ -2,6 +2,7 @@
 import logging
 import re
 import requests
+import asyncio
 from urllib.parse import urlparse, parse_qs, urlunparse
 from plugin_base import ToolPlugin
 from plugin_settings import get_plugin_settings
@@ -52,14 +53,19 @@ class DiscordNotifierPlugin(ToolPlugin):
             logger.warning("Discord webhook URL is not set.")
             return
 
-        # Apply formatting
         formatted_message = self.format_summary_for_discord(content)
 
-        try:
-            response = requests.post(webhook_url, json={"content": formatted_message})
-            if response.status_code >= 400:
-                logger.warning(f"Failed to post to Discord webhook: {response.status_code} {response.text}")
-        except Exception as e:
-            logger.warning(f"Exception while posting to Discord webhook: {e}")
+        def post_to_discord():
+            try:
+                return requests.post(webhook_url, json={"content": formatted_message}, timeout=10)
+            except Exception as e:
+                return e
+
+        result = await asyncio.to_thread(post_to_discord)
+
+        if isinstance(result, Exception):
+            logger.warning(f"Exception while posting to Discord webhook: {result}")
+        elif result.status_code >= 400:
+            logger.warning(f"Failed to post to Discord webhook: {result.status_code} {result.text}")
 
 plugin = DiscordNotifierPlugin()
