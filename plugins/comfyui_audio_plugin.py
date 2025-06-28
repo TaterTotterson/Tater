@@ -10,7 +10,8 @@ from io import BytesIO
 from plugin_base import ToolPlugin
 import discord
 import streamlit as st
-from helpers import redis_client, send_waiting_message, load_image_from_url
+from helpers import redis_client, load_image_from_url
+from chat_helpers import send_waiting_message, save_assistant_message
 import base64
 
 # Generate a unique client ID for this plugin instance.
@@ -136,6 +137,7 @@ class ComfyUIAudioPlugin(ToolPlugin):
                 return audios_list[0]
         raise Exception("No audio returned from ComfyUI.")
 
+    # --- Discord Handler ---
     async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
         user_prompt = args.get("prompt")
         if not user_prompt:
@@ -144,16 +146,17 @@ class ComfyUIAudioPlugin(ToolPlugin):
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=self.waiting_prompt_template,
-            save_callback=lambda x: None,
-            send_callback=lambda x: message.channel.send(x)
+            save_callback=lambda text: asyncio.create_task(save_assistant_message(message.channel.id, text)),
+            send_callback=lambda text: message.channel.send(text)
         )
 
         try:
             audio_bytes = await asyncio.to_thread(ComfyUIAudioPlugin.process_prompt, user_prompt)
             file = discord.File(BytesIO(audio_bytes), filename="generated_audio.mp3")
             await message.channel.send(file=file)
+            await save_assistant_message(message.channel.id, "🎵")
 
-            # Optional AI follow-up message
+            # Friendly follow-up
             safe_prompt = user_prompt[:300].strip()
             system_msg = f'The user just received an AI-generated audio clip based on this prompt: "{safe_prompt}".'
             final_response = await ollama_client.chat(
@@ -166,31 +169,36 @@ class ComfyUIAudioPlugin(ToolPlugin):
                 keep_alive=ollama_client.keep_alive,
                 options={"num_ctx": context_length}
             )
-
             message_text = final_response["message"].get("content", "").strip() or "Enjoy your track!"
             await message.channel.send(message_text)
+            await save_assistant_message(message.channel.id, message_text)
 
         except Exception as e:
-            await message.channel.send(f"Failed to generate audio: {e}")
+            error = f"Failed to generate audio: {e}"
+            await message.channel.send(error)
+            await save_assistant_message(message.channel.id, error)
 
         return ""
 
+    # --- WebUI Handler ---
     async def handle_webui(self, args, ollama_client, context_length):
         user_prompt = args.get("prompt")
         if not user_prompt:
             return "No prompt provided for ComfyUI Audio."
 
+        from helpers import save_assistant_message  # Ensure it's imported
+        import streamlit as st
+
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=self.waiting_prompt_template,
-            save_callback=None,
-            send_callback=lambda x: st.chat_message("assistant", avatar=self.assistant_avatar).write(x)
+            save_callback=lambda text: asyncio.create_task(save_assistant_message("webui", text)),
+            send_callback=lambda text: st.chat_message("assistant", avatar=self.assistant_avatar).write(text)
         )
 
         try:
             audio_bytes = await asyncio.to_thread(ComfyUIAudioPlugin.process_prompt, user_prompt)
 
-            # Return base64-encoded audio for WebUI
             audio_data = {
                 "type": "audio",
                 "name": "generated_audio.mp3",
@@ -198,7 +206,6 @@ class ComfyUIAudioPlugin(ToolPlugin):
                 "mimetype": "audio/mpeg"
             }
 
-            # Friendly follow-up from Ollama
             safe_prompt = user_prompt[:300].strip()
             system_msg = f'The user just received an AI-generated audio clip based on this prompt: "{safe_prompt}".'
             final_response = await ollama_client.chat(
@@ -213,10 +220,17 @@ class ComfyUIAudioPlugin(ToolPlugin):
             )
 
             message_text = final_response["message"].get("content", "").strip() or "Enjoy your track!"
+            await save_assistant_message("webui", message_text)
 
             return [audio_data, message_text]
 
         except Exception as e:
-            return f"Failed to generate audio: {e}"
+            error = f"Failed to generate audio: {e}"
+            await save_assistant_message("webui", error)
+            return error
+
+    # --- IRC Handler ---
+    async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
+        await bot.privmsg(channel, f"{user}: ❌ This plugin only works in Discord or the WebUI.")
 
 plugin = ComfyUIAudioPlugin()

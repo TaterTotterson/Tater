@@ -11,7 +11,8 @@ from io import BytesIO
 from plugin_base import ToolPlugin
 import discord
 import streamlit as st
-from helpers import redis_client, send_waiting_message, load_image_from_url
+from helpers import redis_client, load_image_from_url
+from chat_helpers import send_waiting_message, save_assistant_message
 import base64
 
 client_id = str(uuid.uuid4())
@@ -133,7 +134,9 @@ class ComfyUIVideoPlugin(ToolPlugin):
                 return imgs[0]
         raise Exception("No images returned from ComfyUI.")
 
+    # --- Discord Handler ---
     async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
+
         user_prompt = args.get("prompt")
         if not user_prompt:
             return "No prompt provided for ComfyUI Video."
@@ -141,7 +144,7 @@ class ComfyUIVideoPlugin(ToolPlugin):
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=self.waiting_prompt_template,
-            save_callback=lambda x: None,
+            save_callback=lambda x: asyncio.create_task(save_assistant_message(message.channel.id, x)),
             send_callback=lambda x: message.channel.send(x)
         )
 
@@ -150,7 +153,10 @@ class ComfyUIVideoPlugin(ToolPlugin):
             file = discord.File(BytesIO(video_bytes), filename="generated_video.webp")
             await message.channel.send(file=file)
 
-            # Friendly follow-up message
+            # Save image marker
+            await save_assistant_message(message.channel.id, "🖼️")
+
+            # Follow-up
             safe_prompt = user_prompt[:300].strip()
             system_msg = f'The user has just been shown a looping animated video based on the prompt: "{safe_prompt}".'
             followup = await ollama_client.chat(
@@ -165,13 +171,18 @@ class ComfyUIVideoPlugin(ToolPlugin):
             )
             followup_text = followup["message"].get("content", "").strip() or "🎬 Here's your animated video!"
             await message.channel.send(followup_text)
+            await save_assistant_message(message.channel.id, followup_text)
 
         except Exception as e:
-            return f"Failed to queue prompt: {e}"
+            error_msg = f"Failed to queue prompt: {e}"
+            await save_assistant_message(message.channel.id, error_msg)
+            return error_msg
 
         return ""
 
+    # --- WebUI Handler ---
     async def handle_webui(self, args, ollama_client, context_length):
+
         user_prompt = args.get("prompt")
         if not user_prompt:
             return "No prompt provided for ComfyUI Video."
@@ -179,14 +190,13 @@ class ComfyUIVideoPlugin(ToolPlugin):
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=self.waiting_prompt_template,
-            save_callback=lambda x: None,
-            send_callback=lambda x: st.chat_message("assistant", avatar=self.assistant_avatar).write(x)
+            save_callback=lambda x: asyncio.create_task(save_assistant_message("webui", x)),
+            send_callback=lambda x: st.chat_message("assistant", avatar=load_image_from_url()).write(x)
         )
 
         try:
             video_bytes = await asyncio.to_thread(ComfyUIVideoPlugin.process_prompt, user_prompt)
 
-            # Encode video (animated WebP) into base64
             b64_video = base64.b64encode(video_bytes).decode("utf-8")
             image_data = {
                 "type": "image",
@@ -195,7 +205,7 @@ class ComfyUIVideoPlugin(ToolPlugin):
                 "mimetype": "image/webp"
             }
 
-            # Friendly follow-up
+            # Follow-up
             safe_prompt = user_prompt[:300].strip()
             system_msg = f'The user has just been shown a looping animated video based on the prompt: "{safe_prompt}".'
             followup = await ollama_client.chat(
@@ -210,10 +220,18 @@ class ComfyUIVideoPlugin(ToolPlugin):
             )
             message_text = followup["message"].get("content", "").strip() or "🎬 Here's your animated video!"
 
-            # Return both image and follow-up for WebUI
+            # Save follow-up message
+            await save_assistant_message("webui", message_text)
+
             return [image_data, message_text]
 
         except Exception as e:
-            return f"Failed to queue prompt: {e}"
+            error_msg = f"Failed to queue prompt: {e}"
+            await save_assistant_message("webui", error_msg)
+            return error_msg
+
+    # --- IRC Handler ---
+    async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
+        await bot.privmsg(channel, f"{user}: This plugin is only supported on Discord and WebUI.")
 
 plugin = ComfyUIVideoPlugin()

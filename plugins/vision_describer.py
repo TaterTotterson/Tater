@@ -6,8 +6,7 @@ import os
 import discord
 from plugin_base import ToolPlugin
 from plugin_settings import get_plugin_settings
-from helpers import send_waiting_message
-
+from chat_helpers import send_waiting_message, save_assistant_message
 
 def decode_base64(data: str) -> bytes:
     data = data.strip()
@@ -84,8 +83,18 @@ class VisionDescriberPlugin(ToolPlugin):
                 return f"Error: Vision service returned status code {response.status_code}.\nResponse: {response.text}"
         except Exception as e:
             return f"Error calling vision service: {str(e)}"
-
+   
+    async def process_image_web(self, file_content: bytes, filename: str):
+        additional_prompt = (
+            "You are an expert visual assistant. Describe the contents of this image in detail, "
+            "mentioning key objects, scenes, or actions if recognizable."
+        )
+        server, model = self.get_vision_settings()
+        description = await asyncio.to_thread(self.call_ollama_vision, server, model, file_content, additional_prompt)
+        return description
+        
     async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
+
         image_bytes = None
 
         # 1. Try image in current message
@@ -95,14 +104,16 @@ class VisionDescriberPlugin(ToolPlugin):
                     image_bytes = await attachment.read()
                     break
 
-        # 2. Try URL
+        # 2. Try image URL
         if not image_bytes and args.get("image_url"):
             try:
                 resp = requests.get(args.get("image_url"))
                 if resp.status_code == 200:
                     image_bytes = resp.content
             except Exception as e:
-                await safe_send(message.channel, f"Error downloading image: {str(e)}")
+                error_msg = f"Error downloading image: {str(e)}"
+                await safe_send(message.channel, error_msg)
+                await save_assistant_message(message.channel.id, error_msg)
                 return ""
 
         # 3. Try base64
@@ -110,10 +121,12 @@ class VisionDescriberPlugin(ToolPlugin):
             try:
                 image_bytes = decode_base64(args.get("image_base64"))
             except Exception as e:
-                await safe_send(message.channel, f"Error decoding base64 image: {str(e)}")
+                error_msg = f"Error decoding base64 image: {str(e)}"
+                await safe_send(message.channel, error_msg)
+                await save_assistant_message(message.channel.id, error_msg)
                 return ""
 
-        # 4. Search previous messages
+        # 4. Try prior messages
         if not image_bytes:
             async for previous in message.channel.history(limit=10, oldest_first=False):
                 if previous.id == message.id:
@@ -126,7 +139,7 @@ class VisionDescriberPlugin(ToolPlugin):
                 if image_bytes:
                     break
 
-        # 5. Still no image: generate AI fallback message
+        # 5. No image found — generate AI fallback message
         if not image_bytes:
             fallback_prompt = (
                 f"Generate a message telling {message.author.mention} that no image was found. "
@@ -136,20 +149,21 @@ class VisionDescriberPlugin(ToolPlugin):
             await send_waiting_message(
                 ollama_client=ollama_client,
                 prompt_text=fallback_prompt,
-                save_callback=lambda text: None,
+                save_callback=lambda text: asyncio.create_task(save_assistant_message(message.channel.id, text)),
                 send_callback=lambda text: safe_send(message.channel, text)
             )
             return ""
 
+        # 6. Show real waiting message
         waiting_prompt = self.waiting_prompt_template.format(mention=message.author.mention)
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=waiting_prompt,
-            save_callback=lambda text: None,
+            save_callback=lambda text: asyncio.create_task(save_assistant_message(message.channel.id, text)),
             send_callback=lambda text: safe_send(message.channel, text)
         )
 
-        # New smarter default prompt
+        # 7. Build vision prompt
         additional_prompt = (
             "You are an expert visual assistant. Describe the contents of this image in detail, "
             "mentioning key objects, scenes, or actions if recognizable."
@@ -157,28 +171,27 @@ class VisionDescriberPlugin(ToolPlugin):
 
         server, model = self.get_vision_settings()
 
+        # 8. Run vision model
         description = await asyncio.to_thread(
             self.call_ollama_vision,
             server, model, image_bytes, additional_prompt,
             context_length, -1
         )
 
+        # 9. Send and save response
         if description:
             for chunk in [description[i:i + max_response_length] for i in range(0, len(description), max_response_length)]:
                 await safe_send(message.channel, chunk)
-        return ""
+                await save_assistant_message(message.channel.id, chunk)
 
-    async def process_image_web(self, file_content: bytes, filename: str):
-        additional_prompt = (
-            "You are an expert visual assistant. Describe the contents of this image in detail, "
-            "mentioning key objects, scenes, or actions if recognizable."
-        )
-        server, model = self.get_vision_settings()
-        description = await asyncio.to_thread(self.call_ollama_vision, server, model, file_content, additional_prompt)
-        return description
+        return ""
 
     async def handle_webui(self, args, ollama_client, context_length):
         return "🖼️ This plugin is currently only available via Discord. Web support is not yet implemented."
+
+    async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
+        message = f"{user}: This plugin only works via Discord. IRC support is not available yet."
+        await bot.privmsg(channel, message)
 
 
 plugin = VisionDescriberPlugin()

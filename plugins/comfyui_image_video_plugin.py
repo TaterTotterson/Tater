@@ -9,7 +9,8 @@ from io import BytesIO
 from plugin_base import ToolPlugin
 import discord
 import base64
-from helpers import redis_client, send_waiting_message, load_image_from_url
+from helpers import redis_client, load_image_from_url
+from chat_helpers import send_waiting_message, save_assistant_message
 
 client_id = str(uuid.uuid4())
 
@@ -144,7 +145,7 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
         finally:
             ws.close()
 
-    # Updated section inside handle_discord()
+    # --- Discord Handler ---
     async def handle_discord(self, message, args, ollama_client, ctx_length, max_response_length):
         image_bytes = None
         filename = None
@@ -163,7 +164,9 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
                 image_bytes = base64.b64decode(args["image_bytes"])
                 filename = args.get("filename", "input.png")
             except Exception:
-                return "❌ Couldn’t decode `image_bytes`. Provide valid Base64."
+                error_msg = "❌ Couldn’t decode `image_bytes`. Provide valid Base64."
+                await save_assistant_message(message.channel.id, error_msg)
+                return error_msg
 
         # 3. Search recent messages
         if not image_bytes:
@@ -186,19 +189,17 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
             await send_waiting_message(
                 ollama_client=ollama_client,
                 prompt_text=fallback_prompt,
-                save_callback=lambda _: None,
+                save_callback=lambda text: asyncio.create_task(save_assistant_message(message.channel.id, text)),
                 send_callback=lambda msg: message.channel.send(msg)
             )
             return ""
 
-        prompt = args.get("prompt", "").strip()
-        if not prompt:
-            prompt = "A gentle animation of the provided image."
+        prompt = args.get("prompt", "").strip() or "A gentle animation of the provided image."
 
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=self.waiting_prompt_template,
-            save_callback=lambda _: None,
+            save_callback=lambda text: asyncio.create_task(save_assistant_message(message.channel.id, text)),
             send_callback=lambda msg: message.channel.send(msg)
         )
 
@@ -206,9 +207,8 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
             animated = await asyncio.to_thread(
                 self.process_prompt, prompt, image_bytes, filename
             )
-            await message.channel.send(
-                file=discord.File(BytesIO(animated), filename="animated.webp")
-            )
+            await message.channel.send(file=discord.File(BytesIO(animated), filename="animated.webp"))
+            await save_assistant_message(message.channel.id, "🖼️")
 
             # Friendly follow-up
             safe_prompt = prompt[:300].strip()
@@ -225,13 +225,21 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
             )
             followup_text = followup["message"].get("content", "").strip() or "Here's your animated image!"
             await message.channel.send(followup_text)
+            await save_assistant_message(message.channel.id, followup_text)
 
         except Exception as e:
-            return f"❌ Failed to generate animation: {e}"
+            error = f"❌ Failed to generate animation: {e}"
+            await save_assistant_message(message.channel.id, error)
+            return error
 
         return ""
 
+    # --- WebUI Handler ---
     async def handle_webui(self, args, ollama_client, ctx_length):
         return "❌ This plugin only works in Discord."
+
+    # --- IRC Handler ---
+    async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
+        await bot.privmsg(channel, f"{user}: ❌ This plugin only works in Discord.")
 
 plugin = ComfyUIImageVideoPlugin()
