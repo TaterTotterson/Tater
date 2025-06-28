@@ -147,7 +147,8 @@ class RSSManager:
             summary_text = "Could not retrieve a summary for this article."
         else:
             summarization_prompt = (
-                "Please summarize the following article in a clear and engaging format for Discord. "
+                "Please summarize the following article in a clear and engaging format for Discord.\n\n"
+                "Avoid starting with phrases like 'Here's a summary' – begin directly.\n\n"
                 "Include a title and use bullet points for the main takeaways:\n\n"
                 f"{article_text}\n\nSummary:"
             )
