@@ -200,6 +200,9 @@ def run():
     try:
         bot = irc3.IrcBot(**config)
         bot.run(forever=True)
-    finally:
-        # 🛠️ Make sure the correct lock key is cleared for IRC
-        redis_client.delete("tater:platform:irc_platform:lock")
+    except Exception as e:
+        logger.error(f"Failed to start IRC bot: {e}")
+
+# 👇 Prevent accidental startup on import
+if __name__ == "__main__":
+    run()

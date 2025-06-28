@@ -249,18 +249,18 @@ def run():
     ollama_port = os.getenv("OLLAMA_PORT", "11434")
     ollama_client = OllamaClientWrapper(host=f"http://{ollama_host}:{ollama_port}")
 
-    try:
-        if token and admin_id and channel_id:
-            client = discord_platform(
-                ollama_client=ollama_client,
-                admin_user_id=int(admin_id),
-                response_channel_id=int(channel_id),
-                command_prefix="!",
-                intents=discord.Intents.all()
-            )
-            client.run(token)
-        else:
-            print("⚠️ Missing Discord settings in Redis. Bot not started.")
-    finally:
-        # Clear the Redis lock so the bot can restart cleanly next time
-        redis_client.delete("tater:platform:discord_platform:lock")
+    if token and admin_id and channel_id:
+        client = discord_platform(
+            ollama_client=ollama_client,
+            admin_user_id=int(admin_id),
+            response_channel_id=int(channel_id),
+            command_prefix="!",
+            intents=discord.Intents.all()
+        )
+        client.run(token)
+    else:
+        logger.warning("⚠️ Missing Discord settings in Redis. Bot not started.")
+
+# 👇 ONLY run this when executing the file directly, NOT on import
+if __name__ == "__main__":
+    run()
