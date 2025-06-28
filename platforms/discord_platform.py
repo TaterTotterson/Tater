@@ -1,4 +1,4 @@
-# discord_platform.py
+# platform/discord_platform.py
 import os
 import json
 import asyncio
@@ -92,9 +92,7 @@ class discord_platform(commands.Bot):
             f"Current Date and Time is: {now}\n\n"
             f"{BASE_PROMPT}\n\n"
             f"{tool_instructions}\n\n"
-            "Only consider the most recent user message when deciding whether to call a tool.\n"
-            "Ignore earlier messages in the conversation for tool use decisions.\n"
-            "If no function is clearly required based on the last message alone, respond normally.\n"
+            "If no function is needed, reply normally."
         )
 
     async def setup_hook(self):
