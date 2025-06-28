@@ -1,4 +1,4 @@
-# platform/discord_platform.py
+# discord_platform.py
 import os
 import json
 import asyncio
