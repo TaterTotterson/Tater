@@ -18,8 +18,8 @@ from plugin_registry import plugin_registry
 from rss import RSSManager
 from platform_registry import platform_registry
 import threading
+import subprocess
 from helpers import (
-    send_waiting_message,
     OllamaClientWrapper,
     load_image_from_url,
     run_async,
@@ -202,26 +202,65 @@ for category, settings in sorted(plugin_categories.items()):
         st.subheader(f"{category} Settings")
         current_settings = get_plugin_settings(category)
         new_settings = {}
+
         for key, info in settings.items():
+            input_type    = info.get("type", "text")
             default_value = current_settings.get(key, info.get("default", ""))
-            input_type = info.get("type", "text")  # default to text if not specified
+
+            # --- BUTTONS go first ---
+            if input_type == "button":
+                if st.button(info["label"], key=f"{category}_{key}_button"):
+                    plugin_obj = next(
+                        (p for p in plugin_registry.values()
+                         if getattr(p, "settings_category", "") == category),
+                        None
+                    )
+                    if plugin_obj and hasattr(plugin_obj, "handle_setting_button"):
+                        result = plugin_obj.handle_setting_button(key)
+                        if result:
+                            st.success(result)
+                # optionally show description under the button
+                if info.get("description"):
+                    st.caption(info["description"])
+                continue  # skip saving a value for buttons
+
+            # PASSWORD
             if input_type == "password":
-                new_value = st.text_input(info.get("label", key), value=default_value, help=info.get("description", ""), type="password")
+                new_value = st.text_input(
+                    info.get("label", key),
+                    value=default_value,
+                    help=info.get("description", ""),
+                    type="password"
+                )
+
+            # FILE
             elif input_type == "file":
-                uploaded_file = st.file_uploader(info.get("label", key), type=["json"], key=f"{category}_{key}")
+                uploaded_file = st.file_uploader(
+                    info.get("label", key),
+                    type=["json"],
+                    key=f"{category}_{key}"
+                )
                 if uploaded_file is not None:
                     try:
                         file_content = uploaded_file.read().decode("utf-8")
-                        json.loads(file_content)  # Validate the JSON
+                        json.loads(file_content)  # validate
                         new_value = file_content
                     except Exception as e:
                         st.error(f"Error in uploaded file for {key}: {e}")
                         new_value = default_value
                 else:
                     new_value = default_value
+
+            # TEXT (fallback)
             else:
-                new_value = st.text_input(info.get("label", key), value=default_value, help=info.get("description", ""))
+                new_value = st.text_input(
+                    info.get("label", key),
+                    value=default_value,
+                    help=info.get("description", "")
+                )
+
             new_settings[key] = new_value
+
         if st.button(f"Save {category} Settings", key=f"save_{category}_unique"):
             save_plugin_settings(category, new_settings)
             st.success(f"{category} settings saved.")
@@ -240,7 +279,7 @@ def build_system_prompt(base_prompt):
 
     return (
         f"Current Date and Time is: {now}\n\n"
-        f"{base_prompt}\n\n"
+        f"{BASE_PROMPT}\n\n"
         f"{tool_instructions}\n\n"
         "If no function is needed, reply normally."
     )
@@ -476,24 +515,24 @@ elif user_input:
     chat_settings = get_chat_settings()
     username = chat_settings["username"]
 
-    # Show and save user input
-    st.chat_message("user", avatar=user_avatar if user_avatar else "🦖").write(user_input)
+    # Show + save input
+    st.chat_message("user", avatar=user_avatar or "🦖").write(user_input)
     save_message("user", username, user_input)
 
-    # Run model
+    # Run LLM and parse function
     response_text = run_async(process_message(username, user_input))
-
-    # ✅ Parse for function call using shared helper
     response_json = parse_function_json(response_text)
 
     if response_json:
         func_response = run_async(process_function_call(response_json, user_question=user_input))
-
-        # ✅ Loop through responses if it's a list
         responses = func_response if isinstance(func_response, list) else [func_response]
 
         for item in responses:
-            save_message("assistant", "assistant", item)
+            if isinstance(item, dict) and "type" in item:
+                save_message("assistant", "assistant", item)
+            else:
+                save_message("assistant", "assistant", item if isinstance(item, str) else json.dumps(item, indent=2))
+
             with st.chat_message("assistant", avatar=assistant_avatar):
                 if isinstance(item, dict) and "type" in item:
                     if item["type"] == "image":
@@ -506,7 +545,7 @@ elif user_input:
                         st.warning(f"[Unsupported content type: {item.get('type')}]")
                 else:
                     st.write(item)
+
     else:
-        # Normal text response
         save_message("assistant", "assistant", response_text)
         st.chat_message("assistant", avatar=assistant_avatar).write(response_text)
