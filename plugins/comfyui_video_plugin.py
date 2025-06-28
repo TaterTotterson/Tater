@@ -11,8 +11,7 @@ from io import BytesIO
 from plugin_base import ToolPlugin
 import discord
 import streamlit as st
-from helpers import redis_client, load_image_from_url
-from chat_helpers import send_waiting_message, save_assistant_message
+from helpers import redis_client, load_image_from_url, send_waiting_message, save_assistant_message
 import base64
 
 client_id = str(uuid.uuid4())
@@ -136,7 +135,6 @@ class ComfyUIVideoPlugin(ToolPlugin):
 
     # --- Discord Handler ---
     async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
-
         user_prompt = args.get("prompt")
         if not user_prompt:
             return "No prompt provided for ComfyUI Video."
@@ -144,8 +142,8 @@ class ComfyUIVideoPlugin(ToolPlugin):
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=self.waiting_prompt_template,
-            save_callback=lambda x: asyncio.create_task(save_assistant_message(message.channel.id, x)),
-            send_callback=lambda x: message.channel.send(x)
+            save_callback=lambda x: save_assistant_message(message.channel.id, x),
+            send_callback=lambda x: asyncio.create_task(message.channel.send(x))
         )
 
         try:
@@ -154,16 +152,16 @@ class ComfyUIVideoPlugin(ToolPlugin):
             await message.channel.send(file=file)
 
             # Save image marker
-            await save_assistant_message(message.channel.id, "🖼️")
+            save_assistant_message(message.channel.id, "🖼️")
 
             # Follow-up
             safe_prompt = user_prompt[:300].strip()
-            system_msg = f'The user has just been shown a looping animated video based on the prompt: "{safe_prompt}".'
+            system_msg = f'The user has just been shown a animated video based on the prompt: "{safe_prompt}".'
             followup = await ollama_client.chat(
                 model=ollama_client.model,
                 messages=[
                     {"role": "system", "content": system_msg},
-                    {"role": "user", "content": "Give them a short, fun message celebrating the video."}
+                    {"role": "user", "content": "Respond with a short, fun message celebrating the video. Do not include any lead-in phrases or instructions — just the message."}
                 ],
                 stream=False,
                 keep_alive=ollama_client.keep_alive,
@@ -171,63 +169,59 @@ class ComfyUIVideoPlugin(ToolPlugin):
             )
             followup_text = followup["message"].get("content", "").strip() or "🎬 Here's your animated video!"
             await message.channel.send(followup_text)
-            await save_assistant_message(message.channel.id, followup_text)
+            save_assistant_message(message.channel.id, followup_text)
 
         except Exception as e:
             error_msg = f"Failed to queue prompt: {e}"
-            await save_assistant_message(message.channel.id, error_msg)
+            save_assistant_message(message.channel.id, error_msg)
             return error_msg
 
         return ""
 
     # --- WebUI Handler ---
     async def handle_webui(self, args, ollama_client, context_length):
-
         user_prompt = args.get("prompt")
         if not user_prompt:
-            return "No prompt provided for ComfyUI Video."
+            return "No prompt provided."
 
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=self.waiting_prompt_template,
-            save_callback=lambda x: asyncio.create_task(save_assistant_message("webui", x)),
-            send_callback=lambda x: st.chat_message("assistant", avatar=load_image_from_url()).write(x)
+            save_callback=lambda x: save_assistant_message("webui", x),
+            send_callback=lambda x: st.chat_message("assistant", avatar=self.assistant_avatar).write(x)
         )
 
         try:
-            video_bytes = await asyncio.to_thread(ComfyUIVideoPlugin.process_prompt, user_prompt)
+            image_bytes = await asyncio.to_thread(ComfyUIVideoPlugin.process_prompt, user_prompt)
 
-            b64_video = base64.b64encode(video_bytes).decode("utf-8")
             image_data = {
                 "type": "image",
-                "name": "generated_video.webp",
-                "data": b64_video,
-                "mimetype": "image/webp"
+                "name": "generated_comfyui.png",
+                "data": base64.b64encode(image_bytes).decode("utf-8"),
+                "mimetype": "image/png"
             }
 
-            # Follow-up
             safe_prompt = user_prompt[:300].strip()
             system_msg = f'The user has just been shown a looping animated video based on the prompt: "{safe_prompt}".'
-            followup = await ollama_client.chat(
+
+            final_response = await ollama_client.chat(
                 model=ollama_client.model,
                 messages=[
                     {"role": "system", "content": system_msg},
-                    {"role": "user", "content": "Give them a short, fun message celebrating the video."}
+                    {"role": "user", "content": "Give them a short, fun message celebrating the video. Do not include any instructions or lead-in phrases — just the message."}
                 ],
                 stream=False,
                 keep_alive=ollama_client.keep_alive,
                 options={"num_ctx": context_length}
             )
-            message_text = followup["message"].get("content", "").strip() or "🎬 Here's your animated video!"
 
-            # Save follow-up message
-            await save_assistant_message("webui", message_text)
-
+            message_text = final_response["message"].get("content", "").strip() or "🎬 Here's your animated video!"
+            save_assistant_message("webui", message_text)
             return [image_data, message_text]
 
         except Exception as e:
             error_msg = f"Failed to queue prompt: {e}"
-            await save_assistant_message("webui", error_msg)
+            save_assistant_message("webui", error_msg)
             return error_msg
 
     # --- IRC Handler ---

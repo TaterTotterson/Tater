@@ -9,8 +9,7 @@ from io import BytesIO
 from plugin_base import ToolPlugin
 import discord
 import base64
-from helpers import redis_client, load_image_from_url
-from chat_helpers import send_waiting_message, save_assistant_message
+from helpers import redis_client, load_image_from_url, send_waiting_message, save_assistant_message
 
 client_id = str(uuid.uuid4())
 
@@ -165,7 +164,7 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
                 filename = args.get("filename", "input.png")
             except Exception:
                 error_msg = "❌ Couldn’t decode `image_bytes`. Provide valid Base64."
-                await save_assistant_message(message.channel.id, error_msg)
+                save_assistant_message(message.channel.id, error_msg)
                 return error_msg
 
         # 3. Search recent messages
@@ -189,7 +188,7 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
             await send_waiting_message(
                 ollama_client=ollama_client,
                 prompt_text=fallback_prompt,
-                save_callback=lambda text: asyncio.create_task(save_assistant_message(message.channel.id, text)),
+                save_callback=lambda text: save_assistant_message(message.channel.id, text),
                 send_callback=lambda msg: message.channel.send(msg)
             )
             return ""
@@ -199,7 +198,7 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=self.waiting_prompt_template,
-            save_callback=lambda text: asyncio.create_task(save_assistant_message(message.channel.id, text)),
+            save_callback=lambda text: save_assistant_message(message.channel.id, text),
             send_callback=lambda msg: message.channel.send(msg)
         )
 
@@ -208,7 +207,7 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
                 self.process_prompt, prompt, image_bytes, filename
             )
             await message.channel.send(file=discord.File(BytesIO(animated), filename="animated.webp"))
-            await save_assistant_message(message.channel.id, "🖼️")
+            save_assistant_message(message.channel.id, "🖼️")
 
             # Friendly follow-up
             safe_prompt = prompt[:300].strip()
@@ -217,7 +216,7 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
                 model=ollama_client.model,
                 messages=[
                     {"role": "system", "content": system_msg},
-                    {"role": "user", "content": "Give them a short, friendly sentence acknowledging the generated animation."}
+                    {"role": "user", "content": "Give them a short, fun message celebrating the animation. Do not include any lead-in phrases or instructions — just the message"}
                 ],
                 stream=False,
                 keep_alive=ollama_client.keep_alive,
@@ -225,11 +224,11 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
             )
             followup_text = followup["message"].get("content", "").strip() or "Here's your animated image!"
             await message.channel.send(followup_text)
-            await save_assistant_message(message.channel.id, followup_text)
+            save_assistant_message(message.channel.id, followup_text)
 
         except Exception as e:
             error = f"❌ Failed to generate animation: {e}"
-            await save_assistant_message(message.channel.id, error)
+            save_assistant_message(message.channel.id, error)
             return error
 
         return ""

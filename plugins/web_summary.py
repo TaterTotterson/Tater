@@ -7,8 +7,7 @@ import streamlit as st
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from plugin_base import ToolPlugin
-from helpers import load_image_from_url, format_irc
-from chat_helpers import send_waiting_message, save_assistant_message
+from helpers import load_image_from_url, format_irc, send_waiting_message, save_assistant_message
 
 load_dotenv()
 logger = logging.getLogger("web_summary")
@@ -85,6 +84,13 @@ class WebSummaryPlugin(ToolPlugin):
         parts.append(text)
         return parts
 
+    async def safe_send(self, channel, content):
+        if len(content) <= 2000:
+            await channel.send(content)
+        else:
+            for chunk in self.split_message(content, 1900):
+                await channel.send(chunk)
+
     async def web_summary(self, url, ollama_client):
         article_text = self.fetch_web_summary(url, ollama_client.model)
         if not article_text:
@@ -122,12 +128,12 @@ class WebSummaryPlugin(ToolPlugin):
         summary = await self.web_summary(url, ollama_client)
         if not summary:
             msg = "Failed to summarize the article."
-            await save_assistant_message(message.channel.id, msg)
+            save_assistant_message(message.channel.id, msg)
             return msg
 
         for chunk in self.split_message(summary, max_response_length):
             await self.safe_send(message.channel, chunk)
-        await save_assistant_message(message.channel.id, summary)
+        save_assistant_message(message.channel.id, summary)
         return ""
 
     async def handle_webui(self, args, ollama_client, context_length):
@@ -145,10 +151,10 @@ class WebSummaryPlugin(ToolPlugin):
         summary = await self.web_summary(url, ollama_client)
         if not summary:
             msg = "Failed to summarize the article."
-            await save_assistant_message("webui:chat_history", msg)
+            save_assistant_message("webui:chat_history", msg)
             return msg
 
-        await save_assistant_message("webui:chat_history", summary)
+        save_assistant_message("webui:chat_history", summary)
         return "\n".join(self.split_message(summary))
 
     async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
@@ -173,14 +179,7 @@ class WebSummaryPlugin(ToolPlugin):
         for chunk in self.split_message(formatted, 400):
             await bot.privmsg(channel, chunk)
 
-        await save_assistant_message(channel, summary)
+        save_assistant_message(channel, summary)
         return ""
-
-    async def safe_send(self, channel, content):
-        if len(content) <= 2000:
-            await channel.send(content)
-        else:
-            for chunk in self.split_message(content, 1900):
-                await channel.send(chunk)
 
 plugin = WebSummaryPlugin()

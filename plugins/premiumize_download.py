@@ -10,15 +10,23 @@ from io import BytesIO
 import requests
 import streamlit as st
 from PIL import Image
+from helpers import load_image_from_url, redis_client, format_irc, send_waiting_message
 
-# Import helper functions and shared redis client from helpers.py.
-from helpers import load_image_from_url, redis_client, format_irc
-from chat_helpers import send_waiting_message, save_assistant_message
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-# Remove local load_dotenv; we'll rely on plugin settings from Redis.
+# ---------------------------------------------------------
+# Save assistant message to Redis history
+# ---------------------------------------------------------
+def save_assistant_message(channel_id, content):
+    key = f"tater:channel:{channel_id}:history"
+    redis_client.rpush(key, json.dumps({
+        "role": "assistant",
+        "username": "assistant",
+        "content": content
+    }))
+    redis_client.ltrim(key, -20, -1)
 
 class PremiumizeDownloadPlugin(ToolPlugin):
     name = "premiumize_download"

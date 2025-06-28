@@ -11,8 +11,7 @@ import streamlit as st
 from duckduckgo_search import DDGS
 import requests
 from plugin_base import ToolPlugin
-from helpers import load_image_from_url, format_irc, extract_json
-from chat_helpers import send_waiting_message, save_assistant_message
+from helpers import load_image_from_url, format_irc, extract_json, send_waiting_message, save_assistant_message
 
 load_dotenv()
 assistant_avatar = load_image_from_url()
@@ -107,7 +106,7 @@ class WebSearchPlugin(ToolPlugin):
             text = text[split:].strip()
         parts.append(text)
         return parts
-
+    
     async def safe_send(self, channel, content):
         if len(content) <= 2000:
             await channel.send(content)
@@ -115,6 +114,9 @@ class WebSearchPlugin(ToolPlugin):
             for chunk in self.split_message(content, 1900):
                 await channel.send(chunk)
 
+    # ---------------------------------------------------------
+    # Discord handler
+    # ---------------------------------------------------------
     async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
         query = args.get("query")
         if not query:
@@ -125,14 +127,14 @@ class WebSearchPlugin(ToolPlugin):
             ollama_client,
             prompt_text=self.waiting_prompt_template.format(mention=mention),
             send_callback=lambda text: asyncio.create_task(self.safe_send(message.channel, text)),
-            save_callback=lambda text: asyncio.create_task(save_assistant_message(message.channel.id, text))
+            save_callback=lambda text: save_assistant_message(message.channel.id, text)
         )
 
         results = self.search_web(query)
         if not results:
             msg = "I couldn't find any relevant search results."
             await self.safe_send(message.channel, msg)
-            await save_assistant_message(message.channel.id, msg)
+            save_assistant_message(message.channel.id, msg)
             return
 
         formatted_results = self.format_search_results(results)
@@ -170,7 +172,7 @@ class WebSearchPlugin(ToolPlugin):
         if not choice_json or choice_json.get("function") != "web_fetch":
             msg = "Failed to parse a valid link from search results."
             await self.safe_send(message.channel, msg)
-            await save_assistant_message(message.channel.id, msg)
+            save_assistant_message(message.channel.id, msg)
             return
 
         link = choice_json["arguments"].get("link")
@@ -178,14 +180,14 @@ class WebSearchPlugin(ToolPlugin):
         if not link:
             msg = "No link was selected for detailed info."
             await self.safe_send(message.channel, msg)
-            await save_assistant_message(message.channel.id, msg)
+            save_assistant_message(message.channel.id, msg)
             return
 
         summary = await asyncio.to_thread(self.fetch_web_summary, link, ollama_client.model)
         if not summary:
             msg = "Failed to extract text from the selected page."
             await self.safe_send(message.channel, msg)
-            await save_assistant_message(message.channel.id, msg)
+            save_assistant_message(message.channel.id, msg)
             return
 
         info_prompt = (
@@ -209,9 +211,12 @@ class WebSearchPlugin(ToolPlugin):
             final_answer = "The assistant couldn't generate a response based on the web content."
 
         await self.safe_send(message.channel, final_answer)
-        await save_assistant_message(message.channel.id, final_answer)
+        save_assistant_message(message.channel.id, final_answer)
         return ""
 
+    # ---------------------------------------------------------
+    # WebUI handler
+    # ---------------------------------------------------------
     async def handle_webui(self, args, ollama_client, context_length):
         await send_waiting_message(
             ollama_client,
@@ -227,7 +232,7 @@ class WebSearchPlugin(ToolPlugin):
         results = self.search_web(query)
         if not results:
             msg = "No results found."
-            await save_assistant_message("webui:chat_history", msg)
+            save_assistant_message("webui:chat_history", msg)
             return msg
 
         formatted_results = self.format_search_results(results)
@@ -264,19 +269,19 @@ class WebSearchPlugin(ToolPlugin):
 
         if not choice_json or choice_json.get("function") != "web_fetch":
             msg = "Failed to parse function response."
-            await save_assistant_message("webui:chat_history", msg)
+            save_assistant_message("webui:chat_history", msg)
             return msg
 
         link = choice_json["arguments"].get("link")
         if not link:
             msg = "No link was selected."
-            await save_assistant_message("webui:chat_history", msg)
+            save_assistant_message("webui:chat_history", msg)
             return msg
 
         summary = await asyncio.to_thread(self.fetch_web_summary, link, ollama_client.model)
         if not summary:
             msg = "Failed to extract content from page."
-            await save_assistant_message("webui:chat_history", msg)
+            save_assistant_message("webui:chat_history", msg)
             return msg
 
         info_prompt = (
@@ -296,11 +301,14 @@ class WebSearchPlugin(ToolPlugin):
         )
 
         final_answer = final_response["message"].get("content", "").strip()
-        await save_assistant_message("webui:chat_history", final_answer)
+        save_assistant_message("webui:chat_history", final_answer)
         return final_answer
 
+    # ---------------------------------------------------------
+    # IRC handler
+    # ---------------------------------------------------------
     async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
-        from helpers import format_irc  # reuse shared function
+        from helpers import format_irc
 
         query = args.get("query")
         if not query:
@@ -382,6 +390,6 @@ class WebSearchPlugin(ToolPlugin):
         for chunk in self.split_message(irc_answer, 400):
             await bot.privmsg(channel, chunk)
 
-        await save_assistant_message(channel, answer)
+        save_assistant_message(channel, answer)
 
 plugin = WebSearchPlugin()
