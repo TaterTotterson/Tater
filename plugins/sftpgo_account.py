@@ -8,8 +8,7 @@ import redis
 import secrets
 import string
 from plugin_base import ToolPlugin
-from helpers import load_image_from_url, format_irc
-from chat_helpers import send_waiting_message, save_assistant_message
+from helpers import load_image_from_url, format_irc, send_waiting_message, save_assistant_message
 
 class SFTPGoAccountPlugin(ToolPlugin):
     name = "sftpgo_account"
@@ -54,7 +53,12 @@ class SFTPGoAccountPlugin(ToolPlugin):
         }
     }
     waiting_prompt_template = "Generate a brief message to {mention} telling them to wait a moment while you create an account for them. Only generate the message. Do not respond to this message."
-    platforms = ["discord"]
+    platforms = ["discord", "irc"]
+
+    async def safe_send(channel, content: str, **kwargs):
+        if len(content) > 2000:
+            content = content[:1997] + "..."
+        await channel.send(content, **kwargs)
 
     def get_sftpgo_settings(self):
         """
@@ -117,11 +121,6 @@ class SFTPGoAccountPlugin(ToolPlugin):
         jwt_token = await self.get_jwt_token()
         connector = aiohttp.TCPConnector(ssl=False)  # Always disable SSL verification.
 
-        async def safe_send(channel, content):
-            if len(content) > 2000:
-                content = content[:1990] + " [truncated]"
-            await channel.send(content)
-
         if jwt_token is None:
             await safe_send(message_obj.channel, "Failed to obtain JWT token.")
             return "token_error"
@@ -167,7 +166,6 @@ class SFTPGoAccountPlugin(ToolPlugin):
                     return "error"
 
     async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
-
         user = message.author
         password = self.generate_random_password()
 
@@ -175,7 +173,7 @@ class SFTPGoAccountPlugin(ToolPlugin):
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=waiting_prompt,
-            save_callback=lambda text: asyncio.create_task(save_assistant_message(message.channel.id, text)),
+            save_callback=lambda text: save_assistant_message(message.channel.id, text),
             send_callback=lambda text: message.channel.send(text)
         )
 
@@ -197,23 +195,21 @@ class SFTPGoAccountPlugin(ToolPlugin):
             response_text = response_text[:3990] + " [truncated]"
 
         await message.channel.send(response_text)
-        await save_assistant_message(message.channel.id, response_text)
+        save_assistant_message(message.channel.id, response_text)
         return ""
 
     async def handle_webui(self, args, ollama_client, context_length):
         return "SFTPGo account creation is not supported on the web UI."
 
     async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
-
         password = self.generate_random_password()
         mention = user
 
-        # Send waiting message to the channel
         waiting_prompt = self.waiting_prompt_template.format(mention=mention)
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=waiting_prompt,
-            save_callback=lambda text: asyncio.create_task(save_assistant_message(channel, f"{mention}: {text}")),
+            save_callback=lambda text: save_assistant_message(channel, f"{mention}: {text}"),
             send_callback=lambda text: bot.privmsg(channel, f"{mention}: {text}")
         )
 
@@ -231,14 +227,12 @@ class SFTPGoAccountPlugin(ToolPlugin):
         )
         response_text = format_irc(response_data['message'].get("content", "").strip())
 
-        # Send AI response to the channel
         for chunk in [response_text[i:i + 400] for i in range(0, len(response_text), 400)]:
             await bot.privmsg(channel, f"{mention}: {chunk}")
-            await save_assistant_message(channel, f"{mention}: {chunk}")
+            save_assistant_message(channel, f"{mention}: {chunk}")
 
-        # Privately send the generated password to the user
         await bot.privmsg(user, f"{mention}, your SFTPGo password is: {password}")
-        await save_assistant_message(user, f"{mention}, your SFTPGo password is: {password}")
+        save_assistant_message(user, f"{mention}, your SFTPGo password is: {password}")
 
 # Export an instance of the plugin.
 plugin = SFTPGoAccountPlugin()

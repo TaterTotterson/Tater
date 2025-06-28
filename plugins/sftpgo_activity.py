@@ -8,8 +8,7 @@ import redis
 import secrets
 import string
 from plugin_base import ToolPlugin
-from helpers import load_image_from_url, format_irc
-from chat_helpers import send_waiting_message, save_assistant_message
+from helpers import load_image_from_url, format_irc, send_waiting_message, redis_client, save_assistant_message
 import streamlit as st
 
 class SFTPGoActivityPlugin(ToolPlugin):
@@ -43,7 +42,7 @@ class SFTPGoActivityPlugin(ToolPlugin):
         }
     }
     waiting_prompt_template = "Generate a brief message to {mention} telling them to wait a moment while you access the server to see who is using it. Only generate the message. Do not respond to this message."
-    platforms = ["discord", "webui"]
+    platforms = ["discord", "webui", "irc"]
 
     def get_sftpgo_settings(self):
         """
@@ -138,15 +137,13 @@ class SFTPGoActivityPlugin(ToolPlugin):
                 else:
                     error_text = await response.text()
                     return f"Failed to retrieve connections info. Status code: {response.status}, Error: {error_text}"
-
+    
     async def get_current_activity(self, message_obj, ollama_client):
-        """
-        Uses raw connection details and Ollama to generate a friendly summary.
-        """
         raw_activity = await self.get_current_activity_raw(message_obj)
         prompt = (
             f"The following are the current connection details from the server:\n\n{raw_activity}\n\n"
-            "Please provide a brief status report of the current connection status on the server. Only generate the message. Do not respond to this message."
+            "Please provide a brief status report of the current connection status on the server. "
+            "Only generate the message. Do not respond to this message."
         )
         response_data = await ollama_client.chat(
             model=ollama_client.model,
@@ -157,6 +154,7 @@ class SFTPGoActivityPlugin(ToolPlugin):
             response_text = response_text[:3990] + " [truncated]"
         return response_text
 
+    # --- Discord Handler ---
     async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
 
         user = message.author
@@ -164,44 +162,45 @@ class SFTPGoActivityPlugin(ToolPlugin):
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=waiting_prompt,
-            save_callback=lambda text: asyncio.create_task(save_assistant_message(message.channel.id, text)),
+            save_callback=lambda text: save_assistant_message(message.channel.id, text),
             send_callback=lambda text: message.channel.send(text)
         )
 
         result = await self.get_current_activity(message, ollama_client)
         await message.channel.send(result)
-        await save_assistant_message(message.channel.id, result)
+        save_assistant_message(message.channel.id, result)
         return ""
 
-
+    # --- WebUI Handler ---
     async def handle_webui(self, args, ollama_client, context_length):
 
         waiting_prompt = self.waiting_prompt_template.format(mention="User")
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=waiting_prompt,
-            save_callback=lambda text: asyncio.create_task(save_assistant_message("webui", text)),
+            save_callback=lambda text: save_assistant_message("webui", text),
             send_callback=lambda text: st.chat_message("assistant", avatar=load_image_from_url()).write(text)
         )
 
         result = await self.get_current_activity(None, ollama_client)
-        await save_assistant_message("webui", result)
+        save_assistant_message("webui", result)
         return result
 
+    # --- IRC Handler ---
     async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
         mention = user
         waiting_prompt = self.waiting_prompt_template.format(mention=mention)
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=waiting_prompt,
-            save_callback=lambda text: asyncio.create_task(save_assistant_message(channel, f"{mention}: {text}")),
+            save_callback=lambda text: save_assistant_message(channel, f"{mention}: {text}"),
             send_callback=lambda text: bot.privmsg(channel, f"{mention}: {text}")
         )
         result = await self.get_current_activity(None, ollama_client)
         formatted = format_irc(result)
         for chunk in [formatted[i:i + 400] for i in range(0, len(formatted), 400)]:
             await bot.privmsg(channel, chunk)
-            await save_assistant_message(channel, chunk)
+            save_assistant_message(channel, chunk)
 
 # Export an instance of the plugin.
 plugin = SFTPGoActivityPlugin()

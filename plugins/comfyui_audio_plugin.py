@@ -10,11 +10,9 @@ from io import BytesIO
 from plugin_base import ToolPlugin
 import discord
 import streamlit as st
-from helpers import redis_client, load_image_from_url
-from chat_helpers import send_waiting_message, save_assistant_message
+from helpers import redis_client, load_image_from_url, send_waiting_message, save_assistant_message
 import base64
 
-# Generate a unique client ID for this plugin instance.
 client_id = str(uuid.uuid4())
 
 class ComfyUIAudioPlugin(ToolPlugin):
@@ -47,18 +45,15 @@ class ComfyUIAudioPlugin(ToolPlugin):
 
     @staticmethod
     def get_server_address():
-        # Retrieve settings for the audio plugin.
         settings = redis_client.hgetall("plugin_settings:ComfyUI Audio")
         url = settings.get("COMFYUI_AUDIO_URL", "").strip()
         if not url:
             return "localhost:8188"
-        # Remove scheme if present.
         if url.startswith("http://"):
             return url[len("http://"):]
         elif url.startswith("https://"):
             return url[len("https://"):]
-        else:
-            return url
+        return url
 
     @staticmethod
     def queue_prompt(prompt):
@@ -66,7 +61,7 @@ class ComfyUIAudioPlugin(ToolPlugin):
         p = {"prompt": prompt, "client_id": client_id}
         data = json.dumps(p).encode("utf-8")
         req = urllib.request.Request(
-            "http://{}/prompt".format(server_address),
+            f"http://{server_address}/prompt",
             data=data,
             headers={"Content-Type": "application/json"}
         )
@@ -77,13 +72,13 @@ class ComfyUIAudioPlugin(ToolPlugin):
         server_address = ComfyUIAudioPlugin.get_server_address()
         data = {"filename": filename, "subfolder": subfolder, "type": folder_type}
         url_values = urllib.parse.urlencode(data)
-        with urllib.request.urlopen("http://{}/view?{}".format(server_address, url_values)) as response:
+        with urllib.request.urlopen(f"http://{server_address}/view?{url_values}") as response:
             return response.read()
 
     @staticmethod
     def get_history(prompt_id):
         server_address = ComfyUIAudioPlugin.get_server_address()
-        with urllib.request.urlopen("http://{}/history/{}".format(server_address, prompt_id)) as response:
+        with urllib.request.urlopen(f"http://{server_address}/history/{prompt_id}") as response:
             return json.loads(response.read())
 
     @staticmethod
@@ -97,18 +92,16 @@ class ComfyUIAudioPlugin(ToolPlugin):
                 if message["type"] == "executing":
                     data = message["data"]
                     if data["node"] is None and data["prompt_id"] == prompt_id:
-                        break  # Execution is complete.
-            else:
-                continue  # Skip any non-text (e.g. binary) messages.
+                        break
         history = ComfyUIAudioPlugin.get_history(prompt_id)[prompt_id]
         for node_id in history["outputs"]:
             node_output = history["outputs"][node_id]
-            audios_output = []
             if "audio" in node_output:
-                for audio in node_output["audio"]:
-                    audio_data = ComfyUIAudioPlugin.get_audio(audio["filename"], audio["subfolder"], audio["type"])
-                    audios_output.append(audio_data)
-            output_audios[node_id] = audios_output
+                audios_output = [
+                    ComfyUIAudioPlugin.get_audio(audio["filename"], audio["subfolder"], audio["type"])
+                    for audio in node_output["audio"]
+                ]
+                output_audios[node_id] = audios_output
         return output_audios
 
     @staticmethod
@@ -116,28 +109,24 @@ class ComfyUIAudioPlugin(ToolPlugin):
         settings = redis_client.hgetall("plugin_settings:ComfyUI Audio")
         workflow_str = settings.get("COMFYUI_AUDIO_WORKFLOW", "").strip()
         if not workflow_str:
-            raise Exception("No workflow template set in COMFYUI_AUDIO_WORKFLOW. Please provide a valid JSON template.")
+            raise Exception("No workflow template set in COMFYUI_AUDIO_WORKFLOW.")
         return json.loads(workflow_str)
 
     @staticmethod
     def process_prompt(user_prompt: str) -> bytes:
-        # Retrieve and update the workflow template with the user prompt.
         workflow = ComfyUIAudioPlugin.get_workflow_template()
-        # Adjust the workflow nodes as needed for your audio generation.
         workflow["6"]["inputs"]["text"] = user_prompt
         workflow["6"]["widgets_values"] = [user_prompt]
         ws = websocket.WebSocket()
         server_address = ComfyUIAudioPlugin.get_server_address()
-        ws.connect("ws://{}/ws?clientId={}".format(server_address, client_id))
+        ws.connect(f"ws://{server_address}/ws?clientId={client_id}")
         audios = ComfyUIAudioPlugin.get_audios(ws, workflow)
         ws.close()
-        # Return the first audio found.
-        for node_id, audios_list in audios.items():
+        for audios_list in audios.values():
             if audios_list:
                 return audios_list[0]
         raise Exception("No audio returned from ComfyUI.")
 
-    # --- Discord Handler ---
     async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
         user_prompt = args.get("prompt")
         if not user_prompt:
@@ -146,17 +135,16 @@ class ComfyUIAudioPlugin(ToolPlugin):
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=self.waiting_prompt_template,
-            save_callback=lambda text: asyncio.create_task(save_assistant_message(message.channel.id, text)),
+            save_callback=lambda text: save_assistant_message(message.channel.id, text),
             send_callback=lambda text: message.channel.send(text)
         )
 
         try:
-            audio_bytes = await asyncio.to_thread(ComfyUIAudioPlugin.process_prompt, user_prompt)
+            audio_bytes = await asyncio.to_thread(self.process_prompt, user_prompt)
             file = discord.File(BytesIO(audio_bytes), filename="generated_audio.mp3")
             await message.channel.send(file=file)
-            await save_assistant_message(message.channel.id, "🎵")
+            save_assistant_message(message.channel.id, "🎵")
 
-            # Friendly follow-up
             safe_prompt = user_prompt[:300].strip()
             system_msg = f'The user just received an AI-generated audio clip based on this prompt: "{safe_prompt}".'
             final_response = await ollama_client.chat(
@@ -171,34 +159,29 @@ class ComfyUIAudioPlugin(ToolPlugin):
             )
             message_text = final_response["message"].get("content", "").strip() or "Enjoy your track!"
             await message.channel.send(message_text)
-            await save_assistant_message(message.channel.id, message_text)
+            save_assistant_message(message.channel.id, message_text)
 
         except Exception as e:
             error = f"Failed to generate audio: {e}"
             await message.channel.send(error)
-            await save_assistant_message(message.channel.id, error)
+            save_assistant_message(message.channel.id, error)
 
         return ""
 
-    # --- WebUI Handler ---
     async def handle_webui(self, args, ollama_client, context_length):
         user_prompt = args.get("prompt")
         if not user_prompt:
-            return "No prompt provided for ComfyUI Audio."
-
-        from helpers import save_assistant_message  # Ensure it's imported
-        import streamlit as st
+            return "No prompt provided."
 
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=self.waiting_prompt_template,
-            save_callback=lambda text: asyncio.create_task(save_assistant_message("webui", text)),
+            save_callback=lambda text: save_assistant_message("webui", text),
             send_callback=lambda text: st.chat_message("assistant", avatar=self.assistant_avatar).write(text)
         )
 
         try:
-            audio_bytes = await asyncio.to_thread(ComfyUIAudioPlugin.process_prompt, user_prompt)
-
+            audio_bytes = await asyncio.to_thread(self.process_prompt, user_prompt)
             audio_data = {
                 "type": "audio",
                 "name": "generated_audio.mp3",
@@ -220,16 +203,15 @@ class ComfyUIAudioPlugin(ToolPlugin):
             )
 
             message_text = final_response["message"].get("content", "").strip() or "Enjoy your track!"
-            await save_assistant_message("webui", message_text)
+            save_assistant_message("webui", message_text)
 
             return [audio_data, message_text]
 
         except Exception as e:
             error = f"Failed to generate audio: {e}"
-            await save_assistant_message("webui", error)
+            save_assistant_message("webui", error)
             return error
 
-    # --- IRC Handler ---
     async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
         await bot.privmsg(channel, f"{user}: ❌ This plugin only works in Discord or the WebUI.")
 

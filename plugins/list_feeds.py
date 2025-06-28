@@ -9,14 +9,12 @@ from PIL import Image
 from io import BytesIO
 import requests
 import asyncio
-from chat_helpers import send_waiting_message, save_assistant_message
+from helpers import load_image_from_url, send_waiting_message, save_assistant_message
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-# Import helper functions from helpers.py.
-from helpers import load_image_from_url, send_waiting_message
 assistant_avatar = load_image_from_url()  # Uses default avatar URL from helpers.py
 
 # Create a Redis client.
@@ -45,7 +43,7 @@ class ListFeedsPlugin(ToolPlugin):
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=waiting_prompt,
-            save_callback=lambda text: asyncio.create_task(save_assistant_message(message.channel.id, text)),
+            save_callback=lambda text: save_assistant_message(message.channel.id, text),
             send_callback=lambda text: asyncio.create_task(message.channel.send(text))
         )
 
@@ -57,7 +55,7 @@ class ListFeedsPlugin(ToolPlugin):
             final_message = "No RSS feeds are currently being watched."
 
         await message.channel.send(final_message)
-        await save_assistant_message(message.channel.id, final_message)
+        save_assistant_message(message.channel.id, final_message)
         return ""
 
     # --- Web UI Handler ---
@@ -67,7 +65,7 @@ class ListFeedsPlugin(ToolPlugin):
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=waiting_prompt,
-            save_callback=lambda text: asyncio.create_task(save_assistant_message("webui", text)),
+            save_callback=lambda text: save_assistant_message("webui", text),
             send_callback=lambda text: st.chat_message("assistant", avatar=assistant_avatar).write(text)
         )
 
@@ -78,7 +76,7 @@ class ListFeedsPlugin(ToolPlugin):
         else:
             final_message = "No RSS feeds are currently being watched."
 
-        await save_assistant_message("webui", final_message)
+        save_assistant_message("webui", final_message)
         return final_message
 
     # --- IRC Handler ---
@@ -88,7 +86,7 @@ class ListFeedsPlugin(ToolPlugin):
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=waiting_prompt,
-            save_callback=lambda text: asyncio.create_task(save_assistant_message(channel, f"{user}: {text}")),
+            save_callback=lambda text: save_assistant_message(channel, f"{user}: {text}"),
             send_callback=lambda text: bot.privmsg(channel, f"{user}: {text}")
         )
 
@@ -101,7 +99,7 @@ class ListFeedsPlugin(ToolPlugin):
 
         for line in final_message.split("\n"):
             await bot.privmsg(channel, line)
-            await save_assistant_message(channel, line)
+            save_assistant_message(channel, line)
 
 # Export the plugin instance.
 plugin = ListFeedsPlugin()

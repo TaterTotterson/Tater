@@ -9,20 +9,18 @@ import streamlit as st
 from PIL import Image
 from io import BytesIO
 import requests
-from chat_helpers import send_waiting_message, save_assistant_message
+import redis
+from helpers import load_image_from_url, send_waiting_message, save_assistant_message
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-# Import helper functions from helpers.py.
-from helpers import load_image_from_url, send_waiting_message
 assistant_avatar = load_image_from_url()  # Uses default URL from helpers.py
 
 # Create a Redis client (adjust DB if needed)
 redis_host = os.getenv('REDIS_HOST', '127.0.0.1')
 redis_port = int(os.getenv('REDIS_PORT', 6379))
-import redis
 redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
 
 class UnwatchFeedPlugin(ToolPlugin):
@@ -46,7 +44,7 @@ class UnwatchFeedPlugin(ToolPlugin):
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=waiting_prompt,
-            save_callback=lambda text: asyncio.create_task(save_assistant_message(message.channel.id, text)),
+            save_callback=lambda text: save_assistant_message(message.channel.id, text),
             send_callback=lambda text: asyncio.create_task(message.channel.send(text))
         )
 
@@ -61,7 +59,7 @@ class UnwatchFeedPlugin(ToolPlugin):
             final_message = "No feed URL provided for unwatching."
 
         await message.channel.send(final_message)
-        await save_assistant_message(message.channel.id, final_message)
+        save_assistant_message(message.channel.id, final_message)
         return ""
 
     # --- Web UI Handler ---
@@ -71,14 +69,14 @@ class UnwatchFeedPlugin(ToolPlugin):
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=waiting_prompt,
-            save_callback=lambda text: asyncio.create_task(save_assistant_message("webui", text)),
+            save_callback=lambda text: save_assistant_message("webui", text),
             send_callback=lambda text: st.chat_message("assistant", avatar=assistant_avatar).write(text)
         )
 
         feed_url = args.get("feed_url")
         if not feed_url:
             final_message = "No feed URL provided for unwatching."
-            await save_assistant_message("webui", final_message)
+            save_assistant_message("webui", final_message)
             return final_message
 
         removed = redis_client.hdel("rss:feeds", feed_url)
@@ -87,7 +85,7 @@ class UnwatchFeedPlugin(ToolPlugin):
         else:
             final_message = f"Feed {feed_url} was not found in the watch list."
 
-        await save_assistant_message("webui", final_message)
+        save_assistant_message("webui", final_message)
         return final_message
 
     # --- IRC Handler ---
@@ -99,7 +97,7 @@ class UnwatchFeedPlugin(ToolPlugin):
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=waiting_prompt,
-            save_callback=lambda text: asyncio.create_task(save_assistant_message(channel, f"{user}: {text}")),
+            save_callback=lambda text: save_assistant_message(channel, f"{user}: {text}"),
             send_callback=lambda text: bot.privmsg(channel, f"{user}: {text}")
         )
 
@@ -107,7 +105,7 @@ class UnwatchFeedPlugin(ToolPlugin):
         if not feed_url:
             msg = f"{user}: No feed URL provided for unwatching."
             await bot.privmsg(channel, msg)
-            await save_assistant_message(channel, msg)
+            save_assistant_message(channel, msg)
             return
 
         removed = redis_client.hdel("rss:feeds", feed_url)
@@ -117,11 +115,7 @@ class UnwatchFeedPlugin(ToolPlugin):
             msg = f"{user}: Feed {feed_url} was not found in the watch list."
 
         await bot.privmsg(channel, msg)
-        await save_assistant_message(channel, msg)
-
-    # Optional: Keep this helper if still used elsewhere
-    async def generate_error_message(self, prompt, fallback, message):
-        return fallback
+        save_assistant_message(channel, msg)
 
 # Export the plugin instance.
 plugin = UnwatchFeedPlugin()

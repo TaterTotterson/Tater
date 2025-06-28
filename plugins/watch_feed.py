@@ -11,15 +11,12 @@ from io import BytesIO
 import requests
 import asyncio
 import redis
-from helpers import format_irc
-from chat_helpers import send_waiting_message, save_assistant_message
+from helpers import format_irc, load_image_from_url, send_waiting_message, save_assistant_message
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-# Import helper functions from helpers.py.
-from helpers import load_image_from_url, send_waiting_message
 assistant_avatar = load_image_from_url()  # Uses default avatar URL from helpers.py
 
 # Create a Redis client (adjust DB if needed)
@@ -48,7 +45,7 @@ class WatchFeedPlugin(ToolPlugin):
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=waiting_prompt,
-            save_callback=lambda text: asyncio.create_task(save_assistant_message(message.channel.id, text)),
+            save_callback=lambda text: save_assistant_message(message.channel.id, text),
             send_callback=lambda text: asyncio.create_task(message.channel.send(text))
         )
 
@@ -73,7 +70,7 @@ class WatchFeedPlugin(ToolPlugin):
             final_message = "No feed URL provided for watching."
 
         await message.channel.send(final_message)
-        await save_assistant_message(message.channel.id, final_message)
+        save_assistant_message(message.channel.id, final_message)
         return ""
 
     # --- Web UI Handler ---
@@ -83,14 +80,14 @@ class WatchFeedPlugin(ToolPlugin):
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=waiting_prompt,
-            save_callback=lambda text: asyncio.create_task(save_assistant_message("webui", text)),
+            save_callback=lambda text: save_assistant_message("webui", text),
             send_callback=lambda text: st.chat_message("assistant", avatar=assistant_avatar).write(text)
         )
 
         feed_url = args.get("feed_url")
         if not feed_url:
             final_message = "No feed URL provided for watching."
-            await save_assistant_message("webui", final_message)
+            save_assistant_message("webui", final_message)
             return final_message
 
         parsed_feed = feedparser.parse(feed_url)
@@ -109,7 +106,7 @@ class WatchFeedPlugin(ToolPlugin):
             redis_client.hset("rss:feeds", feed_url, last_ts)
             final_message = f"Now watching feed: {feed_url}"
 
-        await save_assistant_message("webui", final_message)
+        save_assistant_message("webui", final_message)
         return final_message
 
     # --- IRC Handler ---
@@ -121,7 +118,7 @@ class WatchFeedPlugin(ToolPlugin):
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=waiting_prompt,
-            save_callback=lambda text: asyncio.create_task(save_assistant_message(channel, f"{user}: {text}")),
+            save_callback=lambda text: save_assistant_message(channel, f"{user}: {text}"),
             send_callback=lambda text: bot.privmsg(channel, f"{user}: {text}")
         )
 
@@ -129,7 +126,7 @@ class WatchFeedPlugin(ToolPlugin):
         if not feed_url:
             msg = f"{user}: No feed URL provided for watching."
             await bot.privmsg(channel, msg)
-            await save_assistant_message(channel, msg)
+            save_assistant_message(channel, msg)
             return
 
         parsed_feed = feedparser.parse(feed_url)
@@ -149,7 +146,7 @@ class WatchFeedPlugin(ToolPlugin):
             msg = f"{user}: Now watching feed: {feed_url}"
 
         await bot.privmsg(channel, msg)
-        await save_assistant_message(channel, msg)
+        save_assistant_message(channel, msg)
 
 # Export the plugin instance.
 plugin = WatchFeedPlugin()

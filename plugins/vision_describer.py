@@ -6,7 +6,7 @@ import os
 import discord
 from plugin_base import ToolPlugin
 from plugin_settings import get_plugin_settings
-from chat_helpers import send_waiting_message, save_assistant_message
+from helpers import send_waiting_message, save_assistant_message, redis_client
 
 def decode_base64(data: str) -> bytes:
     data = data.strip()
@@ -94,17 +94,14 @@ class VisionDescriberPlugin(ToolPlugin):
         return description
         
     async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
-
         image_bytes = None
 
-        # 1. Try image in current message
         if message.attachments:
             for attachment in message.attachments:
                 if any(attachment.filename.lower().endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".gif"]):
                     image_bytes = await attachment.read()
                     break
 
-        # 2. Try image URL
         if not image_bytes and args.get("image_url"):
             try:
                 resp = requests.get(args.get("image_url"))
@@ -113,20 +110,18 @@ class VisionDescriberPlugin(ToolPlugin):
             except Exception as e:
                 error_msg = f"Error downloading image: {str(e)}"
                 await safe_send(message.channel, error_msg)
-                await save_assistant_message(message.channel.id, error_msg)
+                ave_assistant_message(message.channel.id, error_msg)
                 return ""
 
-        # 3. Try base64
         if not image_bytes and args.get("image_base64"):
             try:
                 image_bytes = decode_base64(args.get("image_base64"))
             except Exception as e:
                 error_msg = f"Error decoding base64 image: {str(e)}"
                 await safe_send(message.channel, error_msg)
-                await save_assistant_message(message.channel.id, error_msg)
+                save_assistant_message(message.channel.id, error_msg)
                 return ""
 
-        # 4. Try prior messages
         if not image_bytes:
             async for previous in message.channel.history(limit=10, oldest_first=False):
                 if previous.id == message.id:
@@ -139,7 +134,6 @@ class VisionDescriberPlugin(ToolPlugin):
                 if image_bytes:
                     break
 
-        # 5. No image found — generate AI fallback message
         if not image_bytes:
             fallback_prompt = (
                 f"Generate a message telling {message.author.mention} that no image was found. "
@@ -149,21 +143,19 @@ class VisionDescriberPlugin(ToolPlugin):
             await send_waiting_message(
                 ollama_client=ollama_client,
                 prompt_text=fallback_prompt,
-                save_callback=lambda text: asyncio.create_task(save_assistant_message(message.channel.id, text)),
+                save_callback=lambda text: save_assistant_message(message.channel.id, text),
                 send_callback=lambda text: safe_send(message.channel, text)
             )
             return ""
 
-        # 6. Show real waiting message
         waiting_prompt = self.waiting_prompt_template.format(mention=message.author.mention)
         await send_waiting_message(
             ollama_client=ollama_client,
             prompt_text=waiting_prompt,
-            save_callback=lambda text: asyncio.create_task(save_assistant_message(message.channel.id, text)),
+            save_callback=lambda text: save_assistant_message(message.channel.id, text),
             send_callback=lambda text: safe_send(message.channel, text)
         )
 
-        # 7. Build vision prompt
         additional_prompt = (
             "You are an expert visual assistant. Describe the contents of this image in detail, "
             "mentioning key objects, scenes, or actions if recognizable."
@@ -171,18 +163,16 @@ class VisionDescriberPlugin(ToolPlugin):
 
         server, model = self.get_vision_settings()
 
-        # 8. Run vision model
         description = await asyncio.to_thread(
             self.call_ollama_vision,
             server, model, image_bytes, additional_prompt,
             context_length, -1
         )
 
-        # 9. Send and save response
         if description:
             for chunk in [description[i:i + max_response_length] for i in range(0, len(description), max_response_length)]:
                 await safe_send(message.channel, chunk)
-                await save_assistant_message(message.channel.id, chunk)
+                save_assistant_message(message.channel.id, chunk)
 
         return ""
 
