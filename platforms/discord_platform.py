@@ -183,9 +183,11 @@ class discord_platform(commands.Bot):
                         result = await plugin.handle_discord(
                             message, args, self.ollama, self.ollama.context_length, self.max_response_length
                         )
-                        if result:
+                        if isinstance(result, str) and result.strip():
                             await safe_send(message.channel, result, self.max_response_length)
                             await self.save_message(message.channel.id, "assistant", "assistant", result)
+                        else:
+                            logger.debug(f"[{func}] Plugin returned no usable response (type: {type(result)}).")
                         return  # ✅ Prevent fallback
                     else:
                         error = await self.generate_error_message(
