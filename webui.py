@@ -28,6 +28,7 @@ from helpers import (
 )
 
 dotenv.load_dotenv()
+platform_threads = {}
 
 if "discord_bot_started" not in st.session_state:
     st.session_state["discord_bot_started"] = False
@@ -105,6 +106,10 @@ def set_plugin_enabled(plugin_name, enabled):
     redis_client.hset("plugin_enabled", plugin_name, "true" if enabled else "false")
 
 def start_platform_thread(category_key):
+    if category_key in platform_threads:
+        print(f"⚠️ Platform '{category_key}' is already running (in memory).")
+        return
+
     def platform_runner():
         import importlib
         try:
@@ -122,14 +127,10 @@ def start_platform_thread(category_key):
             import traceback
             traceback.print_exc()
 
-    redis_lock_key = f"tater:platform:{category_key}:lock"
-    if redis_client.get(redis_lock_key) == "true":
-        print(f"⚠️ Platform '{category_key}' is already running (lock found).")
-        return
-
-    # Set the lock with a TTL to prevent orphan locks (e.g., 1 hour)
-    redis_client.set(redis_lock_key, "true", ex=3600)
-    threading.Thread(target=platform_runner, daemon=True).start()
+    # Register thread
+    thread = threading.Thread(target=platform_runner, daemon=True)
+    platform_threads[category_key] = thread
+    thread.start()
 
 def render_plugin_controls(plugin_name):
     current_state = get_plugin_enabled(plugin_name)
