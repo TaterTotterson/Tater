@@ -121,6 +121,14 @@ def start_platform_thread(category_key):
             print(f"❌ Error loading platform '{module_path}': {e}")
             import traceback
             traceback.print_exc()
+
+    redis_lock_key = f"tater:platform:{category_key}:lock"
+    if redis_client.get(redis_lock_key) == "true":
+        print(f"⚠️ Platform '{category_key}' is already running (lock found).")
+        return
+
+    # Set the lock with a TTL to prevent orphan locks (e.g., 1 hour)
+    redis_client.set(redis_lock_key, "true", ex=3600)
     threading.Thread(target=platform_runner, daemon=True).start()
 
 def render_plugin_controls(plugin_name):
@@ -394,13 +402,15 @@ for platform in platform_registry:
     key = platform["key"]  # e.g. irc_platform
     state_key = f"{key}_running"
 
-    if state_key not in st.session_state:
-        st.session_state[state_key] = redis_client.get(state_key) == "true"
+    # Check Redis to determine if this platform should be running
+    platform_should_run = redis_client.get(state_key) == "true"
 
-    if st.session_state[state_key] and not st.session_state["platform_states"].get(key, False):
-        start_platform_thread(key)
-        st.session_state["platform_states"][key] = True
-        st.success(f"{platform['category']} auto-connected.")
+    if platform_should_run:
+        # If not already running in this session, start it and record the state
+        if not st.session_state["platform_states"].get(key, False):
+            start_platform_thread(key)
+            st.session_state["platform_states"][key] = True
+            st.success(f"{platform['category']} auto-connected.")
 
 st.title("Tater Chat Web UI")
 
