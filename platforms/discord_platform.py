@@ -66,11 +66,6 @@ async def safe_send(channel, content, max_length=2000):
     for i in range(0, len(content), max_length):
         await channel.send(content[i:i+max_length])
 
-BASE_PROMPT = (
-    "You are Tater Totterson, a Discord-savvy AI assistant with access to various tools and plugins.\n\n"
-    "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
-)
-
 class discord_platform(commands.Bot):
     def __init__(self, ollama_client, admin_user_id, response_channel_id, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -81,6 +76,12 @@ class discord_platform(commands.Bot):
 
     def build_system_prompt(self):
         now = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
+
+        base_prompt = (
+            "You are Tater Totterson, a Discord-savvy AI assistant with access to various tools and plugins.\n\n"
+            "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
+        )
+
         tool_instructions = "\n\n".join(
             f"Tool: {plugin.name}\n"
             f"Description: {getattr(plugin, 'description', 'No description provided.')}\n"
@@ -88,10 +89,19 @@ class discord_platform(commands.Bot):
             for plugin in plugin_registry.values()
             if ("discord" in plugin.platforms or "both" in plugin.platforms) and get_plugin_enabled(plugin.name)
         )
+
+        behavior_guard = (
+            "Only use a tool if the user's most recent message clearly asks for something specific, like:\n"
+            "'generate', 'summarize', 'download', 'search', etc.\n"
+            "Do not call tools in response to casual remarks, praise, or jokes like 'thanks', 'nice job', or 'wow!'.\n"
+            "In those cases, just reply like a normal assistant.\n\n"
+        )
+
         return (
             f"Current Date and Time is: {now}\n\n"
-            f"{BASE_PROMPT}\n\n"
+            f"{base_prompt}\n\n"
             f"{tool_instructions}\n\n"
+            f"{behavior_guard}"
             "If no function is needed, reply normally."
         )
 
