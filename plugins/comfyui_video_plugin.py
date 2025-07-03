@@ -45,8 +45,22 @@ class ComfyUIVideoPlugin(ToolPlugin):
     assistant_avatar = load_image_from_url()
 
     @staticmethod
+    def insert_prompt_into_workflow(workflow: dict, prompt_text: str) -> dict:
+        """
+        Replaces the text in the first CLIPTextEncode node with user prompt.
+        """
+        for node_id, node in workflow.items():
+            if node.get("class_type") == "CLIPTextEncode":
+                if "inputs" in node and "text" in node["inputs"]:
+                    node["inputs"]["text"] = prompt_text
+                if "widgets_values" in node:
+                    node["widgets_values"] = [prompt_text]
+                break  # Stop after first match
+        return workflow
+
+    @staticmethod
     def get_server_address():
-        settings = redis_client.hgetall(f"plugin_settings:{ComfyUIPlugin.settings_category}")
+        settings = redis_client.hgetall(f"plugin_settings:{ComfyUIVideoPlugin.settings_category}")
         url = settings.get("COMFYUI_VIDEO_URL", "").strip()
         if not url:
             return "localhost:8188"
@@ -110,7 +124,7 @@ class ComfyUIVideoPlugin(ToolPlugin):
 
     @staticmethod
     def get_workflow_template():
-        settings = redis_client.hgetall(f"plugin_settings:{ComfyUIPlugin.settings_category}")
+        settings = redis_client.hgetall(f"plugin_settings:{ComfyUIVideoPlugin.settings_category}")
         workflow_str = settings.get("COMFYUI_VIDEO_WORKFLOW", "").strip()
         if not workflow_str:
             raise Exception("No workflow template set in COMFYUI_VIDEO_WORKFLOW. Please provide a valid JSON template.")
@@ -118,20 +132,24 @@ class ComfyUIVideoPlugin(ToolPlugin):
 
     @staticmethod
     def process_prompt(user_prompt: str) -> bytes:
-        # Retrieve the workflow template from settings and update it with the user prompt
         workflow = ComfyUIVideoPlugin.get_workflow_template()
-        workflow["6"]["inputs"]["text"] = user_prompt
-        workflow["6"]["widgets_values"] = [user_prompt]
+        workflow = ComfyUIVideoPlugin.insert_prompt_into_workflow(workflow, user_prompt)
+
         ws = websocket.WebSocket()
         server_address = ComfyUIVideoPlugin.get_server_address()
-        ws.connect("ws://{}/ws?clientId={}".format(server_address, client_id))
-        images = ComfyUIVideoPlugin.get_images(ws, workflow)
-        ws.close()
-        # Return the first animated WebP found (i.e., the generated video)
+        ws.connect(f"ws://{server_address}/ws?clientId={client_id}")
+
+        try:
+            images = ComfyUIVideoPlugin.get_images(ws, workflow)
+        finally:
+            ws.close()
+
+        # Return the first animated WebP found
         for node_id, imgs in images.items():
             if imgs:
                 return imgs[0]
-        raise Exception("No images returned from ComfyUI.")
+
+        raise Exception("No video/image returned from ComfyUI.")
 
     # --- Discord Handler ---
     async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
@@ -196,9 +214,9 @@ class ComfyUIVideoPlugin(ToolPlugin):
 
             image_data = {
                 "type": "image",
-                "name": "generated_comfyui.png",
+                "name": "generated_video.webp",
                 "data": base64.b64encode(image_bytes).decode("utf-8"),
-                "mimetype": "image/png"
+                "mimetype": "image/webp"
             }
 
             safe_prompt = user_prompt[:300].strip()
