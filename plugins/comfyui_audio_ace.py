@@ -11,6 +11,7 @@ from plugin_base import ToolPlugin
 import discord
 import streamlit as st
 import re
+import yaml
 from helpers import redis_client, load_image_from_url, send_waiting_message, save_assistant_message
 
 client_id = str(uuid.uuid4())
@@ -153,29 +154,19 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         content = response.get("message", {}).get("content", "").strip()
 
         try:
-            # Remove triple backtick wrappers
+            # Remove markdown code block wrappers
             cleaned = re.sub(r"^```(?:json)?\s*|```$", "", content, flags=re.MULTILINE).strip()
 
-            # Attempt to parse normally
+            # Try strict JSON parse
             try:
                 result = json.loads(cleaned)
             except json.JSONDecodeError:
-                # Fallback: escape literal newlines and quotes in the "lyrics" field manually
-                lyrics_match = re.search(r'"lyrics"\s*:\s*"((?:.|\n)*?)"', cleaned, re.DOTALL)
-                if lyrics_match:
-                    lyrics_raw = lyrics_match.group(1)
-                    lyrics_escaped = (
-                        lyrics_raw
-                        .replace("\\", "\\\\")
-                        .replace("\"", "\\\"")
-                        .replace("\n", "\\n")
-                    )
-                    start, end = lyrics_match.span(1)
-                    cleaned = cleaned[:start] + lyrics_escaped + cleaned[end:]
-                    result = json.loads(cleaned)
-                else:
-                    raise
+                # Fall back to YAML (handles unescaped quotes, newlines, etc.)
+                result = yaml.safe_load(cleaned)
+                cleaned = json.dumps(result)  # convert back to proper JSON
+                result = json.loads(cleaned)
 
+            # Extract + validate fields
             tags = result.get("tags", "").strip()
             lyrics = result.get("lyrics", "").strip()
 
