@@ -22,6 +22,7 @@ The following plugins can be triggerd simple by asking Tater after you enable th
 | `comfyui_image_video`    | Animates images into WebP loops using ComfyUI.                              | discord                |
 | `comfyui_video_plugin`   | Creates videos from prompts using ComfyUI and video workflows               | discord, webui         |
 | `comfyui_audio_plugin`   | Generates music/audio from prompts using ComfyUI                            | discord, webui         |
+| `comfyui_audio_ace`      | Composes full-length songs using AceStep. Generates lyrics, tags, and MP3s  | discord, webui         |
 | `ftp_browser`            | Allows users to browse FTP servers via Discord                              | discord                |
 | `sftpgo_account`         | Creates SFTPGo user accounts and their credentials                          | discord, irc           |
 | `sftpgo_activity`        | Views SFTPGo user activity like file transfers and sessions                 | discord, irc           |
