@@ -46,7 +46,7 @@ class ComfyUIVideoPlugin(ToolPlugin):
 
     @staticmethod
     def get_server_address():
-        settings = redis_client.hgetall("plugin_settings:ComfyUI Video")
+        settings = redis_client.hgetall(f"plugin_settings:{ComfyUIPlugin.settings_category}")
         url = settings.get("COMFYUI_VIDEO_URL", "").strip()
         if not url:
             return "localhost:8188"
@@ -110,7 +110,7 @@ class ComfyUIVideoPlugin(ToolPlugin):
 
     @staticmethod
     def get_workflow_template():
-        settings = redis_client.hgetall("plugin_settings:ComfyUI Video")
+        settings = redis_client.hgetall(f"plugin_settings:{ComfyUIPlugin.settings_category}")
         workflow_str = settings.get("COMFYUI_VIDEO_WORKFLOW", "").strip()
         if not workflow_str:
             raise Exception("No workflow template set in COMFYUI_VIDEO_WORKFLOW. Please provide a valid JSON template.")
