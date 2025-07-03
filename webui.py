@@ -275,9 +275,14 @@ for category, settings in sorted(plugin_categories.items()):
             st.success(f"{category} settings saved.")
 
 # ----------------- SYSTEM PROMPT -----------------
-def build_system_prompt(base_prompt):
+def build_system_prompt():
     now = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
-    # We include the full string directly here
+
+    base_prompt = (
+        "You are Tater Totterson, an AI assistant with access to various tools and plugins.\n\n"
+        "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
+    )
+
     tool_instructions = "\n\n".join(
         f"Tool: {plugin.name}\n"
         f"Description: {getattr(plugin, 'description', 'No description provided.')}\n"
@@ -286,22 +291,24 @@ def build_system_prompt(base_prompt):
         if ("webui" in plugin.platforms or "both" in plugin.platforms) and get_plugin_enabled(plugin.name)
     )
 
+    behavior_guard = (
+        "Only use a tool if the user's most recent message clearly asks for something specific, like:\n"
+        "'generate', 'summarize', 'download', 'search', etc.\n"
+        "Do not call tools in response to casual remarks, praise, or jokes like 'thanks', 'nice job', or 'wow!'.\n"
+        "In those cases, just reply like a normal assistant.\n\n"
+    )
+
     return (
         f"Current Date and Time is: {now}\n\n"
-        f"{BASE_PROMPT}\n\n"
+        f"{base_prompt}\n\n"
         f"{tool_instructions}\n\n"
+        f"{behavior_guard}"
         "If no function is needed, reply normally."
     )
 
-BASE_PROMPT = (
-    "You are Tater Totterson, An AI assistant with access to various tools and plugins.\n\n"
-    "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else).:\n\n"
-)
-SYSTEM_PROMPT = build_system_prompt(BASE_PROMPT)
-
 # ----------------- PROCESSING FUNCTIONS -----------------
 async def process_message(user_name, message_content):
-    final_system_prompt = SYSTEM_PROMPT
+    final_system_prompt = build_system_prompt()
     history = load_chat_history()[-20:]
     messages_list = [{"role": "system", "content": final_system_prompt}]
 
