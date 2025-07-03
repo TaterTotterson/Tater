@@ -160,12 +160,18 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
             try:
                 result = json.loads(cleaned)
             except json.JSONDecodeError:
-                # Fallback: escape literal newlines in the "lyrics" field manually
-                lyrics_match = re.search(r'"lyrics"\s*:\s*"((?:.|\n)*?)"', cleaned)
+                # Fallback: escape literal newlines and quotes in the "lyrics" field manually
+                lyrics_match = re.search(r'"lyrics"\s*:\s*"((?:.|\n)*?)"', cleaned, re.DOTALL)
                 if lyrics_match:
                     lyrics_raw = lyrics_match.group(1)
-                    lyrics_escaped = lyrics_raw.replace("\n", "\\n")
-                    cleaned = cleaned.replace(lyrics_raw, lyrics_escaped)
+                    lyrics_escaped = (
+                        lyrics_raw
+                        .replace("\\", "\\\\")
+                        .replace("\"", "\\\"")
+                        .replace("\n", "\\n")
+                    )
+                    start, end = lyrics_match.span(1)
+                    cleaned = cleaned[:start] + lyrics_escaped + cleaned[end:]
                     result = json.loads(cleaned)
                 else:
                     raise
