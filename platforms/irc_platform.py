@@ -103,13 +103,14 @@ def load_irc_history(channel, limit=20):
             formatted.append({"role": "user", "content": f"{sender}: {data['content']}"})
     return formatted
 
-BASE_PROMPT = (
-    "You are Tater Totterson, an IRC-savvy AI assistant with access to various tools and plugins.\n\n"
-    "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
-)
-
 def build_system_prompt():
     now = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
+
+    base_prompt = (
+        "You are Tater Totterson, an IRC-savvy AI assistant with access to various tools and plugins.\n\n"
+        "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
+    )
+
     tool_instructions = "\n\n".join(
         f"Tool: {plugin.name}\n"
         f"Description: {getattr(plugin, 'description', 'No description provided.')}\n"
@@ -117,10 +118,19 @@ def build_system_prompt():
         for plugin in plugin_registry.values()
         if ("irc" in plugin.platforms or "both" in plugin.platforms) and get_plugin_enabled(plugin.name)
     )
+
+    behavior_guard = (
+        "Only use a tool if the user's most recent message clearly asks for something specific, like:\n"
+        "'generate', 'summarize', 'download', 'search', etc.\n"
+        "Do not call tools in response to casual remarks, praise, or jokes like 'thanks', 'nice job', or 'lol'.\n"
+        "In those cases, just reply like a normal assistant.\n\n"
+    )
+
     return (
         f"Current Date and Time is: {now}\n\n"
-        f"{BASE_PROMPT}\n\n"
+        f"{base_prompt}\n\n"
         f"{tool_instructions}\n\n"
+        f"{behavior_guard}"
         "If no function is needed, reply normally."
     )
 
