@@ -46,7 +46,7 @@ class ComfyUIPlugin(ToolPlugin):
 
     @staticmethod
     def get_server_address():
-        settings = redis_client.hgetall("plugin_settings:ComfyUI")
+        settings = redis_client.hgetall(f"plugin_settings:{ComfyUIPlugin.settings_category}")
         url = settings.get("COMFYUI_URL", "").strip()
         if not url:
             return "localhost:8188"
@@ -109,7 +109,7 @@ class ComfyUIPlugin(ToolPlugin):
 
     @staticmethod
     def get_workflow_template():
-        settings = redis_client.hgetall("plugin_settings:ComfyUI")
+        settings = redis_client.hgetall(f"plugin_settings:{ComfyUIPlugin.settings_category}")
         workflow_str = settings.get("COMFYUI_WORKFLOW", "").strip()
         if not workflow_str:
             raise Exception("No workflow template set in COMFYUI_WORKFLOW. Please provide a valid JSON template.")
