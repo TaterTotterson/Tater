@@ -120,10 +120,11 @@ def build_system_prompt():
     )
 
     behavior_guard = (
-        "Only use a tool if the user's most recent message clearly asks for something specific, like:\n"
+        "Only use a tool if the user's most recent message clearly asks you to perform an action — like:\n"
         "'generate', 'summarize', 'download', 'search', etc.\n"
-        "Do not call tools in response to casual remarks, praise, or jokes like 'thanks', 'nice job', or 'lol'.\n"
-        "In those cases, just reply like a normal assistant.\n\n"
+        "Do not call tools in response to casual remarks, praise, or jokes like 'thanks', 'nice job', or 'wow!'.\n"
+        "Also, if the user is asking a general question (e.g., 'are you good at music?'), reply normally — do not use a tool.\n"
+        "Only use tools when the user's intent to act is clear.\n\n"
     )
 
     return (
