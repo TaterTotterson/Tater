@@ -14,6 +14,10 @@ from datetime import datetime
 from plugin_registry import plugin_registry
 from helpers import OllamaClientWrapper, parse_function_json
 import logging
+import threading
+import signal
+import time
+
 
 load_dotenv()
 redis_host = os.getenv('REDIS_HOST', '127.0.0.1')
@@ -94,8 +98,9 @@ class discord_platform(commands.Bot):
             "Only use a tool if the user's most recent message clearly asks you to perform an action — like:\n"
             "'generate', 'summarize', 'download', 'search', etc.\n"
             "Do not call tools in response to casual remarks, praise, or jokes like 'thanks', 'nice job', or 'wow!'.\n"
-            "Also, if the user is asking a general question (e.g., 'are you good at music?'), reply normally — do not use a tool.\n"
-            "Only use tools when the user's intent to act is clear.\n\n"
+            "If the user is asking a general question (e.g., 'are you good at music?'), reply normally — do not use a tool.\n"
+            "Do not simulate or pretend to use a tool. Only use a tool when explicitly needed, and only include tool results when one was actually called.\n"
+            "If you already responded with a tool result and the user repeats or rephrases the request without changing the goal, do not simulate another result. Ask for clarification if needed.\n\n"
         )
 
         return (
@@ -245,33 +250,74 @@ class AdminCommands(commands.Cog):
 async def setup_commands(client: commands.Bot):
     logger.info("Commands setup complete.")
 
-def run():
-    redis_client = redis.Redis(
-        host=os.getenv('REDIS_HOST', '127.0.0.1'),
-        port=int(os.getenv('REDIS_PORT', 6379)),
-        decode_responses=True
-    )
+def run(stop_event=None):
+    token     = redis_client.hget("discord_platform_settings", "discord_token")
+    admin_id  = redis_client.hget("discord_platform_settings", "admin_user_id")
+    channel_id= redis_client.hget("discord_platform_settings", "response_channel_id")
 
-    token = redis_client.hget("discord_platform_settings", "discord_token")
-    admin_id = redis_client.hget("discord_platform_settings", "admin_user_id")
-    channel_id = redis_client.hget("discord_platform_settings", "response_channel_id")
-
+    # Build Ollama client
     ollama_host = os.getenv("OLLAMA_HOST", "127.0.0.1")
     ollama_port = os.getenv("OLLAMA_PORT", "11434")
     ollama_client = OllamaClientWrapper(host=f"http://{ollama_host}:{ollama_port}")
 
-    if token and admin_id and channel_id:
-        client = discord_platform(
-            ollama_client=ollama_client,
-            admin_user_id=int(admin_id),
-            response_channel_id=int(channel_id),
-            command_prefix="!",
-            intents=discord.Intents.all()
-        )
-        client.run(token)
-    else:
-        logger.warning("⚠️ Missing Discord settings in Redis. Bot not started.")
+    if not (token and admin_id and channel_id):
+        print("⚠️ Missing Discord settings in Redis. Bot not started.")
+        return
 
-# 👇 ONLY run this when executing the file directly, NOT on import
-if __name__ == "__main__":
-    run()
+    client = discord_platform(
+        ollama_client=ollama_client,
+        admin_user_id=int(admin_id),
+        response_channel_id=int(channel_id),
+        command_prefix="!",
+        intents=discord.Intents.all()
+    )
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    async def run_bot():
+        try:
+            await client.start(token)
+        except asyncio.CancelledError:
+            # Expected on shutdown
+            pass
+        except Exception as e:
+            print(f"❌ Discord bot crashed: {e}")
+
+    def monitor_stop():
+        # Only start monitor if a stop_event was provided
+        if not stop_event:
+            return
+        while not stop_event.is_set():
+            time.sleep(1)
+        logger.info("🛑 Stop signal received for Discord platform. Logging out.")
+
+        shutdown_complete = threading.Event()
+
+        async def shutdown():
+            try:
+                await client.close()
+                # discord.py keeps an aiohttp.ClientSession at client.http.session
+                if hasattr(client, "http") and getattr(client.http, "session", None):
+                    await client.http.session.close()
+                await asyncio.sleep(0.1)
+            except Exception as e:
+                logger.error(f"Error during Discord shutdown: {e}")
+            finally:
+                shutdown_complete.set()
+
+        # Schedule shutdown coroutine on the bot’s loop
+        loop.call_soon_threadsafe(lambda: asyncio.ensure_future(shutdown()))
+        # Wait up to 15s for it to finish
+        shutdown_complete.wait(timeout=15)
+
+    # Start the monitor thread if we have a stop_event
+    if stop_event:
+        threading.Thread(target=monitor_stop, daemon=True).start()
+
+    # Run the bot — ensures the loop is closed afterwards
+    try:
+        loop.run_until_complete(run_bot())
+    finally:
+        if not loop.is_closed():
+            loop.close()
