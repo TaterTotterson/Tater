@@ -9,9 +9,10 @@ from irc3.plugins.command import command
 from datetime import datetime
 from dotenv import load_dotenv
 import re
+import threading
 from plugin_registry import plugin_registry
 from helpers import OllamaClientWrapper, parse_function_json
-
+import time
 
 load_dotenv()
 logger = logging.getLogger("irc.tater")
@@ -123,8 +124,9 @@ def build_system_prompt():
         "Only use a tool if the user's most recent message clearly asks you to perform an action — like:\n"
         "'generate', 'summarize', 'download', 'search', etc.\n"
         "Do not call tools in response to casual remarks, praise, or jokes like 'thanks', 'nice job', or 'wow!'.\n"
-        "Also, if the user is asking a general question (e.g., 'are you good at music?'), reply normally — do not use a tool.\n"
-        "Only use tools when the user's intent to act is clear.\n\n"
+        "If the user is asking a general question (e.g., 'are you good at music?'), reply normally — do not use a tool.\n"
+        "Do not simulate or pretend to use a tool. Only use a tool when explicitly needed, and only include tool results when one was actually called.\n"
+        "If you already responded with a tool result and the user repeats or rephrases the request without changing the goal, do not simulate another result. Ask for clarification if needed.\n\n"
     )
 
     return (
@@ -193,7 +195,8 @@ class irc_platform:
             logger.error(f"Error processing IRC message: {e}")
             self.bot.privmsg(target, f"{mask.nick}: Sorry, I ran into an error while thinking.")
 
-def run():
+def run(stop_event=None):
+    # 1) Build your IRC config
     config = {
         "nick": IRC_NICK,
         "autojoins": [IRC_CHANNEL],
@@ -201,19 +204,48 @@ def run():
         "port": IRC_PORT,
         "ssl": False,
         "includes": [__name__],
-        "loop": asyncio.get_event_loop(),
     }
-
     if IRC_USERNAME and IRC_PASSWORD:
         config["username"] = IRC_USERNAME
         config["password"] = IRC_PASSWORD
 
-    try:
-        bot = irc3.IrcBot(**config)
-        bot.run(forever=True)
-    except Exception as e:
-        logger.error(f"Failed to start IRC bot: {e}")
+    # 2) Spin up a fresh event loop for this platform
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
-# 👇 Prevent accidental startup on import
-if __name__ == "__main__":
-    run()
+    bot = irc3.IrcBot(loop=loop, **config)
+
+    # 3) Single coroutine to run the bot and watch for stop_event
+    async def bot_runner():
+        try:
+            bot.create_connection()
+            logger.info("✅ IRC bot connected.")
+
+            # If no stop_event was passed, just run forever
+            if not stop_event:
+                await asyncio.Event().wait()
+
+            # Otherwise, poll the threading.Event
+            while not stop_event.is_set():
+                await asyncio.sleep(1)
+
+            logger.info("🛑 stop_event triggered, shutting down IRC bot...")
+            bot.quit("Shutting down.")
+            await asyncio.sleep(0.5)
+
+        except asyncio.CancelledError:
+            # expected on shutdown
+            pass
+        except Exception as e:
+            logger.error(f"❌ IRC bot error: {e}")
+
+    # 4) Run it & ensure clean loop shutdown
+    try:
+        loop.run_until_complete(bot_runner())
+    finally:
+        # cancel any leftover tasks
+        pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+        for task in pending:
+            task.cancel()
+        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        loop.close()
