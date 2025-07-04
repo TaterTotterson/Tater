@@ -125,8 +125,9 @@ def build_system_prompt():
         "'generate', 'summarize', 'download', 'search', etc.\n"
         "Do not call tools in response to casual remarks, praise, or jokes like 'thanks', 'nice job', or 'wow!'.\n"
         "If the user is asking a general question (e.g., 'are you good at music?'), reply normally — do not use a tool.\n"
-        "Do not simulate or pretend to use a tool. Only use a tool when explicitly needed, and only include tool results when one was actually called.\n"
-        "If you already responded with a tool result and the user repeats or rephrases the request without changing the goal, do not simulate another result. Ask for clarification if needed.\n\n"
+        "Do not simulate or pretend to use a tool. Only include tool results when one was actually triggered.\n"
+        "Avoid copying your own past responses or following patterns from earlier messages just because they included tools or emojis.\n"
+        "Focus on clear user intent, not style imitation. If in doubt, respond simply.\n\n"
     )
 
     return (
