@@ -7,18 +7,17 @@ import json
 import re
 import asyncio
 import dotenv
-import feedparser
 import logging
 import base64
 import requests
+import importlib
+import threading
 from datetime import datetime
 from PIL import Image
 from io import BytesIO
 from plugin_registry import plugin_registry
 from rss import RSSManager
 from platform_registry import platform_registry
-import threading
-import subprocess
 from helpers import (
     OllamaClientWrapper,
     load_image_from_url,
@@ -27,11 +26,59 @@ from helpers import (
     parse_function_json
 )
 
-dotenv.load_dotenv()
-platform_threads = {}
+for handler in logging.root.handlers[:]:
+    logging.root.removeHandler(handler)
 
-if "discord_bot_started" not in st.session_state:
-    st.session_state["discord_bot_started"] = False
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-8s %(name)-20s %(message)s"
+)
+
+logging.getLogger("discord.http").setLevel(logging.WARNING)
+logging.getLogger("irc3").setLevel(logging.WARNING)
+
+dotenv.load_dotenv()
+
+@st.cache_resource(show_spinner=False)
+def _start_rss(_ollama_client):
+    def _run():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        rss_manager = RSSManager(ollama_client=_ollama_client)
+        loop.run_until_complete(rss_manager.poll_feeds())
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return t
+
+@st.cache_resource(show_spinner=False)
+def _start_platform(key):
+    stop_flag = st.session_state.setdefault("platform_stop_flags", {}).get(key)
+    thread = st.session_state.setdefault("platform_threads", {}).get(key)
+
+    # 🛑 Don't start again if already running
+    if thread and thread.is_alive():
+        return thread, stop_flag
+
+    stop_flag = threading.Event()
+
+    def runner():
+        try:
+            module = importlib.import_module(f"platforms.{key}")
+            if hasattr(module, "run"):
+                module.run(stop_event=stop_flag)
+            else:
+                print(f"⚠️ No run(stop_event) in platforms.{key}")
+        except Exception as e:
+            print(f"❌ Error in platform {key}: {e}")
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+
+    # Save for future shutdown/restart
+    st.session_state["platform_threads"][key] = thread
+    st.session_state["platform_stop_flags"][key] = stop_flag
+
+    return thread, stop_flag
 
 # Redis configuration for the web UI (using a separate DB)
 redis_host = os.getenv('REDIS_HOST', '127.0.0.1')
@@ -105,71 +152,71 @@ def get_plugin_enabled(plugin_name):
 def set_plugin_enabled(plugin_name, enabled):
     redis_client.hset("plugin_enabled", plugin_name, "true" if enabled else "false")
 
-def start_platform_thread(category_key):
-    if category_key in platform_threads:
-        print(f"⚠️ Platform '{category_key}' is already running (in memory).")
-        return
-
-    def platform_runner():
-        import importlib
-        try:
-            module_path = category_key if category_key.startswith("platforms.") else f"platforms.{category_key}"
-            module = importlib.import_module(module_path)
-            print(f"✅ Imported module: {module_path}")
-            if hasattr(module, "run"):
-                module.run()
-            else:
-                print(f"⚠️ No `run()` entry point found in module '{module_path}'")
-        except ModuleNotFoundError:
-            print(f"❌ Module '{module_path}' not found.")
-        except Exception as e:
-            print(f"❌ Error loading platform '{module_path}': {e}")
-            import traceback
-            traceback.print_exc()
-
-    # Register thread
-    thread = threading.Thread(target=platform_runner, daemon=True)
-    platform_threads[category_key] = thread
-    thread.start()
-
 def render_plugin_controls(plugin_name):
     current_state = get_plugin_enabled(plugin_name)
     toggle_state = st.toggle(plugin_name, value=current_state, key=f"plugin_toggle_{plugin_name}")
     set_plugin_enabled(plugin_name, toggle_state)
 
 def render_platform_controls(platform, redis_client):
-    category = platform["label"]  
-    key = platform["key"]
-    required = platform["required"]
+    category     = platform["label"]
+    key          = platform["key"]
+    required     = platform["required"]
+    short_name   = category.replace(" Settings", "").strip()
+    state_key    = f"{key}_running"
+    cooldown_key = f"tater:cooldown:{key}"
+    cooldown_secs = 10  # 🕒 adjust as needed
 
-    short_name = category.replace(" Settings", "").strip()  # e.g. "Discord"
+    # read current on/off from Redis
+    is_running = (redis_client.get(state_key) == "true")
+    emoji      = "🟢" if is_running else "🔴"
 
-    toggle_key = f"{category}_toggle"
-    state_key = f"{key}_running"
-    if state_key not in st.session_state:
-        st.session_state[state_key] = redis_client.get(state_key) == "true"
+    # force‐off gadget for cooldown toggle feedback
+    force_off_key = f"{category}_toggle_force_off"
+    if st.session_state.get(force_off_key):
+        del st.session_state[force_off_key]
+        is_enabled = False
+    else:
+        is_enabled = st.toggle(f"{emoji} Enable {short_name}",
+                               value=is_running,
+                               key=f"{category}_toggle")
 
-    is_enabled = st.toggle(f"Enable {short_name}", value=st.session_state[state_key], key=toggle_key)
-    if is_enabled and not st.session_state[state_key]:
-        start_platform_thread(key)
-        st.session_state[state_key] = True
+    # --- TURNING ON ---
+    if is_enabled and not is_running:
+        # cooldown check
+        last = redis_client.get(cooldown_key)
+        now  = time.time()
+        if last and now - float(last) < cooldown_secs:
+            remaining = int(cooldown_secs - (now - float(last)))
+            st.warning(f"⏳ Wait {remaining}s before restarting {short_name}.")
+            st.session_state[force_off_key] = True
+            st.rerun()
+
+        # actually start it
+        _start_platform(key)
         redis_client.set(state_key, "true")
-        st.session_state["platform_states"][key] = True
         st.success(f"{short_name} started.")
-    elif not is_enabled and st.session_state[state_key]:
-        st.warning(f"{short_name} will stop on next restart.")
-        st.session_state[state_key] = False
-        redis_client.set(state_key, "false")
 
-    # Settings form
+    # --- TURNING OFF ---
+    elif not is_enabled and is_running:
+        # grab the cached thread & flag, shut it down
+        _, stop_flag = _start_platform(key)
+        stop_flag.set()
+
+        # clear the cache so next enable will spawn anew
+        _start_platform.clear()
+
+        redis_client.set(state_key, "false")
+        redis_client.set(cooldown_key, str(time.time()))
+        st.success(f"{short_name} stopped.")
+
+    # --- SETTINGS FORM ---
     redis_key = f"{key}_settings"
     current_settings = redis_client.hgetall(redis_key)
     new_settings = {}
     for setting_key, setting in required.items():
-        default = current_settings.get(setting_key, setting.get("default", ""))
         new_settings[setting_key] = st.text_input(
             setting["label"],
-            value=default,
+            value=current_settings.get(setting_key, setting.get("default", "")),
             help=setting.get("description", ""),
             key=f"{category}_{setting_key}"
         )
@@ -295,8 +342,9 @@ def build_system_prompt():
         "Only use a tool if the user's most recent message clearly asks you to perform an action — like:\n"
         "'generate', 'summarize', 'download', 'search', etc.\n"
         "Do not call tools in response to casual remarks, praise, or jokes like 'thanks', 'nice job', or 'wow!'.\n"
-        "Also, if the user is asking a general question (e.g., 'are you good at music?'), reply normally — do not use a tool.\n"
-        "Only use tools when the user's intent to act is clear.\n\n"
+        "If the user is asking a general question (e.g., 'are you good at music?'), reply normally — do not use a tool.\n"
+        "Do not simulate or pretend to use a tool. Only use a tool when explicitly needed, and only include tool results when one was actually called.\n"
+        "If you already responded with a tool result and the user repeats or rephrases the request without changing the goal, do not simulate another result. Ask for clarification if needed.\n\n"
     )
     
     return (
@@ -392,21 +440,9 @@ uploaded_files = st.sidebar.file_uploader(
 )
 
 # ------------------ RSS ------------------
-if "rss_started" not in st.session_state:
-    st.session_state["rss_started"] = True
-
-    def start_rss_background():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        rss_manager = RSSManager(ollama_client=ollama_client)
-        loop.run_until_complete(rss_manager.poll_feeds())
-
-    threading.Thread(target=start_rss_background, daemon=True).start()
+_start_rss(ollama_client)
 
 # ------------------ PLATFORM MANAGEMENT ------------------
-if "platform_states" not in st.session_state:
-    st.session_state["platform_states"] = {}
-
 for platform in platform_registry:
     key = platform["key"]  # e.g. irc_platform
     state_key = f"{key}_running"
@@ -415,18 +451,14 @@ for platform in platform_registry:
     platform_should_run = redis_client.get(state_key) == "true"
 
     if platform_should_run:
-        # If not already running in this session, start it and record the state
-        if not st.session_state["platform_states"].get(key, False):
-            start_platform_thread(key)
-            st.session_state["platform_states"][key] = True
-            st.success(f"{platform['category']} auto-connected.")
+        _start_platform(key)
+        st.success(f"{platform['category']} auto-connected.")
 
 st.title("Tater Chat Web UI")
 
 chat_settings = get_chat_settings()
-user_avatar = None
-if chat_settings.get("avatar"):
-    user_avatar = load_avatar_image(chat_settings["avatar"])
+avatar_b64 = chat_settings.get("avatar")
+user_avatar = load_avatar_image(avatar_b64) if avatar_b64 else None
 
 if "chat_history_cache" not in st.session_state:
     st.session_state["chat_history_cache"] = load_chat_history()
