@@ -146,7 +146,7 @@ Follow these steps to enable Google Custom Search API and connect it to your bot
 
 ### Step 2: Enable the Custom Search API
 
-1. Visit this link (replace `your-project-id` if needed):  
+1. Visit this link:  
    https://console.developers.google.com/apis/api/customsearch.googleapis.com/overview
 2. Make sure your project is selected (top navbar).
 3. Click **"Enable"**.
