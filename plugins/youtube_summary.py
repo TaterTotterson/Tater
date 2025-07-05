@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 import streamlit as st
 from youtube_transcript_api import YouTubeTranscriptApi
 from plugin_base import ToolPlugin
-from helpers import load_image_from_url, format_irc, send_waiting_message, redis_client, save_assistant_message
+from helpers import load_image_from_url, format_irc, redis_client
 import redis
 import discord
 
@@ -37,6 +37,9 @@ class YouTubeSummaryPlugin(ToolPlugin):
             "description": "Manually check and install the latest version of the transcript API."
         }
     }
+    waiting_prompt_template = (
+        "Generate a brief message to {mention} elling them to wait a moment while I watch this boring video. Only generate the message. Do not respond to this message."
+    )
     platforms = ["discord", "webui", "irc"]
 
     def handle_setting_button(self, key):
@@ -159,23 +162,10 @@ class YouTubeSummaryPlugin(ToolPlugin):
             except:
                 pass
 
-        prompt = (
-            f"Generate a brief message to {message.author.mention} telling them to wait a moment "
-            "while I watch this boring video and summarize it. Only generate the message. Do not respond to this message."
-        )
-
-        await send_waiting_message(
-            ollama_client=ollama_client,
-            prompt_text=prompt,
-            save_callback=lambda text: save_assistant_message(channel.id, text),
-            send_callback=lambda text: asyncio.create_task(self.safe_send(channel, text))
-        )
-
         summary = await self.async_fetch_summary(video_url, ollama_client)
         for part in self.split_message(self.format_article(summary), max_response_length):
             await self.safe_send(channel, part)
 
-        save_assistant_message(channel.id, summary)
         return ""
 
     # ---------------------------------------------------------
@@ -186,20 +176,7 @@ class YouTubeSummaryPlugin(ToolPlugin):
         if not video_url:
             return "No YouTube URL provided."
 
-        prompt = (
-            "Generate a brief message to User telling them to wait a moment while I watch this boring video "
-            "and summarize it. Only generate the message. Do not respond to this message."
-        )
-
-        await send_waiting_message(
-            ollama_client=ollama_client,
-            prompt_text=prompt,
-            save_callback=lambda text: save_assistant_message("webui", text),
-            send_callback=lambda text: st.chat_message("assistant", avatar=assistant_avatar).write(text)
-        )
-
         summary = await self.async_fetch_summary(video_url, ollama_client)
-        save_assistant_message("webui", summary)
         return "\n".join(self.split_message(self.format_article(summary)))
 
     # ---------------------------------------------------------
@@ -212,23 +189,6 @@ class YouTubeSummaryPlugin(ToolPlugin):
         if not video_url:
             return f"{nick}: No YouTube URL provided."
 
-        prompt = (
-            f"Generate a brief message to {nick} telling them to wait a moment while I watch this boring "
-            "video and summarize it. Only generate the message. Do not respond to this message."
-        )
-
-        # Send and save IRC waiting message
-        async def send_and_save_waiting(text):
-            save_assistant_message(channel, text)
-            bot.privmsg(channel, text)
-
-        await send_waiting_message(
-            ollama_client=ollama_client,
-            prompt_text=prompt,
-            save_callback=lambda text: save_assistant_message(channel, text),
-            send_callback=send_and_save_waiting
-        )
-
         summary = await self.async_fetch_summary(video_url, ollama_client)
         if not summary:
             return f"{nick}: Could not generate summary."
@@ -238,7 +198,6 @@ class YouTubeSummaryPlugin(ToolPlugin):
             bot.privmsg(channel, part)
             await asyncio.sleep(0.1)
 
-        save_assistant_message(channel, summary)
         return ""
 
 plugin = YouTubeSummaryPlugin()

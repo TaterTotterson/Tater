@@ -4,7 +4,7 @@ import io
 import asyncio
 import aioftp
 from plugin_base import ToolPlugin
-from helpers import load_image_from_url, redis_client, send_waiting_message, save_assistant_message
+from helpers import load_image_from_url, redis_client, send_waiting_message
 
 async def safe_send(channel, content: str, **kwargs):
     if len(content) > 2000:
@@ -197,29 +197,17 @@ class FtpBrowserPlugin(ToolPlugin):
     async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
         user_id = message.author.id
         FtpBrowserPlugin.user_paths[user_id] = "/"
-
-        waiting_prompt = self.waiting_prompt_template.format(mention=message.author.mention)
-        await send_waiting_message(
-            ollama_client=ollama_client,
-            prompt_text=waiting_prompt,
-            save_callback=lambda text: save_assistant_message(message.channel.id, text),
-            send_callback=lambda text: asyncio.create_task(safe_send(message.channel, text))
-        )
-
         entries = await FtpBrowserPlugin.list_ftp_files("/")
         response_text = "Browsing `/`"
         await safe_send(message.channel, response_text, view=FtpBrowserPlugin.FileBrowserView(self, user_id, "/", entries, ollama_client=ollama_client))
-        save_assistant_message(message.channel.id, response_text)
         return ""
 
     async def handle_webui(self, args, ollama_client, context_length):
         response = "📂 FTP browsing is only available on Discord for now."
-        save_assistant_message("webui", response)
         return response
 
     async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
         message = f"{user}: FTP browsing is only available on Discord for now."
         await bot.privmsg(channel, message)
-        save_assistant_message(channel, message)
 
 plugin = FtpBrowserPlugin()

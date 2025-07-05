@@ -12,7 +12,7 @@ from plugin_base import ToolPlugin
 import requests
 import streamlit as st
 from io import BytesIO
-from helpers import send_waiting_message, save_assistant_message
+from helpers import send_waiting_message
 
 # No need to call load_dotenv here since settings are handled via the WebUI.
 logger = logging.getLogger(__name__)
@@ -138,7 +138,6 @@ class PremiumizeTorrentPlugin(ToolPlugin):
                     if len(download_links) > 10:
                         view = self.PaginatedLinks(download_links, f"Download Links for `{filename}`")
                         await channel.send(content=view.get_page_content(), view=view)
-                        await save_assistant_message(channel.id, f"🧲 Paginated download links sent for `{filename}`.")
                         return f"[Premiumize] Download links sent for `{filename}`."
                     else:
                         links_message = f"**Download Links for `{filename}`:**\n"
@@ -247,26 +246,15 @@ class PremiumizeTorrentPlugin(ToolPlugin):
         if not message.attachments:
             prompt = f"Generate an error message to {message.author.mention} explaining that no torrent file was attached. Only generate the message. Do not respond to this message."
             error_msg = await self.generate_error_message(prompt, "No torrent file attached for Premiumize torrent check.", message)
-            save_assistant_message(message.channel.id, error_msg)
             return error_msg
-
-        waiting_prompt = self.waiting_prompt_template.format(mention=message.author.mention)
-        await send_waiting_message(
-            ollama_client=ollama_client,
-            prompt_text=waiting_prompt,
-            save_callback=lambda text: save_assistant_message(message.channel.id, text),
-            send_callback=lambda text: message.channel.send(text)
-        )
 
         async with message.channel.typing():
             try:
                 result = await self.process_torrent(message.channel, message.attachments[0], max_response_length)
-                save_assistant_message(message.channel.id, result)
                 return result
             except Exception as e:
                 prompt = f"Generate an error message to {message.author.mention} explaining that I was unable to retrieve the Premiumize torrent info. Only generate the message. Do not respond to this message."
                 error_msg = await self.generate_error_message(prompt, f"Failed to retrieve Premiumize torrent info: {e}", message)
-                save_assistant_message(message.channel.id, error_msg)
                 return error_msg
 
     async def handle_webui(self, args, ollama_client, context_length):

@@ -16,18 +16,6 @@ from helpers import load_image_from_url, redis_client, format_irc, send_waiting_
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-# ---------------------------------------------------------
-# Save assistant message to Redis history
-# ---------------------------------------------------------
-def save_assistant_message(channel_id, content):
-    key = f"tater:channel:{channel_id}:history"
-    redis_client.rpush(key, json.dumps({
-        "role": "assistant",
-        "username": "assistant",
-        "content": content
-    }))
-    redis_client.ltrim(key, -20, -1)
-
 class PremiumizeDownloadPlugin(ToolPlugin):
     name = "premiumize_download"
     usage = (
@@ -187,13 +175,6 @@ class PremiumizeDownloadPlugin(ToolPlugin):
     async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
         url = args.get("url")
         if url:
-            waiting_prompt = self.waiting_prompt_template.format(mention=message.author.mention)
-            await send_waiting_message(
-                ollama_client=ollama_client,
-                prompt_text=waiting_prompt,
-                save_callback=lambda text: None,
-                send_callback=lambda text: message.channel.send(text)
-            )
             async with message.channel.typing():
                 try:
                     await PremiumizeDownloadPlugin.process_download_discord(message.channel, url, max_response_length)
@@ -208,27 +189,14 @@ class PremiumizeDownloadPlugin(ToolPlugin):
             return error_msg
 
     async def handle_webui(self, args, ollama_client, context_length):
-        from helpers import save_assistant_message, load_image_from_url
-        import streamlit as st
-
         mention = "User"
-        waiting_prompt = self.waiting_prompt_template.format(mention=mention)
-
-        await send_waiting_message(
-            ollama_client=ollama_client,
-            prompt_text=waiting_prompt,
-            save_callback=lambda text: asyncio.create_task(save_assistant_message("webui", text)),
-            send_callback=lambda text: st.chat_message("assistant", avatar=load_image_from_url()).write(text)
-        )
 
         url = args.get("url")
         if not url:
             error_msg = "No URL provided for Premiumize download check."
-            await save_assistant_message("webui", error_msg)
             return error_msg
 
         result = await PremiumizeDownloadPlugin.process_download_web(url)
-        await save_assistant_message("webui", result)
         return result
 
     async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
@@ -239,24 +207,13 @@ class PremiumizeDownloadPlugin(ToolPlugin):
         if not url:
             error_msg = f"{mention}: No URL provided for Premiumize download check."
             await bot.privmsg(channel, error_msg)
-            await save_assistant_message(channel, error_msg)
             return
-
-        waiting_prompt = self.waiting_prompt_template.format(mention=mention)
-        await send_waiting_message(
-            ollama_client=ollama_client,
-            prompt_text=waiting_prompt,
-            save_callback=lambda text: asyncio.create_task(save_assistant_message(channel, f"{mention}: {text}")),
-            send_callback=lambda text: bot.privmsg(channel, f"{mention}: {text}")
-        )
 
         result = await PremiumizeDownloadPlugin.process_download_web(url)
         result_formatted = format_irc(result)
 
         for chunk in [result_formatted[i:i + 400] for i in range(0, len(result_formatted), 400)]:
             await bot.privmsg(channel, chunk)
-            await save_assistant_message(channel, chunk)
-
 
     async def generate_error_message(self, prompt, fallback, message):
         return fallback

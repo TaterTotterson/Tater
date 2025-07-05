@@ -164,7 +164,6 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
                 filename = args.get("filename", "input.png")
             except Exception:
                 error_msg = "❌ Couldn’t decode `image_bytes`. Provide valid Base64."
-                save_assistant_message(message.channel.id, error_msg)
                 return error_msg
 
         # 3. Search recent messages
@@ -195,13 +194,6 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
 
         prompt = args.get("prompt", "").strip() or "A gentle animation of the provided image."
 
-        await send_waiting_message(
-            ollama_client=ollama_client,
-            prompt_text=self.waiting_prompt_template,
-            save_callback=lambda text: save_assistant_message(message.channel.id, text),
-            send_callback=lambda msg: message.channel.send(msg)
-        )
-
         try:
             animated = await asyncio.to_thread(
                 self.process_prompt, prompt, image_bytes, filename
@@ -224,11 +216,9 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
             )
             followup_text = followup["message"].get("content", "").strip() or "Here's your animated image!"
             await message.channel.send(followup_text)
-            save_assistant_message(message.channel.id, followup_text)
 
         except Exception as e:
             error = f"❌ Failed to generate animation: {e}"
-            save_assistant_message(message.channel.id, error)
             return error
 
         return ""

@@ -12,7 +12,7 @@ import discord
 import streamlit as st
 import re
 import yaml
-from helpers import redis_client, load_image_from_url, send_waiting_message, save_assistant_message
+from helpers import redis_client, load_image_from_url, save_assistant_message
 
 client_id = str(uuid.uuid4())
 
@@ -259,13 +259,6 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         if not user_prompt:
             return "No prompt provided."
 
-        await send_waiting_message(
-            ollama_client=ollama_client,
-            prompt_text=self.waiting_prompt_template,
-            save_callback=lambda text: save_assistant_message(message.channel.id, text),
-            send_callback=lambda text: message.channel.send(text)
-        )
-
         try:
             tags, lyrics = await self.generate_tags_and_lyrics(user_prompt, ollama_client, context_length)
             audio_bytes = await asyncio.to_thread(self.process_prompt, user_prompt, tags, lyrics)
@@ -288,12 +281,10 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
 
             comment = response["message"].get("content", "").strip() or "Hope you enjoy the track!"
             await message.channel.send(comment)
-            save_assistant_message(message.channel.id, comment)
 
         except Exception as e:
             error = f"🎵 Failed to create song: {e}"
             await message.channel.send(error)
-            save_assistant_message(message.channel.id, error)
 
         return ""
 
@@ -301,13 +292,6 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         user_prompt = args.get("prompt")
         if not user_prompt:
             return "No prompt provided."
-
-        await send_waiting_message(
-            ollama_client=ollama_client,
-            prompt_text=self.waiting_prompt_template,
-            save_callback=lambda text: save_assistant_message("webui", text),
-            send_callback=lambda text: st.chat_message("assistant", avatar=self.assistant_avatar).write(text)
-        )
 
         try:
             tags, lyrics = await self.generate_tags_and_lyrics(user_prompt, ollama_client, context_length)
@@ -333,13 +317,11 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
             )
 
             message_text = response["message"].get("content", "").strip() or "Hope you enjoy the track!"
-            save_assistant_message("webui", message_text)
 
             return [audio_data, message_text]
 
         except Exception as e:
             error = f"🎵 Failed to create song: {e}"
-            save_assistant_message("webui", error)
             return error
 
     async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
