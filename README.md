@@ -132,7 +132,63 @@ Once the container is running, open your browser and navigate to:
 
 The Streamlit-based web UI will be available for interacting with Tater.
 
+---
 
+## 🔍 Web Search Plugin Setup (Google Custom Search)
+
+Follow these steps to enable Google Custom Search API and connect it to your bot.
+
+---
+
+### Step 1: Create or Select a Google Cloud Project
+
+1. Go to: https://console.cloud.google.com/projectselector2/home/dashboard
+2. Click **"New Project"** or select an existing one.
+3. Note your **Project ID** (you’ll need it in later steps).
+
+---
+
+### Step 2: Enable the Custom Search API
+
+1. Visit this link (replace `your-project-id` if needed):  
+   https://console.developers.google.com/apis/api/customsearch.googleapis.com/overview
+2. Make sure your project is selected (top navbar).
+3. Click **"Enable"**.
+
+---
+
+### Step 3: Create an API Key
+
+1. Go to: https://console.cloud.google.com/apis/credentials
+2. Click **“+ CREATE CREDENTIALS” > API key**
+3. Copy the generated API key.
+
+---
+
+### Step 4: Set Up a Programmable Search Engine (CSE)
+
+1. Go to: https://programmablesearchengine.google.com/controlpanel/create
+2. In **Sites to search**, enter: `*.com` or just `www.google.com` temporarily.
+3. Click **Create**.
+4. Go to **Control Panel > Basics**, find your **Search engine ID** (CX).
+5. Click **“Search the entire web”** under **Sites to search**.
+6. Save your changes.
+
+---
+
+### Step 5: Add Keys to the Plugin Settings
+
+In your Tater bot WebUI:
+1. Open the **Plugin Settings** sidebar.
+2. Find the **Web Search** plugin.
+3. Paste:
+   - **Google API Key** → from Step 3
+   - **Google Search Engine ID (CX)** → from Step 4
+4. Save the settings.
+
+---
+
+### ✅ Done! Test a search in Discord, WebUI, or IRC:
 
 ## Redis Persistence
 NOTE: this should be enabled by default in Redis-Stack
