@@ -358,23 +358,19 @@ def build_system_prompt():
 
 # ----------------- PROCESSING FUNCTIONS -----------------
 async def process_message(user_name, message_content):
-    # 1️⃣ Build the system prompt
     final_system_prompt = build_system_prompt()
 
-    # 2️⃣ Load the last 20 messages from Redis (including the one you just saved)
+    # Load last 20 (including the one just saved)
     history = load_chat_history()[-20:]
 
-    # 3️⃣ Translate into LLM format
     messages_list = [{"role": "system", "content": final_system_prompt}]
     for msg in history:
-        if msg["role"] == "user":
-            # include username so the model knows who said what
-            content = f"{msg['username']}: {msg['content']}"
-        else:
-            content = msg["content"]
-        messages_list.append({"role": msg["role"], "content": content})
+        # no more prefixing!
+        messages_list.append({
+            "role": msg["role"],
+            "content": msg["content"]
+        })
 
-    # 4️⃣ Call the model once
     response = await ollama_client.chat(
         model=ollama_client.model,
         messages=messages_list,
@@ -382,8 +378,7 @@ async def process_message(user_name, message_content):
         keep_alive=-1,
         options={"num_ctx": ollama_client.context_length}
     )
-
-    return response["message"].get("content", "").strip()
+    return response["message"]["content"].strip()
 
 async def process_function_call(response_json, user_question=""):
     func = response_json.get("function")
