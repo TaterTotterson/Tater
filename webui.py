@@ -358,33 +358,23 @@ def build_system_prompt():
 
 # ----------------- PROCESSING FUNCTIONS -----------------
 async def process_message(user_name, message_content):
-    # Build the system prompt
+    # 1️⃣ Build the system prompt
     final_system_prompt = build_system_prompt()
 
-    # Load the last 20 messages from Redis
-    history = load_chat_history()  # returns the full list
-    # Keep only the most recent 19 so that after appending the new message we still have 20 total
-    history = history[-19:]
+    # 2️⃣ Load the last 20 messages from Redis (including the one you just saved)
+    history = load_chat_history()[-20:]
 
-    # 3️⃣ Append the current user message
-    history.append({
-        "role": "user",
-        "username": user_name,
-        "content": message_content
-    })
-
-    # Translate Redis-style entries into LLM messages
+    # 3️⃣ Translate into LLM format
     messages_list = [{"role": "system", "content": final_system_prompt}]
     for msg in history:
         if msg["role"] == "user":
-            # prefix with username so the model knows who said what
+            # include username so the model knows who said what
             content = f"{msg['username']}: {msg['content']}"
         else:
-            # assistant messages are their raw content
             content = msg["content"]
         messages_list.append({"role": msg["role"], "content": content})
 
-    # Call the model once
+    # 4️⃣ Call the model once
     response = await ollama_client.chat(
         model=ollama_client.model,
         messages=messages_list,
@@ -563,41 +553,42 @@ if uploaded_files:
 
 # Handle plain‐text user input
 elif user_input := st.chat_input("Chat with Tater…"):
-    # show & persist user message
+    uname = chat_settings["username"]
+
+    # Persist the user’s message to Redis
+    save_message("user", uname, user_input)
+
+    # Refresh in‐memory history from Redis
+    st.session_state.chat_messages = load_chat_history().copy()
+
+    # Display the user’s message
     st.chat_message("user", avatar=user_avatar or "🦖").write(user_input)
-    save_message("user", chat_settings["username"], user_input)
-    st.session_state.chat_messages.append({
-        "role": "user", "username": chat_settings["username"], "content": user_input
-    })
 
-    # get LLM response
+    # Get the assistant’s response
     with st.spinner("Tater is thinking..."):
-        response_text = run_async(process_message(chat_settings["username"], user_input))
+        response_text = run_async(process_message(uname, user_input))
 
-    # parse for function call
+    # Check for a function call
     func_call = parse_function_json(response_text)
     if func_call:
         func_result = run_async(process_function_call(func_call, user_input))
-        results = func_result if isinstance(func_result, list) else [func_result]
-
-        for item in results:
-            with st.chat_message("assistant", avatar=assistant_avatar):
-                if isinstance(item, dict) and item.get("type") == "image":
-                    data = base64.b64decode(item["data"])
-                    st.image(Image.open(BytesIO(data)), caption=item.get("name", ""))
-                elif isinstance(item, dict) and item.get("type") == "audio":
-                    data = base64.b64decode(item["data"])
-                    st.audio(data, format=item.get("mimetype", "audio/mpeg"))
-                else:
-                    st.write(item)
-
-            save_message("assistant", "assistant", item if isinstance(item, str) else item)
-            st.session_state.chat_messages.append({
-                "role": "assistant", "username": "assistant", "content": item
-            })
+        responses = func_result if isinstance(func_result, list) else [func_result]
     else:
-        st.chat_message("assistant", avatar=assistant_avatar).write(response_text)
-        save_message("assistant", "assistant", response_text)
-        st.session_state.chat_messages.append({
-            "role": "assistant", "username": "assistant", "content": response_text
-        })
+        responses = [response_text]
+
+    # Render & persist each assistant response
+    for item in responses:
+        with st.chat_message("assistant", avatar=assistant_avatar):
+            if isinstance(item, dict) and item.get("type") == "image":
+                data = base64.b64decode(item["data"])
+                st.image(Image.open(BytesIO(data)), caption=item.get("name", ""))
+            elif isinstance(item, dict) and item.get("type") == "audio":
+                data = base64.b64decode(item["data"])
+                st.audio(data, format=item.get("mimetype", "audio/mpeg"))
+            else:
+                st.write(item)
+
+        save_message("assistant", "assistant", item)
+
+    # refresh in‐memory history again so chat_messages is fully up to date
+    st.session_state.chat_messages = load_chat_history().copy()
