@@ -11,7 +11,7 @@ from plugin_base import ToolPlugin
 import streamlit as st
 from PIL import Image
 import discord
-from helpers import load_image_from_url, redis_client, send_waiting_message, save_assistant_message
+from helpers import load_image_from_url, redis_client, save_assistant_message
 
 load_dotenv()
 
@@ -114,14 +114,6 @@ class AutomaticPlugin(ToolPlugin):
         if not prompt_text:
             return "No prompt provided for Automatic111."
 
-        waiting_prompt = self.waiting_prompt_template.format(mention=message.author.mention)
-        await send_waiting_message(
-            ollama_client=ollama_client,
-            prompt_text=waiting_prompt,
-            save_callback=lambda text: save_assistant_message(message.channel.id, text),
-            send_callback=lambda text: message.channel.send(text)
-        )
-
         async with message.channel.typing():
             try:
                 image_bytes = await asyncio.to_thread(self.generate_image, prompt_text)
@@ -144,12 +136,10 @@ class AutomaticPlugin(ToolPlugin):
 
                 reply = final_response["message"].get("content", "").strip() or "Here's your image!"
                 await message.channel.send(reply)
-                save_assistant_message(message.channel.id, reply)
 
             except Exception as e:
                 error_msg = f"❌ Failed to generate image: {e}"
                 await message.channel.send(error_msg)
-                save_assistant_message(message.channel.id, error_msg)
 
         return ""
 
@@ -158,13 +148,6 @@ class AutomaticPlugin(ToolPlugin):
         prompt_text = args.get("prompt")
         if not prompt_text:
             return "No prompt provided for Automatic111."
-
-        await send_waiting_message(
-            ollama_client=ollama_client,
-            prompt_text=self.waiting_prompt_template.format(mention="User"),
-            save_callback=lambda text: save_assistant_message("webui", text),
-            send_callback=lambda text: st.chat_message("assistant", avatar=self.assistant_avatar).write(text)
-        )
 
         try:
             image_bytes = await asyncio.to_thread(self.generate_image, prompt_text)
@@ -190,13 +173,11 @@ class AutomaticPlugin(ToolPlugin):
             )
 
             message_text = final_response["message"].get("content", "").strip() or "Here's your image!"
-            save_assistant_message("webui", message_text)
 
             return [image_data, message_text]
 
         except Exception as e:
             error = f"Failed to generate image: {e}"
-            save_assistant_message("webui", error)
             return error
 
     # --- IRC Handler ---

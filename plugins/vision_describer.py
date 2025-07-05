@@ -6,7 +6,7 @@ import os
 import discord
 from plugin_base import ToolPlugin
 from plugin_settings import get_plugin_settings
-from helpers import send_waiting_message, save_assistant_message, redis_client
+from helpers import send_waiting_message, redis_client
 
 def decode_base64(data: str) -> bytes:
     data = data.strip()
@@ -119,7 +119,6 @@ class VisionDescriberPlugin(ToolPlugin):
             except Exception as e:
                 error_msg = f"Error decoding base64 image: {str(e)}"
                 await safe_send(message.channel, error_msg)
-                save_assistant_message(message.channel.id, error_msg)
                 return ""
 
         if not image_bytes:
@@ -148,14 +147,6 @@ class VisionDescriberPlugin(ToolPlugin):
             )
             return ""
 
-        waiting_prompt = self.waiting_prompt_template.format(mention=message.author.mention)
-        await send_waiting_message(
-            ollama_client=ollama_client,
-            prompt_text=waiting_prompt,
-            save_callback=lambda text: save_assistant_message(message.channel.id, text),
-            send_callback=lambda text: safe_send(message.channel, text)
-        )
-
         additional_prompt = (
             "You are an expert visual assistant. Describe the contents of this image in detail, "
             "mentioning key objects, scenes, or actions if recognizable."
@@ -172,7 +163,6 @@ class VisionDescriberPlugin(ToolPlugin):
         if description:
             for chunk in [description[i:i + max_response_length] for i in range(0, len(description), max_response_length)]:
                 await safe_send(message.channel, chunk)
-                save_assistant_message(message.channel.id, chunk)
 
         return ""
 

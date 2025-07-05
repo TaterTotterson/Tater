@@ -157,13 +157,6 @@ class ComfyUIVideoPlugin(ToolPlugin):
         if not user_prompt:
             return "No prompt provided for ComfyUI Video."
 
-        await send_waiting_message(
-            ollama_client=ollama_client,
-            prompt_text=self.waiting_prompt_template,
-            save_callback=lambda x: save_assistant_message(message.channel.id, x),
-            send_callback=lambda x: asyncio.create_task(message.channel.send(x))
-        )
-
         try:
             video_bytes = await asyncio.to_thread(ComfyUIVideoPlugin.process_prompt, user_prompt)
             file = discord.File(BytesIO(video_bytes), filename="generated_video.webp")
@@ -187,11 +180,9 @@ class ComfyUIVideoPlugin(ToolPlugin):
             )
             followup_text = followup["message"].get("content", "").strip() or "🎬 Here's your animated video!"
             await message.channel.send(followup_text)
-            save_assistant_message(message.channel.id, followup_text)
 
         except Exception as e:
             error_msg = f"Failed to queue prompt: {e}"
-            save_assistant_message(message.channel.id, error_msg)
             return error_msg
 
         return ""
@@ -201,13 +192,6 @@ class ComfyUIVideoPlugin(ToolPlugin):
         user_prompt = args.get("prompt")
         if not user_prompt:
             return "No prompt provided."
-
-        await send_waiting_message(
-            ollama_client=ollama_client,
-            prompt_text=self.waiting_prompt_template,
-            save_callback=lambda x: save_assistant_message("webui", x),
-            send_callback=lambda x: st.chat_message("assistant", avatar=self.assistant_avatar).write(x)
-        )
 
         try:
             image_bytes = await asyncio.to_thread(ComfyUIVideoPlugin.process_prompt, user_prompt)
@@ -234,12 +218,10 @@ class ComfyUIVideoPlugin(ToolPlugin):
             )
 
             message_text = final_response["message"].get("content", "").strip() or "🎬 Here's your animated video!"
-            save_assistant_message("webui", message_text)
             return [image_data, message_text]
 
         except Exception as e:
             error_msg = f"Failed to queue prompt: {e}"
-            save_assistant_message("webui", error_msg)
             return error_msg
 
     # --- IRC Handler ---

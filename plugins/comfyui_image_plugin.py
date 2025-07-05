@@ -11,7 +11,7 @@ from io import BytesIO
 from plugin_base import ToolPlugin
 import discord
 import streamlit as st
-from helpers import redis_client, load_image_from_url, format_irc, send_waiting_message, save_assistant_message
+from helpers import redis_client, load_image_from_url, format_irc, save_assistant_message
 import base64
 
 client_id = str(uuid.uuid4())
@@ -169,13 +169,6 @@ class ComfyUIImagePlugin(ToolPlugin):
         if not user_prompt:
             return "No prompt provided for ComfyUI."
 
-        await send_waiting_message(
-            ollama_client=ollama_client,
-            prompt_text=self.waiting_prompt_template,
-            save_callback=lambda x: save_assistant_message(message.channel.id, x),
-            send_callback=lambda x: message.channel.send(x)
-        )
-
         try:
             image_bytes = await asyncio.to_thread(ComfyUIImagePlugin.process_prompt, user_prompt)
             file = discord.File(BytesIO(image_bytes), filename="generated_comfyui.png")
@@ -199,12 +192,10 @@ class ComfyUIImagePlugin(ToolPlugin):
             message_text = final_response["message"].get("content", "").strip() or "Here's your generated image!"
             for chunk in [message_text[i:i + max_response_length] for i in range(0, len(message_text), max_response_length)]:
                 await message.channel.send(chunk)
-            save_assistant_message(message.channel.id, message_text)
 
         except Exception as e:
             error_msg = f"Failed to queue prompt: {e}"
             await message.channel.send(error_msg)
-            save_assistant_message(message.channel.id, error_msg)
 
         return ""
 
@@ -215,13 +206,6 @@ class ComfyUIImagePlugin(ToolPlugin):
         user_prompt = args.get("prompt")
         if not user_prompt:
             return "No prompt provided for ComfyUI."
-
-        await send_waiting_message(
-            ollama_client=ollama_client,
-            prompt_text=self.waiting_prompt_template,
-            save_callback=lambda x: save_assistant_message("webui", x),
-            send_callback=lambda x: st.chat_message("assistant", avatar=self.assistant_avatar).write(x)
-        )
 
         try:
             image_bytes = await asyncio.to_thread(ComfyUIImagePlugin.process_prompt, user_prompt)
@@ -247,12 +231,10 @@ class ComfyUIImagePlugin(ToolPlugin):
             )
 
             message_text = final_response["message"].get("content", "").strip() or "Here's your generated image!"
-            save_assistant_message("webui", message_text)
             return [image_data, message_text]
 
         except Exception as e:
             error_msg = f"Failed to queue prompt: {e}"
-            save_assistant_message("webui", error_msg)
             return error_msg
 
     # ---------------------------------------------------------
@@ -262,6 +244,5 @@ class ComfyUIImagePlugin(ToolPlugin):
         response = "This plugin is only supported on Discord and WebUI."
         formatted = format_irc(response)
         await bot.privmsg(channel, f"{user}: {formatted}")
-        save_assistant_message(channel, f"{user}: {formatted}")
 
 plugin = ComfyUIImagePlugin()
