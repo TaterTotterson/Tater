@@ -23,7 +23,8 @@ from helpers import (
     load_image_from_url,
     run_async,
     set_main_loop,
-    parse_function_json
+    parse_function_json,
+    send_waiting_message
 )
 
 for handler in logging.root.handlers[:]:
@@ -94,11 +95,9 @@ ollama_client = OllamaClientWrapper(host=f'http://{ollama_host}:{ollama_port}')
 main_loop = asyncio.get_event_loop()
 set_main_loop(main_loop)
 
-CHAT_HISTORY_KEY = "webui:chat_history"
-
 st.set_page_config(
     page_title="Tater Chat",
-    page_icon=":material/tooltip_2:"  # can be a URL or a local file path
+    page_icon=":material/tooltip_2:"
 )
 
 def save_message(role, username, content):
@@ -109,15 +108,16 @@ def save_message(role, username, content):
     }
     redis_client.rpush("webui:chat_history", json.dumps(message_data))
     redis_client.ltrim("webui:chat_history", -20, -1)
-    st.session_state.pop("chat_history_cache", None)  # Invalidate cache
 
 def load_chat_history():
     history = redis_client.lrange("webui:chat_history", 0, -1)
     return [json.loads(msg) for msg in history]
 
 def clear_chat_history():
+    # Clear persisted history
     redis_client.delete("webui:chat_history")
-    st.session_state.pop("chat_history_cache", None)
+    # Clear in-memory session list
+    st.session_state.pop("chat_messages", None)
 
 assistant_avatar = load_image_from_url()
 
@@ -164,7 +164,7 @@ def render_platform_controls(platform, redis_client):
     short_name   = category.replace(" Settings", "").strip()
     state_key    = f"{key}_running"
     cooldown_key = f"tater:cooldown:{key}"
-    cooldown_secs = 10  # 🕒 adjust as needed
+    cooldown_secs = 10
 
     # read current on/off from Redis
     is_running = (redis_client.get(state_key) == "true")
@@ -358,30 +358,33 @@ def build_system_prompt():
 
 # ----------------- PROCESSING FUNCTIONS -----------------
 async def process_message(user_name, message_content):
+    # Build the system prompt
     final_system_prompt = build_system_prompt()
-    history = load_chat_history()[-20:]
+
+    # Load the last 20 messages from Redis
+    history = load_chat_history()  # returns the full list
+    # Keep only the most recent 19 so that after appending the new message we still have 20 total
+    history = history[-19:]
+
+    # 3️⃣ Append the current user message
+    history.append({
+        "role": "user",
+        "username": user_name,
+        "content": message_content
+    })
+
+    # Translate Redis-style entries into LLM messages
     messages_list = [{"role": "system", "content": final_system_prompt}]
-
     for msg in history:
-        content = msg.get("content")
-
-        if isinstance(content, str):
-            # Normal text message
-            formatted = f"{msg['username']}: {content}" if msg["role"] == "user" else content
-        elif isinstance(content, dict):
-            # Fallback for image/audio/etc.
-            content_type = content.get("type", "non-text")
-            placeholder = f"[{content_type} content]"
-            formatted = f"{msg['username']}: {placeholder}" if msg["role"] == "user" else placeholder
+        if msg["role"] == "user":
+            # prefix with username so the model knows who said what
+            content = f"{msg['username']}: {msg['content']}"
         else:
-            # Unknown type — be safe
-            formatted = "[unsupported content]"
+            # assistant messages are their raw content
+            content = msg["content"]
+        messages_list.append({"role": msg["role"], "content": content})
 
-        messages_list.append({"role": msg["role"], "content": formatted})
-
-    # Add the current user message
-    messages_list.append({"role": "user", "content": f"{user_name}: {message_content}"})
-
+    # Call the model once
     response = await ollama_client.chat(
         model=ollama_client.model,
         messages=messages_list,
@@ -455,149 +458,146 @@ for platform in platform_registry:
         _start_platform(key)
         st.success(f"{platform['category']} auto-connected.")
 
+# ------------------ Chat ------------------
 st.title("Tater Chat Web UI")
 
 chat_settings = get_chat_settings()
-avatar_b64 = chat_settings.get("avatar")
+avatar_b64  = chat_settings.get("avatar")
 user_avatar = load_avatar_image(avatar_b64) if avatar_b64 else None
 
-if "chat_history_cache" not in st.session_state:
-    st.session_state["chat_history_cache"] = load_chat_history()
+# Initialize in‐memory chat list once
+if "chat_messages" not in st.session_state:
+    st.session_state.chat_messages = load_chat_history().copy()
 
-for msg in st.session_state["chat_history_cache"]:
-    role = msg["role"]
-    avatar = user_avatar if role == "user" else assistant_avatar
+# Render all messages from session state
+for msg in st.session_state.chat_messages:
+    role    = msg["role"]
+    avatar  = user_avatar if role == "user" else assistant_avatar
     content = msg["content"]
 
     with st.chat_message(role, avatar=avatar):
-        if isinstance(content, dict) and "type" in content:
-            media_type = content["type"]
-            if media_type == "image":
-                image_bytes = base64.b64decode(content["data"])
-                st.image(Image.open(BytesIO(image_bytes)), caption=content.get("name", ""))
-            elif media_type == "audio":
-                audio_bytes = base64.b64decode(content["data"])
-                st.audio(audio_bytes, format=content.get("mimetype", "audio/mpeg"))
-            else:
-                st.warning(f"[Unsupported media type: {media_type}]")
+        if isinstance(content, dict) and content.get("type") == "image":
+            data = base64.b64decode(content["data"])
+            st.image(Image.open(BytesIO(data)), caption=content.get("name", ""))
+        elif isinstance(content, dict) and content.get("type") == "audio":
+            data = base64.b64decode(content["data"])
+            st.audio(data, format=content.get("mimetype", "audio/mpeg"))
         else:
             st.write(content)
 
-user_input = st.chat_input("Chat with Tater...")
-
+# Handle attachments first (if any)
 if uploaded_files:
     allowed_extensions = [".torrent", ".png", ".jpg", ".jpeg", ".gif"]
-    # Check for disallowed attachments.
-    for uploaded_file in uploaded_files:
-        if not any(uploaded_file.name.lower().endswith(ext) for ext in allowed_extensions):
-            error_response = run_async(
+    for uf in uploaded_files:
+        if not any(uf.name.lower().endswith(ext) for ext in allowed_extensions):
+            err = run_async(
                 ollama_client.chat(
                     model=ollama_client.model,
-                    messages=[{
-                        "role": "system",
-                        "content": "Tell the user, Only torrent files and image files are allowed. Only tell the user do not respond to this message"
-                    }],
+                    messages=[{"role":"system",
+                               "content":"Only torrent and image files are allowed."}],
                     stream=False,
                     keep_alive=-1,
                     options={"num_ctx": ollama_client.context_length}
                 )
             )
-            st.stop()  # Stop further processing.
-    
-    # If we reach here, all files are allowed.
-    torrent_file = None
-    image_file = None
-    for uploaded_file in uploaded_files:
-        lower_name = uploaded_file.name.lower()
-        if lower_name.endswith(".torrent"):
-            torrent_file = uploaded_file
-            break  # Prioritize torrent files if present.
-        elif lower_name.endswith((".png", ".jpg", ".jpeg", ".gif")):
-            image_file = uploaded_file
+            st.chat_message("assistant", avatar=assistant_avatar).write(err)
+            st.stop()
+
+    torrent_file = next((f for f in uploaded_files if f.name.lower().endswith(".torrent")), None)
+    image_file   = next((f for f in uploaded_files if f.name.lower().endswith((".png", ".jpg", ".jpeg", ".gif"))), None)
 
     if torrent_file:
-        st.chat_message("user", avatar=user_avatar if user_avatar else "🦖").write(f"[Torrent attachment: {torrent_file.name}]")
-        save_message("user", chat_settings["username"], f"[Torrent attachment: {torrent_file.name}]")
-        
-        run_async(
-            send_waiting_message(
+        # user message
+        st.chat_message("user", avatar=user_avatar or "🦖").write(f"[Torrent: {torrent_file.name}]")
+        save_message("user", chat_settings["username"], f"[Torrent: {torrent_file.name}]")
+        st.session_state.chat_messages.append({
+            "role": "user", "username": chat_settings["username"],
+            "content": f"[Torrent: {torrent_file.name}]"
+        })
+
+        # waiting + plugin
+        with st.spinner("Checking torrent..."):
+            run_async(send_waiting_message(
                 ollama_client=ollama_client,
-                prompt_text="Please wait while I check if the torrent file is cached. Only generate the waiting message.",
-                save_callback=lambda text: save_message("assistant", "assistant", text),
-                send_callback=lambda text: st.chat_message("assistant", avatar=assistant_avatar).write(text)
-            )
-        )
-        
-        premiumize_plugin = plugin_registry.get("premiumize_torrent")
-        if premiumize_plugin:
-            torrent_result = run_async(premiumize_plugin.process_torrent_web(torrent_file.read(), torrent_file.name))
-        else:
-            torrent_result = "Error: premiumize plugin not available."
-        
-        if "uploader_key" in st.session_state:
-            st.session_state.pop("uploader_key")
-        save_message("assistant", "assistant", torrent_result)
-        st.chat_message("assistant", avatar=assistant_avatar).write(torrent_result)
-    
+                prompt_text="Please wait while I check this torrent.",
+                save_callback=lambda t: save_message("assistant","assistant",t),
+                send_callback=lambda t: st.chat_message("assistant",avatar=assistant_avatar).write(t)
+            ))
+            plugin = plugin_registry.get("premiumize_torrent")
+            result = run_async(plugin.process_torrent_web(torrent_file.read(), torrent_file.name)) \
+                     if plugin else "Error: no premiumize plugin."
+        st.chat_message("assistant", avatar=assistant_avatar).write(result)
+        save_message("assistant","assistant",result)
+        st.session_state.chat_messages.append({
+            "role": "assistant", "username": "assistant", "content": result
+        })
+
     elif image_file:
-        st.chat_message("user", avatar=user_avatar if user_avatar else "🦖").write(f"[Image attachment: {image_file.name}]")
-        save_message("user", chat_settings["username"], f"[Image attachment: {image_file.name}]")
-        
-        run_async(
-            send_waiting_message(
+        # user message
+        st.chat_message("user", avatar=user_avatar or "🦖").write(f"[Image: {image_file.name}]")
+        save_message("user", chat_settings["username"], f"[Image: {image_file.name}]")
+        st.session_state.chat_messages.append({
+            "role": "user", "username": chat_settings["username"],
+            "content": f"[Image: {image_file.name}]"
+        })
+
+        # waiting + plugin
+        with st.spinner("Analyzing image..."):
+            run_async(send_waiting_message(
                 ollama_client=ollama_client,
-                prompt_text="Please wait while I analyze the image and generate a description. Only generate the waiting message.",
-                save_callback=lambda text: save_message("assistant", "assistant", text),
-                send_callback=lambda text: st.chat_message("assistant", avatar=assistant_avatar).write(text)
-            )
-        )
-        
-        vision_plugin = plugin_registry.get("vision_describer")
-        if vision_plugin:
-            image_result = run_async(vision_plugin.process_image_web(image_file.read(), image_file.name))
-        else:
-            image_result = "Error: vision plugin not available."
-        
-        if "uploader_key" in st.session_state:
-            st.session_state.pop("uploader_key")
-        save_message("assistant", "assistant", image_result)
-        st.chat_message("assistant", avatar=assistant_avatar).write(image_result)
+                prompt_text="Please wait while I analyze this image.",
+                save_callback=lambda t: save_message("assistant","assistant",t),
+                send_callback=lambda t: st.chat_message("assistant",avatar=assistant_avatar).write(t)
+            ))
+            plugin = plugin_registry.get("vision_describer")
+            result = run_async(plugin.process_image_web(image_file.read(), image_file.name)) \
+                     if plugin else "Error: no vision plugin."
+        st.chat_message("assistant", avatar=assistant_avatar).write(result)
+        save_message("assistant","assistant",result)
+        st.session_state.chat_messages.append({
+            "role": "assistant", "username": "assistant", "content": result
+        })
 
-elif user_input:
-    chat_settings = get_chat_settings()
-    username = chat_settings["username"]
+    # reset uploader so sidebar clears
+    st.session_state.pop("uploader_key", None)
 
-    # Show + save input
+# Handle plain‐text user input
+elif user_input := st.chat_input("Chat with Tater…"):
+    # show & persist user message
     st.chat_message("user", avatar=user_avatar or "🦖").write(user_input)
-    save_message("user", username, user_input)
+    save_message("user", chat_settings["username"], user_input)
+    st.session_state.chat_messages.append({
+        "role": "user", "username": chat_settings["username"], "content": user_input
+    })
 
-    # Run LLM and parse function
-    response_text = run_async(process_message(username, user_input))
-    response_json = parse_function_json(response_text)
+    # get LLM response
+    with st.spinner("Tater is thinking..."):
+        response_text = run_async(process_message(chat_settings["username"], user_input))
 
-    if response_json:
-        func_response = run_async(process_function_call(response_json, user_question=user_input))
-        responses = func_response if isinstance(func_response, list) else [func_response]
+    # parse for function call
+    func_call = parse_function_json(response_text)
+    if func_call:
+        func_result = run_async(process_function_call(func_call, user_input))
+        results = func_result if isinstance(func_result, list) else [func_result]
 
-        for item in responses:
-            if isinstance(item, dict) and "type" in item:
-                save_message("assistant", "assistant", item)
-            else:
-                save_message("assistant", "assistant", item if isinstance(item, str) else json.dumps(item, indent=2))
-
+        for item in results:
             with st.chat_message("assistant", avatar=assistant_avatar):
-                if isinstance(item, dict) and "type" in item:
-                    if item["type"] == "image":
-                        image_bytes = base64.b64decode(item["data"])
-                        st.image(Image.open(BytesIO(image_bytes)), caption=item.get("name", ""))
-                    elif item["type"] == "audio":
-                        audio_bytes = base64.b64decode(item["data"])
-                        st.audio(audio_bytes, format=item.get("mimetype", "audio/mpeg"))
-                    else:
-                        st.warning(f"[Unsupported content type: {item.get('type')}]")
+                if isinstance(item, dict) and item.get("type") == "image":
+                    data = base64.b64decode(item["data"])
+                    st.image(Image.open(BytesIO(data)), caption=item.get("name", ""))
+                elif isinstance(item, dict) and item.get("type") == "audio":
+                    data = base64.b64decode(item["data"])
+                    st.audio(data, format=item.get("mimetype", "audio/mpeg"))
                 else:
                     st.write(item)
 
+            save_message("assistant", "assistant", item if isinstance(item, str) else item)
+            st.session_state.chat_messages.append({
+                "role": "assistant", "username": "assistant", "content": item
+            })
     else:
-        save_message("assistant", "assistant", response_text)
         st.chat_message("assistant", avatar=assistant_avatar).write(response_text)
+        save_message("assistant", "assistant", response_text)
+        st.session_state.chat_messages.append({
+            "role": "assistant", "username": "assistant", "content": response_text
+        })
