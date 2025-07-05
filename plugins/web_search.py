@@ -9,9 +9,11 @@ from urllib.parse import urlparse
 from dotenv import load_dotenv
 import streamlit as st
 from duckduckgo_search import DDGS
+import time
+import random
 import requests
 from plugin_base import ToolPlugin
-from helpers import load_image_from_url, format_irc, extract_json, send_waiting_message, save_assistant_message
+from helpers import load_image_from_url, format_irc, extract_json, send_waiting_message, save_assistant_message, redis_client
 
 load_dotenv()
 assistant_avatar = load_image_from_url()
@@ -28,15 +30,62 @@ class WebSearchPlugin(ToolPlugin):
         "}\n"
     )
     description = "Searches the web and returns summarized answers to user questions."
+    settings_category = "Web Search"
+    required_settings = {
+        "GOOGLE_API_KEY": {
+            "label": "Google API Key",
+            "type": "string",
+            "default": "",
+            "description": "Get this from https://console.cloud.google.com/apis/credentials"
+        },
+        "GOOGLE_CX": {
+            "label": "Google Search Engine ID",
+            "type": "string",
+            "default": "",
+            "description": "Get this from https://programmablesearchengine.google.com/controlpanel/all — be sure to enable 'Search the entire web'"
+        }
+    }
     waiting_prompt_template = (
         "Generate a brief message to {mention} telling them to wait a moment while I search the web for additional information. Only generate the message. Do not respond to this message."
     )
     platforms = ["discord", "webui", "irc"]
 
     def search_web(self, query, num_results=10):
+        settings = redis_client.hgetall("plugin_settings:Web Search")
+        api_key = settings.get("GOOGLE_API_KEY", "")
+        cx = settings.get("GOOGLE_CX", "")
+
+        if not api_key or not cx:
+            warning = "Search is not configured. Please set your Google API key and Search Engine ID in the plugin settings."
+            logger.warning(f"[Google CSE] {warning}")
+            return [{"title": "Missing configuration", "href": "", "body": warning}]
+
         try:
-            with DDGS() as ddgs:
-                return ddgs.text(query, max_results=num_results)
+            response = requests.get(
+                "https://www.googleapis.com/customsearch/v1",
+                params={
+                    "key": api_key,
+                    "cx": cx,
+                    "q": query,
+                    "num": num_results
+                },
+                timeout=10
+            )
+
+            if response.status_code != 200:
+                logger.error(f"[Google CSE error] HTTP {response.status_code}: {response.text}")
+                return []
+
+            data = response.json()
+            results = []
+            for item in data.get("items", []):
+                results.append({
+                    "title": item.get("title"),
+                    "href": item.get("link"),
+                    "body": item.get("snippet"),
+                })
+            return results
+
         except Exception as e:
             logger.error(f"[search_web error] {e}")
             return []
