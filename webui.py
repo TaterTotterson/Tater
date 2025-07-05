@@ -384,10 +384,24 @@ async def process_function_call(response_json, user_question=""):
     func = response_json.get("function")
     args = response_json.get("arguments", {})
     from plugin_registry import plugin_registry
+
     if func in plugin_registry:
         plugin = plugin_registry[func]
-        result = await plugin.handle_webui(args, ollama_client, ollama_client.context_length)
-        return result  # Can be string or dict
+
+        # 🌟 Show waiting message if defined
+        if hasattr(plugin, "waiting_prompt_template"):
+            wait_msg = plugin.waiting_prompt_template.format(mention="User")
+            run_async(send_waiting_message(
+                ollama_client,
+                prompt_text=wait_msg,
+                save_callback=lambda t: save_message("assistant", "assistant", t),
+                send_callback=lambda t: st.chat_message("assistant", avatar=assistant_avatar).write(t)
+            ))
+
+        # 🌟 NEW: Show spinner during plugin execution
+        with st.spinner("Tater is thinking..."):
+            result = await plugin.handle_webui(args, ollama_client, ollama_client.context_length)
+        return result
     else:
         return "Received an unknown function call."
 
