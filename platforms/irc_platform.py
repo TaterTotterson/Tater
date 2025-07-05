@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 import re
 import threading
 from plugin_registry import plugin_registry
-from helpers import OllamaClientWrapper, parse_function_json
+from helpers import OllamaClientWrapper, parse_function_json, send_waiting_message
 import time
 
 load_dotenv()
@@ -173,6 +173,13 @@ class irc_platform:
                 args = parsed.get("arguments", {})
                 if func in plugin_registry and get_plugin_enabled(func):
                     plugin = plugin_registry[func]
+
+                    # 👇 NEW: Send waiting message if template exists
+                    if hasattr(plugin, "waiting_prompt_template"):
+                        wait_msg = plugin.waiting_prompt_template.format(mention=mask.nick)
+                        self.bot.privmsg(target, wait_msg)
+                        save_irc_message(channel=target, role="assistant", username="assistant", content=wait_msg)
+
                     result = await plugin.handle_irc(
                         self.bot,
                         target,
