@@ -41,79 +41,73 @@ class WatchFeedPlugin(ToolPlugin):
     # --- Discord Handler ---
     async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
         feed_url = args.get("feed_url")
-        if feed_url:
-            parsed_feed = feedparser.parse(feed_url)
-            if parsed_feed.bozo:
-                final_message = f"Failed to parse feed: {feed_url}"
-            else:
-                last_ts = 0.0
-                if parsed_feed.entries:
-                    for entry in parsed_feed.entries:
-                        if 'published_parsed' in entry:
-                            entry_ts = time.mktime(entry.published_parsed)
-                            if entry_ts > last_ts:
-                                last_ts = entry_ts
-                else:
-                    last_ts = time.time()
-                redis_client.hset("rss:feeds", feed_url, last_ts)
-                final_message = f"Now watching feed: {feed_url}"
-        else:
-            final_message = "No feed URL provided for watching."
+        if not feed_url:
+            return "No feed URL provided for watching."
 
-        await message.channel.send(final_message)
-        return ""
+        parsed_feed = feedparser.parse(feed_url)
+        if parsed_feed.bozo:
+            return f"Failed to parse feed: {feed_url}"
+
+        last_ts = 0.0
+        if parsed_feed.entries:
+            for entry in parsed_feed.entries:
+                if 'published_parsed' in entry:
+                    entry_ts = time.mktime(entry.published_parsed)
+                    if entry_ts > last_ts:
+                        last_ts = entry_ts
+        else:
+            last_ts = time.time()
+
+        redis_client.hset("rss:feeds", feed_url, last_ts)
+        return f"Now watching feed: {feed_url}"
+
 
     # --- Web UI Handler ---
     async def handle_webui(self, args, ollama_client, context_length):
         feed_url = args.get("feed_url")
         if not feed_url:
-            final_message = "No feed URL provided for watching."
-            return final_message
+            return "No feed URL provided for watching."
 
         parsed_feed = feedparser.parse(feed_url)
         if parsed_feed.bozo:
-            final_message = f"Failed to parse feed: {feed_url}"
-        else:
-            last_ts = 0.0
-            if parsed_feed.entries:
-                for entry in parsed_feed.entries:
-                    if 'published_parsed' in entry:
-                        entry_ts = time.mktime(entry.published_parsed)
-                        if entry_ts > last_ts:
-                            last_ts = entry_ts
-            else:
-                last_ts = time.time()
-            redis_client.hset("rss:feeds", feed_url, last_ts)
-            final_message = f"Now watching feed: {feed_url}"
+            return f"Failed to parse feed: {feed_url}"
 
-        return final_message
+        last_ts = 0.0
+        if parsed_feed.entries:
+            for entry in parsed_feed.entries:
+                if 'published_parsed' in entry:
+                    entry_ts = time.mktime(entry.published_parsed)
+                    if entry_ts > last_ts:
+                        last_ts = entry_ts
+        else:
+            last_ts = time.time()
+
+        redis_client.hset("rss:feeds", feed_url, last_ts)
+        return f"Now watching feed: {feed_url}"
+
 
     # --- IRC Handler ---
     async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
-        mention = user
         feed_url = args.get("feed_url")
         if not feed_url:
-            msg = f"{user}: No feed URL provided for watching."
-            await bot.privmsg(channel, msg)
-            return
+            return f"{user}: No feed URL provided for watching."
 
         parsed_feed = feedparser.parse(feed_url)
         if parsed_feed.bozo:
-            msg = f"{user}: Failed to parse feed: {feed_url}"
-        else:
-            last_ts = 0.0
-            if parsed_feed.entries:
-                for entry in parsed_feed.entries:
-                    if 'published_parsed' in entry:
-                        entry_ts = time.mktime(entry.published_parsed)
-                        if entry_ts > last_ts:
-                            last_ts = entry_ts
-            else:
-                last_ts = time.time()
-            redis_client.hset("rss:feeds", feed_url, last_ts)
-            msg = f"{user}: Now watching feed: {feed_url}"
+            return f"{user}: Failed to parse feed: {feed_url}"
 
-        await bot.privmsg(channel, msg)
+        last_ts = 0.0
+        if parsed_feed.entries:
+            for entry in parsed_feed.entries:
+                if 'published_parsed' in entry:
+                    entry_ts = time.mktime(entry.published_parsed)
+                    if entry_ts > last_ts:
+                        last_ts = entry_ts
+        else:
+            last_ts = time.time()
+
+        redis_client.hset("rss:feeds", feed_url, last_ts)
+        return f"{user}: Now watching feed: {feed_url}"
 
 # Export the plugin instance.
 plugin = WatchFeedPlugin()

@@ -11,7 +11,7 @@ from io import BytesIO
 from plugin_base import ToolPlugin
 import discord
 import streamlit as st
-from helpers import redis_client, load_image_from_url, format_irc, save_assistant_message
+from helpers import redis_client, load_image_from_url, format_irc
 import base64
 
 client_id = str(uuid.uuid4())
@@ -170,34 +170,35 @@ class ComfyUIImagePlugin(ToolPlugin):
             return "No prompt provided for ComfyUI."
 
         try:
-            image_bytes = await asyncio.to_thread(ComfyUIImagePlugin.process_prompt, user_prompt)
-            file = discord.File(BytesIO(image_bytes), filename="generated_comfyui.png")
-            await message.channel.send(file=file)
+            async with message.channel.typing():
+                image_bytes = await asyncio.to_thread(ComfyUIImagePlugin.process_prompt, user_prompt)
 
-            save_assistant_message(message.channel.id, "🖼️")
+                safe_prompt = user_prompt[:300].strip()
+                system_msg = f'The user has just been shown an AI-generated image based on the prompt: "{safe_prompt}".'
+                final_response = await ollama_client.chat(
+                    model=ollama_client.model,
+                    messages=[
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": "Respond with a short, fun message celebrating the image. Do not include any lead-in phrases or instructions — just the message."}
+                    ],
+                    stream=False,
+                    keep_alive=ollama_client.keep_alive,
+                    options={"num_ctx": context_length}
+                )
 
-            safe_prompt = user_prompt[:300].strip()
-            system_msg = f'The user has just been shown an AI-generated image based on the prompt: "{safe_prompt}".'
-            final_response = await ollama_client.chat(
-                model=ollama_client.model,
-                messages=[
-                    {"role": "system", "content": system_msg},
-                    {"role": "user", "content": "Respond with a short, fun message celebrating the image. Do not include any lead-in phrases or instructions — just the message.."}
-                ],
-                stream=False,
-                keep_alive=ollama_client.keep_alive,
-                options={"num_ctx": context_length}
-            )
-
-            message_text = final_response["message"].get("content", "").strip() or "Here's your generated image!"
-            for chunk in [message_text[i:i + max_response_length] for i in range(0, len(message_text), max_response_length)]:
-                await message.channel.send(chunk)
+                message_text = final_response["message"].get("content", "").strip() or "Here's your generated image!"
+                return [
+                    {
+                        "type": "image",
+                        "name": "generated_comfyui.png",
+                        "data": base64.b64encode(image_bytes).decode("utf-8"),
+                        "mimetype": "image/png"
+                    },
+                    message_text
+                ]
 
         except Exception as e:
-            error_msg = f"Failed to queue prompt: {e}"
-            await message.channel.send(error_msg)
-
-        return ""
+            return f"Failed to queue prompt: {e}"
 
     # ---------------------------------------------------------
     # WebUI handler

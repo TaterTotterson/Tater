@@ -165,55 +165,64 @@ class SFTPGoAccountPlugin(ToolPlugin):
                     await safe_send(message_obj.channel, f"Failed to create user. Status code: {response.status}, Error: {error_text}")
                     return "error"
 
+    # --- Discord Handler ---
     async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
         user = message.author
         password = self.generate_random_password()
 
         result = await self.create_sftp_account(user.name, password, message)
+
         if result == "created":
-            prompt = f"Generate a brief message stating that an account for '{user.name}' has been successfully created. Only generate the message. Do not respond to this message."
+            prompt = f"Generate a brief message stating that an account for '{user.name}' has been successfully created."
         elif result == "exists":
-            prompt = f"Generate a brief message stating that '{user.name}' already has an account but is trying to make a new one!. Only generate the message. Do not respond to this message."
+            prompt = f"Generate a brief message stating that '{user.name}' already has an account but is trying to make a new one!"
         else:
-            prompt = f"Generate a brief message stating that an error occurred while creating the account for '{user.name}'. Only generate the message. Do not respond to this message."
+            prompt = f"Generate a brief message stating that an error occurred while creating the account for '{user.name}'."
 
         response_data = await ollama_client.chat(
             model=ollama_client.model,
-            messages=[{"role": "user", "content": prompt}]
+            messages=[{"role": "user", "content": prompt}],
+            stream=False,
+            keep_alive=ollama_client.keep_alive,
+            options={"num_ctx": context_length}
         )
 
-        response_text = response_data['message'].get('content', '')
-        if len(response_text) > 4000:
-            response_text = response_text[:3990] + " [truncated]"
+        response_text = response_data['message'].get('content', '').strip()
+        if password:
+            response_text += f"\n\n🔐 Password: `{password}`"
+        return response_text
 
-        await message.channel.send(response_text)
-        return ""
 
+    # --- WebUI Handler ---
     async def handle_webui(self, args, ollama_client, context_length):
-        return "SFTPGo account creation is not supported on the web UI."
+        return "❌ SFTPGo account creation is not supported on the web UI."
 
+
+    # --- IRC Handler ---
     async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
         password = self.generate_random_password()
-        mention = user
-
         result = await self.create_sftp_account(user, password, None)
+
         if result == "created":
-            prompt = f"Generate a brief message stating that an account for '{user}' has been successfully created. Only generate the message. Do not respond to this message."
+            prompt = f"Generate a brief message stating that an account for '{user}' has been successfully created."
         elif result == "exists":
-            prompt = f"Generate a brief message stating that '{user}' already has an account but is trying to make a new one!. Only generate the message. Do not respond to this message."
+            prompt = f"Generate a brief message stating that '{user}' already has an account but is trying to make a new one!"
         else:
-            prompt = f"Generate a brief message stating that an error occurred while creating the account for '{user}'. Only generate the message. Do not respond to this message."
+            prompt = f"Generate a brief message stating that an error occurred while creating the account for '{user}'."
 
         response_data = await ollama_client.chat(
             model=ollama_client.model,
-            messages=[{"role": "user", "content": prompt}]
+            messages=[{"role": "user", "content": prompt}],
+            stream=False,
+            keep_alive=ollama_client.keep_alive,
+            options={"num_ctx": context_length}
         )
+
         response_text = format_irc(response_data['message'].get("content", "").strip())
+        if password:
+            response_text += f"\nPassword: {password}"
 
-        for chunk in [response_text[i:i + 400] for i in range(0, len(response_text), 400)]:
-            await bot.privmsg(channel, f"{mention}: {chunk}")
-
-        await bot.privmsg(user, f"{mention}, your SFTPGo password is: {password}")
+        return f"{user}: {response_text}"
 
 # Export an instance of the plugin.
 plugin = SFTPGoAccountPlugin()

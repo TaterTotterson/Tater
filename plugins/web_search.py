@@ -175,9 +175,7 @@ class WebSearchPlugin(ToolPlugin):
 
         results = self.search_web(query)
         if not results:
-            msg = "I couldn't find any relevant search results."
-            await self.safe_send(message.channel, msg)
-            return
+            return "I couldn't find any relevant search results."
 
         formatted_results = self.format_search_results(results)
         user_question = message.content
@@ -201,7 +199,7 @@ class WebSearchPlugin(ToolPlugin):
             messages=[{"role": "system", "content": choice_prompt}],
             stream=False,
             keep_alive=-1,
-            options={"num_ctx": ollama_client.context_length}
+            options={"num_ctx": context_length}
         )
 
         choice_text = choice_response['message'].get('content', '').strip()
@@ -212,22 +210,16 @@ class WebSearchPlugin(ToolPlugin):
             choice_json = json.loads(json_str) if json_str else None
 
         if not choice_json or choice_json.get("function") != "web_fetch":
-            msg = "Failed to parse a valid link from search results."
-            await self.safe_send(message.channel, msg)
-            return
+            return "Failed to parse a valid link from search results."
 
         link = choice_json["arguments"].get("link")
         original_query = choice_json["arguments"].get("query", query)
         if not link:
-            msg = "No link was selected for detailed info."
-            await self.safe_send(message.channel, msg)
-            return
+            return "No link was selected for detailed info."
 
         summary = await asyncio.to_thread(self.fetch_web_summary, link, ollama_client.model)
         if not summary:
-            msg = "Failed to extract text from the selected page."
-            await self.safe_send(message.channel, msg)
-            return
+            return "Failed to extract text from the selected page."
 
         info_prompt = (
             f"Your name is Tater Totterson, you are answering a question based on the following web page content.\n\n"
@@ -242,15 +234,11 @@ class WebSearchPlugin(ToolPlugin):
             messages=[{"role": "system", "content": info_prompt}],
             stream=False,
             keep_alive=-1,
-            options={"num_ctx": ollama_client.context_length}
+            options={"num_ctx": context_length}
         )
 
         final_answer = final_response['message'].get('content', '').strip()
-        if not final_answer:
-            final_answer = "The assistant couldn't generate a response based on the web content."
-
-        await self.safe_send(message.channel, final_answer)
-        return ""
+        return final_answer or "The assistant couldn't generate a response based on the web content."
 
     # ---------------------------------------------------------
     # WebUI handler
@@ -336,15 +324,11 @@ class WebSearchPlugin(ToolPlugin):
     async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
         query = args.get("query")
         if not query:
-            await bot.privmsg(channel, f"{user}: No search query provided.")
-            return
-
-        await bot.privmsg(channel, f"{user}: Searching the web for \"{query}\"...")
+            return f"{user}: No search query provided."
 
         results = self.search_web(query)
         if not results:
-            await bot.privmsg(channel, f"{user}: No results found.")
-            return
+            return f"{user}: No results found."
 
         formatted_results = self.format_search_results(results)
         user_question = raw_message
@@ -379,18 +363,15 @@ class WebSearchPlugin(ToolPlugin):
             choice_json = json.loads(json_str) if json_str else None
 
         if not choice_json or choice_json.get("function") != "web_fetch":
-            await bot.privmsg(channel, f"{user}: Failed to parse search response.")
-            return
+            return f"{user}: Failed to parse search response."
 
         link = choice_json["arguments"].get("link")
         if not link:
-            await bot.privmsg(channel, f"{user}: No link selected.")
-            return
+            return f"{user}: No link selected."
 
         summary = await asyncio.to_thread(self.fetch_web_summary, link, ollama_client.model)
         if not summary:
-            await bot.privmsg(channel, f"{user}: Couldn't extract content from selected link.")
-            return
+            return f"{user}: Couldn't extract content from selected link."
 
         info_prompt = (
             f"Your name is Tater Totterson. Answer the user's question using this content.\n\n"
@@ -409,9 +390,6 @@ class WebSearchPlugin(ToolPlugin):
         )
 
         answer = final["message"].get("content", "").strip()
-        irc_answer = format_irc(answer)
-
-        for chunk in self.split_message(irc_answer, 400):
-            await bot.privmsg(channel, chunk)
+        return format_irc(answer)
 
 plugin = WebSearchPlugin()

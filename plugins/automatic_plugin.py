@@ -11,7 +11,7 @@ from plugin_base import ToolPlugin
 import streamlit as st
 from PIL import Image
 import discord
-from helpers import load_image_from_url, redis_client, save_assistant_message
+from helpers import load_image_from_url, redis_client
 
 load_dotenv()
 
@@ -114,12 +114,11 @@ class AutomaticPlugin(ToolPlugin):
         if not prompt_text:
             return "No prompt provided for Automatic111."
 
-        async with message.channel.typing():
-            try:
+        try:
+            async with message.channel.typing():
                 image_bytes = await asyncio.to_thread(self.generate_image, prompt_text)
                 image_file = discord.File(BytesIO(image_bytes), filename="generated_image.png")
                 await message.channel.send(file=image_file)
-                save_assistant_message(message.channel.id, "🖼️")
 
                 safe_prompt = prompt_text[:300].strip()
                 system_msg = f'The user has just been shown an image based on this prompt: "{safe_prompt}".'
@@ -135,13 +134,20 @@ class AutomaticPlugin(ToolPlugin):
                 )
 
                 reply = final_response["message"].get("content", "").strip() or "Here's your image!"
-                await message.channel.send(reply)
+                return [
+                    {
+                        "type": "image",
+                        "name": "generated_image.png",
+                        "data": base64.b64encode(image_bytes).decode("utf-8"),
+                        "mimetype": "image/png"
+                    },
+                    reply
+                ]
 
-            except Exception as e:
-                error_msg = f"❌ Failed to generate image: {e}"
-                await message.channel.send(error_msg)
-
-        return ""
+        except Exception as e:
+            error_msg = f"❌ Failed to generate image: {e}"
+            await message.channel.send(error_msg)
+            return error_msg
 
     # --- WebUI Handler ---
     async def handle_webui(self, args, ollama_client, context_length):

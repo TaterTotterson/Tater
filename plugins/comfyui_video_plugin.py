@@ -11,7 +11,7 @@ from io import BytesIO
 from plugin_base import ToolPlugin
 import discord
 import streamlit as st
-from helpers import redis_client, load_image_from_url, send_waiting_message, save_assistant_message
+from helpers import redis_client, load_image_from_url, send_waiting_message
 import base64
 
 client_id = str(uuid.uuid4())
@@ -151,7 +151,6 @@ class ComfyUIVideoPlugin(ToolPlugin):
 
         raise Exception("No video/image returned from ComfyUI.")
 
-    # --- Discord Handler ---
     async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
         user_prompt = args.get("prompt")
         if not user_prompt:
@@ -159,15 +158,17 @@ class ComfyUIVideoPlugin(ToolPlugin):
 
         try:
             video_bytes = await asyncio.to_thread(ComfyUIVideoPlugin.process_prompt, user_prompt)
-            file = discord.File(BytesIO(video_bytes), filename="generated_video.webp")
-            await message.channel.send(file=file)
 
-            # Save image marker
-            save_assistant_message(message.channel.id, "🖼️")
+            video_data = {
+                "type": "image",
+                "name": "generated_video.webp",
+                "data": base64.b64encode(video_bytes).decode("utf-8"),
+                "mimetype": "image/webp"
+            }
 
-            # Follow-up
             safe_prompt = user_prompt[:300].strip()
-            system_msg = f'The user has just been shown a animated video based on the prompt: "{safe_prompt}".'
+            system_msg = f'The user has just been shown an animated video based on the prompt: "{safe_prompt}".'
+
             followup = await ollama_client.chat(
                 model=ollama_client.model,
                 messages=[
@@ -178,14 +179,13 @@ class ComfyUIVideoPlugin(ToolPlugin):
                 keep_alive=ollama_client.keep_alive,
                 options={"num_ctx": context_length}
             )
+
             followup_text = followup["message"].get("content", "").strip() or "🎬 Here's your animated video!"
-            await message.channel.send(followup_text)
+
+            return [video_data, followup_text]
 
         except Exception as e:
-            error_msg = f"Failed to queue prompt: {e}"
-            return error_msg
-
-        return ""
+            return f"Failed to queue prompt: {e}"
 
     # --- WebUI Handler ---
     async def handle_webui(self, args, ollama_client, context_length):

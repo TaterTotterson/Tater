@@ -12,7 +12,7 @@ import discord
 import streamlit as st
 import re
 import yaml
-from helpers import redis_client, load_image_from_url, save_assistant_message
+from helpers import redis_client, load_image_from_url
 
 client_id = str(uuid.uuid4())
 
@@ -254,6 +254,13 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
 
         raise Exception("No audio returned.")
 
+    from io import BytesIO
+    import base64
+    from helpers import format_irc  # ✅ Make sure you have this for IRC
+
+    # ---------------------------------------
+    # Discord
+    # ---------------------------------------
     async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
         user_prompt = args.get("prompt")
         if not user_prompt:
@@ -262,10 +269,6 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         try:
             tags, lyrics = await self.generate_tags_and_lyrics(user_prompt, ollama_client, context_length)
             audio_bytes = await asyncio.to_thread(self.process_prompt, user_prompt, tags, lyrics)
-
-            file = discord.File(BytesIO(audio_bytes), filename="ace_song.mp3")
-            await message.channel.send(file=file)
-            save_assistant_message(message.channel.id, "🎵")
 
             system_msg = f'The user received a ComfyUI-generated audio clip based on: "{user_prompt}"'
             response = await ollama_client.chat(
@@ -279,15 +282,24 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
                 options={"num_ctx": context_length}
             )
 
-            comment = response["message"].get("content", "").strip() or "Hope you enjoy the track!"
-            await message.channel.send(comment)
+            message_text = response["message"].get("content", "").strip() or "Hope you enjoy the track!"
+
+            return [
+                {
+                    "type": "audio",
+                    "name": "ace_song.mp3",
+                    "data": base64.b64encode(audio_bytes).decode("utf-8"),
+                    "mimetype": "audio/mpeg"
+                },
+                message_text
+            ]
 
         except Exception as e:
-            error = f"🎵 Failed to create song: {e}"
-            await message.channel.send(error)
+            return f"Failed to create song: {e}"
 
-        return ""
-
+    # ---------------------------------------
+    # WebUI
+    # ---------------------------------------
     async def handle_webui(self, args, ollama_client, context_length):
         user_prompt = args.get("prompt")
         if not user_prompt:
@@ -304,7 +316,7 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
                 "mimetype": "audio/mpeg"
             }
 
-            system_msg = f'The user received a ComfyUI-generated song based on: "{user_prompt}"'
+            system_msg = f'The user received a ComfyUI-generated song based on: \"{user_prompt}\"'
             response = await ollama_client.chat(
                 model=ollama_client.model,
                 messages=[
@@ -321,10 +333,13 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
             return [audio_data, message_text]
 
         except Exception as e:
-            error = f"🎵 Failed to create song: {e}"
-            return error
+            return f"Failed to create song: {e}"
 
+    # ---------------------------------------
+    # IRC
+    # ---------------------------------------
     async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
-        await bot.privmsg(channel, f"{user}: 🎵 Sorry, this plugin only works in Discord or WebUI.")
+        msg = "Sorry, this plugin only works in Discord or WebUI."
+        await bot.privmsg(channel, f"{user}: {format_irc(msg)}")
 
 plugin = ComfyUIAudioAcePlugin()

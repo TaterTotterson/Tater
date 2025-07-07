@@ -172,50 +172,34 @@ class PremiumizeDownloadPlugin(ToolPlugin):
                 self.update_buttons()
                 await interaction.response.edit_message(content=self.get_page_content(), view=self)
 
+    # --- Discord Handler ---
     async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
         url = args.get("url")
-        if url:
-            async with message.channel.typing():
-                try:
-                    await PremiumizeDownloadPlugin.process_download_discord(message.channel, url, max_response_length)
-                    return ""
-                except Exception as e:
-                    prompt = f"Generate an error message to {message.author.mention} explaining that I was unable to retrieve the Premiumize download links for the URL. Only generate the message. Do not respond to this message."
-                    error_msg = await self.generate_error_message(prompt, f"Failed to retrieve Premiumize download links: {e}", message)
-                    return error_msg
-        else:
-            prompt = f"Generate an error message to {message.author.mention} explaining that no URL was provided for Premiumize download check. Only generate the message. Do not respond to this message."
-            error_msg = await self.generate_error_message(prompt, "No URL provided for Premiumize download check.", message)
-            return error_msg
+        if not url:
+            return f"{message.author.mention}: No URL provided for Premiumize download check."
 
+        try:
+            result = await PremiumizeDownloadPlugin.process_download_web(url)
+            return result
+        except Exception as e:
+            return f"{message.author.mention}: Failed to retrieve Premiumize download links: {e}"
+
+    # --- WebUI Handler ---
     async def handle_webui(self, args, ollama_client, context_length):
-        mention = "User"
-
         url = args.get("url")
         if not url:
-            error_msg = "No URL provided for Premiumize download check."
-            return error_msg
+            return "No URL provided for Premiumize download check."
 
         result = await PremiumizeDownloadPlugin.process_download_web(url)
         return result
 
+    # --- IRC Handler ---
     async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
-
-        mention = user
         url = args.get("url")
-
         if not url:
-            error_msg = f"{mention}: No URL provided for Premiumize download check."
-            await bot.privmsg(channel, error_msg)
-            return
+            return f"{user}: No URL provided for Premiumize download check."
 
         result = await PremiumizeDownloadPlugin.process_download_web(url)
-        result_formatted = format_irc(result)
-
-        for chunk in [result_formatted[i:i + 400] for i in range(0, len(result_formatted), 400)]:
-            await bot.privmsg(channel, chunk)
-
-    async def generate_error_message(self, prompt, fallback, message):
-        return fallback
+        return format_irc(result)
 
 plugin = PremiumizeDownloadPlugin()

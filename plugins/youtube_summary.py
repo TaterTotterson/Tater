@@ -134,9 +134,6 @@ class YouTubeSummaryPlugin(ToolPlugin):
         parts.append(text)
         return parts
 
-    # ---------------------------------------------------------
-    # Discord handler
-    # ---------------------------------------------------------
     async def async_fetch_summary(self, video_url, ollama_client):
         video_id = self.extract_video_id(video_url)
         transcript = self.get_transcript_api(video_id)
@@ -145,28 +142,18 @@ class YouTubeSummaryPlugin(ToolPlugin):
         chunks = self.split_text_into_chunks(transcript, ollama_client.context_length)
         return await self.summarize_chunks(chunks, ollama_client)
 
+    # ---------------------------------------------------------
+    # Discord handler
+    # ---------------------------------------------------------
     async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
         video_url = args.get("video_url")
         if not video_url:
             return "No YouTube URL provided."
 
-        # Resolve correct output channel
-        channel = message.channel
-        if not isinstance(channel, discord.DMChannel):
-            try:
-                response_channel_id = int(os.getenv("RESPONSE_CHANNEL_ID", self.response_channel_id))
-                if message.guild:
-                    fallback = message.guild.get_channel(response_channel_id)
-                    if fallback:
-                        channel = fallback
-            except:
-                pass
-
         summary = await self.async_fetch_summary(video_url, ollama_client)
-        for part in self.split_message(self.format_article(summary), max_response_length):
-            await self.safe_send(channel, part)
+        formatted = self.format_article(summary)
 
-        return ""
+        return "\n".join(self.split_message(formatted, max_response_length))
 
     # ---------------------------------------------------------
     # WebUI handler
@@ -193,11 +180,7 @@ class YouTubeSummaryPlugin(ToolPlugin):
         if not summary:
             return f"{nick}: Could not generate summary."
 
-        irc_output = format_irc(self.format_article(summary))
-        for part in self.split_message(irc_output, 350):
-            bot.privmsg(channel, part)
-            await asyncio.sleep(0.1)
-
-        return ""
+        formatted = format_irc(self.format_article(summary))
+        return "\n".join(self.split_message(formatted, 350))
 
 plugin = YouTubeSummaryPlugin()

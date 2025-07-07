@@ -4,7 +4,7 @@ import io
 import asyncio
 import aioftp
 from plugin_base import ToolPlugin
-from helpers import load_image_from_url, redis_client, send_waiting_message
+from helpers import load_image_from_url, redis_client
 
 async def safe_send(channel, content: str, **kwargs):
     if len(content) > 2000:
@@ -150,13 +150,25 @@ class FtpBrowserPlugin(ToolPlugin):
 
                 if size > FtpBrowserPlugin.max_upload_size_bytes:
                     await interaction.response.defer()
-                    prompt_text = f"Generate a brief message to {interaction.user.mention}, telling them the file `{self.path}` is too large to send via Discord (>{size // (1024 * 1024)}MB) and they should connect to the FTP manually to download it."
-                    await send_waiting_message(
-                        ollama_client=self.ollama_client,
-                        prompt_text=prompt_text,
-                        save_callback=lambda text: None,
-                        send_callback=lambda text: interaction.followup.send(text)
+
+                    system_msg = (
+                        f"The user tried to download `{self.path}`, but the file is too large "
+                        f"to send via Discord (> {size // (1024 * 1024)}MB)."
                     )
+                    response = await self.ollama_client.chat(
+                        model=self.ollama_client.model,
+                        messages=[
+                            {"role": "system", "content": system_msg},
+                            {"role": "user", "content": f"Tell them in a friendly way that they should connect to the FTP manually to download this file."}
+                        ],
+                        stream=False,
+                        keep_alive=self.ollama_client.keep_alive,
+                        options={"num_ctx": 2048}  # or context_length if available
+                    )
+
+                    reply = response["message"].get("content", "").strip() or "That file is a bit too big for Discord. Please use your FTP client to grab it manually!"
+                    await interaction.followup.send(reply)
+
                 else:
                     file_data = await FtpBrowserPlugin.download_ftp_file(new_path)
                     await interaction.response.send_message(file=discord.File(fp=file_data, filename=self.path))
@@ -198,9 +210,28 @@ class FtpBrowserPlugin(ToolPlugin):
         user_id = message.author.id
         FtpBrowserPlugin.user_paths[user_id] = "/"
         entries = await FtpBrowserPlugin.list_ftp_files("/")
-        response_text = "Browsing `/`"
-        await safe_send(message.channel, response_text, view=FtpBrowserPlugin.FileBrowserView(self, user_id, "/", entries, ollama_client=ollama_client))
-        return ""
+
+        await safe_send(
+            message.channel,
+            "Browsing `/`",
+            view=FtpBrowserPlugin.FileBrowserView(self, user_id, "/", entries, ollama_client=ollama_client)
+        )
+
+        # Generate short follow-up
+        system_msg = f"The user is now browsing the root directory of an FTP server."
+        followup = await ollama_client.chat(
+            model=ollama_client.model,
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": "Send a short friendly message to encourage their FTP browsing. Do not include any instructions — just the message."}
+            ],
+            stream=False,
+            keep_alive=ollama_client.keep_alive,
+            options={"num_ctx": context_length}
+        )
+
+        message_text = followup["message"].get("content", "").strip() or "Happy browsing!"
+        return message_text
 
     async def handle_webui(self, args, ollama_client, context_length):
         response = "📂 FTP browsing is only available on Discord for now."

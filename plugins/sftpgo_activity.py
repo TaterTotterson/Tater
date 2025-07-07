@@ -156,23 +156,20 @@ class SFTPGoActivityPlugin(ToolPlugin):
 
     # --- Discord Handler ---
     async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
-        user = message.author
         result = await self.get_current_activity(message, ollama_client)
-        await message.channel.send(result)
-        return ""
+        return result
+
 
     # --- WebUI Handler ---
     async def handle_webui(self, args, ollama_client, context_length):
         result = await self.get_current_activity(None, ollama_client)
         return result
 
+
     # --- IRC Handler ---
     async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
-        mention = user
         result = await self.get_current_activity(None, ollama_client)
-        formatted = format_irc(result)
-        for chunk in [formatted[i:i + 400] for i in range(0, len(formatted), 400)]:
-            await bot.privmsg(channel, chunk)
+        return f"{user}: {format_irc(result)}"
 
 # Export an instance of the plugin.
 plugin = SFTPGoActivityPlugin()

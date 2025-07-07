@@ -241,27 +241,24 @@ class PremiumizeTorrentPlugin(ToolPlugin):
                 self.update_buttons()
                 await interaction.response.edit_message(content=self.get_page_content(), view=self)
 
+    # --- Discord Handler ---
     async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
-
         if not message.attachments:
-            prompt = f"Generate an error message to {message.author.mention} explaining that no torrent file was attached. Only generate the message. Do not respond to this message."
-            error_msg = await self.generate_error_message(prompt, "No torrent file attached for Premiumize torrent check.", message)
-            return error_msg
+            return f"{message.author.mention}: No torrent file attached for Premiumize torrent check."
 
-        async with message.channel.typing():
-            try:
-                result = await self.process_torrent(message.channel, message.attachments[0], max_response_length)
-                return result
-            except Exception as e:
-                prompt = f"Generate an error message to {message.author.mention} explaining that I was unable to retrieve the Premiumize torrent info. Only generate the message. Do not respond to this message."
-                error_msg = await self.generate_error_message(prompt, f"Failed to retrieve Premiumize torrent info: {e}", message)
-                return error_msg
+        try:
+            result = await self.process_torrent(message.channel, message.attachments[0], max_response_length)
+            return result
+        except Exception as e:
+            return f"{message.author.mention}: Failed to retrieve Premiumize torrent info: {e}"
 
+    # --- WebUI Handler ---
     async def handle_webui(self, args, ollama_client, context_length):
-        return "This plugin is only supported on Discord."
+        return "❌ This plugin is only supported on Discord."
 
+    # --- IRC Handler ---
     async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
-        await bot.privmsg(channel, f"{user}: This plugin is only supported on Discord.")
+        return f"{user}: ❌ This plugin is only supported on Discord."
 
     async def generate_error_message(self, prompt, fallback, message):
         return fallback

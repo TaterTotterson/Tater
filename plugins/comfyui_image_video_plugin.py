@@ -163,8 +163,7 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
                 image_bytes = base64.b64decode(args["image_bytes"])
                 filename = args.get("filename", "input.png")
             except Exception:
-                error_msg = "❌ Couldn’t decode `image_bytes`. Provide valid Base64."
-                return error_msg
+                return "❌ Couldn’t decode `image_bytes`. Provide valid Base64."
 
         # 3. Search recent messages
         if not image_bytes:
@@ -195,15 +194,10 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
         prompt = args.get("prompt", "").strip() or "A gentle animation of the provided image."
 
         try:
-            animated = await asyncio.to_thread(
-                self.process_prompt, prompt, image_bytes, filename
-            )
-            await message.channel.send(file=discord.File(BytesIO(animated), filename="animated.webp"))
-            save_assistant_message(message.channel.id, "🖼️")
-
-            # Friendly follow-up
+            animated = await asyncio.to_thread(self.process_prompt, prompt, image_bytes, filename)
             safe_prompt = prompt[:300].strip()
             system_msg = f'The user has just been shown an animated image based on the prompt: "{safe_prompt}".'
+
             followup = await ollama_client.chat(
                 model=ollama_client.model,
                 messages=[
@@ -214,15 +208,22 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
                 keep_alive=ollama_client.keep_alive,
                 options={"num_ctx": ctx_length}
             )
+
             followup_text = followup["message"].get("content", "").strip() or "Here's your animated image!"
-            await message.channel.send(followup_text)
+
+            return [
+                {
+                    "type": "image",
+                    "name": "animated.webp",
+                    "data": base64.b64encode(animated).decode("utf-8"),
+                    "mimetype": "image/webp"
+                },
+                followup_text
+            ]
 
         except Exception as e:
-            error = f"❌ Failed to generate animation: {e}"
-            return error
-
-        return ""
-
+            return f"❌ Failed to generate animation: {e}"
+            
     # --- WebUI Handler ---
     async def handle_webui(self, args, ollama_client, ctx_length):
         return "❌ This plugin only works in Discord."

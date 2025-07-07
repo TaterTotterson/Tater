@@ -120,12 +120,9 @@ class WebSummaryPlugin(ToolPlugin):
 
         summary = await self.web_summary(url, ollama_client)
         if not summary:
-            msg = "Failed to summarize the article."
-            return msg
+            return "Failed to summarize the article."
 
-        for chunk in self.split_message(summary, max_response_length):
-            await self.safe_send(message.channel, chunk)
-        return ""
+        return "\n".join(self.split_message(summary, max_response_length))
 
     async def handle_webui(self, args, ollama_client, context_length):
         url = args.get("url")
@@ -142,18 +139,13 @@ class WebSummaryPlugin(ToolPlugin):
     async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
         url = args.get("url")
         if not url:
-            await bot.privmsg(channel, f"{user}: No URL provided.")
-            return ""
+            return f"{user}: No URL provided."
 
         summary = await self.web_summary(url, ollama_client)
         if not summary:
-            await bot.privmsg(channel, f"{user}: Failed to summarize article.")
-            return ""
+            return f"{user}: Failed to summarize article."
 
         formatted = format_irc(summary)
-        for chunk in self.split_message(formatted, 400):
-            await bot.privmsg(channel, chunk)
-
-        return ""
+        return "\n".join(self.split_message(formatted, 400))
 
 plugin = WebSummaryPlugin()
