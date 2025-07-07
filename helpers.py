@@ -150,7 +150,18 @@ def parse_function_json(response_text):
                 return None
         else:
             return None
-    return response_json if isinstance(response_json, dict) and "function" in response_json else None
+
+    # If it's a single function object
+    if isinstance(response_json, dict) and "function" in response_json:
+        return response_json
+
+    # If it's a list of functions, return the first valid one
+    if isinstance(response_json, list):
+        for item in response_json:
+            if isinstance(item, dict) and "function" in item:
+                return item
+
+    return None
 
 # ---------------------------------------------------------
 # IRC formatting cleanup

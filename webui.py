@@ -365,10 +365,20 @@ async def process_message(user_name, message_content):
 
     messages_list = [{"role": "system", "content": final_system_prompt}]
     for msg in history:
-        # no more prefixing!
+        content = msg["content"]
+
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, dict) and content.get("type") == "image":
+            text = f"[Image: {content.get('name', 'unnamed image')}]"
+        elif isinstance(content, dict) and content.get("type") == "audio":
+            text = f"[Audio: {content.get('name', 'unnamed audio')}]"
+        else:
+            continue  # skip unrecognized content formats
+
         messages_list.append({
             "role": msg["role"],
-            "content": msg["content"]
+            "content": text
         })
 
     response = await ollama_client.chat(
