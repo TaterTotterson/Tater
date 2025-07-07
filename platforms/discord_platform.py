@@ -17,6 +17,8 @@ import logging
 import threading
 import signal
 import time
+import base64
+from io import BytesIO
 
 
 load_dotenv()
@@ -143,14 +145,31 @@ class discord_platform(commands.Bot):
         history_key = f"tater:channel:{channel_id}:history"
         raw_history = redis_client.lrange(history_key, -limit, -1)
         formatted = []
+
         for entry in raw_history:
             data = json.loads(entry)
             role = data.get("role", "user")
             sender = data.get("username", role)
+            content = data.get("content")
+
+            # Convert image/audio dicts into text placeholders
+            if isinstance(content, dict):
+                if content.get("type") == "image":
+                    placeholder = f"[Image: {content.get('name', 'unnamed image')}]"
+                elif content.get("type") == "audio":
+                    placeholder = f"[Audio: {content.get('name', 'unnamed audio')}]"
+                else:
+                    continue  # skip unknown content types
+            elif isinstance(content, str):
+                placeholder = content
+            else:
+                continue  # skip anything else unexpected
+
             formatted.append({
                 "role": role,
-                "content": data["content"] if role == "assistant" else f"{sender}: {data['content']}"
+                "content": placeholder if role == "assistant" else f"{sender}: {placeholder}"
             })
+
         return formatted
 
     async def save_message(self, channel_id, role, username, content):
@@ -199,7 +218,7 @@ class discord_platform(commands.Bot):
                     if func in plugin_registry and get_plugin_enabled(func):
                         plugin = plugin_registry[func]
 
-                        # 👇 NEW: Send waiting message if template exists
+                        # Show waiting message if defined
                         if hasattr(plugin, "waiting_prompt_template"):
                             wait_msg = plugin.waiting_prompt_template.format(mention=message.author.mention)
                             await send_waiting_message(
@@ -208,8 +227,8 @@ class discord_platform(commands.Bot):
                                 send_callback=lambda t: asyncio.create_task(
                                     safe_send(message.channel, t, self.max_response_length)
                                 ),
-                                save_callback=lambda t: self.save_message(
-                                    message.channel.id, "assistant", "assistant", t
+                                save_callback=lambda t: asyncio.create_task(
+                                    self.save_message(message.channel.id, "assistant", "assistant", t)
                                 )
                             )
 
@@ -217,12 +236,38 @@ class discord_platform(commands.Bot):
                             message, args, self.ollama, self.ollama.context_length, self.max_response_length
                         )
 
-                        if isinstance(result, str) and result.strip():
+                        if isinstance(result, list):
+                            for item in result:
+                                if isinstance(item, str):
+                                    await safe_send(message.channel, item, self.max_response_length)
+                                    await self.save_message(message.channel.id, "assistant", "assistant", item)
+
+                                elif isinstance(item, dict):
+                                    content_type = item.get("type")
+                                    filename = item.get("name", "output.bin")
+
+                                    try:
+                                        if "bytes" in item:
+                                            binary = item["bytes"]
+                                        elif "data" in item:
+                                            binary = base64.b64decode(item["data"])
+                                        else:
+                                            logger.warning(f"Missing 'bytes' or 'data' for {content_type} content.")
+                                            continue
+
+                                        file = discord.File(BytesIO(binary), filename=filename)
+                                        await message.channel.send(file=file)
+
+                                        placeholder = f"[{content_type.capitalize()}: {filename}]"
+                                        await self.save_message(message.channel.id, "assistant", "assistant", placeholder)
+
+                                    except Exception as e:
+                                        logger.warning(f"Failed to handle {content_type} return: {e}")
+
+                        elif isinstance(result, str):
                             await safe_send(message.channel, result, self.max_response_length)
                             await self.save_message(message.channel.id, "assistant", "assistant", result)
-                        else:
-                            logger.debug(f"[{func}] Plugin returned no usable response (type: {type(result)}).")
-                        return  # ✅ Prevent fallback
+
                     else:
                         error = await self.generate_error_message(
                             f"Unknown or disabled function call: {func}.",
@@ -231,6 +276,7 @@ class discord_platform(commands.Bot):
                         )
                         await message.channel.send(error)
                         return
+
                 else:
                     await safe_send(message.channel, response_text, self.max_response_length)
                     await self.save_message(message.channel.id, "assistant", "assistant", response_text)
@@ -241,6 +287,7 @@ class discord_platform(commands.Bot):
                 error_prompt = f"Generate a friendly error message to {message.author.mention} explaining that an error occurred while processing the request."
                 error_msg = await self.generate_error_message(error_prompt, fallback, message)
                 await message.channel.send(error_msg)
+
 
     async def on_reaction_add(self, reaction, user):
         if user.bot:

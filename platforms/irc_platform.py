@@ -138,70 +138,78 @@ def build_system_prompt():
         "If no function is needed, reply normally."
     )
 
-@irc3.plugin
-class irc_platform:
-    def __init__(self, bot):
-        self.bot = bot
+@irc3.event(irc3.rfc.PRIVMSG)
+async def on_message(self, mask, event, target, data):
+    save_irc_message(channel=target, role="user", username=mask.nick, content=data)
 
-    @irc3.event(irc3.rfc.PRIVMSG)
-    async def on_message(self, mask, event, target, data):
-        save_irc_message(channel=target, role="user", username=mask.nick, content=data)
+    if "tater" not in data.lower():
+        return
 
-        if "tater" not in data.lower():
-            return
+    logger.info(f"<{mask.nick}> {data}")
+    history = load_irc_history(channel=target, limit=20)
+    messages = [{"role": "system", "content": build_system_prompt()}] + history
 
-        logger.info(f"<{mask.nick}> {data}")
-        history = load_irc_history(channel=target, limit=20)
-        messages = [{"role": "system", "content": build_system_prompt()}] + history
+    try:
+        response = await ollama_client.chat(
+            model=OLLAMA_MODEL,
+            messages=messages,
+            stream=False,
+            keep_alive=-1,
+            options={"num_ctx": ollama_client.context_length}
+        )
+        response_text = response["message"].get("content", "").strip()
+        logger.info(f"Tater: {response_text}")
 
-        try:
-            response = await ollama_client.chat(
-                model=OLLAMA_MODEL,
-                messages=messages,
-                stream=False,
-                keep_alive=-1,
-                options={"num_ctx": ollama_client.context_length}
-            )
-            response_text = response["message"].get("content", "").strip()
-            logger.info(f"Tater: {response_text}")
+        parsed = parse_function_json(response_text)
+        if parsed and isinstance(parsed, dict) and "function" in parsed:
+            func = parsed["function"]
+            args = parsed.get("arguments", {})
 
-            plugin_handled = False
-            parsed = parse_function_json(response_text)
+            if func in plugin_registry and get_plugin_enabled(func):
+                plugin = plugin_registry[func]
 
-            if parsed and isinstance(parsed, dict) and "function" in parsed:
-                func = parsed["function"]
-                args = parsed.get("arguments", {})
-                if func in plugin_registry and get_plugin_enabled(func):
-                    plugin = plugin_registry[func]
+                # 👉 Waiting message
+                if hasattr(plugin, "waiting_prompt_template"):
+                    wait_msg = plugin.waiting_prompt_template.format(mention=mask.nick)
+                    self.bot.privmsg(target, wait_msg)
+                    save_irc_message(channel=target, role="assistant", username="assistant", content=wait_msg)
 
-                    # 👇 NEW: Send waiting message if template exists
-                    if hasattr(plugin, "waiting_prompt_template"):
-                        wait_msg = plugin.waiting_prompt_template.format(mention=mask.nick)
-                        self.bot.privmsg(target, wait_msg)
-                        save_irc_message(channel=target, role="assistant", username="assistant", content=wait_msg)
+                result = await plugin.handle_irc(
+                    self.bot, target, mask.nick, data, args, ollama_client
+                )
 
-                    result = await plugin.handle_irc(
-                        self.bot,
-                        target,
-                        mask.nick,
-                        data,
-                        args,
-                        ollama_client
-                    )
-                    plugin_handled = True
-                    if result and result.strip():
-                        self.bot.privmsg(target, result)
-                        save_irc_message(channel=target, role="assistant", username="assistant", content=result)
-                    return
+                if isinstance(result, list):
+                    for item in result:
+                        if isinstance(item, str):
+                            for chunk in [item[i:i+MAX_RESPONSE_LENGTH] for i in range(0, len(item), MAX_RESPONSE_LENGTH)]:
+                                self.bot.privmsg(target, chunk)
+                            save_irc_message(channel=target, role="assistant", username="assistant", content=item)
 
-            if not plugin_handled:
-                for i in range(0, len(response_text), MAX_RESPONSE_LENGTH):
-                    self.bot.privmsg(target, response_text[i:i+MAX_RESPONSE_LENGTH])
-                save_irc_message(channel=target, role="assistant", username="assistant", content=response_text)
+                        elif isinstance(item, dict):
+                            kind = item.get("type")
+                            name = item.get("name", "output")
+                            placeholder = f"[{kind.capitalize()}: {name}]"
+                            self.bot.privmsg(target, f"{mask.nick}: {placeholder}")
+                            save_irc_message(channel=target, role="assistant", username="assistant", content=placeholder)
 
-        except Exception as e:
-            logger.error(f"Error processing IRC message: {e}")
-            self.bot.privmsg(target, f"{mask.nick}: Sorry, I ran into an error while thinking.")
+                elif isinstance(result, str) and result.strip():
+                    for chunk in [result[i:i+MAX_RESPONSE_LENGTH] for i in range(0, len(result), MAX_RESPONSE_LENGTH)]:
+                        self.bot.privmsg(target, chunk)
+                    save_irc_message(channel=target, role="assistant", username="assistant", content=result)
+
+                else:
+                    logger.debug(f"[{func}] Plugin returned nothing or unrecognized result type: {type(result)}")
+
+                return
+
+        # Default fallback (not tool-based)
+        for chunk in [response_text[i:i+MAX_RESPONSE_LENGTH] for i in range(0, len(response_text), MAX_RESPONSE_LENGTH)]:
+            self.bot.privmsg(target, chunk)
+        save_irc_message(channel=target, role="assistant", username="assistant", content=response_text)
+
+    except Exception as e:
+        logger.error(f"Error processing IRC message: {e}")
+        self.bot.privmsg(target, f"{mask.nick}: Sorry, I ran into an error while thinking.")
 
 def run(stop_event=None):
     # 1) Build your IRC config
