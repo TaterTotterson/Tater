@@ -6,7 +6,7 @@ import os
 import discord
 from plugin_base import ToolPlugin
 from plugin_settings import get_plugin_settings
-from helpers import send_waiting_message, redis_client
+from helpers import redis_client
 
 def decode_base64(data: str) -> bytes:
     data = data.strip()
@@ -93,6 +93,7 @@ class VisionDescriberPlugin(ToolPlugin):
         description = await asyncio.to_thread(self.call_ollama_vision, server, model, file_content, additional_prompt)
         return description
         
+    # --- Discord Handler ---
     async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
         image_bytes = None
 
@@ -108,18 +109,13 @@ class VisionDescriberPlugin(ToolPlugin):
                 if resp.status_code == 200:
                     image_bytes = resp.content
             except Exception as e:
-                error_msg = f"Error downloading image: {str(e)}"
-                await safe_send(message.channel, error_msg)
-                ave_assistant_message(message.channel.id, error_msg)
-                return ""
+                return f"❌ Error downloading image: {str(e)}"
 
         if not image_bytes and args.get("image_base64"):
             try:
                 image_bytes = decode_base64(args.get("image_base64"))
             except Exception as e:
-                error_msg = f"Error decoding base64 image: {str(e)}"
-                await safe_send(message.channel, error_msg)
-                return ""
+                return f"❌ Error decoding base64 image: {str(e)}"
 
         if not image_bytes:
             async for previous in message.channel.history(limit=10, oldest_first=False):
@@ -139,13 +135,16 @@ class VisionDescriberPlugin(ToolPlugin):
                 "Mention they can attach an image, include a URL, or paste base64. "
                 "Only generate the message. Do not respond to this message."
             )
-            await send_waiting_message(
-                ollama_client=ollama_client,
-                prompt_text=fallback_prompt,
-                save_callback=lambda text: save_assistant_message(message.channel.id, text),
-                send_callback=lambda text: safe_send(message.channel, text)
+            fmsg = await ollama_client.chat(
+                model=ollama_client.model,
+                messages=[
+                    {"role": "user", "content": fallback_prompt}
+                ],
+                stream=False,
+                keep_alive=ollama_client.keep_alive,
+                options={"num_ctx": context_length}
             )
-            return ""
+            return fmsg["message"].get("content", "").strip()
 
         additional_prompt = (
             "You are an expert visual assistant. Describe the contents of this image in detail, "
@@ -161,17 +160,19 @@ class VisionDescriberPlugin(ToolPlugin):
         )
 
         if description:
-            for chunk in [description[i:i + max_response_length] for i in range(0, len(description), max_response_length)]:
-                await safe_send(message.channel, chunk)
+            return description[:max_response_length]
 
-        return ""
+        return "❌ Failed to generate image description."
 
+
+    # --- WebUI Handler ---
     async def handle_webui(self, args, ollama_client, context_length):
         return "🖼️ This plugin is currently only available via Discord. Web support is not yet implemented."
 
+
+    # --- IRC Handler ---
     async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
-        message = f"{user}: This plugin only works via Discord. IRC support is not available yet."
-        await bot.privmsg(channel, message)
+        return f"{user}: This plugin only works via Discord. IRC support is not available yet."
 
 
 plugin = VisionDescriberPlugin()

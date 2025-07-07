@@ -42,47 +42,40 @@ class UnwatchFeedPlugin(ToolPlugin):
         feed_url = args.get("feed_url")
         if feed_url:
             removed = redis_client.hdel("rss:feeds", feed_url)
-            if removed:
-                final_message = f"Stopped watching feed: {feed_url}"
-            else:
-                final_message = f"Feed {feed_url} was not found in the watch list."
+            final_message = (
+                f"Stopped watching feed: {feed_url}" if removed
+                else f"Feed {feed_url} was not found in the watch list."
+            )
         else:
             final_message = "No feed URL provided for unwatching."
 
-        await message.channel.send(final_message)
-        return ""
+        return final_message
+
 
     # --- Web UI Handler ---
     async def handle_webui(self, args, ollama_client, context_length):
         feed_url = args.get("feed_url")
         if not feed_url:
-            final_message = "No feed URL provided for unwatching."
-            return final_message
+            return "No feed URL provided for unwatching."
 
         removed = redis_client.hdel("rss:feeds", feed_url)
-        if removed:
-            final_message = f"Stopped watching feed: {feed_url}"
-        else:
-            final_message = f"Feed {feed_url} was not found in the watch list."
+        return (
+            f"Stopped watching feed: {feed_url}" if removed
+            else f"Feed {feed_url} was not found in the watch list."
+        )
 
-        return final_message
 
     # --- IRC Handler ---
     async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
-        mention = user
         feed_url = args.get("feed_url")
         if not feed_url:
-            msg = f"{user}: No feed URL provided for unwatching."
-            await bot.privmsg(channel, msg)
-            return
+            return f"{user}: No feed URL provided for unwatching."
 
         removed = redis_client.hdel("rss:feeds", feed_url)
-        if removed:
-            msg = f"{user}: Stopped watching feed: {feed_url}"
-        else:
-            msg = f"{user}: Feed {feed_url} was not found in the watch list."
-
-        await bot.privmsg(channel, msg)
+        return (
+            f"{user}: Stopped watching feed: {feed_url}" if removed
+            else f"{user}: Feed {feed_url} was not found in the watch list."
+        )
 
 # Export the plugin instance.
 plugin = UnwatchFeedPlugin()

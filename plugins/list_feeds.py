@@ -45,8 +45,7 @@ class ListFeedsPlugin(ToolPlugin):
         else:
             final_message = "No RSS feeds are currently being watched."
 
-        await message.channel.send(final_message)
-        return ""
+        return final_message
 
     # --- Web UI Handler ---
     async def handle_webui(self, args, ollama_client, context_length):
@@ -63,13 +62,11 @@ class ListFeedsPlugin(ToolPlugin):
     async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
         feeds = redis_client.hgetall("rss:feeds")
         if feeds:
-            feed_list = "\n".join(f"{feed} (last update: {feeds[feed]})" for feed in feeds)
-            final_message = f"{user}: Currently watched feeds:\n{feed_list}"
+            lines = [f"{user}: Currently watched feeds:"]
+            lines += [f"{feed} (last update: {feeds[feed]})" for feed in feeds]
         else:
-            final_message = f"{user}: No RSS feeds are currently being watched."
-
-        for line in final_message.split("\n"):
-            await bot.privmsg(channel, line)
+            lines = [f"{user}: No RSS feeds are currently being watched."]
+        return "\n".join(lines)
 
 # Export the plugin instance.
 plugin = ListFeedsPlugin()
