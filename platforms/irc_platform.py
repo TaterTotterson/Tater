@@ -4,8 +4,6 @@ import json
 import redis
 import logging
 import asyncio
-import irc3
-from irc3.plugins.command import command
 from datetime import datetime
 from dotenv import load_dotenv
 import re
@@ -13,6 +11,9 @@ import threading
 from plugin_registry import plugin_registry
 from helpers import OllamaClientWrapper, parse_function_json, send_waiting_message
 import time
+import sys
+import irc3
+from irc3.plugins.command import command
 
 load_dotenv()
 logger = logging.getLogger("irc.tater")
@@ -87,10 +88,13 @@ def get_plugin_enabled(name):
 
 def save_irc_message(channel, role, username, content):
     key = f"tater:irc:{channel}:history"
+    max_store = int(redis_client.get("tater:max_store") or 20)
     redis_client.rpush(key, json.dumps({"role": role, "username": username, "content": content}))
-    redis_client.ltrim(key, -20, -1)
+    redis_client.ltrim(key, -max_store, -1)
 
-def load_irc_history(channel, limit=20):
+def load_irc_history(channel, limit=None):
+    if limit is None:
+        limit = int(redis_client.get("tater:max_ollama") or 8)
     key = f"tater:irc:{channel}:history"
     raw_history = redis_client.lrange(key, -limit, -1)
     formatted = []
@@ -146,17 +150,11 @@ async def on_message(self, mask, event, target, data):
         return
 
     logger.info(f"<{mask.nick}> {data}")
-    history = load_irc_history(channel=target, limit=20)
+    history = load_irc_history(channel=target)
     messages = [{"role": "system", "content": build_system_prompt()}] + history
 
     try:
-        response = await ollama_client.chat(
-            model=OLLAMA_MODEL,
-            messages=messages,
-            stream=False,
-            keep_alive=-1,
-            options={"num_ctx": ollama_client.context_length}
-        )
+        response = await ollama_client.chat(messages)
         response_text = response["message"].get("content", "").strip()
         logger.info(f"Tater: {response_text}")
 
@@ -168,33 +166,37 @@ async def on_message(self, mask, event, target, data):
             if func in plugin_registry and get_plugin_enabled(func):
                 plugin = plugin_registry[func]
 
-                # 👉 Waiting message
+                # Waiting message
                 if hasattr(plugin, "waiting_prompt_template"):
-                    wait_msg = plugin.waiting_prompt_template.format(mention=mask.nick)
-                    self.bot.privmsg(target, wait_msg)
-                    save_irc_message(channel=target, role="assistant", username="assistant", content=wait_msg)
+                    wait_prompt = plugin.waiting_prompt_template.format(mention=mask.nick)
+                    wait_response = await ollama_client.chat(
+                        messages=[{"role": "user", "content": wait_prompt}]
+                    )
+                    wait_text = wait_response["message"]["content"].strip()
+                    self.privmsg(target, wait_text)
+                    save_irc_message(channel=target, role="assistant", username="assistant", content=wait_text)
 
                 result = await plugin.handle_irc(
-                    self.bot, target, mask.nick, data, args, ollama_client
+                    self, target, mask.nick, data, args, ollama_client
                 )
 
                 if isinstance(result, list):
                     for item in result:
                         if isinstance(item, str):
                             for chunk in [item[i:i+MAX_RESPONSE_LENGTH] for i in range(0, len(item), MAX_RESPONSE_LENGTH)]:
-                                self.bot.privmsg(target, chunk)
+                                self.privmsg(target, chunk)
                             save_irc_message(channel=target, role="assistant", username="assistant", content=item)
 
                         elif isinstance(item, dict):
                             kind = item.get("type")
                             name = item.get("name", "output")
                             placeholder = f"[{kind.capitalize()}: {name}]"
-                            self.bot.privmsg(target, f"{mask.nick}: {placeholder}")
+                            self.privmsg(target, f"{mask.nick}: {placeholder}")
                             save_irc_message(channel=target, role="assistant", username="assistant", content=placeholder)
 
                 elif isinstance(result, str) and result.strip():
                     for chunk in [result[i:i+MAX_RESPONSE_LENGTH] for i in range(0, len(result), MAX_RESPONSE_LENGTH)]:
-                        self.bot.privmsg(target, chunk)
+                        self.privmsg(target, chunk)
                     save_irc_message(channel=target, role="assistant", username="assistant", content=result)
 
                 else:
@@ -204,12 +206,12 @@ async def on_message(self, mask, event, target, data):
 
         # Default fallback (not tool-based)
         for chunk in [response_text[i:i+MAX_RESPONSE_LENGTH] for i in range(0, len(response_text), MAX_RESPONSE_LENGTH)]:
-            self.bot.privmsg(target, chunk)
+            self.privmsg(target, chunk)
         save_irc_message(channel=target, role="assistant", username="assistant", content=response_text)
 
     except Exception as e:
         logger.error(f"Error processing IRC message: {e}")
-        self.bot.privmsg(target, f"{mask.nick}: Sorry, I ran into an error while thinking.")
+        self.privmsg(target, f"{mask.nick}: Sorry, I ran into an error while thinking.")
 
 def run(stop_event=None):
     # 1) Build your IRC config
