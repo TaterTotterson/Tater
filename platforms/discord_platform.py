@@ -99,8 +99,7 @@ class discord_platform(commands.Bot):
         behavior_guard = (
             "Only call a tool if the user's latest message clearly asks for an action — like 'generate', 'summarize', or 'download'.\n"
             "Ignore casual remarks or praise like 'thanks' or 'nice job'.\n"
-            "Don't pretend to call a tool.\n"
-            "Don't mimic past patterns with tools or emojis — follow current intent only.\n"
+            "Do NOT mimic your past responses — follow current intent only.\n"
         )
         
         return (
@@ -225,7 +224,7 @@ class discord_platform(commands.Bot):
                 return
 
         system_prompt = self.build_system_prompt()
-        history = await self.load_history(message.channel.id, limit=20)
+        history = await self.load_history(message.channel.id)
         messages_list = [{"role": "system", "content": system_prompt}] + history
 
         async with message.channel.typing():
