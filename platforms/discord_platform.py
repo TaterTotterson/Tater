@@ -130,18 +130,17 @@ class discord_platform(commands.Bot):
     async def generate_error_message(self, prompt: str, fallback: str, message: discord.Message):
         try:
             error_response = await self.ollama.chat(
-                model=self.ollama.model,
-                messages=[{"role": "system", "content": prompt}],
-                stream=False,
-                keep_alive=-1,
-                options={"num_ctx": self.ollama.context_length}
+                messages=[{"role": "system", "content": prompt}]
             )
             return error_response['message'].get('content', '').strip() or fallback
         except Exception as e:
             logger.error(f"Error generating error message: {e}")
             return fallback
 
-    async def load_history(self, channel_id, limit=20):
+    async def load_history(self, channel_id, limit=None):
+        if limit is None:
+            limit = int(redis_client.get("tater:max_ollama") or 8)
+
         history_key = f"tater:channel:{channel_id}:history"
         raw_history = redis_client.lrange(history_key, -limit, -1)
         formatted = []
@@ -152,18 +151,24 @@ class discord_platform(commands.Bot):
             sender = data.get("username", role)
             content = data.get("content")
 
-            # Convert image/audio dicts into text placeholders
             if isinstance(content, dict):
-                if content.get("type") == "image":
-                    placeholder = f"[Image: {content.get('name', 'unnamed image')}]"
-                elif content.get("type") == "audio":
-                    placeholder = f"[Audio: {content.get('name', 'unnamed audio')}]"
+                file_type = content.get("type")
+                name = content.get("name", "unnamed file")
+
+                if file_type == "image":
+                    placeholder = f"[Image: {name}]"
+                elif file_type == "audio":
+                    placeholder = f"[Audio: {name}]"
+                elif file_type == "video":
+                    placeholder = f"[Video: {name}]"
+                elif file_type == "file":
+                    placeholder = f"[File: {name}]"
                 else:
-                    continue  # skip unknown content types
+                    continue  # skip unknown or unsupported types
             elif isinstance(content, str):
                 placeholder = content
             else:
-                continue  # skip anything else unexpected
+                continue
 
             formatted.append({
                 "role": role,
@@ -174,14 +179,46 @@ class discord_platform(commands.Bot):
 
     async def save_message(self, channel_id, role, username, content):
         key = f"tater:channel:{channel_id}:history"
+        max_store = int(redis_client.get("tater:max_store") or 20)
         redis_client.rpush(key, json.dumps({"role": role, "username": username, "content": content}))
-        redis_client.ltrim(key, -20, -1)
+        redis_client.ltrim(key, -max_store, -1)
 
     async def on_message(self, message: discord.Message):
         if message.author == self.user:
             return
 
-        await self.save_message(message.channel.id, "user", message.author.name, message.content)
+        # Handle text + attachments
+        if message.attachments:
+            for attachment in message.attachments:
+                try:
+                    if not attachment.content_type:
+                        continue
+
+                    file_bytes = await attachment.read()
+                    file_b64 = base64.b64encode(file_bytes).decode("utf-8")
+
+                    if attachment.content_type.startswith("image/"):
+                        file_type = "image"
+                    elif attachment.content_type.startswith("audio/"):
+                        file_type = "audio"
+                    elif attachment.content_type.startswith("video/"):
+                        file_type = "video"
+                    else:
+                        file_type = "file"
+
+                    file_obj = {
+                        "type": file_type,
+                        "name": attachment.filename,
+                        "mimetype": attachment.content_type,
+                        "data": file_b64
+                    }
+
+                    await self.save_message(message.channel.id, "user", message.author.name, file_obj)
+                except Exception as e:
+                    logger.warning(f"Failed to store attachment ({attachment.filename}): {e}")
+        else:
+            # Just a text message
+            await self.save_message(message.channel.id, "user", message.author.display_name, message.content)
 
         if isinstance(message.channel, discord.DMChannel):
             if message.author.id != self.admin_user_id:
@@ -197,13 +234,7 @@ class discord_platform(commands.Bot):
         async with message.channel.typing():
             try:
                 logger.debug(f"Sending messages to Ollama: {messages_list}")
-                response = await self.ollama.chat(
-                    model=self.ollama.model,
-                    messages=messages_list,
-                    stream=False,
-                    keep_alive=-1,
-                    options={"num_ctx": self.ollama.context_length}
-                )
+                response = await self.ollama.chat(messages_list)
                 response_text = response['message'].get('content', '').strip()
                 if not response_text:
                     await message.channel.send("I'm not sure how to respond to that.")
@@ -232,9 +263,7 @@ class discord_platform(commands.Bot):
                                 )
                             )
 
-                        result = await plugin.handle_discord(
-                            message, args, self.ollama, self.ollama.context_length, self.max_response_length
-                        )
+                        result = await plugin.handle_discord(message, args, self.ollama)
 
                         if isinstance(result, list):
                             for item in result:
@@ -258,8 +287,14 @@ class discord_platform(commands.Bot):
                                         file = discord.File(BytesIO(binary), filename=filename)
                                         await message.channel.send(file=file)
 
-                                        placeholder = f"[{content_type.capitalize()}: {filename}]"
-                                        await self.save_message(message.channel.id, "assistant", "assistant", placeholder)
+                                        # Save full image/audio content to Redis
+                                        content_obj = {
+                                            "type": content_type,
+                                            "name": filename,
+                                            "mimetype": item.get("mimetype", ""),
+                                            "data": base64.b64encode(binary).decode("utf-8")
+                                        }
+                                        await self.save_message(message.channel.id, "assistant", "assistant", content_obj)
 
                                     except Exception as e:
                                         logger.warning(f"Failed to handle {content_type} return: {e}")
@@ -292,12 +327,20 @@ class discord_platform(commands.Bot):
     async def on_reaction_add(self, reaction, user):
         if user.bot:
             return
+
         for plugin in plugin_registry.values():
-            if hasattr(plugin, "on_reaction_add") and get_plugin_enabled(plugin.name):
-                try:
-                    await plugin.on_reaction_add(reaction, user)
-                except Exception as e:
-                    logger.error(f"[{plugin.name}] Error in on_reaction_add: {e}")
+            # Only call plugins that implement on_reaction_add
+            if not hasattr(plugin, "on_reaction_add"):
+                continue
+
+            # Respect plugin toggle (even for passive ones)
+            if not get_plugin_enabled(plugin.name):
+                continue
+
+            try:
+                await plugin.on_reaction_add(reaction, user)
+            except Exception as e:
+                logger.error(f"[{plugin.name}] Error in on_reaction_add: {e}")
 
 class AdminCommands(commands.Cog):
     def __init__(self, bot: discord_platform):
