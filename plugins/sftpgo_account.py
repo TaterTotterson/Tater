@@ -166,7 +166,7 @@ class SFTPGoAccountPlugin(ToolPlugin):
                     return "error"
 
     # --- Discord Handler ---
-    async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
+    async def handle_discord(self, message, args, ollama_client):
         user = message.author
         password = self.generate_random_password()
 
@@ -180,11 +180,7 @@ class SFTPGoAccountPlugin(ToolPlugin):
             prompt = f"Generate a brief message stating that an error occurred while creating the account for '{user.name}'."
 
         response_data = await ollama_client.chat(
-            model=ollama_client.model,
-            messages=[{"role": "user", "content": prompt}],
-            stream=False,
-            keep_alive=ollama_client.keep_alive,
-            options={"num_ctx": context_length}
+            messages=[{"role": "user", "content": prompt}]
         )
 
         response_text = response_data['message'].get('content', '').strip()
@@ -194,7 +190,7 @@ class SFTPGoAccountPlugin(ToolPlugin):
 
 
     # --- WebUI Handler ---
-    async def handle_webui(self, args, ollama_client, context_length):
+    async def handle_webui(self, args, ollama_client):
         return "❌ SFTPGo account creation is not supported on the web UI."
 
 
@@ -211,11 +207,7 @@ class SFTPGoAccountPlugin(ToolPlugin):
             prompt = f"Generate a brief message stating that an error occurred while creating the account for '{user}'."
 
         response_data = await ollama_client.chat(
-            model=ollama_client.model,
-            messages=[{"role": "user", "content": prompt}],
-            stream=False,
-            keep_alive=ollama_client.keep_alive,
-            options={"num_ctx": context_length}
+            messages=[{"role": "user", "content": prompt}]
         )
 
         response_text = format_irc(response_data['message'].get("content", "").strip())

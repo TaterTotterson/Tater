@@ -24,7 +24,7 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         '  "arguments": {"prompt": "<Concept for the song, e.g. happy summer song>"}\n'
         '}\n'
     )
-    description = "Generates music using AceStep with structured lyrics and tags."
+    description = "Generates music using ComfyUI Audio Ace."
     settings_category = "ComfyUI Audio Ace"
     platforms = ["discord", "webui"]
     required_settings = {
@@ -43,8 +43,10 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
 
     @staticmethod
     def get_server_address():
-        settings = redis_client.hgetall("plugin_settings:ComfyUI Audio Ace")
-        url = settings.get("COMFYUI_AUDIO_ACE_URL", "").strip()
+        settings = redis_client.hgetall(
+            f"plugin_settings:{ComfyUIAudioAcePlugin.settings_category}"
+        )
+        url = settings.get("COMFYUI_AUDIO_ACE_URL", "").strip() or "localhost:8188"
         if not url:
             return "localhost:8188"
         return url.replace("http://", "").replace("https://", "")
@@ -141,14 +143,10 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         )
 
         response = await ollama_client.chat(
-            model=ollama_client.model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": "Write tags and lyrics for the song."}
-            ],
-            stream=False,
-            keep_alive=ollama_client.keep_alive,
-            options={"num_ctx": context_length}
+            ]
         )
 
         content = response.get("message", {}).get("content", "").strip()
@@ -261,7 +259,7 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
     # ---------------------------------------
     # Discord
     # ---------------------------------------
-    async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
+    async def handle_discord(self, message, args, ollama_client):
         user_prompt = args.get("prompt")
         if not user_prompt:
             return "No prompt provided."
@@ -272,14 +270,10 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
 
             system_msg = f'The user received a ComfyUI-generated audio clip based on: "{user_prompt}"'
             response = await ollama_client.chat(
-                model=ollama_client.model,
                 messages=[
                     {"role": "system", "content": system_msg},
                     {"role": "user", "content": "Send a short friendly comment about the new song. Only generate the message. Do not respond to this message."}
-                ],
-                stream=False,
-                keep_alive=ollama_client.keep_alive,
-                options={"num_ctx": context_length}
+                ]
             )
 
             message_text = response["message"].get("content", "").strip() or "Hope you enjoy the track!"
@@ -300,7 +294,7 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
     # ---------------------------------------
     # WebUI
     # ---------------------------------------
-    async def handle_webui(self, args, ollama_client, context_length):
+    async def handle_webui(self, args, ollama_client):
         user_prompt = args.get("prompt")
         if not user_prompt:
             return "No prompt provided."
@@ -318,14 +312,10 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
 
             system_msg = f'The user received a ComfyUI-generated song based on: \"{user_prompt}\"'
             response = await ollama_client.chat(
-                model=ollama_client.model,
                 messages=[
                     {"role": "system", "content": system_msg},
                     {"role": "user", "content": "Send a short friendly comment about the new song. Only generate the message. Do not respond to this message."}
-                ],
-                stream=False,
-                keep_alive=ollama_client.keep_alive,
-                options={"num_ctx": context_length}
+                ]
             )
 
             message_text = response["message"].get("content", "").strip() or "Hope you enjoy the track!"

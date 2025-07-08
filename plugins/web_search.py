@@ -166,7 +166,7 @@ class WebSearchPlugin(ToolPlugin):
     # ---------------------------------------------------------
     # Discord handler
     # ---------------------------------------------------------
-    async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
+    async def handle_discord(self, message, args, ollama_client):
         query = args.get("query")
         if not query:
             return "No search query provided."
@@ -195,11 +195,7 @@ class WebSearchPlugin(ToolPlugin):
         )
 
         choice_response = await ollama_client.chat(
-            model=ollama_client.model,
-            messages=[{"role": "system", "content": choice_prompt}],
-            stream=False,
-            keep_alive=-1,
-            options={"num_ctx": context_length}
+            messages=[{"role": "system", "content": choice_prompt}]
         )
 
         choice_text = choice_response['message'].get('content', '').strip()
@@ -230,11 +226,7 @@ class WebSearchPlugin(ToolPlugin):
         )
 
         final_response = await ollama_client.chat(
-            model=ollama_client.model,
-            messages=[{"role": "system", "content": info_prompt}],
-            stream=False,
-            keep_alive=-1,
-            options={"num_ctx": context_length}
+            messages=[{"role": "system", "content": info_prompt}]
         )
 
         final_answer = final_response['message'].get('content', '').strip()
@@ -243,7 +235,7 @@ class WebSearchPlugin(ToolPlugin):
     # ---------------------------------------------------------
     # WebUI handler
     # ---------------------------------------------------------
-    async def handle_webui(self, args, ollama_client, context_length):
+    async def handle_webui(self, args, ollama_client):
         query = args.get("query")
         if not query:
             return "No search query provided."
@@ -271,11 +263,7 @@ class WebSearchPlugin(ToolPlugin):
         )
 
         choice_response = await ollama_client.chat(
-            model=ollama_client.model,
-            messages=[{"role": "system", "content": choice_prompt}],
-            stream=False,
-            keep_alive=-1,
-            options={"num_ctx": ollama_client.context_length}
+            messages=[{"role": "system", "content": choice_prompt}]
         )
 
         choice_text = choice_response['message'].get('content', '').strip()
@@ -308,11 +296,7 @@ class WebSearchPlugin(ToolPlugin):
         )
 
         final_response = await ollama_client.chat(
-            model=ollama_client.model,
-            messages=[{"role": "system", "content": info_prompt}],
-            stream=False,
-            keep_alive=-1,
-            options={"num_ctx": ollama_client.context_length}
+            messages=[{"role": "system", "content": info_prompt}]
         )
 
         final_answer = final_response["message"].get("content", "").strip()
@@ -348,11 +332,7 @@ class WebSearchPlugin(ToolPlugin):
         )
 
         response = await ollama_client.chat(
-            model=ollama_client.model,
-            messages=[{"role": "system", "content": choice_prompt}],
-            stream=False,
-            keep_alive=-1,
-            options={"num_ctx": ollama_client.context_length}
+            messages=[{"role": "system", "content": choice_prompt}]
         )
 
         content = response["message"].get("content", "").strip()
@@ -382,11 +362,7 @@ class WebSearchPlugin(ToolPlugin):
         )
 
         final = await ollama_client.chat(
-            model=ollama_client.model,
-            messages=[{"role": "system", "content": info_prompt}],
-            stream=False,
-            keep_alive=-1,
-            options={"num_ctx": ollama_client.context_length}
+            messages=[{"role": "system", "content": info_prompt}]
         )
 
         answer = final["message"].get("content", "").strip()

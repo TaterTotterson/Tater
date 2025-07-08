@@ -37,7 +37,7 @@ class ListFeedsPlugin(ToolPlugin):
     platforms = ["discord", "webui", "irc"]
 
     # --- Discord Handler ---
-    async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
+    async def handle_discord(self, message, args, ollama_client):
         feeds = redis_client.hgetall("rss:feeds")
         if feeds:
             feed_list = "\n".join(f"{feed} (last update: {feeds[feed]})" for feed in feeds)
@@ -48,7 +48,7 @@ class ListFeedsPlugin(ToolPlugin):
         return final_message
 
     # --- Web UI Handler ---
-    async def handle_webui(self, args, ollama_client, context_length):
+    async def handle_webui(self, args, ollama_client):
         feeds = redis_client.hgetall("rss:feeds")
         if feeds:
             feed_list = "\n".join(f"{feed} (last update: {feeds[feed]})" for feed in feeds)

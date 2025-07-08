@@ -6,7 +6,7 @@ import os
 import discord
 from plugin_base import ToolPlugin
 from plugin_settings import get_plugin_settings
-from helpers import redis_client
+from helpers import redis_client, get_latest_image_from_history
 
 def decode_base64(data: str) -> bytes:
     data = data.strip()
@@ -34,10 +34,9 @@ class VisionDescriberPlugin(ToolPlugin):
         '}'
     )
     description = (
-        "Describes the most recent image in the channel, either from an attachment, URL, or base64. "
-        "Can be triggered with no arguments."
+        "Uses AI vision to describe the most recently available image. "
+        "No input needed — it automatically finds the latest uploaded or generated image."
     )
-    platforms = ["discord"]
     settings_category = "Vision"
     required_settings = {
         "ollama_server_address": {
@@ -56,6 +55,7 @@ class VisionDescriberPlugin(ToolPlugin):
     waiting_prompt_template = (
         "Generate a brief message to {mention} telling them to wait a moment while you use your magnifying glass to inspect their image in detail. Only generate the message. Do not respond to this message."
     )
+    platforms = ["discord", "webui"]
 
     def get_vision_settings(self):
         settings = get_plugin_settings(self.settings_category)
@@ -92,82 +92,62 @@ class VisionDescriberPlugin(ToolPlugin):
         server, model = self.get_vision_settings()
         description = await asyncio.to_thread(self.call_ollama_vision, server, model, file_content, additional_prompt)
         return description
-        
-    # --- Discord Handler ---
-    async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
-        image_bytes = None
 
-        if message.attachments:
-            for attachment in message.attachments:
-                if any(attachment.filename.lower().endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".gif"]):
-                    image_bytes = await attachment.read()
-                    break
-
-        if not image_bytes and args.get("image_url"):
-            try:
-                resp = requests.get(args.get("image_url"))
-                if resp.status_code == 200:
-                    image_bytes = resp.content
-            except Exception as e:
-                return f"❌ Error downloading image: {str(e)}"
-
-        if not image_bytes and args.get("image_base64"):
-            try:
-                image_bytes = decode_base64(args.get("image_base64"))
-            except Exception as e:
-                return f"❌ Error decoding base64 image: {str(e)}"
-
-        if not image_bytes:
-            async for previous in message.channel.history(limit=10, oldest_first=False):
-                if previous.id == message.id:
-                    continue
-                if previous.attachments:
-                    for attachment in previous.attachments:
-                        if any(attachment.filename.lower().endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".gif"]):
-                            image_bytes = await attachment.read()
-                            break
-                if image_bytes:
-                    break
+    async def handle_discord(self, message, args, ollama_client):
+        image_bytes, filename = get_latest_image_from_history(
+            f"tater:channel:{message.channel.id}:history",
+            allowed_mimetypes=["image/png", "image/jpeg"]
+        )
 
         if not image_bytes:
             fallback_prompt = (
                 f"Generate a message telling {message.author.mention} that no image was found. "
-                "Mention they can attach an image, include a URL, or paste base64. "
+                "Mention they can attach an image or generate one with a plugin. "
                 "Only generate the message. Do not respond to this message."
             )
-            fmsg = await ollama_client.chat(
-                model=ollama_client.model,
+
+            response = await ollama_client.chat(
                 messages=[
                     {"role": "user", "content": fallback_prompt}
-                ],
-                stream=False,
-                keep_alive=ollama_client.keep_alive,
-                options={"num_ctx": context_length}
+                ]
             )
-            return fmsg["message"].get("content", "").strip()
+            return response["message"].get("content", "").strip()
 
-        additional_prompt = (
+        prompt = (
             "You are an expert visual assistant. Describe the contents of this image in detail, "
             "mentioning key objects, scenes, or actions if recognizable."
         )
 
         server, model = self.get_vision_settings()
-
         description = await asyncio.to_thread(
             self.call_ollama_vision,
-            server, model, image_bytes, additional_prompt,
-            context_length, -1
+            server, model, image_bytes, prompt
         )
 
-        if description:
-            return description[:max_response_length]
-
-        return "❌ Failed to generate image description."
-
+        return description[:1500] if description else "❌ Failed to generate image description."
 
     # --- WebUI Handler ---
-    async def handle_webui(self, args, ollama_client, context_length):
-        return "🖼️ This plugin is currently only available via Discord. Web support is not yet implemented."
+    async def handle_webui(self, args, ollama_client):
+        image_bytes, filename = get_latest_image_from_history(
+            "webui:chat_history",
+            allowed_mimetypes=["image/png", "image/jpeg"]
+        )
+
+        if not image_bytes:
+            return "❌ No image found. Please upload one or generate one using an image plugin first."
+
+        prompt = (
+            "You are an expert visual assistant. Describe the contents of this image in detail, "
+            "mentioning key objects, scenes, or actions if recognizable."
+        )
+
+        server, model = self.get_vision_settings()
+        description = await asyncio.to_thread(
+            self.call_ollama_vision,
+            server, model, image_bytes, prompt
+        )
+
+        return description[:1500] if description else "❌ Failed to generate image description."
 
 
     # --- IRC Handler ---

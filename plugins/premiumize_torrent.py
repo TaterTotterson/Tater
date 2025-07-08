@@ -9,17 +9,12 @@ from discord import ui, ButtonStyle
 import logging
 import asyncio
 from plugin_base import ToolPlugin
-import requests
-import streamlit as st
-from io import BytesIO
-from helpers import send_waiting_message
+from helpers import get_latest_file_from_history, redis_client
+import base64
 
 # No need to call load_dotenv here since settings are handled via the WebUI.
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
-
-# Import helper functions and shared redis_client from helpers.py.
-from helpers import redis_client
+logger.setLevel(logging.INFO)
 
 class PremiumizeTorrentPlugin(ToolPlugin):
     name = "premiumize_torrent"
@@ -29,7 +24,7 @@ class PremiumizeTorrentPlugin(ToolPlugin):
         '  "arguments": {}\n'
         "}\n"
     )
-    description = "Checks if a torrent file provided by the user is cached on Premiumize.me."
+    description = "Checks if a torrent file in chat history is cached on Premiumize.me."
     settings_category = "Premiumize"
     required_settings = {
         "PREMIUMIZE_API_KEY": {
@@ -122,63 +117,37 @@ class PremiumizeTorrentPlugin(ToolPlugin):
                         return data.get("content", [])
                 return None
 
-    async def process_torrent(self, channel: discord.TextChannel, torrent_attachment: discord.Attachment, max_response_length=2000):
-        file_path = f"./{torrent_attachment.filename}"
-        await torrent_attachment.save(file_path)
+    async def process_torrent(self, channel: discord.TextChannel, max_response_length=2000):
+        file_data = get_latest_file_from_history(channel.id, filetype="file", extensions=[".torrent"])
+        if not file_data:
+            await channel.send(content="Please upload a `.torrent` file before using this tool.")
+            return ""
+
+        filename = file_data["name"]
+        file_bytes = base64.b64decode(file_data["data"])
+        file_path = f"./{filename}"
+
         try:
+            with open(file_path, "wb") as f:
+                f.write(file_bytes)
+
             torrent_hash = self.extract_torrent_hash(file_path)
             if not torrent_hash:
                 await channel.send(content="Failed to extract torrent hash.")
                 return ""
-            cached, filename = await self.check_premiumize_cache(torrent_hash)
+
+            cached, display_name = await self.check_premiumize_cache(torrent_hash)
             if cached:
                 magnet_link = self.create_magnet_link(torrent_hash)
                 download_links = await self.get_premiumize_download_links(magnet_link)
+
                 if download_links:
                     if len(download_links) > 10:
-                        view = self.PaginatedLinks(download_links, f"Download Links for `{filename}`")
+                        view = self.PaginatedLinks(download_links, f"Download Links for `{display_name}`")
                         await channel.send(content=view.get_page_content(), view=view)
-                        return f"[Premiumize] Download links sent for `{filename}`."
-                    else:
-                        links_message = f"**Download Links for `{filename}`:**\n"
-                        for file in download_links:
-                            encoded_filename = self.encode_filename(file['path'])
-                            encoded_link = file['link'].replace(file['path'], encoded_filename)
-                            new_line = f"- [{file['path']}]({encoded_link})\n"
-                            if len(links_message) + len(new_line) > max_response_length:
-                                break
-                            links_message += new_line
-                        await channel.send(content=links_message)
-                else:
-                    await channel.send(content="Failed to fetch download links.")
-            else:
-                await channel.send(content=f"The torrent `{torrent_attachment.filename}` is not cached on Premiumize.me.")
-        except Exception as e:
-            logger.error(f"Error processing torrent: {e}")
-            await channel.send(content="An error occurred while processing the torrent file.")
-        finally:
-            try:
-                import os
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-            except Exception:
-                pass
-        return ""
+                        return f"[Premiumize] Download links sent for `{display_name}`."
 
-    async def process_torrent_web(self, file_content: bytes, filename: str, max_response_length=2000):
-        file_path = f"./{filename}"
-        try:
-            with open(file_path, "wb") as f:
-                f.write(file_content)
-            torrent_hash = self.extract_torrent_hash(file_path)
-            if not torrent_hash:
-                return "Failed to extract torrent hash."
-            cached, cached_filename = await self.check_premiumize_cache(torrent_hash)
-            if cached:
-                magnet_link = self.create_magnet_link(torrent_hash)
-                download_links = await self.get_premiumize_download_links(magnet_link)
-                if download_links:
-                    links_message = f"**Download Links for `{cached_filename}`:**\n"
+                    links_message = f"**Download Links for `{display_name}`:**\n"
                     for file in download_links:
                         encoded_filename = self.encode_filename(file['path'])
                         encoded_link = file['link'].replace(file['path'], encoded_filename)
@@ -186,19 +155,22 @@ class PremiumizeTorrentPlugin(ToolPlugin):
                         if len(links_message) + len(new_line) > max_response_length:
                             break
                         links_message += new_line
-                    return links_message
-                return "Failed to fetch download links."
-            return f"The torrent `{filename}` is not cached on Premiumize.me."
+                    await channel.send(content=links_message)
+                else:
+                    await channel.send(content="Failed to fetch download links.")
+            else:
+                await channel.send(content=f"The torrent `{filename}` is not cached on Premiumize.me.")
         except Exception as e:
             logger.error(f"Error processing torrent: {e}")
-            return "An error occurred while processing the torrent file."
+            await channel.send(content="An error occurred while processing the torrent file.")
         finally:
             try:
-                import os
                 if os.path.exists(file_path):
                     os.remove(file_path)
             except Exception:
                 pass
+
+        return ""
 
     class PaginatedLinks(ui.View):
         def __init__(self, links, title, page_size=10):
@@ -242,18 +214,15 @@ class PremiumizeTorrentPlugin(ToolPlugin):
                 await interaction.response.edit_message(content=self.get_page_content(), view=self)
 
     # --- Discord Handler ---
-    async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
-        if not message.attachments:
-            return f"{message.author.mention}: No torrent file attached for Premiumize torrent check."
-
+    async def handle_discord(self, message, args, ollama_client):
         try:
-            result = await self.process_torrent(message.channel, message.attachments[0], max_response_length)
+            result = await self.process_torrent(message.channel)
             return result
         except Exception as e:
             return f"{message.author.mention}: Failed to retrieve Premiumize torrent info: {e}"
 
     # --- WebUI Handler ---
-    async def handle_webui(self, args, ollama_client, context_length):
+    async def handle_webui(self, args, ollama_client):
         return "❌ This plugin is only supported on Discord."
 
     # --- IRC Handler ---

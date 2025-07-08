@@ -31,14 +31,14 @@ class UnwatchFeedPlugin(ToolPlugin):
         '  "arguments": {"feed_url": "<RSS feed URL>"}\n'
         "}\n"
     )
-    description = "Removes an RSS feed provided by the user from the watch list."
+    description = "Removes an RSS feed provided by the user from the rss watch list."
     waiting_prompt_template = (
         "Generate a brief message to {mention} telling them to wait a moment while I remove the feed from the watch list. Only generate the message. Do not respond to this message."
     )
     platforms = ["discord", "webui", "irc"]
 
     # --- Discord Handler ---
-    async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
+    async def handle_discord(self, message, args, ollama_client):
         feed_url = args.get("feed_url")
         if feed_url:
             removed = redis_client.hdel("rss:feeds", feed_url)
@@ -53,7 +53,7 @@ class UnwatchFeedPlugin(ToolPlugin):
 
 
     # --- Web UI Handler ---
-    async def handle_webui(self, args, ollama_client, context_length):
+    async def handle_webui(self, args, ollama_client):
         feed_url = args.get("feed_url")
         if not feed_url:
             return "No feed URL provided for unwatching."

@@ -9,7 +9,7 @@ from io import BytesIO
 from plugin_base import ToolPlugin
 import discord
 import base64
-from helpers import redis_client, load_image_from_url, send_waiting_message, save_assistant_message
+from helpers import redis_client, load_image_from_url, get_latest_image_from_history
 
 client_id = str(uuid.uuid4())
 
@@ -23,7 +23,7 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
         '  }\n'
         '}'
     )
-    description = "Animates images into a looping WebP."
+    description = "Animates the most recent image in chat into a looping WebP using ComfyUI."
     settings_category = "ComfyUI Animate Image"
     required_settings = {
         "COMFYUI_VIDEO_URL": {
@@ -71,15 +71,15 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
 
     @staticmethod
     def get_workflow_template() -> dict:
-        raw = redis_client.hget(
-            f"plugin_settings:{ComfyUIImageVideoPlugin.settings_category}",
-            "COMFYUI_VIDEO_WORKFLOW"
-        ) or ""
-        if not raw:
-            raise RuntimeError(
-                "No WanImageToVideo workflow template set in settings."
-            )
-        return json.loads(raw)
+        key = "plugin_settings:ComfyUI Animate Image:workflow"
+        try:
+            raw = redis_client.get(key)
+            if raw:
+                return json.loads(raw)
+        except Exception:
+            pass
+        raise RuntimeError("No workflow found in Redis. Please upload a valid JSON workflow.")
+
 
     @staticmethod
     def queue_workflow(workflow: dict) -> dict:
@@ -145,53 +145,28 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
             ws.close()
 
     # --- Discord Handler ---
-    async def handle_discord(self, message, args, ollama_client, ctx_length, max_response_length):
-        image_bytes = None
-        filename = None
-
-        # 1. Attachments in current message
-        if message.attachments:
-            for att in message.attachments:
-                if att.content_type and att.content_type.startswith("image/"):
-                    image_bytes = await att.read()
-                    filename = att.filename
-                    break
-
-        # 2. Base64 input
-        if not image_bytes and args.get("image_bytes"):
-            try:
-                image_bytes = base64.b64decode(args["image_bytes"])
-                filename = args.get("filename", "input.png")
-            except Exception:
-                return "❌ Couldn’t decode `image_bytes`. Provide valid Base64."
-
-        # 3. Search recent messages
-        if not image_bytes:
-            async for previous in message.channel.history(limit=10, oldest_first=False):
-                if previous.id == message.id:
-                    continue
-                for att in previous.attachments:
-                    if att.content_type and att.content_type.startswith("image/"):
-                        image_bytes = await att.read()
-                        filename = att.filename
-                        break
-                if image_bytes:
-                    break
+    async def handle_discord(self, message, args, ollama_client):
+        prompt = args.get("prompt", "").strip() or "A gentle animation of the provided image."
+        channel_key = f"tater:channel:{message.channel.id}:history"
+        image_bytes, filename = get_latest_image_from_history(channel_key)
 
         if not image_bytes:
             fallback_prompt = (
                 f"Generate a message telling {message.author.mention} that no image was found. "
-                "Mention they can attach an image or use base64. Only generate the message."
+                "Mention they can attach an image or use an image plugin. Only generate the message."
             )
-            await send_waiting_message(
-                ollama_client=ollama_client,
-                prompt_text=fallback_prompt,
-                save_callback=lambda text: save_assistant_message(message.channel.id, text),
-                send_callback=lambda msg: message.channel.send(msg)
-            )
-            return ""
 
-        prompt = args.get("prompt", "").strip() or "A gentle animation of the provided image."
+            response = await ollama_client.chat(
+                messages=[
+                    {"role": "system", "content": "You're helping users animate images."},
+                    {"role": "user", "content": fallback_prompt}
+                ]
+            )
+
+            fallback_msg = response["message"].get("content", "").strip() or (
+                f"{message.author.mention}, I couldn’t find an image. Try uploading one or use an image plugin first."
+            )
+            return fallback_msg
 
         try:
             animated = await asyncio.to_thread(self.process_prompt, prompt, image_bytes, filename)
@@ -199,14 +174,10 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
             system_msg = f'The user has just been shown an animated image based on the prompt: "{safe_prompt}".'
 
             followup = await ollama_client.chat(
-                model=ollama_client.model,
                 messages=[
                     {"role": "system", "content": system_msg},
                     {"role": "user", "content": "Give them a short, fun message celebrating the animation. Do not include any lead-in phrases or instructions — just the message"}
-                ],
-                stream=False,
-                keep_alive=ollama_client.keep_alive,
-                options={"num_ctx": ctx_length}
+                ]
             )
 
             followup_text = followup["message"].get("content", "").strip() or "Here's your animated image!"
@@ -225,8 +196,39 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
             return f"❌ Failed to generate animation: {e}"
             
     # --- WebUI Handler ---
-    async def handle_webui(self, args, ollama_client, ctx_length):
-        return "❌ This plugin only works in Discord."
+    async def handle_webui(self, args, ollama_client):
+        prompt = args.get("prompt", "").strip() or "A gentle animation of the provided image."
+        image_bytes, filename = get_latest_image_from_history("webui:chat_history")
+
+        if not image_bytes:
+            return "❌ No image found. Please upload one or generate one using an image plugin first."
+
+        try:
+            animated = await asyncio.to_thread(self.process_prompt, prompt, image_bytes, filename)
+            safe_prompt = prompt[:300].strip()
+            system_msg = f'The user has just been shown an animated image based on the prompt: "{safe_prompt}".'
+
+            followup = await ollama_client.chat(
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": "Give them a short, fun message celebrating the animation. Do not include any lead-in phrases or instructions — just the message"}
+                ]
+            )
+
+            followup_text = followup["message"].get("content", "").strip() or "Here's your animated image!"
+
+            return [
+                {
+                    "type": "image",
+                    "name": "animated.webp",
+                    "data": base64.b64encode(animated).decode("utf-8"),
+                    "mimetype": "image/webp"
+                },
+                followup_text
+            ]
+
+        except Exception as e:
+            return f"❌ Failed to generate animation: {e}"
 
     # --- IRC Handler ---
     async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
