@@ -71,13 +71,14 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
 
     @staticmethod
     def get_workflow_template() -> dict:
-        key = "plugin_settings:ComfyUI Animate Image:workflow"
-        try:
-            raw = redis_client.get(key)
-            if raw:
+        settings_key = f"plugin_settings:{ComfyUIImageVideoPlugin.settings_category}"
+        settings = redis_client.hgetall(settings_key)
+        raw = settings.get("COMFYUI_VIDEO_WORKFLOW")
+        if raw:
+            try:
                 return json.loads(raw)
-        except Exception:
-            pass
+            except json.JSONDecodeError:
+                raise RuntimeError("Uploaded workflow is not valid JSON.")
         raise RuntimeError("No workflow found in Redis. Please upload a valid JSON workflow.")
 
 
