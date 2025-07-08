@@ -4,8 +4,7 @@ import os
 import logging
 import json
 from dotenv import load_dotenv
-import ollama
-
+from helpers import OllamaClientWrapper
 from plugin_base import ToolPlugin
 from plugin_settings import get_plugin_enabled
 
@@ -13,15 +12,14 @@ from plugin_settings import get_plugin_enabled
 load_dotenv()
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "127.0.0.1")
 OLLAMA_PORT = os.getenv("OLLAMA_PORT", "11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
-OLLAMA_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
+OLLAMA_CLIENT = OllamaClientWrapper(host=f"http://{OLLAMA_HOST}:{OLLAMA_PORT}")
 
 logger = logging.getLogger("emoji_ai_responder")
 
 class EmojiAIResponderPlugin(ToolPlugin):
     name = "emoji_ai_responder"
     description = "Uses Ollama to pick an appropriate emoji when a user reacts to a message."
-    platforms = []
+    platforms = ["passive"]
 
     async def on_reaction_add(self, reaction, user):
         logger.debug(f"[emoji_ai_responder] on_reaction_add fired: {user.name} reacted to '{reaction.message.content[:80]}'")
@@ -39,24 +37,22 @@ class EmojiAIResponderPlugin(ToolPlugin):
             return
 
         system_prompt = (
-            "You are an assistant that picks a single emoji to represent a message.\n"
-            "Respond only with a function call in the following format:\n\n"
+            "You are an assistant that picks a single, context-appropriate emoji in response to a message.\n\n"
+            "Choose one emoji that best reflects the **emotion**, **intent**, or **theme** of the message. For example, it could express humor, success, approval, frustration, or curiosity.\n\n"
+            "Respond only with the following JSON format:\n\n"
             '{\n'
             '  "function": "suggest_emoji",\n'
             '  "arguments": {\n'
             '    "emoji": "🔥"\n'
             '  }\n'
             '}\n\n'
-            "Do not include any other text. Always respond using this format.\n\n"
+            "Do not include any other text, explanation, or commentary. Only return the JSON object.\n\n"
             f'The message is:\n"{message_content}"'
         )
 
         try:
-            response = await ollama.chat(
-                model=OLLAMA_MODEL,
-                base_url=OLLAMA_URL,
-                messages=[{"role": "system", "content": system_prompt}],
-                function_call="auto"
+            response = await OLLAMA_CLIENT.chat(
+                messages=[{"role": "system", "content": system_prompt}]
             )
 
             ai_reply = response.get("message", {}).get("content", "").strip()

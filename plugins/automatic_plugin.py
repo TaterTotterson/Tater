@@ -109,7 +109,7 @@ class AutomaticPlugin(ToolPlugin):
         raise Exception(f"Image generation failed ({response.status_code}): {response.text}")
 
     # --- Discord Handler ---
-    async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
+    async def handle_discord(self, message, args, ollama_client):
         prompt_text = args.get("prompt")
         if not prompt_text:
             return "No prompt provided for Automatic111."
@@ -123,14 +123,10 @@ class AutomaticPlugin(ToolPlugin):
                 safe_prompt = prompt_text[:300].strip()
                 system_msg = f'The user has just been shown an image based on this prompt: "{safe_prompt}".'
                 final_response = await ollama_client.chat(
-                    model=ollama_client.model,
                     messages=[
                         {"role": "system", "content": system_msg},
                         {"role": "user", "content": "Send a short, friendly response to accompany the image."}
-                    ],
-                    stream=False,
-                    keep_alive=ollama_client.keep_alive,
-                    options={"num_ctx": context_length}
+                    ]
                 )
 
                 reply = final_response["message"].get("content", "").strip() or "Here's your image!"
@@ -150,7 +146,7 @@ class AutomaticPlugin(ToolPlugin):
             return error_msg
 
     # --- WebUI Handler ---
-    async def handle_webui(self, args, ollama_client, context_length):
+    async def handle_webui(self, args, ollama_client):
         prompt_text = args.get("prompt")
         if not prompt_text:
             return "No prompt provided for Automatic111."
@@ -168,14 +164,10 @@ class AutomaticPlugin(ToolPlugin):
             safe_prompt = prompt_text[:300].strip()
             system_msg = f'The user has just been shown an image based on this prompt: "{safe_prompt}".'
             final_response = await ollama_client.chat(
-                model=ollama_client.model,
                 messages=[
                     {"role": "system", "content": system_msg},
                     {"role": "user", "content": "Send a short, friendly response to accompany the image."}
-                ],
-                stream=False,
-                keep_alive=ollama_client.keep_alive,
-                options={"num_ctx": context_length}
+                ]
             )
 
             message_text = final_response["message"].get("content", "").strip() or "Here's your image!"
@@ -183,8 +175,7 @@ class AutomaticPlugin(ToolPlugin):
             return [image_data, message_text]
 
         except Exception as e:
-            error = f"Failed to generate image: {e}"
-            return error
+            return f"Failed to generate image: {e}"
 
     # --- IRC Handler ---
     async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):

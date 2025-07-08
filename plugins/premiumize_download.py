@@ -173,7 +173,7 @@ class PremiumizeDownloadPlugin(ToolPlugin):
                 await interaction.response.edit_message(content=self.get_page_content(), view=self)
 
     # --- Discord Handler ---
-    async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
+    async def handle_discord(self, message, args, ollama_client):
         url = args.get("url")
         if not url:
             return f"{message.author.mention}: No URL provided for Premiumize download check."
@@ -185,7 +185,7 @@ class PremiumizeDownloadPlugin(ToolPlugin):
             return f"{message.author.mention}: Failed to retrieve Premiumize download links: {e}"
 
     # --- WebUI Handler ---
-    async def handle_webui(self, args, ollama_client, context_length):
+    async def handle_webui(self, args, ollama_client):
         url = args.get("url")
         if not url:
             return "No URL provided for Premiumize download check."

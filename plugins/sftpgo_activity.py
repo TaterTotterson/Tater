@@ -19,7 +19,7 @@ class SFTPGoActivityPlugin(ToolPlugin):
         '  "arguments": {} \n'
         '}\n'
     )
-    description = ("Retrieves current connection activity from the SFTPGo server and provides a friendly summary.")
+    description = ("Retrieves current connection activity from the SFTPGo.")
     settings_category = "SFTPGo"
     required_settings = {
         "SFTPGO_API_URL": {

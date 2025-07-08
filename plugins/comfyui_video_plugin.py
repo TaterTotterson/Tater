@@ -151,7 +151,7 @@ class ComfyUIVideoPlugin(ToolPlugin):
 
         raise Exception("No video/image returned from ComfyUI.")
 
-    async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
+    async def handle_discord(self, message, args, ollama_client):
         user_prompt = args.get("prompt")
         if not user_prompt:
             return "No prompt provided for ComfyUI Video."
@@ -170,14 +170,10 @@ class ComfyUIVideoPlugin(ToolPlugin):
             system_msg = f'The user has just been shown an animated video based on the prompt: "{safe_prompt}".'
 
             followup = await ollama_client.chat(
-                model=ollama_client.model,
                 messages=[
                     {"role": "system", "content": system_msg},
                     {"role": "user", "content": "Respond with a short, fun message celebrating the video. Do not include any lead-in phrases or instructions — just the message."}
-                ],
-                stream=False,
-                keep_alive=ollama_client.keep_alive,
-                options={"num_ctx": context_length}
+                ]
             )
 
             followup_text = followup["message"].get("content", "").strip() or "🎬 Here's your animated video!"
@@ -188,7 +184,7 @@ class ComfyUIVideoPlugin(ToolPlugin):
             return f"Failed to queue prompt: {e}"
 
     # --- WebUI Handler ---
-    async def handle_webui(self, args, ollama_client, context_length):
+    async def handle_webui(self, args, ollama_client):
         user_prompt = args.get("prompt")
         if not user_prompt:
             return "No prompt provided."
@@ -207,14 +203,10 @@ class ComfyUIVideoPlugin(ToolPlugin):
             system_msg = f'The user has just been shown a looping animated video based on the prompt: "{safe_prompt}".'
 
             final_response = await ollama_client.chat(
-                model=ollama_client.model,
                 messages=[
                     {"role": "system", "content": system_msg},
                     {"role": "user", "content": "Give them a short, fun message celebrating the video. Do not include any instructions or lead-in phrases — just the message."}
-                ],
-                stream=False,
-                keep_alive=ollama_client.keep_alive,
-                options={"num_ctx": context_length}
+                ]
             )
 
             message_text = final_response["message"].get("content", "").strip() or "🎬 Here's your animated video!"

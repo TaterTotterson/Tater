@@ -24,7 +24,7 @@ class ComfyUIImagePlugin(ToolPlugin):
         '  "arguments": {"prompt": "<Text prompt for the image>"}\n'
         "}\n"
     )
-    description = "Generates an image using ComfyUI."
+    description = "Draws a picture using a prompt provided by the user using ComfyUI."
     settings_category = "ComfyUI Image"
     required_settings = {
         "COMFYUI_URL": {
@@ -164,7 +164,7 @@ class ComfyUIImagePlugin(ToolPlugin):
     # ---------------------------------------------------------
     # Discord handler
     # ---------------------------------------------------------
-    async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
+    async def handle_discord(self, message, args, ollama_client):
         user_prompt = args.get("prompt")
         if not user_prompt:
             return "No prompt provided for ComfyUI."
@@ -176,14 +176,10 @@ class ComfyUIImagePlugin(ToolPlugin):
                 safe_prompt = user_prompt[:300].strip()
                 system_msg = f'The user has just been shown an AI-generated image based on the prompt: "{safe_prompt}".'
                 final_response = await ollama_client.chat(
-                    model=ollama_client.model,
                     messages=[
                         {"role": "system", "content": system_msg},
                         {"role": "user", "content": "Respond with a short, fun message celebrating the image. Do not include any lead-in phrases or instructions — just the message."}
-                    ],
-                    stream=False,
-                    keep_alive=ollama_client.keep_alive,
-                    options={"num_ctx": context_length}
+                    ]
                 )
 
                 message_text = final_response["message"].get("content", "").strip() or "Here's your generated image!"
@@ -203,7 +199,7 @@ class ComfyUIImagePlugin(ToolPlugin):
     # ---------------------------------------------------------
     # WebUI handler
     # ---------------------------------------------------------
-    async def handle_webui(self, args, ollama_client, context_length):
+    async def handle_webui(self, args, ollama_client):
         user_prompt = args.get("prompt")
         if not user_prompt:
             return "No prompt provided for ComfyUI."
@@ -221,14 +217,10 @@ class ComfyUIImagePlugin(ToolPlugin):
             safe_prompt = user_prompt[:300].strip()
             system_msg = f'The user has just been shown an AI-generated image based on the prompt: "{safe_prompt}".'
             final_response = await ollama_client.chat(
-                model=ollama_client.model,
                 messages=[
                     {"role": "system", "content": system_msg},
                     {"role": "user", "content": "Respond with a short, fun message celebrating the image. Do not include any lead-in phrases or instructions — just the message."}
-                ],
-                stream=False,
-                keep_alive=ollama_client.keep_alive,
-                options={"num_ctx": context_length}
+                ]
             )
 
             message_text = final_response["message"].get("content", "").strip() or "Here's your generated image!"

@@ -105,15 +105,11 @@ class WebSummaryPlugin(ToolPlugin):
         )
 
         response = await ollama_client.chat(
-            model=ollama_client.model,
-            messages=[{"role": "user", "content": prompt}],
-            stream=False,
-            keep_alive=-1,
-            options={"num_ctx": ollama_client.context_length}
+            messages=[{"role": "user", "content": prompt}]
         )
         return response["message"].get("content", "")
 
-    async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
+    async def handle_discord(self, message, args, ollama_client):
         url = args.get("url")
         if not url:
             return "No webpage URL provided."
@@ -124,7 +120,7 @@ class WebSummaryPlugin(ToolPlugin):
 
         return "\n".join(self.split_message(summary, max_response_length))
 
-    async def handle_webui(self, args, ollama_client, context_length):
+    async def handle_webui(self, args, ollama_client):
         url = args.get("url")
         if not url:
             return "No webpage URL provided."

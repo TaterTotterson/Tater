@@ -96,11 +96,7 @@ class YouTubeSummaryPlugin(ToolPlugin):
                 "Write a brief summary of this portion using bullet points:\n\n" + chunk
             )
             resp = await ollama_client.chat(
-                model=ollama_client.model,
-                messages=[{"role": "system", "content": prompt}],
-                stream=False,
-                keep_alive=-1,
-                options={"num_ctx": ollama_client.context_length}
+                messages=[{"role": "system", "content": prompt}]
             )
             partial_summaries.append(resp["message"]["content"].strip())
 
@@ -110,11 +106,7 @@ class YouTubeSummaryPlugin(ToolPlugin):
             + "\n\n".join(partial_summaries)
         )
         final = await ollama_client.chat(
-            model=ollama_client.model,
-            messages=[{"role": "system", "content": final_prompt}],
-            stream=False,
-            keep_alive=-1,
-            options={"num_ctx": ollama_client.context_length}
+            messages=[{"role": "system", "content": final_prompt}]
         )
         return final["message"]["content"].strip()
 

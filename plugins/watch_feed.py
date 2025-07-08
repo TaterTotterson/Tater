@@ -32,14 +32,14 @@ class WatchFeedPlugin(ToolPlugin):
         '  "arguments": {"feed_url": "<RSS feed URL>"}\n'
         "}\n"
     )
-    description = "Adds an RSS feed provided by the user to the watch list."
+    description = "Adds an RSS feed provided by the user to the rss watch list."
     waiting_prompt_template = (
         "Generate a brief message to {mention} telling them to wait a moment while I add the feed to the watch list. Only generate the message. Do not respond to this message."
     )
     platforms = ["discord", "webui", "irc"]
 
     # --- Discord Handler ---
-    async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
+    async def handle_discord(self, message, args, ollama_client):
         feed_url = args.get("feed_url")
         if not feed_url:
             return "No feed URL provided for watching."
@@ -63,7 +63,7 @@ class WatchFeedPlugin(ToolPlugin):
 
 
     # --- Web UI Handler ---
-    async def handle_webui(self, args, ollama_client, context_length):
+    async def handle_webui(self, args, ollama_client):
         feed_url = args.get("feed_url")
         if not feed_url:
             return "No feed URL provided for watching."

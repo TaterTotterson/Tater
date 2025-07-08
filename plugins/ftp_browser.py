@@ -22,7 +22,7 @@ class FtpBrowserPlugin(ToolPlugin):
         '  "arguments": {}\n'
         "}\n"
     )
-    description = "Browse and download files from the FTP server."
+    description = "Lets the user browse and download files from the FTP server."
     settings_category = "FTPBrowser"
     required_settings = {
         "FTP_HOST": {
@@ -206,7 +206,7 @@ class FtpBrowserPlugin(ToolPlugin):
             entries = await FtpBrowserPlugin.list_ftp_files(self.current_path)
             await interaction.response.edit_message(content=f"Browsing: `{self.current_path}`", view=FtpBrowserPlugin.FileBrowserView(self.plugin, self.user_id, self.current_path, entries, self.page, ollama_client=self.ollama_client))
 
-    async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
+    async def handle_discord(self, message, args, ollama_client):
         user_id = message.author.id
         FtpBrowserPlugin.user_paths[user_id] = "/"
         entries = await FtpBrowserPlugin.list_ftp_files("/")
@@ -220,20 +220,16 @@ class FtpBrowserPlugin(ToolPlugin):
         # Generate short follow-up
         system_msg = f"The user is now browsing the root directory of an FTP server."
         followup = await ollama_client.chat(
-            model=ollama_client.model,
             messages=[
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": "Send a short friendly message to encourage their FTP browsing. Do not include any instructions — just the message."}
-            ],
-            stream=False,
-            keep_alive=ollama_client.keep_alive,
-            options={"num_ctx": context_length}
+            ]
         )
 
         message_text = followup["message"].get("content", "").strip() or "Happy browsing!"
         return message_text
 
-    async def handle_webui(self, args, ollama_client, context_length):
+    async def handle_webui(self, args, ollama_client):
         response = "📂 FTP browsing is only available on Discord for now."
         return response
 
