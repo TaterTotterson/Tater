@@ -9,6 +9,7 @@ import redis
 from dotenv import load_dotenv
 import re
 import json
+import base64
 
 load_dotenv()
 nest_asyncio.apply()
@@ -111,6 +112,15 @@ class OllamaClientWrapper(ollama.AsyncClient):
         self.context_length = context_length
         self.keep_alive = keep_alive
 
+    async def chat(self, messages, **kwargs):
+        return await super().chat(
+            model=kwargs.get("model", self.model),
+            messages=messages,
+            stream=kwargs.get("stream", False),
+            keep_alive=kwargs.get("keep_alive", self.keep_alive),
+            options=kwargs.get("options", {"num_ctx": self.context_length}),
+        )
+
 # ---------------------------------------------------------
 # Function JSON parsing helpers
 # ---------------------------------------------------------
@@ -176,3 +186,52 @@ def format_irc(text):
     text = re.sub(r"^- ", "* ", text, flags=re.MULTILINE)
     text = re.sub(r"\n\s*\n", "\n\n", text)
     return text.strip()
+
+# ---------------------------------------------------------
+# Get latest image from redis
+# ---------------------------------------------------------
+def get_latest_image_from_history(key: str, allowed_mimetypes=None):
+    if allowed_mimetypes is None:
+        allowed_mimetypes = ["image/png", "image/jpeg"]
+
+    # Scan the full history stored in Redis
+    history = redis_client.lrange(key, 0, -1)
+    for entry in reversed(history):  # Start from the newest
+        try:
+            msg = json.loads(entry)
+            content = msg.get("content")
+            if isinstance(content, dict):
+                mimetype = content.get("mimetype", "")
+                filename = content.get("name", "").lower()
+
+                if (
+                    content.get("type") == "image"
+                    and content.get("data")
+                    and mimetype in allowed_mimetypes
+                    and not filename.endswith(".webp")
+                ):
+                    image_bytes = base64.b64decode(content["data"])
+                    return image_bytes, filename or "input.png"
+        except Exception:
+            continue
+
+    return None, None
+
+# ---------------------------------------------------------
+# Get latest file from redis
+# ---------------------------------------------------------
+def get_latest_file_from_history(channel_id, filetype="file", extensions=None):
+    """
+    Search Redis chat history for the latest file-type entry with optional extensions (e.g. .torrent).
+    """
+    history_key = f"tater:channel:{channel_id}:history"
+    raw_history = redis_client.lrange(history_key, 0, -1)  # Read full history
+
+    for entry in reversed(raw_history):
+        data = json.loads(entry)
+        content = data.get("content")
+        if isinstance(content, dict) and content.get("type") == filetype:
+            filename = content.get("name", "").lower()
+            if not extensions or any(filename.endswith(ext) for ext in extensions):
+                return content
+    return None
