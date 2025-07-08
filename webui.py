@@ -12,6 +12,7 @@ import base64
 import requests
 import importlib
 import threading
+import sys 
 from datetime import datetime
 from PIL import Image
 from io import BytesIO
@@ -27,16 +28,20 @@ from helpers import (
     send_waiting_message
 )
 
+# Remove any prior handlers
 for handler in logging.root.handlers[:]:
     logging.root.removeHandler(handler)
 
+# Global logging setup
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)-8s %(name)-20s %(message)s"
+    format="%(asctime)s %(levelname)-8s %(name)-20s %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
 
+# Quiet/noisy modules
 logging.getLogger("discord.http").setLevel(logging.WARNING)
-logging.getLogger("irc3").setLevel(logging.WARNING)
+logging.getLogger("irc3.TaterBot").setLevel(logging.WARNING)  # Optional: suppress join/config spam
 
 dotenv.load_dotenv()
 
@@ -56,7 +61,7 @@ def _start_platform(key):
     stop_flag = st.session_state.setdefault("platform_stop_flags", {}).get(key)
     thread = st.session_state.setdefault("platform_threads", {}).get(key)
 
-    # 🛑 Don't start again if already running
+    # Don't start again if already running
     if thread and thread.is_alive():
         return thread, stop_flag
 
@@ -107,7 +112,8 @@ def save_message(role, username, content):
         "content": content  # can be string or dict
     }
     redis_client.rpush("webui:chat_history", json.dumps(message_data))
-    redis_client.ltrim("webui:chat_history", -20, -1)
+    max_messages = int(redis_client.get("tater:max_store") or 20)
+    redis_client.ltrim("webui:chat_history", -max_messages, -1)
 
 def load_chat_history():
     history = redis_client.lrange("webui:chat_history", 0, -1)
@@ -139,7 +145,9 @@ def load_avatar_image(avatar_b64):
     try:
         avatar_bytes = base64.b64decode(avatar_b64)
         return Image.open(BytesIO(avatar_bytes))
-    except Exception as e:
+    except Exception:
+        # Clear corrupted avatar from settings
+        redis_client.hdel("chat_settings", "avatar")
         return None
 
 def get_plugin_enabled(plugin_name):
@@ -361,7 +369,8 @@ async def process_message(user_name, message_content):
     final_system_prompt = build_system_prompt()
 
     # Load last 20 (including the one just saved)
-    history = load_chat_history()[-20:]
+    max_ollama = int(redis_client.get("tater:max_ollama") or 8)
+    history = load_chat_history()[-max_ollama:]
 
     messages_list = [{"role": "system", "content": final_system_prompt}]
     for msg in history:
@@ -381,13 +390,8 @@ async def process_message(user_name, message_content):
             "content": text
         })
 
-    response = await ollama_client.chat(
-        model=ollama_client.model,
-        messages=messages_list,
-        stream=False,
-        keep_alive=-1,
-        options={"num_ctx": ollama_client.context_length}
-    )
+    response = await ollama_client.chat(messages_list)
+
     return response["message"]["content"].strip()
 
 async def process_function_call(response_json, user_question=""):
@@ -398,7 +402,7 @@ async def process_function_call(response_json, user_question=""):
     if func in plugin_registry:
         plugin = plugin_registry[func]
 
-        # 🌟 Show waiting message if defined
+        # Show waiting message if defined
         if hasattr(plugin, "waiting_prompt_template"):
             wait_msg = plugin.waiting_prompt_template.format(mention="User")
             run_async(send_waiting_message(
@@ -408,9 +412,9 @@ async def process_function_call(response_json, user_question=""):
                 send_callback=lambda t: st.chat_message("assistant", avatar=assistant_avatar).write(t)
             ))
 
-        # 🌟 NEW: Show spinner during plugin execution
+        # Show spinner during plugin execution
         with st.spinner("Tater is thinking..."):
-            result = await plugin.handle_webui(args, ollama_client, ollama_client.context_length)
+            result = await plugin.handle_webui(args, ollama_client)
         return result
     else:
         return "Received an unknown function call."
@@ -428,10 +432,12 @@ for platform in sorted(platform_registry, key=lambda p: p["category"].lower()):
     with st.sidebar.expander(label, expanded=False):
         render_platform_controls(platform, redis_client)
 
-with st.sidebar.expander("Chat Settings", expanded=False):
-    st.subheader("User Settings")
+with st.sidebar.expander("WebUI Settings", expanded=False):
+    st.subheader("WebUI Settings")
     current_chat = get_chat_settings()
     username = st.text_input("USERNAME", value=current_chat["username"])
+    display_count = int(redis_client.get("tater:max_display") or 8)
+    new_display = st.number_input("Messages Shown in WebUI", min_value=1, max_value=500, value=display_count, key="webui_display_count")
     uploaded_avatar = st.file_uploader("Upload your avatar", type=["png", "jpg", "jpeg"], key="avatar_uploader")
     if uploaded_avatar is not None:
         avatar_bytes = uploaded_avatar.read()
@@ -439,18 +445,27 @@ with st.sidebar.expander("Chat Settings", expanded=False):
         save_chat_settings(username, avatar_b64)
     else:
         save_chat_settings(username)
+
+    if st.button("Save WebUI Settings", key="save_webui_settings"):
+        redis_client.set("tater:max_display", new_display)
+        st.success("WebUI settings updated.")
+
     if st.button("Clear Chat History", key="clear_history"):
         clear_chat_history()
         st.success("Chat history cleared.")
 
-# One-time file upload handler
-if "uploader_key" not in st.session_state:
-    st.session_state["uploader_key"] = f"sidebar_uploader_{int(time.time())}"
-uploaded_files = st.sidebar.file_uploader(
-    "Attach torrent or image", 
-    accept_multiple_files=True, 
-    key=st.session_state["uploader_key"]
-)
+with st.sidebar.expander("Tater Settings", expanded=False):
+    st.subheader("Tater Runtime Configuration")
+    stored_count = int(redis_client.get("tater:max_store") or 20)
+    ollama_count = int(redis_client.get("tater:max_ollama") or 8)
+
+    new_store = st.number_input("Max Stored Messages", min_value=1, max_value=500, value=stored_count)
+    new_ollama = st.number_input("Messages Sent to Ollama", min_value=1, max_value=new_store, value=ollama_count)
+
+    if st.button("Save Tater Settings"):
+        redis_client.set("tater:max_store", new_store)
+        redis_client.set("tater:max_ollama", new_ollama)
+        st.success("Tater settings updated.")
 
 # ------------------ RSS ------------------
 _start_rss(ollama_client)
@@ -476,7 +491,9 @@ user_avatar = load_avatar_image(avatar_b64) if avatar_b64 else None
 
 # Initialize in‐memory chat list once
 if "chat_messages" not in st.session_state:
-    st.session_state.chat_messages = load_chat_history().copy()
+    full_history = load_chat_history()
+    max_display = int(redis_client.get("tater:max_display") or 8)
+    st.session_state.chat_messages = full_history[-max_display:]
 
 # Render all messages from session state
 for msg in st.session_state.chat_messages:
@@ -486,92 +503,28 @@ for msg in st.session_state.chat_messages:
 
     with st.chat_message(role, avatar=avatar):
         if isinstance(content, dict) and content.get("type") == "image":
-            data = base64.b64decode(content["data"])
-            st.image(Image.open(BytesIO(data)), caption=content.get("name", ""))
+            if content.get("mimetype") == "image/webp":
+                # Animated WebP: use raw HTML to ensure animation
+                st.markdown(
+                    f'''
+                    <img src="data:image/webp;base64,{content["data"]}"
+                         alt="{content.get("name", "")}"
+                         style="max-width: 100%; border-radius: 0.5rem;" autoplay loop>
+                    ''',
+                    unsafe_allow_html=True
+                )
+            else:
+                data = base64.b64decode(content["data"])
+                st.image(Image.open(BytesIO(data)), caption=content.get("name", ""))
+
         elif isinstance(content, dict) and content.get("type") == "audio":
             data = base64.b64decode(content["data"])
             st.audio(data, format=content.get("mimetype", "audio/mpeg"))
         else:
             st.write(content)
 
-# Handle attachments first (if any)
-if uploaded_files:
-    allowed_extensions = [".torrent", ".png", ".jpg", ".jpeg", ".gif"]
-    for uf in uploaded_files:
-        if not any(uf.name.lower().endswith(ext) for ext in allowed_extensions):
-            err = run_async(
-                ollama_client.chat(
-                    model=ollama_client.model,
-                    messages=[{"role":"system",
-                               "content":"Only torrent and image files are allowed."}],
-                    stream=False,
-                    keep_alive=-1,
-                    options={"num_ctx": ollama_client.context_length}
-                )
-            )
-            st.chat_message("assistant", avatar=assistant_avatar).write(err)
-            st.stop()
-
-    torrent_file = next((f for f in uploaded_files if f.name.lower().endswith(".torrent")), None)
-    image_file   = next((f for f in uploaded_files if f.name.lower().endswith((".png", ".jpg", ".jpeg", ".gif"))), None)
-
-    if torrent_file:
-        # user message
-        st.chat_message("user", avatar=user_avatar or "🦖").write(f"[Torrent: {torrent_file.name}]")
-        save_message("user", chat_settings["username"], f"[Torrent: {torrent_file.name}]")
-        st.session_state.chat_messages.append({
-            "role": "user", "username": chat_settings["username"],
-            "content": f"[Torrent: {torrent_file.name}]"
-        })
-
-        # waiting + plugin
-        with st.spinner("Checking torrent..."):
-            run_async(send_waiting_message(
-                ollama_client=ollama_client,
-                prompt_text="Please wait while I check this torrent.",
-                save_callback=lambda t: save_message("assistant","assistant",t),
-                send_callback=lambda t: st.chat_message("assistant",avatar=assistant_avatar).write(t)
-            ))
-            plugin = plugin_registry.get("premiumize_torrent")
-            result = run_async(plugin.process_torrent_web(torrent_file.read(), torrent_file.name)) \
-                     if plugin else "Error: no premiumize plugin."
-        st.chat_message("assistant", avatar=assistant_avatar).write(result)
-        save_message("assistant","assistant",result)
-        st.session_state.chat_messages.append({
-            "role": "assistant", "username": "assistant", "content": result
-        })
-
-    elif image_file:
-        # user message
-        st.chat_message("user", avatar=user_avatar or "🦖").write(f"[Image: {image_file.name}]")
-        save_message("user", chat_settings["username"], f"[Image: {image_file.name}]")
-        st.session_state.chat_messages.append({
-            "role": "user", "username": chat_settings["username"],
-            "content": f"[Image: {image_file.name}]"
-        })
-
-        # waiting + plugin
-        with st.spinner("Analyzing image..."):
-            run_async(send_waiting_message(
-                ollama_client=ollama_client,
-                prompt_text="Please wait while I analyze this image.",
-                save_callback=lambda t: save_message("assistant","assistant",t),
-                send_callback=lambda t: st.chat_message("assistant",avatar=assistant_avatar).write(t)
-            ))
-            plugin = plugin_registry.get("vision_describer")
-            result = run_async(plugin.process_image_web(image_file.read(), image_file.name)) \
-                     if plugin else "Error: no vision plugin."
-        st.chat_message("assistant", avatar=assistant_avatar).write(result)
-        save_message("assistant","assistant",result)
-        st.session_state.chat_messages.append({
-            "role": "assistant", "username": "assistant", "content": result
-        })
-
-    # reset uploader so sidebar clears
-    st.session_state.pop("uploader_key", None)
-
-# Handle plain‐text user input
-elif user_input := st.chat_input("Chat with Tater…"):
+# Chat
+if user_input := st.chat_input("Chat with Tater…"):
     uname = chat_settings["username"]
 
     # Persist the user’s message to Redis
