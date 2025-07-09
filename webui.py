@@ -347,9 +347,9 @@ def build_system_prompt():
     )
 
     behavior_guard = (
-        "Only call a tool if the user's latest message clearly asks for an action — like 'generate', 'summarize', or 'download'.\n"
-        "Ignore casual remarks or praise like 'thanks' or 'nice job'.\n"
-        "Do NOT mimic your past responses — follow current intent only.\n"
+        "Only call a tool if the user's latest message clearly requests an action — such as 'generate', 'summarize', or 'download'.\n"
+        "Do not call a tool in response to casual or friendly messages like 'thanks', 'lol', or 'cool' — reply normally instead.\n"
+        "Never mimic earlier responses or patterns — always respond based on the user's current intent only.\n"
     )
     
     return (
@@ -523,20 +523,21 @@ for msg in st.session_state.chat_messages:
 if user_input := st.chat_input("Chat with Tater…"):
     uname = chat_settings["username"]
 
-    # Persist the user’s message to Redis
+    # Save user message
     save_message("user", uname, user_input)
 
-    # Refresh in‐memory history from Redis
-    st.session_state.chat_messages = load_chat_history().copy()
+    # Refresh display history for UI
+    max_display = int(redis_client.get("tater:max_display") or 8)
+    st.session_state.chat_messages = load_chat_history()[-max_display:]
 
-    # Display the user’s message
+    # Show user's message in chat
     st.chat_message("user", avatar=user_avatar or "🦖").write(user_input)
 
-    # Get the assistant’s response
+    # AI response
     with st.spinner("Tater is thinking..."):
         response_text = run_async(process_message(uname, user_input))
 
-    # Check for a function call
+    # Check for function call
     func_call = parse_function_json(response_text)
     if func_call:
         func_result = run_async(process_function_call(func_call, user_input))
@@ -544,7 +545,7 @@ if user_input := st.chat_input("Chat with Tater…"):
     else:
         responses = [response_text]
 
-    # Render & persist each assistant response
+    # Save assistant message(s) and update UI
     for item in responses:
         with st.chat_message("assistant", avatar=assistant_avatar):
             if isinstance(item, dict) and item.get("type") == "image":
@@ -555,8 +556,7 @@ if user_input := st.chat_input("Chat with Tater…"):
                 st.audio(data, format=item.get("mimetype", "audio/mpeg"))
             else:
                 st.write(item)
-
         save_message("assistant", "assistant", item)
 
-    # refresh in‐memory history again so chat_messages is fully up to date
-    st.session_state.chat_messages = load_chat_history().copy()
+    # Final trim for chat display
+    st.session_state.chat_messages = load_chat_history()[-max_display:]
