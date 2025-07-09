@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 import re
 import threading
 from plugin_registry import plugin_registry
-from helpers import OllamaClientWrapper, parse_function_json, send_waiting_message
+from helpers import OllamaClientWrapper, parse_function_json
 import time
 import sys
 import irc3
@@ -163,16 +163,17 @@ async def on_message(self, mask, event, target, data):
             if func in plugin_registry and get_plugin_enabled(func):
                 plugin = plugin_registry[func]
 
-                # Waiting message
+                # 🔧 Fetch waiting message manually, save + send it explicitly
                 if hasattr(plugin, "waiting_prompt_template"):
                     wait_prompt = plugin.waiting_prompt_template.format(mention=mask.nick)
                     wait_response = await ollama_client.chat(
-                        messages=[{"role": "user", "content": wait_prompt}]
+                        messages=[{"role": "system", "content": wait_prompt}]
                     )
                     wait_text = wait_response["message"]["content"].strip()
                     self.privmsg(target, wait_text)
                     save_irc_message(channel=target, role="assistant", username="assistant", content=wait_text)
 
+                # Handle plugin result
                 result = await plugin.handle_irc(
                     self, target, mask.nick, data, args, ollama_client
                 )

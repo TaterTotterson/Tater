@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 import re
 from datetime import datetime
 from plugin_registry import plugin_registry
-from helpers import OllamaClientWrapper, parse_function_json, send_waiting_message
+from helpers import OllamaClientWrapper, parse_function_json
 import logging
 import threading
 import signal
@@ -249,16 +249,18 @@ class discord_platform(commands.Bot):
                         # Show waiting message if defined
                         if hasattr(plugin, "waiting_prompt_template"):
                             wait_msg = plugin.waiting_prompt_template.format(mention=message.author.mention)
-                            await send_waiting_message(
-                                ollama_client=self.ollama,
-                                prompt_text=wait_msg,
-                                send_callback=lambda t: asyncio.create_task(
-                                    safe_send(message.channel, t, self.max_response_length)
-                                ),
-                                save_callback=lambda t: asyncio.create_task(
-                                    self.save_message(message.channel.id, "assistant", "assistant", t)
-                                )
+
+                            # Directly fetch the waiting message text from Ollama
+                            wait_response = await self.ollama.chat(
+                                messages=[{"role": "system", "content": wait_msg}]
                             )
+                            wait_text = wait_response["message"]["content"].strip()
+
+                            # Save waiting message to Redis
+                            await self.save_message(message.channel.id, "assistant", "assistant", wait_text)
+
+                            # Send waiting message to Discord
+                            await safe_send(message.channel, wait_text, self.max_response_length)
 
                         result = await plugin.handle_discord(message, args, self.ollama)
 
