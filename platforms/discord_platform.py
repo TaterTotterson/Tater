@@ -97,9 +97,9 @@ class discord_platform(commands.Bot):
         )
 
         behavior_guard = (
-            "Only call a tool if the user's latest message clearly asks for an action — like 'generate', 'summarize', or 'download'.\n"
-            "Ignore casual remarks or praise like 'thanks' or 'nice job'.\n"
-            "Do NOT mimic your past responses — follow current intent only.\n"
+            "Only call a tool if the user's latest message clearly requests an action — such as 'generate', 'summarize', or 'download'.\n"
+            "Do not call a tool in response to casual or friendly messages like 'thanks', 'lol', or 'cool' — reply normally instead.\n"
+            "Never mimic earlier responses or patterns — always respond based on the user's current intent only.\n"
         )
         
         return (
