@@ -11,7 +11,7 @@ from io import BytesIO
 from plugin_base import ToolPlugin
 import discord
 import streamlit as st
-from helpers import redis_client, load_image_from_url, send_waiting_message
+from helpers import redis_client, load_image_from_url
 import base64
 
 client_id = str(uuid.uuid4())
