@@ -25,7 +25,6 @@ from helpers import (
     run_async,
     set_main_loop,
     parse_function_json,
-    send_waiting_message
 )
 
 # Remove any prior handlers
@@ -405,20 +404,26 @@ async def process_function_call(response_json, user_question=""):
 
     if func in plugin_registry:
         plugin = plugin_registry[func]
-
-        # Show waiting message if defined
         if hasattr(plugin, "waiting_prompt_template"):
             wait_msg = plugin.waiting_prompt_template.format(mention="User")
-            run_async(send_waiting_message(
-                ollama_client,
-                prompt_text=wait_msg,
-                save_callback=lambda t: save_message("assistant", "assistant", t),
-                send_callback=lambda t: st.chat_message("assistant", avatar=assistant_avatar).write(t)
-            ))
 
-        # Show spinner during plugin execution
+            # 🔧 Ask Ollama for a natural "waiting" message
+            wait_response = await ollama_client.chat(
+                messages=[{"role": "system", "content": wait_msg}]
+            )
+            wait_text = wait_response["message"]["content"].strip()
+
+            # Save waiting message to Redis
+            save_message("assistant", "assistant", wait_text)
+
+            # Render waiting message in chat
+            with st.chat_message("assistant", avatar=assistant_avatar):
+                st.write(wait_text)
+
+        # 🕒 Show spinner during plugin execution
         with st.spinner("Tater is thinking..."):
             result = await plugin.handle_webui(args, ollama_client)
+
         return result
     else:
         return "Received an unknown function call."

@@ -52,41 +52,6 @@ def save_assistant_message(channel_id, content):
     redis_client.ltrim(key, -20, -1)
 
 # ---------------------------------------------------------
-# Send a waiting message via Ollama and optionally save/send
-# ---------------------------------------------------------
-async def send_waiting_message(
-    ollama_client,
-    prompt_text,
-    model=None,
-    context_length=None,
-    save_callback=None,
-    send_callback=None
-):
-    if model is None:
-        model = getattr(ollama_client, "model", os.getenv("OLLAMA_MODEL", "gemma3:27b"))
-    if context_length is None:
-        context_length = getattr(ollama_client, "context_length", int(os.getenv("CONTEXT_LENGTH", 20000)))
-    keep_alive = getattr(ollama_client, "keep_alive", DEFAULT_KEEP_ALIVE)
-
-    waiting_response = await ollama_client.chat(
-        model=model,
-        messages=[{"role": "system", "content": prompt_text}],
-        stream=False,
-        keep_alive=keep_alive,
-        options={"num_ctx": context_length}
-    )
-
-    waiting_text = waiting_response["message"].get("content", "").strip() or prompt_text
-
-    if save_callback:
-        save_callback(waiting_text)
-    if send_callback:
-        ret = send_callback(waiting_text)
-        if asyncio.iscoroutine(ret):
-            await ret
-    return waiting_text
-
-# ---------------------------------------------------------
 # Main event loop reference + run_async helper
 # ---------------------------------------------------------
 _main_loop = None
