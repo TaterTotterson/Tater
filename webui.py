@@ -113,7 +113,8 @@ def save_message(role, username, content):
     }
     redis_client.rpush("webui:chat_history", json.dumps(message_data))
     max_messages = int(redis_client.get("tater:max_store") or 20)
-    redis_client.ltrim("webui:chat_history", -max_messages, -1)
+    if max_store > 0:
+        redis_client.ltrim(key, -max_store, -1)
 
 def load_chat_history():
     history = redis_client.lrange("webui:chat_history", 0, -1)
@@ -455,8 +456,12 @@ with st.sidebar.expander("Tater Settings", expanded=False):
     stored_count = int(redis_client.get("tater:max_store") or 20)
     ollama_count = int(redis_client.get("tater:max_ollama") or 8)
 
-    new_store = st.number_input("Max Stored Messages", min_value=1, max_value=500, value=stored_count)
-    new_ollama = st.number_input("Messages Sent to Ollama", min_value=1, max_value=new_store, value=ollama_count)
+    new_store = st.number_input("Max Stored Messages (0 = unlimited)", min_value=0, value=stored_count)
+    if new_store == 0:
+        st.warning("⚠️ Unlimited history enabled — this may grow Redis memory usage over time.")
+    new_ollama = st.number_input("Messages Sent to Ollama", min_value=1, value=ollama_count)
+    if new_store > 0 and new_ollama > new_store:
+        st.warning("⚠️ You're trying to send more messages to Ollama than you’re storing. Consider increasing Max Stored Messages.")
 
     if st.button("Save Tater Settings"):
         redis_client.set("tater:max_store", new_store)
