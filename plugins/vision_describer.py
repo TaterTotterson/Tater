@@ -50,7 +50,14 @@ class VisionDescriberPlugin(ToolPlugin):
             "description": "The model name used for vision tasks.",
             "type": "text",
             "default": "llava"
+        },
+        "vision_context_length": {
+            "label": "Context Length (num_ctx)",
+            "description": "Controls how much context the vision model uses. Higher = more context, slower response.",
+            "type": "number",
+            "default": "20000"
         }
+
     }
     waiting_prompt_template = (
         "Generate a brief message to {mention} telling them to wait a moment while you use your magnifying glass to inspect their image in detail. Only generate the message. Do not respond to this message."
@@ -61,9 +68,10 @@ class VisionDescriberPlugin(ToolPlugin):
         settings = get_plugin_settings(self.settings_category)
         server = settings.get("ollama_server_address", self.required_settings["ollama_server_address"]["default"])
         model = settings.get("ollama_model", self.required_settings["ollama_model"]["default"])
-        return server, model
+        num_ctx = int(settings.get("vision_context_length", self.required_settings["vision_context_length"]["default"]))
+        return server, model, num_ctx
 
-    def call_ollama_vision(self, server, model, image_bytes, additional_prompt, num_ctx=2048, keep_alive=-1):
+    def call_ollama_vision(self, server, model, image_bytes, additional_prompt, num_ctx=20000, keep_alive=-1):
         try:
             image_b64 = base64.b64encode(image_bytes).decode("utf-8") if isinstance(image_bytes, bytes) else image_bytes
 
@@ -89,8 +97,11 @@ class VisionDescriberPlugin(ToolPlugin):
             "You are an expert visual assistant. Describe the contents of this image in detail, "
             "mentioning key objects, scenes, or actions if recognizable."
         )
-        server, model = self.get_vision_settings()
-        description = await asyncio.to_thread(self.call_ollama_vision, server, model, file_content, additional_prompt)
+        server, model, num_ctx = self.get_vision_settings()
+        description = await asyncio.to_thread(
+            self.call_ollama_vision,
+            server, model, file_content, additional_prompt, num_ctx=num_ctx
+        )
         return description
 
     async def handle_discord(self, message, args, ollama_client):
@@ -118,10 +129,10 @@ class VisionDescriberPlugin(ToolPlugin):
             "mentioning key objects, scenes, or actions if recognizable."
         )
 
-        server, model = self.get_vision_settings()
+        server, model, num_ctx = self.get_vision_settings()
         description = await asyncio.to_thread(
             self.call_ollama_vision,
-            server, model, image_bytes, prompt
+            server, model, image_bytes, prompt, num_ctx=num_ctx
         )
 
         return description[:1500] if description else "❌ Failed to generate image description."
@@ -141,10 +152,10 @@ class VisionDescriberPlugin(ToolPlugin):
             "mentioning key objects, scenes, or actions if recognizable."
         )
 
-        server, model = self.get_vision_settings()
+        server, model, num_ctx = self.get_vision_settings()
         description = await asyncio.to_thread(
             self.call_ollama_vision,
-            server, model, image_bytes, prompt
+            server, model, image_bytes, prompt, num_ctx=num_ctx
         )
 
         return description[:1500] if description else "❌ Failed to generate image description."
