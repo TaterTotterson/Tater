@@ -177,7 +177,8 @@ class discord_platform(commands.Bot):
         key = f"tater:channel:{channel_id}:history"
         max_store = int(redis_client.get("tater:max_store") or 20)
         redis_client.rpush(key, json.dumps({"role": role, "username": username, "content": content}))
-        redis_client.ltrim(key, -max_store, -1)
+        if max_store > 0:
+            redis_client.ltrim(key, -max_store, -1)
 
     async def on_message(self, message: discord.Message):
         if message.author == self.user:

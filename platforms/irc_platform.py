@@ -90,7 +90,8 @@ def save_irc_message(channel, role, username, content):
     key = f"tater:irc:{channel}:history"
     max_store = int(redis_client.get("tater:max_store") or 20)
     redis_client.rpush(key, json.dumps({"role": role, "username": username, "content": content}))
-    redis_client.ltrim(key, -max_store, -1)
+    if max_store > 0:
+        redis_client.ltrim(key, -max_store, -1)
 
 def load_irc_history(channel, limit=None):
     if limit is None:
