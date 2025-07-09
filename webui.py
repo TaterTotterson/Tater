@@ -111,11 +111,18 @@ def save_message(role, username, content):
         "username": username,
         "content": content  # can be string or dict
     }
-    redis_client.rpush("webui:chat_history", json.dumps(message_data))
-    max_messages = int(redis_client.get("tater:max_store") or 20)
+
+    key = "webui:chat_history"
+    redis_client.rpush(key, json.dumps(message_data))
+
+    try:
+        max_store = int(redis_client.get("tater:max_store") or 20)
+    except (ValueError, TypeError):
+        max_store = 20
+
     if max_store > 0:
         redis_client.ltrim(key, -max_store, -1)
-
+        
 def load_chat_history():
     history = redis_client.lrange("webui:chat_history", 0, -1)
     return [json.loads(msg) for msg in history]
