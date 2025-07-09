@@ -7,6 +7,14 @@ Tater is a AI Assistant that integrates with Ollama to provide a variety of AI-p
 
 The following plugins can be triggerd simple by asking Tater after you enable them, ex: ``` Tater summarize this youtube video http://youtube.com/watch?v=000000 ```
 
+## 🌐 Tater Platform Overview
+
+| Platform   | Description                                                                     |
+|------------|---------------------------------------------------------------------------------|
+| `webui`    | Streamlit-based WebUI for chatting, configuring plugins, and managing settings. |
+| `discord`  | Full-featured bot media support, and runs compatible plugins                    |
+| `irc`      | Lightweight IRC bot that responds to mentions and runs compatible plugins.      |
+
 
 ## 🧩 Tater Plugin Overview
 
@@ -16,10 +24,10 @@ The following plugins can be triggerd simple by asking Tater after you enable th
 | `web_summary`            | Summarizes content from a provided URL                                      | discord, webui, irc    |
 | `web_search`             | Performs web search to help answer user questions                           | discord, webui, irc    |
 | `emoji_ai_responder`     | Picks a relevant emoji based on a message when someone reacts to it         | discord                |
-| `vision_describer`       | Analyzes uploaded images and returns AI-generated descriptions              | discord                |
+| `vision_describer`       | Analyzes uploaded images and returns AI-generated descriptions              | discord, webui         |
 | `automatic_plugin`       | Generates images using AUTOMATIC1111 API based on user prompt               | discord, webui         |
 | `comfyui_plugin`         | Generates images with ComfyUI using custom workflow templates               | discord, webui         |
-| `comfyui_image_video`    | Animates images into WebP loops using ComfyUI.                              | discord                |
+| `comfyui_image_video`    | Animates images into WebP loops using ComfyUI.                              | discord  webui         |
 | `comfyui_video_plugin`   | Creates videos from prompts using ComfyUI and video workflows               | discord, webui         |
 | `comfyui_audio_plugin`   | Generates music/audio from prompts using ComfyUI                            | discord, webui         |
 | `comfyui_audio_ace`      | Composes full-length songs using AceStep. Generates lyrics, tags, and MP3s  | discord, webui         |
@@ -33,14 +41,14 @@ The following plugins can be triggerd simple by asking Tater after you enable th
 
 This system runs in the background and posts summarized RSS feed updates. The following plugins enhance or interact with this watcher:
 
-| Plugin Name              | Description                                                                 | Type              | Platform         |
-|--------------------------|-----------------------------------------------------------------------------|-------------------|------------------|
-| `discord_notifier`       | Posts RSS updates directly to a configured Discord channel                  | RSS Notifier      | plugin-triggered  |
-| `telegram_notifier`      | Sends RSS updates to a Telegram channel using the internal feed watcher     | RSS Notifier      | plugin-triggered  |
-| `wordpress_poster`       | Posts RSS updates to WordPress using the internal feed watcher              | RSS Notifier      | plugin-triggered  |
-| `list_feeds`             | Lists all RSS feeds being watched by the internal feed watcher              | RSS Management    | discord, webui    |
-| `watch_feed`             | Adds a feed to the internal RSS watcher                                     | RSS Management    | discord, webui    |
-| `unwatch_feed`           | Removes a feed from the internal RSS watcher                                | RSS Management    | discord, webui    |
+| Plugin Name              | Description                                                                 | Type              | Platform               |
+|--------------------------|-----------------------------------------------------------------------------|-------------------|------------------------|
+| `discord_notifier`       | Posts RSS updates directly to a configured Discord channel                  | RSS Notifier      | plugin-triggered       |
+| `telegram_notifier`      | Sends RSS updates to a Telegram channel using the internal feed watcher     | RSS Notifier      | plugin-triggered       |
+| `wordpress_poster`       | Posts RSS updates to WordPress using the internal feed watcher              | RSS Notifier      | plugin-triggered       |
+| `list_feeds`             | Lists all RSS feeds being watched by the internal feed watcher              | RSS Management    | discord, webui, irc    |
+| `watch_feed`             | Adds a feed to the internal RSS watcher                                     | RSS Management    | discord, webui, irc    |
+| `unwatch_feed`           | Removes a feed from the internal RSS watcher                                | RSS Management    | discord, webui, irc    |
 
 
 **Note**:
