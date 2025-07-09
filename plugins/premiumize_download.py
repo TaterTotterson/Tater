@@ -10,7 +10,7 @@ from io import BytesIO
 import requests
 import streamlit as st
 from PIL import Image
-from helpers import load_image_from_url, redis_client, format_irc, send_waiting_message
+from helpers import load_image_from_url, redis_client, format_irc
 
 
 logger = logging.getLogger(__name__)

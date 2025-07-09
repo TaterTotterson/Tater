@@ -11,7 +11,7 @@ from io import BytesIO
 import requests
 import asyncio
 import redis
-from helpers import format_irc, load_image_from_url, send_waiting_message
+from helpers import format_irc, load_image_from_url
 
 load_dotenv()
 logger = logging.getLogger(__name__)

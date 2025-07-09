@@ -8,7 +8,7 @@ import redis
 import secrets
 import string
 from plugin_base import ToolPlugin
-from helpers import load_image_from_url, format_irc, send_waiting_message
+from helpers import load_image_from_url, format_irc
 
 class SFTPGoAccountPlugin(ToolPlugin):
     name = "sftpgo_account"

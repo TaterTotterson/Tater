@@ -10,7 +10,7 @@ from PIL import Image
 from io import BytesIO
 import requests
 import redis
-from helpers import load_image_from_url, send_waiting_message
+from helpers import load_image_from_url
 
 load_dotenv()
 logger = logging.getLogger(__name__)
