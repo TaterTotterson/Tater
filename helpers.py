@@ -63,9 +63,9 @@ async def send_waiting_message(
     send_callback=None
 ):
     if model is None:
-        model = getattr(ollama_client, "model", os.getenv("OLLAMA_MODEL", "command-r:35B"))
+        model = getattr(ollama_client, "model", os.getenv("OLLAMA_MODEL", "gemma3:27b"))
     if context_length is None:
-        context_length = getattr(ollama_client, "context_length", int(os.getenv("CONTEXT_LENGTH", 10000)))
+        context_length = getattr(ollama_client, "context_length", int(os.getenv("CONTEXT_LENGTH", 20000)))
     keep_alive = getattr(ollama_client, "keep_alive", DEFAULT_KEEP_ALIVE)
 
     waiting_response = await ollama_client.chat(
@@ -113,12 +113,15 @@ class OllamaClientWrapper(ollama.AsyncClient):
         self.keep_alive = keep_alive
 
     async def chat(self, messages, **kwargs):
+        options = kwargs.get("options", {}).copy()
+        options.setdefault("num_ctx", self.context_length)
+
         return await super().chat(
             model=kwargs.get("model", self.model),
             messages=messages,
             stream=kwargs.get("stream", False),
             keep_alive=kwargs.get("keep_alive", self.keep_alive),
-            options=kwargs.get("options", {"num_ctx": self.context_length}),
+            options=options,
         )
 
 # ---------------------------------------------------------
