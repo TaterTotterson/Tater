@@ -12,7 +12,7 @@ The following plugins can be triggerd simple by asking Tater after you enable th
 | Platform   | Description                                                                     |
 |------------|---------------------------------------------------------------------------------|
 | `webui`    | Streamlit-based WebUI for chatting, configuring plugins, and managing settings. |
-| `discord`  | Full-featured bot media support, and runs compatible plugins                    |
+| `discord`  | Full-featured discord bot that runs compatible plugins                          |
 | `irc`      | Lightweight IRC bot that responds to mentions and runs compatible plugins.      |
 
 
