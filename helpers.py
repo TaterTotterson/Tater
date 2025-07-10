@@ -133,12 +133,16 @@ def get_latest_image_from_history(key: str, allowed_mimetypes=None):
     if allowed_mimetypes is None:
         allowed_mimetypes = ["image/png", "image/jpeg"]
 
-    # Scan the full history stored in Redis
     history = redis_client.lrange(key, 0, -1)
-    for entry in reversed(history):  # Start from the newest
+    for entry in reversed(history):
         try:
             msg = json.loads(entry)
             content = msg.get("content")
+
+            # 🔥 Unwrap plugin_response wrapper
+            if isinstance(content, dict) and content.get("marker") == "plugin_response":
+                content = content.get("content", {})
+
             if isinstance(content, dict):
                 mimetype = content.get("mimetype", "")
                 filename = content.get("name", "").lower()
@@ -160,17 +164,23 @@ def get_latest_image_from_history(key: str, allowed_mimetypes=None):
 # Get latest file from redis
 # ---------------------------------------------------------
 def get_latest_file_from_history(channel_id, filetype="file", extensions=None):
-    """
-    Search Redis chat history for the latest file-type entry with optional extensions (e.g. .torrent).
-    """
     history_key = f"tater:channel:{channel_id}:history"
-    raw_history = redis_client.lrange(history_key, 0, -1)  # Read full history
+    raw_history = redis_client.lrange(history_key, 0, -1)
 
     for entry in reversed(raw_history):
-        data = json.loads(entry)
-        content = data.get("content")
-        if isinstance(content, dict) and content.get("type") == filetype:
-            filename = content.get("name", "").lower()
-            if not extensions or any(filename.endswith(ext) for ext in extensions):
-                return content
+        try:
+            data = json.loads(entry)
+            content = data.get("content")
+
+            # 🔥 Unwrap plugin_response wrapper
+            if isinstance(content, dict) and content.get("marker") == "plugin_response":
+                content = content.get("content", {})
+
+            if isinstance(content, dict) and content.get("type") == filetype:
+                filename = content.get("name", "").lower()
+                if not extensions or any(filename.endswith(ext) for ext in extensions):
+                    return content
+        except Exception:
+            continue
+
     return None
