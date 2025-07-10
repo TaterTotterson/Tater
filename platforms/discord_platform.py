@@ -98,8 +98,7 @@ class discord_platform(commands.Bot):
 
         behavior_guard = (
             "Only call a tool if the user's latest message clearly requests an action — such as 'generate', 'summarize', or 'download'.\n"
-            "Do not call a tool in response to casual or friendly messages like 'thanks', 'lol', or 'cool' — reply normally instead.\n"
-            "Never mimic earlier responses or patterns — always respond based on the user's current intent only.\n"
+            "Never call a tool in response to casual or friendly messages like 'thanks', 'lol', or 'cool' — reply normally instead.\n"
         )
         
         return (
@@ -147,29 +146,33 @@ class discord_platform(commands.Bot):
             sender = data.get("username", role)
             content = data.get("content")
 
-            if isinstance(content, dict):
-                file_type = content.get("type")
-                name = content.get("name", "unnamed file")
-
-                if file_type == "image":
-                    placeholder = f"[Image: {name}]"
-                elif file_type == "audio":
-                    placeholder = f"[Audio: {name}]"
-                elif file_type == "video":
-                    placeholder = f"[Video: {name}]"
-                elif file_type == "file":
-                    placeholder = f"[File: {name}]"
+            if role == "user":
+                if isinstance(content, str):
+                    text = content
+                elif isinstance(content, dict) and content.get("type") == "image":
+                    text = "[Image]"
+                elif isinstance(content, dict) and content.get("type") == "audio":
+                    text = "[Audio]"
                 else:
-                    continue  # skip unknown or unsupported types
-            elif isinstance(content, str):
-                placeholder = content
-            else:
-                continue
+                    text = "[Unknown]"
 
-            formatted.append({
-                "role": role,
-                "content": placeholder if role == "assistant" else f"{sender}: {placeholder}"
-            })
+                formatted.append({
+                    "role": "user",
+                    "content": f"{sender}: {text}"
+                })
+
+            elif role == "assistant":
+                if isinstance(content, dict) and content.get("marker") == "plugin_call":
+                    plugin_call_text = json.dumps({
+                        "function": content.get("plugin"),
+                        "arguments": content.get("arguments", {})
+                    }, indent=2)
+                    formatted.append({"role": "assistant", "content": plugin_call_text})
+                elif isinstance(content, dict) and content.get("marker") == "plugin_response":
+                    continue
+                else:
+                    if isinstance(content, str):
+                        formatted.append({"role": "assistant", "content": content})
 
         return formatted
 
@@ -243,6 +246,12 @@ class discord_platform(commands.Bot):
                     func = response_json.get("function")
                     args = response_json.get("arguments", {})
 
+                    # Save structured plugin_call marker
+                    await self.save_message(
+                        message.channel.id, "assistant", "assistant",
+                        {"marker": "plugin_call", "plugin": func, "arguments": args}
+                    )
+
                     if func in plugin_registry and get_plugin_enabled(func):
                         plugin = plugin_registry[func]
 
@@ -257,7 +266,10 @@ class discord_platform(commands.Bot):
                             wait_text = wait_response["message"]["content"].strip()
 
                             # Save waiting message to Redis
-                            await self.save_message(message.channel.id, "assistant", "assistant", wait_text)
+                            await self.save_message(
+                                message.channel.id, "assistant", "assistant",
+                                {"marker": "plugin_response", "content": wait_text}
+                            )
 
                             # Send waiting message to Discord
                             await safe_send(message.channel, wait_text, self.max_response_length)
@@ -268,7 +280,10 @@ class discord_platform(commands.Bot):
                             for item in result:
                                 if isinstance(item, str):
                                     await safe_send(message.channel, item, self.max_response_length)
-                                    await self.save_message(message.channel.id, "assistant", "assistant", item)
+                                    await self.save_message(
+                                        message.channel.id, "assistant", "assistant",
+                                        {"marker": "plugin_response", "content": item}
+                                    )
 
                                 elif isinstance(item, dict):
                                     content_type = item.get("type")
@@ -286,14 +301,17 @@ class discord_platform(commands.Bot):
                                         file = discord.File(BytesIO(binary), filename=filename)
                                         await message.channel.send(file=file)
 
-                                        # Save full image/audio content to Redis
                                         content_obj = {
                                             "type": content_type,
                                             "name": filename,
                                             "mimetype": item.get("mimetype", ""),
                                             "data": base64.b64encode(binary).decode("utf-8")
                                         }
-                                        await self.save_message(message.channel.id, "assistant", "assistant", content_obj)
+
+                                        await self.save_message(
+                                            message.channel.id, "assistant", "assistant",
+                                            {"marker": "plugin_response", "content": content_obj}
+                                        )
 
                                     except Exception as e:
                                         logger.warning(f"Failed to handle {content_type} return: {e}")
