@@ -577,3 +577,4 @@ if user_input := st.chat_input("Chat with Tater…"):
 
     # Final trim for chat display
     st.session_state.chat_messages = load_chat_history()[-max_display:]
+    st.rerun()
