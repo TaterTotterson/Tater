@@ -12,7 +12,7 @@ import discord
 import streamlit as st
 import re
 import yaml
-from helpers import redis_client, load_image_from_url
+from helpers import redis_client
 
 client_id = str(uuid.uuid4())
 
@@ -39,7 +39,6 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         "Generate a fun message telling the user you're writing lyrics and calling in a virtual band to record the track."
         "Keep it short and enthusiastic. Only generate the message. Do not respond to this message."
     )
-    assistant_avatar = load_image_from_url()
 
     @staticmethod
     def get_server_address():

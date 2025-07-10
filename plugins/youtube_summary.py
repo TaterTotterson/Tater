@@ -11,12 +11,11 @@ from dotenv import load_dotenv
 import streamlit as st
 from youtube_transcript_api import YouTubeTranscriptApi
 from plugin_base import ToolPlugin
-from helpers import load_image_from_url, format_irc, redis_client
+from helpers import format_irc, redis_client
 import redis
 import discord
 
 load_dotenv()
-assistant_avatar = load_image_from_url()
 
 class YouTubeSummaryPlugin(ToolPlugin):
     name = "youtube_summary"

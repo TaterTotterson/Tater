@@ -10,7 +10,7 @@ from io import BytesIO
 import requests
 import streamlit as st
 from PIL import Image
-from helpers import load_image_from_url, redis_client, format_irc
+from helpers import redis_client, format_irc
 
 
 logger = logging.getLogger(__name__)
@@ -38,9 +38,6 @@ class PremiumizeDownloadPlugin(ToolPlugin):
         "Generate a brief message to {mention} telling them to wait a moment while I check Premiumize for that URL and retrieve download links. Only generate the message. Do not respond to this message."
     )
     platforms = ["discord", "webui", "irc"]
-
-    # Use the default assistant avatar loaded from helpers.
-    assistant_avatar = load_image_from_url()  # Uses default URL from helpers.py
 
     @staticmethod
     async def get_premiumize_download_links(item: str, api_key: str):

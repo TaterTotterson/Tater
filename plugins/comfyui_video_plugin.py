@@ -11,7 +11,7 @@ from io import BytesIO
 from plugin_base import ToolPlugin
 import discord
 import streamlit as st
-from helpers import redis_client, load_image_from_url
+from helpers import redis_client
 import base64
 
 client_id = str(uuid.uuid4())
@@ -42,7 +42,6 @@ class ComfyUIVideoPlugin(ToolPlugin):
     }
     waiting_prompt_template = "Generate a message telling the user to please wait while you assemble a film crew and direct your cinematic masterpiece!, Only generate the message. Do not respond to this message."
     platforms = ["discord", "webui"]
-    assistant_avatar = load_image_from_url()
 
     @staticmethod
     def insert_prompt_into_workflow(workflow: dict, prompt_text: str) -> dict:

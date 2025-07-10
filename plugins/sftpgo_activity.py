@@ -8,7 +8,7 @@ import redis
 import secrets
 import string
 from plugin_base import ToolPlugin
-from helpers import load_image_from_url, format_irc, redis_client
+from helpers import format_irc, redis_client
 import streamlit as st
 
 class SFTPGoActivityPlugin(ToolPlugin):
