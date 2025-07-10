@@ -22,16 +22,6 @@ redis_client = redis.Redis(
     decode_responses=True
 )
 
-DEFAULT_ASSISTANT_AVATAR_URL = "https://raw.githubusercontent.com/MasterPhooey/Tater-Discord-WebUI/refs/heads/main/images/tater.png"
-
-# ---------------------------------------------------------
-# Image loading utility
-# ---------------------------------------------------------
-def load_image_from_url(url: str = DEFAULT_ASSISTANT_AVATAR_URL) -> Image.Image:
-    response = requests.get(url)
-    response.raise_for_status()
-    return Image.open(BytesIO(response.content))
-
 # ---------------------------------------------------------
 # Main event loop reference + run_async helper
 # ---------------------------------------------------------
