@@ -264,7 +264,7 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
             return "No prompt provided."
 
         try:
-            tags, lyrics = await self.generate_tags_and_lyrics(user_prompt, ollama_client, context_length)
+            tags, lyrics = await self.generate_tags_and_lyrics(user_prompt, ollama_client)
             audio_bytes = await asyncio.to_thread(self.process_prompt, user_prompt, tags, lyrics)
 
             system_msg = f'The user received a ComfyUI-generated audio clip based on: "{user_prompt}"'
@@ -299,7 +299,7 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
             return "No prompt provided."
 
         try:
-            tags, lyrics = await self.generate_tags_and_lyrics(user_prompt, ollama_client, context_length)
+            tags, lyrics = await self.generate_tags_and_lyrics(user_prompt, ollama_client)
             audio_bytes = await asyncio.to_thread(self.process_prompt, user_prompt, tags, lyrics)
 
             audio_data = {
