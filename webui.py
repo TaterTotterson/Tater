@@ -21,7 +21,6 @@ from rss import RSSManager
 from platform_registry import platform_registry
 from helpers import (
     OllamaClientWrapper,
-    load_image_from_url,
     run_async,
     set_main_loop,
     parse_function_json,
