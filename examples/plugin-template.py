@@ -2,7 +2,6 @@
 import os
 import asyncio
 from plugin_base import ToolPlugin
-from helpers import send_waiting_message, load_image_from_url
 
 # Optionally load environment variables if needed.
 # from dotenv import load_dotenv
@@ -32,8 +31,7 @@ class <PluginName>Plugin(ToolPlugin):
         "Generate a brief message to {mention} telling them to wait while I process your <plugin_name> request. Only generate the message. Do not respond to this message."
     )
     platforms = ["discord", "webui"]
-    assistant_avatar = load_image_from_url()
-
+    
     # --- Helper Functions as Static Methods ---
     @staticmethod
     def some_helper_function(param):
