@@ -16,6 +16,7 @@ import redis
 import discord
 
 load_dotenv()
+DEFAULT_CONTEXT_LENGTH = int(os.getenv("CONTEXT_LENGTH", 2048))
 
 class YouTubeSummaryPlugin(ToolPlugin):
     name = "youtube_summary"
@@ -37,7 +38,7 @@ class YouTubeSummaryPlugin(ToolPlugin):
         }
     }
     waiting_prompt_template = (
-        "Generate a brief message to {mention} elling them to wait a moment while I watch this boring video. Only generate the message. Do not respond to this message."
+        "Generate a brief message to {mention} telling them to wait a moment while I watch this boring video. Only generate the message. Do not respond to this message."
     )
     platforms = ["discord", "webui", "irc"]
 
@@ -48,7 +49,7 @@ class YouTubeSummaryPlugin(ToolPlugin):
                 return "Successfully updated youtube-transcript-api."
             except subprocess.CalledProcessError as e:
                 return f"Failed to update: {e}"
-                
+
     @staticmethod
     def extract_video_id(youtube_url):
         parsed = urlparse(youtube_url)
@@ -59,7 +60,7 @@ class YouTubeSummaryPlugin(ToolPlugin):
         return None
 
     @staticmethod
-    def split_text_into_chunks(text, context_length):
+    def split_text_into_chunks(text, context_length=DEFAULT_CONTEXT_LENGTH):
         max_tokens = int(context_length * 0.8)
         words = text.split()
         chunks, chunk = [], []
@@ -130,32 +131,31 @@ class YouTubeSummaryPlugin(ToolPlugin):
         transcript = self.get_transcript_api(video_id)
         if not transcript:
             return "Sorry, this video does not have a transcript available, or it may be restricted."
-        chunks = self.split_text_into_chunks(transcript, ollama_client.context_length)
+        chunks = self.split_text_into_chunks(transcript, DEFAULT_CONTEXT_LENGTH)
         return await self.summarize_chunks(chunks, ollama_client)
 
     # ---------------------------------------------------------
     # Discord handler
     # ---------------------------------------------------------
-    async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
+    async def handle_discord(self, message, args, ollama_client):
         video_url = args.get("video_url")
         if not video_url:
             return "No YouTube URL provided."
 
         summary = await self.async_fetch_summary(video_url, ollama_client)
         formatted = self.format_article(summary)
-
-        return "\n".join(self.split_message(formatted, max_response_length))
+        return "\n".join(self.split_message(formatted, 1500))
 
     # ---------------------------------------------------------
     # WebUI handler
     # ---------------------------------------------------------
-    async def handle_webui(self, args, ollama_client, context_length):
+    async def handle_webui(self, args, ollama_client):
         video_url = args.get("video_url")
         if not video_url:
             return "No YouTube URL provided."
 
         summary = await self.async_fetch_summary(video_url, ollama_client)
-        return "\n".join(self.split_message(self.format_article(summary)))
+        return "\n".join(self.split_message(self.format_article(summary), 1500))
 
     # ---------------------------------------------------------
     # IRC handler

@@ -155,17 +155,15 @@ class FtpBrowserPlugin(ToolPlugin):
                         f"to send via Discord (> {size // (1024 * 1024)}MB)."
                     )
                     response = await self.ollama_client.chat(
-                        model=self.ollama_client.model,
                         messages=[
                             {"role": "system", "content": system_msg},
-                            {"role": "user", "content": f"Tell them in a friendly way that they should connect to the FTP manually to download this file."}
-                        ],
-                        stream=False,
-                        keep_alive=self.ollama_client.keep_alive,
-                        options={"num_ctx": 2048}  # or context_length if available
+                            {"role": "user", "content": "Tell them in a friendly way that they should connect to the FTP manually to download this file."}
+                        ]
                     )
 
-                    reply = response["message"].get("content", "").strip() or "That file is a bit too big for Discord. Please use your FTP client to grab it manually!"
+                    reply = response["message"].get("content", "").strip() or \
+                        "That file is a bit too big for Discord. Please use your FTP client to grab it manually!"
+
                     await interaction.followup.send(reply)
 
                 else:
@@ -216,7 +214,6 @@ class FtpBrowserPlugin(ToolPlugin):
             view=FtpBrowserPlugin.FileBrowserView(self, user_id, "/", entries, ollama_client=ollama_client)
         )
 
-        # Generate short follow-up
         system_msg = f"The user is now browsing the root directory of an FTP server."
         followup = await ollama_client.chat(
             messages=[
@@ -229,11 +226,9 @@ class FtpBrowserPlugin(ToolPlugin):
         return message_text
 
     async def handle_webui(self, args, ollama_client):
-        response = "📂 FTP browsing is only available on Discord for now."
-        return response
+        return "📂 FTP browsing is only available on Discord for now."
 
     async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
-        message = f"{user}: FTP browsing is only available on Discord for now."
-        await bot.privmsg(channel, message)
+        await bot.privmsg(channel, f"{user}: FTP browsing is only available on Discord for now.")
 
 plugin = FtpBrowserPlugin()

@@ -155,13 +155,13 @@ class SFTPGoActivityPlugin(ToolPlugin):
         return response_text
 
     # --- Discord Handler ---
-    async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
+    async def handle_discord(self, message, args, ollama_client):
         result = await self.get_current_activity(message, ollama_client)
         return result
 
 
     # --- WebUI Handler ---
-    async def handle_webui(self, args, ollama_client, context_length):
+    async def handle_webui(self, args, ollama_client):
         result = await self.get_current_activity(None, ollama_client)
         return result
 
