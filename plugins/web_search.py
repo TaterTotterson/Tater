@@ -13,10 +13,9 @@ import time
 import random
 import requests
 from plugin_base import ToolPlugin
-from helpers import load_image_from_url, format_irc, extract_json, redis_client
+from helpers import format_irc, extract_json, redis_client
 
 load_dotenv()
-assistant_avatar = load_image_from_url()
 
 logger = logging.getLogger("web_search")
 logger.setLevel(logging.INFO)

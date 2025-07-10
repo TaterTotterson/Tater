@@ -10,13 +10,10 @@ from PIL import Image
 from io import BytesIO
 import requests
 import redis
-from helpers import load_image_from_url
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
-
-assistant_avatar = load_image_from_url()  # Uses default URL from helpers.py
 
 # Create a Redis client (adjust DB if needed)
 redis_host = os.getenv('REDIS_HOST', '127.0.0.1')

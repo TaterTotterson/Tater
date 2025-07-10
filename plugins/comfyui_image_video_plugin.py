@@ -9,7 +9,7 @@ from io import BytesIO
 from plugin_base import ToolPlugin
 import discord
 import base64
-from helpers import redis_client, load_image_from_url, get_latest_image_from_history
+from helpers import redis_client, get_latest_image_from_history
 
 client_id = str(uuid.uuid4())
 
@@ -44,7 +44,6 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
         "Only generate the message. Do not respond to this message."
     )
     platforms = ["discord"]
-    assistant_avatar = load_image_from_url()
 
     @staticmethod
     def get_server_address():

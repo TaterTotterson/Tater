@@ -11,13 +11,11 @@ from io import BytesIO
 import requests
 import asyncio
 import redis
-from helpers import format_irc, load_image_from_url
+from helpers import format_irc
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
-
-assistant_avatar = load_image_from_url()  # Uses default avatar URL from helpers.py
 
 # Create a Redis client (adjust DB if needed)
 redis_host = os.getenv('REDIS_HOST', '127.0.0.1')

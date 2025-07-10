@@ -4,7 +4,7 @@ import io
 import asyncio
 import aioftp
 from plugin_base import ToolPlugin
-from helpers import load_image_from_url, redis_client
+from helpers import redis_client
 
 async def safe_send(channel, content: str, **kwargs):
     if len(content) > 2000:
@@ -54,7 +54,6 @@ class FtpBrowserPlugin(ToolPlugin):
         "Generate a brief message to {mention}, telling them to wait a moment while you load the FTP browser for them."
     )
     platforms = ["discord"]
-    assistant_avatar = load_image_from_url()
     max_upload_size_bytes = 25 * 1024 * 1024  # 25 MB
 
     user_paths = {}

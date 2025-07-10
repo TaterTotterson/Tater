@@ -11,7 +11,7 @@ from plugin_base import ToolPlugin
 import streamlit as st
 from PIL import Image
 import discord
-from helpers import load_image_from_url, redis_client
+from helpers import redis_client
 
 load_dotenv()
 
@@ -73,7 +73,6 @@ class AutomaticPlugin(ToolPlugin):
         "Generate a brief message to {mention} telling them to wait a moment while you draw them a masterpiece. Only generate the message. Do not respond to this message."
     )
     platforms = ["discord", "webui"]
-    assistant_avatar = load_image_from_url()
 
     @staticmethod
     def generate_image(prompt: str) -> bytes:

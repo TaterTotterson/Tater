@@ -7,13 +7,11 @@ import streamlit as st
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from plugin_base import ToolPlugin
-from helpers import load_image_from_url, format_irc
+from helpers import format_irc
 
 load_dotenv()
 logger = logging.getLogger("web_summary")
 logger.setLevel(logging.INFO)
-
-assistant_avatar = load_image_from_url()
 
 class WebSummaryPlugin(ToolPlugin):
     name = "web_summary"
