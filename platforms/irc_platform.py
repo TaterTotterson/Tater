@@ -103,10 +103,37 @@ def load_irc_history(channel, limit=None):
         data = json.loads(entry)
         role = data.get("role", "user")
         sender = data.get("username", role)
-        if role == "assistant":
-            formatted.append({"role": "assistant", "content": data["content"]})
+        content = data.get("content")
+
+        if isinstance(content, dict):
+            if content.get("marker") == "plugin_response":
+                continue  # Skip plugin responses from context
+
+            if content.get("marker") == "plugin_call":
+                plugin_call_text = json.dumps({
+                    "function": content.get("plugin"),
+                    "arguments": content.get("arguments", {})
+                }, indent=2)
+                formatted.append({"role": "assistant", "content": plugin_call_text})
+                continue
+
+            file_type = content.get("type")
+            name = content.get("name", "unnamed file")
+            if file_type in ["image", "audio", "video", "file"]:
+                placeholder = f"[{file_type.capitalize()}: {name}]"
+            else:
+                continue  # Unknown type, skip
+
+        elif isinstance(content, str):
+            placeholder = content
+
         else:
-            formatted.append({"role": "user", "content": f"{sender}: {data['content']}"})
+            continue
+
+        if role == "assistant":
+            formatted.append({"role": "assistant", "content": placeholder})
+        else:
+            formatted.append({"role": "user", "content": f"{sender}: {placeholder}"})
     return formatted
 
 def build_system_prompt():
@@ -127,8 +154,7 @@ def build_system_prompt():
 
     behavior_guard = (
         "Only call a tool if the user's latest message clearly requests an action — such as 'generate', 'summarize', or 'download'.\n"
-        "Do not call a tool in response to casual or friendly messages like 'thanks', 'lol', or 'cool' — reply normally instead.\n"
-        "Never mimic earlier responses or patterns — always respond based on the user's current intent only.\n"
+        "Never call a tool in response to casual or friendly messages like 'thanks', 'lol', or 'cool' — reply normally instead.\n"
     )
 
     return (
@@ -163,7 +189,14 @@ async def on_message(self, mask, event, target, data):
             if func in plugin_registry and get_plugin_enabled(func):
                 plugin = plugin_registry[func]
 
-                # 🔧 Fetch waiting message manually, save + send it explicitly
+                # Save structured plugin_call marker
+                save_irc_message(channel=target, role="assistant", username="assistant", content={
+                    "marker": "plugin_call",
+                    "plugin": func,
+                    "arguments": args
+                })
+
+                # Optional waiting message
                 if hasattr(plugin, "waiting_prompt_template"):
                     wait_prompt = plugin.waiting_prompt_template.format(mention=mask.nick)
                     wait_response = await ollama_client.chat(
@@ -171,38 +204,47 @@ async def on_message(self, mask, event, target, data):
                     )
                     wait_text = wait_response["message"]["content"].strip()
                     self.privmsg(target, wait_text)
-                    save_irc_message(channel=target, role="assistant", username="assistant", content=wait_text)
+                    save_irc_message(channel=target, role="assistant", username="assistant", content={
+                        "marker": "plugin_response",
+                        "content": wait_text
+                    })
 
-                # Handle plugin result
-                result = await plugin.handle_irc(
-                    self, target, mask.nick, data, args, ollama_client
-                )
+                result = await plugin.handle_irc(self, target, mask.nick, data, args, ollama_client)
 
                 if isinstance(result, list):
                     for item in result:
                         if isinstance(item, str):
                             for chunk in [item[i:i+MAX_RESPONSE_LENGTH] for i in range(0, len(item), MAX_RESPONSE_LENGTH)]:
                                 self.privmsg(target, chunk)
-                            save_irc_message(channel=target, role="assistant", username="assistant", content=item)
+                            save_irc_message(channel=target, role="assistant", username="assistant", content={
+                                "marker": "plugin_response",
+                                "content": item
+                            })
 
                         elif isinstance(item, dict):
-                            kind = item.get("type")
+                            kind = item.get("type", "file").capitalize()
                             name = item.get("name", "output")
-                            placeholder = f"[{kind.capitalize()}: {name}]"
+                            placeholder = f"[{kind}: {name}]"
                             self.privmsg(target, f"{mask.nick}: {placeholder}")
-                            save_irc_message(channel=target, role="assistant", username="assistant", content=placeholder)
+                            save_irc_message(channel=target, role="assistant", username="assistant", content={
+                                "marker": "plugin_response",
+                                "content": placeholder
+                            })
 
                 elif isinstance(result, str) and result.strip():
                     for chunk in [result[i:i+MAX_RESPONSE_LENGTH] for i in range(0, len(result), MAX_RESPONSE_LENGTH)]:
                         self.privmsg(target, chunk)
-                    save_irc_message(channel=target, role="assistant", username="assistant", content=result)
+                    save_irc_message(channel=target, role="assistant", username="assistant", content={
+                        "marker": "plugin_response",
+                        "content": result
+                    })
 
                 else:
                     logger.debug(f"[{func}] Plugin returned nothing or unrecognized result type: {type(result)}")
 
                 return
 
-        # Default fallback (not tool-based)
+        # Default fallback reply
         for chunk in [response_text[i:i+MAX_RESPONSE_LENGTH] for i in range(0, len(response_text), MAX_RESPONSE_LENGTH)]:
             self.privmsg(target, chunk)
         save_irc_message(channel=target, role="assistant", username="assistant", content=response_text)
