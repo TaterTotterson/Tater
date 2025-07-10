@@ -127,7 +127,7 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         }
 
     @staticmethod
-    async def generate_tags_and_lyrics(user_prompt, ollama_client, context_length):
+    async def generate_tags_and_lyrics(user_prompt, ollama_client):
         system_prompt = (
             f"The user wants a song: \"{user_prompt}\".\n\n"
             "Write a JSON object with these two fields:\n"
