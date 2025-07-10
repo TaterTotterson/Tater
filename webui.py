@@ -132,7 +132,10 @@ def clear_chat_history():
     # Clear in-memory session list
     st.session_state.pop("chat_messages", None)
 
-assistant_avatar = load_image_from_url()
+def load_local_avatar():
+    return Image.open("images/tater.png")
+
+assistant_avatar = load_local_avatar()
 
 # ----------------- SETTINGS HELPER FUNCTIONS -----------------
 def get_chat_settings():
@@ -536,25 +539,23 @@ for msg in st.session_state.chat_messages:
         else:
             st.write(content)
 
-# Chat
 if user_input := st.chat_input("Chat with Tater…"):
     uname = chat_settings["username"]
 
-    # Save user message
+    # Save and append user message right away
     save_message("user", uname, user_input)
+    st.session_state.chat_messages.append({
+        "role": "user",
+        "content": user_input
+    })
 
-    # Refresh display history for UI
-    max_display = int(redis_client.get("tater:max_display") or 8)
-    st.session_state.chat_messages = load_chat_history()[-max_display:]
-
-    # Show user's message in chat
+    # Show user's message immediately for feedback
     st.chat_message("user", avatar=user_avatar or "🦖").write(user_input)
 
-    # AI response
+    # Show spinner while thinking
     with st.spinner("Tater is thinking..."):
         response_text = run_async(process_message(uname, user_input))
 
-    # Check for function call
     func_call = parse_function_json(response_text)
     if func_call:
         func_result = run_async(process_function_call(func_call, user_input))
@@ -562,19 +563,13 @@ if user_input := st.chat_input("Chat with Tater…"):
     else:
         responses = [response_text]
 
-    # Save assistant message(s) and update UI
+    # Just append assistant responses — no immediate rendering
     for item in responses:
-        with st.chat_message("assistant", avatar=assistant_avatar):
-            if isinstance(item, dict) and item.get("type") == "image":
-                data = base64.b64decode(item["data"])
-                st.image(Image.open(BytesIO(data)), caption=item.get("name", ""))
-            elif isinstance(item, dict) and item.get("type") == "audio":
-                data = base64.b64decode(item["data"])
-                st.audio(data, format=item.get("mimetype", "audio/mpeg"))
-            else:
-                st.write(item)
+        st.session_state.chat_messages.append({
+            "role": "assistant",
+            "content": item
+        })
         save_message("assistant", "assistant", item)
 
-    # Final trim for chat display
-    st.session_state.chat_messages = load_chat_history()[-max_display:]
+    # Force rerun, assistant reply will render on next pass
     st.rerun()

@@ -22,7 +22,6 @@ redis_client = redis.Redis(
     decode_responses=True
 )
 
-DEFAULT_KEEP_ALIVE = -1
 DEFAULT_ASSISTANT_AVATAR_URL = "https://raw.githubusercontent.com/MasterPhooey/Tater-Discord-WebUI/refs/heads/main/images/tater.png"
 
 # ---------------------------------------------------------
@@ -32,24 +31,6 @@ def load_image_from_url(url: str = DEFAULT_ASSISTANT_AVATAR_URL) -> Image.Image:
     response = requests.get(url)
     response.raise_for_status()
     return Image.open(BytesIO(response.content))
-
-# ---------------------------------------------------------
-# Save assistant message to Redis history
-# ---------------------------------------------------------
-def save_assistant_message(channel_id, content):
-    if isinstance(channel_id, str) and (channel_id.startswith("#") or channel_id.startswith("irc:")):
-        key = f"tater:irc:{channel_id}:history"
-    elif isinstance(channel_id, str) and channel_id.startswith("webui"):
-        key = f"tater:channel:{channel_id}:history"
-    else:
-        key = f"tater:channel:{channel_id}:history"
-
-    redis_client.rpush(key, json.dumps({
-        "role": "assistant",
-        "username": "assistant",
-        "content": content
-    }))
-    redis_client.ltrim(key, -20, -1)
 
 # ---------------------------------------------------------
 # Main event loop reference + run_async helper
