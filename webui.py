@@ -357,8 +357,7 @@ def build_system_prompt():
 
     behavior_guard = (
         "Only call a tool if the user's latest message clearly requests an action — such as 'generate', 'summarize', or 'download'.\n"
-        "Do not call a tool in response to casual or friendly messages like 'thanks', 'lol', or 'cool' — reply normally instead.\n"
-        "Never mimic earlier responses or patterns — always respond based on the user's current intent only.\n"
+        "Never call a tool in response to casual or friendly messages like 'thanks', 'lol', or 'cool' — reply normally instead.\n"
     )
     
     return (
@@ -372,31 +371,42 @@ def build_system_prompt():
 # ----------------- PROCESSING FUNCTIONS -----------------
 async def process_message(user_name, message_content):
     final_system_prompt = build_system_prompt()
-
-    # Load last 20 (including the one just saved)
     max_ollama = int(redis_client.get("tater:max_ollama") or 8)
     history = load_chat_history()[-max_ollama:]
 
     messages_list = [{"role": "system", "content": final_system_prompt}]
+
     for msg in history:
         content = msg["content"]
 
-        if isinstance(content, str):
-            text = content
-        elif isinstance(content, dict) and content.get("type") == "image":
-            text = f"[Image: {content.get('name', 'unnamed image')}]"
-        elif isinstance(content, dict) and content.get("type") == "audio":
-            text = f"[Audio: {content.get('name', 'unnamed audio')}]"
-        else:
-            continue  # skip unrecognized content formats
+        if msg["role"] == "user":
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, dict) and content.get("type") == "image":
+                text = "[Image]"
+            elif isinstance(content, dict) and content.get("type") == "audio":
+                text = "[Audio]"
+            else:
+                text = "[Unknown]"
 
-        messages_list.append({
-            "role": msg["role"],
-            "content": text
-        })
+            messages_list.append({"role": "user", "content": text})
+
+        elif msg["role"] == "assistant":
+            if isinstance(content, dict) and content.get("marker") == "plugin_call":
+                plugin_call_text = json.dumps({
+                    "function": content.get("plugin"),
+                    "arguments": content.get("arguments", {})
+                }, indent=2)
+                messages_list.append({"role": "assistant", "content": plugin_call_text})
+            elif isinstance(content, dict) and content.get("marker") == "plugin_response":
+                # Skip all plugin responses entirely!
+                continue
+            else:
+                # Normal assistant reply
+                if isinstance(content, str):
+                    messages_list.append({"role": "assistant", "content": content})
 
     response = await ollama_client.chat(messages_list)
-
     return response["message"]["content"].strip()
 
 async def process_function_call(response_json, user_question=""):
@@ -405,6 +415,13 @@ async def process_function_call(response_json, user_question=""):
     from plugin_registry import plugin_registry
 
     if func in plugin_registry:
+        # Save structured plugin_call marker
+        save_message("assistant", "assistant", {
+            "marker": "plugin_call",
+            "plugin": func,
+            "arguments": args
+        })
+
         plugin = plugin_registry[func]
         if hasattr(plugin, "waiting_prompt_template"):
             wait_msg = plugin.waiting_prompt_template.format(mention="User")
@@ -416,7 +433,10 @@ async def process_function_call(response_json, user_question=""):
             wait_text = wait_response["message"]["content"].strip()
 
             # Save waiting message to Redis
-            save_message("assistant", "assistant", wait_text)
+            save_message("assistant", "assistant", {
+                "marker": "plugin_response",
+                "content": wait_text
+            })
 
             # Render waiting message in chat
             with st.chat_message("assistant", avatar=assistant_avatar):
@@ -426,7 +446,13 @@ async def process_function_call(response_json, user_question=""):
         with st.spinner("Tater is thinking..."):
             result = await plugin.handle_webui(args, ollama_client)
 
-        return result
+        # Normalize to list of responses
+        responses = result if isinstance(result, list) else [result]
+
+        # Wrap every response as structured plugin_response for storage
+        wrapped_responses = [{"marker": "plugin_response", "content": r} for r in responses]
+
+        return wrapped_responses
     else:
         return "Received an unknown function call."
 
@@ -512,14 +538,21 @@ if "chat_messages" not in st.session_state:
 
 # Render all messages from session state
 for msg in st.session_state.chat_messages:
-    role    = msg["role"]
-    avatar  = user_avatar if role == "user" else assistant_avatar
+    role = msg["role"]
+    avatar = user_avatar if role == "user" else assistant_avatar
     content = msg["content"]
+
+    # 🔧 Robust unwrap of nested plugin_response wrappers first
+    while isinstance(content, dict) and content.get("marker") == "plugin_response":
+        content = content.get("content")
+
+    # 🔧 After unwrap, check for plugin_call marker and skip render if needed
+    if isinstance(content, dict) and content.get("marker") == "plugin_call":
+        continue
 
     with st.chat_message(role, avatar=avatar):
         if isinstance(content, dict) and content.get("type") == "image":
             if content.get("mimetype") == "image/webp":
-                # Animated WebP: use raw HTML to ensure animation
                 st.markdown(
                     f'''
                     <img src="data:image/webp;base64,{content["data"]}"
@@ -535,6 +568,7 @@ for msg in st.session_state.chat_messages:
         elif isinstance(content, dict) and content.get("type") == "audio":
             data = base64.b64decode(content["data"])
             st.audio(data, format=content.get("mimetype", "audio/mpeg"))
+
         else:
             st.write(content)
 
