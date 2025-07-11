@@ -5,8 +5,6 @@
 
 Tater is a AI Assistant that integrates with Ollama to provide a variety of AI-powered tools, Tater has a web UI for setup and internal private chat. Whether you're on Discord, IRC or using the WebUI, Tater is at your service.
 
-The following plugins can be triggerd simple by asking Tater after you enable them, ex: ``` Tater summarize this youtube video http://youtube.com/watch?v=000000 ```
-
 ## 🌐 Tater Platform Overview
 
 | Platform   | Description                                                                     |
@@ -15,6 +13,7 @@ The following plugins can be triggerd simple by asking Tater after you enable th
 | `discord`  | Full-featured discord bot that runs compatible plugins                          |
 | `irc`      | Lightweight IRC bot that responds to mentions and runs compatible plugins.      |
 
+The following plugins can be triggerd simple by asking Tater after you enable them, ex: ``` Tater summarize this youtube video http://youtube.com/watch?v=000000 ```
 
 ## 🧩 Tater Plugin Overview
 
