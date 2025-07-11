@@ -126,7 +126,7 @@ docker run -d --name tater_webui \
   -e OLLAMA_HOST=127.0.0.1 \
   -e OLLAMA_PORT=11434 \
   -e OLLAMA_MODEL=gemma3:27b \
-  -e CONTEXT_LENGTH=10000 \
+  -e CONTEXT_LENGTH=20000 \
   -e REDIS_HOST=redis \
   -e REDIS_PORT=6379 \
   masterphooey/tater-webui
