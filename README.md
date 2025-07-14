@@ -5,6 +5,8 @@
 
 Tater is a AI Assistant that integrates with Ollama to provide a variety of AI-powered tools, Tater has a web UI for setup and internal private chat. Whether you're on Discord, IRC or using the WebUI, Tater is at your service.
 
+---
+
 ## 🌐 Tater Platform Overview
 
 | Platform   | Description                                                                     |
@@ -51,7 +53,10 @@ This system runs in the background and posts summarized RSS feed updates. The fo
 | `watch_feed`             | Adds a feed to the internal RSS watcher                                     | RSS Management    | discord, webui, irc    |
 | `unwatch_feed`           | Removes a feed from the internal RSS watcher                                | RSS Management    | discord, webui, irc    |
 
-
+Here are some examples of the RSS watcher in action:
+- **WordPress Poster**: [tater.news](https://tater.news)
+- **Telegram Notifier**: [@TaterNews](https://t.me/TaterNews)
+---
 **Note**:
 - You don't have to use a model that is tagged with tools, test different models if the one you are using isnt trigging the plugins.
 - Tater currently recommends using gemma3:27b
