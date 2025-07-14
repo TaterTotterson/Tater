@@ -41,7 +41,7 @@ class SFTPGoActivityPlugin(ToolPlugin):
             "description": "The password to authenticate with the SFTPGo API."
         }
     }
-    waiting_prompt_template = "Generate a brief message to {mention} telling them to wait a moment while you access the server to see who is using it. Only generate the message. Do not respond to this message."
+    waiting_prompt_template = "Write a friendly message telling {mention} you’re accessing the server to see who’s using it now! Only output that message."
     platforms = ["discord", "webui", "irc"]
 
     def get_sftpgo_settings(self):

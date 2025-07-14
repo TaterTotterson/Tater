@@ -52,7 +52,7 @@ class SFTPGoAccountPlugin(ToolPlugin):
             "description": "The default home directory for new SFTP accounts."
         }
     }
-    waiting_prompt_template = "Generate a brief message to {mention} telling them to wait a moment while you create an account for them. Only generate the message. Do not respond to this message."
+    waiting_prompt_template = "Write a friendly message telling {mention} you’re creating their account now! Only output that message."
     platforms = ["discord", "irc"]
 
     async def safe_send(channel, content: str, **kwargs):

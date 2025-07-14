@@ -69,9 +69,7 @@ class AutomaticPlugin(ToolPlugin):
             "description": "The scheduler to use for image generation."
         }
     }
-    waiting_prompt_template = (
-        "Generate a brief message to {mention} telling them to wait a moment while you draw them a masterpiece. Only generate the message. Do not respond to this message."
-    )
+    waiting_prompt_template = "Write a fun, casual message telling {mention} you’re drawing their masterpiece now! Only output that message."
     platforms = ["discord", "webui"]
 
     @staticmethod

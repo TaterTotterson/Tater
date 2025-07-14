@@ -1,3 +1,4 @@
+# plugins/comfyui_audio_ace.py
 import os
 import json
 import uuid
@@ -35,10 +36,10 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
             "description": "Base URL for the ComfyUI Ace Audio server."
         }
     }
-    waiting_prompt_template = (
-        "Generate a fun message telling the user you're writing lyrics and calling in a virtual band to record the track."
-        "Keep it short and enthusiastic. Only generate the message. Do not respond to this message."
-    )
+    waiting_prompt_template = "Write a fun, upbeat message saying you’re writing lyrics and calling in a virtual band now! Only output that message."
+    
+    async def get_tags_and_lyrics(self, user_prompt, ollama_client):
+        return await self.generate_tags_and_lyrics(user_prompt, ollama_client)
 
     @staticmethod
     def get_server_address():

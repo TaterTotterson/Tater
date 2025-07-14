@@ -37,9 +37,7 @@ class YouTubeSummaryPlugin(ToolPlugin):
             "description": "Manually check and install the latest version of the transcript API."
         }
     }
-    waiting_prompt_template = (
-        "Generate a brief message to {mention} telling them to wait a moment while I watch this boring video. Only generate the message. Do not respond to this message."
-    )
+    waiting_prompt_template = "Write a friendly message telling {mention} you’re watching the video and working on it now! Only output that message."
     platforms = ["discord", "webui", "irc"]
 
     def handle_setting_button(self, key):

@@ -22,9 +22,7 @@ class WebSummaryPlugin(ToolPlugin):
         "}\n"
     )
     description = "Summarizes an article from a URL provided by the user."
-    waiting_prompt_template = (
-        "Generate a brief message to {mention} telling them to wait a moment while I read this boring article and summarize it. Only generate the message. Do not respond to this message."
-    )
+    waiting_prompt_template = "Write a casual, friendly message telling {mention} you’re reading the article and preparing a summary now! Only output that message."
     platforms = ["discord", "webui", "irc"]
 
     @staticmethod
@@ -116,7 +114,7 @@ class WebSummaryPlugin(ToolPlugin):
         if not summary:
             return "Failed to summarize the article."
 
-        return "\n".join(self.split_message(summary, max_response_length))
+        return "\n".join(self.split_message(summary))
 
     async def handle_webui(self, args, ollama_client):
         url = args.get("url")

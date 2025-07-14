@@ -31,9 +31,7 @@ class WatchFeedPlugin(ToolPlugin):
         "}\n"
     )
     description = "Adds an RSS feed provided by the user to the rss watch list."
-    waiting_prompt_template = (
-        "Generate a brief message to {mention} telling them to wait a moment while I add the feed to the watch list. Only generate the message. Do not respond to this message."
-    )
+    waiting_prompt_template = "Write a friendly message telling {mention} you’re adding the feed to the watch list now! Only output that message."
     platforms = ["discord", "webui", "irc"]
 
     # --- Discord Handler ---
