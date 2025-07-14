@@ -4,8 +4,13 @@ FROM python:3.11-slim
 # Set the working directory in the container.
 WORKDIR /app
 
-# Install system dependencies (if needed).
-RUN apt-get update && apt-get install -y build-essential libpq-dev wget && rm -rf /var/lib/apt/lists/*
+# Install system dependencies (including ffmpeg again)
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    libpq-dev \
+    wget \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy the requirements file into the container.
 COPY requirements.txt .
