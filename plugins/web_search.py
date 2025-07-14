@@ -8,7 +8,6 @@ from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 import streamlit as st
-from duckduckgo_search import DDGS
 import time
 import random
 import requests
