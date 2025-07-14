@@ -50,9 +50,7 @@ class FtpBrowserPlugin(ToolPlugin):
             "description": "Password for FTP login."
         }
     }
-    waiting_prompt_template = (
-        "Generate a brief message to {mention}, telling them to wait a moment while you load the FTP browser for them."
-    )
+    waiting_prompt_template = "Write a friendly message telling {mention} you’re loading the FTP browser now! Only output that message."
     platforms = ["discord"]
     max_upload_size_bytes = 25 * 1024 * 1024  # 25 MB
 

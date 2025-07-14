@@ -1,16 +1,13 @@
-# plugins/comfyui_image_plugin.py
 import os
 import json
 import uuid
 import urllib.request
 import urllib.parse
 import asyncio
-import time
 import websocket
 from io import BytesIO
 from plugin_base import ToolPlugin
 import discord
-import streamlit as st
 from helpers import redis_client, format_irc
 import base64
 
@@ -32,24 +29,31 @@ class ComfyUIImagePlugin(ToolPlugin):
             "type": "string",
             "default": "http://localhost:8188",
             "description": "The base URL for the ComfyUI API (do not include endpoint paths)."
+
+        },
+        "IMAGE_RESOLUTION": {
+            "label": "Image Resolution",
+            "type": "select",
+            "default": "720p",
+            "options": ["144p", "240p", "360p", "480p", "720p", "1080p"],
+            "description": "Resolution for generated images."
         },
         "COMFYUI_WORKFLOW": {
             "label": "Workflow Template (JSON)",
-            "type": "file",  # Using file upload in webui; stored as JSON string in Redis.
+            "type": "file",
             "default": "",
             "description": "Upload your JSON workflow template file. This field is required."
         }
     }
-    waiting_prompt_template = "Generate a message telling the user to please wait a moment while you create them a Masterpiece! Only generate the message. Do not respond to this message."
+    waiting_prompt_template = "Write a fun, casual message saying you’re creating their masterpiece now! Only output that message."
     platforms = ["discord", "webui"]
 
     @staticmethod
     def get_server_address():
         settings = redis_client.hgetall(f"plugin_settings:{ComfyUIImagePlugin.settings_category}")
-        url = settings.get("COMFYUI_URL", "").strip()
+        url = settings.get("COMFYUI_URL", b"").decode("utf-8").strip() if isinstance(settings.get("COMFYUI_URL"), bytes) else settings.get("COMFYUI_URL", "").strip()
         if not url:
             return "localhost:8188"
-        # Remove scheme if present
         if url.startswith("http://"):
             return url[len("http://"):]
         elif url.startswith("https://"):
@@ -62,7 +66,7 @@ class ComfyUIImagePlugin(ToolPlugin):
         server_address = ComfyUIImagePlugin.get_server_address()
         p = {"prompt": prompt, "client_id": client_id}
         data = json.dumps(p).encode("utf-8")
-        req = urllib.request.Request("http://{}/prompt".format(server_address),
+        req = urllib.request.Request(f"http://{server_address}/prompt",
                                      data=data,
                                      headers={"Content-Type": "application/json"})
         return json.loads(urllib.request.urlopen(req).read())
@@ -72,13 +76,13 @@ class ComfyUIImagePlugin(ToolPlugin):
         server_address = ComfyUIImagePlugin.get_server_address()
         data = {"filename": filename, "subfolder": subfolder, "type": folder_type}
         url_values = urllib.parse.urlencode(data)
-        with urllib.request.urlopen("http://{}/view?{}".format(server_address, url_values)) as response:
+        with urllib.request.urlopen(f"http://{server_address}/view?{url_values}") as response:
             return response.read()
 
     @staticmethod
     def get_history(prompt_id):
         server_address = ComfyUIImagePlugin.get_server_address()
-        with urllib.request.urlopen("http://{}/history/{}".format(server_address, prompt_id)) as response:
+        with urllib.request.urlopen(f"http://{server_address}/history/{prompt_id}") as response:
             return json.loads(response.read())
 
     @staticmethod
@@ -92,12 +96,9 @@ class ComfyUIImagePlugin(ToolPlugin):
                 if message["type"] == "executing":
                     data = message["data"]
                     if data["node"] is None and data["prompt_id"] == prompt_id:
-                        break  # Execution is done
-            else:
-                continue  # skip binary data
+                        break
         history = ComfyUIImagePlugin.get_history(prompt_id)[prompt_id]
-        for node_id in history["outputs"]:
-            node_output = history["outputs"][node_id]
+        for node_id, node_output in history["outputs"].items():
             images_output = []
             if "images" in node_output:
                 for image in node_output["images"]:
@@ -109,13 +110,14 @@ class ComfyUIImagePlugin(ToolPlugin):
     @staticmethod
     def get_workflow_template():
         settings = redis_client.hgetall(f"plugin_settings:{ComfyUIImagePlugin.settings_category}")
-        workflow_str = settings.get("COMFYUI_WORKFLOW", "").strip()
+        workflow_raw = settings.get("COMFYUI_WORKFLOW", b"")
+        workflow_str = workflow_raw.decode("utf-8").strip() if isinstance(workflow_raw, bytes) else workflow_raw.strip()
         if not workflow_str:
             raise Exception("No workflow template set in COMFYUI_WORKFLOW. Please provide a valid JSON template.")
         return json.loads(workflow_str)
 
     @staticmethod
-    def process_prompt(user_prompt: str) -> bytes:
+    def process_prompt(user_prompt: str, width: int = None, height: int = None) -> bytes:
         def insert_prompts(workflow, user_prompt, negative_prompt=""):
             positive_found = False
             negative_found = False
@@ -134,7 +136,6 @@ class ComfyUIImagePlugin(ToolPlugin):
                         node["widgets_values"] = [negative_prompt]
                         negative_found = True
 
-            # Fallback if titles aren't labeled
             if not positive_found and len(encode_nodes) > 0:
                 encode_nodes[0]["inputs"]["text"] = user_prompt
                 encode_nodes[0]["widgets_values"] = [user_prompt]
@@ -142,27 +143,46 @@ class ComfyUIImagePlugin(ToolPlugin):
                 encode_nodes[1]["inputs"]["text"] = negative_prompt
                 encode_nodes[1]["widgets_values"] = [negative_prompt]
 
-        # Load workflow
         workflow = ComfyUIImagePlugin.get_workflow_template()
         insert_prompts(workflow, user_prompt)
 
-        # Connect to WebSocket
+        res_map = {
+            "144p": (256, 144),
+            "240p": (426, 240),
+            "360p": (480, 360),
+            "480p": (640, 480),
+            "720p": (1280, 720),
+            "1080p": (1920, 1080)
+        }
+
+        settings = redis_client.hgetall(f"plugin_settings:{ComfyUIImagePlugin.settings_category}")
+        raw = settings.get("IMAGE_RESOLUTION", b"720p")
+        if isinstance(raw, bytes):
+            resolution = raw.decode("utf-8")
+        else:
+            resolution = raw
+        default_w, default_h = res_map.get(resolution, (1280, 720))
+
+        w = width or default_w
+        h = height or default_h
+
+        for node_id, node in workflow.items():
+            if node.get("class_type") in ("EmptyLatentImage", "EmptySD3LatentImage", "ModelSamplingFlux"):
+                node["inputs"]["width"] = w
+                node["inputs"]["height"] = h
+
         ws = websocket.WebSocket()
         server_address = ComfyUIImagePlugin.get_server_address()
         ws.connect(f"ws://{server_address}/ws?clientId={client_id}")
         images = ComfyUIImagePlugin.get_images(ws, workflow)
         ws.close()
 
-        # Return the first image found
         for node_id, imgs in images.items():
             if imgs:
                 return imgs[0]
 
         raise Exception("No images returned from ComfyUI.")
 
-    # ---------------------------------------------------------
-    # Discord handler
-    # ---------------------------------------------------------
     async def handle_discord(self, message, args, ollama_client):
         user_prompt = args.get("prompt")
         if not user_prompt:
@@ -195,9 +215,6 @@ class ComfyUIImagePlugin(ToolPlugin):
         except Exception as e:
             return f"Failed to queue prompt: {e}"
 
-    # ---------------------------------------------------------
-    # WebUI handler
-    # ---------------------------------------------------------
     async def handle_webui(self, args, ollama_client):
         user_prompt = args.get("prompt")
         if not user_prompt:
@@ -226,12 +243,8 @@ class ComfyUIImagePlugin(ToolPlugin):
             return [image_data, message_text]
 
         except Exception as e:
-            error_msg = f"Failed to queue prompt: {e}"
-            return error_msg
+            return f"Failed to queue prompt: {e}"
 
-    # ---------------------------------------------------------
-    # IRC handler
-    # ---------------------------------------------------------
     async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
         response = "This plugin is only supported on Discord and WebUI."
         formatted = format_irc(response)

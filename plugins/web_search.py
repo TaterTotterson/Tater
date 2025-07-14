@@ -44,9 +44,7 @@ class WebSearchPlugin(ToolPlugin):
             "description": "Get this from https://programmablesearchengine.google.com/controlpanel/all — be sure to enable 'Search the entire web'"
         }
     }
-    waiting_prompt_template = (
-        "Generate a brief message to {mention} telling them to wait a moment while I search the web for additional information. Only generate the message. Do not respond to this message."
-    )
+    waiting_prompt_template = "Write a friendly message telling {mention} you’re searching the web for more information now! Only output that message."
     platforms = ["discord", "webui", "irc"]
 
     def search_web(self, query, num_results=10):

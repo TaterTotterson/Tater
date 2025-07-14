@@ -34,9 +34,7 @@ class PremiumizeDownloadPlugin(ToolPlugin):
             "description": "Your Premiumize.me API key."
         }
     }
-    waiting_prompt_template = (
-        "Generate a brief message to {mention} telling them to wait a moment while I check Premiumize for that URL and retrieve download links. Only generate the message. Do not respond to this message."
-    )
+    waiting_prompt_template = "Write a friendly message telling {mention} you’re checking Premiumize and retrieving download links now! Only output that message."
     platforms = ["discord", "webui", "irc"]
 
     @staticmethod

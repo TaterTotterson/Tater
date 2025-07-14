@@ -59,9 +59,7 @@ class VisionDescriberPlugin(ToolPlugin):
         }
 
     }
-    waiting_prompt_template = (
-        "Generate a brief message to {mention} telling them to wait a moment while you use your magnifying glass to inspect their image in detail. Only generate the message. Do not respond to this message."
-    )
+    waiting_prompt_template = "Write a playful message telling {mention} you’re using your magnifying glass to inspect their image now! Only output that message."
     platforms = ["discord", "webui"]
 
     def get_vision_settings(self):
