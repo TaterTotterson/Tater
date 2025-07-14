@@ -248,7 +248,9 @@ def get_plugin_settings(category):
 
 def save_plugin_settings(category, settings_dict):
     key = f"plugin_settings:{category}"
-    redis_client.hset(key, mapping=settings_dict)
+    # Ensure all values are converted to strings before saving to Redis
+    str_settings = {k: str(v) for k, v in settings_dict.items()}
+    redis_client.hset(key, mapping=str_settings)
 
 # Updated: Gather distinct plugin settings categories from the plugin registry,
 # only including plugins that are enabled.
@@ -292,7 +294,6 @@ for category, settings in sorted(plugin_categories.items()):
                         result = plugin_obj.handle_setting_button(key)
                         if result:
                             st.success(result)
-                # optionally show description under the button
                 if info.get("description"):
                     st.caption(info["description"])
                 continue  # skip saving a value for buttons
@@ -323,6 +324,31 @@ for category, settings in sorted(plugin_categories.items()):
                         new_value = default_value
                 else:
                     new_value = default_value
+
+            # SELECT
+            elif input_type == "select":
+                options = info.get("options", [])
+                if not options:
+                    options = ["Option 1", "Option 2"]  # fallback default
+                current_index = options.index(default_value) if default_value in options else 0
+                new_value = st.selectbox(
+                    info.get("label", key),
+                    options,
+                    index=current_index,
+                    help=info.get("description", "")
+                )
+
+            # CHECKBOX
+            elif input_type == "checkbox":
+                is_checked = (
+                    default_value if isinstance(default_value, bool)
+                    else str(default_value).lower() in ("true", "1", "yes")
+                )
+                new_value = st.checkbox(
+                    info.get("label", key),
+                    value=is_checked,
+                    help=info.get("description", "")
+                )
 
             # TEXT (fallback)
             else:
@@ -568,6 +594,10 @@ for msg in st.session_state.chat_messages:
         elif isinstance(content, dict) and content.get("type") == "audio":
             data = base64.b64decode(content["data"])
             st.audio(data, format=content.get("mimetype", "audio/mpeg"))
+
+        elif isinstance(content, dict) and content.get("type") == "video":
+            data = base64.b64decode(content["data"])
+            st.video(data, format=content.get("mimetype", "video/mp4"))
 
         else:
             st.write(content)

@@ -2,10 +2,10 @@ aiohttp
 beautifulsoup4
 bencodepy
 discord.py
-duckduckgo_search
 feedparser
 ollama
 Pillow
+moviepy
 python-dotenv
 requests
 streamlit
