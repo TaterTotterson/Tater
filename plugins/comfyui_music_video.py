@@ -173,12 +173,15 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
             with open(tmp_img, "wb") as f:
                 f.write(image_bytes)
 
+            # 🔧 Patch: ensure predictable name sent to upload API
+            upload_filename = f"frame_{i}.png"  # No job_id prefix for ComfyUI expectations!
+
             animation_desc = ""
             anim_bytes = await asyncio.to_thread(
                 anim_plugin.process_prompt,
                 animation_desc,
                 image_bytes,
-                tmp_img,
+                upload_filename,  # Pass predictable filename here!
                 w,
                 h,
                 int(per * 16)
