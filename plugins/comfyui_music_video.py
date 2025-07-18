@@ -1,9 +1,9 @@
-# plugins/comfyui_music_video.py
 import os
 import asyncio
 import base64
 import subprocess
 import json
+import uuid
 from PIL import Image
 from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 from plugin_base import ToolPlugin
@@ -62,7 +62,7 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
         return float(info["format"]["duration"])
 
     def webp_to_mp4(self, input_file, output_file, fps=16, duration=5):
-        frames, tmp_dir, frame_files = [], "/tmp/temp_frames", []
+        frames, tmp_dir, frame_files = [], f"{os.path.dirname(input_file)}/frames", []
         os.makedirs(tmp_dir, exist_ok=True)
         try:
             im = Image.open(input_file)
@@ -77,8 +77,8 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
             path = f"{tmp_dir}/frame_{idx}.png"
             frame.save(path, "PNG")
             frame_files.append(path)
-        if len(frame_files) == 1:
-            frame_files *= int(fps * duration)
+        if len(frame_files) == 1 or duration < 1:
+            frame_files *= max(1, int(fps * duration))
         clip = ImageSequenceClip(frame_files, fps=fps)
         clip.write_videofile(output_file, codec='libx264', fps=fps, audio=False, logger=None)
         for p in frame_files:
@@ -86,29 +86,31 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
         os.rmdir(tmp_dir)
 
     def ffmpeg_concat(self, video_paths, audio_path, out):
-        listpath = "/tmp/concat_list.txt"
+        listpath = f"{out}_concat_list.txt"
         with open(listpath, "w") as f:
             for p in video_paths:
                 f.write(f"file '{p}'\n")
         cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", listpath, "-i", audio_path, "-c:v", "libx264", "-c:a", "aac", "-shortest", out]
-        asyncio.run(asyncio.to_thread(os.system, ' '.join(cmd)))
+        subprocess.run(cmd, check=True)
+        os.remove(listpath)
 
-    def cleanup_temp_files(self, count):
+    def cleanup_temp_files(self, job_id, count):
         try:
-            # Always remove these known temp files
-            for path in ["/tmp/audio.mp3", "/tmp/final.mp4", "/tmp/final_small.mp4"]:
-                if os.path.exists(path):
-                    os.remove(path)
-
+            for ext in ["mp3", "mp4"]:
+                for suffix in ["audio", "final", "final_small"]:
+                    path = f"/tmp/{job_id}_{suffix}.{ext}"
+                    if os.path.exists(path):
+                        os.remove(path)
             for i in range(count):
                 for ext in ["webp", "mp4", "png"]:
-                    path = f"/tmp/clip_{i}.{ext}" if ext != "png" else f"/tmp/frame_{i}.png"
+                    path = f"/tmp/{job_id}_clip_{i}.{ext}" if ext != "png" else f"/tmp/{job_id}_frame_{i}.png"
                     if os.path.exists(path):
                         os.remove(path)
         except Exception as e:
             print(f"[Cleanup warning] {e}")
 
     async def generate_music_video(self, prompt, ollama_client):
+        job_id = str(uuid.uuid4())[:8]
         audio_plugin = ComfyUIAudioAcePlugin()
         try:
             tags, lyrics = await audio_plugin.get_tags_and_lyrics(prompt, ollama_client)
@@ -118,11 +120,15 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
         if not lyrics:
             return "❌ No lyrics returned for visuals."
 
+        audio_path = f"/tmp/{job_id}_audio.mp3"
+        final_video_path = f"/tmp/{job_id}_final.mp4"
+        final_small_path = f"/tmp/{job_id}_final_small.mp4"
+
         audio_bytes = await asyncio.to_thread(audio_plugin.process_prompt, prompt, tags, lyrics)
-        with open("/tmp/audio.mp3", "wb") as f:
+        with open(audio_path, "wb") as f:
             f.write(audio_bytes)
 
-        duration = self.get_mp3_duration("/tmp/audio.mp3")
+        duration = self.get_mp3_duration(audio_path)
         duration = max(30, min(300, duration))
 
         sections = self.split_sections(lyrics)
@@ -163,39 +169,35 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
                 h
             )
 
-            tmp_img = f"/tmp/frame_{i}.png"
+            tmp_img = f"/tmp/{job_id}_frame_{i}.png"
             with open(tmp_img, "wb") as f:
                 f.write(image_bytes)
 
-            # REMOVE Ollama animation prompt
             animation_desc = ""
-
-            # Call animation as before:
             anim_bytes = await asyncio.to_thread(
                 anim_plugin.process_prompt,
                 animation_desc,
                 image_bytes,
-                f"frame_{i}.png",
+                tmp_img,
                 w,
                 h,
                 int(per * 16)
             )
 
-            tmp_input = f"/tmp/clip_{i}.webp"
+            tmp_input = f"/tmp/{job_id}_clip_{i}.webp"
             with open(tmp_input, "wb") as f:
                 f.write(anim_bytes)
 
-            tmp_mp4 = f"/tmp/clip_{i}.mp4"
+            tmp_mp4 = f"/tmp/{job_id}_clip_{i}.mp4"
             self.webp_to_mp4(tmp_input, tmp_mp4, fps=16, duration=per)
             vids.append(tmp_mp4)
 
         if not vids:
             return "❌ Failed to generate any video clips."
 
-        final = "/tmp/final.mp4"
-        self.ffmpeg_concat(vids, "/tmp/audio.mp3", final)
+        self.ffmpeg_concat(vids, audio_path, final_video_path)
 
-        with open(final, "rb") as f:
+        with open(final_video_path, "rb") as f:
             final_bytes = f.read()
 
         msg = await ollama_client.chat([
@@ -208,26 +210,25 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
             "name": "music_video.mp4",
             "data": base64.b64encode(final_bytes).decode(),
             "mimetype": "video/mp4"
-        }, msg["message"]["content"], len(vids)]
+        }, msg["message"]["content"], job_id, len(vids)]
 
     async def handle_discord(self, message, args, ollama_client):
         if "prompt" not in args:
             return "No prompt given."
         try:
             result = await self.generate_music_video(args["prompt"], ollama_client)
-            if isinstance(result, list) and len(result) == 3:
-                payload, text, count = result
+            if isinstance(result, list) and len(result) == 4:
+                payload, text, job_id, count = result
                 decoded = base64.b64decode(payload["data"])
                 if len(decoded) / (1024 * 1024) > 8:
-                    # Re-encode for smaller size but keep MP4 output
                     subprocess.run([
-                        "ffmpeg", "-y", "-i", "/tmp/final.mp4",
+                        "ffmpeg", "-y", "-i", f"/tmp/{job_id}_final.mp4",
                         "-c:v", "libx264", "-b:v", "200k",
-                        "-c:a", "aac", "/tmp/final_small.mp4"
+                        "-c:a", "aac", f"/tmp/{job_id}_final_small.mp4"
                     ], check=True)
-                    with open("/tmp/final_small.mp4", "rb") as f:
+                    with open(f"/tmp/{job_id}_final_small.mp4", "rb") as f:
                         mp4_bytes = f.read()
-                    self.cleanup_temp_files(count)
+                    self.cleanup_temp_files(job_id, count)
                     return [
                         {
                             "type": "video",
@@ -238,7 +239,7 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
                         text
                     ]
                 else:
-                    self.cleanup_temp_files(count)
+                    self.cleanup_temp_files(job_id, count)
                     return [payload, text]
             return result
         except Exception as e:
@@ -249,9 +250,9 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
             return "No prompt given."
         try:
             result = await self.generate_music_video(args["prompt"], ollama_client)
-            if isinstance(result, list) and len(result) == 3:
-                payload, text, count = result
-                self.cleanup_temp_files(count)
+            if isinstance(result, list) and len(result) == 4:
+                payload, text, job_id, count = result
+                self.cleanup_temp_files(job_id, count)
                 return [payload, text]
             return result
         except Exception as e:
