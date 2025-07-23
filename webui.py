@@ -464,7 +464,16 @@ async def process_function_call(response_json, user_question=""):
                 "content": wait_text
             })
 
-            # Render waiting message in chat
+            # Append waiting message to session state for persistence
+            st.session_state.chat_messages.append({
+                "role": "assistant",
+                "content": {
+                    "marker": "plugin_response",
+                    "content": wait_text
+                }
+            })
+
+            # Immediate feedback: render waiting message now before rerun
             with st.chat_message("assistant", avatar=assistant_avatar):
                 st.write(wait_text)
 
