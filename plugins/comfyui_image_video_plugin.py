@@ -5,10 +5,8 @@ import uuid
 import requests
 import asyncio
 import websocket
-import base64
 from plugin_base import ToolPlugin
 from helpers import redis_client, get_latest_image_from_history
-from plugin_settings import get_plugin_settings
 
 client_id = str(uuid.uuid4())
 
@@ -20,7 +18,7 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
         '  "arguments": {"prompt": "<Text prompt for the animation>"}\n'
         '}'
     )
-    description = "Animates the most recent image in chat into a looping WebP using ComfyUI."
+    description = "Animates the most recent image in chat into a looping WebP or MP4 using ComfyUI."
     settings_category = "ComfyUI Animate Image"
     required_settings = {
         "COMFYUI_VIDEO_URL": {
@@ -43,14 +41,14 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
             "description": "Approximate animation length in seconds."
         },
         "COMFYUI_VIDEO_WORKFLOW": {
-            "label": "WanImageToVideo Workflow (JSON)",
+            "label": "Workflow Template (JSON)",
             "type": "file",
             "default": "",
-            "description": "Upload your ComfyUI JSON workflow template for WanImageToVideo."
+            "description": "Upload your ComfyUI JSON workflow template."
         }
     }
     waiting_prompt_template = "Write a playful, friendly message saying you’re bringing their image to life now! Only output that message."
-    platforms = ["discord", "webui"]
+    platforms = ["webui"]
 
     @staticmethod
     def get_server_address():
@@ -75,11 +73,10 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
     @staticmethod
     def upload_image(image_bytes: bytes, filename: str) -> str:
         server = ComfyUIImageVideoPlugin.get_server_address()
-        data = {"overwrite": "true"}
         resp = requests.post(
             f"http://{server}/upload/image",
             files={"image": (filename, image_bytes)},
-            data=data
+            data={"overwrite": "true"}
         )
         resp.raise_for_status()
         result = resp.json()
@@ -107,29 +104,30 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
         return resp.json()
 
     @staticmethod
-    def collect_outputs(ws, workflow: dict) -> bytes:
+    def collect_outputs(ws, workflow: dict):
         info = ComfyUIImageVideoPlugin.queue_workflow(workflow)
         pid = info["prompt_id"]
         while True:
             frame = ws.recv()
             if isinstance(frame, str):
                 msg = json.loads(frame)
-                if (
-                    msg.get("type") == "executing" and
-                    msg["data"].get("prompt_id") == pid and
-                    msg["data"]["node"] is None
-                ):
+                if msg.get("type") == "executing" and msg["data"].get("prompt_id") == pid and msg["data"]["node"] is None:
                     break
         server = ComfyUIImageVideoPlugin.get_server_address()
         hist = requests.get(f"http://{server}/history/{pid}").json()[pid]
         for node in hist["outputs"].values():
             if "images" in node:
                 img = node["images"][0]
-                return ComfyUIImageVideoPlugin.get_image(img["filename"], img["subfolder"], img["type"])
-        raise RuntimeError("No output images returned by workflow.")
+                content = ComfyUIImageVideoPlugin.get_image(img["filename"], img["subfolder"], img["type"])
+                return content, "webp"
+            if "videos" in node:
+                vid = node["videos"][0]
+                content = ComfyUIImageVideoPlugin.get_image(vid["filename"], vid["subfolder"], vid["type"])
+                return content, "mp4"
+        raise RuntimeError("No output images or videos returned by workflow.")
 
     @staticmethod
-    def process_prompt(prompt: str, image_bytes: bytes, filename: str, width: int = None, height: int = None, length: int = None) -> bytes:
+    def process_prompt(prompt: str, image_bytes: bytes, filename: str, width: int = None, height: int = None, length: int = None):
         uploaded = ComfyUIImageVideoPlugin.upload_image(image_bytes, filename)
         wf = ComfyUIImageVideoPlugin.get_workflow_template()
 
@@ -147,7 +145,6 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
         resolution = raw_res.decode("utf-8") if isinstance(raw_res, bytes) else raw_res
         default_w, default_h = res_map.get(resolution, (640, 480))
 
-        # 👉 New: LENGTH is now seconds, convert to frames internally (16 FPS default)
         fps = 16
         raw_length = settings.get("LENGTH", b"1")
         try:
@@ -159,14 +156,28 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
 
         w = width or default_w
         h = height or default_h
-        l = length or default_frames  # Keep override intact!
+        l = length or default_frames
 
+        patched_first_prompt = False
         for node in wf.values():
             if node.get("class_type") == "LoadImage":
                 node["inputs"]["image"] = uploaded
-            if node.get("class_type") == "CLIPTextEncode" and "Positive" in node.get("_meta", {}).get("title", ""):
-                node["inputs"]["text"] = prompt
+            if node.get("class_type") == "CLIPTextEncode" and (
+                "Positive" in node.get("_meta", {}).get("title", "") or
+                "Prompt" in node.get("_meta", {}).get("title", "")
+            ):
+                if not patched_first_prompt:
+                    node["inputs"]["text"] = prompt
+                    patched_first_prompt = True
             if node.get("class_type") == "WanImageToVideo":
+                node["inputs"]["width"] = w
+                node["inputs"]["height"] = h
+                node["inputs"]["length"] = l
+            if node.get("class_type") == "WanVaceToVideo":
+                node["inputs"]["width"] = w
+                node["inputs"]["height"] = h
+                node["inputs"]["length"] = l
+            if node.get("class_type") == "CosmosPredict2ImageToVideoLatent":
                 node["inputs"]["width"] = w
                 node["inputs"]["height"] = h
                 node["inputs"]["length"] = l
@@ -181,32 +192,10 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
 
     # --- Discord Handler ---
     async def handle_discord(self, message, args, ollama_client):
-        # prompt = args.get("prompt", "").strip() or ""
-        prompt = ""
-        channel_key = f"tater:channel:{message.channel.id}:history"
-        image_bytes, filename = get_latest_image_from_history(channel_key)
+        return "❌ This plugin is only available in the WebUI due to file size limitations."
 
-        if not image_bytes:
-            return f"{message.author.mention}, I couldn’t find an image. Try uploading one or use an image plugin first."
-
-        try:
-            animated = await asyncio.to_thread(self.process_prompt, prompt, image_bytes, filename)
-            followup_text = "Here's your animated image!"
-            return [
-                {
-                    "type": "image",
-                    "name": "animated.webp",
-                    "data": base64.b64encode(animated).decode("utf-8"),
-                    "mimetype": "image/webp"
-                },
-                followup_text
-            ]
-
-        except Exception as e:
-            return f"❌ Failed to generate animation: {e}"
-
+    # --- WebUI Handler ---
     async def handle_webui(self, args, ollama_client):
-        # prompt = args.get("prompt", "").strip() or ""
         prompt = ""
         image_bytes, filename = get_latest_image_from_history("webui:chat_history")
 
@@ -214,22 +203,23 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
             return "❌ No image found. Please upload one or generate one using an image plugin first."
 
         try:
-            animated = await asyncio.to_thread(self.process_prompt, prompt, image_bytes, filename)
-            followup_text = "Here's your animated image!"
+            animated_bytes, ext = await asyncio.to_thread(self.process_prompt, prompt, image_bytes, filename)
+            mime = "image/webp" if ext == "webp" else "video/mp4"
+            file_name = f"animated.{ext}"
+            followup_text = "Here's your animated image!" if ext == "webp" else "Here's your animated video!"
             return [
                 {
-                    "type": "image",
-                    "name": "animated.webp",
-                    "data": base64.b64encode(animated).decode("utf-8"),
-                    "mimetype": "image/webp"
+                    "type": "image" if ext == "webp" else "video",
+                    "name": file_name,
+                    "data": base64.b64encode(animated_bytes).decode("utf-8"),
+                    "mimetype": mime
                 },
                 followup_text
             ]
-
         except Exception as e:
             return f"❌ Failed to generate animation: {e}"
 
     async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
-        await bot.privmsg(channel, f"{user}: ❌ This plugin only works in Discord.")
+        await bot.privmsg(channel, f"{user}: ❌ This plugin is only available in the WebUI.")
 
 plugin = ComfyUIImageVideoPlugin()

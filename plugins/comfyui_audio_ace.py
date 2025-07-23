@@ -13,7 +13,7 @@ import discord
 import streamlit as st
 import re
 import yaml
-from helpers import redis_client
+from helpers import redis_client, format_irc
 
 client_id = str(uuid.uuid4())
 
@@ -235,7 +235,7 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         # Automatically estimate song duration based on lyric content
         lines = lyrics.strip().splitlines()
         line_count = sum(1 for l in lines if l.strip() and not l.strip().startswith("["))
-        estimated_duration = int(line_count * 3.5)
+        estimated_duration = int(line_count * 5.0) + 20
         duration = max(30, min(300, estimated_duration))  # Clamp to sane range
 
         workflow["17"]["inputs"]["seconds"] = duration
@@ -251,10 +251,6 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
                 return audios_list[0]
 
         raise Exception("No audio returned.")
-
-    from io import BytesIO
-    import base64
-    from helpers import format_irc  # ✅ Make sure you have this for IRC
 
     # ---------------------------------------
     # Discord
