@@ -107,24 +107,49 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
     def collect_outputs(ws, workflow: dict):
         info = ComfyUIImageVideoPlugin.queue_workflow(workflow)
         pid = info["prompt_id"]
+
+        # Wait for execution to complete
         while True:
             frame = ws.recv()
             if isinstance(frame, str):
                 msg = json.loads(frame)
                 if msg.get("type") == "executing" and msg["data"].get("prompt_id") == pid and msg["data"]["node"] is None:
                     break
+
         server = ComfyUIImageVideoPlugin.get_server_address()
         hist = requests.get(f"http://{server}/history/{pid}").json()[pid]
+
+        # Try normal inline output first
         for node in hist["outputs"].values():
             if "images" in node:
                 img = node["images"][0]
                 content = ComfyUIImageVideoPlugin.get_image(img["filename"], img["subfolder"], img["type"])
-                return content, "webp"
+                ext = os.path.splitext(img["filename"])[-1].lstrip(".") or "webp"
+                return content, ext
+
             if "videos" in node:
                 vid = node["videos"][0]
                 content = ComfyUIImageVideoPlugin.get_image(vid["filename"], vid["subfolder"], vid["type"])
-                return content, "mp4"
-        raise RuntimeError("No output images or videos returned by workflow.")
+                ext = os.path.splitext(vid["filename"])[-1].lstrip(".") or "mp4"
+                return content, ext
+
+        # Fallback: manually resolve SaveVideo output
+        for node in workflow.values():
+            if node.get("class_type") == "SaveVideo":
+                prefix = node["inputs"].get("filename_prefix", "ComfyUI")
+                # Handle subfolder/base name
+                if "/" in prefix:
+                    subfolder, base = prefix.split("/", 1)
+                else:
+                    subfolder, base = "", prefix
+                guessed_filename = f"{base}.mp4"
+                try:
+                    content = ComfyUIImageVideoPlugin.get_image(guessed_filename, subfolder, "output")
+                    return content, "mp4"
+                except Exception as e:
+                    raise RuntimeError(f"Could not fetch video file from disk: {e}")
+
+        raise RuntimeError("No output found in ComfyUI history or disk.")
 
     @staticmethod
     def process_prompt(prompt: str, image_bytes: bytes, filename: str, width: int = None, height: int = None, length: int = None):
