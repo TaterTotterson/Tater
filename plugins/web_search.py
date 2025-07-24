@@ -15,7 +15,6 @@ from plugin_base import ToolPlugin
 from helpers import format_irc, extract_json, redis_client
 
 load_dotenv()
-
 logger = logging.getLogger("web_search")
 logger.setLevel(logging.INFO)
 
@@ -34,13 +33,11 @@ class WebSearchPlugin(ToolPlugin):
             "label": "Google API Key",
             "type": "string",
             "default": "",
-            "description": "Get this from https://console.cloud.google.com/apis/credentials"
         },
         "GOOGLE_CX": {
             "label": "Google Search Engine ID",
             "type": "string",
             "default": "",
-            "description": "Get this from https://programmablesearchengine.google.com/controlpanel/all — be sure to enable 'Search the entire web'"
         }
     }
     waiting_prompt_template = "Write a friendly message telling {mention} you’re searching the web for more information now! Only output that message."
@@ -59,99 +56,69 @@ class WebSearchPlugin(ToolPlugin):
         try:
             response = requests.get(
                 "https://www.googleapis.com/customsearch/v1",
-                params={
-                    "key": api_key,
-                    "cx": cx,
-                    "q": query,
-                    "num": num_results
-                },
+                params={"key": api_key, "cx": cx, "q": query, "num": num_results},
                 timeout=10
             )
-
             if response.status_code != 200:
                 logger.error(f"[Google CSE error] HTTP {response.status_code}: {response.text}")
                 return []
 
-            data = response.json()
-            results = []
-            for item in data.get("items", []):
-                results.append({
+            return [
+                {
                     "title": item.get("title"),
                     "href": item.get("link"),
                     "body": item.get("snippet"),
-                })
-            return results
-
+                }
+                for item in response.json().get("items", [])
+            ]
         except Exception as e:
             logger.error(f"[search_web error] {e}")
             return []
 
     def format_search_results(self, results):
-        formatted = ""
-        for idx, result in enumerate(results, start=1):
-            title = result.get("title", "No Title")
-            link = result.get("href", "No Link")
-            snippet = result.get("body", "")
-            formatted += f"{idx}. {title} - {link}\n"
-            if snippet:
-                formatted += f"   {snippet}\n"
-        return formatted
+        out = ""
+        for i, result in enumerate(results, 1):
+            out += f"{i}. {result.get('title', 'No Title')} - {result.get('href', '')}\n"
+            if result.get("body"):
+                out += f"   {result['body']}\n"
+        return out
 
     @staticmethod
-    def fetch_web_summary(webpage_url, model):
+    def fetch_web_summary(url, model):
         headers = {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/114.0.0.0 Safari/537.36"
-            ),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Referer": "https://www.google.com/",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1"
+            )
         }
-
         try:
-            resp = requests.get(webpage_url, headers=headers, timeout=10)
+            resp = requests.get(url, headers=headers, timeout=10)
             if resp.status_code != 200:
-                logger.error(f"Request failed: {resp.status_code} - {webpage_url}")
+                logger.error(f"Request failed: {resp.status_code} - {url}")
                 return None
-
             soup = BeautifulSoup(resp.text, "html.parser")
-            for element in soup(["script", "style", "header", "footer", "nav", "aside"]):
-                element.decompose()
-
+            for tag in soup(["script", "style", "header", "footer", "nav", "aside"]):
+                tag.decompose()
             container = soup.find("article") or soup.find("main") or soup.body
             if not container:
                 return None
-
-            text = container.get_text(separator="\n")
-            lines = [line.strip() for line in text.splitlines() if line.strip()]
+            lines = [line.strip() for line in container.get_text(separator="\n").splitlines() if line.strip()]
             article_text = "\n".join(lines)
-
-            if len(article_text.split()) > 3000:
-                article_text = " ".join(article_text.split()[:3000])
-            logger.info(f"[fetch_web_summary] Extracted {len(article_text)} characters from {webpage_url}")
-            return article_text
+            return " ".join(article_text.split()[:3000]) if article_text else None
         except Exception as e:
             logger.error(f"[fetch_web_summary error] {e}")
             return None
 
-    @staticmethod
-    def split_message(text, chunk_size=1500):
-        parts = []
+    def split_message(self, text, chunk_size=1500):
+        chunks = []
         while len(text) > chunk_size:
-            split = text.rfind('\n', 0, chunk_size)
-            if split == -1:
-                split = text.rfind(' ', 0, chunk_size)
-            if split == -1:
-                split = chunk_size
-            parts.append(text[:split])
+            split = text.rfind('\n', 0, chunk_size) or text.rfind(' ', 0, chunk_size) or chunk_size
+            chunks.append(text[:split])
             text = text[split:].strip()
-        parts.append(text)
-        return parts
-    
+        chunks.append(text)
+        return chunks
+
     async def safe_send(self, channel, content):
         if len(content) <= 2000:
             await channel.send(content)
@@ -159,209 +126,87 @@ class WebSearchPlugin(ToolPlugin):
             for chunk in self.split_message(content, 1900):
                 await channel.send(chunk)
 
-    # ---------------------------------------------------------
-    # Discord handler
-    # ---------------------------------------------------------
+    async def pick_link_and_summarize(self, results, query, user_question, ollama_client, max_attempts=3):
+        attempted_links = set()
+        for attempt in range(max_attempts):
+            filtered = [r for r in results if r["href"] not in attempted_links]
+            if not filtered:
+                break
+
+            formatted_results = self.format_search_results(filtered)
+
+            prompt = (
+                f"Your name is Tater Totterson, you're researching the topic '{query}' "
+                f"because the user asked: '{user_question}'.\n\n"
+                f"Here are search results:\n\n{formatted_results}\n\n"
+                "Respond with:\n"
+                "{\n"
+                '  "function": "web_fetch",\n'
+                '  "arguments": {\n'
+                '    "link": "<chosen link>",\n'
+                f'    "query": "{query}",\n'
+                f'    "user_question": "{user_question}"\n'
+                "  }\n"
+                "}"
+            )
+
+            response = await ollama_client.chat(messages=[{"role": "system", "content": prompt}])
+            choice = response["message"].get("content", "").strip()
+            try:
+                choice_json = json.loads(choice)
+            except:
+                json_str = extract_json(choice)
+                choice_json = json.loads(json_str) if json_str else None
+
+            if not choice_json or choice_json.get("function") != "web_fetch":
+                continue
+
+            link = choice_json["arguments"].get("link")
+            if not link:
+                continue
+
+            summary = await asyncio.to_thread(self.fetch_web_summary, link, ollama_client.model)
+            if summary:
+                final_prompt = (
+                    f"Your name is Tater Totterson. Answer the user's question using this content.\n\n"
+                    f"Query: {query}\n"
+                    f"User Question: {user_question}\n\n"
+                    f"Content:\n{summary}\n\n"
+                    "Do not introduce yourself. Only answer:"
+                )
+                final = await ollama_client.chat(messages=[{"role": "system", "content": final_prompt}])
+                return final["message"].get("content", "").strip()
+
+            attempted_links.add(link)
+
+        return "Sorry, I couldn't extract content from any of the top results."
+
     async def handle_discord(self, message, args, ollama_client):
         query = args.get("query")
         if not query:
             return "No search query provided."
-
-        mention = message.author.mention
-
         results = self.search_web(query)
         if not results:
-            return "I couldn't find any relevant search results."
+            return "No results found."
+        return await self.pick_link_and_summarize(results, query, message.content, ollama_client)
 
-        formatted_results = self.format_search_results(results)
-        user_question = message.content
-
-        choice_prompt = (
-            f"Your name is Tater Totterson, you are looking for more information on the topic '{query}', because the user asked: '{user_question}'.\n\n"
-            f"Here are the top search results:\n\n{formatted_results}\n\n"
-            "Pick the most relevant link. Respond ONLY with this JSON format:\n"
-            "{\n"
-            '  "function": "web_fetch",\n'
-            '  "arguments": {\n'
-            '    "link": "<chosen link>",\n'
-            f'    "query": "{query}",\n'
-            f'    "user_question": "{user_question}"\n'
-            "  }\n"
-            "}"
-        )
-
-        choice_response = await ollama_client.chat(
-            messages=[{"role": "system", "content": choice_prompt}]
-        )
-
-        choice_text = choice_response['message'].get('content', '').strip()
-        try:
-            choice_json = json.loads(choice_text)
-        except:
-            json_str = extract_json(choice_text)
-            choice_json = json.loads(json_str) if json_str else None
-
-        if not choice_json or choice_json.get("function") != "web_fetch":
-            return "Failed to parse a valid link from search results."
-
-        link = choice_json["arguments"].get("link")
-        original_query = choice_json["arguments"].get("query", query)
-        if not link:
-            return "No link was selected for detailed info."
-
-        summary = await asyncio.to_thread(self.fetch_web_summary, link, ollama_client.model)
-        if not summary:
-            return "Failed to extract text from the selected page."
-
-        info_prompt = (
-            f"Your name is Tater Totterson, you are answering a question based on the following web page content.\n\n"
-            f"Original Query: {original_query}\n"
-            f"User Question: {user_question}\n\n"
-            f"Web Content:\n{summary}\n\n"
-            f"Please provide a concise answer:"
-        )
-
-        final_response = await ollama_client.chat(
-            messages=[{"role": "system", "content": info_prompt}]
-        )
-
-        final_answer = final_response['message'].get('content', '').strip()
-        return final_answer or "The assistant couldn't generate a response based on the web content."
-
-    # ---------------------------------------------------------
-    # WebUI handler
-    # ---------------------------------------------------------
     async def handle_webui(self, args, ollama_client):
         query = args.get("query")
         if not query:
             return "No search query provided."
-
         results = self.search_web(query)
         if not results:
-            msg = "No results found."
-            return msg
+            return "No results found."
+        return await self.pick_link_and_summarize(results, query, args.get("user_question", ""), ollama_client)
 
-        formatted_results = self.format_search_results(results)
-        user_question = args.get("user_question", "")
-
-        choice_prompt = (
-            f"Your name is Tater Totterson, you are researching the topic '{query}' because the user asked: '{user_question}'.\n\n"
-            f"Here are search results:\n\n{formatted_results}\n\n"
-            "Respond with:\n"
-            "{\n"
-            '  "function": "web_fetch",\n'
-            '  "arguments": {\n'
-            '    "link": "<chosen link>",\n'
-            f'    "query": "{query}",\n'
-            f'    "user_question": "{user_question}"\n'
-            "  }\n"
-            "}"
-        )
-
-        choice_response = await ollama_client.chat(
-            messages=[{"role": "system", "content": choice_prompt}]
-        )
-
-        choice_text = choice_response['message'].get('content', '').strip()
-        try:
-            choice_json = json.loads(choice_text)
-        except:
-            json_str = extract_json(choice_text)
-            choice_json = json.loads(json_str) if json_str else None
-
-        if not choice_json or choice_json.get("function") != "web_fetch":
-            msg = "Failed to parse function response."
-            return msg
-
-        link = choice_json["arguments"].get("link")
-        if not link:
-            msg = "No link was selected."
-            return msg
-
-        summary = await asyncio.to_thread(self.fetch_web_summary, link, ollama_client.model)
-        if not summary:
-            msg = "Failed to extract content from page."
-            return msg
-
-        info_prompt = (
-            f"Your name is Tater Totterson. Answer the user's question using this content.\n\n"
-            f"Query: {query}\n"
-            f"User Question: {user_question}\n\n"
-            f"Content:\n{summary}\n\n"
-            "Do not introduce yourself. Only answer:"
-        )
-
-        final_response = await ollama_client.chat(
-            messages=[{"role": "system", "content": info_prompt}]
-        )
-
-        final_answer = final_response["message"].get("content", "").strip()
-        return final_answer
-
-    # ---------------------------------------------------------
-    # IRC handler
-    # ---------------------------------------------------------
     async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
         query = args.get("query")
         if not query:
             return f"{user}: No search query provided."
-
         results = self.search_web(query)
         if not results:
             return f"{user}: No results found."
-
-        formatted_results = self.format_search_results(results)
-        user_question = raw_message
-
-        choice_prompt = (
-            f"Your name is Tater Totterson, you are researching the topic '{query}' because the user asked: '{user_question}'.\n\n"
-            f"Here are search results:\n\n{formatted_results}\n\n"
-            "Respond with:\n"
-            "{\n"
-            '  "function": "web_fetch",\n'
-            '  "arguments": {\n'
-            '    "link": "<chosen link>",\n'
-            f'    "query": "{query}",\n'
-            f'    "user_question": "{user_question}"\n'
-            "  }\n"
-            "}"
-        )
-
-        response = await ollama_client.chat(
-            messages=[{"role": "system", "content": choice_prompt}]
-        )
-
-        content = response["message"].get("content", "").strip()
-        try:
-            choice_json = json.loads(content)
-        except:
-            json_str = extract_json(content)
-            choice_json = json.loads(json_str) if json_str else None
-
-        if not choice_json or choice_json.get("function") != "web_fetch":
-            return f"{user}: Failed to parse search response."
-
-        link = choice_json["arguments"].get("link")
-        if not link:
-            return f"{user}: No link selected."
-
-        summary = await asyncio.to_thread(self.fetch_web_summary, link, ollama_client.model)
-        if not summary:
-            return f"{user}: Couldn't extract content from selected link."
-
-        info_prompt = (
-            f"Your name is Tater Totterson. Answer the user's question using this content.\n\n"
-            f"Query: {query}\n"
-            f"User Question: {user_question}\n\n"
-            f"Content:\n{summary}\n\n"
-            "Do not introduce yourself. Only answer:"
-        )
-
-        final = await ollama_client.chat(
-            messages=[{"role": "system", "content": info_prompt}]
-        )
-
-        answer = final["message"].get("content", "").strip()
+        answer = await self.pick_link_and_summarize(results, query, raw_message, ollama_client)
         return format_irc(answer)
 
 plugin = WebSearchPlugin()
