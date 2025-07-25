@@ -147,3 +147,6 @@ Once the container is running, open your browser and navigate to:
 The Streamlit-based web UI will be available for interacting with Tater.
 
 ---
+
+https://github.com/user-attachments/assets/dffa38fb-b4a5-45e8-a98a-614263446040
+
