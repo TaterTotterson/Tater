@@ -5,6 +5,7 @@ import uuid
 import requests
 import asyncio
 import websocket
+import base64  # ✅ fix for missing import
 from plugin_base import ToolPlugin
 from helpers import redis_client, get_latest_image_from_history
 
@@ -15,7 +16,7 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
     usage = (
         '{\n'
         '  "function": "comfyui_image_video",\n'
-        '  "arguments": {"prompt": "<Text prompt for the animation>"}\n'
+        '  "arguments": {"prompt": "<Describe how you want the animation to move or behave>"}\n'
         '}'
     )
     description = "Animates the most recent image in chat into a looping WebP or MP4 using ComfyUI."
@@ -221,7 +222,7 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
 
     # --- WebUI Handler ---
     async def handle_webui(self, args, ollama_client):
-        prompt = ""
+        prompt = args.get("prompt", "").strip()
         image_bytes, filename = get_latest_image_from_history("webui:chat_history")
 
         if not image_bytes:
