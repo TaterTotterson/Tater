@@ -5,7 +5,7 @@ import uuid
 import requests
 import asyncio
 import websocket
-import base64  # ✅ fix for missing import
+import base64
 from plugin_base import ToolPlugin
 from helpers import redis_client, get_latest_image_from_history
 
