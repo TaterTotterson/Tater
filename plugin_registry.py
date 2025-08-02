@@ -16,6 +16,7 @@ from plugins.sftpgo_account import plugin as sftpgo_account_plugin
 from plugins.sftpgo_activity import plugin as sftpgo_activity_plugin
 from plugins.vision_describer import plugin as vision_describer_plugin
 from plugins.ftp_browser import plugin as ftp_browser_plugin
+from plugins.webdav_browser import plugin as webdav_browser_plugin
 from plugins.telegram_notifier import plugin as telegram_notifier_plugin
 from plugins.wordpress_poster import plugin as wordpress_poster_plugin
 from plugins.discord_notifier import plugin as discord_notifier_plugin
@@ -40,6 +41,7 @@ plugin_registry = {
     sftpgo_activity_plugin.name: sftpgo_activity_plugin,
     vision_describer_plugin.name: vision_describer_plugin,
     ftp_browser_plugin.name: ftp_browser_plugin,
+    webdav_browser_plugin.name: webdav_browser_plugin,
     telegram_notifier_plugin.name: telegram_notifier_plugin,
     wordpress_poster_plugin.name: wordpress_poster_plugin,
     discord_notifier_plugin.name: discord_notifier_plugin,
