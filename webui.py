@@ -12,7 +12,8 @@ import base64
 import requests
 import importlib
 import threading
-import sys 
+import sys
+import uuid
 from datetime import datetime
 from PIL import Image
 from io import BytesIO
@@ -172,7 +173,10 @@ def set_plugin_enabled(plugin_name, enabled):
 def render_plugin_controls(plugin_name):
     current_state = get_plugin_enabled(plugin_name)
     toggle_state = st.toggle(plugin_name, value=current_state, key=f"plugin_toggle_{plugin_name}")
-    set_plugin_enabled(plugin_name, toggle_state)
+
+    if toggle_state != current_state:
+        set_plugin_enabled(plugin_name, toggle_state)
+        st.rerun()
 
 def render_platform_controls(platform, redis_client):
     category     = platform["label"]
@@ -192,10 +196,12 @@ def render_platform_controls(platform, redis_client):
     if st.session_state.get(force_off_key):
         del st.session_state[force_off_key]
         is_enabled = False
+        new_toggle = False
     else:
-        is_enabled = st.toggle(f"{emoji} Enable {short_name}",
+        new_toggle = st.toggle(f"{emoji} Enable {short_name}",
                                value=is_running,
                                key=f"{category}_toggle")
+        is_enabled = new_toggle
 
     # --- TURNING ON ---
     if is_enabled and not is_running:
@@ -215,13 +221,9 @@ def render_platform_controls(platform, redis_client):
 
     # --- TURNING OFF ---
     elif not is_enabled and is_running:
-        # grab the cached thread & flag, shut it down
         _, stop_flag = _start_platform(key)
         stop_flag.set()
-
-        # clear the cache so next enable will spawn anew
         _start_platform.clear()
-
         redis_client.set(state_key, "false")
         redis_client.set(cooldown_key, str(time.time()))
         st.success(f"{short_name} stopped.")
@@ -240,6 +242,10 @@ def render_platform_controls(platform, redis_client):
     if st.button(f"Save {short_name} Settings", key=f"save_{category}_unique"):
         redis_client.hset(redis_key, mapping=new_settings)
         st.success(f"{short_name} settings saved.")
+
+    # Trigger refresh if toggle changed
+    if new_toggle != is_running:
+        st.rerun()
 
 # ----------------- PLUGIN SETTINGS -----------------
 def get_plugin_settings(category):
@@ -435,6 +441,36 @@ async def process_message(user_name, message_content):
     response = await ollama_client.chat(messages_list)
     return response["message"]["content"].strip()
 
+def start_plugin_job(plugin_name, args, ollama_client):
+    job_id = str(uuid.uuid4())
+    redis_key = f"webui:plugin_jobs:{job_id}"
+    redis_client.hset(redis_key, mapping={
+        "status": "pending",
+        "plugin": plugin_name,
+        "args": json.dumps(args),
+        "created_at": time.time()
+    })
+
+    def job_runner():
+        try:
+            plugin = plugin_registry[plugin_name]
+            result = asyncio.run(plugin.handle_webui(args, ollama_client))
+            responses = result if isinstance(result, list) else [result]
+            redis_client.hset(redis_key, mapping={
+                "status": "done",
+                "responses": json.dumps(responses)
+            })
+        except Exception as e:
+            redis_client.hset(redis_key, mapping={
+                "status": "error",
+                "error": str(e)
+            })
+        finally:
+            redis_client.set("webui:needs_rerun", "true")  # Trigger UI update
+
+    threading.Thread(target=job_runner, daemon=True).start()
+    return job_id
+
 async def process_function_call(response_json, user_question=""):
     func = response_json.get("function")
     args = response_json.get("arguments", {})
@@ -452,7 +488,7 @@ async def process_function_call(response_json, user_question=""):
         if hasattr(plugin, "waiting_prompt_template"):
             wait_msg = plugin.waiting_prompt_template.format(mention="User")
 
-            # 🔧 Ask Ollama for a natural "waiting" message
+            # Ask Ollama for a natural "waiting" message
             wait_response = await ollama_client.chat(
                 messages=[{"role": "system", "content": wait_msg}]
             )
@@ -477,17 +513,12 @@ async def process_function_call(response_json, user_question=""):
             with st.chat_message("assistant", avatar=assistant_avatar):
                 st.write(wait_text)
 
-        # 🕒 Show spinner during plugin execution
-        with st.spinner("Tater is thinking..."):
-            result = await plugin.handle_webui(args, ollama_client)
+        # Start background plugin job (new logic)
+        start_plugin_job(func, args, ollama_client)
 
-        # Normalize to list of responses
-        responses = result if isinstance(result, list) else [result]
+        # Let the job return its response later
+        return []
 
-        # Wrap every response as structured plugin_response for storage
-        wrapped_responses = [{"marker": "plugin_response", "content": r} for r in responses]
-
-        return wrapped_responses
     else:
         return "Received an unknown function call."
 
@@ -525,6 +556,12 @@ with st.sidebar.expander("WebUI Settings", expanded=False):
     if st.button("Clear Chat History", key="clear_history"):
         clear_chat_history()
         st.success("Chat history cleared.")
+
+    if st.button("Clear Active Plugin Jobs", key="clear_plugin_jobs"):
+        for key in redis_client.scan_iter("webui:plugin_jobs:*"):
+            redis_client.delete(key)
+        st.success("All active plugin jobs have been cleared.")
+        st.rerun()
 
 with st.sidebar.expander("Tater Settings", expanded=False):
     st.subheader("Tater Runtime Configuration")
@@ -565,11 +602,29 @@ chat_settings = get_chat_settings()
 avatar_b64  = chat_settings.get("avatar")
 user_avatar = load_avatar_image(avatar_b64) if avatar_b64 else None
 
-# Initialize in‐memory chat list once
 if "chat_messages" not in st.session_state:
     full_history = load_chat_history()
     max_display = int(redis_client.get("tater:max_display") or 8)
     st.session_state.chat_messages = full_history[-max_display:]
+
+# Check for completed plugin jobs
+for key in redis_client.scan_iter("webui:plugin_jobs:*"):
+    job = redis_client.hgetall(key)
+    if job.get("status") == "done":
+        try:
+            responses = json.loads(job.get("responses", "[]"))
+            for r in responses:
+                item = {
+                    "role": "assistant",
+                    "content": {
+                        "marker": "plugin_response",
+                        "content": r
+                    }
+                }
+                st.session_state.chat_messages.append(item)
+                save_message("assistant", "assistant", item["content"])
+        finally:
+            redis_client.delete(key)
 
 # Render all messages from session state
 for msg in st.session_state.chat_messages:
@@ -645,3 +700,29 @@ if user_input := st.chat_input("Chat with Tater…"):
 
     # Force rerun, assistant reply will render on next pass
     st.rerun()
+
+# Check for pending plugin jobs and gather names
+pending_plugins = []
+for key in redis_client.scan_iter("webui:plugin_jobs:*"):
+    if redis_client.hget(key, "status") == "pending":
+        job = redis_client.hgetall(key)
+        plugin_name = job.get("plugin")
+        if plugin_name in plugin_registry:
+            plugin = plugin_registry[plugin_name]
+            display_name = getattr(plugin, "pretty_name", plugin.name)
+            pending_plugins.append(display_name)
+
+# If any are pending, show spinner with names
+if pending_plugins:
+    names_str = ", ".join(pending_plugins)
+    with st.spinner(f"Tater is working on: {names_str}"):
+        while True:
+            still_pending = False
+            for key in redis_client.scan_iter("webui:plugin_jobs:*"):
+                if redis_client.hget(key, "status") == "pending":
+                    still_pending = True
+                    break
+            if not still_pending:
+                break
+            time.sleep(1)
+        st.rerun()
