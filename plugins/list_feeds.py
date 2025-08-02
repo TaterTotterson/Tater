@@ -4,17 +4,11 @@ import logging
 import redis
 from dotenv import load_dotenv
 from plugin_base import ToolPlugin
-import streamlit as st
-from PIL import Image
-from io import BytesIO
-import requests
-import asyncio
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-# Create a Redis client.
 redis_host = os.getenv('REDIS_HOST', '127.0.0.1')
 redis_port = int(os.getenv('REDIS_PORT', 6379))
 redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
@@ -32,37 +26,27 @@ class ListFeedsPlugin(ToolPlugin):
     waiting_prompt_template = "Write a friendly, casual message telling {mention} you’re grabbing the current watched feeds now! Only output that message."
     platforms = ["discord", "webui", "irc"]
 
-    # --- Discord Handler ---
-    async def handle_discord(self, message, args, ollama_client):
+    async def _list_feeds(self, username: str = None):
         feeds = redis_client.hgetall("rss:feeds")
-        if feeds:
-            feed_list = "\n".join(f"{feed} (last update: {feeds[feed]})" for feed in feeds)
-            final_message = f"Currently watched feeds:\n{feed_list}"
-        else:
-            final_message = "No RSS feeds are currently being watched."
+        prefix = f"{username}: " if username else ""
+        if not feeds:
+            return f"{prefix}No RSS feeds are currently being watched."
 
-        return final_message
-
-    # --- Web UI Handler ---
-    async def handle_webui(self, args, ollama_client):
-        feeds = redis_client.hgetall("rss:feeds")
-        if feeds:
-            feed_list = "\n".join(f"{feed} (last update: {feeds[feed]})" for feed in feeds)
-            final_message = f"Currently watched feeds:\n{feed_list}"
-        else:
-            final_message = "No RSS feeds are currently being watched."
-
-        return final_message
-
-    # --- IRC Handler ---
-    async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
-        feeds = redis_client.hgetall("rss:feeds")
-        if feeds:
-            lines = [f"{user}: Currently watched feeds:"]
+        if username:
+            lines = [f"{username}: Currently watched feeds:"]
             lines += [f"{feed} (last update: {feeds[feed]})" for feed in feeds]
+            return "\n".join(lines)
         else:
-            lines = [f"{user}: No RSS feeds are currently being watched."]
-        return "\n".join(lines)
+            feed_list = "\n".join(f"{feed} (last update: {feeds[feed]})" for feed in feeds)
+            return f"Currently watched feeds:\n{feed_list}"
 
-# Export the plugin instance.
+    async def handle_discord(self, message, args, ollama_client):
+        return await self._list_feeds()
+
+    async def handle_webui(self, args, ollama_client):
+        return await self._list_feeds()
+
+    async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
+        return await self._list_feeds(username=user)
+
 plugin = ListFeedsPlugin()
