@@ -22,6 +22,7 @@ class ComfyUIImagePlugin(ToolPlugin):
         "}\n"
     )
     description = "Draws a picture using a prompt provided by the user using ComfyUI."
+    pretty_name = "Your Image"
     settings_category = "ComfyUI Image"
     required_settings = {
         "COMFYUI_URL": {

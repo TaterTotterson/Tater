@@ -25,6 +25,7 @@ class PremiumizeDownloadPlugin(ToolPlugin):
         "}\n"
     )
     description = "Checks if a file link provided by the user is cached on Premiumize.me."
+    pretty_name = "Getting Links"
     settings_category = "Premiumize"
     required_settings = {
         "PREMIUMIZE_API_KEY": {
@@ -69,7 +70,7 @@ class PremiumizeDownloadPlugin(ToolPlugin):
         return quote(filename)
 
     @classmethod
-    async def process_download_web(cls, url: str, max_response_length=2000):
+    async def _process_download_web(cls, url: str, max_response_length=2000):
         """
         Process a Premiumize download request for the Web UI.
         Returns a text message with download links.
@@ -183,10 +184,17 @@ class PremiumizeDownloadPlugin(ToolPlugin):
     async def handle_webui(self, args, ollama_client):
         url = args.get("url")
         if not url:
-            return "No URL provided for Premiumize download check."
+            return ["No URL provided for Premiumize download check."]
 
-        result = await PremiumizeDownloadPlugin.process_download_web(url)
-        return result
+        try:
+            asyncio.get_running_loop()
+            result = await self._process_download_web(url)
+        except RuntimeError:
+            result = asyncio.run(self._process_download_web(url))
+        except Exception as e:
+            return [f"❌ Failed to check download: {e}"]
+
+        return result if isinstance(result, list) else [result]
 
     # --- IRC Handler ---
     async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
@@ -194,7 +202,14 @@ class PremiumizeDownloadPlugin(ToolPlugin):
         if not url:
             return f"{user}: No URL provided for Premiumize download check."
 
-        result = await PremiumizeDownloadPlugin.process_download_web(url)
+        try:
+            asyncio.get_running_loop()
+            result = await self._process_download_web(url)
+        except RuntimeError:
+            result = asyncio.run(self._process_download_web(url))
+        except Exception as e:
+            return f"{user}: Error checking download: {e}"
+
         return format_irc(result)
 
 plugin = PremiumizeDownloadPlugin()

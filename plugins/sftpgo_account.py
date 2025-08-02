@@ -19,6 +19,7 @@ class SFTPGoAccountPlugin(ToolPlugin):
         '}\n'
     )
     description = ("Creates an SFTPGo account on the server for the user.")
+    pretty_name = "Creating Account"
     settings_category = "SFTPGo"
     required_settings = {
         "SFTPGO_API_URL": {

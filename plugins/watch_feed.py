@@ -31,6 +31,7 @@ class WatchFeedPlugin(ToolPlugin):
         "}\n"
     )
     description = "Adds an RSS feed provided by the user to the rss watch list."
+    pretty_name = "Adding Your Feed"
     waiting_prompt_template = "Write a friendly message telling {mention} you’re adding the feed to the watch list now! Only output that message."
     platforms = ["discord", "webui", "irc"]
 
@@ -60,26 +61,33 @@ class WatchFeedPlugin(ToolPlugin):
 
     # --- Web UI Handler ---
     async def handle_webui(self, args, ollama_client):
-        feed_url = args.get("feed_url")
-        if not feed_url:
-            return "No feed URL provided for watching."
+        def inner():
+            feed_url = args.get("feed_url")
+            if not feed_url:
+                return ["No feed URL provided for watching."]
 
-        parsed_feed = feedparser.parse(feed_url)
-        if parsed_feed.bozo:
-            return f"Failed to parse feed: {feed_url}"
+            parsed_feed = feedparser.parse(feed_url)
+            if parsed_feed.bozo:
+                return [f"Failed to parse feed: {feed_url}"]
 
-        last_ts = 0.0
-        if parsed_feed.entries:
-            for entry in parsed_feed.entries:
-                if 'published_parsed' in entry:
-                    entry_ts = time.mktime(entry.published_parsed)
-                    if entry_ts > last_ts:
-                        last_ts = entry_ts
-        else:
-            last_ts = time.time()
+            last_ts = 0.0
+            if parsed_feed.entries:
+                for entry in parsed_feed.entries:
+                    if 'published_parsed' in entry:
+                        entry_ts = time.mktime(entry.published_parsed)
+                        if entry_ts > last_ts:
+                            last_ts = entry_ts
+            else:
+                last_ts = time.time()
 
-        redis_client.hset("rss:feeds", feed_url, last_ts)
-        return f"Now watching feed: {feed_url}"
+            redis_client.hset("rss:feeds", feed_url, last_ts)
+            return [f"Now watching feed: {feed_url}"]
+
+        try:
+            loop = asyncio.get_running_loop()
+            return await asyncio.to_thread(inner)
+        except RuntimeError:
+            return asyncio.run(asyncio.to_thread(inner))
 
 
     # --- IRC Handler ---
