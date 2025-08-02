@@ -259,16 +259,18 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
         if "prompt" not in args:
             return ["No prompt given."]
 
-        async def inner():
-            try:
-                return await self._generate_music_video(args["prompt"], ollama_client)
-            except Exception as e:
-                return [f"⚠️ Error generating music video: {e}"]
+        async def _generate():
+            return await self._generate_music_video(args["prompt"], ollama_client)
 
         try:
-            return await inner()
+            loop = asyncio.get_running_loop()
+            if loop.is_running():
+                return await _generate()
         except RuntimeError:
-            return asyncio.run(inner())
+            pass  # Not in a loop, fall through
+
+        # Run from a background thread (Streamlit thread-safe)
+        return asyncio.run(_generate())
 
     async def handle_irc(self, bot, channel, user, raw, args, ollama_client):
         await bot.privmsg(channel, f"{user}: This plugin is supported only on WebUI.")
