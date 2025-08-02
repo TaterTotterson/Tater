@@ -130,10 +130,11 @@ class ComfyUIVideoPlugin(ToolPlugin):
 
         # Ask Ollama for N unique image prompts
         list_prompt = (
-            f"Come up with {num_clips} different visual scene descriptions based on this concept:\n"
+            f"Based on this exact scene description:\n\n"
             f"\"{prompt}\"\n\n"
-            f"Each should describe a unique illustration or moment that could be animated.\n"
-            f"Only return a numbered list of {num_clips} short prompts. No lead-in phrases or instructions."
+            f"Create {num_clips} short image generation prompts that stay true to the main character, mood, and setting. "
+            f"Vary only small details like background, lighting, angle, or pose — but never change the subject."
+            f"\n\nOnly return a numbered list with no extra text."
         )
         resp = await ollama_client.chat([
             {"role": "system", "content": "You generate multiple diverse prompts for AI image creation."},
