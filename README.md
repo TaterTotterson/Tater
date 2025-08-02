@@ -27,12 +27,11 @@ The following plugins can be triggerd simple by asking Tater after you enable th
 | `emoji_ai_responder`         | Picks a relevant emoji based on a message when someone reacts to it         | discord               |
 | `vision_describer`           | Analyzes uploaded images and returns AI-generated descriptions              | discord, webui        |
 | `automatic_plugin`           | Generates images using AUTOMATIC1111 API based on user prompt               | discord, webui        |
-| `comfyui_plugin`             | Generates images with ComfyUI using custom workflow templates               | discord, webui        |
-| `comfyui_image_video`        | Animates images into WebP loops using ComfyUI.                              | discord, webui        |
-| `comfyui_video_plugin`       | Creates videos from prompts using ComfyUI and video workflows               | discord, webui        |
-| `comfyui_audio_plugin`       | Generates music/audio from prompts using ComfyUI                            | discord, webui        |
+| `comfyui_image_plugin`       | Generates images with ComfyUI using custom workflow templates               | discord, webui        |
+| `comfyui_image_video`        | Animates images into WebP loops using ComfyUI.                              | webui                 |
+| `comfyui_video_plugin`       | Creates videos from prompts using ComfyUI and video workflows               | webui                 |
 | `comfyui_audio_ace`          | Composes full-length songs using AceStep. Generates lyrics, tags, and MP3s  | discord, webui        |
-| `comfyui_music_video_plugin` | Generates complete AI music videos with lyrics, audio, and visuals          | discord, webui        |
+| `comfyui_music_video_plugin` | Generates complete AI music videos with lyrics, audio, and visuals          | webui                 |
 | `ftp_browser`                | Allows users to browse FTP servers via Discord                              | discord               |
 | `webdav_browser`             | Allows browsing and downloading files from WebDAV servers                   | discord               |
 | `sftpgo_account`             | Creates SFTPGo user accounts and their credentials                          | discord, irc          |
