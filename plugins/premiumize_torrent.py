@@ -25,6 +25,7 @@ class PremiumizeTorrentPlugin(ToolPlugin):
         "}\n"
     )
     description = "Checks if a torrent file in chat history is cached on Premiumize.me."
+    pretty_name = "Getting Links"
     settings_category = "Premiumize"
     required_settings = {
         "PREMIUMIZE_API_KEY": {

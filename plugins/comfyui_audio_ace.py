@@ -26,6 +26,7 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         '}\n'
     )
     description = "Generates music using ComfyUI Audio Ace."
+    pretty_name = "Your Song"
     settings_category = "ComfyUI Audio Ace"
     platforms = ["discord", "webui"]
     required_settings = {
@@ -177,6 +178,28 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         except Exception as e:
             raise Exception(f"Ollama response format error: {e}\nContent:\n{content}")
 
+    async def _generate(self, prompt: str, ollama_client):
+            # This is your full async pipeline
+            tags, lyrics = await self.generate_tags_and_lyrics(prompt, ollama_client)
+            audio_bytes = await asyncio.to_thread(self.process_prompt, prompt, tags, lyrics)
+
+            audio_data = {
+                "type": "audio",
+                "name": "ace_song.mp3",
+                "data": base64.b64encode(audio_bytes).decode("utf-8"),
+                "mimetype": "audio/mpeg"
+            }
+
+            system_msg = f'The user received a ComfyUI-generated song based on: "{prompt}"'
+            response = await ollama_client.chat(
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": "Send a short friendly comment about the new song. Only generate the message. Do not respond to this message."}
+                ]
+            )
+            message_text = response["message"].get("content", "").strip() or "Hope you enjoy the track!"
+            return [audio_data, message_text]
+
     @staticmethod
     def queue_prompt(prompt):
         server_address = ComfyUIAudioAcePlugin.get_server_address()
@@ -250,7 +273,7 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
             if audios_list:
                 return audios_list[0]
 
-        raise Exception("No audio returned.")
+        raise Exception("No audio returned.")   
 
     # ---------------------------------------
     # Discord
@@ -291,35 +314,17 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
     # WebUI
     # ---------------------------------------
     async def handle_webui(self, args, ollama_client):
-        user_prompt = args.get("prompt")
-        if not user_prompt:
-            return "No prompt provided."
+            prompt = args.get("prompt", "").strip()
+            if not prompt:
+                return ["No prompt provided."]
 
-        try:
-            tags, lyrics = await self.generate_tags_and_lyrics(user_prompt, ollama_client)
-            audio_bytes = await asyncio.to_thread(self.process_prompt, user_prompt, tags, lyrics)
-
-            audio_data = {
-                "type": "audio",
-                "name": "ace_song.mp3",
-                "data": base64.b64encode(audio_bytes).decode("utf-8"),
-                "mimetype": "audio/mpeg"
-            }
-
-            system_msg = f'The user received a ComfyUI-generated song based on: \"{user_prompt}\"'
-            response = await ollama_client.chat(
-                messages=[
-                    {"role": "system", "content": system_msg},
-                    {"role": "user", "content": "Send a short friendly comment about the new song. Only generate the message. Do not respond to this message."}
-                ]
-            )
-
-            message_text = response["message"].get("content", "").strip() or "Hope you enjoy the track!"
-
-            return [audio_data, message_text]
-
-        except Exception as e:
-            return f"Failed to create song: {e}"
+            try:
+                # If we're already in an event loop (e.g. live WebUI), await directly
+                asyncio.get_running_loop()
+                return await self._generate(prompt, ollama_client)
+            except RuntimeError:
+                # Otherwise (background thread), spin up a fresh loop
+                return asyncio.run(self._generate(prompt, ollama_client))
 
     # ---------------------------------------
     # IRC

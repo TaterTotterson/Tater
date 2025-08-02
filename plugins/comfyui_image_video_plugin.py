@@ -20,6 +20,7 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
         '}'
     )
     description = "Animates the most recent image in chat into a looping WebP or MP4 using ComfyUI."
+    pretty_name = "Animating Your Image"
     settings_category = "ComfyUI Animate Image"
     required_settings = {
         "COMFYUI_VIDEO_URL": {
@@ -50,6 +51,31 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
     }
     waiting_prompt_template = "Write a playful, friendly message saying you’re bringing their image to life now! Only output that message."
     platforms = ["webui"]
+
+    def webp_to_mp4(self, input_file, output_file, fps=16, duration=5):
+        from PIL import Image
+        from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
+
+        frames, tmp_dir, frame_files = [], f"{os.path.dirname(input_file)}/frames_{uuid.uuid4().hex[:6]}", []
+        os.makedirs(tmp_dir, exist_ok=True)
+        try:
+            im = Image.open(input_file)
+            while True:
+                frames.append(im.copy().convert("RGBA"))
+                im.seek(im.tell() + 1)
+        except EOFError:
+            pass
+        for idx, frame in enumerate(frames):
+            path = f"{tmp_dir}/frame_{idx}.png"
+            frame.save(path, "PNG")
+            frame_files.append(path)
+        if len(frame_files) == 1 or duration < 1:
+            frame_files *= max(1, int(fps * duration))
+        clip = ImageSequenceClip(frame_files, fps=fps)
+        clip.write_videofile(output_file, codec='libx264', fps=fps, audio=False, logger=None)
+        for p in frame_files:
+            os.remove(p)
+        os.rmdir(tmp_dir) 
 
     @staticmethod
     def get_server_address():
@@ -216,26 +242,54 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
         finally:
             ws.close()
 
-    # --- Discord Handler ---
-    async def handle_discord(self, message, args, ollama_client):
-        return "❌ This plugin is only available in the WebUI due to file size limitations."
-
-    # --- WebUI Handler ---
-    async def handle_webui(self, args, ollama_client):
+    async def _generate(self, args, ollama_client):
         prompt = args.get("prompt", "").strip()
         image_bytes, filename = get_latest_image_from_history("webui:chat_history")
 
         if not image_bytes:
-            return "❌ No image found. Please upload one or generate one using an image plugin first."
+            return ["❌ No image found. Please upload one or generate one using an image plugin first."]
 
         try:
-            animated_bytes, ext = await asyncio.to_thread(self.process_prompt, prompt, image_bytes, filename)
-            mime = "image/webp" if ext == "webp" else "video/mp4"
-            file_name = f"animated.{ext}"
-            followup_text = "Here's your animated image!" if ext == "webp" else "Here's your animated video!"
+            animated_bytes, ext = await asyncio.to_thread(
+                self.process_prompt, prompt, image_bytes, filename
+            )
+            # Convert webp to mp4 if needed
+            if ext == "webp":
+                tmp_webp = f"/tmp/{uuid.uuid4().hex}.webp"
+                tmp_mp4 = f"/tmp/{uuid.uuid4().hex}.mp4"
+                with open(tmp_webp, "wb") as f:
+                    f.write(animated_bytes)
+
+                settings = redis_client.hgetall(f"plugin_settings:{self.settings_category}")
+                raw_len = settings.get("LENGTH", b"10")
+                try:
+                    duration = int(raw_len.decode() if isinstance(raw_len, bytes) else raw_len)
+                except ValueError:
+                    duration = 10
+
+                self.webp_to_mp4(tmp_webp, tmp_mp4, fps=16, duration=duration)
+
+                with open(tmp_mp4, "rb") as f:
+                    animated_bytes = f.read()
+                ext = "mp4"
+                mime = "video/mp4"
+                file_name = "animated.mp4"
+                msg = await ollama_client.chat([
+                    {"role": "system", "content": f"The user has just been shown an animated video based on the prompt: \"{prompt}\"."},
+                    {"role": "user", "content": "Reply with a short, fun message celebrating the animation. No lead-in phrases or instructions."}
+                ])
+
+                followup_text = msg["message"]["content"].strip() or "🎞️ Here's your animated video!"
+
+                os.remove(tmp_webp)
+                os.remove(tmp_mp4)
+            else:
+                mime = "video/mp4" if ext == "mp4" else "image/webp"
+                file_name = f"animated.{ext}"
+                followup_text = "Here's your animated video!" if ext == "mp4" else "Here's your animated image!"
             return [
                 {
-                    "type": "image" if ext == "webp" else "video",
+                    "type": "video",
                     "name": file_name,
                     "data": base64.b64encode(animated_bytes).decode("utf-8"),
                     "mimetype": mime
@@ -243,7 +297,19 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
                 followup_text
             ]
         except Exception as e:
-            return f"❌ Failed to generate animation: {e}"
+            return [f"❌ Failed to generate animation: {e}"]
+
+    # --- Discord Handler ---
+    async def handle_discord(self, message, args, ollama_client):
+        return "❌ This plugin is only available in the WebUI due to file size limitations."
+
+    # --- WebUI Handler ---
+    async def handle_webui(self, args, ollama_client):
+        try:
+            asyncio.get_running_loop()
+            return await self._generate(args, ollama_client)
+        except RuntimeError:
+            return asyncio.run(self._generate(args, ollama_client))
 
     async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
         await bot.privmsg(channel, f"{user}: ❌ This plugin is only available in the WebUI.")

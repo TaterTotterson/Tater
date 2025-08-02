@@ -1,3 +1,4 @@
+# plugins/ftp_browser.py
 import discord
 from discord.ext import commands
 import io
@@ -23,6 +24,7 @@ class FtpBrowserPlugin(ToolPlugin):
         "}\n"
     )
     description = "Lets the user browse and download files from the FTP server."
+    pretty_name = "Connecting to FTP"
     settings_category = "FTPBrowser"
     required_settings = {
         "FTP_HOST": {

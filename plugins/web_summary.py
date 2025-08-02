@@ -22,6 +22,7 @@ class WebSummaryPlugin(ToolPlugin):
         "}\n"
     )
     description = "Summarizes an article from a URL provided by the user."
+    pretty_name = "Summarizing Your Article"
     waiting_prompt_template = "Write a casual, friendly message telling {mention} you’re reading the article and preparing a summary now! Only output that message."
     platforms = ["discord", "webui", "irc"]
 
@@ -87,7 +88,7 @@ class WebSummaryPlugin(ToolPlugin):
             for chunk in self.split_message(content, 1900):
                 await channel.send(chunk)
 
-    async def web_summary(self, url, ollama_client):
+    async def _web_summary(self, url, ollama_client):
         article_text = self.fetch_web_summary(url, ollama_client.model)
         if not article_text:
             return None
@@ -110,30 +111,30 @@ class WebSummaryPlugin(ToolPlugin):
         if not url:
             return "No webpage URL provided."
 
-        summary = await self.web_summary(url, ollama_client)
-        if not summary:
-            return "Failed to summarize the article."
-
-        return "\n".join(self.split_message(summary))
+        try:
+            return await self._web_summary(url, ollama_client)
+        except Exception as e:
+            return f"Failed to summarize the article: {e}"
 
     async def handle_webui(self, args, ollama_client):
         url = args.get("url")
         if not url:
-            return "No webpage URL provided."
+            return ["No webpage URL provided."]
 
-        summary = await self.web_summary(url, ollama_client)
-        if not summary:
-            msg = "Failed to summarize the article."
-            return msg
-
-        return "\n".join(self.split_message(summary))
+        try:
+            loop = asyncio.get_running_loop()
+            return await self._web_summary(url, ollama_client)
+        except RuntimeError:
+            return asyncio.run(self._web_summary(url, ollama_client))
+        except Exception as e:
+            return [f"Failed to summarize the article: {e}"]
 
     async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
         url = args.get("url")
         if not url:
             return f"{user}: No URL provided."
 
-        summary = await self.web_summary(url, ollama_client)
+        summary = await self._web_summary(url, ollama_client)
         if not summary:
             return f"{user}: Failed to summarize article."
 

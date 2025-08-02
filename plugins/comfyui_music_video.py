@@ -23,6 +23,7 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
         '}\n'
     )
     description = "Generates a complete AI music video including lyrics, music, and animated visuals by orchestrating ComfyUI plugins."
+    pretty_name = "Your Music Video"
     platforms = ["webui"]
     waiting_prompt_template = "Generate a fun, upbeat message saying you're composing the full music video now! Only output that message."
     settings_category = "ComfyUI Music Video"
@@ -107,7 +108,7 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
             os.remove(p)
         os.rmdir(tmp_dir)
 
-    async def generate_music_video(self, prompt, ollama_client):
+    async def _generate_music_video(self, prompt, ollama_client):
         vision_plugin = VisionDescriberPlugin()
         job_id = str(uuid.uuid4())[:8]
         audio_plugin = ComfyUIAudioAcePlugin()
@@ -256,11 +257,18 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
 
     async def handle_webui(self, args, ollama_client):
         if "prompt" not in args:
-            return "No prompt given."
+            return ["No prompt given."]
+
+        async def inner():
+            try:
+                return await self._generate_music_video(args["prompt"], ollama_client)
+            except Exception as e:
+                return [f"⚠️ Error generating music video: {e}"]
+
         try:
-            return await self.generate_music_video(args["prompt"], ollama_client)
-        except Exception as e:
-            return f"⚠️ Error generating music video: {e}"
+            return await inner()
+        except RuntimeError:
+            return asyncio.run(inner())
 
     async def handle_irc(self, bot, channel, user, raw, args, ollama_client):
         await bot.privmsg(channel, f"{user}: This plugin is supported only on WebUI.")

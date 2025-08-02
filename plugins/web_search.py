@@ -27,6 +27,7 @@ class WebSearchPlugin(ToolPlugin):
         "}\n"
     )
     description = "Searches the web and returns summarized answers to user questions."
+    pretty_name = "Searching For More Info"
     settings_category = "Web Search"
     required_settings = {
         "GOOGLE_API_KEY": {
@@ -126,7 +127,7 @@ class WebSearchPlugin(ToolPlugin):
             for chunk in self.split_message(content, 1900):
                 await channel.send(chunk)
 
-    async def pick_link_and_summarize(self, results, query, user_question, ollama_client, max_attempts=3):
+    async def _pick_link_and_summarize(self, results, query, user_question, ollama_client, max_attempts=3):
         attempted_links = set()
         for attempt in range(max_attempts):
             filtered = [r for r in results if r["href"] not in attempted_links]
@@ -188,16 +189,30 @@ class WebSearchPlugin(ToolPlugin):
         results = self.search_web(query)
         if not results:
             return "No results found."
-        return await self.pick_link_and_summarize(results, query, message.content, ollama_client)
+        return await self._pick_link_and_summarize(results, query, message.content, ollama_client)
 
     async def handle_webui(self, args, ollama_client):
         query = args.get("query")
         if not query:
-            return "No search query provided."
+            return ["No search query provided."]
+
         results = self.search_web(query)
         if not results:
-            return "No results found."
-        return await self.pick_link_and_summarize(results, query, args.get("user_question", ""), ollama_client)
+            return ["No results found."]
+
+        async def inner():
+            return await self._pick_link_and_summarize(
+                results,
+                query,
+                args.get("user_question", ""),
+                ollama_client
+            )
+
+        try:
+            asyncio.get_running_loop()
+            return await inner()
+        except RuntimeError:
+            return asyncio.run(inner())
 
     async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
         query = args.get("query")
@@ -206,7 +221,7 @@ class WebSearchPlugin(ToolPlugin):
         results = self.search_web(query)
         if not results:
             return f"{user}: No results found."
-        answer = await self.pick_link_and_summarize(results, query, raw_message, ollama_client)
+        answer = await self._pick_link_and_summarize(results, query, raw_message, ollama_client)
         return format_irc(answer)
 
 plugin = WebSearchPlugin()

@@ -37,6 +37,7 @@ class VisionDescriberPlugin(ToolPlugin):
         "Uses AI vision to describe the most recently available image. "
         "No input needed — it automatically finds the latest uploaded or generated image."
     )
+    pretty_name = "Describing Your Image"
     settings_category = "Vision"
     required_settings = {
         "ollama_server_address": {
@@ -102,25 +103,14 @@ class VisionDescriberPlugin(ToolPlugin):
         )
         return description
 
-    async def handle_discord(self, message, args, ollama_client):
+    async def _describe_latest_image(self, redis_key: str):
         image_bytes, filename = get_latest_image_from_history(
-            f"tater:channel:{message.channel.id}:history",
+            redis_key,
             allowed_mimetypes=["image/png", "image/jpeg"]
         )
 
         if not image_bytes:
-            fallback_prompt = (
-                f"Generate a message telling {message.author.mention} that no image was found. "
-                "Mention they can attach an image or generate one with a plugin. "
-                "Only generate the message. Do not respond to this message."
-            )
-
-            response = await ollama_client.chat(
-                messages=[
-                    {"role": "user", "content": fallback_prompt}
-                ]
-            )
-            return response["message"].get("content", "").strip()
+            return ["❌ No image found. Please upload one or generate one using an image plugin first."]
 
         prompt = (
             "You are an expert visual assistant. Describe the contents of this image in detail, "
@@ -128,36 +118,34 @@ class VisionDescriberPlugin(ToolPlugin):
         )
 
         server, model, num_ctx = self.get_vision_settings()
-        description = await asyncio.to_thread(
-            self.call_ollama_vision,
-            server, model, image_bytes, prompt, num_ctx=num_ctx
-        )
+        try:
+            description = await asyncio.to_thread(
+                self.call_ollama_vision,
+                server, model, image_bytes, prompt, num_ctx=num_ctx
+            )
+            return [description[:1500]] if description else ["❌ Failed to generate image description."]
+        except Exception as e:
+            return [f"❌ Error: {e}"]
 
-        return description[:1500] if description else "❌ Failed to generate image description."
+    # --- Discord Handler ---
+    async def handle_discord(self, message, args, ollama_client):
+        key = f"tater:channel:{message.channel.id}:history"
+
+        try:
+            asyncio.get_running_loop()
+            result = await self._describe_latest_image(key)
+        except RuntimeError:
+            result = asyncio.run(self._describe_latest_image(key))
+
+        return result[0] if result else f"{message.author.mention}: ❌ No image found or failed to process."
 
     # --- WebUI Handler ---
     async def handle_webui(self, args, ollama_client):
-        image_bytes, filename = get_latest_image_from_history(
-            "webui:chat_history",
-            allowed_mimetypes=["image/png", "image/jpeg"]
-        )
-
-        if not image_bytes:
-            return "❌ No image found. Please upload one or generate one using an image plugin first."
-
-        prompt = (
-            "You are an expert visual assistant. Describe the contents of this image in detail, "
-            "mentioning key objects, scenes, or actions if recognizable."
-        )
-
-        server, model, num_ctx = self.get_vision_settings()
-        description = await asyncio.to_thread(
-            self.call_ollama_vision,
-            server, model, image_bytes, prompt, num_ctx=num_ctx
-        )
-
-        return description[:1500] if description else "❌ Failed to generate image description."
-
+        try:
+            asyncio.get_running_loop()
+            return await self._describe_latest_image("webui:chat_history")
+        except RuntimeError:
+            return asyncio.run(self._describe_latest_image("webui:chat_history"))
 
     # --- IRC Handler ---
     async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):

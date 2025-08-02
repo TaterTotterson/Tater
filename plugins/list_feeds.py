@@ -28,6 +28,7 @@ class ListFeedsPlugin(ToolPlugin):
         "}\n"
     )
     description = "Lists the RSS feeds currently being watched."
+    pretty_name = "Getting RSS Feeds"
     waiting_prompt_template = "Write a friendly, casual message telling {mention} you’re grabbing the current watched feeds now! Only output that message."
     platforms = ["discord", "webui", "irc"]
 
