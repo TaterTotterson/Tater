@@ -4,3 +4,37 @@ toolbarMode = "viewer"
 
 [browser]
 gatherUsageStats = false
+
+[theme]
+base = "dark"
+primaryColor = "#ff7f00"
+backgroundColor = "#1e1e1e"
+secondaryBackgroundColor = "#2b2b2b"
+textColor = "#ffffff"
+linkColor = "#ffa733"
+codeBackgroundColor = "#2d2d2d"
+font = "sans-serif"
+codeFont = "monospace"
+codeFontSize = "0.875rem"
+baseRadius = "0.5rem"
+buttonRadius = "0.5rem"
+borderColor = "#444444"
+dataframeBorderColor = "#555555"
+showWidgetBorder = true
+showSidebarBorder = false
+
+[theme.sidebar]
+primaryColor = "#ff7f00"
+backgroundColor = "#2b2b2b"
+secondaryBackgroundColor = "#1e1e1e"
+textColor = "#ffffff"
+linkColor = "#ffa733"
+codeBackgroundColor = "#2d2d2d"
+font = "sans-serif"
+codeFont = "monospace"
+codeFontSize = "0.75rem"
+baseRadius = "0.5rem"
+buttonRadius = "0.5rem"
+borderColor = "#444444"
+dataframeBorderColor = "#555555"
+showWidgetBorder = true
