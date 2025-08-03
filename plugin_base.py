@@ -12,10 +12,10 @@ class ToolPlugin:
         "Only generate the message. Do not respond to this message."
     )
 
-    async def handle_discord(self, message, args, llm, context_length, max_response_length):
+    async def handle_discord(self, message, args, llm_client):
         raise NotImplementedError
 
-    async def handle_webui(self, args, llm_client, context_length):
+    async def handle_webui(self, args, llm_client):
         raise NotImplementedError
 
     async def notify(self, title: str, content: str):
