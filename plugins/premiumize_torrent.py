@@ -213,7 +213,7 @@ class PremiumizeTorrentPlugin(ToolPlugin):
                 await interaction.response.edit_message(content=self.get_page_content(), view=self)
 
     # --- Discord Handler ---
-    async def handle_discord(self, message, args, ollama_client):
+    async def handle_discord(self, message, args, llm_client):
         try:
             result = await self.process_torrent(message.channel)
             return result
@@ -221,11 +221,11 @@ class PremiumizeTorrentPlugin(ToolPlugin):
             return f"{message.author.mention}: Failed to retrieve Premiumize torrent info: {e}"
 
     # --- WebUI Handler ---
-    async def handle_webui(self, args, ollama_client):
+    async def handle_webui(self, args, llm_client):
         return "❌ This plugin is only supported on Discord."
 
     # --- IRC Handler ---
-    async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
+    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         return f"{user}: ❌ This plugin is only supported on Discord."
 
     async def generate_error_message(self, prompt, fallback, message):

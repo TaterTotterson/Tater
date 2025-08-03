@@ -36,15 +36,15 @@ class UnwatchFeedPlugin(ToolPlugin):
         else:
             return f"{username + ': ' if username else ''}Feed {feed_url} was not found in the watch list."
 
-    async def handle_discord(self, message, args, ollama_client):
+    async def handle_discord(self, message, args, llm_client):
         feed_url = args.get("feed_url")
         return await self._unwatch_feed(feed_url)
 
-    async def handle_webui(self, args, ollama_client):
+    async def handle_webui(self, args, llm_client):
         feed_url = args.get("feed_url")
         return await self._unwatch_feed(feed_url)
 
-    async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
+    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         feed_url = args.get("feed_url")
         return await self._unwatch_feed(feed_url, username=user)
 
