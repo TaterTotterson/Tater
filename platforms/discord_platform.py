@@ -7,12 +7,11 @@ import redis
 import discord
 from discord.ext import commands
 from discord import app_commands
-import ollama
 from dotenv import load_dotenv
 import re
 from datetime import datetime
 from plugin_registry import plugin_registry
-from helpers import OllamaClientWrapper, parse_function_json
+from helpers import LLMClientWrapper, parse_function_json
 import logging
 import threading
 import signal
@@ -73,9 +72,9 @@ async def safe_send(channel, content, max_length=2000):
         await channel.send(content[i:i+max_length])
 
 class discord_platform(commands.Bot):
-    def __init__(self, ollama_client, admin_user_id, response_channel_id, *args, **kwargs):
+    def __init__(self, llm_client, admin_user_id, response_channel_id, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.ollama = ollama_client
+        self.llm = llm_client
         self.admin_user_id = admin_user_id
         self.response_channel_id = response_channel_id
         self.max_response_length = max_response_length
@@ -124,7 +123,7 @@ class discord_platform(commands.Bot):
 
     async def generate_error_message(self, prompt: str, fallback: str, message: discord.Message):
         try:
-            error_response = await self.ollama.chat(
+            error_response = await self.llm.chat(
                 messages=[{"role": "system", "content": prompt}]
             )
             return error_response['message'].get('content', '').strip() or fallback
@@ -134,7 +133,7 @@ class discord_platform(commands.Bot):
 
     async def load_history(self, channel_id, limit=None):
         if limit is None:
-            limit = int(redis_client.get("tater:max_ollama") or 8)
+            limit = int(redis_client.get("tater:max_llm") or 8)
 
         history_key = f"tater:channel:{channel_id}:history"
         raw_history = redis_client.lrange(history_key, -limit, -1)
@@ -233,8 +232,8 @@ class discord_platform(commands.Bot):
 
         async with message.channel.typing():
             try:
-                logger.debug(f"Sending messages to Ollama: {messages_list}")
-                response = await self.ollama.chat(messages_list)
+                logger.debug(f"Sending messages to LLM: {messages_list}")
+                response = await self.llm.chat(messages_list)
                 response_text = response['message'].get('content', '').strip()
                 if not response_text:
                     await message.channel.send("I'm not sure how to respond to that.")
@@ -259,8 +258,8 @@ class discord_platform(commands.Bot):
                         if hasattr(plugin, "waiting_prompt_template"):
                             wait_msg = plugin.waiting_prompt_template.format(mention=message.author.mention)
 
-                            # Directly fetch the waiting message text from Ollama
-                            wait_response = await self.ollama.chat(
+                            # Directly fetch the waiting message text from LLM
+                            wait_response = await self.llm.chat(
                                 messages=[{"role": "system", "content": wait_msg}]
                             )
                             wait_text = wait_response["message"]["content"].strip()
@@ -274,7 +273,7 @@ class discord_platform(commands.Bot):
                             # Send waiting message to Discord
                             await safe_send(message.channel, wait_text, self.max_response_length)
 
-                        result = await plugin.handle_discord(message, args, self.ollama)
+                        result = await plugin.handle_discord(message, args, self.llm)
 
                         if isinstance(result, list):
                             for item in result:
@@ -380,17 +379,17 @@ def run(stop_event=None):
     admin_id  = redis_client.hget("discord_platform_settings", "admin_user_id")
     channel_id= redis_client.hget("discord_platform_settings", "response_channel_id")
 
-    # Build Ollama client
-    ollama_host = os.getenv("OLLAMA_HOST", "127.0.0.1")
-    ollama_port = os.getenv("OLLAMA_PORT", "11434")
-    ollama_client = OllamaClientWrapper(host=f"http://{ollama_host}:{ollama_port}")
+    # Build LLM client
+    llm_host = os.getenv("LLM_HOST", "127.0.0.1")
+    llm_port = os.getenv("LLM_PORT", "11434")
+    llm_client = LLMClientWrapper(host=f"http://{llm_host}:{llm_port}")
 
     if not (token and admin_id and channel_id):
         print("⚠️ Missing Discord settings in Redis. Bot not started.")
         return
 
     client = discord_platform(
-        ollama_client=ollama_client,
+        llm_client=llm_client,
         admin_user_id=int(admin_id),
         response_channel_id=int(channel_id),
         command_prefix="!",

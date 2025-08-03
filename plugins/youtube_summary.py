@@ -16,7 +16,7 @@ import redis
 import discord
 
 load_dotenv()
-DEFAULT_CONTEXT_LENGTH = int(os.getenv("CONTEXT_LENGTH", 2048))
+DEFAULT_MAX_TOKENS = 2048
 
 class YouTubeSummaryPlugin(ToolPlugin):
     name = "youtube_summary"
@@ -59,13 +59,13 @@ class YouTubeSummaryPlugin(ToolPlugin):
         return None
 
     @staticmethod
-    def split_text_into_chunks(text, context_length=DEFAULT_CONTEXT_LENGTH):
-        max_tokens = int(context_length * 0.8)
+    def split_text_into_chunks(text, max_tokens=DEFAULT_MAX_TOKENS):
+        limit = int(max_tokens * 0.8)
         words = text.split()
         chunks, chunk = [], []
         for word in words:
             chunk.append(word)
-            if len(chunk) >= max_tokens:
+            if len(chunk) >= limit:
                 chunks.append(" ".join(chunk))
                 chunk = []
         if chunk:
@@ -87,14 +87,14 @@ class YouTubeSummaryPlugin(ToolPlugin):
             print(f"[YouTubeTranscriptApi error] {e}")
             return None
 
-    async def summarize_chunks(self, chunks, ollama_client):
+    async def summarize_chunks(self, chunks, llm_client):
         partial_summaries = []
         for chunk in chunks:
             prompt = (
                 "You are summarizing part of a longer YouTube video transcript. "
                 "Write a brief summary of this portion using bullet points:\n\n" + chunk
             )
-            resp = await ollama_client.chat(
+            resp = await llm_client.chat(
                 messages=[{"role": "system", "content": prompt}]
             )
             partial_summaries.append(resp["message"]["content"].strip())
@@ -104,7 +104,7 @@ class YouTubeSummaryPlugin(ToolPlugin):
             "Combine them into a single summary with a title and final bullet points:\n\n"
             + "\n\n".join(partial_summaries)
         )
-        final = await ollama_client.chat(
+        final = await llm_client.chat(
             messages=[{"role": "system", "content": final_prompt}]
         )
         return final["message"]["content"].strip()
@@ -125,27 +125,27 @@ class YouTubeSummaryPlugin(ToolPlugin):
         parts.append(text)
         return parts
 
-    async def _fetch_summary(self, video_url, ollama_client):
+    async def _fetch_summary(self, video_url, llm_client):
         video_id = self.extract_video_id(video_url)
         transcript = self.get_transcript_api(video_id)
         if not transcript:
             return "Sorry, this video does not have a transcript available, or it may be restricted."
-        chunks = self.split_text_into_chunks(transcript, DEFAULT_CONTEXT_LENGTH)
-        return await self.summarize_chunks(chunks, ollama_client)
+        chunks = self.split_text_into_chunks(transcript, DEFAULT_MAX_TOKENS)
+        return await self.summarize_chunks(chunks, llm_client)
 
 # ---------------------------------------------------------
 # Discord handler
 # ---------------------------------------------------------
-    async def handle_discord(self, message, args, ollama_client):
+    async def handle_discord(self, message, args, llm_client):
         video_url = args.get("video_url")
         if not video_url:
             return "No YouTube URL provided."
 
         try:
             loop = asyncio.get_running_loop()
-            summary = await self._fetch_summary(video_url, ollama_client)
+            summary = await self._fetch_summary(video_url, llm_client)
         except RuntimeError:
-            summary = asyncio.run(self._fetch_summary(video_url, ollama_client))
+            summary = asyncio.run(self._fetch_summary(video_url, llm_client))
 
         formatted = self.format_article(summary)
         return "\n".join(self.split_message(formatted, 1500))
@@ -153,16 +153,16 @@ class YouTubeSummaryPlugin(ToolPlugin):
 # ---------------------------------------------------------
 # WebUI handler
 # ---------------------------------------------------------
-    async def handle_webui(self, args, ollama_client):
+    async def handle_webui(self, args, llm_client):
         video_url = args.get("video_url")
         if not video_url:
             return ["No YouTube URL provided."]
 
         try:
             loop = asyncio.get_running_loop()
-            summary = await self._fetch_summary(video_url, ollama_client)
+            summary = await self._fetch_summary(video_url, llm_client)
         except RuntimeError:
-            summary = asyncio.run(self._fetch_summary(video_url, ollama_client))
+            summary = asyncio.run(self._fetch_summary(video_url, llm_client))
 
         if not summary:
             return ["Failed to summarize the video."]
@@ -173,7 +173,7 @@ class YouTubeSummaryPlugin(ToolPlugin):
 # ---------------------------------------------------------
 # IRC handler
 # ---------------------------------------------------------
-    async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
+    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         video_url = args.get("video_url")
         nick = user
 
@@ -182,9 +182,9 @@ class YouTubeSummaryPlugin(ToolPlugin):
 
         try:
             loop = asyncio.get_running_loop()
-            summary = await self._fetch_summary(video_url, ollama_client)
+            summary = await self._fetch_summary(video_url, llm_client)
         except RuntimeError:
-            summary = asyncio.run(self._fetch_summary(video_url, ollama_client))
+            summary = asyncio.run(self._fetch_summary(video_url, llm_client))
 
         if not summary:
             return f"{nick}: Could not generate summary."

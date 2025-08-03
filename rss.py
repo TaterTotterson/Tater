@@ -8,7 +8,6 @@ import redis
 import requests
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
-import ollama
 from plugin_registry import plugin_registry
 from plugin_settings import get_plugin_enabled, get_plugin_settings
 from helpers import run_async
@@ -23,11 +22,10 @@ redis_port = int(os.getenv('REDIS_PORT', 6379))
 max_response_length = int(os.getenv("MAX_RESPONSE_LENGTH", 1500))
 POLL_INTERVAL = int(os.getenv("RSS_POLL_INTERVAL", 60))  # seconds between polls
 
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "127.0.0.1").strip()
-OLLAMA_PORT = os.getenv("OLLAMA_PORT", "11434").strip()
-OLLAMA_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:27b").strip()
-context_length = int(os.getenv("CONTEXT_LENGTH", 5000))
+LLM_HOST = os.getenv("LLM_HOST", "127.0.0.1").strip()
+LLM_PORT = os.getenv("LLM_PORT", "11434").strip()
+LLM_URL = f"http://{LLM_HOST}:{LLM_PORT}"
+LLM_MODEL = os.getenv("LLM_MODEL", "gemma3:27b").strip()
 
 # Create a Redis client
 redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
@@ -36,7 +34,7 @@ redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_respon
 # Helper Functions
 #############################
 
-def fetch_web_summary(webpage_url, model=OLLAMA_MODEL, retries=3, backoff=2):
+def fetch_web_summary(webpage_url, model=LLM_MODEL, retries=3, backoff=2):
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -86,8 +84,8 @@ def fetch_web_summary(webpage_url, model=OLLAMA_MODEL, retries=3, backoff=2):
 #############################
 
 class RSSManager:
-    def __init__(self, ollama_client):
-        self.ollama_client = ollama_client
+    def __init__(self, llm_client):
+        self.llm_client = llm_client
         self.redis = redis_client
         self.feeds_key = "rss:feeds"
 
@@ -141,7 +139,7 @@ class RSSManager:
         logger.info(f"Processing entry: {entry_title} from {feed_title}")
         
         loop = asyncio.get_running_loop()
-        article_text = await loop.run_in_executor(None, fetch_web_summary, link, OLLAMA_MODEL)
+        article_text = await loop.run_in_executor(None, fetch_web_summary, link, LLM_MODEL)
         
         if not article_text:
             summary_text = "Could not retrieve a summary for this article."
@@ -153,12 +151,10 @@ class RSSManager:
                 f"{article_text}\n\nSummary:"
             )
             try:
-                summarization_response = await self.ollama_client.chat(
-                    model=OLLAMA_MODEL,
+                summarization_response = await self.llm_client.chat(
+                    model=LLM_MODEL,
                     messages=[{"role": "system", "content": summarization_prompt}],
                     stream=False,
-                    keep_alive=-1,
-                    options={"num_ctx": context_length}
                 )
                 summary_text = summarization_response['message'].get('content', '').strip()
                 if not summary_text:

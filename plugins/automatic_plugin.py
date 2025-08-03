@@ -6,7 +6,6 @@ import base64
 import asyncio
 from io import BytesIO
 from dotenv import load_dotenv
-import ollama
 from plugin_base import ToolPlugin
 import streamlit as st
 from PIL import Image
@@ -106,10 +105,10 @@ class AutomaticPlugin(ToolPlugin):
             raise Exception("No image returned from AUTOMATIC1111 API.")
         raise Exception(f"Image generation failed ({response.status_code}): {response.text}")
 
-    async def _respond_to_image(self, prompt_text, image_bytes, ollama_client):
+    async def _respond_to_image(self, prompt_text, image_bytes, llm_client):
         safe_prompt = prompt_text[:300].strip()
         system_msg = f'The user has just been shown an image based on this prompt: "{safe_prompt}".'
-        final_response = await ollama_client.chat(
+        final_response = await llm_client.chat(
             messages=[
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": "Send a short, friendly response to accompany the image."}
@@ -118,7 +117,7 @@ class AutomaticPlugin(ToolPlugin):
         return final_response["message"].get("content", "").strip() or "Here's your image!"
 
     # --- Discord Handler ---
-    async def handle_discord(self, message, args, ollama_client):
+    async def handle_discord(self, message, args, llm_client):
         prompt_text = args.get("prompt")
         if not prompt_text:
             return "No prompt provided for Automatic111."
@@ -129,7 +128,7 @@ class AutomaticPlugin(ToolPlugin):
                 image_file = discord.File(BytesIO(image_bytes), filename="generated_image.png")
                 await message.channel.send(file=image_file)
 
-                reply = await self._respond_to_image(prompt_text, image_bytes, ollama_client)
+                reply = await self._respond_to_image(prompt_text, image_bytes, llm_client)
 
                 return [
                     {
@@ -146,7 +145,7 @@ class AutomaticPlugin(ToolPlugin):
             return error_msg
 
     # --- WebUI Handler ---
-    async def handle_webui(self, args, ollama_client):
+    async def handle_webui(self, args, llm_client):
         prompt_text = args.get("prompt")
         if not prompt_text:
             return ["No prompt provided for Automatic111."]
@@ -160,7 +159,7 @@ class AutomaticPlugin(ToolPlugin):
                     "data": base64.b64encode(image_bytes).decode("utf-8"),
                     "mimetype": "image/png"
                 }
-                message_text = await self._respond_to_image(prompt_text, image_bytes, ollama_client)
+                message_text = await self._respond_to_image(prompt_text, image_bytes, llm_client)
                 return [image_data, message_text]
             except Exception as e:
                 return [f"Failed to generate image: {e}"]
@@ -171,7 +170,7 @@ class AutomaticPlugin(ToolPlugin):
             return asyncio.run(inner())
 
     # --- IRC Handler ---
-    async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
+    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         await bot.privmsg(channel, f"{user}: ❌ This plugin only works in Discord or the WebUI.")
 
 plugin = AutomaticPlugin()

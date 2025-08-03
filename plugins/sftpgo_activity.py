@@ -74,7 +74,7 @@ class SFTPGoActivityPlugin(ToolPlugin):
             print(f"JWT error: {e}")
         return None
 
-    async def _get_activity_summary(self, ollama_client):
+    async def _get_activity_summary(self, llm_client):
         settings = self.get_sftpgo_settings()
         jwt_token = await self.get_jwt_token(settings)
         if not jwt_token:
@@ -108,7 +108,7 @@ class SFTPGoActivityPlugin(ToolPlugin):
                         "Only generate the message. Do not respond to this message."
                     )
 
-                    response = await ollama_client.chat(
+                    response = await llm_client.chat(
                         messages=[{"role": "user", "content": prompt}]
                     )
                     return response["message"].get("content", "").strip() or joined
@@ -117,20 +117,20 @@ class SFTPGoActivityPlugin(ToolPlugin):
             return f"❌ Error retrieving activity: {e}"
 
     # Discord
-    async def handle_discord(self, message, args, ollama_client):
-        return await self._get_activity_summary(ollama_client)
+    async def handle_discord(self, message, args, llm_client):
+        return await self._get_activity_summary(llm_client)
 
     # IRC
-    async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
-        msg = await self._get_activity_summary(ollama_client)
+    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
+        msg = await self._get_activity_summary(llm_client)
         await bot.privmsg(channel, f"{user}: {format_irc(msg)}")
 
     # WebUI
-    async def handle_webui(self, args, ollama_client):
+    async def handle_webui(self, args, llm_client):
         try:
             asyncio.get_running_loop()
-            return [await self._get_activity_summary(ollama_client)]
+            return [await self._get_activity_summary(llm_client)]
         except RuntimeError:
-            return [asyncio.run(self._get_activity_summary(ollama_client))]
+            return [asyncio.run(self._get_activity_summary(llm_client))]
 
 plugin = SFTPGoActivityPlugin()
