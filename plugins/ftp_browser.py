@@ -99,13 +99,13 @@ class FtpBrowserPlugin(ToolPlugin):
         return label if len(label) <= 80 else label[:77] + "..."
 
     class FileBrowserView(discord.ui.View):
-        def __init__(self, plugin, user_id, current_path, entries, page=0, ollama_client=None):
+        def __init__(self, plugin, user_id, current_path, entries, page=0, llm_client=None):
             super().__init__(timeout=300)
             self.plugin = plugin
             self.user_id = user_id
             self.current_path = current_path
             self.page = page
-            self.ollama_client = ollama_client
+            self.llm_client = llm_client
 
             start = page * 22
             end = start + 22
@@ -113,25 +113,25 @@ class FtpBrowserPlugin(ToolPlugin):
 
             for name, is_dir in paged_entries:
                 label = FtpBrowserPlugin.safe_label(("📁 " if is_dir else "📄 ") + name, False)
-                self.add_item(FtpBrowserPlugin.FileButton(plugin, label, name, is_dir, user_id, current_path, ollama_client))
+                self.add_item(FtpBrowserPlugin.FileButton(plugin, label, name, is_dir, user_id, current_path, llm_client))
 
             if current_path != "/":
-                self.add_item(FtpBrowserPlugin.GoBackButton(plugin, user_id, current_path, ollama_client))
+                self.add_item(FtpBrowserPlugin.GoBackButton(plugin, user_id, current_path, llm_client))
 
             if start > 0:
-                self.add_item(FtpBrowserPlugin.PageButton("⬅️ Prev", plugin, user_id, current_path, page - 1, ollama_client))
+                self.add_item(FtpBrowserPlugin.PageButton("⬅️ Prev", plugin, user_id, current_path, page - 1, llm_client))
             if end < len(entries):
-                self.add_item(FtpBrowserPlugin.PageButton("Next ➡️", plugin, user_id, current_path, page + 1, ollama_client))
+                self.add_item(FtpBrowserPlugin.PageButton("Next ➡️", plugin, user_id, current_path, page + 1, llm_client))
 
     class FileButton(discord.ui.Button):
-        def __init__(self, plugin, label, path, is_dir, user_id, current_path, ollama_client):
+        def __init__(self, plugin, label, path, is_dir, user_id, current_path, llm_client):
             super().__init__(label=label, style=discord.ButtonStyle.primary)
             self.plugin = plugin
             self.path = path
             self.is_dir = is_dir
             self.user_id = user_id
             self.current_path = current_path
-            self.ollama_client = ollama_client
+            self.llm_client = llm_client
 
         async def callback(self, interaction: discord.Interaction):
             if interaction.user.id != self.user_id:
@@ -142,7 +142,7 @@ class FtpBrowserPlugin(ToolPlugin):
             if self.is_dir:
                 FtpBrowserPlugin.user_paths[self.user_id] = new_path
                 entries = await FtpBrowserPlugin.list_ftp_files(new_path)
-                await interaction.response.edit_message(content=f"Browsing: `{new_path}`", view=FtpBrowserPlugin.FileBrowserView(self.plugin, self.user_id, new_path, entries, ollama_client=self.ollama_client))
+                await interaction.response.edit_message(content=f"Browsing: `{new_path}`", view=FtpBrowserPlugin.FileBrowserView(self.plugin, self.user_id, new_path, entries, llm_client=self.llm_client))
             else:
                 async with FtpBrowserPlugin.get_ftp_conn_context() as client:
                     size = await FtpBrowserPlugin.get_file_size(client, new_path)
@@ -154,7 +154,7 @@ class FtpBrowserPlugin(ToolPlugin):
                         f"The user tried to download `{self.path}`, but the file is too large "
                         f"to send via Discord (> {size // (1024 * 1024)}MB)."
                     )
-                    response = await self.ollama_client.chat(
+                    response = await self.llm_client.chat(
                         messages=[
                             {"role": "system", "content": system_msg},
                             {"role": "user", "content": "Tell them in a friendly way that they should connect to the FTP manually to download this file."}
@@ -171,12 +171,12 @@ class FtpBrowserPlugin(ToolPlugin):
                     await interaction.response.send_message(file=discord.File(fp=file_data, filename=self.path))
 
     class GoBackButton(discord.ui.Button):
-        def __init__(self, plugin, user_id, current_path, ollama_client):
+        def __init__(self, plugin, user_id, current_path, llm_client):
             super().__init__(label="⬅️ Go Back", style=discord.ButtonStyle.secondary)
             self.plugin = plugin
             self.user_id = user_id
             self.current_path = current_path
-            self.ollama_client = ollama_client
+            self.llm_client = llm_client
 
         async def callback(self, interaction: discord.Interaction):
             if interaction.user.id != self.user_id:
@@ -185,25 +185,25 @@ class FtpBrowserPlugin(ToolPlugin):
             new_path = "/".join(self.current_path.rstrip("/").split("/")[:-1]) or "/"
             FtpBrowserPlugin.user_paths[self.user_id] = new_path
             entries = await FtpBrowserPlugin.list_ftp_files(new_path)
-            await interaction.response.edit_message(content=f"Browsing: `{new_path}`", view=FtpBrowserPlugin.FileBrowserView(self.plugin, self.user_id, new_path, entries, ollama_client=self.ollama_client))
+            await interaction.response.edit_message(content=f"Browsing: `{new_path}`", view=FtpBrowserPlugin.FileBrowserView(self.plugin, self.user_id, new_path, entries, llm_client=self.llm_client))
 
     class PageButton(discord.ui.Button):
-        def __init__(self, label, plugin, user_id, current_path, page, ollama_client):
+        def __init__(self, label, plugin, user_id, current_path, page, llm_client):
             super().__init__(label=label, style=discord.ButtonStyle.secondary)
             self.plugin = plugin
             self.user_id = user_id
             self.current_path = current_path
             self.page = page
-            self.ollama_client = ollama_client
+            self.llm_client = llm_client
 
         async def callback(self, interaction: discord.Interaction):
             if interaction.user.id != self.user_id:
                 return await interaction.response.send_message("This is not your session.", ephemeral=True)
 
             entries = await FtpBrowserPlugin.list_ftp_files(self.current_path)
-            await interaction.response.edit_message(content=f"Browsing: `{self.current_path}`", view=FtpBrowserPlugin.FileBrowserView(self.plugin, self.user_id, self.current_path, entries, self.page, ollama_client=self.ollama_client))
+            await interaction.response.edit_message(content=f"Browsing: `{self.current_path}`", view=FtpBrowserPlugin.FileBrowserView(self.plugin, self.user_id, self.current_path, entries, self.page, llm_client=self.llm_client))
 
-    async def handle_discord(self, message, args, ollama_client):
+    async def handle_discord(self, message, args, llm_client):
         user_id = message.author.id
         FtpBrowserPlugin.user_paths[user_id] = "/"
         entries = await FtpBrowserPlugin.list_ftp_files("/")
@@ -211,11 +211,11 @@ class FtpBrowserPlugin(ToolPlugin):
         await safe_send(
             message.channel,
             "Browsing `/`",
-            view=FtpBrowserPlugin.FileBrowserView(self, user_id, "/", entries, ollama_client=ollama_client)
+            view=FtpBrowserPlugin.FileBrowserView(self, user_id, "/", entries, llm_client=llm_client)
         )
 
         system_msg = f"The user is now browsing the root directory of an FTP server."
-        followup = await ollama_client.chat(
+        followup = await llm_client.chat(
             messages=[
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": "Send a short friendly message to encourage their FTP browsing. Do not include any instructions — just the message."}
@@ -225,10 +225,10 @@ class FtpBrowserPlugin(ToolPlugin):
         message_text = followup["message"].get("content", "").strip() or "Happy browsing!"
         return message_text
 
-    async def handle_webui(self, args, ollama_client):
+    async def handle_webui(self, args, llm_client):
         return "📂 FTP browsing is only available on Discord for now."
 
-    async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
+    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         await bot.privmsg(channel, f"{user}: FTP browsing is only available on Discord for now.")
 
 plugin = FtpBrowserPlugin()

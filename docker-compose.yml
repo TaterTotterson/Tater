@@ -7,11 +7,10 @@ services:
     ports:
       - "8501:8501"  # Streamlit web UI
     environment:
-      OLLAMA_HOST: ${OLLAMA_HOST}
-      OLLAMA_PORT: ${OLLAMA_PORT}
-      OLLAMA_MODEL: ${OLLAMA_MODEL}
-      OLLAMA_EMB_MODEL: ${OLLAMA_EMB_MODEL}
-      CONTEXT_LENGTH: ${CONTEXT_LENGTH}
+      LLM_HOST: ${LLM_HOST}
+      LLM_PORT: ${LLM_PORT}
+      LLM_MODEL: ${LLM_MODEL}
+      LLM_EMB_MODEL: ${LLM_EMB_MODEL}
       REDIS_HOST: redis
       REDIS_PORT: 6379
       AUTOMATIC_URL: ${AUTOMATIC_URL}
@@ -29,3 +28,4 @@ services:
 
 volumes:
   redis_data:
+

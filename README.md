@@ -3,7 +3,7 @@
   <h1>Tater</h1>
 </div>
 
-Tater is a AI Assistant that integrates with Ollama to provide a variety of AI-powered tools, Tater has a web UI for setup and internal private chat. Whether you're on Discord, IRC or using the WebUI, Tater is at your service.
+Tater is a AI Assistant that integrates with LLM to provide a variety of AI-powered tools, Tater has a web UI for setup and internal private chat. Whether you're on Discord, IRC or using the WebUI, Tater is at your service.
 
 ---
 
@@ -65,7 +65,7 @@ Here are some examples of the RSS watcher in action:
 ### Prerequisites
 - Python 3.11
 - **Redis-Stack**
-- Ollama
+- LLM
 - Docker (optional, for containerized deployment)
 
 ### Setting Up Locally
@@ -95,10 +95,9 @@ pip install -r requirements.txt
 Create a `.env` file in the root directory with the following variables:
 
 ```bash
-OLLAMA_HOST=127.0.0.1
-OLLAMA_PORT=11434
-OLLAMA_MODEL=gemma3:27b
-CONTEXT_LENGTH=5000
+LLM_HOST=127.0.0.1
+LLM_PORT=11434
+LLM_MODEL=gemma3:27b
 REDIS_HOST=127.0.0.1
 REDIS_PORT=6379
 ```
@@ -128,10 +127,9 @@ Ensure you supply the required environment variables. You can pass these using t
 ```bash
 docker run -d --name tater_webui \
   -p 8501:8501 \
-  -e OLLAMA_HOST=127.0.0.1 \
-  -e OLLAMA_PORT=11434 \
-  -e OLLAMA_MODEL=gemma3:27b \
-  -e CONTEXT_LENGTH=20000 \
+  -e LLM_HOST=127.0.0.1 \
+  -e LLM_PORT=11434 \
+  -e LLM_MODEL=gemma3:27b \
   -e REDIS_HOST=redis \
   -e REDIS_PORT=6379 \
   masterphooey/tater-webui

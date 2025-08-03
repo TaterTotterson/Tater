@@ -127,7 +127,7 @@ class WebSearchPlugin(ToolPlugin):
             for chunk in self.split_message(content, 1900):
                 await channel.send(chunk)
 
-    async def _pick_link_and_summarize(self, results, query, user_question, ollama_client, max_attempts=3):
+    async def _pick_link_and_summarize(self, results, query, user_question, llm_client, max_attempts=3):
         attempted_links = set()
         for attempt in range(max_attempts):
             filtered = [r for r in results if r["href"] not in attempted_links]
@@ -151,7 +151,7 @@ class WebSearchPlugin(ToolPlugin):
                 "}"
             )
 
-            response = await ollama_client.chat(messages=[{"role": "system", "content": prompt}])
+            response = await llm_client.chat(messages=[{"role": "system", "content": prompt}])
             choice = response["message"].get("content", "").strip()
             try:
                 choice_json = json.loads(choice)
@@ -166,7 +166,7 @@ class WebSearchPlugin(ToolPlugin):
             if not link:
                 continue
 
-            summary = await asyncio.to_thread(self.fetch_web_summary, link, ollama_client.model)
+            summary = await asyncio.to_thread(self.fetch_web_summary, link, llm_client.model)
             if summary:
                 final_prompt = (
                     f"Your name is Tater Totterson. Answer the user's question using this content.\n\n"
@@ -175,23 +175,23 @@ class WebSearchPlugin(ToolPlugin):
                     f"Content:\n{summary}\n\n"
                     "Do not introduce yourself. Only answer:"
                 )
-                final = await ollama_client.chat(messages=[{"role": "system", "content": final_prompt}])
+                final = await llm_client.chat(messages=[{"role": "system", "content": final_prompt}])
                 return final["message"].get("content", "").strip()
 
             attempted_links.add(link)
 
         return "Sorry, I couldn't extract content from any of the top results."
 
-    async def handle_discord(self, message, args, ollama_client):
+    async def handle_discord(self, message, args, llm_client):
         query = args.get("query")
         if not query:
             return "No search query provided."
         results = self.search_web(query)
         if not results:
             return "No results found."
-        return await self._pick_link_and_summarize(results, query, message.content, ollama_client)
+        return await self._pick_link_and_summarize(results, query, message.content, llm_client)
 
-    async def handle_webui(self, args, ollama_client):
+    async def handle_webui(self, args, llm_client):
         query = args.get("query")
         if not query:
             return ["No search query provided."]
@@ -205,7 +205,7 @@ class WebSearchPlugin(ToolPlugin):
                 results,
                 query,
                 args.get("user_question", ""),
-                ollama_client
+                llm_client
             )
 
         try:
@@ -214,14 +214,14 @@ class WebSearchPlugin(ToolPlugin):
         except RuntimeError:
             return asyncio.run(inner())
 
-    async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
+    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         query = args.get("query")
         if not query:
             return f"{user}: No search query provided."
         results = self.search_web(query)
         if not results:
             return f"{user}: No results found."
-        answer = await self._pick_link_and_summarize(results, query, raw_message, ollama_client)
+        answer = await self._pick_link_and_summarize(results, query, raw_message, llm_client)
         return format_irc(answer)
 
 plugin = WebSearchPlugin()

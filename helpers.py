@@ -1,6 +1,6 @@
 import os
 import asyncio
-import ollama
+from openai import AsyncOpenAI
 import requests
 from PIL import Image
 from io import BytesIO
@@ -36,29 +36,33 @@ def run_async(coro):
     return loop.run_until_complete(coro)
 
 # ---------------------------------------------------------
-# Ollama client wrapper
+# LLM client wrapper
 # ---------------------------------------------------------
-class OllamaClientWrapper(ollama.AsyncClient):
-    def __init__(self, host, model=None, context_length=None, keep_alive=-1, **kwargs):
-        model = model or os.getenv("OLLAMA_MODEL", "command-r:35B")
-        context_length = context_length or int(os.getenv("CONTEXT_LENGTH", 10000))
-        super().__init__(host=host, **kwargs)
-        self.host = host
+class LLMClientWrapper:
+    def __init__(self, host, model=None, **kwargs):
+        model = model or os.getenv("LLM_MODEL", "gemma3:27b")
+        base_url = host.rstrip('/')
+        if not base_url.startswith("http"):
+            base_url = f"http://{base_url}"
+        if not base_url.endswith("/v1"):
+            base_url = f"{base_url}/v1"
+        self.client = AsyncOpenAI(base_url=base_url, api_key=os.getenv("LLM_API_KEY", "not-needed"), **kwargs)
+        self.host = base_url
         self.model = model
-        self.context_length = context_length
-        self.keep_alive = keep_alive
 
     async def chat(self, messages, **kwargs):
-        options = kwargs.get("options", {}).copy()
-        options.setdefault("num_ctx", self.context_length)
-
-        return await super().chat(
-            model=kwargs.get("model", self.model),
+        stream = kwargs.pop("stream", False)
+        model = kwargs.pop("model", self.model)
+        response = await self.client.chat.completions.create(
+            model=model,
             messages=messages,
-            stream=kwargs.get("stream", False),
-            keep_alive=kwargs.get("keep_alive", self.keep_alive),
-            options=options,
+            stream=stream,
+            **kwargs,
         )
+        if stream:
+            return response
+        choice = response.choices[0].message
+        return {"model": response.model, "message": {"role": choice.role, "content": choice.content}}
 
 # ---------------------------------------------------------
 # Function JSON parsing helpers
@@ -85,8 +89,6 @@ def extract_json(text):
                         return candidate
                     except json.JSONDecodeError:
                         continue
-    return None
-
 def parse_function_json(response_text):
     try:
         response_json = json.loads(response_text)

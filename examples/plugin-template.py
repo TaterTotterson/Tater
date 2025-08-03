@@ -39,11 +39,11 @@ class <PluginName>Plugin(ToolPlugin):
         return param
 
     # --- Discord Handler ---
-    async def handle_discord(self, message, args, ollama_client, context_length, max_response_length):
+    async def handle_discord(self, message, args, llm_client):
         # Validate input from args (adjust as needed).
         waiting_prompt = self.waiting_prompt_template.format(mention=message.author.mention)
         await send_waiting_message(
-            ollama_client=ollama_client,
+            llm_client=llm_client,
             prompt_text=waiting_prompt,
             save_callback=lambda text: None,
             send_callback=lambda text: message.channel.send(text)
@@ -53,10 +53,10 @@ class <PluginName>Plugin(ToolPlugin):
         return ""
 
     # --- Web UI Handler ---
-    async def handle_webui(self, args, ollama_client, context_length):
+    async def handle_webui(self, args, llm_client):
         waiting_prompt = self.waiting_prompt_template.format(mention="User")
         await send_waiting_message(
-            ollama_client=ollama_client,
+            llm_client=llm_client,
             prompt_text=waiting_prompt,
             save_callback=lambda text: None,
             send_callback=lambda text: st.chat_message("assistant", avatar=load_image_from_url()).write(text)

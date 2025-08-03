@@ -52,15 +52,15 @@ class WatchFeedPlugin(ToolPlugin):
         redis_client.hset("rss:feeds", feed_url, last_ts)
         return f"{prefix}Now watching feed: {feed_url}"
 
-    async def handle_discord(self, message, args, ollama_client):
+    async def handle_discord(self, message, args, llm_client):
         feed_url = args.get("feed_url")
         return await self._watch_feed(feed_url)
 
-    async def handle_webui(self, args, ollama_client):
+    async def handle_webui(self, args, llm_client):
         feed_url = args.get("feed_url")
         return await self._watch_feed(feed_url)
 
-    async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
+    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         feed_url = args.get("feed_url")
         return await self._watch_feed(feed_url, username=user)
 

@@ -108,12 +108,12 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
             os.remove(p)
         os.rmdir(tmp_dir)
 
-    async def _generate_music_video(self, prompt, ollama_client):
+    async def _generate_music_video(self, prompt, llm_client):
         vision_plugin = VisionDescriberPlugin()
         job_id = str(uuid.uuid4())[:8]
         audio_plugin = ComfyUIAudioAcePlugin()
 
-        tags, lyrics = await audio_plugin.get_tags_and_lyrics(prompt, ollama_client)
+        tags, lyrics = await audio_plugin.get_tags_and_lyrics(prompt, llm_client)
         if not lyrics:
             return "❌ No lyrics returned for visuals."
 
@@ -166,7 +166,7 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
                     "Avoid text overlays and focus on a vivid scene." + part_hint
                 )
 
-                img_resp = await ollama_client.chat([
+                img_resp = await llm_client.chat([
                     {"role": "system", "content": "You help generate creative prompts for AI-generated illustrations."},
                     {"role": "user", "content": img_desc_prompt}
                 ])
@@ -196,7 +196,7 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
                     "Write a single clear sentence that describes what this image depicts and how it might animate to reflect the lyrics."
                 )
 
-                resp = await ollama_client.chat([
+                resp = await llm_client.chat([
                     {"role": "system", "content": "You generate vivid single-sentence descriptions that combine image content and lyric context for animation."},
                     {"role": "user", "content": animation_prompt}
                 ])
@@ -235,7 +235,7 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
         with open(final_video_path, "rb") as f:
             final_bytes = f.read()
 
-        msg = await ollama_client.chat([
+        msg = await llm_client.chat([
             {"role": "system", "content": f"User got a music video for '{prompt}'"},
             {"role": "user", "content": "Send short celebration text."}
         ])
@@ -252,15 +252,15 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
             msg["message"]["content"]
         ]
 
-    async def handle_discord(self, message, args, ollama_client):
+    async def handle_discord(self, message, args, llm_client):
         return "❌ This plugin is only available in the WebUI due to file size limitations."
 
-    async def handle_webui(self, args, ollama_client):
+    async def handle_webui(self, args, llm_client):
         if "prompt" not in args:
             return ["No prompt given."]
 
         async def _generate():
-            return await self._generate_music_video(args["prompt"], ollama_client)
+            return await self._generate_music_video(args["prompt"], llm_client)
 
         try:
             loop = asyncio.get_running_loop()
@@ -272,7 +272,7 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
         # Run from a background thread (Streamlit thread-safe)
         return asyncio.run(_generate())
 
-    async def handle_irc(self, bot, channel, user, raw, args, ollama_client):
+    async def handle_irc(self, bot, channel, user, raw, args, llm_client):
         await bot.privmsg(channel, f"{user}: This plugin is supported only on WebUI.")
 
 plugin = ComfyUIMusicVideoPlugin()
