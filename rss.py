@@ -26,7 +26,6 @@ LLM_HOST = os.getenv("LLM_HOST", "127.0.0.1").strip()
 LLM_PORT = os.getenv("LLM_PORT", "11434").strip()
 LLM_URL = f"http://{LLM_HOST}:{LLM_PORT}"
 LLM_MODEL = os.getenv("LLM_MODEL", "gemma3:27b").strip()
-context_length = int(os.getenv("CONTEXT_LENGTH", 5000))
 
 # Create a Redis client
 redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
@@ -156,8 +155,6 @@ class RSSManager:
                     model=LLM_MODEL,
                     messages=[{"role": "system", "content": summarization_prompt}],
                     stream=False,
-                    keep_alive=-1,
-                    options={"num_ctx": context_length}
                 )
                 summary_text = summarization_response['message'].get('content', '').strip()
                 if not summary_text:

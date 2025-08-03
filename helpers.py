@@ -39,9 +39,8 @@ def run_async(coro):
 # LLM client wrapper
 # ---------------------------------------------------------
 class LLMClientWrapper:
-    def __init__(self, host, model=None, context_length=None, keep_alive=-1, **kwargs):
+    def __init__(self, host, model=None, **kwargs):
         model = model or os.getenv("LLM_MODEL", "gemma3:27b")
-        context_length = context_length or int(os.getenv("CONTEXT_LENGTH", 10000))
         base_url = host.rstrip('/')
         if not base_url.startswith("http"):
             base_url = f"http://{base_url}"
@@ -50,17 +49,15 @@ class LLMClientWrapper:
         self.client = AsyncOpenAI(base_url=base_url, api_key=os.getenv("LLM_API_KEY", "not-needed"), **kwargs)
         self.host = base_url
         self.model = model
-        self.context_length = context_length
-        self.keep_alive = keep_alive
 
     async def chat(self, messages, **kwargs):
-        options = kwargs.get("options", {})
-        stream = kwargs.get("stream", False)
+        stream = kwargs.pop("stream", False)
+        model = kwargs.pop("model", self.model)
         response = await self.client.chat.completions.create(
-            model=kwargs.get("model", self.model),
+            model=model,
             messages=messages,
             stream=stream,
-            **options,
+            **kwargs,
         )
         if stream:
             return response
@@ -92,8 +89,6 @@ def extract_json(text):
                         return candidate
                     except json.JSONDecodeError:
                         continue
-    return None
-
 def parse_function_json(response_text):
     try:
         response_json = json.loads(response_text)

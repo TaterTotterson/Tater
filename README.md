@@ -98,7 +98,6 @@ Create a `.env` file in the root directory with the following variables:
 LLM_HOST=127.0.0.1
 LLM_PORT=11434
 LLM_MODEL=gemma3:27b
-CONTEXT_LENGTH=5000
 REDIS_HOST=127.0.0.1
 REDIS_PORT=6379
 ```
@@ -131,7 +130,6 @@ docker run -d --name tater_webui \
   -e LLM_HOST=127.0.0.1 \
   -e LLM_PORT=11434 \
   -e LLM_MODEL=gemma3:27b \
-  -e CONTEXT_LENGTH=20000 \
   -e REDIS_HOST=redis \
   -e REDIS_PORT=6379 \
   masterphooey/tater-webui

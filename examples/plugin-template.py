@@ -39,7 +39,7 @@ class <PluginName>Plugin(ToolPlugin):
         return param
 
     # --- Discord Handler ---
-    async def handle_discord(self, message, args, llm_client, context_length, max_response_length):
+    async def handle_discord(self, message, args, llm_client):
         # Validate input from args (adjust as needed).
         waiting_prompt = self.waiting_prompt_template.format(mention=message.author.mention)
         await send_waiting_message(
@@ -53,7 +53,7 @@ class <PluginName>Plugin(ToolPlugin):
         return ""
 
     # --- Web UI Handler ---
-    async def handle_webui(self, args, llm_client, context_length):
+    async def handle_webui(self, args, llm_client):
         waiting_prompt = self.waiting_prompt_template.format(mention="User")
         await send_waiting_message(
             llm_client=llm_client,

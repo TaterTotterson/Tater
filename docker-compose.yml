@@ -11,7 +11,6 @@ services:
       LLM_PORT: ${LLM_PORT}
       LLM_MODEL: ${LLM_MODEL}
       LLM_EMB_MODEL: ${LLM_EMB_MODEL}
-      CONTEXT_LENGTH: ${CONTEXT_LENGTH}
       REDIS_HOST: redis
       REDIS_PORT: 6379
       AUTOMATIC_URL: ${AUTOMATIC_URL}
@@ -29,3 +28,4 @@ services:
 
 volumes:
   redis_data:
+

@@ -16,7 +16,7 @@ import redis
 import discord
 
 load_dotenv()
-DEFAULT_CONTEXT_LENGTH = int(os.getenv("CONTEXT_LENGTH", 2048))
+DEFAULT_MAX_TOKENS = 2048
 
 class YouTubeSummaryPlugin(ToolPlugin):
     name = "youtube_summary"
@@ -59,13 +59,13 @@ class YouTubeSummaryPlugin(ToolPlugin):
         return None
 
     @staticmethod
-    def split_text_into_chunks(text, context_length=DEFAULT_CONTEXT_LENGTH):
-        max_tokens = int(context_length * 0.8)
+    def split_text_into_chunks(text, max_tokens=DEFAULT_MAX_TOKENS):
+        limit = int(max_tokens * 0.8)
         words = text.split()
         chunks, chunk = [], []
         for word in words:
             chunk.append(word)
-            if len(chunk) >= max_tokens:
+            if len(chunk) >= limit:
                 chunks.append(" ".join(chunk))
                 chunk = []
         if chunk:
@@ -130,7 +130,7 @@ class YouTubeSummaryPlugin(ToolPlugin):
         transcript = self.get_transcript_api(video_id)
         if not transcript:
             return "Sorry, this video does not have a transcript available, or it may be restricted."
-        chunks = self.split_text_into_chunks(transcript, DEFAULT_CONTEXT_LENGTH)
+        chunks = self.split_text_into_chunks(transcript, DEFAULT_MAX_TOKENS)
         return await self.summarize_chunks(chunks, llm_client)
 
 # ---------------------------------------------------------
