@@ -21,7 +21,7 @@ from plugin_registry import plugin_registry
 from rss import RSSManager
 from platform_registry import platform_registry
 from helpers import (
-    OllamaClientWrapper,
+    LLMClientWrapper,
     run_async,
     set_main_loop,
     parse_function_json,
@@ -45,11 +45,11 @@ logging.getLogger("irc3.TaterBot").setLevel(logging.WARNING)  # Optional: suppre
 dotenv.load_dotenv()
 
 @st.cache_resource(show_spinner=False)
-def _start_rss(_ollama_client):
+def _start_rss(_llm_client):
     def _run():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        rss_manager = RSSManager(ollama_client=_ollama_client)
+        rss_manager = RSSManager(llm_client=_llm_client)
         loop.run_until_complete(rss_manager.poll_feeds())
     t = threading.Thread(target=_run, daemon=True)
     t.start()
@@ -90,10 +90,10 @@ redis_host = os.getenv('REDIS_HOST', '127.0.0.1')
 redis_port = int(os.getenv('REDIS_PORT', 6379))
 redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
 
-# Setup Ollama client for web UI using our wrapper.
-ollama_host = os.getenv('OLLAMA_HOST', '127.0.0.1')
-ollama_port = int(os.getenv('OLLAMA_PORT', 11434))
-ollama_client = OllamaClientWrapper(host=f'http://{ollama_host}:{ollama_port}')
+# Setup LLM client for web UI using our wrapper.
+llm_host = os.getenv('LLM_HOST', '127.0.0.1')
+llm_port = int(os.getenv('LLM_PORT', 11434))
+llm_client = LLMClientWrapper(host=f'http://{llm_host}:{llm_port}')
 
 # Set the main event loop used for run_async.
 main_loop = asyncio.get_event_loop()
@@ -403,8 +403,8 @@ def build_system_prompt():
 # ----------------- PROCESSING FUNCTIONS -----------------
 async def process_message(user_name, message_content):
     final_system_prompt = build_system_prompt()
-    max_ollama = int(redis_client.get("tater:max_ollama") or 8)
-    history = load_chat_history()[-max_ollama:]
+    max_llm = int(redis_client.get("tater:max_llm") or 8)
+    history = load_chat_history()[-max_llm:]
 
     messages_list = [{"role": "system", "content": final_system_prompt}]
 
@@ -438,10 +438,10 @@ async def process_message(user_name, message_content):
                 if isinstance(content, str):
                     messages_list.append({"role": "assistant", "content": content})
 
-    response = await ollama_client.chat(messages_list)
+    response = await llm_client.chat(messages_list)
     return response["message"]["content"].strip()
 
-def start_plugin_job(plugin_name, args, ollama_client):
+def start_plugin_job(plugin_name, args, llm_client):
     job_id = str(uuid.uuid4())
     redis_key = f"webui:plugin_jobs:{job_id}"
     redis_client.hset(redis_key, mapping={
@@ -454,7 +454,7 @@ def start_plugin_job(plugin_name, args, ollama_client):
     def job_runner():
         try:
             plugin = plugin_registry[plugin_name]
-            result = asyncio.run(plugin.handle_webui(args, ollama_client))
+            result = asyncio.run(plugin.handle_webui(args, llm_client))
             responses = result if isinstance(result, list) else [result]
             redis_client.hset(redis_key, mapping={
                 "status": "done",
@@ -488,8 +488,8 @@ async def process_function_call(response_json, user_question=""):
         if hasattr(plugin, "waiting_prompt_template"):
             wait_msg = plugin.waiting_prompt_template.format(mention="User")
 
-            # Ask Ollama for a natural "waiting" message
-            wait_response = await ollama_client.chat(
+            # Ask LLM for a natural "waiting" message
+            wait_response = await llm_client.chat(
                 messages=[{"role": "system", "content": wait_msg}]
             )
             wait_text = wait_response["message"]["content"].strip()
@@ -514,7 +514,7 @@ async def process_function_call(response_json, user_question=""):
                 st.write(wait_text)
 
         # Start background plugin job (new logic)
-        start_plugin_job(func, args, ollama_client)
+        start_plugin_job(func, args, llm_client)
 
         # Let the job return its response later
         return []
@@ -566,22 +566,22 @@ with st.sidebar.expander("WebUI Settings", expanded=False):
 with st.sidebar.expander("Tater Settings", expanded=False):
     st.subheader("Tater Runtime Configuration")
     stored_count = int(redis_client.get("tater:max_store") or 20)
-    ollama_count = int(redis_client.get("tater:max_ollama") or 8)
+    llm_count = int(redis_client.get("tater:max_llm") or 8)
 
     new_store = st.number_input("Max Stored Messages (0 = unlimited)", min_value=0, value=stored_count)
     if new_store == 0:
         st.warning("⚠️ Unlimited history enabled — this may grow Redis memory usage over time.")
-    new_ollama = st.number_input("Messages Sent to Ollama", min_value=1, value=ollama_count)
-    if new_store > 0 and new_ollama > new_store:
-        st.warning("⚠️ You're trying to send more messages to Ollama than you’re storing. Consider increasing Max Stored Messages.")
+    new_llm = st.number_input("Messages Sent to LLM", min_value=1, value=llm_count)
+    if new_store > 0 and new_llm > new_store:
+        st.warning("⚠️ You're trying to send more messages to LLM than you’re storing. Consider increasing Max Stored Messages.")
 
     if st.button("Save Tater Settings"):
         redis_client.set("tater:max_store", new_store)
-        redis_client.set("tater:max_ollama", new_ollama)
+        redis_client.set("tater:max_llm", new_llm)
         st.success("Tater settings updated.")
 
 # ------------------ RSS ------------------
-_start_rss(ollama_client)
+_start_rss(llm_client)
 
 # ------------------ PLATFORM MANAGEMENT ------------------
 for platform in platform_registry:

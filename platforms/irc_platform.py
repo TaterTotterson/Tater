@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 import re
 import threading
 from plugin_registry import plugin_registry
-from helpers import OllamaClientWrapper, parse_function_json
+from helpers import LLMClientWrapper, parse_function_json
 import time
 import sys
 import irc3
@@ -77,10 +77,10 @@ IRC_USERNAME = irc_settings.get("irc_username", "")
 IRC_PASSWORD = irc_settings.get("irc_password", "")
 
 MAX_RESPONSE_LENGTH = int(os.getenv("MAX_RESPONSE_LENGTH", 1500))
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
-ollama_host = os.getenv("OLLAMA_HOST", "127.0.0.1")
-ollama_port = os.getenv("OLLAMA_PORT", "11434")
-ollama_client = OllamaClientWrapper(host=f"http://{ollama_host}:{ollama_port}")
+LLM_MODEL = os.getenv("LLM_MODEL", "llama3")
+llm_host = os.getenv("LLM_HOST", "127.0.0.1")
+llm_port = os.getenv("LLM_PORT", "11434")
+llm_client = LLMClientWrapper(host=f"http://{llm_host}:{llm_port}")
 
 def get_plugin_enabled(name):
     enabled = redis_client.hget("plugin_enabled", name)
@@ -95,7 +95,7 @@ def save_irc_message(channel, role, username, content):
 
 def load_irc_history(channel, limit=None):
     if limit is None:
-        limit = int(redis_client.get("tater:max_ollama") or 8)
+        limit = int(redis_client.get("tater:max_llm") or 8)
     key = f"tater:irc:{channel}:history"
     raw_history = redis_client.lrange(key, -limit, -1)
     formatted = []
@@ -177,7 +177,7 @@ async def on_message(self, mask, event, target, data):
     messages = [{"role": "system", "content": build_system_prompt()}] + history
 
     try:
-        response = await ollama_client.chat(messages)
+        response = await llm_client.chat(messages)
         response_text = response["message"].get("content", "").strip()
         logger.info(f"Tater: {response_text}")
 
@@ -199,7 +199,7 @@ async def on_message(self, mask, event, target, data):
                 # Optional waiting message
                 if hasattr(plugin, "waiting_prompt_template"):
                     wait_prompt = plugin.waiting_prompt_template.format(mention=mask.nick)
-                    wait_response = await ollama_client.chat(
+                    wait_response = await llm_client.chat(
                         messages=[{"role": "system", "content": wait_prompt}]
                     )
                     wait_text = wait_response["message"]["content"].strip()
@@ -209,7 +209,7 @@ async def on_message(self, mask, event, target, data):
                         "content": wait_text
                     })
 
-                result = await plugin.handle_irc(self, target, mask.nick, data, args, ollama_client)
+                result = await plugin.handle_irc(self, target, mask.nick, data, args, llm_client)
 
                 if isinstance(result, list):
                     for item in result:

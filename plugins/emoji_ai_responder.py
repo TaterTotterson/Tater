@@ -4,21 +4,21 @@ import os
 import logging
 import json
 from dotenv import load_dotenv
-from helpers import OllamaClientWrapper
+from helpers import LLMClientWrapper
 from plugin_base import ToolPlugin
 from plugin_settings import get_plugin_enabled
 
 # Load environment variables
 load_dotenv()
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "127.0.0.1")
-OLLAMA_PORT = os.getenv("OLLAMA_PORT", "11434")
-OLLAMA_CLIENT = OllamaClientWrapper(host=f"http://{OLLAMA_HOST}:{OLLAMA_PORT}")
+LLM_HOST = os.getenv("LLM_HOST", "127.0.0.1")
+LLM_PORT = os.getenv("LLM_PORT", "11434")
+LLM_CLIENT = LLMClientWrapper(host=f"http://{LLM_HOST}:{LLM_PORT}")
 
 logger = logging.getLogger("emoji_ai_responder")
 
 class EmojiAIResponderPlugin(ToolPlugin):
     name = "emoji_ai_responder"
-    description = "Uses Ollama to pick an appropriate emoji when a user reacts to a message."
+    description = "Uses LLM to pick an appropriate emoji when a user reacts to a message."
     platforms = ["passive"]
 
     async def on_reaction_add(self, reaction, user):
@@ -51,12 +51,12 @@ class EmojiAIResponderPlugin(ToolPlugin):
         )
 
         try:
-            response = await OLLAMA_CLIENT.chat(
+            response = await LLM_CLIENT.chat(
                 messages=[{"role": "system", "content": system_prompt}]
             )
 
             ai_reply = response.get("message", {}).get("content", "").strip()
-            logger.debug(f"[emoji_ai_responder] Ollama reply: {ai_reply}")
+            logger.debug(f"[emoji_ai_responder] LLM reply: {ai_reply}")
             if not ai_reply:
                 return
 

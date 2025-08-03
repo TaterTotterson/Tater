@@ -88,8 +88,8 @@ class WebSummaryPlugin(ToolPlugin):
             for chunk in self.split_message(content, 1900):
                 await channel.send(chunk)
 
-    async def _web_summary(self, url, ollama_client):
-        article_text = self.fetch_web_summary(url, ollama_client.model)
+    async def _web_summary(self, url, llm_client):
+        article_text = self.fetch_web_summary(url, llm_client.model)
         if not article_text:
             return None
 
@@ -101,40 +101,40 @@ class WebSummaryPlugin(ToolPlugin):
             f"Article:\n{article_text}"
         )
 
-        response = await ollama_client.chat(
+        response = await llm_client.chat(
             messages=[{"role": "user", "content": prompt}]
         )
         return response["message"].get("content", "")
 
-    async def handle_discord(self, message, args, ollama_client):
+    async def handle_discord(self, message, args, llm_client):
         url = args.get("url")
         if not url:
             return "No webpage URL provided."
 
         try:
-            return await self._web_summary(url, ollama_client)
+            return await self._web_summary(url, llm_client)
         except Exception as e:
             return f"Failed to summarize the article: {e}"
 
-    async def handle_webui(self, args, ollama_client):
+    async def handle_webui(self, args, llm_client):
         url = args.get("url")
         if not url:
             return ["No webpage URL provided."]
 
         try:
             loop = asyncio.get_running_loop()
-            return await self._web_summary(url, ollama_client)
+            return await self._web_summary(url, llm_client)
         except RuntimeError:
-            return asyncio.run(self._web_summary(url, ollama_client))
+            return asyncio.run(self._web_summary(url, llm_client))
         except Exception as e:
             return [f"Failed to summarize the article: {e}"]
 
-    async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
+    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         url = args.get("url")
         if not url:
             return f"{user}: No URL provided."
 
-        summary = await self._web_summary(url, ollama_client)
+        summary = await self._web_summary(url, llm_client)
         if not summary:
             return f"{user}: Failed to summarize article."
 

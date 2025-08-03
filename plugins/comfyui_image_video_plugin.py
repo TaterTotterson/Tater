@@ -242,7 +242,7 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
         finally:
             ws.close()
 
-    async def _generate(self, args, ollama_client):
+    async def _generate(self, args, llm_client):
         prompt = args.get("prompt", "").strip()
         image_bytes, filename = get_latest_image_from_history("webui:chat_history")
 
@@ -274,7 +274,7 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
                 ext = "mp4"
                 mime = "video/mp4"
                 file_name = "animated.mp4"
-                msg = await ollama_client.chat([
+                msg = await llm_client.chat([
                     {"role": "system", "content": f"The user has just been shown an animated video based on the prompt: \"{prompt}\"."},
                     {"role": "user", "content": "Reply with a short, fun message celebrating the animation. No lead-in phrases or instructions."}
                 ])
@@ -300,18 +300,18 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
             return [f"❌ Failed to generate animation: {e}"]
 
     # --- Discord Handler ---
-    async def handle_discord(self, message, args, ollama_client):
+    async def handle_discord(self, message, args, llm_client):
         return "❌ This plugin is only available in the WebUI due to file size limitations."
 
     # --- WebUI Handler ---
-    async def handle_webui(self, args, ollama_client):
+    async def handle_webui(self, args, llm_client):
         try:
             asyncio.get_running_loop()
-            return await self._generate(args, ollama_client)
+            return await self._generate(args, llm_client)
         except RuntimeError:
-            return asyncio.run(self._generate(args, ollama_client))
+            return asyncio.run(self._generate(args, llm_client))
 
-    async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
+    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         await bot.privmsg(channel, f"{user}: ❌ This plugin is only available in the WebUI.")
 
 plugin = ComfyUIImageVideoPlugin()

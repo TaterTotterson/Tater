@@ -40,14 +40,14 @@ class VisionDescriberPlugin(ToolPlugin):
     pretty_name = "Describing Your Image"
     settings_category = "Vision"
     required_settings = {
-        "ollama_server_address": {
-            "label": "Ollama Server Address",
-            "description": "The address of the Ollama server for vision tasks.",
+        "llm_server_address": {
+            "label": "LLM Server Address",
+            "description": "The address of the LLM server for vision tasks.",
             "type": "text",
             "default": "http://127.0.0.1:11434"
         },
-        "ollama_model": {
-            "label": "Ollama Vision Model",
+        "llm_model": {
+            "label": "LLM Vision Model",
             "description": "The model name used for vision tasks.",
             "type": "text",
             "default": "llava"
@@ -65,12 +65,12 @@ class VisionDescriberPlugin(ToolPlugin):
 
     def get_vision_settings(self):
         settings = get_plugin_settings(self.settings_category)
-        server = settings.get("ollama_server_address", self.required_settings["ollama_server_address"]["default"])
-        model = settings.get("ollama_model", self.required_settings["ollama_model"]["default"])
+        server = settings.get("llm_server_address", self.required_settings["llm_server_address"]["default"])
+        model = settings.get("llm_model", self.required_settings["llm_model"]["default"])
         num_ctx = int(settings.get("vision_context_length", self.required_settings["vision_context_length"]["default"]))
         return server, model, num_ctx
 
-    def call_ollama_vision(self, server, model, image_bytes, additional_prompt, num_ctx=20000, keep_alive=-1):
+    def call_llm_vision(self, server, model, image_bytes, additional_prompt, num_ctx=20000, keep_alive=-1):
         try:
             image_b64 = base64.b64encode(image_bytes).decode("utf-8") if isinstance(image_bytes, bytes) else image_bytes
 
@@ -98,7 +98,7 @@ class VisionDescriberPlugin(ToolPlugin):
         )
         server, model, num_ctx = self.get_vision_settings()
         description = await asyncio.to_thread(
-            self.call_ollama_vision,
+            self.call_llm_vision,
             server, model, file_content, additional_prompt, num_ctx=num_ctx
         )
         return description
@@ -120,7 +120,7 @@ class VisionDescriberPlugin(ToolPlugin):
         server, model, num_ctx = self.get_vision_settings()
         try:
             description = await asyncio.to_thread(
-                self.call_ollama_vision,
+                self.call_llm_vision,
                 server, model, image_bytes, prompt, num_ctx=num_ctx
             )
             return [description[:1500]] if description else ["❌ Failed to generate image description."]
@@ -128,7 +128,7 @@ class VisionDescriberPlugin(ToolPlugin):
             return [f"❌ Error: {e}"]
 
     # --- Discord Handler ---
-    async def handle_discord(self, message, args, ollama_client):
+    async def handle_discord(self, message, args, llm_client):
         key = f"tater:channel:{message.channel.id}:history"
 
         try:
@@ -140,7 +140,7 @@ class VisionDescriberPlugin(ToolPlugin):
         return result[0] if result else f"{message.author.mention}: ❌ No image found or failed to process."
 
     # --- WebUI Handler ---
-    async def handle_webui(self, args, ollama_client):
+    async def handle_webui(self, args, llm_client):
         try:
             asyncio.get_running_loop()
             return await self._describe_latest_image("webui:chat_history")
@@ -148,7 +148,7 @@ class VisionDescriberPlugin(ToolPlugin):
             return asyncio.run(self._describe_latest_image("webui:chat_history"))
 
     # --- IRC Handler ---
-    async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
+    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         return f"{user}: This plugin only works via Discord. IRC support is not available yet."
 
 

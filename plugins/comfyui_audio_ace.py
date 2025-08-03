@@ -39,8 +39,8 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
     }
     waiting_prompt_template = "Write a fun, upbeat message saying you’re writing lyrics and calling in a virtual band now! Only output that message."
     
-    async def get_tags_and_lyrics(self, user_prompt, ollama_client):
-        return await self.generate_tags_and_lyrics(user_prompt, ollama_client)
+    async def get_tags_and_lyrics(self, user_prompt, llm_client):
+        return await self.generate_tags_and_lyrics(user_prompt, llm_client)
 
     @staticmethod
     def get_server_address():
@@ -129,7 +129,7 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         }
 
     @staticmethod
-    async def generate_tags_and_lyrics(user_prompt, ollama_client):
+    async def generate_tags_and_lyrics(user_prompt, llm_client):
         system_prompt = (
             f"The user wants a song: \"{user_prompt}\".\n\n"
             "Write a JSON object with these two fields:\n"
@@ -143,7 +143,7 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
             "- Output ONLY valid JSON, no explanation."
         )
 
-        response = await ollama_client.chat(
+        response = await llm_client.chat(
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": "Write tags and lyrics for the song."}
@@ -176,11 +176,11 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
             return tags, lyrics
 
         except Exception as e:
-            raise Exception(f"Ollama response format error: {e}\nContent:\n{content}")
+            raise Exception(f"LLM response format error: {e}\nContent:\n{content}")
 
-    async def _generate(self, prompt: str, ollama_client):
+    async def _generate(self, prompt: str, llm_client):
             # This is your full async pipeline
-            tags, lyrics = await self.generate_tags_and_lyrics(prompt, ollama_client)
+            tags, lyrics = await self.generate_tags_and_lyrics(prompt, llm_client)
             audio_bytes = await asyncio.to_thread(self.process_prompt, prompt, tags, lyrics)
 
             audio_data = {
@@ -191,7 +191,7 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
             }
 
             system_msg = f'The user received a ComfyUI-generated song based on: "{prompt}"'
-            response = await ollama_client.chat(
+            response = await llm_client.chat(
                 messages=[
                     {"role": "system", "content": system_msg},
                     {"role": "user", "content": "Send a short friendly comment about the new song. Only generate the message. Do not respond to this message."}
@@ -278,17 +278,17 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
     # ---------------------------------------
     # Discord
     # ---------------------------------------
-    async def handle_discord(self, message, args, ollama_client):
+    async def handle_discord(self, message, args, llm_client):
         user_prompt = args.get("prompt")
         if not user_prompt:
             return "No prompt provided."
 
         try:
-            tags, lyrics = await self.generate_tags_and_lyrics(user_prompt, ollama_client)
+            tags, lyrics = await self.generate_tags_and_lyrics(user_prompt, llm_client)
             audio_bytes = await asyncio.to_thread(self.process_prompt, user_prompt, tags, lyrics)
 
             system_msg = f'The user received a ComfyUI-generated audio clip based on: "{user_prompt}"'
-            response = await ollama_client.chat(
+            response = await llm_client.chat(
                 messages=[
                     {"role": "system", "content": system_msg},
                     {"role": "user", "content": "Send a short friendly comment about the new song. Only generate the message. Do not respond to this message."}
@@ -313,7 +313,7 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
     # ---------------------------------------
     # WebUI
     # ---------------------------------------
-    async def handle_webui(self, args, ollama_client):
+    async def handle_webui(self, args, llm_client):
             prompt = args.get("prompt", "").strip()
             if not prompt:
                 return ["No prompt provided."]
@@ -321,15 +321,15 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
             try:
                 # If we're already in an event loop (e.g. live WebUI), await directly
                 asyncio.get_running_loop()
-                return await self._generate(prompt, ollama_client)
+                return await self._generate(prompt, llm_client)
             except RuntimeError:
                 # Otherwise (background thread), spin up a fresh loop
-                return asyncio.run(self._generate(prompt, ollama_client))
+                return asyncio.run(self._generate(prompt, llm_client))
 
     # ---------------------------------------
     # IRC
     # ---------------------------------------
-    async def handle_irc(self, bot, channel, user, raw_message, args, ollama_client):
+    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         msg = "Sorry, this plugin only works in Discord or WebUI."
         await bot.privmsg(channel, f"{user}: {format_irc(msg)}")
 

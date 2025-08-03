@@ -97,7 +97,7 @@ class ComfyUIVideoPlugin(ToolPlugin):
         subprocess.run(cmd, check=True)
         os.remove(listpath)
 
-    def parse_ollama_prompt_list(self, raw_text, expected_count):
+    def parse_llm_prompt_list(self, raw_text, expected_count):
         prompts = []
         for line in raw_text.strip().splitlines():
             if '.' in line:
@@ -106,7 +106,7 @@ class ComfyUIVideoPlugin(ToolPlugin):
                     prompts.append(parts[1].strip())
         return prompts if len(prompts) >= expected_count else None
 
-    async def _generate_video(self, prompt, ollama_client):
+    async def _generate_video(self, prompt, llm_client):
         settings = redis_client.hgetall(f"plugin_settings:{self.settings_category}")
         raw_res = settings.get("VIDEO_RESOLUTION", b"720p")
         resolution = raw_res.decode() if isinstance(raw_res, bytes) else raw_res
@@ -128,7 +128,7 @@ class ComfyUIVideoPlugin(ToolPlugin):
         temp_paths, final_clips = [], []
         anim_plugin = ComfyUIImageVideoPlugin()
 
-        # Ask Ollama for N unique image prompts
+        # Ask LLM for N unique image prompts
         list_prompt = (
             f"Based on this exact scene description:\n\n"
             f"\"{prompt}\"\n\n"
@@ -136,12 +136,12 @@ class ComfyUIVideoPlugin(ToolPlugin):
             f"Vary only small details like background, lighting, angle, or pose — but never change the subject."
             f"\n\nOnly return a numbered list with no extra text."
         )
-        resp = await ollama_client.chat([
+        resp = await llm_client.chat([
             {"role": "system", "content": "You generate multiple diverse prompts for AI image creation."},
             {"role": "user", "content": list_prompt}
         ])
         raw_list = resp["message"]["content"]
-        image_prompts = self.parse_ollama_prompt_list(raw_list, num_clips)
+        image_prompts = self.parse_llm_prompt_list(raw_list, num_clips)
 
         for i in range(num_clips):
             image_prompt = (
@@ -172,7 +172,7 @@ class ComfyUIVideoPlugin(ToolPlugin):
                 f"\"{image_prompt}\"\n\n"
                 "Write a single clear sentence that describes what this image depicts and how it might animate to reflect the user's intent."
             )
-            anim_resp = await ollama_client.chat([
+            anim_resp = await llm_client.chat([
                 {"role": "system", "content": "You generate vivid single-sentence descriptions that combine image content and user prompt for animation."},
                 {"role": "user", "content": animation_prompt}
             ])
@@ -211,7 +211,7 @@ class ComfyUIVideoPlugin(ToolPlugin):
             final_bytes = f.read()
         temp_paths.append(out_path)
 
-        msg = await ollama_client.chat([
+        msg = await llm_client.chat([
             {"role": "system", "content": f"The user has just been shown a video based on '{prompt}'."},
             {"role": "user", "content": "Reply with a short, fun message celebrating the video. No lead-in phrases or instructions."}
         ])
@@ -228,21 +228,21 @@ class ComfyUIVideoPlugin(ToolPlugin):
             msg["message"]["content"].strip() or "🎬 Here’s your video!"
         ]
 
-    async def handle_discord(self, message, args, ollama_client):
+    async def handle_discord(self, message, args, llm_client):
         return "❌ This plugin is only available in the WebUI due to file size limitations."
 
-    async def handle_webui(self, args, ollama_client):
+    async def handle_webui(self, args, llm_client):
         if "prompt" not in args:
             return ["No prompt provided."]
         try:
             asyncio.get_running_loop()
-            return await self._generate_video(args["prompt"], ollama_client)
+            return await self._generate_video(args["prompt"], llm_client)
         except RuntimeError:
-            return asyncio.run(self._generate_video(args["prompt"], ollama_client))
+            return asyncio.run(self._generate_video(args["prompt"], llm_client))
         except Exception as e:
             return [f"⚠️ Error generating video: {e}"]
 
-    async def handle_irc(self, bot, channel, user, raw, args, ollama_client):
+    async def handle_irc(self, bot, channel, user, raw, args, llm_client):
         await bot.privmsg(channel, f"{user}: This plugin is supported only on WebUI.")
 
 plugin = ComfyUIVideoPlugin()
