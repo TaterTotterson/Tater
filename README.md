@@ -73,13 +73,13 @@ Here are some examples of the RSS watcher in action:
 1. **Clone the Repository**
 
 ```bash
-git clone https://github.com/MasterPhooey/Tater-Discord-WebUI.git
+git clone https://github.com/MasterPhooey/Tater.git
 ```
 
 2. **Navigate to the Project Directory**
 
 ```bash
-cd Tater-Discord-WebUI
+cd Tater
 ```
 
 3. **Install Dependencies**
