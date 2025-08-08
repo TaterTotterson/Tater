@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 import re
 from datetime import datetime
 from plugin_registry import plugin_registry
-from helpers import LLMClientWrapper, parse_function_json
+from helpers import LLMClientWrapper, parse_function_json, get_tater_name
 import logging
 import threading
 import signal
@@ -49,7 +49,7 @@ PLATFORM_SETTINGS = {
             "label": "Response Channel ID",
             "type": "string",
             "default": "",
-            "description": "Channel where Tater replies"
+            "description": "Channel where the assistant replies"
         }
     }
 }
@@ -82,8 +82,9 @@ class discord_platform(commands.Bot):
     def build_system_prompt(self):
         now = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
 
+        first, last = get_tater_name()
         base_prompt = (
-            "You are Tater Totterson, a Discord-savvy AI assistant with access to various tools and plugins.\n\n"
+            f"You are {first} {last}, a Discord-savvy AI assistant with access to various tools and plugins.\n\n"
             "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
         )
 
@@ -117,7 +118,8 @@ class discord_platform(commands.Bot):
             logger.error(f"Failed to sync app commands: {e}")
 
     async def on_ready(self):
-        activity = discord.Activity(name='tater', state='Totterson', type=discord.ActivityType.custom)
+        first, last = get_tater_name()
+        activity = discord.Activity(name=first.lower(), state=last, type=discord.ActivityType.custom)
         await self.change_presence(activity=activity)
         logger.info(f"Bot is ready. Admin: {self.admin_user_id}, Response Channel: {self.response_channel_id}")
 

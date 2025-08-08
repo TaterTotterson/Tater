@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 import re
 import threading
 from plugin_registry import plugin_registry
-from helpers import LLMClientWrapper, parse_function_json
+from helpers import LLMClientWrapper, parse_function_json, get_tater_name
 import time
 import sys
 import irc3
@@ -139,8 +139,9 @@ def load_irc_history(channel, limit=None):
 def build_system_prompt():
     now = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
 
+    first, last = get_tater_name()
     base_prompt = (
-        "You are Tater Totterson, an IRC-savvy AI assistant with access to various tools and plugins.\n\n"
+        f"You are {first} {last}, an IRC-savvy AI assistant with access to various tools and plugins.\n\n"
         "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
     )
 
@@ -169,7 +170,8 @@ def build_system_prompt():
 async def on_message(self, mask, event, target, data):
     save_irc_message(channel=target, role="user", username=mask.nick, content=data)
 
-    if "tater" not in data.lower():
+    first, _ = get_tater_name()
+    if first.lower() not in data.lower():
         return
 
     logger.info(f"<{mask.nick}> {data}")
@@ -179,7 +181,7 @@ async def on_message(self, mask, event, target, data):
     try:
         response = await llm_client.chat(messages)
         response_text = response["message"].get("content", "").strip()
-        logger.info(f"Tater: {response_text}")
+        logger.info(f"{first}: {response_text}")
 
         parsed = parse_function_json(response_text)
         if parsed and isinstance(parsed, dict) and "function" in parsed:

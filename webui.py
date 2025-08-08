@@ -25,6 +25,7 @@ from helpers import (
     run_async,
     set_main_loop,
     parse_function_json,
+    get_tater_name,
 )
 
 # Remove any prior handlers
@@ -99,8 +100,10 @@ llm_client = LLMClientWrapper(host=f'http://{llm_host}:{llm_port}')
 main_loop = asyncio.get_event_loop()
 set_main_loop(main_loop)
 
+first_name, last_name = get_tater_name()
+
 st.set_page_config(
-    page_title="Tater Chat",
+    page_title=f"{first_name} Chat",
     page_icon=":material/tooltip_2:"
 )
 
@@ -132,10 +135,22 @@ def clear_chat_history():
     # Clear in-memory session list
     st.session_state.pop("chat_messages", None)
 
-def load_local_avatar():
+def load_default_tater_avatar():
     return Image.open("images/tater.png")
 
-assistant_avatar = load_local_avatar()
+
+def get_tater_avatar():
+    avatar_b64 = redis_client.get("tater:avatar")
+    if avatar_b64:
+        try:
+            avatar_bytes = base64.b64decode(avatar_b64)
+            return Image.open(BytesIO(avatar_bytes))
+        except Exception:
+            redis_client.delete("tater:avatar")
+    return load_default_tater_avatar()
+
+
+assistant_avatar = get_tater_avatar()
 
 # ----------------- SETTINGS HELPER FUNCTIONS -----------------
 def get_chat_settings():
@@ -374,8 +389,9 @@ for category, settings in sorted(plugin_categories.items()):
 def build_system_prompt():
     now = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
 
+    first, last = get_tater_name()
     base_prompt = (
-        "You are Tater Totterson, an AI assistant with access to various tools and plugins.\n\n"
+        f"You are {first} {last}, an AI assistant with access to various tools and plugins.\n\n"
         "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
     )
 
@@ -563,10 +579,22 @@ with st.sidebar.expander("WebUI Settings", expanded=False):
         st.success("All active plugin jobs have been cleared.")
         st.rerun()
 
-with st.sidebar.expander("Tater Settings", expanded=False):
+with st.sidebar.expander(f"{first_name} Settings", expanded=False):
     st.subheader("Tater Runtime Configuration")
     stored_count = int(redis_client.get("tater:max_store") or 20)
     llm_count = int(redis_client.get("tater:max_llm") or 8)
+    default_first = redis_client.get("tater:first_name") or first_name
+    default_last = redis_client.get("tater:last_name") or last_name
+
+    first_input = st.text_input("First Name", value=default_first)
+    last_input = st.text_input("Last Name", value=default_last)
+    uploaded_tater_avatar = st.file_uploader(
+        f"Upload {first_input}'s avatar", type=["png", "jpg", "jpeg"], key="tater_avatar_uploader"
+    )
+    if uploaded_tater_avatar is not None:
+        avatar_bytes = uploaded_tater_avatar.read()
+        avatar_b64 = base64.b64encode(avatar_bytes).decode("utf-8")
+        redis_client.set("tater:avatar", avatar_b64)
 
     new_store = st.number_input("Max Stored Messages (0 = unlimited)", min_value=0, value=stored_count)
     if new_store == 0:
@@ -578,7 +606,10 @@ with st.sidebar.expander("Tater Settings", expanded=False):
     if st.button("Save Tater Settings"):
         redis_client.set("tater:max_store", new_store)
         redis_client.set("tater:max_llm", new_llm)
+        redis_client.set("tater:first_name", first_input)
+        redis_client.set("tater:last_name", last_input)
         st.success("Tater settings updated.")
+        st.rerun()
 
 # ------------------ RSS ------------------
 _start_rss(llm_client)
@@ -596,7 +627,7 @@ for platform in platform_registry:
         st.success(f"{platform['category']} auto-connected.")
 
 # ------------------ Chat ------------------
-st.title("Tater Chat Web UI")
+st.title(f"{first_name} Chat Web UI")
 
 chat_settings = get_chat_settings()
 avatar_b64  = chat_settings.get("avatar")
@@ -666,7 +697,7 @@ for msg in st.session_state.chat_messages:
         else:
             st.write(content)
 
-if user_input := st.chat_input("Chat with Tater…"):
+if user_input := st.chat_input(f"Chat with {first_name}…"):
     uname = chat_settings["username"]
 
     # Save and append user message right away
@@ -680,7 +711,7 @@ if user_input := st.chat_input("Chat with Tater…"):
     st.chat_message("user", avatar=user_avatar or "🦖").write(user_input)
 
     # Show spinner while thinking
-    with st.spinner("Tater is thinking..."):
+    with st.spinner(f"{first_name} is thinking..."):
         response_text = run_async(process_message(uname, user_input))
 
     func_call = parse_function_json(response_text)
@@ -715,7 +746,7 @@ for key in redis_client.scan_iter("webui:plugin_jobs:*"):
 # If any are pending, show spinner with names
 if pending_plugins:
     names_str = ", ".join(pending_plugins)
-    with st.spinner(f"Tater is working on: {names_str}"):
+    with st.spinner(f"{first_name} is working on: {names_str}"):
         while True:
             still_pending = False
             for key in redis_client.scan_iter("webui:plugin_jobs:*"):
