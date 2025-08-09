@@ -22,6 +22,21 @@ redis_client = redis.Redis(
     decode_responses=True
 )
 
+
+def get_tater_name():
+    """Return the assistant's first and last name from Redis."""
+    first = redis_client.get("tater:first_name")
+    if not first:
+        first = "Tater"
+        redis_client.set("tater:first_name", first)
+
+    last = redis_client.get("tater:last_name")
+    if not last:
+        last = "Totterson"
+        redis_client.set("tater:last_name", last)
+
+    return first, last
+
 # ---------------------------------------------------------
 # Main event loop reference + run_async helper
 # ---------------------------------------------------------

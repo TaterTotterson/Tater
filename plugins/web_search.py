@@ -12,7 +12,7 @@ import time
 import random
 import requests
 from plugin_base import ToolPlugin
-from helpers import format_irc, extract_json, redis_client
+from helpers import format_irc, extract_json, redis_client, get_tater_name
 
 load_dotenv()
 logger = logging.getLogger("web_search")
@@ -135,9 +135,10 @@ class WebSearchPlugin(ToolPlugin):
                 break
 
             formatted_results = self.format_search_results(filtered)
+            first, last = get_tater_name()
 
             prompt = (
-                f"Your name is Tater Totterson, you're researching the topic '{query}' "
+                f"Your name is {first} {last}, you're researching the topic '{query}' "
                 f"because the user asked: '{user_question}'.\n\n"
                 f"Here are search results:\n\n{formatted_results}\n\n"
                 "Respond with:\n"
@@ -168,8 +169,9 @@ class WebSearchPlugin(ToolPlugin):
 
             summary = await asyncio.to_thread(self.fetch_web_summary, link, llm_client.model)
             if summary:
+                first, last = get_tater_name()
                 final_prompt = (
-                    f"Your name is Tater Totterson. Answer the user's question using this content.\n\n"
+                    f"Your name is {first} {last}. Answer the user's question using this content.\n\n"
                     f"Query: {query}\n"
                     f"User Question: {user_question}\n\n"
                     f"Content:\n{summary}\n\n"
