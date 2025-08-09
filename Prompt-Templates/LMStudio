@@ -1,0 +1,28 @@
+{{ bos_token }}
+{# --- Render history in ChatML --- #}
+{% for m in messages %}
+  {% if m.role == 'system' and m.content %}
+<|im_start|>system
+{{ m.content }}
+<|im_end|>
+  {% elif m.role == 'user' and m.content %}
+<|im_start|>user
+{{ m.content }}
+<|im_end|>
+  {% elif m.role == 'assistant' and m.content %}
+<|im_start|>assistant
+{{ m.content }}
+<|im_end|>
+  {% endif %}
+{% endfor %}
+
+{# --- Post-history steering so it prefers tool/JSON calls --- #}
+<|im_start|>system
+When a tool/function is implied by the conversation or schema, reply ONLY with a single JSON object:
+{"function":"<name>","arguments":{...}}
+No commentary, no markdown, no code fences, no extra keys.
+If no tool is implied, answer normally.
+<|im_end|>
+
+{# --- IMPORTANT: open the next assistant turn and DO NOT close it --- #}
+<|im_start|>assistant
