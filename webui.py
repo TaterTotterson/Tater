@@ -333,7 +333,8 @@ for category, settings in sorted(plugin_categories.items()):
                     info.get("label", key),
                     value=default_value,
                     help=info.get("description", ""),
-                    type="password"
+                    type="password",
+                    key=f"{category}_{key}"
                 )
 
             # FILE
@@ -356,15 +357,14 @@ for category, settings in sorted(plugin_categories.items()):
 
             # SELECT
             elif input_type == "select":
-                options = info.get("options", [])
-                if not options:
-                    options = ["Option 1", "Option 2"]  # fallback default
+                options = info.get("options", []) or ["Option 1", "Option 2"]
                 current_index = options.index(default_value) if default_value in options else 0
                 new_value = st.selectbox(
                     info.get("label", key),
                     options,
                     index=current_index,
-                    help=info.get("description", "")
+                    help=info.get("description", ""),
+                    key=f"{category}_{key}"
                 )
 
             # CHECKBOX
@@ -376,7 +376,8 @@ for category, settings in sorted(plugin_categories.items()):
                 new_value = st.checkbox(
                     info.get("label", key),
                     value=is_checked,
-                    help=info.get("description", "")
+                    help=info.get("description", ""),
+                    key=f"{category}_{key}"
                 )
 
             # TEXT (fallback)
@@ -384,7 +385,8 @@ for category, settings in sorted(plugin_categories.items()):
                 new_value = st.text_input(
                     info.get("label", key),
                     value=default_value,
-                    help=info.get("description", "")
+                    help=info.get("description", ""),
+                    key=f"{category}_{key}"  # 🔹 unique per plugin+setting
                 )
 
             new_settings[key] = new_value
