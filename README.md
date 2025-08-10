@@ -140,9 +140,12 @@ docker pull masterphooey/tater-webui
 
 ### 2. Configuring Environment Variables
 
-Ensure you supply the required environment variables. You can pass these using the `-e` flag when starting the container. For example:
+Ensure you supply the required environment variables. You can pass these using the `-e` flag when starting the container.
 
-```bash
+---
+
+Example: Local backend (Ollama, LM Studio, LocalAI)
+```
 docker run -d --name tater_webui \
   -p 8501:8501 \
   -e LLM_HOST=127.0.0.1 \
@@ -152,6 +155,22 @@ docker run -d --name tater_webui \
   -e REDIS_PORT=6379 \
   masterphooey/tater-webui
 ```
+---
+
+Example: ChatGPT (GPT-4o, etc.)
+```
+docker run -d --name tater_webui \
+  -p 8501:8501 \
+  -e LLM_HOST=https://api.openai.com \
+  -e LLM_PORT= \
+  -e LLM_MODEL=gpt-4o \
+  -e LLM_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxx \
+  -e REDIS_HOST=redis \
+  -e REDIS_PORT=6379 \
+  masterphooey/tater-webui
+```
+Note: When using ChatGPT, leave LLM_PORT blank.  
+Tater will automatically connect using HTTPS without appending a port number.
 
 ### 3. Access the Web UI
 
