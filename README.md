@@ -94,7 +94,7 @@ pip install -r requirements.txt
 4. **Configure Environment Variables**
 
 Create a `.env` file in the root directory.  
-Below are example configurations for local LLM backends (Ollama, LM Studio, LocalAI) and OpenAI API (ChatGPT, GPT-4o, etc.).
+Below are example configurations for local LLM backends (Ollama, LM Studio, LocalAI) and ChatGPT (GPT-4o, etc.).
 
 ---
 
@@ -108,7 +108,7 @@ REDIS_PORT=6379
 ```
 ---
 
-Example: OpenAI API (ChatGPT, GPT-4o, etc.)
+Example: ChatGPT (GPT-4o, etc.)
 ```
 LLM_HOST=https://api.openai.com  
 LLM_PORT=  
@@ -117,9 +117,8 @@ LLM_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxx
 REDIS_HOST=127.0.0.1  
 REDIS_PORT=6379  
 ```
-Note: When using the OpenAI API, leave LLM_PORT blank.  
+Note: When using ChatGPT, leave LLM_PORT blank.  
 Tater will automatically connect using HTTPS without appending a port number.
-
 
 5. **Run the Web UI**
 
