@@ -4,19 +4,20 @@ import base64
 import requests
 import os
 import discord
+import mimetypes
 from plugin_base import ToolPlugin
 from plugin_settings import get_plugin_settings
 from helpers import redis_client, get_latest_image_from_history
 
 def decode_base64(data: str) -> bytes:
+    """Safely decode base64 or data: URL strings (kept for parity/utility)."""
     data = data.strip()
     if data.startswith("data:"):
         _, data = data.split(",", 1)
     missing_padding = len(data) % 4
     if missing_padding:
-        data += '=' * (4 - missing_padding)
+        data += "=" * (4 - missing_padding)
     return base64.b64decode(data)
-
 
 async def safe_send(channel: discord.TextChannel, content: str):
     """Send content to Discord, split if over 2000 characters."""
@@ -24,6 +25,10 @@ async def safe_send(channel: discord.TextChannel, content: str):
     for chunk in chunks:
         await channel.send(chunk)
 
+def _to_data_url(image_bytes: bytes, filename: str = "image.png") -> str:
+    mime = mimetypes.guess_type(filename)[0] or "image/png"
+    b64 = base64.b64encode(image_bytes).decode("utf-8")
+    return f"data:{mime};base64,{b64}"
 
 class VisionDescriberPlugin(ToolPlugin):
     name = "vision_describer"
@@ -34,63 +39,77 @@ class VisionDescriberPlugin(ToolPlugin):
         '}'
     )
     description = (
-        "Uses AI vision to describe the most recently available image. "
+        "Uses an OpenAI-compatible *vision* model to describe the most recent image. "
         "No input needed — it automatically finds the latest uploaded or generated image."
     )
     pretty_name = "Describing Your Image"
     settings_category = "Vision"
     required_settings = {
-        "llm_server_address": {
-            "label": "LLM Server Address",
-            "description": "The address of the LLM server for vision tasks.",
+        "api_base": {
+            "label": "API Base URL",
+            "description": "OpenAI-compatible base URL (e.g., http://127.0.0.1:1234).",
             "type": "text",
-            "default": "http://127.0.0.1:11434"
+            "default": "http://127.0.0.1:1234"
         },
-        "llm_model": {
-            "label": "LLM Vision Model",
-            "description": "The model name used for vision tasks.",
+        "model": {
+            "label": "Vision Model",
+            "description": "OpenAI-compatible model name (e.g., qwen2.5-vl-7b-instruct, gemma-3-12b-it, etc.).",
             "type": "text",
-            "default": "llava"
+            "default": "gemma3-27b-abliterated-dpo"
         }
-
+        # NOTE: API key is pulled from env if needed (OPENAI_API_KEY).
     }
     waiting_prompt_template = "Write a playful message telling {mention} you’re using your magnifying glass to inspect their image now! Only output that message."
     platforms = ["discord", "webui"]
 
     def get_vision_settings(self):
-        settings = get_plugin_settings(self.settings_category)
-        server = settings.get("llm_server_address", self.required_settings["llm_server_address"]["default"])
-        model = settings.get("llm_model", self.required_settings["llm_model"]["default"])
-        return server, model
+        s = get_plugin_settings(self.settings_category)
+        api_base = s.get("api_base", self.required_settings["api_base"]["default"]).rstrip("/")
+        model = s.get("model", self.required_settings["model"]["default"])
+        # Optional API key from env for servers that require it
+        api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        return api_base, model, api_key
 
-    def call_llm_vision(self, server, model, image_bytes, additional_prompt):
+    def _call_openai_vision(self, api_base: str, model: str, image_bytes: bytes, prompt: str, filename: str = "image.png") -> str:
+        url = f"{api_base}/v1/chat/completions"
+        data_url = _to_data_url(image_bytes, filename)
+        payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt or "Describe this image."},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                }
+            ],
+            "temperature": 0.2,
+        }
+        headers = {"Content-Type": "application/json"}
+        # Add Authorization header if OPENAI_API_KEY is present
+        _, _, api_key = self.get_vision_settings()
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        resp = requests.post(url, json=payload, headers=headers, timeout=90)
+        if resp.status_code != 200:
+            return f"Error: Vision service returned status {resp.status_code}.\nResponse: {resp.text}"
+        j = resp.json()
         try:
-            image_b64 = base64.b64encode(image_bytes).decode("utf-8") if isinstance(image_bytes, bytes) else image_bytes
+            return j["choices"][0]["message"]["content"].strip()
+        except Exception:
+            return f"Error: Unexpected response shape: {j}"
 
-            payload = {
-                "model": model,
-                "prompt": additional_prompt,
-                "stream": False,
-                "images": [image_b64],
-            }
-            response = requests.post(f"{server}/api/generate", json=payload)
-            if response.status_code == 200:
-                result = response.json()
-                return result.get("response", "No description provided.").strip()
-            else:
-                return f"Error: Vision service returned status code {response.status_code}.\nResponse: {response.text}"
-        except Exception as e:
-            return f"Error calling vision service: {str(e)}"
-   
     async def process_image_web(self, file_content: bytes, filename: str):
-        additional_prompt = (
+        prompt = (
             "You are an expert visual assistant. Describe the contents of this image in detail, "
             "mentioning key objects, scenes, or actions if recognizable."
         )
-        server, model = self.get_vision_settings()
+        api_base, model, _ = self.get_vision_settings()
         description = await asyncio.to_thread(
-            self.call_llm_vision,
-            server, model, file_content, additional_prompt
+            self._call_openai_vision,
+            api_base, model, file_content, prompt, filename
         )
         return description
 
@@ -108,11 +127,11 @@ class VisionDescriberPlugin(ToolPlugin):
             "mentioning key objects, scenes, or actions if recognizable."
         )
 
-        server, model = self.get_vision_settings()
+        api_base, model, _ = self.get_vision_settings()
         try:
             description = await asyncio.to_thread(
-                self.call_llm_vision,
-                server, model, image_bytes, prompt
+                self._call_openai_vision,
+                api_base, model, image_bytes, prompt, filename
             )
             return [description[:1500]] if description else ["❌ Failed to generate image description."]
         except Exception as e:
@@ -121,13 +140,11 @@ class VisionDescriberPlugin(ToolPlugin):
     # --- Discord Handler ---
     async def handle_discord(self, message, args, llm_client):
         key = f"tater:channel:{message.channel.id}:history"
-
         try:
             asyncio.get_running_loop()
             result = await self._describe_latest_image(key)
         except RuntimeError:
             result = asyncio.run(self._describe_latest_image(key))
-
         return result[0] if result else f"{message.author.mention}: ❌ No image found or failed to process."
 
     # --- WebUI Handler ---
@@ -140,7 +157,6 @@ class VisionDescriberPlugin(ToolPlugin):
 
     # --- IRC Handler ---
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
-        return f"{user}: This plugin only works via Discord. IRC support is not available yet."
-
+        return f"{user}: This plugin only works via Discord and WebUI. IRC support is not available yet."
 
 plugin = VisionDescriberPlugin()
