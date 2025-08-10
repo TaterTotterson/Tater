@@ -59,14 +59,14 @@ Here are some examples of the RSS watcher in action:
 ---
 **Note**:
 - You don't have to use a model that is tagged with tools, test different models if the one you are using isnt trigging the plugins.
-- Tater currently recommends using gemma3:27b
+- Tater currently recommends using Gemma3-27b-Abliterated
 
 ## Installation
 
 ### Prerequisites
 - Python 3.11
 - **Redis-Stack**
-- LLM
+- OpenAI API–compatible LLM app (such as **Ollama**, **LocalAI**, **LM Studio**, **Lemonade**, or **OpenAI API**)
 - Docker (optional, for containerized deployment)
 
 ### Setting Up Locally
