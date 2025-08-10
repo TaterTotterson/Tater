@@ -91,10 +91,18 @@ redis_host = os.getenv('REDIS_HOST', '127.0.0.1')
 redis_port = int(os.getenv('REDIS_PORT', 6379))
 redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
 
-# Setup LLM client for web UI using our wrapper.
 llm_host = os.getenv('LLM_HOST', '127.0.0.1')
-llm_port = int(os.getenv('LLM_PORT', 11434))
-llm_client = LLMClientWrapper(host=f'http://{llm_host}:{llm_port}')
+llm_port = os.getenv('LLM_PORT', '11434')
+
+# If LLM_HOST already includes http(s), don't append port
+if llm_host.startswith("http://") or llm_host.startswith("https://"):
+    # Allow skipping port entirely for APIs like OpenAI
+    if llm_port and not llm_host.endswith(f":{llm_port}"):
+        llm_client = LLMClientWrapper(host=f'{llm_host}:{llm_port}')
+    else:
+        llm_client = LLMClientWrapper(host=llm_host)
+else:
+    llm_client = LLMClientWrapper(host=f'http://{llm_host}:{llm_port}')
 
 # Set the main event loop used for run_async.
 main_loop = asyncio.get_event_loop()
