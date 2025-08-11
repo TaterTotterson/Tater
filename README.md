@@ -37,8 +37,9 @@ The following plugins can be triggerd simple by asking Tater after you enable th
 | `webdav_browser`             | Allows browsing and downloading files from WebDAV servers                   | discord               |
 | `sftpgo_account`             | Creates SFTPGo user accounts and their credentials                          | discord, irc          |
 | `sftpgo_activity`            | Views SFTPGo user activity like file transfers and sessions                 | discord, irc          |
-| `premiumize_torrent`         | Checks if a torrent is cached on Premiumize and returns download links      | discord        |
+| `premiumize_torrent`         | Checks if a torrent is cached on Premiumize and returns download links      | discord               |
 | `premiumize_download`        | Checks Premiumize for cached file links and returns downloads               | discord, webui, irc   |
+| `device_compare`             | Compares two devices, fetching specs and FPS benchmarks from online sources | discord, webui        |
 
 ### 📡 RSS Feed Watcher (Built-in)
 
