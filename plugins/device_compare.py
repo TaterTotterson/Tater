@@ -90,8 +90,8 @@ class DeviceComparePlugin(ToolPlugin):
         max_attempts: int = 3,
     ) -> tuple[dict, list[str]]:
         """
-        Iteratively ask LLM to pick 3 spec links for THIS device, try fetch+extract;
-        if empty or fetch fails, remove tried links and pick again from remaining.
+        Iteratively ask LLM to pick 3 spec links for THIS device by INDEX (1-based).
+        If empty or fetch fails, remove tried links and pick again from remaining.
         Returns (specs_dict, used_sources).
         """
         tried: set[str] = set()
@@ -103,24 +103,41 @@ class DeviceComparePlugin(ToolPlugin):
                 f"You are {first} {last}. Choose 3 high-quality, SPEC-FOCUSED links for this device.\n"
                 f"- Prefer official spec pages, reputable reviews with spec tables, or datasheets.\n\n"
                 f"DEVICE: {device}\n\n"
-                f"SEARCH RESULTS:\n{self._format_results_for_llm(candidates)}\n\n"
-                "Return ONLY JSON:\n"
+                f"SEARCH RESULTS (numbered):\n{self._format_results_for_llm(candidates)}\n\n"
+                "Return ONLY JSON using 1-based indexes from the list above. DO NOT invent links.\n"
                 "{\n"
                 '  "function": "pick_sources",\n'
-                '  "arguments": {"urls": ["...","...","..."]}\n'
+                '  "arguments": {"indexes": [1, 2, 3]}\n'
                 "}"
             )
-            resp = await llm_client.chat(messages=[{"role":"system","content":prompt}])
-            content = resp["message"].get("content","").strip()
+            resp = await llm_client.chat(messages=[{"role": "system", "content": prompt}])
+            content = resp["message"].get("content", "").strip()
             try:
                 js = json.loads(content)
-            except:
+            except Exception:
                 js = json.loads(extract_json(content) or "{}")
-            urls = js.get("arguments", {}).get("urls", []) if isinstance(js, dict) else []
-            if not urls:
+
+            raw_idxs = (js.get("arguments", {}) or {}).get("indexes", [])
+            # Fallback: first 3 candidates
+            if not isinstance(raw_idxs, list) or not raw_idxs:
                 urls = [r["href"] for r in candidates[:3] if r.get("href")]
-            # Drop already tried
+            else:
+                # Map indexes -> urls (1-based to 0-based)
+                urls = []
+                for idx in raw_idxs:
+                    try:
+                        i = int(idx) - 1
+                        if 0 <= i < len(candidates):
+                            u = candidates[i].get("href")
+                            if u:
+                                urls.append(u)
+                    except Exception:
+                        continue
+
+            # Drop already-tried and dedupe
             urls = [u for u in urls if u not in tried]
+            seen = set()
+            urls = [u for u in urls if not (u in seen or seen.add(u))]
             return urls[:3]
 
         for _ in range(max_attempts):
@@ -129,24 +146,18 @@ class DeviceComparePlugin(ToolPlugin):
                 break
 
             texts = {u: self.fetch_page_text(u) for u in batch}
-            # mark tried (even if text empty) so we don't loop on dead links
             tried.update(batch)
 
-            # skip completely empty batch
             if not any(texts.values()):
                 continue
 
             specs = await self._extract_specs_from_pages(llm_client, device, texts)
-            # heuristic: if we got at least one meaningful field, accept
-            meaningful = any(specs.get(k) for k in ("cpu","gpu","ram","resolution","refresh_rate","ports"))
+            meaningful = any(specs.get(k) for k in ("cpu", "gpu", "ram", "resolution", "refresh_rate", "ports"))
             if meaningful:
-                specs.setdefault("_sources", [u for u,t in texts.items() if t])
+                specs.setdefault("_sources", [u for u, t in texts.items() if t])
                 specs.setdefault("title", device)
                 return specs, specs["_sources"]
 
-            # otherwise, continue to next attempt
-
-        # give up gracefully
         return {"title": device, "_sources": []}, []
 
     async def _pick_fps_with_retries(
@@ -155,7 +166,6 @@ class DeviceComparePlugin(ToolPlugin):
         device: str,
         base_results: List[Dict[str, str]],
         max_attempts: int = 3,
-        must_terms: list[str] | None = None,   # <— new
     ) -> tuple[dict, list[str]]:
         async def attempt_on_results(results):
             tried: set[str] = set()
@@ -163,33 +173,46 @@ class DeviceComparePlugin(ToolPlugin):
 
             async def choose_batch(candidates):
                 first, last = get_tater_name()
-                aliases_txt = ", ".join(must_terms or [])
                 prompt = (
                     f"You are {first} {last}. Choose up to 3 links that include per-game FPS/benchmark tables for:\n"
                     f"{device}\n\n"
                     "STRICT RULES:\n"
-                    f"- The page MUST be about this exact device. Its title or snippet should mention the device name "
-                    f"or one of these aliases: [{aliases_txt}].\n"
-                    "- Do NOT pick generic GPU reviews (e.g., 4070 Super), other devices, buying guides, or ‘which mini PC’ threads.\n"
-                    "- Prefer pages with tabular FPS by game.\n"
-                    "- If none qualify, return an empty array.\n\n"
-                    f"SEARCH RESULTS:\n{self._format_results_for_llm(candidates)}\n\n"
-                    "Return ONLY JSON:\n"
+                    f"- The page MUST clearly be about the exact device name the user typed ('{device}') — "
+                    "this name must appear in the page title, snippet, or URL.\n"
+                    "- If no links qualify, return an empty array.\n\n"
+                    f"SEARCH RESULTS (numbered):\n{self._format_results_for_llm(candidates)}\n\n"
+                    "Return ONLY JSON using 1-based indexes from the list above. DO NOT invent links.\n"
                     "{\n"
                     '  "function": "pick_fps_sources",\n'
-                    '  "arguments": {"urls": ["...","...","..."]}\n'
+                    '  "arguments": {"indexes": [1, 2, 3]}\n'
                     "}"
                 )
-                resp = await llm_client.chat(messages=[{"role":"system","content":prompt}])
-                content = resp["message"].get("content","").strip()
+                resp = await llm_client.chat(messages=[{"role": "system", "content": prompt}])
+                content = resp["message"].get("content", "").strip()
                 try:
                     js = json.loads(content)
-                except:
+                except Exception:
                     js = json.loads(extract_json(content) or "{}")
-                urls = js.get("arguments", {}).get("urls", []) if isinstance(js, dict) else []
-                if not urls:
+
+                raw_idxs = (js.get("arguments", {}) or {}).get("indexes", [])
+                if not isinstance(raw_idxs, list) or not raw_idxs:
                     urls = [r["href"] for r in candidates[:3] if r.get("href")]
+                else:
+                    urls = []
+                    for idx in raw_idxs:
+                        try:
+                            i = int(idx) - 1
+                            if 0 <= i < len(candidates):
+                                u = candidates[i].get("href")
+                                if u:
+                                    urls.append(u)
+                        except Exception:
+                            continue
+
+                # Drop already-tried and dedupe
                 urls = [u for u in urls if u not in tried]
+                seen = set()
+                urls = [u for u in urls if not (u in seen or seen.add(u))]
                 return urls[:3]
 
             for _ in range(max_attempts):
@@ -202,42 +225,26 @@ class DeviceComparePlugin(ToolPlugin):
 
                 if not any(texts.values()):
                     continue
-                # Keep only pages that actually mention the device/aliases
-                if must_terms:
-                    def mentions_any(s: str) -> bool:
-                        s = s.lower()
-                        return any(t in s for t in must_terms)
-                    texts = {u: t for u, t in texts.items() if t and mentions_any(t)}
-                    if not texts:
-                        continue
+
                 data = await self._extract_fps_table(llm_client, device, texts)
                 fps = data.get("fps_by_game", {})
                 if isinstance(fps, dict) and any(fps.values()):
-                    used = data.get("_sources", [u for u,t in texts.items() if t])
-                    return {"fps_by_game": fps}, used
+                    used = data.get("_sources", [u for u, t in texts.items() if t])
+                    return {
+                        "title": device,
+                        "fps_by_game": fps,
+                        "_sources": used
+                    }, used
 
-            return {}, []
+            # Match specs style: include title and _sources keys even if empty
+            return {"title": device, "fps_by_game": {}, "_sources": []}, []
 
-        # 1) try on base results
+        # Try only base results (no alt queries)
         got, used = await attempt_on_results(base_results)
-        if got:
+        if got and any(got.get("fps_by_game", {}).values()):
             return got, used
 
-        # 2) retry with alternative queries
-        alt_queries = [
-            f'{device} gaming benchmarks 1080p 1440p',
-            f'{device} performance tests fps',
-            f'{device} review fps results',
-        ]
-        for q in alt_queries:
-            alt_results = self.google_search(q, self._get_settings()["fps_results"])
-            if not alt_results:
-                continue
-            got, used = await attempt_on_results(alt_results)
-            if got:
-                return got, used
-
-        return {}, []
+        return {"title": device, "fps_by_game": {}, "_sources": []}, []
 
     async def _extract_specs_from_pages(self, llm_client, device_name: str, url_to_text: Dict[str, str]) -> Dict[str, Any]:
         docs = []
@@ -420,16 +427,6 @@ class DeviceComparePlugin(ToolPlugin):
         }
 
         def _load_font(size=16, bold=False):
-            candidates = [
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-                "/System/Library/Fonts/Supplemental/Arial Bold.ttf" if bold else "/System/Library/Fonts/Supplemental/Arial.ttf",
-            ]
-            for path in candidates:
-                if path and os.path.exists(path):
-                    try:
-                        return ImageFont.truetype(path, size=size)
-                    except Exception:
-                        pass
             return ImageFont.load_default()
 
         body_font   = _load_font(20, bold=False)
@@ -646,62 +643,46 @@ class DeviceComparePlugin(ToolPlugin):
             return {"error": "Search is not configured. Please add GOOGLE_API_KEY and GOOGLE_CX in Device Compare settings."}
 
         # SPEC side (per device, with retries)
-        results_a = self.google_search(f"{device_a} specs review datasheet comparison", cfg["spec_results"])
-        results_b = self.google_search(f"{device_b} specs review datasheet comparison", cfg["spec_results"])
+        results_a = self.google_search(f"{device_a} official hardware specifications tech specs", cfg["spec_results"])
+        results_b = self.google_search(f"{device_b} official hardware specifications tech specs", cfg["spec_results"])
         if not results_a or not results_b:
             return {"error": "No results found for one or both devices."}
 
         specs_a, spec_src_a = await self._pick_specs_with_retries(llm_client, device_a, results_a, max_attempts=3)
         specs_b, spec_src_b = await self._pick_specs_with_retries(llm_client, device_b, results_b, max_attempts=3)
 
-        # FPS side (optional, per device, LLM gate + alias prefilter + retries)
+        # FPS side
         fps_sources_a = []
         fps_sources_b = []
         fps_rows = []
 
         if cfg["enable_fps"]:
-            # helper: alias-aware prefilter for search results
-            def _prefilter_by_aliases(items, aliases):
-                if not items or not aliases:
-                    return items or []
-                out = []
-                for it in items:
-                    txt = f"{it.get('title','')} {it.get('snippet','')}".lower()
-                    if any(a in txt for a in aliases):
-                        out.append(it)
-                # if nothing passed the filter, fall back to originals (don't over-prune)
-                return out or (items or [])
-
             # Ask if FPS makes sense for each device
             should_a = await self._should_fetch_fps(llm_client, device_a, specs_a)
             should_b = await self._should_fetch_fps(llm_client, device_b, specs_b)
 
             if should_a:
-                aliases_a = self._device_aliases(device_a, specs_a) if hasattr(self, "_device_aliases") else [device_a.lower()]
-                fps_q_a = f'{device_a} game fps benchmark review "fps" 1080p 1440p'
+                fps_q_a = f'{device_a} gaming fps'
                 fps_res_a = self.google_search(fps_q_a, cfg["fps_results"]) or []
-                fps_res_a = _prefilter_by_aliases(fps_res_a, aliases_a)
                 fps_a, fps_src_a = await self._pick_fps_with_retries(
-                    llm_client, device_a, fps_res_a, max_attempts=3, must_terms=aliases_a
+                    llm_client, device_a, fps_res_a, max_attempts=3
                 )
-                if fps_a.get("fps_by_game"):
-                    specs_a["fps_by_game"] = fps_a["fps_by_game"]
-                    fps_sources_a = fps_src_a
+                # Always attach the dict (it includes title/fps_by_game/_sources)
+                specs_a["fps_by_game"] = fps_a.get("fps_by_game", {})
+                fps_sources_a = fps_src_a
 
             if should_b:
-                aliases_b = self._device_aliases(device_b, specs_b) if hasattr(self, "_device_aliases") else [device_b.lower()]
-                fps_q_b = f'{device_b} game fps benchmark review "fps" 1080p 1440p'
+                fps_q_b = f'{device_b} gaming fps'
                 fps_res_b = self.google_search(fps_q_b, cfg["fps_results"]) or []
-                fps_res_b = _prefilter_by_aliases(fps_res_b, aliases_b)
                 fps_b, fps_src_b = await self._pick_fps_with_retries(
-                    llm_client, device_b, fps_res_b, max_attempts=3, must_terms=aliases_b
+                    llm_client, device_b, fps_res_b, max_attempts=3
                 )
-                if fps_b.get("fps_by_game"):
-                    specs_b["fps_by_game"] = fps_b["fps_by_game"]
-                    fps_sources_b = fps_src_b
+                specs_b["fps_by_game"] = fps_b.get("fps_by_game", {})
+                fps_sources_b = fps_src_b
 
-            # Build FPS rows only if we actually found data
-            if specs_a.get("fps_by_game") or specs_b.get("fps_by_game"):
+            # Build FPS rows only if we actually found any game entries
+            if (specs_a.get("fps_by_game") and any(specs_a["fps_by_game"].values())) or \
+               (specs_b.get("fps_by_game") and any(specs_b["fps_by_game"].values())):
                 fps_rows = self._build_fps_rows(specs_a, specs_b, cfg["max_fps_rows"])
 
         # ensure titles+sources
@@ -729,29 +710,6 @@ class DeviceComparePlugin(ToolPlugin):
             "title": f"{specs_a.get('title','Device A')} vs {specs_b.get('title','Device B')}",
             "sources_text": sources_text
         }
-
-    def _device_aliases(self, device: str, specs: Dict[str, Any] | None = None) -> list[str]:
-        name = (device or "").strip()
-        al = {name.lower(), name.replace("-", " ").lower(), name.replace(" ", "-").lower()}
-
-        if specs:
-            brand = (specs.get("brand","") or "").strip()
-            model = (specs.get("model","") or "").strip()
-            if brand or model:
-                combos = [
-                    f"{brand} {model}".strip(),
-                    f"{brand}-{model}".strip("-"),
-                    model,
-                ]
-                for c in combos:
-                    c = c.strip()
-                    if c:
-                        al.add(c.lower())
-                        al.add(c.replace("-", " ").lower())
-                        al.add(c.replace(" ", "-").lower())
-
-        # de-dupe & drop empties
-        return [a for a in sorted(al) if a]
 
     # ---------- platform handlers ----------
     async def handle_discord(self, message, args, llm_client):
