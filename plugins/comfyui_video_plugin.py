@@ -47,7 +47,7 @@ class ComfyUIVideoPlugin(ToolPlugin):
             "description": "How many clips to generate and merge into one video."
         }
     }
-    waiting_prompt_template = "Write a fun, upbeat message saying you’re directing a short video now! Only output that message."
+    waiting_prompt_template = "Generate a fun, upbeat message saying you’re directing a short video now! Only output that message."
 
     res_map = {
         "144p": (256, 144),
@@ -124,7 +124,7 @@ class ComfyUIVideoPlugin(ToolPlugin):
         except ValueError:
             num_clips = 1
 
-        # 👇 Pull FPS once from the image→video workflow stored in Redis (fallback to 16 if missing)
+        # Pull FPS once from the image→video workflow stored in Redis (fallback to 16 if missing)
         try:
             wf = ComfyUIImageVideoPlugin.get_workflow_template()
             fps = next(
@@ -191,7 +191,7 @@ class ComfyUIVideoPlugin(ToolPlugin):
             ])
             animation_desc = anim_resp["message"]["content"].strip() or "A short animation that reflects the prompt."
 
-            # 👇 Use frame_count computed from seconds_per_clip × fps
+            # Use frame_count computed from seconds_per_clip × fps
             anim_bytes, ext = await asyncio.to_thread(
                 anim_plugin.process_prompt,
                 animation_desc,
@@ -209,7 +209,7 @@ class ComfyUIVideoPlugin(ToolPlugin):
 
             if ext == "webp":
                 mp4_path = f"/tmp/{job_id}_clip_{i}.mp4"
-                # 👇 keep playback speed consistent with the workflow FPS
+                # keep playback speed consistent with the workflow FPS
                 self.webp_to_mp4(anim_path, mp4_path, fps=fps, duration=seconds_per_clip)
                 temp_paths.append(mp4_path)
                 final_clips.append(mp4_path)

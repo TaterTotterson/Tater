@@ -51,7 +51,7 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
             "description": "Upload your ComfyUI JSON workflow template."
         }
     }
-    waiting_prompt_template = "Write a playful, friendly message saying you’re bringing their image to life now! Only output that message."
+    waiting_prompt_template = "Generate a playful, friendly message saying you’re bringing their image to life now! Only output that message."
     platforms = ["webui"]
 
     @staticmethod
