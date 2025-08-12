@@ -134,6 +134,17 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
         num_clips = len(sections) * 2
         per = duration / num_clips
 
+        # Pull FPS once from the image→video workflow stored in Redis
+        wf = ComfyUIImageVideoPlugin.get_workflow_template()
+        fps = 16  # default
+        for node in wf.values():
+            if node.get("class_type") == "CreateVideo":
+                try:
+                    fps = int(node["inputs"].get("fps", 16))
+                except Exception:
+                    fps = 16
+                break
+
         vids = []
         exts_used = set()
 
@@ -159,10 +170,9 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
                 part_hint = f" (Part {part_num + 1})" if part_num > 0 else ""
 
                 img_desc_prompt = (
-                    f"The following are song lyrics:\n\n"
-                    f"\"{section}\"\n\n"
+                    f'The following are song lyrics:\n\n"{section}"\n\n'
                     "Write a single clear sentence describing a visual scene or illustration that conveys the meaning, emotion, or subject of these lyrics. "
-                    "If the lyrics are subjective or abstract (e.g., 'Do you think I'm beautiful?'), imagine a representative visual (e.g., a beautiful woman in a serene setting). "
+                    "If the lyrics are subjective or abstract (e.g., 'Do you think I'm beautiful?'), imagine a representative visual. "
                     "Avoid text overlays and focus on a vivid scene." + part_hint
                 )
 
@@ -189,10 +199,8 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
                 desc = desc.strip() or "An interesting scene"
 
                 animation_prompt = (
-                    f"The following is a visual description of an image:\n\n"
-                    f"\"{desc}\"\n\n"
-                    f"And here is a section of song lyrics:\n\n"
-                    f"\"{section}\"\n\n"
+                    f'The following is a visual description of an image:\n\n"{desc}"\n\n'
+                    f'And here is a section of song lyrics:\n\n"{section}"\n\n'
                     "Write a single clear sentence that describes what this image depicts and how it might animate to reflect the lyrics."
                 )
 
@@ -203,6 +211,10 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
                 animation_desc = resp["message"]["content"].strip() or "A scene that reflects the lyrics."
 
                 upload_filename = f"frame_{clip_idx}.png"
+
+                # frame count uses the fps we pulled from the template
+                frame_count = int(per * fps)
+
                 anim_bytes, ext = await asyncio.to_thread(
                     anim_plugin.process_prompt,
                     animation_desc,
@@ -210,7 +222,7 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
                     upload_filename,
                     w,
                     h,
-                    int(per * 16)
+                    frame_count
                 )
 
                 exts_used.add(ext)
@@ -220,7 +232,8 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
 
                 if ext == "webp":
                     tmp_mp4 = f"/tmp/{job_id}_clip_{clip_idx}.mp4"
-                    self.webp_to_mp4(tmp_path, tmp_mp4, fps=16, duration=per)
+                    # keep playback speed consistent with generation
+                    self.webp_to_mp4(tmp_path, tmp_mp4, fps=fps, duration=per)
                     vids.append(tmp_mp4)
                 else:
                     vids.append(tmp_path)

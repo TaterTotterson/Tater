@@ -6,6 +6,8 @@ import requests
 import asyncio
 import websocket
 import base64
+from PIL import Image
+from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 from plugin_base import ToolPlugin
 from helpers import redis_client, get_latest_image_from_history
 
@@ -52,9 +54,17 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
     waiting_prompt_template = "Write a playful, friendly message saying you’re bringing their image to life now! Only output that message."
     platforms = ["webui"]
 
+    @staticmethod
+    def get_fps_from_workflow(wf: dict, default: int = 16) -> int:
+        try:
+            for node in wf.values():
+                if node.get("class_type") == "CreateVideo":
+                    return int(node["inputs"].get("fps", default))
+        except Exception:
+            pass
+        return default
+
     def webp_to_mp4(self, input_file, output_file, fps=16, duration=5):
-        from PIL import Image
-        from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 
         frames, tmp_dir, frame_files = [], f"{os.path.dirname(input_file)}/frames_{uuid.uuid4().hex[:6]}", []
         os.makedirs(tmp_dir, exist_ok=True)
@@ -197,14 +207,16 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
         resolution = raw_res.decode("utf-8") if isinstance(raw_res, bytes) else raw_res
         default_w, default_h = res_map.get(resolution, (640, 480))
 
-        fps = 16
+        # get fps from the workflow's CreateVideo node (fallback 16)
+        fps = ComfyUIImageVideoPlugin.get_fps_from_workflow(wf, default=16)
+
         raw_length = settings.get("LENGTH", b"1")
         try:
             default_seconds = int(raw_length.decode() if isinstance(raw_length, bytes) else raw_length)
         except ValueError:
             default_seconds = 1
 
-        default_frames = default_seconds * fps
+        default_frames = max(1, default_seconds * fps)
 
         w = width or default_w
         h = height or default_h
@@ -214,6 +226,7 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
         for node in wf.values():
             if node.get("class_type") == "LoadImage":
                 node["inputs"]["image"] = uploaded
+
             if node.get("class_type") == "CLIPTextEncode" and (
                 "Positive" in node.get("_meta", {}).get("title", "") or
                 "Prompt" in node.get("_meta", {}).get("title", "")
@@ -221,15 +234,14 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
                 if not patched_first_prompt:
                     node["inputs"]["text"] = prompt
                     patched_first_prompt = True
-            if node.get("class_type") == "WanImageToVideo":
-                node["inputs"]["width"] = w
-                node["inputs"]["height"] = h
-                node["inputs"]["length"] = l
-            if node.get("class_type") == "WanVaceToVideo":
-                node["inputs"]["width"] = w
-                node["inputs"]["height"] = h
-                node["inputs"]["length"] = l
-            if node.get("class_type") == "CosmosPredict2ImageToVideoLatent":
+
+            # set width/height/length on relevant I2V nodes (includes WAN 2.2)
+            if node.get("class_type") in {
+                "WanImageToVideo",
+                "WanVaceToVideo",
+                "CosmosPredict2ImageToVideoLatent",
+                "Wan22ImageToVideoLatent",   # NEW for your template
+            }:
                 node["inputs"]["width"] = w
                 node["inputs"]["height"] = h
                 node["inputs"]["length"] = l
@@ -253,7 +265,7 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
             animated_bytes, ext = await asyncio.to_thread(
                 self.process_prompt, prompt, image_bytes, filename
             )
-            # Convert webp to mp4 if needed
+
             if ext == "webp":
                 tmp_webp = f"/tmp/{uuid.uuid4().hex}.webp"
                 tmp_mp4 = f"/tmp/{uuid.uuid4().hex}.mp4"
@@ -267,7 +279,11 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
                 except ValueError:
                     duration = 10
 
-                self.webp_to_mp4(tmp_webp, tmp_mp4, fps=16, duration=duration)
+                # pull fps from the stored workflow for conversion too
+                wf = ComfyUIImageVideoPlugin.get_workflow_template()
+                fps = ComfyUIImageVideoPlugin.get_fps_from_workflow(wf, default=16)
+
+                self.webp_to_mp4(tmp_webp, tmp_mp4, fps=fps, duration=duration)
 
                 with open(tmp_mp4, "rb") as f:
                     animated_bytes = f.read()
@@ -275,7 +291,7 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
                 mime = "video/mp4"
                 file_name = "animated.mp4"
                 msg = await llm_client.chat([
-                    {"role": "system", "content": f"The user has just been shown an animated video based on the prompt: \"{prompt}\"."},
+                    {"role": "system", "content": f'The user has just been shown an animated video based on the prompt: "{prompt}".'},
                     {"role": "user", "content": "Reply with a short, fun message celebrating the animation. No lead-in phrases or instructions."}
                 ])
 
@@ -287,6 +303,7 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
                 mime = "video/mp4" if ext == "mp4" else "image/webp"
                 file_name = f"animated.{ext}"
                 followup_text = "Here's your animated video!" if ext == "mp4" else "Here's your animated image!"
+
             return [
                 {
                     "type": "video",
