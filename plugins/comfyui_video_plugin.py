@@ -114,15 +114,25 @@ class ComfyUIVideoPlugin(ToolPlugin):
 
         raw_len = settings.get("VIDEO_LENGTH", b"5")
         try:
-            duration = int(raw_len.decode() if isinstance(raw_len, bytes) else raw_len)
+            seconds_per_clip = int(raw_len.decode() if isinstance(raw_len, bytes) else raw_len)
         except ValueError:
-            duration = 5
+            seconds_per_clip = 5
 
         raw_clips = settings.get("VIDEO_CLIPS", b"1")
         try:
             num_clips = int(raw_clips.decode() if isinstance(raw_clips, bytes) else raw_clips)
         except ValueError:
             num_clips = 1
+
+        # 👇 Pull FPS once from the image→video workflow stored in Redis (fallback to 16 if missing)
+        try:
+            wf = ComfyUIImageVideoPlugin.get_workflow_template()
+            fps = next(
+                (int(n["inputs"].get("fps", 16)) for n in wf.values() if n.get("class_type") == "CreateVideo"),
+                16
+            )
+        except Exception:
+            fps = 16
 
         job_id = str(uuid.uuid4())[:8]
         temp_paths, final_clips = [], []
@@ -143,6 +153,9 @@ class ComfyUIVideoPlugin(ToolPlugin):
         raw_list = resp["message"]["content"]
         image_prompts = self.parse_llm_prompt_list(raw_list, num_clips)
 
+        # frames per clip (length in frames is what ComfyUI expects)
+        frame_count = max(1, int(seconds_per_clip * fps))
+
         for i in range(num_clips):
             image_prompt = (
                 image_prompts[i]
@@ -160,9 +173,9 @@ class ComfyUIVideoPlugin(ToolPlugin):
                 f.write(image_bytes)
             temp_paths.append(tmp_img)
 
-            with open(tmp_img, "rb") as f:
-                image_content = f.read()
-            desc = await vision_plugin.process_image_web(image_content, tmp_img)
+            # Optional: describe the image for a better animation prompt (kept from your version)
+            from plugins.vision_describer import VisionDescriberPlugin
+            desc = await vision_plugin.process_image_web(open(tmp_img, "rb").read(), tmp_img)
             desc = desc.strip() or "An interesting scene"
 
             animation_prompt = (
@@ -178,6 +191,7 @@ class ComfyUIVideoPlugin(ToolPlugin):
             ])
             animation_desc = anim_resp["message"]["content"].strip() or "A short animation that reflects the prompt."
 
+            # 👇 Use frame_count computed from seconds_per_clip × fps
             anim_bytes, ext = await asyncio.to_thread(
                 anim_plugin.process_prompt,
                 animation_desc,
@@ -185,7 +199,7 @@ class ComfyUIVideoPlugin(ToolPlugin):
                 f"clip_{i}.png",
                 w,
                 h,
-                duration * 16
+                frame_count
             )
 
             anim_path = f"/tmp/{job_id}_clip_{i}.{ext}"
@@ -195,7 +209,8 @@ class ComfyUIVideoPlugin(ToolPlugin):
 
             if ext == "webp":
                 mp4_path = f"/tmp/{job_id}_clip_{i}.mp4"
-                self.webp_to_mp4(anim_path, mp4_path, fps=16, duration=duration)
+                # 👇 keep playback speed consistent with the workflow FPS
+                self.webp_to_mp4(anim_path, mp4_path, fps=fps, duration=seconds_per_clip)
                 temp_paths.append(mp4_path)
                 final_clips.append(mp4_path)
             else:
