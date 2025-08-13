@@ -3,8 +3,7 @@
   <h1>Tater</h1>
 </div>
 
-**Tater** is an AI assistant that connects to any OpenAI API–compatible LLM, giving you a powerful set of AI-driven tools. It includes a WebUI for setup and private chats, and works across **Discord**, **IRC**, and the WebUI itself.  
-**Note:** If you’re using anything other than Ollama, make sure you have a [correct prompt template configured](https://github.com/MasterPhooey/Tater/wiki/Prompt-Templates) for your app to get the best results.
+**Tater** is an AI assistant that connects to any OpenAI API–compatible LLM, giving you a powerful set of AI-driven tools. It includes a WebUI for setup and private chats, and works across **Discord**, **IRC**, and the WebUI itself.
 
 ---
 
