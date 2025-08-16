@@ -472,6 +472,8 @@ def start_plugin_job(plugin_name, args, llm_client):
     redis_key = f"webui:plugin_jobs:{job_id}"
     redis_client.hset(redis_key, mapping={
         "status": "pending",
+        "is_running": "1",
+        "is_done": "0",
         "plugin": plugin_name,
         "args": json.dumps(args),
         "created_at": time.time()
@@ -484,15 +486,20 @@ def start_plugin_job(plugin_name, args, llm_client):
             responses = result if isinstance(result, list) else [result]
             redis_client.hset(redis_key, mapping={
                 "status": "done",
+                "is_running": "0",
+                "is_done": "1",
                 "responses": json.dumps(responses)
             })
         except Exception as e:
             redis_client.hset(redis_key, mapping={
                 "status": "error",
+                "is_running": "0",
+                "is_done": "0",
                 "error": str(e)
             })
         finally:
-            redis_client.set("webui:needs_rerun", "true")  # Trigger UI update
+            # one-shot refresh signal (any job finishing should refresh)
+            redis_client.set("webui:needs_rerun", "true")
 
     threading.Thread(target=job_runner, daemon=True).start()
     return job_id
@@ -742,10 +749,13 @@ if user_input := st.chat_input(f"Chat with {first_name}…"):
     # Force rerun, assistant reply will render on next pass
     st.rerun()
 
-# Check for pending plugin jobs and gather names
+# ---------------- Pending jobs spinner with transition-based refresh ----------------
+# Gather pending plugin names for the UI label (unchanged)
 pending_plugins = []
+pending_keys = set()
 for key in redis_client.scan_iter("webui:plugin_jobs:*"):
     if redis_client.hget(key, "status") == "pending":
+        pending_keys.add(key)
         job = redis_client.hgetall(key)
         plugin_name = job.get("plugin")
         if plugin_name in plugin_registry:
@@ -753,17 +763,35 @@ for key in redis_client.scan_iter("webui:plugin_jobs:*"):
             display_name = getattr(plugin, "pretty_name", plugin.name)
             pending_plugins.append(display_name)
 
-# If any are pending, show spinner with names
+# If any are pending, show spinner and poll for either
 if pending_plugins:
     names_str = ", ".join(pending_plugins)
     with st.spinner(f"{first_name} is working on: {names_str}"):
+        previous_pending = set(pending_keys)
         while True:
-            still_pending = False
+            transition_detected = False
+            current_pending = set()
+
             for key in redis_client.scan_iter("webui:plugin_jobs:*"):
-                if redis_client.hget(key, "status") == "pending":
-                    still_pending = True
-                    break
-            if not still_pending:
+                status = redis_client.hget(key, "status")
+
+                if status == "pending":
+                    current_pending.add(key)
+                else:
+                    if key in previous_pending:
+                        transition_detected = True
+
+            # safety: handle vanished keys too
+            for key in list(previous_pending):
+                if not redis_client.exists(key):
+                    transition_detected = True
+
+            if transition_detected:
                 break
+            if not current_pending:
+                break
+
+            previous_pending = current_pending
             time.sleep(1)
+
         st.rerun()
