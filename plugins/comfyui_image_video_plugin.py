@@ -4,14 +4,13 @@ import json
 import uuid
 import requests
 import asyncio
-import websocket
 import base64
+import secrets
+import copy
 from PIL import Image
 from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 from plugin_base import ToolPlugin
-from helpers import redis_client, get_latest_image_from_history
-
-client_id = str(uuid.uuid4())
+from helpers import redis_client, get_latest_image_from_history, run_comfy_prompt
 
 class ComfyUIImageVideoPlugin(ToolPlugin):
     name = "comfyui_image_video"
@@ -54,6 +53,65 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
     waiting_prompt_template = "Generate a playful, friendly message saying you’re bringing their image to life now! Only output that message."
     platforms = ["webui"]
 
+    # ---------------------------
+    # URL helpers
+    # ---------------------------
+    @staticmethod
+    def get_base_http() -> str:
+        settings = redis_client.hgetall(f"plugin_settings:{ComfyUIImageVideoPlugin.settings_category}")
+        url_raw = settings.get("COMFYUI_VIDEO_URL", b"")
+        url = url_raw.decode("utf-8").strip() if isinstance(url_raw, (bytes, bytearray)) else (url_raw or "").strip()
+        if not url:
+            url = "http://localhost:8188"
+        if not url.startswith("http://") and not url.startswith("https://"):
+            url = "http://" + url
+        return url.rstrip("/")
+
+    @staticmethod
+    def get_base_ws(base_http: str) -> str:
+        # http->ws, https->wss
+        scheme = "wss" if base_http.startswith("https://") else "ws"
+        return base_http.replace("http", scheme, 1)
+
+    # ---------------------------
+    # Workflow/template + I/O
+    # ---------------------------
+    @staticmethod
+    def get_workflow_template() -> dict:
+        settings = redis_client.hgetall(f"plugin_settings:{ComfyUIImageVideoPlugin.settings_category}")
+        raw = settings.get("COMFYUI_VIDEO_WORKFLOW", b"")
+        workflow_str = raw.decode("utf-8").strip() if isinstance(raw, (bytes, bytearray)) else (raw or "").strip()
+        if not workflow_str:
+            raise RuntimeError("No workflow found in Redis. Please upload a valid JSON workflow.")
+        return json.loads(workflow_str)
+
+    @staticmethod
+    def upload_image(base_http: str, image_bytes: bytes, filename: str) -> str:
+        resp = requests.post(
+            f"{base_http}/upload/image",
+            files={"image": (filename, image_bytes)},
+            data={"overwrite": "true"},
+            timeout=60
+        )
+        resp.raise_for_status()
+        result = resp.json()
+        name = result.get("name") or result.get("filename")
+        sub = result.get("subfolder", "")
+        return f"{sub}/{name}" if sub else name
+
+    @staticmethod
+    def get_history(base_http: str, prompt_id: str) -> dict:
+        r = requests.get(f"{base_http}/history/{prompt_id}", timeout=30)
+        r.raise_for_status()
+        return r.json()
+
+    @staticmethod
+    def fetch_asset(base_http: str, filename: str, subfolder: str, folder_type: str) -> bytes:
+        params = {"filename": filename, "subfolder": subfolder, "type": folder_type}
+        r = requests.get(f"{base_http}/view", params=params, timeout=60)
+        r.raise_for_status()
+        return r.content
+
     @staticmethod
     def get_fps_from_workflow(wf: dict, default: int = 16) -> int:
         try:
@@ -64,8 +122,8 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
             pass
         return default
 
+    # Convert animated webp (from Comfy) into mp4 for better compatibility
     def webp_to_mp4(self, input_file, output_file, fps=16, duration=5):
-
         frames, tmp_dir, frame_files = [], f"{os.path.dirname(input_file)}/frames_{uuid.uuid4().hex[:6]}", []
         os.makedirs(tmp_dir, exist_ok=True)
         try:
@@ -85,175 +143,140 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
         clip.write_videofile(output_file, codec='libx264', fps=fps, audio=False, logger=None)
         for p in frame_files:
             os.remove(p)
-        os.rmdir(tmp_dir) 
+        os.rmdir(tmp_dir)
+
+    # ---------------------------
+    # Core generation (sync)
+    # ---------------------------
+    @staticmethod
+    def _apply_overrides(workflow: dict, prompt_text: str, uploaded_image_path: str, width: int, height: int, frames: int):
+        """Patch the uploaded image path, prompt text, and geometry/length into the workflow."""
+        patched_first_prompt = False
+        for node in workflow.values():
+            if not isinstance(node, dict):
+                continue
+
+            # point loaders to uploaded image
+            if node.get("class_type") == "LoadImage":
+                node.setdefault("inputs", {})
+                node["inputs"]["image"] = uploaded_image_path
+
+            # insert prompt for CLIPTextEncode (Positive/Prompt)
+            if node.get("class_type") == "CLIPTextEncode" and (
+                "Positive" in node.get("_meta", {}).get("title", "") or
+                "Prompt" in node.get("_meta", {}).get("title", "")
+            ):
+                if not patched_first_prompt:
+                    node.setdefault("inputs", {})
+                    node["inputs"]["text"] = prompt_text
+                    patched_first_prompt = True
+
+            # set width/height/length on common I2V nodes (WAN 2.2 etc.)
+            if node.get("class_type") in {
+                "WanImageToVideo",
+                "WanVaceToVideo",
+                "CosmosPredict2ImageToVideoLatent",
+                "Wan22ImageToVideoLatent",
+            }:
+                node.setdefault("inputs", {})
+                node["inputs"]["width"] = width
+                node["inputs"]["height"] = height
+                node["inputs"]["length"] = frames
 
     @staticmethod
-    def get_server_address():
+    def process_prompt(prompt: str, image_bytes: bytes, filename: str, width: int = None, height: int = None, length: int = None):
+        base_http = ComfyUIImageVideoPlugin.get_base_http()
+        base_ws   = ComfyUIImageVideoPlugin.get_base_ws(base_http)
+
+        # upload the source image
+        uploaded = ComfyUIImageVideoPlugin.upload_image(base_http, image_bytes, filename)
+
+        # pull and clone template per job
+        wf = copy.deepcopy(ComfyUIImageVideoPlugin.get_workflow_template())
+
+        # resolution defaults
         settings = redis_client.hgetall(f"plugin_settings:{ComfyUIImageVideoPlugin.settings_category}")
-        url_raw = settings.get("COMFYUI_VIDEO_URL", b"")
-        url = url_raw.decode("utf-8").strip() if isinstance(url_raw, bytes) else url_raw.strip()
-        if url.startswith("http://"):
-            url = url[len("http://"):]
-        elif url.startswith("https://"):
-            url = url[len("https://"):]
-        return url or "localhost:8188"
+        res_map = {
+            "144p": (256, 144), "240p": (426, 240), "360p": (480, 360),
+            "480p": (640, 480), "720p": (1280, 720), "1080p": (1920, 1080)
+        }
+        raw_res = settings.get("IMAGE_RESOLUTION", b"480p")
+        resolution = raw_res.decode("utf-8") if isinstance(raw_res, (bytes, bytearray)) else (raw_res or "480p")
+        default_w, default_h = res_map.get(resolution, (640, 480))
 
-    @staticmethod
-    def get_workflow_template():
-        settings = redis_client.hgetall(f"plugin_settings:{ComfyUIImageVideoPlugin.settings_category}")
-        raw = settings.get("COMFYUI_VIDEO_WORKFLOW", b"")
-        workflow_str = raw.decode("utf-8").strip() if isinstance(raw, bytes) else raw.strip()
-        if not workflow_str:
-            raise RuntimeError("No workflow found in Redis. Please upload a valid JSON workflow.")
-        return json.loads(workflow_str)
+        # fps from workflow
+        fps = ComfyUIImageVideoPlugin.get_fps_from_workflow(wf, default=16)
 
-    @staticmethod
-    def upload_image(image_bytes: bytes, filename: str) -> str:
-        server = ComfyUIImageVideoPlugin.get_server_address()
-        resp = requests.post(
-            f"http://{server}/upload/image",
-            files={"image": (filename, image_bytes)},
-            data={"overwrite": "true"}
-        )
-        resp.raise_for_status()
-        result = resp.json()
-        name = result.get("name") or result.get("filename")
-        sub = result.get("subfolder", "")
-        return f"{sub}/{name}" if sub else name
+        # length defaults
+        raw_length = settings.get("LENGTH", b"1")
+        try:
+            default_seconds = int(raw_length.decode() if isinstance(raw_length, (bytes, bytearray)) else raw_length)
+        except ValueError:
+            default_seconds = 1
+        default_frames = max(1, default_seconds * fps)
 
-    @staticmethod
-    def get_image(filename, subfolder, folder_type) -> bytes:
-        server = ComfyUIImageVideoPlugin.get_server_address()
-        params = {"filename": filename, "subfolder": subfolder, "type": folder_type}
-        url = f"http://{server}/view?{requests.compat.urlencode(params)}"
-        return requests.get(url).content
+        w = width or default_w
+        h = height or default_h
+        frames = length or default_frames
 
-    @staticmethod
-    def queue_workflow(workflow: dict) -> dict:
-        server = ComfyUIImageVideoPlugin.get_server_address()
-        payload = {"prompt": workflow, "client_id": client_id}
-        resp = requests.post(
-            f"http://{server}/prompt",
-            json=payload,
-            headers={"Content-Type": "application/json"}
-        )
-        resp.raise_for_status()
-        return resp.json()
+        # randomize motion seeds
+        random_seed = secrets.randbits(63)
+        for node in wf.values():
+            if not isinstance(node, dict):
+                continue
+            if node.get("class_type") in {"KSampler", "KSamplerAdvanced"}:
+                inputs = node.get("inputs", {})
+                if inputs.get("add_noise") == "enable" and "noise_seed" in inputs:
+                    inputs["noise_seed"] = int(random_seed)
+                if "seed" in inputs:
+                    inputs["seed"] = int(random_seed)
 
-    @staticmethod
-    def collect_outputs(ws, workflow: dict):
-        info = ComfyUIImageVideoPlugin.queue_workflow(workflow)
-        pid = info["prompt_id"]
+        # patch prompt/image/geometry into the per-job workflow
+        ComfyUIImageVideoPlugin._apply_overrides(wf, prompt, uploaded, w, h, frames)
 
-        # Wait for execution to complete
-        while True:
-            frame = ws.recv()
-            if isinstance(frame, str):
-                msg = json.loads(frame)
-                if msg.get("type") == "executing" and msg["data"].get("prompt_id") == pid and msg["data"]["node"] is None:
-                    break
+        # run Comfy with a per-job client_id + WS and wait by prompt_id
+        prompt_id, _ = run_comfy_prompt(base_http, base_ws, wf)
 
-        server = ComfyUIImageVideoPlugin.get_server_address()
-        hist = requests.get(f"http://{server}/history/{pid}").json()[pid]
+        # fetch outputs from history
+        hist = ComfyUIImageVideoPlugin.get_history(base_http, prompt_id).get(prompt_id, {})
+        outputs = hist.get("outputs", {}) if isinstance(hist, dict) else {}
 
-        # Try normal inline output first
-        for node in hist["outputs"].values():
+        # try image outputs
+        for node in outputs.values():
             if "images" in node:
                 img = node["images"][0]
-                content = ComfyUIImageVideoPlugin.get_image(img["filename"], img["subfolder"], img["type"])
+                content = ComfyUIImageVideoPlugin.fetch_asset(base_http, img["filename"], img.get("subfolder",""), img.get("type","output"))
                 ext = os.path.splitext(img["filename"])[-1].lstrip(".") or "webp"
                 return content, ext
 
+        # try video outputs
+        for node in outputs.values():
             if "videos" in node:
                 vid = node["videos"][0]
-                content = ComfyUIImageVideoPlugin.get_image(vid["filename"], vid["subfolder"], vid["type"])
+                content = ComfyUIImageVideoPlugin.fetch_asset(base_http, vid["filename"], vid.get("subfolder",""), vid.get("type","output"))
                 ext = os.path.splitext(vid["filename"])[-1].lstrip(".") or "mp4"
                 return content, ext
 
-        # Fallback: manually resolve SaveVideo output
-        for node in workflow.values():
+        # fallback: guess SaveVideo prefix on disk
+        for node in wf.values():
             if node.get("class_type") == "SaveVideo":
                 prefix = node["inputs"].get("filename_prefix", "ComfyUI")
-                # Handle subfolder/base name
                 if "/" in prefix:
                     subfolder, base = prefix.split("/", 1)
                 else:
                     subfolder, base = "", prefix
                 guessed_filename = f"{base}.mp4"
                 try:
-                    content = ComfyUIImageVideoPlugin.get_image(guessed_filename, subfolder, "output")
+                    content = ComfyUIImageVideoPlugin.fetch_asset(base_http, guessed_filename, subfolder, "output")
                     return content, "mp4"
                 except Exception as e:
                     raise RuntimeError(f"Could not fetch video file from disk: {e}")
 
         raise RuntimeError("No output found in ComfyUI history or disk.")
 
-    @staticmethod
-    def process_prompt(prompt: str, image_bytes: bytes, filename: str, width: int = None, height: int = None, length: int = None):
-        uploaded = ComfyUIImageVideoPlugin.upload_image(image_bytes, filename)
-        wf = ComfyUIImageVideoPlugin.get_workflow_template()
-
-        settings = redis_client.hgetall(f"plugin_settings:{ComfyUIImageVideoPlugin.settings_category}")
-        res_map = {
-            "144p": (256, 144),
-            "240p": (426, 240),
-            "360p": (480, 360),
-            "480p": (640, 480),
-            "720p": (1280, 720),
-            "1080p": (1920, 1080)
-        }
-
-        raw_res = settings.get("IMAGE_RESOLUTION", b"480p")
-        resolution = raw_res.decode("utf-8") if isinstance(raw_res, bytes) else raw_res
-        default_w, default_h = res_map.get(resolution, (640, 480))
-
-        # get fps from the workflow's CreateVideo node (fallback 16)
-        fps = ComfyUIImageVideoPlugin.get_fps_from_workflow(wf, default=16)
-
-        raw_length = settings.get("LENGTH", b"1")
-        try:
-            default_seconds = int(raw_length.decode() if isinstance(raw_length, bytes) else raw_length)
-        except ValueError:
-            default_seconds = 1
-
-        default_frames = max(1, default_seconds * fps)
-
-        w = width or default_w
-        h = height or default_h
-        l = length or default_frames
-
-        patched_first_prompt = False
-        for node in wf.values():
-            if node.get("class_type") == "LoadImage":
-                node["inputs"]["image"] = uploaded
-
-            if node.get("class_type") == "CLIPTextEncode" and (
-                "Positive" in node.get("_meta", {}).get("title", "") or
-                "Prompt" in node.get("_meta", {}).get("title", "")
-            ):
-                if not patched_first_prompt:
-                    node["inputs"]["text"] = prompt
-                    patched_first_prompt = True
-
-            # set width/height/length on relevant I2V nodes (includes WAN 2.2)
-            if node.get("class_type") in {
-                "WanImageToVideo",
-                "WanVaceToVideo",
-                "CosmosPredict2ImageToVideoLatent",
-                "Wan22ImageToVideoLatent",   # NEW for your template
-            }:
-                node["inputs"]["width"] = w
-                node["inputs"]["height"] = h
-                node["inputs"]["length"] = l
-
-        ws = websocket.WebSocket()
-        server = ComfyUIImageVideoPlugin.get_server_address()
-        ws.connect(f"ws://{server}/ws?clientId={client_id}")
-        try:
-            return ComfyUIImageVideoPlugin.collect_outputs(ws, wf)
-        finally:
-            ws.close()
-
+    # ---------------------------
+    # Orchestration
+    # ---------------------------
     async def _generate(self, args, llm_client):
         prompt = args.get("prompt", "").strip()
         image_bytes, filename = get_latest_image_from_history("webui:chat_history")
@@ -268,18 +291,17 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
 
             if ext == "webp":
                 tmp_webp = f"/tmp/{uuid.uuid4().hex}.webp"
-                tmp_mp4 = f"/tmp/{uuid.uuid4().hex}.mp4"
+                tmp_mp4  = f"/tmp/{uuid.uuid4().hex}.mp4"
                 with open(tmp_webp, "wb") as f:
                     f.write(animated_bytes)
 
                 settings = redis_client.hgetall(f"plugin_settings:{self.settings_category}")
                 raw_len = settings.get("LENGTH", b"10")
                 try:
-                    duration = int(raw_len.decode() if isinstance(raw_len, bytes) else raw_len)
+                    duration = int(raw_len.decode() if isinstance(raw_len, (bytes, bytearray)) else raw_len)
                 except ValueError:
                     duration = 10
 
-                # pull fps from the stored workflow for conversion too
                 wf = ComfyUIImageVideoPlugin.get_workflow_template()
                 fps = ComfyUIImageVideoPlugin.get_fps_from_workflow(wf, default=16)
 
@@ -290,11 +312,11 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
                 ext = "mp4"
                 mime = "video/mp4"
                 file_name = "animated.mp4"
+
                 msg = await llm_client.chat([
                     {"role": "system", "content": f'The user has just been shown an animated video based on the prompt: "{prompt}".'},
                     {"role": "user", "content": "Reply with a short, fun message celebrating the animation. No lead-in phrases or instructions."}
                 ])
-
                 followup_text = msg["message"]["content"].strip() or "🎞️ Here's your animated video!"
 
                 os.remove(tmp_webp)

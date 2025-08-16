@@ -1,21 +1,18 @@
 # plugins/comfyui_audio_ace.py
 import os
 import json
-import uuid
-import urllib.request
-import urllib.parse
 import asyncio
 import base64
-import websocket
+import re
+import yaml
+import random
+import copy
+import requests
 from io import BytesIO
 from plugin_base import ToolPlugin
 import discord
 import streamlit as st
-import re
-import yaml
-from helpers import redis_client, format_irc
-
-client_id = str(uuid.uuid4())
+from helpers import redis_client, format_irc, run_comfy_prompt
 
 class ComfyUIAudioAcePlugin(ToolPlugin):
     name = "comfyui_audio_ace"
@@ -38,20 +35,27 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         }
     }
     waiting_prompt_template = "Write a fun, upbeat message saying you’re writing lyrics and calling in a virtual band now! Only output that message."
-    
-    async def get_tags_and_lyrics(self, user_prompt, llm_client):
-        return await self.generate_tags_and_lyrics(user_prompt, llm_client)
+
+    # ---------------------------
+    # Server URL helpers
+    # ---------------------------
+    @staticmethod
+    def get_base_http():
+        settings = redis_client.hgetall(f"plugin_settings:{ComfyUIAudioAcePlugin.settings_category}")
+        url = (settings.get("COMFYUI_AUDIO_ACE_URL") or "").strip() or "http://localhost:8188"
+        if not url.startswith("http://") and not url.startswith("https://"):
+            url = "http://" + url
+        return url.rstrip("/")
 
     @staticmethod
-    def get_server_address():
-        settings = redis_client.hgetall(
-            f"plugin_settings:{ComfyUIAudioAcePlugin.settings_category}"
-        )
-        url = settings.get("COMFYUI_AUDIO_ACE_URL", "").strip() or "localhost:8188"
-        if not url:
-            return "localhost:8188"
-        return url.replace("http://", "").replace("https://", "")
+    def get_base_ws(base_http: str) -> str:
+        # http://host:8188 -> ws://host:8188
+        scheme = "wss" if base_http.startswith("https://") else "ws"
+        return base_http.replace("http", scheme, 1)
 
+    # ---------------------------
+    # Workflow template
+    # ---------------------------
     @staticmethod
     def get_workflow_template():
         return {
@@ -128,10 +132,16 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
             }
         }
 
+    # ---------------------------
+    # LLM helpers
+    # ---------------------------
+    async def get_tags_and_lyrics(self, user_prompt, llm_client):
+        return await self.generate_tags_and_lyrics(user_prompt, llm_client)
+
     @staticmethod
     async def generate_tags_and_lyrics(user_prompt, llm_client):
         system_prompt = (
-            f"The user wants a song: \"{user_prompt}\".\n\n"
+            f'The user wants a song: "{user_prompt}".\n\n'
             "Write a JSON object with these two fields:\n"
             "1. `tags`: a comma-separated list of music style keywords.\n"
             "2. `lyrics`: multiline string using the following format (in English):\n\n"
@@ -142,30 +152,22 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
             "- Do NOT use [verse 1], [chorus 2], or any custom tag variants.\n"
             "- Output ONLY valid JSON, no explanation."
         )
-
         response = await llm_client.chat(
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": "Write tags and lyrics for the song."}
             ]
         )
-
         content = response.get("message", {}).get("content", "").strip()
-
         try:
-            # Remove markdown code block wrappers
             cleaned = re.sub(r"^```(?:json)?\s*|```$", "", content, flags=re.MULTILINE).strip()
-
-            # Try strict JSON parse
             try:
                 result = json.loads(cleaned)
             except json.JSONDecodeError:
-                # Fall back to YAML (handles unescaped quotes, newlines, etc.)
                 result = yaml.safe_load(cleaned)
-                cleaned = json.dumps(result)  # convert back to proper JSON
+                cleaned = json.dumps(result)
                 result = json.loads(cleaned)
 
-            # Extract + validate fields
             tags = result.get("tags", "").strip()
             lyrics = result.get("lyrics", "").strip()
 
@@ -174,106 +176,95 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
                 raise Exception("Missing or improperly formatted 'tags' or 'lyrics'.")
 
             return tags, lyrics
-
         except Exception as e:
             raise Exception(f"LLM response format error: {e}\nContent:\n{content}")
 
-    async def _generate(self, prompt: str, llm_client):
-            # This is your full async pipeline
-            tags, lyrics = await self.generate_tags_and_lyrics(prompt, llm_client)
-            audio_bytes = await asyncio.to_thread(self.process_prompt, prompt, tags, lyrics)
-
-            audio_data = {
-                "type": "audio",
-                "name": "ace_song.mp3",
-                "data": base64.b64encode(audio_bytes).decode("utf-8"),
-                "mimetype": "audio/mpeg"
-            }
-
-            system_msg = f'The user received a ComfyUI-generated song based on: "{prompt}"'
-            response = await llm_client.chat(
-                messages=[
-                    {"role": "system", "content": system_msg},
-                    {"role": "user", "content": "Send a short friendly comment about the new song. Only generate the message. Do not respond to this message."}
-                ]
-            )
-            message_text = response["message"].get("content", "").strip() or "Hope you enjoy the track!"
-            return [audio_data, message_text]
+    # ---------------------------
+    # ComfyUI I/O helpers (requests)
+    # ---------------------------
+    @staticmethod
+    def get_history(base_http: str, prompt_id: str):
+        r = requests.get(f"{base_http}/history/{prompt_id}", timeout=30)
+        r.raise_for_status()
+        return r.json()
 
     @staticmethod
-    def queue_prompt(prompt):
-        server_address = ComfyUIAudioAcePlugin.get_server_address()
-        p = {"prompt": prompt, "client_id": client_id}
-        data = json.dumps(p).encode("utf-8")
-        req = urllib.request.Request(
-            f"http://{server_address}/prompt",
-            data=data,
-            headers={"Content-Type": "application/json"}
-        )
-        return json.loads(urllib.request.urlopen(req).read())
+    def get_audio_bytes(base_http: str, filename: str, subfolder: str, folder_type: str) -> bytes:
+        params = {"filename": filename, "subfolder": subfolder, "type": folder_type}
+        r = requests.get(f"{base_http}/view", params=params, timeout=60)
+        r.raise_for_status()
+        return r.content
 
+    # ---------------------------
+    # Main generation pipeline
+    # ---------------------------
     @staticmethod
-    def get_audio(filename, subfolder, folder_type):
-        server_address = ComfyUIAudioAcePlugin.get_server_address()
-        data = {"filename": filename, "subfolder": subfolder, "type": folder_type}
-        url_values = urllib.parse.urlencode(data)
-        with urllib.request.urlopen(f"http://{server_address}/view?{url_values}") as response:
-            return response.read()
-
-    @staticmethod
-    def get_history(prompt_id):
-        server_address = ComfyUIAudioAcePlugin.get_server_address()
-        with urllib.request.urlopen(f"http://{server_address}/history/{prompt_id}") as response:
-            return json.loads(response.read())
-
-    @staticmethod
-    def get_audios(ws, prompt):
-        prompt_id = ComfyUIAudioAcePlugin.queue_prompt(prompt)["prompt_id"]
-        output_audios = {}
-        while True:
-            out = ws.recv()
-            if isinstance(out, str):
-                message = json.loads(out)
-                if message["type"] == "executing":
-                    data = message["data"]
-                    if data["node"] is None and data["prompt_id"] == prompt_id:
-                        break
-        history = ComfyUIAudioAcePlugin.get_history(prompt_id)[prompt_id]
-        for node_id in history["outputs"]:
-            node_output = history["outputs"][node_id]
-            if "audio" in node_output:
-                audios_output = [
-                    ComfyUIAudioAcePlugin.get_audio(audio["filename"], audio["subfolder"], audio["type"])
-                    for audio in node_output["audio"]
-                ]
-                output_audios[node_id] = audios_output
-        return output_audios
-
-    @staticmethod
-    def process_prompt(user_prompt: str, tags: str, lyrics: str) -> bytes:
-        workflow = ComfyUIAudioAcePlugin.get_workflow_template()
+    def build_workflow(tags: str, lyrics: str) -> dict:
+        workflow = copy.deepcopy(ComfyUIAudioAcePlugin.get_workflow_template())
         workflow["14"]["inputs"]["tags"] = tags
         workflow["14"]["inputs"]["lyrics"] = lyrics
 
-        # Automatically estimate song duration based on lyric content
+        # Estimate song duration from lyric lines
         lines = lyrics.strip().splitlines()
         line_count = sum(1 for l in lines if l.strip() and not l.strip().startswith("["))
         estimated_duration = int(line_count * 5.0) + 20
-        duration = max(30, min(300, estimated_duration))  # Clamp to sane range
-
+        duration = max(30, min(300, estimated_duration))
         workflow["17"]["inputs"]["seconds"] = duration
 
-        ws = websocket.WebSocket()
-        server_address = ComfyUIAudioAcePlugin.get_server_address()
-        ws.connect(f"ws://{server_address}/ws?clientId={client_id}")
-        audios = ComfyUIAudioAcePlugin.get_audios(ws, workflow)
-        ws.close()
+        # Randomize any 'seed' so each run is unique
+        for node in workflow.values():
+            if isinstance(node, dict):
+                inputs = node.get("inputs")
+                if isinstance(inputs, dict) and "seed" in inputs:
+                    inputs["seed"] = random.randint(0, 2**63 - 1)
+        return workflow
 
-        for audios_list in audios.values():
-            if audios_list:
-                return audios_list[0]
+    @staticmethod
+    def process_prompt_sync(tags: str, lyrics: str) -> bytes:
+        base_http = ComfyUIAudioAcePlugin.get_base_http()
+        base_ws   = ComfyUIAudioAcePlugin.get_base_ws(base_http)
 
-        raise Exception("No audio returned.")   
+        workflow = ComfyUIAudioAcePlugin.build_workflow(tags, lyrics)
+
+        # Run Comfy prompt (per-job client_id inside run_comfy_prompt)
+        prompt_id, _ = run_comfy_prompt(base_http, base_ws, workflow, idle_timeout=240)
+
+        # Pull history and fetch produced audio
+        history = ComfyUIAudioAcePlugin.get_history(base_http, prompt_id).get(prompt_id, {})
+        outputs = history.get("outputs", {}) if isinstance(history, dict) else {}
+
+        for node_id, node_out in outputs.items():
+            if "audio" in node_out:
+                for audio_meta in node_out["audio"]:
+                    filename = audio_meta.get("filename")
+                    subfolder = audio_meta.get("subfolder", "")
+                    folder_type = audio_meta.get("type", "output")
+                    if filename:
+                        return ComfyUIAudioAcePlugin.get_audio_bytes(base_http, filename, subfolder, folder_type)
+
+        raise Exception("No audio returned.")
+
+    async def _generate(self, prompt: str, llm_client):
+        # Full async pipeline
+        tags, lyrics = await self.generate_tags_and_lyrics(prompt, llm_client)
+        audio_bytes = await asyncio.to_thread(self.process_prompt_sync, tags, lyrics)
+
+        audio_data = {
+            "type": "audio",
+            "name": "ace_song.mp3",
+            "data": base64.b64encode(audio_bytes).decode("utf-8"),
+            "mimetype": "audio/mpeg"
+        }
+
+        system_msg = f'The user received a ComfyUI-generated song based on: "{prompt}"'
+        response = await llm_client.chat(
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": "Send a short friendly comment about the new song. Only generate the message. Do not respond to this message."}
+            ]
+        )
+        message_text = response["message"].get("content", "").strip() or "Hope you enjoy the track!"
+        return [audio_data, message_text]
 
     # ---------------------------------------
     # Discord
@@ -282,10 +273,9 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         user_prompt = args.get("prompt")
         if not user_prompt:
             return "No prompt provided."
-
         try:
             tags, lyrics = await self.generate_tags_and_lyrics(user_prompt, llm_client)
-            audio_bytes = await asyncio.to_thread(self.process_prompt, user_prompt, tags, lyrics)
+            audio_bytes = await asyncio.to_thread(self.process_prompt_sync, tags, lyrics)
 
             system_msg = f'The user received a ComfyUI-generated audio clip based on: "{user_prompt}"'
             response = await llm_client.chat(
@@ -294,7 +284,6 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
                     {"role": "user", "content": "Send a short friendly comment about the new song. Only generate the message. Do not respond to this message."}
                 ]
             )
-
             message_text = response["message"].get("content", "").strip() or "Hope you enjoy the track!"
 
             return [
@@ -306,7 +295,6 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
                 },
                 message_text
             ]
-
         except Exception as e:
             return f"Failed to create song: {e}"
 
@@ -314,17 +302,16 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
     # WebUI
     # ---------------------------------------
     async def handle_webui(self, args, llm_client):
-            prompt = args.get("prompt", "").strip()
-            if not prompt:
-                return ["No prompt provided."]
-
-            try:
-                # If we're already in an event loop (e.g. live WebUI), await directly
-                asyncio.get_running_loop()
-                return await self._generate(prompt, llm_client)
-            except RuntimeError:
-                # Otherwise (background thread), spin up a fresh loop
-                return asyncio.run(self._generate(prompt, llm_client))
+        prompt = args.get("prompt", "").strip()
+        if not prompt:
+            return ["No prompt provided."]
+        try:
+            # If we're already in an event loop (e.g. live WebUI), await directly
+            asyncio.get_running_loop()
+            return await self._generate(prompt, llm_client)
+        except RuntimeError:
+            # Otherwise (background thread), spin up a fresh loop
+            return asyncio.run(self._generate(prompt, llm_client))
 
     # ---------------------------------------
     # IRC

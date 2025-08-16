@@ -4,15 +4,14 @@ import asyncio
 import base64
 import uuid
 import subprocess
+import json
 from PIL import Image
+from typing import List, Tuple
 from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 from plugin_base import ToolPlugin
 from helpers import redis_client
 from plugins.comfyui_image_plugin import ComfyUIImagePlugin
 from plugins.comfyui_image_video_plugin import ComfyUIImageVideoPlugin
-from plugins.vision_describer import VisionDescriberPlugin
-
-vision_plugin = VisionDescriberPlugin()
 
 class ComfyUIVideoPlugin(ToolPlugin):
     name = "comfyui_video_plugin"
@@ -35,7 +34,7 @@ class ComfyUIVideoPlugin(ToolPlugin):
             "description": "Resolution of the generated video."
         },
         "VIDEO_LENGTH": {
-            "label": "Video Length (seconds)",
+            "label": "Clip Length (seconds)",
             "type": "string",
             "default": "5",
             "description": "Length of each individual clip."
@@ -97,34 +96,83 @@ class ComfyUIVideoPlugin(ToolPlugin):
         subprocess.run(cmd, check=True)
         os.remove(listpath)
 
-    def parse_llm_prompt_list(self, raw_text, expected_count):
-        prompts = []
-        for line in raw_text.strip().splitlines():
-            if '.' in line:
-                parts = line.split('.', 1)
-                if len(parts) == 2 and parts[1].strip():
-                    prompts.append(parts[1].strip())
-        return prompts if len(prompts) >= expected_count else None
+    async def _derive_motion_directive(self, raw: str, llm_client) -> str:
+        sys = (
+            "Extract the intended motion/animation from the user's request as a single concise directive. "
+            "<= 15 words. Prefer subject motion + camera hints. "
+            "Do not contradict explicit pose/clothing if specified."
+        )
+        usr = f'User request: "{raw}"\nReturn only the motion directive:'
+        try:
+            resp = await llm_client.chat([
+                {"role": "system", "content": sys},
+                {"role": "user", "content": usr}
+            ])
+            motion = (resp.get("message", {}) or {}).get("content", "").strip()
+            return motion[:120] if motion else ""
+        except Exception:
+            return ""
+
+    async def _per_clip_motion_prompts(
+        self, scene_prompts: List[str], base_motion: str, llm_client
+    ) -> List[str]:
+        if not scene_prompts:
+            return []
+        if not base_motion:
+            return ["subtle camera sway; gentle breathing motion"] * len(scene_prompts)
+
+        # Build a compact prompt the model can answer as N lines (numbered or plain).
+        n = len(scene_prompts)
+        scenes_block = "\n".join([f"{i+1}. {sp}" for i, sp in enumerate(scene_prompts)])
+        sys = (
+            "You write very short motion directives tailored to each scene. "
+            "Each line <= 12 words, concrete verbs; may mention camera (pan/tilt/zoom/dolly) "
+            "or subject motion. Do not contradict explicit pose/clothing."
+        )
+        usr = (
+            f'Base motion to preserve: "{base_motion}"\n\n'
+            f"Scenes ({n} lines):\n{scenes_block}\n\n"
+            f"Return {n} lines, one per scene, numbered 1..{n} or plain."
+        )
+        try:
+            resp = await llm_client.chat([
+                {"role": "system", "content": sys},
+                {"role": "user", "content": usr}
+            ])
+            raw = (resp.get("message", {}) or {}).get("content", "") or ""
+            lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+            out = []
+            for ln in lines:
+                # strip numbering if present
+                if ln and ln[0].isdigit():
+                    parts = ln.split(".", 1)
+                    if len(parts) == 1:
+                        parts = ln.split(")", 1)
+                    ln = parts[1].strip() if len(parts) == 2 else ln
+                out.append(ln)
+            if len(out) < n:
+                out += [base_motion] * (n - len(out))
+            return out[:n]
+        except Exception:
+            return [base_motion] * len(scene_prompts)
 
     async def _generate_video(self, prompt, llm_client):
+        # --- read settings safely
         settings = redis_client.hgetall(f"plugin_settings:{self.settings_category}")
         raw_res = settings.get("VIDEO_RESOLUTION", b"720p")
         resolution = raw_res.decode() if isinstance(raw_res, bytes) else raw_res
         w, h = self.res_map.get(resolution, (1280, 720))
 
-        raw_len = settings.get("VIDEO_LENGTH", b"5")
-        try:
-            seconds_per_clip = int(raw_len.decode() if isinstance(raw_len, bytes) else raw_len)
-        except ValueError:
-            seconds_per_clip = 5
+        def _as_int(raw, default):
+            try:
+                return int(raw.decode() if isinstance(raw, bytes) else raw)
+            except Exception:
+                return default
 
-        raw_clips = settings.get("VIDEO_CLIPS", b"1")
-        try:
-            num_clips = int(raw_clips.decode() if isinstance(raw_clips, bytes) else raw_clips)
-        except ValueError:
-            num_clips = 1
+        seconds_per_clip = max(1, _as_int(settings.get("VIDEO_LENGTH", b"5"), 5))
+        num_clips = max(1, min(20, _as_int(settings.get("VIDEO_CLIPS", b"1"), 1)))  # cap to avoid runaway jobs
 
-        # Pull FPS once from the image→video workflow stored in Redis (fallback to 16 if missing)
+        # FPS from the image→video workflow (fallback 16)
         try:
             wf = ComfyUIImageVideoPlugin.get_workflow_template()
             fps = next(
@@ -134,114 +182,131 @@ class ComfyUIVideoPlugin(ToolPlugin):
         except Exception:
             fps = 16
 
+        frame_count = max(1, int(seconds_per_clip * fps))
+
         job_id = str(uuid.uuid4())[:8]
         temp_paths, final_clips = [], []
         anim_plugin = ComfyUIImageVideoPlugin()
 
-        # Ask LLM for N unique image prompts
-        list_prompt = (
-            f"Based on this exact scene description:\n\n"
-            f"\"{prompt}\"\n\n"
-            f"Create {num_clips} short image generation prompts that stay true to the main character, mood, and setting. "
-            f"Vary only small details like background, lighting, angle, or pose — but never change the subject."
-            f"\n\nOnly return a numbered list with no extra text."
+        # --- Ask LLM for N short scene variations of the same concept ---
+        scene_list_prompt = (
+            f'Original brief:\n"{prompt}"\n\n'
+            f"Task: Write {num_clips} distinct, concise scene prompts.\n"
+            "HARD CONSTRAINTS (apply to EVERY line):\n"
+            "- Keep the SAME subject, mood, number of people, and gender.\n"
+            '- If the brief explicitly states pose/position (e.g., "laying on her side"), clothing, accessories, or framing (e.g., "full body"), REPEAT those words VERBATIM in every line.\n'
+            "- Do NOT contradict any explicit motion; you may omit motion unless essential.\n"
+            "- Do NOT change pose, clothing, or framing; do NOT introduce new props or wardrobe.\n"
+            "ALLOWED VARIATION:\n"
+            "- Only small changes to camera angle, lens, lighting, time of day, or background details.\n"
+            "OUTPUT FORMAT:\n"
+            f"- Exactly {num_clips} lines, each ≤ 25 words.\n"
+            "- Numbered list using '1. ', '2. ', etc. No 'Scene:' prefixes.\n"
+            "- Return ONLY the list.\n"
         )
-        resp = await llm_client.chat([
-            {"role": "system", "content": "You generate multiple diverse prompts for AI image creation."},
-            {"role": "user", "content": list_prompt}
-        ])
-        raw_list = resp["message"]["content"]
-        image_prompts = self.parse_llm_prompt_list(raw_list, num_clips)
 
-        # frames per clip (length in frames is what ComfyUI expects)
-        frame_count = max(1, int(seconds_per_clip * fps))
-
-        for i in range(num_clips):
-            image_prompt = (
-                image_prompts[i]
-                if image_prompts and i < len(image_prompts)
-                else f"{prompt} — Scene {i+1}"
-            )
-
-            image_bytes = await asyncio.to_thread(
-                ComfyUIImagePlugin.process_prompt,
-                image_prompt, w, h
-            )
-
-            tmp_img = f"/tmp/{job_id}_frame_{i}.png"
-            with open(tmp_img, "wb") as f:
-                f.write(image_bytes)
-            temp_paths.append(tmp_img)
-
-            # Optional: describe the image for a better animation prompt (kept from your version)
-            from plugins.vision_describer import VisionDescriberPlugin
-            desc = await vision_plugin.process_image_web(open(tmp_img, "rb").read(), tmp_img)
-            desc = desc.strip() or "An interesting scene"
-
-            animation_prompt = (
-                f"The following is a visual description of an image:\n\n"
-                f"\"{desc}\"\n\n"
-                f"And this was the original prompt:\n\n"
-                f"\"{image_prompt}\"\n\n"
-                "Write a single clear sentence that describes what this image depicts and how it might animate to reflect the user's intent."
-            )
-            anim_resp = await llm_client.chat([
-                {"role": "system", "content": "You generate vivid single-sentence descriptions that combine image content and user prompt for animation."},
-                {"role": "user", "content": animation_prompt}
+        try:
+            resp = await llm_client.chat([
+                {"role": "system", "content": "You write concise, varied scene prompts that keep subject & mood consistent."},
+                {"role": "user", "content": scene_list_prompt}
             ])
-            animation_desc = anim_resp["message"]["content"].strip() or "A short animation that reflects the prompt."
-
-            # Use frame_count computed from seconds_per_clip × fps
-            anim_bytes, ext = await asyncio.to_thread(
-                anim_plugin.process_prompt,
-                animation_desc,
-                image_bytes,
-                f"clip_{i}.png",
-                w,
-                h,
-                frame_count
-            )
-
-            anim_path = f"/tmp/{job_id}_clip_{i}.{ext}"
-            with open(anim_path, "wb") as f:
-                f.write(anim_bytes)
-            temp_paths.append(anim_path)
-
-            if ext == "webp":
-                mp4_path = f"/tmp/{job_id}_clip_{i}.mp4"
-                # keep playback speed consistent with the workflow FPS
-                self.webp_to_mp4(anim_path, mp4_path, fps=fps, duration=seconds_per_clip)
-                temp_paths.append(mp4_path)
-                final_clips.append(mp4_path)
+            raw_list = (resp.get("message", {}) or {}).get("content", "") or ""
+            image_prompts = []
+            for line in raw_list.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                if line[0].isdigit():
+                    parts = line.split(".", 1)
+                    if len(parts) == 1:
+                        parts = line.split(")", 1)
+                    if len(parts) == 1:
+                        parts = line.split("-", 1)
+                    if len(parts) == 2 and parts[1].strip():
+                        image_prompts.append(parts[1].strip())
+                        continue
+                image_prompts.append(line)
+            if not image_prompts:
+                image_prompts = [prompt] * num_clips
+            elif len(image_prompts) < num_clips:
+                image_prompts += [image_prompts[-1]] * (num_clips - len(image_prompts))
             else:
-                final_clips.append(anim_path)
+                image_prompts = image_prompts[:num_clips]
+        except Exception:
+            image_prompts = [prompt] * num_clips
 
-        if not final_clips:
-            return "❌ No clips generated."
+        # NEW: derive motion + tailor per-clip motion prompts
+        base_motion = await self._derive_motion_directive(prompt, llm_client)
+        motion_prompts = await self._per_clip_motion_prompts(image_prompts, base_motion, llm_client)
 
         out_path = f"/tmp/{job_id}_final.mp4"
-        self.ffmpeg_concat(final_clips, out_path)
 
-        with open(out_path, "rb") as f:
-            final_bytes = f.read()
-        temp_paths.append(out_path)
+        try:
+            for i in range(num_clips):
+                scene_prompt = image_prompts[i]
+                motion_prompt = motion_prompts[i] if i < len(motion_prompts) else base_motion
 
-        msg = await llm_client.chat([
-            {"role": "system", "content": f"The user has just been shown a video based on '{prompt}'."},
-            {"role": "user", "content": "Reply with a short, fun message celebrating the video. No lead-in phrases or instructions."}
-        ])
+                # 1) Generate a starting image (clean scene prompt)
+                image_bytes = await asyncio.to_thread(
+                    ComfyUIImagePlugin.process_prompt,
+                    scene_prompt, w, h
+                )
 
-        self.cleanup_temp_files(temp_paths)
+                tmp_img = f"/tmp/{job_id}_frame_{i}.png"
+                with open(tmp_img, "wb") as f:
+                    f.write(image_bytes)
+                temp_paths.append(tmp_img)
 
-        return [
-            {
-                "type": "video",
-                "name": "generated_video.mp4",
-                "data": base64.b64encode(final_bytes).decode(),
-                "mimetype": "video/mp4"
-            },
-            msg["message"]["content"].strip() or "🎬 Here’s your video!"
-        ]
+                # 2) Animate using scene + motion in the SAME 'prompt'
+                anim_prompt = f"{scene_prompt}\nMotion: {motion_prompt}"
+
+                anim_bytes, ext = await asyncio.to_thread(
+                    anim_plugin.process_prompt,   # signature unchanged
+                    anim_prompt,                  # blended prompt
+                    image_bytes,
+                    f"clip_{i}.png",
+                    w,
+                    h,
+                    frame_count
+                )
+
+                anim_path = f"/tmp/{job_id}_clip_{i}.{ext}"
+                with open(anim_path, "wb") as f:
+                    f.write(anim_bytes)
+                temp_paths.append(anim_path)
+
+                if ext == "webp":
+                    mp4_path = f"/tmp/{job_id}_clip_{i}.mp4"
+                    self.webp_to_mp4(anim_path, mp4_path, fps=fps, duration=seconds_per_clip)
+                    temp_paths.append(mp4_path)
+                    final_clips.append(mp4_path)
+                else:
+                    final_clips.append(anim_path)
+
+            if not final_clips:
+                return "❌ No clips generated."
+
+            self.ffmpeg_concat(final_clips, out_path)
+            with open(out_path, "rb") as f:
+                final_bytes = f.read()
+            temp_paths.append(out_path)
+
+            msg = await llm_client.chat([
+                {"role": "system", "content": f"The user has just been shown a video based on '{prompt}'."},
+                {"role": "user", "content": "Reply with a short, fun message celebrating the video. No lead-in phrases or instructions."}
+            ])
+
+            return [
+                {
+                    "type": "video",
+                    "name": "generated_video.mp4",
+                    "data": base64.b64encode(final_bytes).decode(),
+                    "mimetype": "video/mp4"
+                },
+                (msg["message"]["content"].strip() if msg and msg.get("message") else "") or "🎬 Here’s your video!"
+            ]
+        finally:
+            self.cleanup_temp_files(temp_paths)
 
     async def handle_discord(self, message, args, llm_client):
         return "❌ This plugin is only available in the WebUI due to file size limitations."

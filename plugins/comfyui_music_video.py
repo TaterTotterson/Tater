@@ -113,14 +113,17 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
         job_id = str(uuid.uuid4())[:8]
         audio_plugin = ComfyUIAudioAcePlugin()
 
+        # --- 1) Lyrics + tags via Audio Ace ---
         tags, lyrics = await audio_plugin.get_tags_and_lyrics(prompt, llm_client)
         if not lyrics:
             return "❌ No lyrics returned for visuals."
 
+        # --- 2) Render audio using the refactored per-job Comfy helper ---
         audio_path = f"/tmp/{job_id}_audio.mp3"
         final_video_path = f"/tmp/{job_id}_final.mp4"
 
-        audio_bytes = await asyncio.to_thread(audio_plugin.process_prompt, prompt, tags, lyrics)
+        # CHANGED: call the new sync method and run it in a worker thread
+        audio_bytes = await asyncio.to_thread(audio_plugin.process_prompt_sync, tags, lyrics)
         with open(audio_path, "wb") as f:
             f.write(audio_bytes)
 
