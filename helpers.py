@@ -10,6 +10,9 @@ from dotenv import load_dotenv
 import re
 import json
 import base64
+import uuid
+import time
+import websocket
 
 load_dotenv()
 nest_asyncio.apply()
@@ -201,3 +204,67 @@ def get_latest_file_from_history(channel_id, filetype="file", extensions=None):
             continue
 
     return None
+
+
+# ---------------------------------------------------------
+# ComfyUI websocket (no timeouts, Ctrl-C friendly)
+# ---------------------------------------------------------
+def run_comfy_prompt(base_http: str, base_ws: str, prompt: dict):
+    client_id = str(uuid.uuid4())
+
+    # 1) Open dedicated WS for this job (no timeout)
+    ws = websocket.create_connection(f"{base_ws}/ws?clientId={client_id}")
+
+    try:
+        # 2) POST the prompt, include client_id (no timeout)
+        resp = requests.post(
+            f"{base_http}/prompt",
+            json={"prompt": prompt, "client_id": client_id}
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        prompt_id = data.get("prompt_id") or data.get("promptId")
+        if not prompt_id:
+            raise RuntimeError(f"ComfyUI /prompt did not return prompt_id: {data}")
+
+        # 3) Listen until our prompt is finished
+        while True:
+            try:
+                raw = ws.recv()  # blocks; KeyboardInterrupt will break out cleanly
+            except KeyboardInterrupt:
+                # Graceful cancel: close socket and bubble up so caller can handle it
+                try:
+                    ws.close()
+                finally:
+                    raise
+            except Exception as e:
+                # Other WS errors bubble as runtime errors
+                raise RuntimeError(f"ComfyUI WS error for prompt {prompt_id}: {e}")
+
+            if not raw:
+                continue
+
+            try:
+                evt = json.loads(raw)
+            except Exception:
+                continue
+
+            etype = evt.get("type")
+            edata = evt.get("data") or {}
+            evt_prompt_id = edata.get("prompt_id") or evt.get("prompt_id")
+
+            # Only react to our own prompt
+            if evt_prompt_id != prompt_id:
+                continue
+
+            # Finished: 'executing' with node == None indicates completion
+            if etype == "executing" and edata.get("node") is None:
+                return prompt_id, evt
+
+            # (Optional: handle other terminal frames here if your setup emits them.)
+
+    finally:
+        try:
+            ws.close()
+        except Exception:
+            pass
