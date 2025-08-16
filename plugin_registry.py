@@ -22,6 +22,7 @@ from plugins.wordpress_poster import plugin as wordpress_poster_plugin
 from plugins.discord_notifier import plugin as discord_notifier_plugin
 from plugins.emoji_ai_responder import plugin as emoji_ai_responder_plugin
 from plugins.device_compare import plugin as device_compare_plugin
+from plugins.lowfi_video import plugin as lowfi_video_plugin
 
 plugin_registry = {
     youtube_plugin.name: youtube_plugin,
@@ -48,4 +49,5 @@ plugin_registry = {
     discord_notifier_plugin.name: discord_notifier_plugin,
     emoji_ai_responder_plugin.name: emoji_ai_responder_plugin,
     device_compare_plugin.name: device_compare_plugin,
+    lowfi_video_plugin.name: lowfi_video_plugin,
 }
