@@ -98,9 +98,11 @@ class ComfyUIVideoPlugin(ToolPlugin):
 
     async def _derive_motion_directive(self, raw: str, llm_client) -> str:
         sys = (
-            "Extract the intended motion/animation from the user's request as a single concise directive. "
-            "<= 15 words. Prefer subject motion + camera hints. "
-            "Do not contradict explicit pose/clothing if specified."
+            "Extract the intended motion/animation from the user's request as one concise directive. "
+            "<= 20 words. "
+            "Prefer subtle, natural subject motion (breathing, blinking, hair sway, head tilt, micro-expressions) "
+            "and optional gentle camera movement. "
+            "Do not contradict explicit pose, clothing, or framing if specified."
         )
         usr = f'User request: "{raw}"\nReturn only the motion directive:'
         try:
@@ -109,7 +111,7 @@ class ComfyUIVideoPlugin(ToolPlugin):
                 {"role": "user", "content": usr}
             ])
             motion = (resp.get("message", {}) or {}).get("content", "").strip()
-            return motion[:120] if motion else ""
+            return motion[:160] if motion else ""
         except Exception:
             return ""
 
@@ -125,9 +127,13 @@ class ComfyUIVideoPlugin(ToolPlugin):
         n = len(scene_prompts)
         scenes_block = "\n".join([f"{i+1}. {sp}" for i, sp in enumerate(scene_prompts)])
         sys = (
-            "You write very short motion directives tailored to each scene. "
-            "Each line <= 12 words, concrete verbs; may mention camera (pan/tilt/zoom/dolly) "
-            "or subject motion. Do not contradict explicit pose/clothing."
+            "Write short, vivid motion directives tailored to each scene. "
+            "Each line <= 20 words. "
+            "Always include subtle, natural subject motion (breathing, blinking, hair sway, head tilt, micro-expressions, tiny limb shifts). "
+            "Optionally add gentle camera motion (pan/tilt/dolly/zoom) or soft environmental effects (light shimmer, breeze). "
+            "Keep all explicit pose, clothing, and framing exactly the same. "
+            "Do not invent new actions, props, or wardrobe. "
+            "Make the subject feel lifelike and animated, not frozen."
         )
         usr = (
             f'Base motion to preserve: "{base_motion}"\n\n'
