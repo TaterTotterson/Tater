@@ -182,16 +182,16 @@ class LowfiVideoPlugin(ToolPlugin):
         return scene or raw
 
     async def _refine_prompt_for_lofi_animation(self, scene_prompt: str, llm_client) -> str:
-        """
-        Turn a scene prompt into ONE loop-friendly animation sentence.
-        Emphasizes subtle motion and explicitly forbids hand movement.
-        """
         sys = (
-            "Rewrite the scene into ONE sentence (<= 25 words) describing how it should animate as a lofi video loop. "
-            "Keep motion subtle (gentle parallax, slow camera drift/zoom, soft sway, flicker, drifting weather/steam). "
-            "Avoid fast actions, cuts, morphs, lip-sync, and any text overlays. "
-            "VERY IMPORTANT: no hand movement; hands/fingers remain still. "
-            "Must feel seamless as a loop. Output only the sentence."
+            "Rewrite the scene into ONE sentence (<= 25 words) describing loopable lofi animation. "
+            "Prefer environmental micro-motion over camera moves. "
+            "If present, animate: ocean/water (gentle waves, ripples), stars/sky (twinkle, drift), hair/fabric (soft wind sway), "
+            "foliage (subtle rustle), smoke/steam/fog (slow waft), rain/snow (drift), lights/neon/candle (soft flicker), "
+            "reflections/shadows (shimmer/slow shift), clouds (drift). "
+            "Camera motion optional and minimal. "
+            "No fast actions, cuts, morphs, lip-sync, or text. "
+            "Hands/fingers remain still. "
+            "Must loop seamlessly. Output only the sentence."
         )
         usr = f'Scene: "{scene_prompt}"\nAnimation directive:'
         try:
