@@ -39,6 +39,7 @@ The following plugins can be triggerd simple by asking Tater after you enable th
 | `premiumize_torrent`         | Checks if a torrent is cached on Premiumize and returns download links      | discord               |
 | `premiumize_download`        | Checks Premiumize for cached file links and returns downloads               | discord, webui, irc   |
 | `device_compare`             | Compares two devices, fetching specs and FPS benchmarks from online sources | discord, webui        |
+| `lowfi_video`                | Generates lofi music videos, outputs 20-min MP4                             | webui                 |
 
 ### 📡 RSS Feed Watcher (Built-in)
 
