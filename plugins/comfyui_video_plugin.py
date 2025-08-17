@@ -98,47 +98,41 @@ class ComfyUIVideoPlugin(ToolPlugin):
 
     async def _derive_motion_directive(self, raw: str, llm_client) -> str:
         sys = (
-            "Extract the intended motion/animation from the user's request as one concise directive. "
-            "<= 20 words. "
-            "Prefer subtle, natural subject motion (breathing, blinking, hair sway, head tilt, micro-expressions) "
-            "and optional gentle camera movement. "
-            "Do not contradict explicit pose, clothing, or framing if specified."
+            "Extract the intended animation as ONE concise directive (<= 24 words). "
+            "Prioritize clear SUBJECT ACTIONS over camera motion (e.g., hand to face, laugh, brush hair behind ear). "
+            "You may include a SINGLE gentle camera cue. "
+            "Do not contradict explicit pose/clothing/framing if specified."
         )
-        usr = f'User request: "{raw}"\nReturn only the motion directive:'
+        usr = f'User request: "{raw}"\nReturn only the motion directive (example: "hand to face; soft laugh; brush hair behind ear; slight dolly-in").'
         try:
             resp = await llm_client.chat([
                 {"role": "system", "content": sys},
                 {"role": "user", "content": usr}
             ])
             motion = (resp.get("message", {}) or {}).get("content", "").strip()
-            return motion[:160] if motion else ""
+            return motion[:200] if motion else ""
         except Exception:
             return ""
 
-    async def _per_clip_motion_prompts(
-        self, scene_prompts: List[str], base_motion: str, llm_client
-    ) -> List[str]:
+    async def _per_clip_motion_prompts(self, scene_prompts, base_motion, llm_client):
         if not scene_prompts:
             return []
         if not base_motion:
-            return ["subtle camera sway; gentle breathing motion"] * len(scene_prompts)
+            base_motion = "hand to face; soft laugh; brush hair behind ear"
 
-        # Build a compact prompt the model can answer as N lines (numbered or plain).
         n = len(scene_prompts)
         scenes_block = "\n".join([f"{i+1}. {sp}" for i, sp in enumerate(scene_prompts)])
         sys = (
-            "Write short, vivid motion directives tailored to each scene. "
-            "Each line <= 20 words. "
-            "Always include subtle, natural subject motion (breathing, blinking, hair sway, head tilt, micro-expressions, tiny limb shifts). "
-            "Optionally add gentle camera motion (pan/tilt/dolly/zoom) or soft environmental effects (light shimmer, breeze). "
-            "Keep all explicit pose, clothing, and framing exactly the same. "
-            "Do not invent new actions, props, or wardrobe. "
-            "Make the subject feel lifelike and animated, not frozen."
+            "For each scene, write a short 2–3 beat SUBJECT ACTION choreography for a ~15s clip. "
+            "Each line <= 28 words. "
+            "Beats should read in order using semicolons (e.g., 'touch cheek; laugh; push hair behind ear'). "
+            "Include optional gentle camera cue last (e.g., 'subtle dolly-in'). "
+            "Keep pose/clothing/framing exactly as given; do not invent props."
         )
         usr = (
-            f'Base motion to preserve: "{base_motion}"\n\n'
+            f'Base actions to preserve if present: "{base_motion}"\n\n'
             f"Scenes ({n} lines):\n{scenes_block}\n\n"
-            f"Return {n} lines, one per scene, numbered 1..{n} or plain."
+            f"Return exactly {n} lines. Numbered or plain is fine."
         )
         try:
             resp = await llm_client.chat([
@@ -149,7 +143,6 @@ class ComfyUIVideoPlugin(ToolPlugin):
             lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
             out = []
             for ln in lines:
-                # strip numbering if present
                 if ln and ln[0].isdigit():
                     parts = ln.split(".", 1)
                     if len(parts) == 1:
