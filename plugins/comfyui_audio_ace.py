@@ -59,77 +59,77 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
     @staticmethod
     def get_workflow_template():
         return {
-            "14": {
-                "inputs": {
-                    "tags": "",
-                    "lyrics": "",
-                    "lyrics_strength": 0.99,
-                    "clip": ["40", 1]
-                },
-                "class_type": "TextEncodeAceStepAudio",
-                "_meta": {"title": "TextEncodeAceStepAudio"}
+          "14": {
+            "inputs": {
+              "tags": "",
+              "lyrics": "",
+              "lyrics_strength": 0.9900000000000002,
+              "clip": ["40", 1]
             },
-            "17": {
-                "inputs": {"seconds": 120, "batch_size": 1},
-                "class_type": "EmptyAceStepLatentAudio",
-                "_meta": {"title": "EmptyAceStepLatentAudio"}
+            "class_type": "TextEncodeAceStepAudio",
+            "_meta": {"title": "TextEncodeAceStepAudio"}
+          },
+          "17": {
+            "inputs": {"seconds": 120, "batch_size": 1},
+            "class_type": "EmptyAceStepLatentAudio",
+            "_meta": {"title": "EmptyAceStepLatentAudio"}
+          },
+          "18": {
+            "inputs": {"samples": ["52", 0], "vae": ["40", 2]},
+            "class_type": "VAEDecodeAudio",
+            "_meta": {"title": "VAEDecodeAudio"}
+          },
+          "40": {
+            "inputs": {"ckpt_name": "ace_step_v1_3.5b.safetensors"},
+            "class_type": "CheckpointLoaderSimple",
+            "_meta": {"title": "Load Checkpoint"}
+          },
+          "44": {
+            "inputs": {"conditioning": ["14", 0]},
+            "class_type": "ConditioningZeroOut",
+            "_meta": {"title": "ConditioningZeroOut"}
+          },
+          "49": {
+            "inputs": {"model": ["51", 0], "operation": ["50", 0]},
+            "class_type": "LatentApplyOperationCFG",
+            "_meta": {"title": "LatentApplyOperationCFG"}
+          },
+          "50": {
+            "inputs": {"multiplier": 1.0000000000000002},
+            "class_type": "LatentOperationTonemapReinhard",
+            "_meta": {"title": "LatentOperationTonemapReinhard"}
+          },
+          "51": {
+            "inputs": {"shift": 5.000000000000001, "model": ["40", 0]},
+            "class_type": "ModelSamplingSD3",
+            "_meta": {"title": "ModelSamplingSD3"}
+          },
+          "52": {
+            "inputs": {
+              "seed": 194793839343750,
+              "steps": 50,
+              "cfg": 5,
+              "sampler_name": "euler",
+              "scheduler": "simple",
+              "denoise": 1,
+              "model": ["49", 0],
+              "positive": ["14", 0],
+              "negative": ["44", 0],
+              "latent_image": ["17", 0]
             },
-            "18": {
-                "inputs": {"samples": ["52", 0], "vae": ["40", 2]},
-                "class_type": "VAEDecodeAudio",
-                "_meta": {"title": "VAEDecodeAudio"}
+            "class_type": "KSampler",
+            "_meta": {"title": "KSampler"}
+          },
+          "59": {
+            "inputs": {
+              "filename_prefix": "audio/ComfyUI",
+              "quality": "V0",
+              "audioUI": "",
+              "audio": ["18", 0]
             },
-            "40": {
-                "inputs": {"ckpt_name": "ace_step_v1_3.5b.safetensors"},
-                "class_type": "CheckpointLoaderSimple",
-                "_meta": {"title": "Load Checkpoint"}
-            },
-            "44": {
-                "inputs": {"conditioning": ["14", 0]},
-                "class_type": "ConditioningZeroOut",
-                "_meta": {"title": "ConditioningZeroOut"}
-            },
-            "49": {
-                "inputs": {"model": ["51", 0], "operation": ["50", 0]},
-                "class_type": "LatentApplyOperationCFG",
-                "_meta": {"title": "LatentApplyOperationCFG"}
-            },
-            "50": {
-                "inputs": {"multiplier": 1.0},
-                "class_type": "LatentOperationTonemapReinhard",
-                "_meta": {"title": "LatentOperationTonemapReinhard"}
-            },
-            "51": {
-                "inputs": {"shift": 5.0, "model": ["40", 0]},
-                "class_type": "ModelSamplingSD3",
-                "_meta": {"title": "ModelSamplingSD3"}
-            },
-            "52": {
-                "inputs": {
-                    "seed": 468254064217846,
-                    "steps": 50,
-                    "cfg": 5,
-                    "sampler_name": "euler",
-                    "scheduler": "simple",
-                    "denoise": 1,
-                    "model": ["49", 0],
-                    "positive": ["14", 0],
-                    "negative": ["44", 0],
-                    "latent_image": ["17", 0]
-                },
-                "class_type": "KSampler",
-                "_meta": {"title": "KSampler"}
-            },
-            "59": {
-                "inputs": {
-                    "filename_prefix": "audio/ComfyUI",
-                    "quality": "V0",
-                    "audioUI": "",
-                    "audio": ["18", 0]
-                },
-                "class_type": "SaveAudioMP3",
-                "_meta": {"title": "Save Audio (MP3)"}
-            }
+            "class_type": "SaveAudioMP3",
+            "_meta": {"title": "Save Audio (MP3)"}
+          }
         }
 
     # ---------------------------
@@ -227,7 +227,7 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         workflow = ComfyUIAudioAcePlugin.build_workflow(tags, lyrics)
 
         # Run Comfy prompt (per-job client_id inside run_comfy_prompt)
-        prompt_id, _ = run_comfy_prompt(base_http, base_ws, workflow, idle_timeout=240)
+        prompt_id, _ = run_comfy_prompt(base_http, base_ws, workflow)
 
         # Pull history and fetch produced audio
         history = ComfyUIAudioAcePlugin.get_history(base_http, prompt_id).get(prompt_id, {})
