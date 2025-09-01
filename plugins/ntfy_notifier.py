@@ -3,6 +3,7 @@ import re
 import logging
 import requests
 import asyncio
+import html
 from urllib.parse import urlparse, parse_qs, urlunparse
 from plugin_base import ToolPlugin
 from plugin_settings import get_plugin_settings
@@ -70,6 +71,35 @@ class NtfyNotifierPlugin(ToolPlugin):
 
     URL_PATTERN = re.compile(r"https?://\S+")
 
+    def format_plaintext(self, message: str) -> str:
+        lines = message.strip().splitlines()
+        cleaned = []
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            # Remove Markdown bold/headers
+            line = re.sub(r"\*\*(.+?)\*\*", r"\1", line)
+            if line.startswith("##"):
+                line = line.lstrip("#").strip()
+
+            # Normalize bullets
+            if line.startswith(("* ", "- ", "• ")):
+                line = f"• {line[2:].strip()}"
+
+            # Strip UTM params from bare URLs
+            if re.fullmatch(r"https?://\S+", line):
+                line = self.strip_utm(line)
+
+            # Decode any HTML entities
+            line = html.unescape(line)
+
+            cleaned.append(line)
+
+        return "\n".join(cleaned)
+
     def strip_utm(self, url: str) -> str:
         try:
             parsed = urlparse(url)
@@ -130,7 +160,7 @@ class NtfyNotifierPlugin(ToolPlugin):
         try:
             # ntfy body is plain text. Keep content as-is, but strip UTM on bare-URL-only lines
             # (We won't do HTML/Markdown conversion here; clients render plain text well.)
-            body = message or ""
+            body = self.format_plaintext(message)
 
             resp = requests.post(url, data=body.encode("utf-8"), headers=headers, auth=auth, timeout=10)
             if resp.status_code >= 300:
