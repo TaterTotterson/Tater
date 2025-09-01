@@ -71,7 +71,7 @@ class NtfyNotifierPlugin(ToolPlugin):
 
     URL_PATTERN = re.compile(r"https?://\S+")
 
-    def format_plaintext(self, message: str) -> str:
+    def format_plaintext(self, title: str, message: str) -> str:
         lines = message.strip().splitlines()
         cleaned = []
 
@@ -93,12 +93,19 @@ class NtfyNotifierPlugin(ToolPlugin):
             if re.fullmatch(r"https?://\S+", line):
                 line = self.strip_utm(line)
 
-            # Decode any HTML entities
+            # Decode HTML entities
             line = html.unescape(line)
 
             cleaned.append(line)
 
-        return "\n".join(cleaned)
+        # Put the article title at the very top, then a blank line, then content
+        output = []
+        if title:
+            output.append(title.strip())
+            output.append("")  # blank line
+        output.extend(cleaned)
+
+        return "\n".join(output)
 
     def strip_utm(self, url: str) -> str:
         try:
@@ -160,7 +167,7 @@ class NtfyNotifierPlugin(ToolPlugin):
         try:
             # ntfy body is plain text. Keep content as-is, but strip UTM on bare-URL-only lines
             # (We won't do HTML/Markdown conversion here; clients render plain text well.)
-            body = self.format_plaintext(message)
+            body = self.format_plaintext(title, message)
 
             resp = requests.post(url, data=body.encode("utf-8"), headers=headers, auth=auth, timeout=10)
             if resp.status_code >= 300:
