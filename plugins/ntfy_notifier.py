@@ -14,7 +14,7 @@ class NtfyNotifierPlugin(ToolPlugin):
     description = "Sends RSS announcements to an ntfy topic (self-hosted or ntfy.sh)."
     usage = ""
     platforms = []
-    settings_category = "ntfy Notifier"
+    settings_category = "NTFY Notifier"
     notifier = True
 
     required_settings = {
