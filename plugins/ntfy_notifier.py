@@ -70,42 +70,8 @@ class NtfyNotifierPlugin(ToolPlugin):
     }
 
     URL_PATTERN = re.compile(r"https?://\S+")
-
-    def format_plaintext(self, title: str, message: str) -> str:
-        lines = message.strip().splitlines()
-        cleaned = []
-
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-
-            # Remove Markdown bold/headers
-            line = re.sub(r"\*\*(.+?)\*\*", r"\1", line)
-            if line.startswith("##"):
-                line = line.lstrip("#").strip()
-
-            # Normalize bullets
-            if line.startswith(("* ", "- ", "• ")):
-                line = f"• {line[2:].strip()}"
-
-            # Strip UTM params from bare URLs
-            if re.fullmatch(r"https?://\S+", line):
-                line = self.strip_utm(line)
-
-            # Decode HTML entities
-            line = html.unescape(line)
-
-            cleaned.append(line)
-
-        # Put the article title at the very top, then a blank line, then content
-        output = []
-        if title:
-            output.append(title.strip())
-            output.append("")  # blank line
-        output.extend(cleaned)
-
-        return "\n".join(output)
+    MARKDOWN_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
+    BARE_URL_PATTERN = re.compile(r"(?<!\()(?<!\])\bhttps?://\S+\b")
 
     def strip_utm(self, url: str) -> str:
         try:
@@ -122,6 +88,43 @@ class NtfyNotifierPlugin(ToolPlugin):
         if not m:
             return None
         return self.strip_utm(m.group(0))
+
+    def _short_url_text(self, url: str) -> str:
+        try:
+            p = urlparse(url)
+            return f"{p.netloc}{p.path}".rstrip("/")
+        except Exception:
+            return url
+
+    def _linkify_bare_urls(self, text: str) -> str:
+        # Convert bare URLs to [domain/path](url), skipping ones already in markdown links
+        def repl(m: re.Match):
+            raw = m.group(0)
+            clean = self.strip_utm(raw)
+            label = self._short_url_text(clean)
+            return f"[{label}]({clean})"
+        return self.BARE_URL_PATTERN.sub(repl, text)
+
+    def format_markdown(self, title: str, message: str) -> str:
+        # Preserve Discord-style markdown, just enhance:
+        msg = html.unescape(message or "").strip()
+
+        # Normalize simple bullets (Discord uses *, -, • … all fine in Markdown)
+        lines = []
+        for line in msg.splitlines():
+            s = line.rstrip()
+            # Keep existing markdown; just ensure bullets have a space after symbol
+            if s.startswith(("*", "-", "•")) and not s.startswith(("* ", "- ", "• ")):
+                s = s[0] + " " + s[1:].lstrip()
+            lines.append(s)
+        msg = "\n".join(lines).strip()
+
+        # Convert bare URLs to Markdown links & strip utm_ params
+        msg = self._linkify_bare_urls(msg)
+
+        # Prepend title as H2
+        head = f"## {title.strip()}\n\n" if title and title.strip() else ""
+        return f"{head}{msg}"
 
     def post_to_ntfy(self, title: str, message: str):
         settings = get_plugin_settings(self.settings_category)
@@ -143,21 +146,19 @@ class NtfyNotifierPlugin(ToolPlugin):
         headers = {
             "Title": title or "",
             "Priority": priority if priority in {"1", "2", "3", "4", "5"} else "3",
+            "Markdown": "yes",  # render Markdown in ntfy
         }
 
         if tags:
-            # Accept comma or space separated; ntfy prefers comma-separated
             norm = ",".join([t.strip() for t in re.split(r"[,\s]+", tags) if t.strip()])
             if norm:
                 headers["Tags"] = norm
 
-        # Optional Click action from first URL in message
         if use_click:
             click_url = self._first_url(message)
             if click_url:
                 headers["Click"] = click_url
 
-        # Auth header preference: Bearer token > Basic auth
         auth = None
         if token:
             headers["Authorization"] = f"Bearer {token}"
@@ -165,10 +166,7 @@ class NtfyNotifierPlugin(ToolPlugin):
             auth = (username, password)
 
         try:
-            # ntfy body is plain text. Keep content as-is, but strip UTM on bare-URL-only lines
-            # (We won't do HTML/Markdown conversion here; clients render plain text well.)
-            body = self.format_plaintext(title, message)
-
+            body = self.format_markdown(title, message)
             resp = requests.post(url, data=body.encode("utf-8"), headers=headers, auth=auth, timeout=10)
             if resp.status_code >= 300:
                 logger.warning(f"ntfy publish failed ({resp.status_code}): {resp.text[:300]}")
@@ -176,7 +174,6 @@ class NtfyNotifierPlugin(ToolPlugin):
             logger.warning(f"Failed to send ntfy message: {e}")
 
     async def notify(self, title: str, content: str):
-        # Mirror Telegram plugin pattern
         await asyncio.to_thread(self.post_to_ntfy, title, content)
 
 plugin = NtfyNotifierPlugin()
