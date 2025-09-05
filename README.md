@@ -40,6 +40,7 @@ The following plugins can be triggerd simple by asking Tater after you enable th
 | `premiumize_download`        | Checks Premiumize for cached file links and returns downloads               | discord, webui, irc   |
 | `device_compare`             | Compares two devices, fetching specs and FPS benchmarks from online sources | discord, webui        |
 | `lowfi_video`                | Generates lofi music videos, outputs 20-min MP4                             | webui                 |
+| `tater_gits_add_feed`        | Adds a GitHub releases feed to the Tater Gits watcher with auto category    | discord, webui, irc   |
 
 ### 📡 RSS Feed Watcher (Built-in)
 
