@@ -24,6 +24,7 @@ from plugins.discord_notifier import plugin as discord_notifier_plugin
 from plugins.emoji_ai_responder import plugin as emoji_ai_responder_plugin
 from plugins.device_compare import plugin as device_compare_plugin
 from plugins.lowfi_video import plugin as lowfi_video_plugin
+from plugins.tater_gits_add_feed import plugin as tater_gits_add_feed_plugin
 
 plugin_registry = {
     youtube_plugin.name: youtube_plugin,
@@ -52,4 +53,5 @@ plugin_registry = {
     emoji_ai_responder_plugin.name: emoji_ai_responder_plugin,
     device_compare_plugin.name: device_compare_plugin,
     lowfi_video_plugin.name: lowfi_video_plugin,
+    tater_gits_add_feed_plugin.name: tater_gits_add_feed_plugin,
 }
