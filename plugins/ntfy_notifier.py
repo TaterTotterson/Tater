@@ -144,7 +144,7 @@ class NtfyNotifierPlugin(ToolPlugin):
 
         url = f"{server}/{topic}"
         headers = {
-            "Title": title or "",
+            # "Title": title or "",
             "Priority": priority if priority in {"1", "2", "3", "4", "5"} else "3",
             "Markdown": "yes",  # render Markdown in ntfy
         }
