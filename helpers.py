@@ -13,6 +13,13 @@ import base64
 import uuid
 import time
 import websocket
+from typing import List, Dict, Any, Optional
+from urllib.parse import urlparse, urlunparse
+
+try:
+    from jinja2 import Template
+except ImportError:
+    Template = None  # pip install jinja2 if not already
 
 load_dotenv()
 nest_asyncio.apply()
@@ -24,7 +31,6 @@ redis_client = redis.Redis(
     db=0,
     decode_responses=True
 )
-
 
 def get_tater_name():
     """Return the assistant's first and last name from Redis."""
@@ -54,21 +60,79 @@ def run_async(coro):
     return loop.run_until_complete(coro)
 
 # ---------------------------------------------------------
-# LLM client wrapper
+# LLM client wrapper (hardcoded template mode)
 # ---------------------------------------------------------
+def _normalize_base_url(host: str) -> str:
+    if not host.startswith("http://") and not host.startswith("https://"):
+        host = f"http://{host}"
+    parsed = urlparse(host.rstrip("/"))
+    path = parsed.path
+    if not path.endswith("/v1"):
+        path = (path + "/v1").replace("//", "/")
+    return urlunparse(parsed._replace(path=path))
+
 class LLMClientWrapper:
     def __init__(self, host, model=None, **kwargs):
         model = model or os.getenv("LLM_MODEL", "gemma3:27b")
-        base_url = host.rstrip('/')
-        if not base_url.startswith("http"):
-            base_url = f"http://{base_url}"
-        if not base_url.endswith("/v1"):
-            base_url = f"{base_url}/v1"
-        self.client = AsyncOpenAI(base_url=base_url, api_key=os.getenv("LLM_API_KEY", "not-needed"), **kwargs)
-        self.host = base_url
+        base_url = _normalize_base_url(host)
+
+        self.client = AsyncOpenAI(
+            base_url=base_url,
+            api_key=os.getenv("LLM_API_KEY", "not-needed"),
+            **kwargs
+        )
+
+        self.host = base_url.rstrip("/")
         self.model = model
 
+        # --- Hardcoded template ---
+        self.prompt_template_path = os.path.join(os.path.dirname(__file__), "lmstudio_gemma3.jinja")
+        self.prompt_template_text: Optional[str] = None
+        if Template and os.path.exists(self.prompt_template_path):
+            with open(self.prompt_template_path, "r", encoding="utf-8") as f:
+                self.prompt_template_text = f.read()
+
+        self.bos_token = ""  # no BOS token by default
+        self.add_generation_prompt = True
+        self.max_tokens = int(os.getenv("LLM_MAX_TOKENS", "1024"))
+        self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.7"))
+        self._template_mode = bool(self.prompt_template_text and Template is not None)
+
+    def _render_jinja_prompt(self, messages: List[Dict[str, Any]]) -> str:
+        if not self.prompt_template_text:
+            raise RuntimeError("Prompt template not found next to helpers.py")
+        tmpl = Template(self.prompt_template_text)
+        return tmpl.render(
+            bos_token=self.bos_token,
+            messages=messages,
+            add_generation_prompt=self.add_generation_prompt
+        )
+
+    async def _complete_with_template(self, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+        prompt_text = self._render_jinja_prompt(messages)
+        url = f"{self.host}/completions"
+        headers = {"Content-Type": "application/json"}
+        payload = {
+            "model": self.model,
+            "prompt": prompt_text,
+            "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
+            "stream": False
+        }
+        resp = await asyncio.to_thread(
+            requests.post, url, headers=headers, data=json.dumps(payload), timeout=600
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        text = (data.get("choices") or [{}])[0].get("text", "")
+        return {"model": data.get("model", self.model),
+                "message": {"role": "assistant", "content": text}}
+
     async def chat(self, messages, **kwargs):
+        if self._template_mode:
+            return await self._complete_with_template(messages)
+
+        # fallback: normal chat completions
         stream = kwargs.pop("stream", False)
         model = kwargs.pop("model", self.model)
         response = await self.client.chat.completions.create(
@@ -83,7 +147,7 @@ class LLMClientWrapper:
         return {"model": response.model, "message": {"role": choice.role, "content": choice.content}}
 
 # ---------------------------------------------------------
-# Function JSON parsing helpers
+# Function JSON parsing helpers (unchanged)
 # ---------------------------------------------------------
 def extract_json(text):
     text = text.strip()
@@ -107,6 +171,7 @@ def extract_json(text):
                         return candidate
                     except json.JSONDecodeError:
                         continue
+
 def parse_function_json(response_text):
     try:
         response_json = json.loads(response_text)
@@ -120,16 +185,12 @@ def parse_function_json(response_text):
         else:
             return None
 
-    # If it's a single function object
     if isinstance(response_json, dict) and "function" in response_json:
         return response_json
-
-    # If it's a list of functions, return the first valid one
     if isinstance(response_json, list):
         for item in response_json:
             if isinstance(item, dict) and "function" in item:
                 return item
-
     return None
 
 # ---------------------------------------------------------

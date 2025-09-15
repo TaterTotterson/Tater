@@ -47,11 +47,37 @@ dotenv.load_dotenv()
 
 @st.cache_resource(show_spinner=False)
 def _start_rss(_llm_client):
+    """
+    Start the RSS poller in a resilient background thread.
+    If poll_feeds() exits or throws, we log it and restart after a short backoff.
+    """
     def _run():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        rss_manager = RSSManager(llm_client=_llm_client)
-        loop.run_until_complete(rss_manager.poll_feeds())
+
+        backoff = 1.0  # seconds (will grow up to 10s)
+        max_backoff = 10.0
+
+        while True:
+            try:
+                rss_manager = RSSManager(llm_client=_llm_client)
+                # If poll_feeds() is a long-lived loop, this blocks until it raises or returns.
+                loop.run_until_complete(rss_manager.poll_feeds())
+                # If it returned cleanly, restart after a tiny pause to avoid hot-looping.
+                logging.getLogger("RSS").warning("poll_feeds() returned; restarting shortly…")
+                time.sleep(1.0)
+                backoff = 1.0  # reset backoff after a clean return
+            except asyncio.CancelledError:
+                logging.getLogger("RSS").info("RSS poller cancelled; exiting thread.")
+                break
+            except KeyboardInterrupt:
+                logging.getLogger("RSS").info("RSS poller interrupted; exiting thread.")
+                break
+            except Exception as e:
+                logging.getLogger("RSS").error(f"RSS crashed: {e}", exc_info=True)
+                time.sleep(backoff)
+                backoff = min(max_backoff, backoff * 2)  # exponential backoff
+
     t = threading.Thread(target=_run, daemon=True)
     t.start()
     return t
@@ -105,7 +131,11 @@ else:
     llm_client = LLMClientWrapper(host=f'http://{llm_host}:{llm_port}')
 
 # Set the main event loop used for run_async.
-main_loop = asyncio.get_event_loop()
+try:
+    main_loop = asyncio.get_running_loop()
+except RuntimeError:
+    main_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(main_loop)
 set_main_loop(main_loop)
 
 first_name, last_name = get_tater_name()
@@ -423,8 +453,75 @@ def build_system_prompt():
         f"{base_prompt}\n\n"
         f"{tool_instructions}\n\n"
         f"{behavior_guard}"
-        "If no function is needed, reply normally."
+        "If no function is needed, reply normally.\n"
     )
+
+# ----------------- LM-STUDIO ----------------------------
+def _to_template_msg(role, content):
+    """
+    Return a dict shaped for the Jinja template:
+      - string -> {"role": role, "content": "text"}
+      - image  -> {"role": role, "content": [{"type":"image"}]}
+      - audio  -> {"role": role, "content": [{"type":"text","text":"[Audio]"}]}
+      - plugin_call -> stringify call as assistant text
+      - plugin_response -> skip (return None)
+    """
+    # Skip plugin responses from LLM context
+    if isinstance(content, dict) and content.get("marker") == "plugin_response":
+        return None
+
+    # Represent plugin calls as plain text (so history still makes sense)
+    if isinstance(content, dict) and content.get("marker") == "plugin_call":
+        as_text = json.dumps({
+            "function": content.get("plugin"),
+            "arguments": content.get("arguments", {})
+        }, indent=2)
+        return {"role": "assistant", "content": as_text} if role == "assistant" else {"role": role, "content": as_text}
+
+    # Media types
+    if isinstance(content, dict) and content.get("type") == "image":
+        return {"role": role, "content": [{"type": "image"}]}
+    if isinstance(content, dict) and content.get("type") == "audio":
+        return {"role": role, "content": [{"type": "text", "text": "[Audio]"}]}
+
+    # Strings and other fallbacks
+    if isinstance(content, str):
+        return {"role": role, "content": content}
+    return {"role": role, "content": str(content)}
+
+
+def _enforce_user_assistant_alternation(loop_messages):
+    """
+    Your template enforces strict alternation and requires the first message to be 'user'.
+    This merges consecutive same-role messages and ensures the list starts with 'user'.
+    """
+    merged = []
+    for m in loop_messages:
+        if not m:  # None from filtered items
+            continue
+        if not merged:
+            merged.append(m)
+            continue
+        if merged[-1]["role"] == m["role"]:
+            # Merge by concatenation/extension depending on content type
+            a, b = merged[-1]["content"], m["content"]
+            if isinstance(a, str) and isinstance(b, str):
+                merged[-1]["content"] = (a + "\n\n" + b).strip()
+            elif isinstance(a, list) and isinstance(b, list):
+                merged[-1]["content"] = a + b
+            else:
+                # Coerce to string merge if mixed
+                merged[-1]["content"] = ( (a if isinstance(a, str) else str(a)) +
+                                          "\n\n" +
+                                          (b if isinstance(b, str) else str(b)) ).strip()
+        else:
+            merged.append(m)
+
+    # Ensure first is user; if not, prepend an empty user turn
+    if merged and merged[0]["role"] != "user":
+        merged.insert(0, {"role": "user", "content": ""})
+
+    return merged
 
 # ----------------- PROCESSING FUNCTIONS -----------------
 async def process_message(user_name, message_content):
@@ -432,38 +529,31 @@ async def process_message(user_name, message_content):
     max_llm = int(redis_client.get("tater:max_llm") or 8)
     history = load_chat_history()[-max_llm:]
 
+    # Start with system (your template handles an optional system at index 0)
     messages_list = [{"role": "system", "content": final_system_prompt}]
 
+    # Convert persisted history into template-ready messages
+    loop_messages = []
     for msg in history:
+        role = msg["role"]
         content = msg["content"]
 
-        if msg["role"] == "user":
-            if isinstance(content, str):
-                text = content
-            elif isinstance(content, dict) and content.get("type") == "image":
-                text = "[Image]"
-            elif isinstance(content, dict) and content.get("type") == "audio":
-                text = "[Audio]"
-            else:
-                text = "[Unknown]"
+        # Normalize assistant/user roles only; ignore others if they ever appear
+        if role not in ("user", "assistant"):
+            # Convert unknown roles to 'assistant' text for safety
+            role = "assistant"
 
-            messages_list.append({"role": "user", "content": text})
+        templ_msg = _to_template_msg(role, content)
+        if templ_msg is not None:
+            loop_messages.append(templ_msg)
 
-        elif msg["role"] == "assistant":
-            if isinstance(content, dict) and content.get("marker") == "plugin_call":
-                plugin_call_text = json.dumps({
-                    "function": content.get("plugin"),
-                    "arguments": content.get("arguments", {})
-                }, indent=2)
-                messages_list.append({"role": "assistant", "content": plugin_call_text})
-            elif isinstance(content, dict) and content.get("marker") == "plugin_response":
-                # Skip all plugin responses entirely!
-                continue
-            else:
-                # Normal assistant reply
-                if isinstance(content, str):
-                    messages_list.append({"role": "assistant", "content": content})
+    # Merge consecutive same-role messages and ensure we start with 'user'
+    loop_messages = _enforce_user_assistant_alternation(loop_messages)
 
+    # Compose final list sent to the LLM
+    messages_list.extend(loop_messages)
+
+    # Call the (template-aware) client — this will hit /v1/completions when the jinja file exists
     response = await llm_client.chat(messages_list)
     return response["message"]["content"].strip()
 
@@ -523,7 +613,10 @@ async def process_function_call(response_json, user_question=""):
 
             # Ask LLM for a natural "waiting" message
             wait_response = await llm_client.chat(
-                messages=[{"role": "system", "content": wait_msg}]
+                messages=[
+                    {"role": "system", "content": "Write one short, friendly status line for the user."},
+                    {"role": "user", "content": wait_msg}
+                ]
             )
             wait_text = wait_response["message"]["content"].strip()
 
