@@ -34,6 +34,41 @@ redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_respon
 # Helper Functions
 #############################
 
+MAX_ARTICLE_CHARS = 12000  # keep well under model context; tune per model
+
+def _build_summary_messages(title: str, source_name: str, content: str):
+    """
+    Build messages compatible with the Jinja template.
+    System gives instruction, user carries the article content.
+    """
+    safe_content = (content or "")[:MAX_ARTICLE_CHARS]
+    system = "Summarize the article for a general audience. Be concise and factual; use a short title and bullet points."
+    user = (
+        f"Title: {title.strip() if title else '(untitled)'}\n"
+        f"Source: {source_name.strip() if source_name else '(unknown)'}\n\n"
+        f"{safe_content}"
+    )
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+def _chunk_text(s: str, limit: int = MAX_ARTICLE_CHARS):
+    s = s or ""
+    out = []
+    start = 0
+    while start < len(s):
+        end = min(len(s), start + limit)
+        cut = s.rfind("\n", start, end)
+        if cut == -1 or cut <= start:
+            cut = s.rfind(" ", start, end)
+        if cut == -1 or cut <= start:
+            cut = end
+        out.append(s[start:cut].strip())
+        start = cut
+    return out
+
+
 def fetch_web_summary(webpage_url, model=LLM_MODEL, retries=3, backoff=2):
     headers = {
         "User-Agent": (
@@ -144,16 +179,10 @@ class RSSManager:
         if not article_text:
             summary_text = "Could not retrieve a summary for this article."
         else:
-            summarization_prompt = (
-                "Please summarize the following article in a clear and engaging format for Discord.\n\n"
-                "Avoid starting with phrases like 'Here's a summary' – begin directly.\n\n"
-                "Include a title and use bullet points for the main takeaways:\n\n"
-                f"{article_text}\n\nSummary:"
-            )
             try:
+                messages = _build_summary_messages(entry_title, feed_title, article_text)
                 summarization_response = await self.llm_client.chat(
-                    model=LLM_MODEL,
-                    messages=[{"role": "system", "content": summarization_prompt}],
+                    messages=messages,
                     stream=False,
                 )
                 summary_text = summarization_response['message'].get('content', '').strip()

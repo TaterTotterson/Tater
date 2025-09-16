@@ -108,7 +108,21 @@ class LLMClientWrapper:
             add_generation_prompt=self.add_generation_prompt
         )
 
+    def _coerce_for_template(self, messages):
+        """
+        If a plugin sends only a single system message, the Jinja template would
+        otherwise produce no usable turn. Coerce to [system, user=<same text>].
+        Leave everything else unchanged.
+        """
+        if isinstance(messages, list) and len(messages) == 1:
+            m0 = messages[0]
+            if isinstance(m0, dict) and m0.get("role") == "system":
+                sys_txt = m0.get("content", "")
+                return [m0, {"role": "user", "content": sys_txt}]
+        return messages
+
     async def _complete_with_template(self, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+        messages = self._coerce_for_template(messages)   # <-- NEW
         prompt_text = self._render_jinja_prompt(messages)
         url = f"{self.host}/completions"
         headers = {"Content-Type": "application/json"}
