@@ -54,6 +54,69 @@ PLATFORM_SETTINGS = {
     }
 }
 
+# ---- LM-Studio template helpers ----
+def _to_template_msg(role, content, sender=None):
+    """
+    Shape messages for the Jinja template.
+    - Strings -> keep as string (optionally prefix with sender for multi-user rooms)
+    - Images  -> [{"type":"image"}]
+    - Audio   -> [{"type":"text","text":"[Audio]"}]
+    - plugin_response -> skip (return None)
+    - plugin_call -> stringify JSON as assistant text
+    """
+    if isinstance(content, dict) and content.get("marker") == "plugin_response":
+        return None
+
+    if isinstance(content, dict) and content.get("marker") == "plugin_call":
+        as_text = json.dumps({
+            "function": content.get("plugin"),
+            "arguments": content.get("arguments", {})
+        }, indent=2)
+        return {"role": "assistant" if role == "assistant" else role, "content": as_text}
+
+    if isinstance(content, dict) and content.get("type") == "image":
+        return {"role": role, "content": [{"type": "image"}]}
+    if isinstance(content, dict) and content.get("type") == "audio":
+        return {"role": role, "content": [{"type": "text", "text": "[Audio]"}]}
+
+    # Text + fallback
+    if isinstance(content, str):
+        if role == "user" and sender:
+            return {"role": "user", "content": f"{sender}: {content}"}
+        return {"role": role, "content": content}
+
+    return {"role": role, "content": str(content)}
+
+
+def _enforce_user_assistant_alternation(loop_messages):
+    """
+    Merge consecutive same-role turns and ensure the first non-system is 'user'.
+    This avoids the template's alternation exception.
+    """
+    merged = []
+    for m in loop_messages:
+        if not m:
+            continue
+        if not merged:
+            merged.append(m)
+            continue
+        if merged[-1]["role"] == m["role"]:
+            a, b = merged[-1]["content"], m["content"]
+            if isinstance(a, str) and isinstance(b, str):
+                merged[-1]["content"] = (a + "\n\n" + b).strip()
+            elif isinstance(a, list) and isinstance(b, list):
+                merged[-1]["content"] = a + b
+            else:
+                merged[-1]["content"] = ( (a if isinstance(a, str) else str(a)) +
+                                          "\n\n" +
+                                          (b if isinstance(b, str) else str(b)) ).strip()
+        else:
+            merged.append(m)
+
+    if merged and merged[0]["role"] != "user":
+        merged.insert(0, {"role": "user", "content": ""})
+    return merged
+
 def get_plugin_enabled(plugin_name):
     enabled = redis_client.hget("plugin_enabled", plugin_name)
     return enabled and enabled.lower() == "true"
@@ -126,7 +189,10 @@ class discord_platform(commands.Bot):
     async def generate_error_message(self, prompt: str, fallback: str, message: discord.Message):
         try:
             error_response = await self.llm.chat(
-                messages=[{"role": "system", "content": prompt}]
+                messages=[
+                    {"role": "system", "content": "Write a short, friendly, plain-English error note."},
+                    {"role": "user", "content": prompt}
+                ]
             )
             return error_response['message'].get('content', '').strip() or fallback
         except Exception as e:
@@ -139,7 +205,7 @@ class discord_platform(commands.Bot):
 
         history_key = f"tater:channel:{channel_id}:history"
         raw_history = redis_client.lrange(history_key, -limit, -1)
-        formatted = []
+        loop_messages = []
 
         for entry in raw_history:
             data = json.loads(entry)
@@ -147,35 +213,16 @@ class discord_platform(commands.Bot):
             sender = data.get("username", role)
             content = data.get("content")
 
-            if role == "user":
-                if isinstance(content, str):
-                    text = content
-                elif isinstance(content, dict) and content.get("type") == "image":
-                    text = "[Image]"
-                elif isinstance(content, dict) and content.get("type") == "audio":
-                    text = "[Audio]"
-                else:
-                    text = "[Unknown]"
+            # Only user/assistant roles are meaningful for the template
+            if role not in ("user", "assistant"):
+                role = "assistant"
 
-                formatted.append({
-                    "role": "user",
-                    "content": f"{sender}: {text}"
-                })
+            templ = _to_template_msg(role, content, sender=sender if role == "user" else None)
+            if templ is not None:
+                loop_messages.append(templ)
 
-            elif role == "assistant":
-                if isinstance(content, dict) and content.get("marker") == "plugin_call":
-                    plugin_call_text = json.dumps({
-                        "function": content.get("plugin"),
-                        "arguments": content.get("arguments", {})
-                    }, indent=2)
-                    formatted.append({"role": "assistant", "content": plugin_call_text})
-                elif isinstance(content, dict) and content.get("marker") == "plugin_response":
-                    continue
-                else:
-                    if isinstance(content, str):
-                        formatted.append({"role": "assistant", "content": content})
-
-        return formatted
+        # Merge consecutive same-role turns and ensure we start with 'user'
+        return _enforce_user_assistant_alternation(loop_messages)
 
     async def save_message(self, channel_id, role, username, content):
         key = f"tater:channel:{channel_id}:history"
@@ -262,7 +309,10 @@ class discord_platform(commands.Bot):
 
                             # Directly fetch the waiting message text from LLM
                             wait_response = await self.llm.chat(
-                                messages=[{"role": "system", "content": wait_msg}]
+                                messages=[
+                                    {"role": "system", "content": "Write one short, friendly status line."},
+                                    {"role": "user", "content": wait_msg}
+                                ]
                             )
                             wait_text = wait_response["message"]["content"].strip()
 
