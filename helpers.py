@@ -73,7 +73,7 @@ def _normalize_base_url(host: str) -> str:
 
 class LLMClientWrapper:
     def __init__(self, host, model=None, **kwargs):
-        model = model or os.getenv("LLM_MODEL", "gemma3:27b")
+        model = model or os.getenv("LLM_MODEL", "gemma-3-27b-it-abliterated")
         base_url = _normalize_base_url(host)
 
         self.client = AsyncOpenAI(
@@ -96,8 +96,17 @@ class LLMClientWrapper:
         self.add_generation_prompt = True
         self.max_tokens = int(os.getenv("LLM_MAX_TOKENS", "1024"))
         self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.7"))
-        self._template_mode = bool(self.prompt_template_text and Template is not None)
 
+        # Allow disabling template mode via env if desired
+        template_enabled_env = os.getenv("LLM_TEMPLATE_ENABLED", "1").strip()
+        template_enabled = template_enabled_env not in ("0", "false", "False", "no")
+        self._template_mode = bool(self.prompt_template_text and Template is not None and template_enabled)
+
+        # Cached probe: does the server support /v1/completions?
+        # None = unknown; True/False = remembered result after first attempt.
+        self._completions_supported: Optional[bool] = None
+
+    # ---------- Template rendering helpers ----------
     def _render_jinja_prompt(self, messages: List[Dict[str, Any]]) -> str:
         if not self.prompt_template_text:
             raise RuntimeError("Prompt template not found next to helpers.py")
@@ -110,9 +119,8 @@ class LLMClientWrapper:
 
     def _coerce_for_template(self, messages):
         """
-        If a plugin sends only a single system message, the Jinja template would
-        otherwise produce no usable turn. Coerce to [system, user=<same text>].
-        Leave everything else unchanged.
+        If a plugin sends only a single system message, coerce to [system, user=<same text>]
+        so the Jinja chat template always has a user turn to render.
         """
         if isinstance(messages, list) and len(messages) == 1:
             m0 = messages[0]
@@ -121,8 +129,24 @@ class LLMClientWrapper:
                 return [m0, {"role": "user", "content": sys_txt}]
         return messages
 
+    def _looks_like_unsupported_completions(self, err: Exception) -> bool:
+        """Heuristic: detect servers that don't support /v1/completions (e.g., Ollama OpenAI compat)."""
+        from requests import HTTPError
+        if isinstance(err, HTTPError) and err.response is not None:
+            code = err.response.status_code
+            text = (err.response.text or "").lower()
+            if code in (404, 405):
+                return True
+            # Common proxy/server messages:
+            needles = ["unknown route", "not found", "no such path", "this route does not exist"]
+            if any(n in text for n in needles):
+                return True
+        # Connection errors or JSON shape mismatches can also indicate lack of support
+        msg = str(err).lower()
+        return "endpoint" in msg and "completions" in msg or "not found" in msg
+
     async def _complete_with_template(self, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
-        messages = self._coerce_for_template(messages)   # <-- NEW
+        messages = self._coerce_for_template(messages)
         prompt_text = self._render_jinja_prompt(messages)
         url = f"{self.host}/completions"
         headers = {"Content-Type": "application/json"}
@@ -142,11 +166,28 @@ class LLMClientWrapper:
         return {"model": data.get("model", self.model),
                 "message": {"role": "assistant", "content": text}}
 
+    # ---------- Public API ----------
     async def chat(self, messages, **kwargs):
-        if self._template_mode:
-            return await self._complete_with_template(messages)
+        """
+        If template mode is enabled, try /v1/completions first.
+        If the server doesn't support it (Ollama), fall back to /v1/chat/completions and
+        remember that for future calls (so we don't keep trying /completions).
+        """
+        # Try template path if enabled and not known to be unsupported
+        if self._template_mode and self._completions_supported is not False:
+            try:
+                result = await self._complete_with_template(messages)
+                self._completions_supported = True
+                return result
+            except Exception as e:
+                # If this looks like "route unsupported", flip the bit and fall through
+                if self._looks_like_unsupported_completions(e):
+                    self._completions_supported = False
+                else:
+                    # Real error during LM Studio call; surface it
+                    raise
 
-        # fallback: normal chat completions
+        # Fallback: OpenAI-compatible /v1/chat/completions (works on Ollama et al.)
         stream = kwargs.pop("stream", False)
         model = kwargs.pop("model", self.model)
         response = await self.client.chat.completions.create(
