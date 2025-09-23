@@ -82,6 +82,59 @@ llm_host = os.getenv("LLM_HOST", "127.0.0.1")
 llm_port = os.getenv("LLM_PORT", "11434")
 llm_client = LLMClientWrapper(host=f"http://{llm_host}:{llm_port}")
 
+# ---- LM-Studio template helpers ----
+def _to_template_msg(role, content, sender=None):
+    """
+    Shape messages for the Jinja template.
+    - Strings -> keep as string (optionally prefix with sender)
+    - plugin_response -> skip (return None)
+    - plugin_call -> stringify JSON as assistant text
+    """
+    if isinstance(content, dict) and content.get("marker") == "plugin_response":
+        return None
+
+    if isinstance(content, dict) and content.get("marker") == "plugin_call":
+        as_text = json.dumps({
+            "function": content.get("plugin"),
+            "arguments": content.get("arguments", {})
+        }, indent=2)
+        return {"role": "assistant" if role == "assistant" else role, "content": as_text}
+
+    # IRC stores plain text; treat files already as placeholders elsewhere
+    if isinstance(content, str):
+        if role == "user" and sender:
+            return {"role": "user", "content": f"{sender}: {content}"}
+        return {"role": role, "content": content}
+
+    # Fallback (shouldn’t really happen on IRC)
+    return {"role": role, "content": str(content)}
+
+
+def _enforce_user_assistant_alternation(loop_messages):
+    """
+    Merge consecutive same-role turns and ensure first turn is 'user'.
+    Prevents the template's alternation error.
+    """
+    merged = []
+    for m in loop_messages:
+        if not m:
+            continue
+        if not merged:
+            merged.append(m)
+            continue
+        if merged[-1]["role"] == m["role"]:
+            a, b = merged[-1]["content"], m["content"]
+            if isinstance(a, str) and isinstance(b, str):
+                merged[-1]["content"] = (a + "\n\n" + b).strip()
+            else:
+                merged[-1]["content"] = (str(a) + "\n\n" + str(b)).strip()
+        else:
+            merged.append(m)
+
+    if merged and merged[0]["role"] != "user":
+        merged.insert(0, {"role": "user", "content": ""})
+    return merged
+
 def get_plugin_enabled(name):
     enabled = redis_client.hget("plugin_enabled", name)
     return enabled and enabled.lower() == "true"
@@ -98,43 +151,27 @@ def load_irc_history(channel, limit=None):
         limit = int(redis_client.get("tater:max_llm") or 8)
     key = f"tater:irc:{channel}:history"
     raw_history = redis_client.lrange(key, -limit, -1)
-    formatted = []
+
+    loop_messages = []
     for entry in raw_history:
         data = json.loads(entry)
         role = data.get("role", "user")
         sender = data.get("username", role)
         content = data.get("content")
 
-        if isinstance(content, dict):
-            if content.get("marker") == "plugin_response":
-                continue  # Skip plugin responses from context
+        # Represent non-text payloads as short placeholders (if you store them)
+        if isinstance(content, dict) and content.get("type") in ["image", "audio", "video", "file"]:
+            name = content.get("name", "file")
+            content = f"[{content['type'].capitalize()}: {name}]"
 
-            if content.get("marker") == "plugin_call":
-                plugin_call_text = json.dumps({
-                    "function": content.get("plugin"),
-                    "arguments": content.get("arguments", {})
-                }, indent=2)
-                formatted.append({"role": "assistant", "content": plugin_call_text})
-                continue
+        if role not in ("user", "assistant"):
+            role = "assistant"
 
-            file_type = content.get("type")
-            name = content.get("name", "unnamed file")
-            if file_type in ["image", "audio", "video", "file"]:
-                placeholder = f"[{file_type.capitalize()}: {name}]"
-            else:
-                continue  # Unknown type, skip
+        templ = _to_template_msg(role, content, sender=sender if role == "user" else None)
+        if templ is not None:
+            loop_messages.append(templ)
 
-        elif isinstance(content, str):
-            placeholder = content
-
-        else:
-            continue
-
-        if role == "assistant":
-            formatted.append({"role": "assistant", "content": placeholder})
-        else:
-            formatted.append({"role": "user", "content": f"{sender}: {placeholder}"})
-    return formatted
+    return _enforce_user_assistant_alternation(loop_messages)
 
 def build_system_prompt():
     now = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
@@ -163,7 +200,7 @@ def build_system_prompt():
         f"{base_prompt}\n\n"
         f"{tool_instructions}\n\n"
         f"{behavior_guard}"
-        "If no function is needed, reply normally."
+        "If no function is needed, reply normally.\n"
     )
 
 @irc3.event(irc3.rfc.PRIVMSG)
@@ -202,7 +239,10 @@ async def on_message(self, mask, event, target, data):
                 if hasattr(plugin, "waiting_prompt_template"):
                     wait_prompt = plugin.waiting_prompt_template.format(mention=mask.nick)
                     wait_response = await llm_client.chat(
-                        messages=[{"role": "system", "content": wait_prompt}]
+                        messages=[
+                            {"role": "system", "content": "Write one short, friendly status line."},
+                            {"role": "user", "content": wait_prompt}
+                        ]
                     )
                     wait_text = wait_response["message"]["content"].strip()
                     self.privmsg(target, wait_text)
