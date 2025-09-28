@@ -25,6 +25,8 @@ from plugins.emoji_ai_responder import plugin as emoji_ai_responder_plugin
 from plugins.device_compare import plugin as device_compare_plugin
 from plugins.lowfi_video import plugin as lowfi_video_plugin
 from plugins.tater_gits_add_feed import plugin as tater_gits_add_feed_plugin
+from plugins.obsidian_search import plugin as obsidian_search_plugin
+from plugins.obsidian_note import plugin as obsidian_note_plugin
 
 plugin_registry = {
     youtube_plugin.name: youtube_plugin,
@@ -54,4 +56,6 @@ plugin_registry = {
     device_compare_plugin.name: device_compare_plugin,
     lowfi_video_plugin.name: lowfi_video_plugin,
     tater_gits_add_feed_plugin.name: tater_gits_add_feed_plugin,
+    obsidian_search_plugin.name: obsidian_search_plugin,
+    obsidian_note_plugin.name: obsidian_note_plugin,
 }
