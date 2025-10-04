@@ -16,3 +16,5 @@ websocket-client
 aioftp
 irc3
 pyyaml
+fastapi
+uvicorn

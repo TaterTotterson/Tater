@@ -42,7 +42,7 @@ class WebSearchPlugin(ToolPlugin):
         }
     }
     waiting_prompt_template = "Write a friendly message telling {mention} you’re searching the web for more information now! Only output that message."
-    platforms = ["discord", "webui", "irc"]
+    platforms = ["discord", "webui", "irc", "homeassistant"]  # ← added HA
 
     def search_web(self, query, num_results=10):
         settings = redis_client.hgetall("plugin_settings:Web Search")
@@ -184,6 +184,7 @@ class WebSearchPlugin(ToolPlugin):
 
         return "Sorry, I couldn't extract content from any of the top results."
 
+    # -------- Platform handlers --------
     async def handle_discord(self, message, args, llm_client):
         query = args.get("query")
         if not query:
@@ -225,5 +226,25 @@ class WebSearchPlugin(ToolPlugin):
             return f"{user}: No results found."
         answer = await self._pick_link_and_summarize(results, query, raw_message, llm_client)
         return format_irc(answer)
+
+    # ✅ New: Home Assistant handler (returns plain text)
+    async def handle_homeassistant(self, args, llm_client):
+        """
+        Expected args:
+          { "query": "<search query>", "user_question": "<original user utterance>" }
+        Returns: plain string (TTS-friendly)
+        """
+        query = args.get("query")
+        if not query:
+            return "No search query provided."
+
+        results = self.search_web(query)
+        if not results:
+            return "No results found."
+
+        user_q = args.get("user_question", "")
+        answer = await self._pick_link_and_summarize(results, query, user_q, llm_client)
+        # keep it concise for TTS
+        return (answer or "No answer available.").strip()
 
 plugin = WebSearchPlugin()
