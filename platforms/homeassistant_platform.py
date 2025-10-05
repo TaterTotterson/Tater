@@ -277,16 +277,6 @@ async def handle_message(payload: HARequest):
                 return HAResponse(response=msg)
 
             try:
-                # Augment tool args with HA context so plugins can auto-target devices/areas
-                args = {
-                    **(args or {}),
-                    "_ha_context": {
-                        "area_id": payload.area_id,    # preferred for area lookups
-                        "area": None,                  # left for future use
-                        "device_id": payload.device_id # if you later want device-scoped logic
-                    }
-                }
-
                 result = await plugin.handle_homeassistant(args, _llm)
 
                 final_text = _flatten_to_text(result).strip() or f"Done with {func}."
