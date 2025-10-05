@@ -29,6 +29,7 @@ from plugins.obsidian_search import plugin as obsidian_search_plugin
 from plugins.obsidian_note import plugin as obsidian_note_plugin
 from plugins.ha_control import plugin as ha_control_plugin
 from plugins.overseerr_trending import plugin as overseerr_trending_plugin
+from plugins.overseerr_request import plugin as overseerr_request_plugin
 
 plugin_registry = {
     youtube_plugin.name: youtube_plugin,
@@ -62,4 +63,5 @@ plugin_registry = {
     obsidian_note_plugin.name: obsidian_note_plugin,
     ha_control_plugin.name: ha_control_plugin,
     overseerr_trending_plugin.name: overseerr_trending_plugin,
+    overseerr_request_plugin.name: overseerr_request_plugin,
 }
