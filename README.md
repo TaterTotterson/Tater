@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://git.phooey.cloud/mastaful/Tater/raw/branch/main/images/animated.webp" alt="Tater Discord Bot" width="200"/>
+  <img src="https://raw.githubusercontent.com/TaterTotterson/Tater/refs/heads/main/images/tater-animated.webp" alt="Tater Discord Bot" width="200"/>
   <h1>Tater</h1>
 </div>
 
@@ -9,11 +9,12 @@
 
 ## 🌐 Tater Platform Overview
 
-| Platform   | Description                                                                     |
-|------------|---------------------------------------------------------------------------------|
-| `webui`    | Streamlit-based WebUI for chatting, configuring plugins, and managing settings. |
-| `discord`  | Full-featured discord bot that runs compatible plugins                          |
-| `irc`      | Lightweight IRC bot that responds to mentions and runs compatible plugins.      |
+| Platform        | Description                                                                                     |
+|-----------------|-------------------------------------------------------------------------------------------------|
+| `webui`         | Streamlit-based WebUI for chatting, configuring plugins, and managing settings.                 |
+| `discord`       | Full-featured Discord bot that runs compatible plugins.                                         |
+| `irc`           | Lightweight IRC bot that responds to mentions and runs compatible plugins.                      |
+| `homeassistant` | Local integration for [Home Assistant](https://github.com/TaterTotterson/Tater-HomeAssistant), allowing Tater to act as a voice-enabled AI assistant through the Assist pipeline. |
 
 ## 🧩 Tater Plugin Overview
 
@@ -41,6 +42,8 @@ The following plugins can be triggerd simple by asking Tater after you enable th
 | `device_compare`             | Compares two devices, fetching specs and FPS benchmarks from online sources | discord, webui        |
 | `lowfi_video`                | Generates lofi music videos, outputs 20-min MP4                             | webui                 |
 | `tater_gits_add_feed`        | Adds a GitHub releases feed to the Tater Gits watcher with auto category    | discord, webui, irc   |
+| `obsidian_search`            | Searches your entire Obsidian vault and extracts relevant notes to answer questions | webui                 |
+| `obsidian_note`              | Creates new notes in your Obsidian vault with AI-generated titles and content       | webui                 |
 
 ### 📡 RSS Feed Watcher (Built-in)
 
@@ -51,6 +54,7 @@ This system runs in the background and posts summarized RSS feed updates. The fo
 | `discord_notifier`       | Posts RSS updates directly to a configured Discord channel                  | RSS Notifier      | plugin-triggered       |
 | `telegram_notifier`      | Sends RSS updates to a Telegram channel using the internal feed watcher     | RSS Notifier      | plugin-triggered       |
 | `wordpress_poster`       | Posts RSS updates to WordPress using the internal feed watcher              | RSS Notifier      | plugin-triggered       |
+| `ntfy_notifier`          | Sends RSS updates to an ntfy topic for instant push notifications           | RSS Notifier      | plugin-triggered       |
 | `list_feeds`             | Lists all RSS feeds being watched by the internal feed watcher              | RSS Management    | discord, webui, irc    |
 | `watch_feed`             | Adds a feed to the internal RSS watcher                                     | RSS Management    | discord, webui, irc    |
 | `unwatch_feed`           | Removes a feed from the internal RSS watcher                                | RSS Management    | discord, webui, irc    |
@@ -60,8 +64,8 @@ Here are some examples of the RSS watcher in action:
 - **Telegram Notifier**: [@TaterNews](https://t.me/TaterNews)
 ---
 **Note**:
-- You don't have to use a model that is tagged with tools, test different models if the one you are using isnt trigging the plugins.
-- Tater currently recommends using Gemma3-27b
+- You don't have to use a model that is tagged with tools, though they will work better, test different models if the one you are using isnt trigging the plugins.
+- Tater currently recommends using gemma3-27b-abliterated
 
 ## Installation
 
@@ -76,7 +80,7 @@ Here are some examples of the RSS watcher in action:
 1. **Clone the Repository**
 
 ```bash
-git clone https://github.com/MasterPhooey/Tater.git
+git clone https://github.com/TaterTotterson/Tater.git
 ```
 
 2. **Navigate to the Project Directory**
@@ -104,7 +108,7 @@ Example: Local backend (Ollama, LM Studio, LocalAI)
 ```
 LLM_HOST=127.0.0.1  
 LLM_PORT=11434  
-LLM_MODEL=gemma3:27b  
+LLM_MODEL=gemma3-27b-abliterated  
 REDIS_HOST=127.0.0.1  
 REDIS_PORT=6379  
 ```
@@ -137,7 +141,7 @@ streamlit run webui.py
 Pull the prebuilt image with the following command:
 
 ```bash
-docker pull masterphooey/tater-webui
+docker pull ghcr.io/tatertotterson/tater:latest
 ```
 
 ### 2. Configuring Environment Variables
@@ -152,10 +156,10 @@ docker run -d --name tater_webui \
   -p 8501:8501 \
   -e LLM_HOST=127.0.0.1 \
   -e LLM_PORT=11434 \
-  -e LLM_MODEL=gemma3:27b \
-  -e REDIS_HOST=redis \
+  -e LLM_MODEL=gemma3-27b-abliterated \
+  -e REDIS_HOST=127.0.0.1 \
   -e REDIS_PORT=6379 \
-  masterphooey/tater-webui
+  ghcr.io/tatertotterson/tater:latest
 ```
 ---
 
@@ -167,9 +171,9 @@ docker run -d --name tater_webui \
   -e LLM_PORT= \
   -e LLM_MODEL=gpt-4o \
   -e LLM_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxx \
-  -e REDIS_HOST=redis \
+  -e REDIS_HOST=127.0.0.1 \
   -e REDIS_PORT=6379 \
-  masterphooey/tater-webui
+  ghcr.io/tatertotterson/tater:latest
 ```
 Note: When using ChatGPT, leave LLM_PORT blank.  
 Tater will automatically connect using HTTPS without appending a port number.
@@ -179,6 +183,12 @@ Tater will automatically connect using HTTPS without appending a port number.
 Once the container is running, open your browser and navigate to:
 
 [http://localhost:8501](http://localhost:8501)
+
+The Streamlit-based web UI will be available for interacting with Tater.
+
+---
+
+https://github.com/user-attachments/assets/dffa38fb-b4a5-45e8-a98a-614263446040
 
 The Streamlit-based web UI will be available for interacting with Tater.
 
