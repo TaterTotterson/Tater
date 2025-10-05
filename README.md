@@ -31,7 +31,7 @@ The following plugins can be triggerd simple by asking Tater after you enable th
 | `comfyui_image_plugin`       | Generates images with ComfyUI using custom workflow templates               | discord, webui        |
 | `comfyui_image_video`        | Animates images into WebP loops using ComfyUI.                              | webui                 |
 | `comfyui_video_plugin`       | Creates videos from prompts using ComfyUI and video workflows               | webui                 |
-| `comfyui_audio_ace`          | Composes full-length songs using AceStep. Generates lyrics, tags, and MP3s  | discord, webui        |
+| `comfyui_audio_ace`          | Composes full-length songs using AceStep. Generates lyrics, tags, and MP3s  | discord, webui, homeassistant        |
 | `comfyui_music_video_plugin` | Generates complete AI music videos with lyrics, audio, and visuals          | webui                 |
 | `ftp_browser`                | Allows users to browse FTP servers via Discord                              | discord               |
 | `webdav_browser`             | Allows browsing and downloading files from WebDAV servers                   | discord               |
