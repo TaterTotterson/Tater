@@ -24,6 +24,8 @@ The following plugins can be triggerd simple by asking Tater after you enable th
 |-------------------------------|-----------------------------------------------------------------------------|-----------------------|
 | `youtube_summary`             | Summarizes YouTube videos.                                                  | discord, webui, irc   |
 | `ha_control`                  | Controls Home Assistant devices via domain, service, entity, or area (e.g., turn lights on, toggle switches, set temperatures). | homeassistant, webui  |
+| `overseerr_trending`          | Fetches Trending or Upcoming movies/TV shows from Overseerr. Example: what movies are trending, what TV shows are upcoming. | webui, homeassistant  |
+| `overseerr_request`           | Adds a movie or TV show to Overseerr by title, creating a new request for it. Example: add the movie F1, request the TV show One Piece. | webui, homeassistant  |
 | `web_summary`                 | Summarizes content from a provided URL                                      | discord, webui, irc   |
 | `web_search`                  | Performs web search to help answer user questions                           | discord, webui, irc, homeassistant   |
 | `emoji_ai_responder`         | Picks a relevant emoji based on a message when someone reacts to it         | discord               |
