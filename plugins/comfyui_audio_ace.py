@@ -41,7 +41,7 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
             "label": "Default media_player entity",
             "type": "string",
             "default": "",
-            "description": "REQUIRED. Example: media_player.living_room_speaker"
+            "description": "Required for Home Assistant. Ex: media_player.living_room_speaker"
         }
     }
 
