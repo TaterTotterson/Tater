@@ -24,7 +24,7 @@ The following plugins can be triggerd simple by asking Tater after you enable th
 |------------------------------|-----------------------------------------------------------------------------|-----------------------|
 | `youtube_summary`            | Summarizes YouTube videos.                                                  | discord, webui, irc   |
 | `web_summary`                | Summarizes content from a provided URL                                      | discord, webui, irc   |
-| `web_search`                 | Performs web search to help answer user questions                           | discord, webui, irc   |
+| `web_search`                 | Performs web search to help answer user questions                           | discord, webui, irc, homeassistant   |
 | `emoji_ai_responder`         | Picks a relevant emoji based on a message when someone reacts to it         | discord               |
 | `vision_describer`           | Analyzes uploaded images and returns AI-generated descriptions              | discord, webui        |
 | `automatic_plugin`           | Generates images using AUTOMATIC1111 API based on user prompt               | discord, webui        |
