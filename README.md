@@ -11,10 +11,10 @@
 
 | Platform        | Description                                                                                     |
 |-----------------|-------------------------------------------------------------------------------------------------|
-| `webui`         | Streamlit-based WebUI for chatting, configuring plugins, and managing settings.                 |
 | `discord`       | Full-featured Discord bot that runs compatible plugins.                                         |
+| `homeassistant` | Native integration for [Home Assistant](https://github.com/TaterTotterson/Tater-HomeAssistant), allowing Tater to act as a voice-enabled AI assistant through the Assist pipeline and control smart devices directly. |
 | `irc`           | Lightweight IRC bot that responds to mentions and runs compatible plugins.                      |
-| `homeassistant` | Local integration for [Home Assistant](https://github.com/TaterTotterson/Tater-HomeAssistant), allowing Tater to act as a voice-enabled AI assistant through the Assist pipeline. |
+| `webui`         | Streamlit-based WebUI for chatting, configuring plugins, and managing settings.                 |
 
 ## 🧩 Tater Plugin Overview
 
@@ -22,31 +22,31 @@ The following plugins can be triggerd simple by asking Tater after you enable th
 
 | Plugin Name                   | Description                                                                 | Platform              |
 |-------------------------------|-----------------------------------------------------------------------------|-----------------------|
-| `youtube_summary`             | Summarizes YouTube videos.                                                  | discord, webui, irc   |
+| `automatic_plugin`            | Generates images using AUTOMATIC1111 API based on user prompt               | discord, webui        |
+| `comfyui_audio_ace`           | Composes full-length songs using AceStep. Generates lyrics, tags, and MP3s  | discord, webui, homeassistant |
+| `comfyui_image_plugin`        | Generates images with ComfyUI using custom workflow templates               | discord, webui        |
+| `comfyui_image_video`         | Animates images into WebP loops using ComfyUI.                              | webui                 |
+| `comfyui_music_video_plugin`  | Generates complete AI music videos with lyrics, audio, and visuals          | webui                 |
+| `comfyui_video_plugin`        | Creates videos from prompts using ComfyUI and video workflows               | webui                 |
+| `device_compare`              | Compares two devices, fetching specs and FPS benchmarks from online sources | discord, webui        |
+| `emoji_ai_responder`          | Picks a relevant emoji based on a message when someone reacts to it         | discord               |
+| `ftp_browser`                 | Allows users to browse FTP servers via Discord                              | discord               |
 | `ha_control`                  | Controls Home Assistant devices via domain, service, entity, or area (e.g., turn lights on, toggle switches, set temperatures). | homeassistant, webui  |
-| `overseerr_trending`          | Fetches Trending or Upcoming movies/TV shows from Overseerr. Example: what movies are trending, what TV shows are upcoming. | webui, homeassistant  |
+| `lowfi_video`                 | Generates lofi music videos, outputs 20-min MP4                             | webui                 |
+| `obsidian_note`               | Creates new notes in your Obsidian vault with AI-generated titles and content | webui                 |
+| `obsidian_search`             | Searches your entire Obsidian vault and extracts relevant notes to answer questions | webui                 |
 | `overseerr_request`           | Adds a movie or TV show to Overseerr by title, creating a new request for it. Example: add the movie F1, request the TV show One Piece. | webui, homeassistant  |
+| `overseerr_trending`          | Fetches Trending or Upcoming movies/TV shows from Overseerr. Example: what movies are trending, what TV shows are upcoming. | webui, homeassistant  |
+| `premiumize_download`         | Checks Premiumize for cached file links and returns downloads               | discord, webui, irc   |
+| `premiumize_torrent`          | Checks if a torrent is cached on Premiumize and returns download links      | discord               |
+| `sftpgo_account`              | Creates SFTPGo user accounts and their credentials                          | discord, irc          |
+| `sftpgo_activity`             | Views SFTPGo user activity like file transfers and sessions                 | discord, irc          |
+| `tater_gits_add_feed`         | Adds a GitHub releases feed to the Tater Gits watcher with auto category    | discord, webui, irc   |
+| `vision_describer`            | Analyzes uploaded images and returns AI-generated descriptions              | discord, webui        |
+| `web_search`                  | Performs web search to help answer user questions                           | discord, webui, irc, homeassistant |
 | `web_summary`                 | Summarizes content from a provided URL                                      | discord, webui, irc   |
-| `web_search`                  | Performs web search to help answer user questions                           | discord, webui, irc, homeassistant   |
-| `emoji_ai_responder`         | Picks a relevant emoji based on a message when someone reacts to it         | discord               |
-| `vision_describer`           | Analyzes uploaded images and returns AI-generated descriptions              | discord, webui        |
-| `automatic_plugin`           | Generates images using AUTOMATIC1111 API based on user prompt               | discord, webui        |
-| `comfyui_image_plugin`       | Generates images with ComfyUI using custom workflow templates               | discord, webui        |
-| `comfyui_image_video`        | Animates images into WebP loops using ComfyUI.                              | webui                 |
-| `comfyui_video_plugin`       | Creates videos from prompts using ComfyUI and video workflows               | webui                 |
-| `comfyui_audio_ace`          | Composes full-length songs using AceStep. Generates lyrics, tags, and MP3s  | discord, webui, homeassistant        |
-| `comfyui_music_video_plugin` | Generates complete AI music videos with lyrics, audio, and visuals          | webui                 |
-| `ftp_browser`                | Allows users to browse FTP servers via Discord                              | discord               |
-| `webdav_browser`             | Allows browsing and downloading files from WebDAV servers                   | discord               |
-| `sftpgo_account`             | Creates SFTPGo user accounts and their credentials                          | discord, irc          |
-| `sftpgo_activity`            | Views SFTPGo user activity like file transfers and sessions                 | discord, irc          |
-| `premiumize_torrent`         | Checks if a torrent is cached on Premiumize and returns download links      | discord               |
-| `premiumize_download`        | Checks Premiumize for cached file links and returns downloads               | discord, webui, irc   |
-| `device_compare`             | Compares two devices, fetching specs and FPS benchmarks from online sources | discord, webui        |
-| `lowfi_video`                | Generates lofi music videos, outputs 20-min MP4                             | webui                 |
-| `tater_gits_add_feed`        | Adds a GitHub releases feed to the Tater Gits watcher with auto category    | discord, webui, irc   |
-| `obsidian_search`            | Searches your entire Obsidian vault and extracts relevant notes to answer questions | webui                 |
-| `obsidian_note`              | Creates new notes in your Obsidian vault with AI-generated titles and content       | webui                 |
+| `webdav_browser`              | Allows browsing and downloading files from WebDAV servers                   | discord               |
+| `youtube_summary`             | Summarizes YouTube videos.                                                  | discord, webui, irc   |
 
 ### 📡 RSS Feed Watcher (Built-in)
 
@@ -63,8 +63,7 @@ This system runs in the background and posts summarized RSS feed updates. The fo
 | `unwatch_feed`           | Removes a feed from the internal RSS watcher                                | RSS Management    | discord, webui, irc    |
 
 Here are some examples of the RSS watcher in action:
-- **WordPress Poster**: [tater.news](https://tater.news)
-- **Telegram Notifier**: [@TaterNews](https://t.me/TaterNews)
+- **WordPress Poster**: [TaterByets.com](https://TaterBytes.com)
 ---
 **Note**:
 - You don't have to use a model that is tagged with tools, though they will work better, test different models if the one you are using isnt trigging the plugins.
