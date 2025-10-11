@@ -31,7 +31,7 @@ The following plugins can be triggerd simple by asking Tater after you enable th
 | `device_compare`              | Compares two devices, fetching specs and FPS benchmarks from online sources | discord, webui        |
 | `emoji_ai_responder`          | Picks a relevant emoji based on a message when someone reacts to it         | discord               |
 | `ftp_browser`                 | Allows users to browse FTP servers via Discord                              | discord               |
-| `ha_control`                  | Controls Home Assistant devices via domain, service, entity, or area (e.g., turn lights on, toggle switches, set temperatures). | homeassistant, webui  |
+| `ha_control`                  | Controls Home Assistant devices via domain, service, entity, or area (e.g., turn lights on, toggle switches, set temperatures). | webui, homeassistant  |
 | `lowfi_video`                 | Generates lofi music videos, outputs 20-min MP4                             | webui                 |
 | `obsidian_note`               | Creates new notes in your Obsidian vault with AI-generated titles and content | webui                 |
 | `obsidian_search`             | Searches your entire Obsidian vault and extracts relevant notes to answer questions | webui                 |
