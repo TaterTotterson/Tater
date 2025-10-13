@@ -5,7 +5,6 @@ import feedparser
 import logging
 from dotenv import load_dotenv
 from plugin_base import ToolPlugin
-from helpers import format_irc
 import redis
 
 load_dotenv()

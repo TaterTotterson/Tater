@@ -8,7 +8,7 @@ import copy
 import requests
 from plugin_base import ToolPlugin
 import discord
-from helpers import redis_client, format_irc, run_comfy_prompt
+from helpers import redis_client, run_comfy_prompt
 
 class ComfyUIImagePlugin(ToolPlugin):
     name = "comfyui_image_plugin"
@@ -255,13 +255,5 @@ class ComfyUIImagePlugin(ToolPlugin):
             return [image_data, message_text]
         except Exception as e:
             return f"Failed to queue prompt: {e}"
-
-    # ---------------------------------------
-    # IRC
-    # ---------------------------------------
-    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
-        response = "This plugin is only supported on Discord and WebUI."
-        formatted = format_irc(response)
-        await bot.privmsg(channel, f"{user}: {formatted}")
 
 plugin = ComfyUIImagePlugin()

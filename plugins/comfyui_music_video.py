@@ -8,7 +8,7 @@ import uuid
 from PIL import Image
 from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 from plugin_base import ToolPlugin
-from helpers import format_irc, redis_client
+from helpers import redis_client
 from plugins.comfyui_audio_ace import ComfyUIAudioAcePlugin
 from plugins.comfyui_image_plugin import ComfyUIImagePlugin
 from plugins.comfyui_image_video_plugin import ComfyUIImageVideoPlugin
@@ -268,9 +268,6 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
             msg["message"]["content"]
         ]
 
-    async def handle_discord(self, message, args, llm_client):
-        return "❌ This plugin is only available in the WebUI due to file size limitations."
-
     async def handle_webui(self, args, llm_client):
         if "prompt" not in args:
             return ["No prompt given."]
@@ -287,8 +284,5 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
 
         # Run from a background thread (Streamlit thread-safe)
         return asyncio.run(_generate())
-
-    async def handle_irc(self, bot, channel, user, raw, args, llm_client):
-        await bot.privmsg(channel, f"{user}: This plugin is supported only on WebUI.")
 
 plugin = ComfyUIMusicVideoPlugin()

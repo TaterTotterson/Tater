@@ -14,7 +14,6 @@ class HAClient:
     """Simple Home Assistant REST API helper (settings from Redis)."""
 
     def __init__(self):
-        # Be tolerant of a stray space in the settings hash key.
         settings = (
             redis_client.hgetall("plugin_settings: Home Assistant")
             or redis_client.hgetall("plugin_settings:Home Assistant")
@@ -57,10 +56,6 @@ class HAClient:
 
 
 class HAControlPlugin(ToolPlugin):
-    """
-    One simple tool for Home Assistant control. The model calls it whenever the
-    user wants to control or check devices.
-    """
     name = "ha_control"
     usage = (
         "{\n"
@@ -103,20 +98,31 @@ class HAControlPlugin(ToolPlugin):
             logger.error(f"[ha_control] Failed to initialize HA client: {e}")
             return None
 
+    def _excluded_entities_set(self) -> set[str]:
+        """
+        Read up to five Voice PE entity IDs from platform settings and exclude them
+        from light control calls. Handles both UPPER and lower keys.
+        """
+        plat = redis_client.hgetall("homeassistant_platform_settings") or {}
+        ids = []
+        keys = ("VOICE_PE_ENTITY_1", "VOICE_PE_ENTITY_2", "VOICE_PE_ENTITY_3", "VOICE_PE_ENTITY_4", "VOICE_PE_ENTITY_5")
+        for k in keys:
+            v = (plat.get(k) or plat.get(k.lower()) or "").strip()
+            if v:
+                ids.append(v.lower())
+        excluded = set(ids)
+        # Helpful for debugging
+        logger.debug(f"[ha_control] excluded voice PE entities: {excluded}")
+        return excluded
+
     @staticmethod
     def _infer_domain_hint(text: str, action: str | None = None) -> str | None:
-        """Light heuristic to help shortlist candidates for 'object' resolution."""
         t = (text or "").lower()
         a = (action or "").lower()
-        # Action-driven hints:
-        if a == "set_temperature":
-            return "climate"
+        if a == "set_temperature": return "climate"
         if a in ("open", "close"):
-            # If they said 'lock' explicitly, prefer lock; otherwise assume cover.
-            if "lock" in t:
-                return "lock"
+            if "lock" in t: return "lock"
             return "cover"
-        # Text-driven hints:
         if any(w in t for w in ("light", "lamp", "bulb")): return "light"
         if any(w in t for w in ("switch", "plug", "outlet")): return "switch"
         if any(w in t for w in ("speaker", "tv", "media", "cast")): return "media_player"
@@ -130,25 +136,19 @@ class HAControlPlugin(ToolPlugin):
         return None
 
     async def _classify_target(self, target: str, llm_client):
-        """
-        Decide whether `target` refers to:
-          - an area+domain     -> {"area": "<Area Name>", "domain":"<domain>"}
-          - a single object    -> {"object":"<free-form name>","domain":"<optional domain hint>"}
-        Output must be strict JSON with exactly one of those shapes.
-        """
         target = (target or "").strip()
         if not target:
             return {}
 
-        allowed_domains = "light, switch, media_player, fan, climate, cover, lock, scene, script, sensor"
+        allowed = "light, switch, media_player, fan, climate, cover, lock, scene, script, sensor"
         system = (
             "You classify smart-home targets for Home Assistant control. "
             "Return strict JSON in ONE of these forms:\n"
-            '  {"area":"<Area Name>","domain":"<one of: ' + allowed_domains + '>"}\n'
+            f'  {{"area":"<Area Name>","domain":"<one of: {allowed}>"}}, or\n'
             '  {"object":"<single device or sensor name>","domain":"<optional domain hint>"}\n'
             "Do NOT include explanations."
         )
-        user = f'Target: "{target}"'
+        user = f'Target: \"{target}\"'
 
         try:
             resp = await llm_client.chat(
@@ -169,16 +169,13 @@ class HAControlPlugin(ToolPlugin):
         except Exception as e:
             logger.warning(f"[ha_control] target classification failed, falling back: {e}")
 
-        # Last resort heuristic: phrases that include 'light(s)' → area+light
         if "light" in target.lower():
             return {"area": target.replace("lights", "").replace("light", "").strip().title(), "domain": "light"}
 
-        # Otherwise treat as an object with a domain guess
         hint = self._infer_domain_hint(target)
         return {"object": target, **({"domain": hint} if hint else {})}
 
     def _shortlist_entities(self, states: list, phrase: str, domain_hint: str | None, limit: int = 12):
-        """Quick heuristic shortlist before asking LLM to pick the single best entity."""
         phrase_l = (phrase or "").lower()
         tokens = {t for t in re.split(r"[\s_\-]+", phrase_l) if t}
         candidates = []
@@ -218,7 +215,6 @@ class HAControlPlugin(ToolPlugin):
         return candidates[:limit] if candidates else []
 
     async def _pick_entity_with_llm(self, phrase: str, shortlist: list, llm_client):
-        """Ask LLM to choose the single best entity_id from a small candidate set."""
         if not shortlist:
             return None
         mini = [{"entity_id": c["entity_id"], "name": c["name"]} for c in shortlist]
@@ -245,7 +241,6 @@ class HAControlPlugin(ToolPlugin):
         return shortlist[0]["entity_id"]
 
     def _extract_temperature(self, data: dict) -> float | None:
-        """Accept common keys for temperature setpoint."""
         if not isinstance(data, dict):
             return None
         for k in ("temperature", "temp", "setpoint", "degrees"):
@@ -259,33 +254,20 @@ class HAControlPlugin(ToolPlugin):
         return None
 
     def _service_for_action(self, action: str, entity_domain: str) -> tuple[str, dict] | None:
-        """
-        Map high-level actions to HA service names for a given entity domain.
-        Returns (service, extra_payload) or None if unsupported.
-        """
         a = action.lower()
         d = entity_domain.lower()
-
         if a in ("turn_on", "turn_off"):
             return a, {}
-
         if a == "open":
-            if d == "cover":
-                return "open_cover", {}
-            if d == "lock":
-                return "unlock", {}
-            # fallback: try 'open' if domain supports a same-named service
+            if d == "cover": return "open_cover", {}
+            if d == "lock":  return "unlock", {}
             return "open", {}
         if a == "close":
-            if d == "cover":
-                return "close_cover", {}
-            if d == "lock":
-                return "lock", {}
+            if d == "cover": return "close_cover", {}
+            if d == "lock":  return "lock", {}
             return "close", {}
-
         if a == "set_temperature" and d == "climate":
             return "set_temperature", {}
-
         return None
 
     # ----------------------------
@@ -335,14 +317,12 @@ class HAControlPlugin(ToolPlugin):
                 state = client.get_state(entity_id)
                 val = state.get("state", "unknown") if isinstance(state, dict) else str(state)
 
-                # Try to get friendly name
                 friendly = entity_id
                 try:
                     friendly = (state.get("attributes", {}) or {}).get("friendly_name") or entity_id
                 except Exception:
                     pass
 
-                # Ask LLM for a natural spoken confirmation
                 system_msg = (
                     f"The user asked for the current value of {friendly}, which is {val}. "
                     "Respond naturally like a smart home assistant, in one short sentence. "
@@ -358,7 +338,6 @@ class HAControlPlugin(ToolPlugin):
                     msg = (resp.get('message', {}) or {}).get('content', '').strip()
                 except Exception:
                     msg = ""
-
                 if not msg:
                     msg = f"The {friendly} is currently {val}."
                 return msg
@@ -371,6 +350,8 @@ class HAControlPlugin(ToolPlugin):
         if action not in ("turn_on", "turn_off", "open", "close", "set_temperature"):
             return f"Unsupported action: {action}"
 
+        excluded = self._excluded_entities_set()
+
         # AREA lane
         if "area" in info and "domain" in info:
             area_arg = info["area"]
@@ -378,7 +359,6 @@ class HAControlPlugin(ToolPlugin):
 
             if action in ("open", "close") and domain != "cover":
                 return f"'{action}' is only supported for area control when domain is 'cover'."
-
             if action == "set_temperature":
                 return "Setting temperature requires a specific thermostat/device, not an area."
 
@@ -403,6 +383,12 @@ class HAControlPlugin(ToolPlugin):
                 if not entities:
                     return f"I couldn’t find any {domain} entities in '{area_arg}'."
 
+                # Exclude configured Voice PE entities for LIGHT domain
+                if domain == "light" and excluded:
+                    entities = [e for e in entities if e.lower() not in excluded]
+                    if not entities:
+                        return f"Nothing to control — all lights in {area_arg} are excluded."
+
                 # Map action to service
                 service = action
                 extra = {}
@@ -416,7 +402,7 @@ class HAControlPlugin(ToolPlugin):
 
                 client.call_service(domain, service, payload)
 
-                # Friendly LLM confirmation (no emojis)
+                # Friendly confirmation
                 domain_label = domain + ("s" if not domain.endswith("s") else "")
                 verb_phrase = service.replace("_cover", "").replace("_", " ") if domain == "cover" else action.replace("_", " ")
                 system_msg = (
@@ -453,19 +439,38 @@ class HAControlPlugin(ToolPlugin):
             return "I couldn't access Home Assistant states."
 
         shortlist = self._shortlist_entities(states, phrase, domain_hint)
+
+        # If we're doing light on/off, filter out excluded Voice PE lights from candidates
+        if action in ("turn_on", "turn_off") and shortlist:
+            shortlist = [c for c in shortlist if c["entity_id"].split(".",1)[0].lower() != "light" or c["entity_id"].lower() not in excluded]
+
         if not shortlist:
             return "I couldn’t find a device matching that."
 
-        entity_id = await self._pick_entity_with_llm(phrase, shortlist, llm_client)
+        # Pick the first non-excluded entity (extra safety)
+        chosen_id = None
+        # Try LLM choice, but if it's excluded, fall back to next
+        candidate_id = await self._pick_entity_with_llm(phrase, shortlist, llm_client)
+        if candidate_id and (candidate_id.lower() not in excluded or candidate_id.split(".",1)[0].lower() != "light"):
+            chosen_id = candidate_id
+        else:
+            for c in shortlist:
+                eid = c["entity_id"]
+                if eid.split(".",1)[0].lower() != "light" or eid.lower() not in excluded:
+                    chosen_id = eid
+                    break
+
+        if not chosen_id:
+            return "The matching light is excluded from control."
+
+        entity_id = chosen_id
         entity_domain = entity_id.split(".", 1)[0].lower()
 
-        # Map action to service
         mapped = self._service_for_action(action, entity_domain)
         if not mapped:
             return f"The action '{action}' is not supported for {entity_domain}."
         service, extra = mapped
 
-        # Special handling for set_temperature
         if action == "set_temperature":
             temperature = self._extract_temperature(data)
             if temperature is None:

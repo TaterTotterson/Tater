@@ -285,15 +285,103 @@ def render_platform_controls(platform, redis_client):
     redis_key = f"{key}_settings"
     current_settings = redis_client.hgetall(redis_key)
     new_settings = {}
+
     for setting_key, setting in required.items():
-        new_settings[setting_key] = st.text_input(
-            setting["label"],
-            value=current_settings.get(setting_key, setting.get("default", "")),
-            help=setting.get("description", ""),
-            key=f"{category}_{setting_key}"
-        )
+        label       = setting.get("label", setting_key)
+        input_type  = setting.get("type", "text")
+        desc        = setting.get("description", "")
+        default_val = setting.get("default", "")
+        current_val = current_settings.get(setting_key, default_val)
+
+        # normalize bools from redis strings
+        def _to_bool(v):
+            if isinstance(v, bool):
+                return v
+            return str(v).lower() in ("true", "1", "yes", "on")
+
+        if input_type == "number":
+            s = str(current_val).strip()
+
+            # Decide if int-like or float-like
+            is_int_like = bool(re.fullmatch(r"-?\d+", s))
+            if is_int_like:
+                try:
+                    current_num = int(s)
+                except Exception:
+                    # fallback to default as int, then 0
+                    try:
+                        current_num = int(str(default_val).strip())
+                    except Exception:
+                        current_num = 0
+                new_val = st.number_input(
+                    label,
+                    value=current_num,
+                    step=1,
+                    format="%d",
+                    help=desc,
+                    key=f"{category}_{setting_key}"
+                )
+            else:
+                # treat everything else as float (including "8787.0", "0.5", "")
+                try:
+                    current_num = float(s)
+                except Exception:
+                    try:
+                        current_num = float(str(default_val).strip())
+                    except Exception:
+                        current_num = 0.0
+                new_val = st.number_input(
+                    label,
+                    value=current_num,
+                    step=1.0,
+                    help=desc,
+                    key=f"{category}_{setting_key}"
+                )
+
+            # store back (Redis expects strings later)
+            new_settings[setting_key] = new_val
+
+        elif input_type == "password":
+            new_val = st.text_input(
+                label, value=str(current_val), help=desc, type="password",
+                key=f"{category}_{setting_key}"
+            )
+            new_settings[setting_key] = new_val
+
+        elif input_type == "checkbox":
+            new_val = st.checkbox(
+                label, value=_to_bool(current_val), help=desc,
+                key=f"{category}_{setting_key}"
+            )
+            new_settings[setting_key] = new_val
+
+        elif input_type == "select":
+            options = setting.get("options", [])
+            # keep current if present; else fall back to default or first option
+            if current_val not in options:
+                current_val = default_val if default_val in options else (options[0] if options else "")
+            new_val = st.selectbox(
+                label, options,
+                index=(options.index(current_val) if options else 0),
+                help=desc, key=f"{category}_{setting_key}"
+            )
+            new_settings[setting_key] = new_val
+
+        else:
+            # default: text
+            new_val = st.text_input(
+                label, value=str(current_val), help=desc,
+                key=f"{category}_{setting_key}"
+            )
+            new_settings[setting_key] = new_val
+
     if st.button(f"Save {short_name} Settings", key=f"save_{category}_unique"):
-        redis_client.hset(redis_key, mapping=new_settings)
+        # coerce all values to strings for Redis HSET
+        save_map = {
+            k: (json.dumps(v) if isinstance(v, (dict, list, bool)) else str(v))
+            for k, v in new_settings.items()
+        }
+        redis_client.hset(redis_key, mapping=save_map)
         st.success(f"{short_name} settings saved.")
 
     # Trigger refresh if toggle changed
@@ -665,9 +753,29 @@ with st.sidebar.expander("WebUI Settings", expanded=False):
     st.subheader("WebUI Settings")
     current_chat = get_chat_settings()
     username = st.text_input("USERNAME", value=current_chat["username"])
-    display_count = int(redis_client.get("tater:max_display") or 8)
-    new_display = st.number_input("Messages Shown in WebUI", min_value=1, max_value=500, value=display_count, key="webui_display_count")
-    uploaded_avatar = st.file_uploader("Upload your avatar", type=["png", "jpg", "jpeg"], key="avatar_uploader")
+
+    # safely cast to int — handles strings or floats in Redis
+    raw_display = redis_client.get("tater:max_display") or 8
+    try:
+        display_count = int(float(raw_display))
+    except (TypeError, ValueError):
+        display_count = 8
+
+    # number input with integer step & format
+    new_display = st.number_input(
+        "Messages Shown in WebUI",
+        min_value=1,
+        max_value=500,
+        value=display_count,
+        step=1,
+        format="%d",
+        key="webui_display_count"
+    )
+
+    uploaded_avatar = st.file_uploader(
+        "Upload your avatar", type=["png", "jpg", "jpeg"], key="avatar_uploader"
+    )
+
     if uploaded_avatar is not None:
         avatar_bytes = uploaded_avatar.read()
         avatar_b64 = base64.b64encode(avatar_bytes).decode("utf-8")

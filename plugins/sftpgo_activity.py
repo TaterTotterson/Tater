@@ -5,7 +5,7 @@ import aiohttp
 import base64
 import redis
 from plugin_base import ToolPlugin
-from helpers import format_irc, redis_client
+from helpers import redis_client
 
 class SFTPGoActivityPlugin(ToolPlugin):
     name = "sftpgo_activity"
@@ -123,7 +123,7 @@ class SFTPGoActivityPlugin(ToolPlugin):
     # IRC
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         msg = await self._get_activity_summary(llm_client)
-        await bot.privmsg(channel, f"{user}: {format_irc(msg)}")
+        await bot.privmsg(channel, f"{user}: {msg}")
 
     # WebUI
     async def handle_webui(self, args, llm_client):

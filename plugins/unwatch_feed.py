@@ -4,7 +4,6 @@ import logging
 import redis
 from dotenv import load_dotenv
 from plugin_base import ToolPlugin
-from helpers import format_irc  # optional, for consistent IRC output
 
 load_dotenv()
 logger = logging.getLogger(__name__)
