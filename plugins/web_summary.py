@@ -7,7 +7,6 @@ import streamlit as st
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from plugin_base import ToolPlugin
-from helpers import format_irc
 
 load_dotenv()
 logger = logging.getLogger("web_summary")
@@ -138,7 +137,6 @@ class WebSummaryPlugin(ToolPlugin):
         if not summary:
             return f"{user}: Failed to summarize article."
 
-        formatted = format_irc(summary)
-        return "\n".join(self.split_message(formatted, 400))
+        return f"{user}: {summary}"
 
 plugin = WebSummaryPlugin()

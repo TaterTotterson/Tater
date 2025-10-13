@@ -8,7 +8,6 @@ import redis
 import secrets
 import string
 from plugin_base import ToolPlugin
-from helpers import format_irc
 
 class SFTPGoAccountPlugin(ToolPlugin):
     name = "sftpgo_account"
@@ -207,15 +206,12 @@ class SFTPGoAccountPlugin(ToolPlugin):
         else:
             prompt = f"Generate a brief message stating that an error occurred while creating the account for '{user}'."
 
-        response_data = await llm_client.chat(
-            messages=[{"role": "user", "content": prompt}]
-        )
-
-        response_text = format_irc(response_data['message'].get("content", "").strip())
+        response_data = await llm_client.chat(messages=[{"role": "user", "content": prompt}])
+        response_text = response_data['message'].get("content", "").strip()
         if password:
-            response_text += f"\nPassword: {password}"
+            # keep it on the same paragraph so the platform sends it as one message
+            response_text += f" Password: {password}"
 
         return f"{user}: {response_text}"
 
-# Export an instance of the plugin.
 plugin = SFTPGoAccountPlugin()

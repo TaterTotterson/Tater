@@ -6,7 +6,7 @@ import logging
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from plugin_base import ToolPlugin
-from helpers import format_irc, extract_json
+from helpers import extract_json
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -24,7 +24,7 @@ class TaterGitsAddFeedPlugin(ToolPlugin):
     description = "Adds a GitHub releases feed to the tater-gits watcher. Infers title prefix and category via LLM."
     pretty_name = "Add Git Feed"
     waiting_prompt_template = "Tell {mention} I’m analyzing that repo and adding the feed now. Output only that friendly message."
-    platforms = ["discord", "webui", "irc"]
+    platforms = ["webui"]
     settings_category = "Tater Gits"
 
     required_settings = {
@@ -186,15 +186,7 @@ class TaterGitsAddFeedPlugin(ToolPlugin):
         return await self._add_via_watcher(payload, base, key)
 
     # ───────────────────────── handlers ─────────────────────────
-    async def handle_discord(self, message, args, llm_client):
-        return await self._run(args.get("url"), llm_client)
-
     async def handle_webui(self, args, llm_client):
         return await self._run(args.get("url"), llm_client)
-
-    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
-        resp = await self._run(args.get("url"), llm_client)
-        return format_irc(resp)
-
 
 plugin = TaterGitsAddFeedPlugin()

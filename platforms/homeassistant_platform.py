@@ -6,12 +6,14 @@ import logging
 import threading
 import time
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 import redis
-from fastapi import FastAPI, HTTPException
+
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 import uvicorn
+import requests
 
 from helpers import LLMClientWrapper, parse_function_json, get_tater_name
 from plugin_registry import plugin_registry
@@ -31,10 +33,13 @@ TIMEOUT_MS = 60_000               # LLM request timeout (ms)
 MAX_HISTORY_CAP = 20               # safety clamp
 SESSION_TTL_SECONDS = 2 * 60 * 60  # auto-expire session history after 2h
 
-# Redis (history + plugin toggles only — NOT for LLM settings)
+# Redis (history + plugin toggles + notifications)
 redis_host = os.getenv("REDIS_HOST", "127.0.0.1")
 redis_port = int(os.getenv("REDIS_PORT", 6379))
 redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
+
+# Notification keys
+REDIS_NOTIF_LIST = "tater:ha:notifications"  # LPUSH new, LRANGE read, then clear
 
 PLATFORM_SETTINGS = {
     "category": "Home Assistant Settings",
@@ -44,7 +49,37 @@ PLATFORM_SETTINGS = {
             "type": "number",
             "default": 8787,
             "description": "TCP port for the Tater ↔ HA bridge"
-        }
+        },
+        "VOICE_PE_ENTITY_1": {
+            "label": "Voice PE entity #1",
+            "type": "string",
+            "default": "",
+            "description": "Entity ID of a Voice PE light/LED (e.g., light.voice_pe_office)"
+        },
+        "VOICE_PE_ENTITY_2": {
+            "label": "Voice PE entity #2",
+            "type": "string",
+            "default": "",
+            "description": "Entity ID of a Voice PE light/LED (e.g., light.voice_pe_office)"
+        },
+        "VOICE_PE_ENTITY_3": {
+            "label": "Voice PE entity #3",
+            "type": "string",
+            "default": "",
+            "description": "Entity ID of a Voice PE light/LED (e.g., light.voice_pe_office)"
+        },
+        "VOICE_PE_ENTITY_4": {
+            "label": "Voice PE entity #4",
+            "type": "string",
+            "default": "",
+            "description": "Entity ID of a Voice PE light/LED (e.g., light.voice_pe_office)"
+        },
+        "VOICE_PE_ENTITY_5": {
+            "label": "Voice PE entity #5",
+            "type": "string",
+            "default": "",
+            "description": "Entity ID of a Voice PE light/LED (e.g., light.voice_pe_office)"
+        },
     }
 }
 
@@ -58,6 +93,16 @@ class HARequest(BaseModel):
 
 class HAResponse(BaseModel):
     response: str
+
+# Notifications DTOs
+class NotificationIn(BaseModel):
+    title: str
+    body: Optional[str] = None
+    level: Optional[str] = None  # info|warn|error (free-form)
+    source: Optional[str] = None # which plugin / feature
+
+class NotificationsOut(BaseModel):
+    notifications: List[Dict[str, Any]]
 
 # -------------------- Plugin gating --------------------
 def get_plugin_enabled(plugin_name: str) -> bool:
@@ -196,8 +241,74 @@ def _flatten_to_text(res: Any) -> str:
             return str(res)
     return str(res)
 
+# -------------------- Minimal HA client (platform local) --------------------
+class _HA:
+    def __init__(self):
+        # Reuse Home Assistant plugin settings for base URL & token
+        s = redis_client.hgetall("plugin_settings: Home Assistant") or redis_client.hgetall("plugin_settings:Home Assistant")
+        self.base = (s.get("HA_BASE_URL") or "http://homeassistant.local:8123").rstrip("/")
+        token = s.get("HA_TOKEN")
+        if not token:
+            raise ValueError("HA_TOKEN missing in 'Home Assistant' plugin settings.")
+        self.headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+    def _req(self, method: str, path: str, json=None, timeout=10):
+        r = requests.request(method, f"{self.base}{path}", headers=self.headers, json=json, timeout=timeout)
+        if r.status_code >= 400:
+            raise RuntimeError(f"HTTP {r.status_code}: {r.text}")
+        try:
+            return r.json()
+        except Exception:
+            return r.text
+
+    def get_state(self, entity_id: str):
+        return self._req("GET", f"/api/states/{entity_id}")
+
+    def call_service(self, domain: str, service: str, data: dict):
+        return self._req("POST", f"/api/services/{domain}/{service}", json=data)
+
+# -------------------- Voice PE helpers --------------------
+def _platform_settings() -> Dict[str, str]:
+    return redis_client.hgetall("homeassistant_platform_settings") or {}
+
+def _voice_pe_entities() -> List[str]:
+    s = _platform_settings()
+    ids = [
+        (s.get("VOICE_PE_ENTITY_1") or "").strip(),
+        (s.get("VOICE_PE_ENTITY_2") or "").strip(),
+        (s.get("VOICE_PE_ENTITY_3") or "").strip(),
+        (s.get("VOICE_PE_ENTITY_4") or "").strip(),
+        (s.get("VOICE_PE_ENTITY_5") or "").strip(),
+    ]
+    return [e for e in ids if e]
+
+def _ring_on():
+    """Turn ON all configured Voice PE LED entities."""
+    ents = _voice_pe_entities()
+    if not ents:
+        return
+    ha = _HA()
+    for eid in ents:
+        try:
+            ha.call_service("light", "turn_on", {"entity_id": eid})
+        except Exception as e:
+            logger.warning(f"[notify] failed to turn on ring {eid}: {e}")
+
+def _ring_off():
+    """Turn OFF all configured Voice PE LED entities."""
+    ents = _voice_pe_entities()
+    if not ents:
+        return
+    ha = _HA()
+    for eid in ents:
+        try:
+            ha.call_service("light", "turn_off", {"entity_id": eid})
+        except Exception as e:
+            logger.warning(f"[notify] failed to turn off ring {eid}: {e}")
+
 # -------------------- App + LLM client --------------------
-app = FastAPI(title="Tater Home Assistant Bridge", version="1.3")
+app = FastAPI(title="Tater Home Assistant Bridge", version="1.5")  # 🔼 simplified ring logic
+
 _llm: Optional[LLMClientWrapper] = None
 
 @app.on_event("startup")
@@ -210,8 +321,66 @@ async def _on_startup():
 
 @app.get("/tater-ha/v1/health")
 async def health():
-    return {"ok": True, "version": "1.3"}
+    return {"ok": True, "version": "1.5"}
 
+# -------------------- Notifications API --------------------
+@app.post("/tater-ha/v1/notifications/add")
+async def add_notification(n: NotificationIn):
+    """
+    Add a notification to the queue and light the Voice PE ring(s).
+    Any plugin can call this to post a notification.
+    """
+    item = {
+        "title": n.title.strip(),
+        "body": (n.body or "").strip(),
+        "level": (n.level or "info").strip(),
+        "source": (n.source or "").strip(),
+        "ts": int(time.time())
+    }
+    # push newest first (LPUSH)
+    redis_client.lpush(REDIS_NOTIF_LIST, json.dumps(item))
+
+    # ring ON (simple)
+    try:
+        _ring_on()
+    except Exception:
+        logger.exception("[notify] ring_on failed")
+
+    return {"ok": True, "queued": True}
+
+@app.get("/tater-ha/v1/notifications", response_model=NotificationsOut)
+async def pull_notifications(background_tasks: BackgroundTasks):
+    """
+    Return all pending notifications (most recent first) and clear the queue.
+    Turn the rings OFF afterward (async) or immediately if queue is empty.
+    """
+    raw = redis_client.lrange(REDIS_NOTIF_LIST, 0, -1) or []
+    notifications = []
+    for r in raw:
+        try:
+            notifications.append(json.loads(r))
+        except Exception:
+            continue
+
+    # Clear the queue
+    try:
+        redis_client.delete(REDIS_NOTIF_LIST)
+    except Exception:
+        logger.warning("[notify] failed to clear notification list")
+
+    # If there were any notifications, turn rings OFF asynchronously
+    if notifications:
+        background_tasks.add_task(_ring_off)
+    else:
+        # No notifications: ensure ring is off right away
+        try:
+            _ring_off()
+        except Exception:
+            logger.exception("[notify] ring_off failed")
+
+    return {"notifications": notifications}
+
+# -------------------- Main HA chat endpoint (unchanged logic) --------------------
 @app.post("/tater-ha/v1/message", response_model=HAResponse)
 async def handle_message(payload: HARequest):
     """

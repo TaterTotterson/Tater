@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 import streamlit as st
 from youtube_transcript_api import YouTubeTranscriptApi
 from plugin_base import ToolPlugin
-from helpers import format_irc, redis_client
+from helpers import redis_client
 import redis
 import discord
 
@@ -80,11 +80,41 @@ class YouTubeSummaryPlugin(ToolPlugin):
                 await channel.send(chunk)
 
     def get_transcript_api(self, video_id):
+        from youtube_transcript_api import YouTubeTranscriptApi
+        import logging
+
+        logger = logging.getLogger("youtube_summary")
+
+        api = YouTubeTranscriptApi()
         try:
-            transcript = YouTubeTranscriptApi.get_transcript(video_id)
-            return " ".join([seg["text"] for seg in transcript])
+            # 1) try direct fetch (library picks best track)
+            try:
+                fetched = api.fetch(video_id)
+            except Exception as e1:
+                logger.info(f"[fetch default] {e1}; trying languages…")
+                # 2) prefer English-ish; if that fails, list → pick → fetch
+                try:
+                    fetched = api.fetch(video_id, languages=["en", "en-US", "en-GB"])
+                except Exception as e2:
+                    logger.info(f"[fetch en*] {e2}; listing transcripts…")
+                    tl = api.list(video_id)                      # TranscriptList
+                    try:
+                        t = tl.find_transcript(["en", "en-US", "en-GB"])
+                    except Exception:
+                        t = next(iter(tl), None)
+                    if not t:
+                        logger.info("No transcripts available for this video.")
+                        return None
+                    fetched = t.fetch()
+
+            # Normalize to raw list of dicts and join the text
+            raw = fetched.to_raw_data() if hasattr(fetched, "to_raw_data") else \
+                  [{"text": getattr(sn, "text", "")} for sn in fetched]
+            text = " ".join(seg.get("text", "") for seg in raw if seg.get("text"))
+            return text.strip() or None
+
         except Exception as e:
-            print(f"[YouTubeTranscriptApi error] {e}")
+            logger.error(f"[YouTubeTranscriptApi fatal] {e}", exc_info=True)
             return None
 
     async def summarize_chunks(self, chunks, llm_client):
@@ -189,8 +219,9 @@ class YouTubeSummaryPlugin(ToolPlugin):
         if not summary:
             return f"{nick}: Could not generate summary."
 
-        formatted = format_irc(self.format_article(summary))
-        return "\n".join(self.split_message(formatted, 350))
+        article = self.format_article(summary)  # produce the full paragraph(s)
+        # Let the IRC platform handle paragraphization & chunking
+        return f"{nick}: {article}"
 
 
 plugin = YouTubeSummaryPlugin()

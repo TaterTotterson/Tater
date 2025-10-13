@@ -10,7 +10,7 @@ from io import BytesIO
 import requests
 import streamlit as st
 from PIL import Image
-from helpers import redis_client, format_irc
+from helpers import redis_client
 
 
 logger = logging.getLogger(__name__)
@@ -210,6 +210,6 @@ class PremiumizeDownloadPlugin(ToolPlugin):
         except Exception as e:
             return f"{user}: Error checking download: {e}"
 
-        return format_irc(result)
+        return f"{user}: {result}"
 
 plugin = PremiumizeDownloadPlugin()

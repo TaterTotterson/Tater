@@ -14,6 +14,7 @@ import time
 import sys
 import irc3
 from irc3.plugins.command import command
+import textwrap
 
 load_dotenv()
 logger = logging.getLogger("irc.tater")
@@ -57,7 +58,6 @@ PLATFORM_SETTINGS = {
             "default": "",
             "description": "Login password (ZNC password)"
         }
-
     }
 }
 
@@ -68,20 +68,133 @@ redis_client = redis.Redis(
     decode_responses=True
 )
 
-irc_settings = redis_client.hgetall("irc_platform_settings")
-IRC_SERVER = irc_settings.get("irc_server", "irc.libera.chat")
-IRC_PORT = int(irc_settings.get("irc_port", 6667))
-IRC_CHANNEL = irc_settings.get("irc_channel", "#tater")
-IRC_NICK = irc_settings.get("irc_nick", "TaterBot")
-IRC_USERNAME = irc_settings.get("irc_username", "")
-IRC_PASSWORD = irc_settings.get("irc_password", "")
-
 MAX_RESPONSE_LENGTH = int(os.getenv("MAX_RESPONSE_LENGTH", 1500))
 LLM_MODEL = os.getenv("LLM_MODEL", "llama3")
 llm_host = os.getenv("LLM_HOST", "127.0.0.1")
 llm_port = os.getenv("LLM_PORT", "11434")
 llm_client = LLMClientWrapper(host=f"http://{llm_host}:{llm_port}")
 
+# ---- Fresh settings + formatting helpers ----
+IRC_PRIVMSG_LIMIT = int(os.getenv("IRC_PRIVMSG_LIMIT", 430))  # safe default for IRC line length
+
+def _load_irc_settings():
+    """Fetch current IRC settings from Redis, with fallback defaults."""
+    settings = (
+        redis_client.hgetall("irc_platform_settings")
+        or redis_client.hgetall("platform_settings:IRC Settings")
+        or redis_client.hgetall("platform_settings:IRC")
+        or {}
+    )
+
+    server = settings.get("irc_server", "irc.libera.chat")
+    port = int(settings.get("irc_port", 6667)) if str(settings.get("irc_port", "")).strip() else 6667
+    channel = settings.get("irc_channel", "#tater")
+    if channel and not channel.startswith("#"):
+        channel = f"#{channel}"
+    nick = settings.get("irc_nick", "TaterBot")
+    username = settings.get("irc_username", "")
+    password = settings.get("irc_password", "")
+    ssl_flag = str(settings.get("irc_ssl", "false")).lower() in ("1", "true", "yes", "on")
+
+    return {
+        "server": server,
+        "port": port,
+        "channel": channel,
+        "nick": nick,
+        "username": username,
+        "password": password,
+        "ssl": ssl_flag,
+    }
+
+def format_irc_text(raw: str, width: int = 80) -> str:
+    if not isinstance(raw, str):
+        return str(raw)
+
+    text = raw.strip()
+    text = re.sub(r'(?m)^\s*(\d+)\.\s*\n+\s*', r'\1. ', text)   # "N.\nTitle" -> "N. Title"
+    text = re.sub(r'(?m)\s*\n\s*-\s+', ' - ', text)             # "Title\n- Subtitle" -> "Title - Subtitle"
+    text = re.sub(r'(?m)\s*\n\((\d{4})\)', r' (\1)', text)      # "Title\n(2025)" -> "Title (2025)"
+
+    lines = text.splitlines()
+    out, current = [], []
+    in_code = False
+
+    def flush():
+        nonlocal current
+        if current:
+            out.append(" ".join(s.strip() for s in current if s.strip()))
+            current = []
+
+    for line in lines:
+        s = line.rstrip()
+        if s.strip().startswith("```"):
+            flush()
+            in_code = not in_code
+            out.append(s)
+            continue
+        if in_code:
+            out.append(s)
+            continue
+        if re.match(r'^\s*\d+\.\s+', s):
+            flush()
+            current.append(s.strip())
+            continue
+        if not s.strip():
+            flush()
+            out.append("")
+            continue
+        current.append(s)
+
+    flush()
+
+    result = "\n".join(out)
+    result = re.sub(r'\n{3,}', '\n\n', result)
+    result = re.sub(r'(?s)^(.*?\S)\s+(?=\d+\.\s)', r'\1\n\n', result, count=1)  # header sep before first item
+    return result
+
+def send_formatted(self, target, text):
+    formatted = format_irc_text(text)
+
+    # Ensure each numbered item starts a new paragraph even if inline
+    # e.g., "... Trending 1. Title ... 2. Title ..." -> split before every "N. "
+    normalized = re.sub(r'(?<!\n)\s+(\d+\.\s+)', r'\n\n\1', formatted)
+
+    # Split into paragraphs on blank lines
+    paragraphs = re.split(r'\n\s*\n+', normalized.strip())
+    lim = IRC_PRIVMSG_LIMIT
+
+    def send_chunked(s: str):
+        s = s.strip()
+        while len(s) > lim:
+            cut = s.rfind(" ", 0, lim)
+            if cut == -1:
+                for ch in ("/", "-", "_", "|", ",", ";", ":"):
+                    cut = s.rfind(ch, 0, lim)
+                    if cut != -1:
+                        cut += 1
+                        break
+            if cut == -1:
+                cut = lim
+            self.privmsg(target, s[:cut].rstrip())
+            time.sleep(0.05)
+            s = s[cut:].lstrip()
+        if s:
+            self.privmsg(target, s)
+            time.sleep(0.02)
+
+    for idx, para in enumerate(paragraphs):
+        p = para.strip()
+        if p.startswith("```") and p.endswith("```"):
+            for line in p.splitlines():
+                send_chunked(line)
+        else:
+            # collapse internal newlines inside a paragraph to single spaces
+            one_line = re.sub(r'\s*\n\s*', ' ', p)
+            send_chunked(one_line)
+
+        if idx < len(paragraphs) - 1:
+            self.privmsg(target, "")
+            
 # ---- LM-Studio template helpers ----
 def _to_template_msg(role, content, sender=None):
     """
@@ -108,7 +221,6 @@ def _to_template_msg(role, content, sender=None):
 
     # Fallback (shouldn’t really happen on IRC)
     return {"role": role, "content": str(content)}
-
 
 def _enforce_user_assistant_alternation(loop_messages):
     """
@@ -245,7 +357,7 @@ async def on_message(self, mask, event, target, data):
                         ]
                     )
                     wait_text = wait_response["message"]["content"].strip()
-                    self.privmsg(target, wait_text)
+                    send_formatted(self, target, wait_text)
                     save_irc_message(channel=target, role="assistant", username="assistant", content={
                         "marker": "plugin_response",
                         "content": wait_text
@@ -256,8 +368,7 @@ async def on_message(self, mask, event, target, data):
                 if isinstance(result, list):
                     for item in result:
                         if isinstance(item, str):
-                            for chunk in [item[i:i+MAX_RESPONSE_LENGTH] for i in range(0, len(item), MAX_RESPONSE_LENGTH)]:
-                                self.privmsg(target, chunk)
+                            send_formatted(self, target, item)
                             save_irc_message(channel=target, role="assistant", username="assistant", content={
                                 "marker": "plugin_response",
                                 "content": item
@@ -274,8 +385,7 @@ async def on_message(self, mask, event, target, data):
                             })
 
                 elif isinstance(result, str) and result.strip():
-                    for chunk in [result[i:i+MAX_RESPONSE_LENGTH] for i in range(0, len(result), MAX_RESPONSE_LENGTH)]:
-                        self.privmsg(target, chunk)
+                    send_formatted(self, target, result)
                     save_irc_message(channel=target, role="assistant", username="assistant", content={
                         "marker": "plugin_response",
                         "content": result
@@ -287,8 +397,7 @@ async def on_message(self, mask, event, target, data):
                 return
 
         # Default fallback reply
-        for chunk in [response_text[i:i+MAX_RESPONSE_LENGTH] for i in range(0, len(response_text), MAX_RESPONSE_LENGTH)]:
-            self.privmsg(target, chunk)
+        send_formatted(self, target, response_text)
         save_irc_message(channel=target, role="assistant", username="assistant", content=response_text)
 
     except Exception as e:
@@ -296,32 +405,40 @@ async def on_message(self, mask, event, target, data):
         self.privmsg(target, f"{mask.nick}: Sorry, I ran into an error while thinking.")
 
 def run(stop_event=None):
-    # 1) Build your IRC config
+    # 1) Load fresh settings each time the platform starts
+    cfg = _load_irc_settings()
+
+    # 2) Build your IRC config from current Redis values
     config = {
-        "nick": IRC_NICK,
-        "autojoins": [IRC_CHANNEL],
-        "host": IRC_SERVER,
-        "port": IRC_PORT,
-        "ssl": False,
+        "nick": cfg["nick"],
+        "autojoins": [cfg["channel"]],
+        "host": cfg["server"],
+        "port": cfg["port"],
+        "ssl": cfg["ssl"],
         "includes": [__name__],
     }
-    if IRC_USERNAME and IRC_PASSWORD:
-        config["username"] = IRC_USERNAME
-        config["password"] = IRC_PASSWORD
+    if cfg["username"] and cfg["password"]:
+        config["username"] = cfg["username"]
+        config["password"] = cfg["password"]
 
-    # 2) Spin up a fresh event loop for this platform
+    logger.info(
+        f"IRC connecting to {cfg['server']}:{cfg['port']} "
+        f"as {cfg['nick']} in {cfg['channel']} (SSL={cfg['ssl']})"
+    )
+
+    # 3) Spin up a fresh event loop for this platform
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
     bot = irc3.IrcBot(loop=loop, **config)
 
-    # 3) Single coroutine to run the bot and watch for stop_event
+    # 4) Single coroutine to run the bot and watch for stop_event
     async def bot_runner():
         try:
             bot.create_connection()
             logger.info("✅ IRC bot connected.")
 
-            # If no stop_event was passed, just run forever
+            # If no stop_event was passed, run forever
             if not stop_event:
                 await asyncio.Event().wait()
 
@@ -334,16 +451,14 @@ def run(stop_event=None):
             await asyncio.sleep(0.5)
 
         except asyncio.CancelledError:
-            # expected on shutdown
-            pass
+            pass  # expected on shutdown
         except Exception as e:
             logger.error(f"❌ IRC bot error: {e}")
 
-    # 4) Run it & ensure clean loop shutdown
+    # 5) Run it & ensure clean loop shutdown
     try:
         loop.run_until_complete(bot_runner())
     finally:
-        # cancel any leftover tasks
         pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
         for task in pending:
             task.cancel()

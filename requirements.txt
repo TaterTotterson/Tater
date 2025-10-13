@@ -9,7 +9,7 @@ moviepy
 python-dotenv
 requests
 streamlit
-youtube_transcript_api
+youtube-transcript-api
 redis
 nest_asyncio
 websocket-client

@@ -12,7 +12,7 @@ import time
 import random
 import requests
 from plugin_base import ToolPlugin
-from helpers import format_irc, extract_json, redis_client, get_tater_name
+from helpers import extract_json, redis_client, get_tater_name
 
 load_dotenv()
 logger = logging.getLogger("web_search")
@@ -221,19 +221,15 @@ class WebSearchPlugin(ToolPlugin):
         query = args.get("query")
         if not query:
             return f"{user}: No search query provided."
+
         results = self.search_web(query)
         if not results:
             return f"{user}: No results found."
-        answer = await self._pick_link_and_summarize(results, query, raw_message, llm_client)
-        return format_irc(answer)
 
-    # ✅ New: Home Assistant handler (returns plain text)
+        answer = await self._pick_link_and_summarize(results, query, raw_message, llm_client)
+        return f"{user}: {answer}"
+
     async def handle_homeassistant(self, args, llm_client):
-        """
-        Expected args:
-          { "query": "<search query>", "user_question": "<original user utterance>" }
-        Returns: plain string (TTS-friendly)
-        """
         query = args.get("query")
         if not query:
             return "No search query provided."

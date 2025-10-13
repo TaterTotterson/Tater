@@ -249,20 +249,6 @@ def parse_function_json(response_text):
     return None
 
 # ---------------------------------------------------------
-# IRC formatting cleanup
-# ---------------------------------------------------------
-def format_irc(text):
-    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)  # Bold
-    text = re.sub(r"\*(.*?)\*", r"\1", text)      # Italic
-    text = re.sub(r"_([^_]+)_", r"\1", text)      # Underline/Italic
-    text = re.sub(r"`([^`]+)`", r"\1", text)      # Inline code
-    text = re.sub(r"#+\s*", "", text)             # Headers
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    text = re.sub(r"^- ", "* ", text, flags=re.MULTILINE)
-    text = re.sub(r"\n\s*\n", "\n\n", text)
-    return text.strip()
-
-# ---------------------------------------------------------
 # Get latest image from redis
 # ---------------------------------------------------------
 def get_latest_image_from_history(key: str, allowed_mimetypes=None):
