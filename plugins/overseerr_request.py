@@ -198,21 +198,16 @@ class OverseerrRequestPlugin(ToolPlugin):
             logger.exception(f"[Overseerr GET /search] {e}")
             return {"error": f"Failed to reach Overseerr: {e}"}
 
-    def _create_request(self, media_type: str, media_id: int):
-        """
-        Newer Overseerr requires 'mediaId' (not 'tmdbId').
-        Ensure media_type is strictly 'movie' or 'tv'.
-        """
-        mt = (media_type or "").lower()
-        if mt not in ("movie", "tv"):
-            # Defensive guard to avoid HTTP 400 "enum" errors
-            return {"error": f"Invalid mediaType '{media_type}'. Must be 'movie' or 'tv'."}
-
+    def _create_request(self, media_type: str, media_id: int, seasons: Optional[List[int]] = None):
         payload: Dict[str, Any] = {
-            "mediaType": mt,           # "movie" | "tv"
-            "mediaId": int(media_id),  # Overseerr expects mediaId (TMDB ID)
-            "is4k": False,             # let Overseerr defaults handle quality; we keep it simple
+            "mediaType": media_type,   # "movie" | "tv"
+            "mediaId": int(media_id),
         }
+        if media_type == "tv":
+            payload["seasons"] = seasons if seasons is not None else []
+
+        # helpful for troubleshooting
+        logger.error(f"[Overseerr POST /request] sending payload={payload}")
         return self._post("/request", payload)
 
     def _do_request_flow(self, args: Dict[str, Any]) -> str:
@@ -245,13 +240,71 @@ class OverseerrRequestPlugin(ToolPlugin):
         if not media_id or not media_type:
             return "Found a potential match, but it lacks required fields (id/type)."
 
-        # 3) Create request
-        resp = self._create_request(media_type, int(media_id))
-        if "error" in resp:
-            return f"Failed to create request for {disp_title}{ypart}: {resp['error']}"
+        # --- helpers ------------------------------------------------------------
+        def needs_filter_retry(resp: Dict[str, Any]) -> bool:
+            err = (resp or {}).get("error", "")
+            if not isinstance(err, str):
+                return False
+            s = err.lower()
+            return ("reading 'filter'" in s) or ("no seasons available to request" in s)
 
-        status = resp.get("status") or (resp.get("request") or {}).get("status")
-        req_id = resp.get("id") or (resp.get("request") or {}).get("id")
+        def fetch_tv_season_numbers(tv_tmdb_id: int) -> List[int]:
+            """
+            Ask Overseerr for TV details and build a list of season numbers.
+            Try /api/v1/tv/{id} first; if not available in this build, fall back to /api/v1/tmdb/tv/{id}.
+            Skip season 0 (specials). Return [] if we can’t find anything sane.
+            """
+            # Prefer native tv details
+            data = self._get(f"/tv/{tv_tmdb_id}")
+            if isinstance(data, dict) and data and "seasons" not in data:
+                # Some versions expose TMDB details under /tmdb/tv/{id}
+                data = self._get(f"/tmdb/tv/{tv_tmdb_id}")
+
+            try:
+                seasons = data.get("seasons", []) if isinstance(data, dict) else []
+                nums = []
+                for s in seasons:
+                    # accept both {seasonNumber: int} and {season_number: int}
+                    num = s.get("seasonNumber") if isinstance(s, dict) else None
+                    if num is None and isinstance(s, dict):
+                        num = s.get("season_number")
+                    if isinstance(num, int) and num > 0:
+                        nums.append(num)
+                # unique + sorted
+                return sorted(set(nums))
+            except Exception:
+                return []
+
+        # 3) Create request (with defensive TV handling)
+        # First attempt: movies as-is; TV with seasons=[]
+        try:
+            if media_type == "tv":
+                resp = self._create_request(media_type, int(media_id), seasons=[])
+            else:
+                resp = self._create_request(media_type, int(media_id))
+        except TypeError:
+            # Back-compat if _create_request doesn’t accept seasons yet
+            resp = self._create_request(media_type, int(media_id))
+
+        # If Overseerr complains about seasons, retry with a concrete list like [1..N]
+        if media_type == "tv" and isinstance(resp, dict) and needs_filter_retry(resp):
+            season_list = fetch_tv_season_numbers(int(media_id)) or [1]  # last-resort fallback
+            try:
+                resp = self._create_request(media_type, int(media_id), seasons=season_list)
+            except TypeError:
+                # Old signature; nothing else to try
+                pass
+
+        # Handle failure paths
+        if isinstance(resp, dict) and "error" in resp:
+            msg = resp["error"]
+            if isinstance(msg, str) and ("already requested" in msg.lower() or "already exists" in msg.lower()):
+                return f"{disp_title}{ypart} ({media_type}) is already in your requests."
+            return f"Failed to create request for {disp_title}{ypart}: {msg}"
+
+        # Success formatting (preserve your original style)
+        status = (resp or {}).get("status") or (resp.get("request") or {}).get("status") if isinstance(resp, dict) else None
+        req_id = (resp or {}).get("id") or (resp.get("request") or {}).get("id") if isinstance(resp, dict) else None
         status_text = f" (status: {status})" if status else ""
         rid = f" [request #{req_id}]" if req_id else ""
 
