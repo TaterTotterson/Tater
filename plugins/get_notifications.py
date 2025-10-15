@@ -17,8 +17,8 @@ class GetNotificationsPlugin(ToolPlugin):
         "}\n"
     )
     description = (
-        "Fetches notifications from the Home Assistant bridge and summarizes them. "
-        "Call this when the user asks for notifications or what's new."
+        "Fetches notifications from the Home Assistant bridge"
+        "Call this when the user asks for notifications or what's the alert."
     )
     pretty_name = "Get Notifications"
     settings_category = "Notifications"
@@ -77,7 +77,6 @@ class GetNotificationsPlugin(ToolPlugin):
             "1) Start with: 'You have N notifications.' (or 'You have no notifications.' if N=0)\n"
             "2) If multiple notifications are similar (e.g., door visitors), merge them into one roll-up sentence "
             "   (e.g., '2 people were at your door: a UPS driver and your wife').\n"
-            "3) Then provide a concise list of each item (or merged group).\n"
             "Keep it short, natural, and clear. No emojis. No code blocks. No technical IDs."
         )
 

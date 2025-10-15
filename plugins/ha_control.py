@@ -62,8 +62,12 @@ class HAControlPlugin(ToolPlugin):
         '  "function": "ha_control",\n'
         '  "arguments": {\n'
         '    "action": "turn_on | turn_off | open | close | set_temperature | get_state",\n'
-        '    "target": "office lights",\n'
-        '    "data": {"brightness_pct": 80}\n'
+        '    "target": "office lights | game room lights | thermostat",\n'
+        '    "data": {\n'
+        '      "brightness_pct": 80,\n'
+        '      "color_name": "blue",\n'
+        '      "temperature": 72\n'
+        '    }\n'
         "  }\n"
         "}\n"
     )
@@ -91,6 +95,79 @@ class HAControlPlugin(ToolPlugin):
     # ----------------------------
     # Internal helpers
     # ----------------------------
+    def _normalize_action_and_data(self, action: str, target: str, data: dict) -> tuple[str, dict]:
+        """
+        Map common color/brightness phrases to HA-friendly forms.
+        - Turn 'set_color', 'set colour', 'change-color', etc. -> 'turn_on'
+        - Map 'color'/'colour' -> 'color_name'
+        - Parse hs/rgb strings -> lists
+        - Infer simple color from target text if missing
+        """
+        a = (action or "").strip().lower()
+        d = dict(data or {})
+        t = (target or "").lower()
+
+        # --- Action synonyms -> supported actions ---
+        # normalize separators
+        a_norm = a.replace("-", "_").replace(" ", "_")
+        colorish = {"set_color", "change_color", "set_colour", "change_colour", "color", "colour"}
+        power_on = {"switch_on", "power_on", "enable", "brighten", "dim"}
+        power_off = {"switch_off", "power_off", "disable"}
+
+        if a_norm in colorish:
+            a = "turn_on"
+        elif a_norm in power_on:
+            a = "turn_on"
+        elif a_norm in power_off:
+            a = "turn_off"
+        else:
+            a = a  # leave as-is (turn_on/turn_off/open/close/set_temperature okay)
+
+        # --- Key normalization for HA lights ---
+        for k in ("color", "colour"):
+            if k in d and isinstance(d[k], str) and d[k].strip():
+                d["color_name"] = d.pop(k).strip().lower()
+
+        # hs/rgb strings -> lists
+        if isinstance(d.get("hs_color"), str):
+            parts = [p.strip() for p in d["hs_color"].split(",")]
+            if len(parts) == 2:
+                try:
+                    d["hs_color"] = [float(parts[0]), float(parts[1])]
+                except:
+                    d.pop("hs_color", None)
+
+        if isinstance(d.get("rgb_color"), str):
+            parts = [p.strip() for p in d["rgb_color"].split(",")]
+            if len(parts) == 3:
+                try:
+                    d["rgb_color"] = [int(parts[0]), int(parts[1]), int(parts[2])]
+                except:
+                    d.pop("rgb_color", None)
+
+        # brightness aliases
+        if isinstance(d.get("brightness"), (int, float)) and 0 <= d["brightness"] <= 100:
+            d["brightness_pct"] = int(d.pop("brightness"))
+        if "brightness_percent" in d and "brightness_pct" not in d:
+            d["brightness_pct"] = int(d.pop("brightness_percent"))
+
+        # Infer simple color from the phrase if none provided
+        if not d.get("color_name"):
+            m = re.search(
+                r"\b(red|orange|yellow|green|cyan|blue|purple|magenta|pink|white|warm white|cool white)\b",
+                t, re.I
+            )
+            if m:
+                d["color_name"] = m.group(1).lower()
+
+        # Final safety: if user clearly asked for a color (via data or text),
+        # and action still isn't supported, coerce to 'turn_on' for lights.
+        if a not in ("turn_on", "turn_off", "open", "close", "set_temperature"):
+            if d.get("color_name") or d.get("hs_color") or d.get("rgb_color"):
+                a = "turn_on"
+
+        return a, d
+
     def _get_client(self):
         try:
             return HAClient()
@@ -290,6 +367,7 @@ class HAControlPlugin(ToolPlugin):
         action = (args.get("action") or "").strip()
         target = (args.get("target") or "").strip()
         data = args.get("data", {}) or {}
+        action, data = self._normalize_action_and_data(action, target, data)
 
         if not action:
             return "Missing 'action'. Use turn_on, turn_off, open, close, set_temperature, or get_state."
@@ -324,9 +402,14 @@ class HAControlPlugin(ToolPlugin):
                     pass
 
                 system_msg = (
-                    f"The user asked for the current value of {friendly}, which is {val}. "
-                    "Respond naturally like a smart home assistant, in one short sentence. "
-                    "Do not include emojis or technical details."
+                    f"The user said: '{target}', and you checked the current state of {friendly}, "
+                    f"which is {val}. "
+                    "Write one short, friendly spoken-style response as if you were a smart home assistant. "
+                    "Use natural phrasing that fits everyday conversation, for example: "
+                    "'The living room temperature is 72 degrees right now.' or "
+                    "'The front door is locked.' "
+                    "Include units or room names naturally if they are part of the device name or context. "
+                    "Do not include emojis or technical language."
                 )
                 try:
                     resp = await llm_client.chat(
@@ -406,9 +489,13 @@ class HAControlPlugin(ToolPlugin):
                 domain_label = domain + ("s" if not domain.endswith("s") else "")
                 verb_phrase = service.replace("_cover", "").replace("_", " ") if domain == "cover" else action.replace("_", " ")
                 system_msg = (
-                    f"The user asked to {verb_phrase} the {domain_label} in the {area_arg} area. "
-                    "Write a short, natural confirmation sentence as if spoken by a smart home assistant. "
-                    "Do not include emojis, entity counts, or technical language."
+                    f"The user said: '{target}', and you successfully performed the action '{verb_phrase}' "
+                    f"on {len(entities)} {domain_label} in the {area_arg} area. "
+                    f"The color requested (if any) was '{payload.get('color_name', '')}'. "
+                    "Write one short, friendly confirmation sentence as if spoken by a smart home assistant. "
+                    "Include the number of lights controlled and the area name naturally. "
+                    "If a color was requested, include it naturally in your response. "
+                    "Do not include emojis or technical language."
                 )
                 try:
                     resp = await llm_client.chat(
@@ -500,9 +587,12 @@ class HAControlPlugin(ToolPlugin):
                 else service.replace("_", " ")
             )
             system_msg = (
-                f"The user asked to {nice_action} for {friendly}. "
-                "Write a short, natural confirmation as if spoken by a smart home assistant. "
-                "Do not include emojis or technical details."
+                f"The user said: '{target}', and you successfully performed the action '{nice_action}' "
+                f"for {friendly}. "
+                "Write one short, friendly confirmation sentence as if spoken by a smart home assistant. "
+                "If the user's phrase or data included a color or location, include that naturally "
+                "(for example: 'I turned the lamp blue for you in the living room.'). "
+                "Do not include emojis or technical language."
             )
             try:
                 resp = await llm_client.chat(

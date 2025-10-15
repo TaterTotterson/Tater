@@ -31,7 +31,7 @@ class OverseerrRequestPlugin(ToolPlugin):
         '  "function": "overseerr_request",\n'
         '  "arguments": {\n'
         '    "title": "<title string>",\n'
-        '    "kind": "movies|tv (optional)"\n'
+        '    "kind": "movie|tv (optional)"\n'
         "  }\n"
         "}\n"
     )
@@ -97,8 +97,9 @@ class OverseerrRequestPlugin(ToolPlugin):
         try:
             r = requests.post(url, json=payload, headers=headers, timeout=20)
             if r.status_code not in (200, 201):
-                logger.error(f"[Overseerr POST {path}] HTTP {r.status_code} :: {r.text}")
+                logger.error(f"[Overseerr POST {path}] HTTP {r.status_code} :: {r.text} :: sent={json.dumps(payload)}")
                 try:
+                    # Return Overseerr error message if present
                     return {"error": json.loads(r.text).get("message", f"HTTP {r.status_code}")}
                 except Exception:
                     return {"error": f"HTTP {r.status_code}"}
@@ -121,21 +122,43 @@ class OverseerrRequestPlugin(ToolPlugin):
         except Exception:
             return None
 
+    @staticmethod
+    def _coerce_kind(kind: Optional[str]) -> Optional[str]:
+        if not kind:
+            return None
+        k = kind.strip().lower()
+        if k.startswith("movie"):
+            return "movie"
+        if "tv" in k or "show" in k or "series" in k:
+            return "tv"
+        return None
+
     def _pick_best_result(self, results: List[Dict[str, Any]], title: str, kind: Optional[str]):
         """
-        Heuristic match: prefer type match + exact/starts-with title.
+        Heuristic match with strong filtering:
+        - Only consider items where mediaType is exactly 'movie' or 'tv'
+        - Only consider items with integer 'id'
+        - Prefer type match + exact/starts-with title
         """
         t_norm = self._norm(title)
-        want_type = None
-        if kind:
-            if kind.startswith("movie"):
-                want_type = "movie"
-            elif "tv" in kind or "show" in kind:
-                want_type = "tv"
+        want_type = self._coerce_kind(kind)
+
+        pool = []
+        for item in results or []:
+            media_type = (item.get("mediaType") or "").lower()
+            item_id = item.get("id")
+            if media_type not in ("movie", "tv"):
+                continue
+            if not isinstance(item_id, int):
+                continue
+            pool.append(item)
+
+        if not pool:
+            return None
 
         best = None
         best_score = -1
-        for item in results:
+        for item in pool:
             media_type = (item.get("mediaType") or "").lower()  # "movie" or "tv"
             cand_title = item.get("title") or item.get("name") or ""
             cand_norm = self._norm(cand_title)
@@ -178,10 +201,16 @@ class OverseerrRequestPlugin(ToolPlugin):
     def _create_request(self, media_type: str, media_id: int):
         """
         Newer Overseerr requires 'mediaId' (not 'tmdbId').
+        Ensure media_type is strictly 'movie' or 'tv'.
         """
+        mt = (media_type or "").lower()
+        if mt not in ("movie", "tv"):
+            # Defensive guard to avoid HTTP 400 "enum" errors
+            return {"error": f"Invalid mediaType '{media_type}'. Must be 'movie' or 'tv'."}
+
         payload: Dict[str, Any] = {
-            "mediaType": media_type,   # "movie" | "tv"
-            "mediaId": int(media_id),  # Overseerr expects mediaId
+            "mediaType": mt,           # "movie" | "tv"
+            "mediaId": int(media_id),  # Overseerr expects mediaId (TMDB ID)
             "is4k": False,             # let Overseerr defaults handle quality; we keep it simple
         }
         return self._post("/request", payload)
@@ -191,7 +220,8 @@ class OverseerrRequestPlugin(ToolPlugin):
         if not title:
             return "No title provided."
 
-        kind = (args.get("kind") or "").strip().lower()
+        # Coerce kind early to bias selection but never send it directly
+        kind = self._coerce_kind(args.get("kind"))
 
         # 1) Search
         srch = self._search(title)
@@ -249,7 +279,6 @@ class OverseerrRequestPlugin(ToolPlugin):
         except RuntimeError:
             return asyncio.run(inner())
 
-
     async def handle_homeassistant(self, args, llm_client):
         """
         Home Assistant TTS output:
@@ -263,5 +292,6 @@ class OverseerrRequestPlugin(ToolPlugin):
         clean = clean.strip(" .")
 
         return f"{clean} has been added to your requests."
+
 
 plugin = OverseerrRequestPlugin()
