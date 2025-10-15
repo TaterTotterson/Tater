@@ -31,6 +31,7 @@ from plugins.ha_control import plugin as ha_control_plugin
 from plugins.overseerr_trending import plugin as overseerr_trending_plugin
 from plugins.overseerr_request import plugin as overseerr_request_plugin
 from plugins.get_notifications import plugin as get_notifications_plugin
+from plugins.doorbell_alert import plugin as doorbell_alert_plugin
 
 plugin_registry = {
     youtube_plugin.name: youtube_plugin,
@@ -66,4 +67,5 @@ plugin_registry = {
     overseerr_trending_plugin.name: overseerr_trending_plugin,
     overseerr_request_plugin.name: overseerr_request_plugin,
     get_notifications_plugin.name: get_notifications_plugin,
+    doorbell_alert_plugin.name: doorbell_alert_plugin,
 }

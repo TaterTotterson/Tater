@@ -57,7 +57,6 @@ class VisionDescriberPlugin(ToolPlugin):
             "type": "text",
             "default": "gemma3-27b-abliterated-dpo"
         }
-        # NOTE: API key is pulled from env if needed (OPENAI_API_KEY).
     }
     waiting_prompt_template = "Write a playful message telling {mention} you’re using your magnifying glass to inspect their image now! Only output that message."
     platforms = ["discord", "webui"]
