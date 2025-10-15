@@ -9,12 +9,13 @@
 
 ## 🌐 Tater Platform Overview
 
-| Platform        | Description                                                                                     |
-|-----------------|-------------------------------------------------------------------------------------------------|
-| `discord`       | Full-featured Discord bot that runs compatible plugins.                                         |
-| `homeassistant` | Native integration for [Home Assistant](https://github.com/TaterTotterson/Tater-HomeAssistant), allowing Tater to act as a voice-enabled AI assistant through the Assist pipeline and control smart devices directly. |
-| `irc`           | Lightweight IRC bot that responds to mentions and runs compatible plugins.                      |
-| `webui`         | Streamlit-based WebUI for chatting, configuring plugins, and managing settings.                 |
+| Platform          | Description                                                                                     |
+|-------------------|-------------------------------------------------------------------------------------------------|
+| `discord`         | Full-featured Discord bot that runs compatible plugins.                                         |
+| `homeassistant`   | Native integration for [Home Assistant](https://github.com/TaterTotterson/Tater-HomeAssistant), allowing Tater to act as a voice-enabled AI assistant through the Assist pipeline and control smart devices directly. |
+| `automations`     | AI-powered [Home Assistant](https://github.com/TaterTotterson/Tater-HomeAssistant) automation endpoint that interprets structured commands and executes automation-specific plugins — designed for instant, no-chat actions like doorbell alerts or triggered events. |
+| `irc`             | Lightweight IRC bot that responds to mentions and runs compatible plugins.                      |
+| `webui`           | Streamlit-based WebUI for chatting, configuring plugins, and managing settings.                 |
 
 ## 🧩 Tater Plugin Overview
 
@@ -29,6 +30,7 @@ The following plugins can be triggerd simple by asking Tater after you enable th
 | `comfyui_music_video_plugin`  | Generates complete AI music videos with lyrics, audio, and visuals          | webui                 |
 | `comfyui_video_plugin`        | Creates videos from prompts using ComfyUI and video workflows               | webui                 |
 | `device_compare`              | Compares two devices, fetching specs and FPS benchmarks from online sources | discord, webui        |
+| `doorbell_alert`              | Triggers when the doorbell rings — captures a snapshot from a Home Assistant camera, analyzes it with Vision AI, and announces who or what is at the door via Piper TTS (optional HA notifications supported). | automations           |
 | `emoji_ai_responder`          | Picks a relevant emoji based on a message when someone reacts to it         | discord               |
 | `ftp_browser`                 | Allows users to browse FTP servers via Discord                              | discord               |
 | `ha_control`                  | Controls Home Assistant devices via domain, service, entity, or area (e.g., turn lights on, toggle switches, set temperatures). | webui, homeassistant  |
