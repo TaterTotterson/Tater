@@ -5,11 +5,10 @@ import asyncio
 import logging
 import threading
 import time
+from pydantic import Field
 from datetime import datetime
 from typing import Optional, Dict, Any, List
-
 import redis
-
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 import uvicorn
@@ -96,10 +95,14 @@ class HAResponse(BaseModel):
 
 # Notifications DTOs
 class NotificationIn(BaseModel):
-    title: str
-    body: Optional[str] = None
-    level: Optional[str] = None  # info|warn|error (free-form)
-    source: Optional[str] = None # which plugin / feature
+    source: str = Field(..., description="Logical source/plugin, e.g., 'doorbell_alert'")
+    title: str = Field(..., description="Short notification title")
+    type: Optional[str] = Field(None, description="Category: doorbell, motion, etc.")
+    message: Optional[str] = Field(None, description="Human-readable notification body")
+    entity_id: Optional[str] = Field(None, description="Primary HA entity related to this notification")
+    ha_time: Optional[str] = Field(None, description="Timestamp string provided by HA (e.g., sensor.date_time_iso)")
+    level: Optional[str] = Field("info", description="info|warn|error (free-form)")
+    data: Optional[Dict[str, Any]] = Field(None, description="Arbitrary structured extras")
 
 class NotificationsOut(BaseModel):
     notifications: List[Dict[str, Any]]
@@ -326,21 +329,22 @@ async def health():
 # -------------------- Notifications API --------------------
 @app.post("/tater-ha/v1/notifications/add")
 async def add_notification(n: NotificationIn):
-    """
-    Add a notification to the queue and light the Voice PE ring(s).
-    Any plugin can call this to post a notification.
-    """
     item = {
+        "source": n.source.strip(),
         "title": n.title.strip(),
-        "body": (n.body or "").strip(),
+        "type": (n.type or "").strip(),
+        "message": (n.message or "").strip(),
+        "entity_id": (n.entity_id or "").strip(),
+        "ha_time": (n.ha_time or "").strip(),
         "level": (n.level or "info").strip(),
-        "source": (n.source or "").strip(),
-        "ts": int(time.time())
+        "data": n.data or {},
+        "ts": int(time.time()),  # server epoch seconds
     }
-    # push newest first (LPUSH)
+
+    # Push newest first
     redis_client.lpush(REDIS_NOTIF_LIST, json.dumps(item))
 
-    # ring ON (simple)
+    # Light up rings
     try:
         _ring_on()
     except Exception:

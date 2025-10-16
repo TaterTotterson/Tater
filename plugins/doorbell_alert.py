@@ -4,6 +4,7 @@ import base64
 import logging
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
+from datetime import datetime, timezone
 
 import requests
 from dotenv import load_dotenv
@@ -20,11 +21,10 @@ class DoorbellAlertPlugin(ToolPlugin):
     """
     Automation-only: When triggered, fetch a snapshot from a Home Assistant camera,
     ask a Vision LLM to describe it briefly, and speak the result via Piper TTS
-    on the configured media_player entities.
+    on the configured media_player entities. Also posts to notifications + events.
     """
     name = "doorbell_alert"
     description = "Doorbell alert tool for when the user requests or says to run a doorbell alert."
-    # Router-only usage (now argument-free; everything comes from settings, overrides optional)
     usage = (
         "{\n"
         '  "function": "doorbell_alert",\n'
@@ -57,6 +57,12 @@ class DoorbellAlertPlugin(ToolPlugin):
             "default": "tts.piper",
             "description": "TTS entity to use (e.g., tts.piper)."
         },
+        "HA_TIME_ENTITY": {
+            "label": "HA Time Entity",
+            "type": "string",
+            "default": "sensor.date_time_iso",
+            "description": "Entity that provides an ISO-like timestamp string (e.g., sensor.date_time_iso)."
+        },
 
         # ---- Doorbell Alert Defaults ----
         "CAMERA_ENTITY": {
@@ -75,7 +81,7 @@ class DoorbellAlertPlugin(ToolPlugin):
             "label": "Enable Notifications by Default",
             "type": "boolean",
             "default": False,
-            "description": "If true, also post alerts to the HA notification queue."
+            "description": "If true, also post alerts to the HA notification queue and events."
         },
 
         # ---- Vision LLM ----
@@ -111,7 +117,8 @@ class DoorbellAlertPlugin(ToolPlugin):
         if not token:
             raise ValueError("HA_TOKEN is missing in Doorbell Alert settings.")
         tts_entity = (s.get("TTS_ENTITY") or "tts.piper").strip() or "tts.piper"
-        return {"base": base, "token": token, "tts_entity": tts_entity}
+        time_entity = (s.get("HA_TIME_ENTITY") or "sensor.date_time_iso").strip()
+        return {"base": base, "token": token, "tts_entity": tts_entity, "time_entity": time_entity}
 
     def _vision(self, s: Dict[str, str]) -> Dict[str, Optional[str]]:
         api_base = (s.get("VISION_API_BASE") or "http://127.0.0.1:1234").rstrip("/")
@@ -129,20 +136,45 @@ class DoorbellAlertPlugin(ToolPlugin):
         return [p.strip() for p in raw if isinstance(p, str) and p.strip()]
 
     def _get_camera_jpeg(self, ha_base: str, token: str, camera_entity: str) -> bytes:
-        """
-        GET /api/camera_proxy/<entity_id>  → current still image (JPEG/PNG).
-        """
         url = f"{ha_base}/api/camera_proxy/{quote(camera_entity, safe='')}"
         r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=10)
         if r.status_code >= 400:
             raise RuntimeError(f"camera_proxy HTTP {r.status_code}: {r.text[:200]}")
         return r.content
 
-    def _notify_ha_bridge(self, title: str, body: str, level: str = "info", source: str = "doorbell_alert") -> None:
+    def _get_ha_time(self, ha_base: str, token: str, time_entity: str) -> str:
         """
-        Posts to the Home Assistant platform's notifications endpoint:
-          POST /tater-ha/v1/notifications/add
-        Uses the HA-bridge bind port from Redis: 'homeassistant_platform_settings' -> 'bind_port'
+        Try to fetch a time string from a HA sensor (e.g., sensor.date_time_iso).
+        Fallback to current UTC ISO8601 if unavailable.
+        """
+        try:
+            if time_entity:
+                url = f"{ha_base}/api/states/{quote(time_entity, safe='')}"
+                r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=5)
+                if r.status_code < 400:
+                    state = r.json().get("state", "")
+                    if isinstance(state, str) and state.strip():
+                        return state.strip()
+        except Exception:
+            logger.debug("[doorbell_alert] HA time entity fetch failed", exc_info=True)
+        # UTC ISO fallback
+        return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+    def _notify_ha_bridge(
+        self,
+        *,
+        source: str,
+        title: str,
+        message: str,
+        level: str = "info",
+        notif_type: str = "doorbell",
+        entity_id: Optional[str] = None,
+        ha_time: Optional[str] = None,
+        data: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """
+        POST to Home Assistant notifications:
+          /tater-ha/v1/notifications/add
         """
         try:
             raw_port = redis_client.hget("homeassistant_platform_settings", "bind_port")
@@ -151,22 +183,64 @@ class DoorbellAlertPlugin(ToolPlugin):
             port = 8787
 
         url = f"http://127.0.0.1:{port}/tater-ha/v1/notifications/add"
+        payload = {
+            "source": source,
+            "title": title,
+            "type": notif_type,
+            "message": message,
+            "entity_id": entity_id or "",
+            "ha_time": ha_time or "",
+            "level": level,
+            "data": data or {},
+        }
         try:
-            r = requests.post(
-                url,
-                json={"title": title, "body": body, "level": level, "source": source},
-                timeout=5,
-            )
+            r = requests.post(url, json=payload, timeout=5)
             if r.status_code >= 400:
                 logger.warning("[doorbell_alert] notify post failed %s: %s", r.status_code, r.text[:200])
         except Exception as e:
             logger.warning("[doorbell_alert] notify post error: %s", e)
 
+    def _post_automation_event(
+        self,
+        *,
+        source: str,
+        title: str,
+        message: str,
+        event_type: str = "doorbell",
+        entity_id: Optional[str] = None,
+        ha_time: Optional[str] = None,
+        level: str = "info",
+        data: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """
+        POST to Automations events:
+          /tater-ha/v1/events/add
+        """
+        try:
+            raw_port = redis_client.hget("automation_platform_settings", "bind_port")
+            port = int(raw_port) if raw_port is not None else 8788
+        except Exception:
+            port = 8788
+
+        url = f"http://127.0.0.1:{port}/tater-ha/v1/events/add"
+        payload = {
+            "source": source,
+            "title": title,
+            "type": event_type,
+            "message": message,
+            "entity_id": entity_id or "",
+            "ha_time": ha_time or "",
+            "level": level,
+            "data": data or {},
+        }
+        try:
+            r = requests.post(url, json=payload, timeout=5)
+            if r.status_code >= 400:
+                logger.warning("[doorbell_alert] events post failed %s: %s", r.status_code, r.text[:200])
+        except Exception as e:
+            logger.warning("[doorbell_alert] events post error: %s", e)
+
     def _vision_describe(self, image_bytes: bytes, api_base: str, model: str, api_key: Optional[str]) -> str:
-        """
-        OpenAI-compatible /v1/chat/completions with an image URL (data URL).
-        Returns a single concise sentence for TTS.
-        """
         b64 = base64.b64encode(image_bytes).decode("utf-8")
         data_url = f"data:image/jpeg;base64,{b64}"
 
@@ -212,23 +286,18 @@ class DoorbellAlertPlugin(ToolPlugin):
         return text or "Someone is at the door."
 
     def _tts_speak(self, ha_base: str, token: str, tts_entity: str, players: List[str], message: str) -> None:
-        """
-        Prefer tts.speak (modern HA). Loop per-player for compatibility.
-        Fallback to tts.piper_say if needed.
-        """
         svc_url = f"{ha_base}/api/services/tts/speak"
         headers = self._ha_headers(token)
 
         for mp in players:
             data = {
-                "entity_id": tts_entity,                # e.g., 'tts.piper'
-                "media_player_entity_id": mp,           # call per player
+                "entity_id": tts_entity,
+                "media_player_entity_id": mp,
                 "message": message,
                 "cache": True,
             }
             r = requests.post(svc_url, headers=headers, json=data, timeout=15)
             if r.status_code >= 400:
-                # Fallback endpoint for some setups
                 fallback_url = f"{ha_base}/api/services/tts/piper_say"
                 r2 = requests.post(fallback_url, headers=headers, json=data, timeout=15)
                 if r2.status_code >= 400:
@@ -239,8 +308,8 @@ class DoorbellAlertPlugin(ToolPlugin):
     # ---------- Automation entrypoint ----------
     async def handle_automation(self, args: Dict[str, Any], llm_client) -> Any:
         """
-        Now argument-free by default (call: 'run doorbell alert').
-        Optional overrides remain supported:
+        Argument-free by default (call: 'run doorbell alert').
+        Optional overrides supported:
           {
             "camera": "camera.some_other_cam",
             "players": ["media_player.one", "media_player.two"],
@@ -275,6 +344,9 @@ class DoorbellAlertPlugin(ToolPlugin):
         if not players:
             raise ValueError("No media players configured — set MEDIA_PLAYERS in plugin settings or pass 'players' in args.")
 
+        # HA time string
+        ha_time = self._get_ha_time(ha["base"], ha["token"], ha["time_entity"])
+
         # 1) Snapshot
         try:
             jpeg = self._get_camera_jpeg(ha["base"], ha["token"], camera)
@@ -282,8 +354,27 @@ class DoorbellAlertPlugin(ToolPlugin):
             logger.exception("[doorbell_alert] Failed to fetch camera snapshot; using generic line")
             generic = "Someone is at the door."
             self._tts_speak(ha["base"], ha["token"], tts_entity, players, generic)
+
+            # Notifications / Events
             if notifications:
-                self._notify_ha_bridge(title="Doorbell", body=generic, level="info", source="doorbell_alert")
+                self._notify_ha_bridge(
+                    source="doorbell_alert",
+                    title="Doorbell",
+                    message=generic,
+                    notif_type="doorbell",
+                    entity_id=camera,
+                    ha_time=ha_time,
+                    level="info",
+                )
+                self._post_automation_event(
+                    source="doorbell_alert",
+                    title="Doorbell",
+                    message=generic,
+                    event_type="doorbell",
+                    entity_id=camera,
+                    ha_time=ha_time,
+                    level="info",
+                )
             return {"ok": True, "note": "snapshot_failed_generic_alert_spoken", "players": players}
 
         # 2) Vision brief
@@ -296,9 +387,30 @@ class DoorbellAlertPlugin(ToolPlugin):
         # 3) Speak
         self._tts_speak(ha["base"], ha["token"], tts_entity, players, desc)
 
-        # 4) Optional HA notification
+        # 4) Notifications + Events (optional)
         if notifications:
-            self._notify_ha_bridge(title="Doorbell", body=desc, level="info", source="doorbell_alert")
+            # include a little context in data so UIs can show where it played
+            extra = {"players": players, "tts_entity": tts_entity}
+            self._notify_ha_bridge(
+                source="doorbell_alert",
+                title="Doorbell",
+                message=desc,
+                notif_type="doorbell",
+                entity_id=camera,
+                ha_time=ha_time,
+                level="info",
+                data=extra,
+            )
+            self._post_automation_event(
+                source="doorbell_alert",
+                title="Doorbell",
+                message=desc,
+                event_type="doorbell",
+                entity_id=camera,
+                ha_time=ha_time,
+                level="info",
+                data=extra,
+            )
 
         # Platform ignores the return; for logs/tracing only
         return {"ok": True, "spoken": True, "players": players}

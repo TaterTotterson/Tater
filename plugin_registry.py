@@ -32,6 +32,8 @@ from plugins.overseerr_trending import plugin as overseerr_trending_plugin
 from plugins.overseerr_request import plugin as overseerr_request_plugin
 from plugins.get_notifications import plugin as get_notifications_plugin
 from plugins.doorbell_alert import plugin as doorbell_alert_plugin
+from plugins.camera_event import plugin as camera_event_plugin
+from plugins.events_query import plugin as events_query_plugin
 
 plugin_registry = {
     youtube_plugin.name: youtube_plugin,
@@ -68,4 +70,6 @@ plugin_registry = {
     overseerr_request_plugin.name: overseerr_request_plugin,
     get_notifications_plugin.name: get_notifications_plugin,
     doorbell_alert_plugin.name: doorbell_alert_plugin,
+    camera_event_plugin.name: camera_event_plugin,
+    events_query_plugin.name: events_query_plugin,
 }
