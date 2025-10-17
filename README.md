@@ -24,14 +24,16 @@ The following plugins can be triggerd simple by asking Tater after you enable th
 | Plugin Name                   | Description                                                                 | Platform              |
 |-------------------------------|-----------------------------------------------------------------------------|-----------------------|
 | `automatic_plugin`            | Generates images using AUTOMATIC1111 API based on user prompt               | discord, webui        |
+| `camera_event`                | Detects motion, describes it with Vision AI, and logs structured events with cooldown. | automations           |
 | `comfyui_audio_ace`           | Composes full-length songs using AceStep. Generates lyrics, tags, and MP3s  | discord, webui, homeassistant |
 | `comfyui_image_plugin`        | Generates images with ComfyUI using custom workflow templates               | discord, webui        |
 | `comfyui_image_video`         | Animates images into WebP loops using ComfyUI.                              | webui                 |
 | `comfyui_music_video_plugin`  | Generates complete AI music videos with lyrics, audio, and visuals          | webui                 |
 | `comfyui_video_plugin`        | Creates videos from prompts using ComfyUI and video workflows               | webui                 |
 | `device_compare`              | Compares two devices, fetching specs and FPS benchmarks from online sources | discord, webui        |
-| `doorbell_alert`              | Triggers when the doorbell rings — captures a snapshot from a Home Assistant camera, analyzes it with Vision AI, and announces who or what is at the door via Piper TTS (optional HA notifications supported). | automations           |
+| `doorbell_alert`              | Triggers when the doorbell rings — captures a snapshot from a Home Assistant camera, analyzes it with Vision AI, announces who or what is at the door via Piper TTS, and now logs events to the Automations Platform. | automations           |
 | `emoji_ai_responder`          | Picks a relevant emoji based on a message when someone reacts to it         | discord               |
+| `events_query`                | Summarizes all stored events by time, area, or activity.                    | webui, homeassistant  |
 | `ftp_browser`                 | Allows users to browse FTP servers via Discord                              | discord               |
 | `ha_control`                  | Controls Home Assistant devices via domain, service, entity, or area (e.g., turn lights on, toggle switches, set temperatures). | webui, homeassistant  |
 | `lowfi_video`                 | Generates lofi music videos, outputs 20-min MP4                             | webui                 |
