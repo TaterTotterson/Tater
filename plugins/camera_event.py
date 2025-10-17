@@ -5,6 +5,7 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
+from datetime import datetime
 
 import requests
 from dotenv import load_dotenv
@@ -23,6 +24,8 @@ class CameraEventPlugin(ToolPlugin):
     analyze with a Vision LLM to produce a short description, and record it as a
     durable event via the Automations /events/add endpoint for later retrieval.
     Includes a per-camera cooldown (configured in settings).
+
+    Also stamps events with HA's local time (ha_time) for consistent querying.
     """
     name = "camera_event"
     description = "Camera event tool for when the user requests or says to run camera event."
@@ -52,6 +55,12 @@ class CameraEventPlugin(ToolPlugin):
             "type": "string",
             "default": "",
             "description": "Create in HA: Profile → Long-Lived Access Tokens."
+        },
+        "TIME_SENSOR_ENTITY": {
+            "label": "Time Sensor (ISO)",
+            "type": "string",
+            "default": "sensor.date_time_iso",
+            "description": "Sensor with ISO-8601 time (e.g., 2025-10-16T14:05:00-05:00)."
         },
 
         # ---- Vision LLM ----
@@ -87,14 +96,15 @@ class CameraEventPlugin(ToolPlugin):
     def _get_settings(self) -> Dict[str, str]:
         s = redis_client.hgetall(f"plugin_settings:{self.settings_category}") or \
             redis_client.hgetall(f"plugin_settings: {self.settings_category}")
-        return s
+        return s or {}
 
     def _ha(self, s: Dict[str, str]) -> Dict[str, str]:
         base = (s.get("HA_BASE_URL") or "http://homeassistant.local:8123").rstrip("/")
         token = s.get("HA_TOKEN") or ""
         if not token:
             raise ValueError("HA_TOKEN is missing in Camera Event settings.")
-        return {"base": base, "token": token}
+        time_sensor = (s.get("TIME_SENSOR_ENTITY") or "sensor.date_time_iso").strip()
+        return {"base": base, "token": token, "time_sensor": time_sensor}
 
     def _vision(self, s: Dict[str, str]) -> Dict[str, Optional[str]]:
         api_base = (s.get("VISION_API_BASE") or "http://127.0.0.1:1234").rstrip("/")
@@ -116,6 +126,23 @@ class CameraEventPlugin(ToolPlugin):
 
     def _ha_headers(self, token: str) -> Dict[str, str]:
         return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+    def _ha_now(self, ha_base: str, token: str, sensor_entity: str) -> datetime:
+        """
+        Use HA's reported time exactly as local-naive time.
+        If HA includes a timezone offset, strip it. Fallback to local system time.
+        """
+        try:
+            url = f"{ha_base}/api/states/{sensor_entity}"
+            r = requests.get(url, headers=self._ha_headers(token), timeout=5)
+            if r.status_code < 400:
+                state = (r.json() or {}).get("state", "")
+                if state and state not in ("unknown", "unavailable"):
+                    dt = datetime.fromisoformat(state)
+                    return dt.replace(tzinfo=None) if dt.tzinfo else dt
+        except Exception:
+            logger.info("[camera_event] HA time sensor fetch failed; using local system time")
+        return datetime.now()
 
     def _get_camera_jpeg(self, ha_base: str, token: str, camera_entity: str) -> bytes:
         """
@@ -168,7 +195,7 @@ class CameraEventPlugin(ToolPlugin):
             raise RuntimeError(f"Vision HTTP {r.status_code}: {r.text[:200]}")
         res = r.json()
         text = (res.get("choices", [{}])[0].get("message", {}).get("content", "") or "").strip()
-        return text or "No clear subject is visible."
+        return text or "Motion event detected."
 
     # -------- Cooldown tracking (per camera) --------
     def _cooldown_key(self, camera_entity: str) -> str:
@@ -191,7 +218,7 @@ class CameraEventPlugin(ToolPlugin):
             logger.warning("[camera_event] failed to set cooldown key for %s", camera_entity)
 
     # -------- Events endpoint --------
-    def _post_event(self, *, source: str, title: str, message: str, entity_id: str, area: Optional[str]) -> None:
+    def _post_event(self, *, source: str, title: str, message: str, entity_id: str, area: Optional[str], ha_time: str) -> None:
         base = self._automation_base_url()
         url = f"{base}/tater-ha/v1/events/add"
         payload = {
@@ -201,6 +228,7 @@ class CameraEventPlugin(ToolPlugin):
             "message": message,
             "entity_id": entity_id,
             "level": "info",
+            "ha_time": ha_time,  # HA local-naive ISO time string
             "data": {"area": (area or "").strip()},
         }
         try:
@@ -247,6 +275,10 @@ class CameraEventPlugin(ToolPlugin):
                 "cooldown_seconds": cooldown_seconds
             }
 
+        # Current HA local time (naive) for event stamping
+        now_local = self._ha_now(ha["base"], ha["token"], ha["time_sensor"])
+        now_iso = now_local.isoformat()
+
         # Fetch snapshot
         try:
             jpeg = self._get_camera_jpeg(ha["base"], ha["token"], camera)
@@ -255,7 +287,14 @@ class CameraEventPlugin(ToolPlugin):
             # Still log an event with generic text so timeline remains useful
             generic = "Motion event detected, but no snapshot was available."
             title = f"{area.title()} motion"
-            self._post_event(source="camera_event", title=title, message=generic, entity_id=camera, area=area)
+            self._post_event(
+                source="camera_event",
+                title=title,
+                message=generic,
+                entity_id=camera,
+                area=area,
+                ha_time=now_iso,
+            )
             self._mark_fired(camera)
             return {"ok": True, "event": "logged_generic_no_snapshot", "camera": camera, "area": area}
 
@@ -268,7 +307,14 @@ class CameraEventPlugin(ToolPlugin):
 
         # Store event
         title = f"{area.title()} motion"
-        self._post_event(source="camera_event", title=title, message=desc, entity_id=camera, area=area)
+        self._post_event(
+            source="camera_event",
+            title=title,
+            message=desc,
+            entity_id=camera,
+            area=area,
+            ha_time=now_iso,
+        )
 
         # Mark cooldown
         self._mark_fired(camera)

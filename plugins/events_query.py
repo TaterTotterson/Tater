@@ -26,16 +26,16 @@ class EventsQueryPlugin(ToolPlugin):
     Natural asks:
       - "what happened in the front yard today?"
       - "was there anyone in the back yard yesterday?"
-      - "what happened in the house on Oct 14th?"
+      - "is anyone currently in the back yard?"
       - "what happened in the garage last 24 hours?"
-      - "what happened outside today?"
+      - "anything happen around the house today?"
     """
     name = "events_query"
     pretty_name = "Events Query"
     description = (
         "Answer questions about stored household events (all sources) by area and timeframe. "
-        "Use this when the user asks what happened, who was seen, or how long something occurred "
-        "in a specific place or time. The model should always include the original user question "
+        "Use this when the user asks what happened, who was seen, how long something occurred, "
+        "or whether someone is currently there. The model should always include the original user question "
         "as the 'query' argument so context is preserved."
     )
 
@@ -45,7 +45,7 @@ class EventsQueryPlugin(ToolPlugin):
         '  "arguments": {\n'
         '    "area": "front yard",            // optional\n'
         '    "timeframe": "today|yesterday|last_24h|<date like Oct 14 or 2025-10-14>",\n'
-        '    "query": "how long were the dogs outside today"  // original user question\n'
+        '    "query": "is anyone currently in the back yard"  // original user question\n'
         "  }\n"
         "}\n"
     )
@@ -101,83 +101,7 @@ class EventsQueryPlugin(ToolPlugin):
             port = 8788
         return f"http://127.0.0.1:{port}"
 
-    # ---------- Area helpers ----------
-    def _area_catalog_from_events(self, events: List[Dict[str, Any]]) -> List[str]:
-        return sorted({
-            ((e.get("data") or {}).get("area") or "").strip()
-            for e in events
-            if ((e.get("data") or {}).get("area") or "").strip()
-        })
-
-    def _guess_outdoor_areas(self, catalog: List[str]) -> List[str]:
-        outdoor_keywords = [
-            "yard", "porch", "patio", "drive", "driveway",
-            "front", "back", "garden", "lawn", "deck"
-        ]
-        def _norm(s: str) -> str:
-            return re.sub(r"[^a-z0-9]+", "", s.lower())
-        return [a for a in catalog if any(k in _norm(a) for k in outdoor_keywords)]
-
-    def _phrase_means_outdoors(self, phrase: str) -> bool:
-        p = (phrase or "").lower()
-        return any(w in p for w in ["outside", "outdoors", "around the house", "around the yard", "yard"])
-
-    def _phrase_means_whole_home(self, phrase: str) -> bool:
-        p = (phrase or "").lower()
-        return any(w in p for w in ["house", "home", "whole house", "whole home", "entire house", "around the home"])
-
-    async def _resolve_areas_with_llm(
-        self, user_area: str, events: List[Dict[str, Any]], llm_client
-    ) -> Optional[List[str]]:
-        """
-        Ask the LLM to map a user-provided area phrase (e.g., 'outside', 'around the house')
-        to a subset of canonical areas actually present in stored events.
-        Returns a list of selected area strings (exactly as they appear in events), or None on failure.
-        """
-        catalog = self._area_catalog_from_events(events)
-        if not catalog:
-            return None
-
-        system = (
-            "You map a user's area phrase to one or more of the known areas below.\n"
-            "Return ONLY a JSON array of strings (no prose). Choose multiple if implied.\n"
-            "Rules:\n"
-            "- If the phrase implies outdoors (e.g., 'outside', 'outdoors', 'around the house', 'yard'), "
-            "  select all outdoor-like areas from the catalog.\n"
-            "- If the phrase implies the whole home (e.g., 'house', 'home', 'around the home'), "
-            "  select ALL areas from the catalog.\n"
-            "- If the phrase names a specific area (e.g., 'front yard', 'porch'), pick that (and close variants if needed).\n"
-            "- If you cannot decide, return an empty array []."
-        )
-        user = json.dumps({
-            "user_area_phrase": (user_area or "").strip(),
-            "known_areas_catalog": catalog
-        }, ensure_ascii=False)
-
-        try:
-            resp = await llm_client.chat(
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                timeout_ms=30_000
-            )
-            raw = (resp.get("message", {}) or {}).get("content", "").strip()
-            selected = json.loads(raw)  # expect strictly a JSON array
-            if not isinstance(selected, list):
-                return None
-
-            cat_set = {c.strip() for c in catalog}
-            out = []
-            for s in selected:
-                if isinstance(s, str) and s.strip() in cat_set:
-                    out.append(s.strip())
-
-            return out or []
-        except Exception as e:
-            logger.info("[events_query] area LLM mapping failed: %s", e)
-            return None
-
+    # ---------- Common helpers ----------
     @staticmethod
     def _norm_area(s: Optional[str]) -> str:
         # lowercase, remove all non-alphanumerics (spaces, underscores, punctuation)
@@ -188,6 +112,7 @@ class EventsQueryPlugin(ToolPlugin):
         nb = self._norm_area(b)
         if not na or not nb:
             return False
+        # exact or contains either direction (handles "back yard" vs "backyard" or "back porch")
         return na == nb or na in nb or nb in na
 
     # ---------- Time helpers ----------
@@ -196,8 +121,8 @@ class EventsQueryPlugin(ToolPlugin):
 
     def _ha_now(self, ha_base: str, token: str, sensor_entity: str) -> datetime:
         """
-        Try HA ISO sensor for authoritative local time (includes tz offset).
-        Fallback: UTC-now if unavailable.
+        Use HA's reported time exactly as local time. If HA provides an offset, strip it.
+        Fallback to local system time (also naive).
         """
         try:
             url = f"{ha_base}/api/states/{sensor_entity}"
@@ -205,23 +130,21 @@ class EventsQueryPlugin(ToolPlugin):
             if r.status_code < 400:
                 state = (r.json() or {}).get("state", "")
                 if state:
-                    return datetime.fromisoformat(state)
+                    dt = datetime.fromisoformat(state)
+                    return dt.replace(tzinfo=None) if dt.tzinfo else dt
         except Exception:
-            logger.info("[events_query] HA time sensor fetch failed; using UTC-now")
-        return datetime.now(timezone.utc)
+            logger.info("[events_query] HA time sensor fetch failed; using local system time")
+        return datetime.now()
 
     @staticmethod
     def _day_bounds(dt: datetime) -> Tuple[datetime, datetime]:
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+        # dt is naive local; keep it that way
         start = dt.replace(hour=0, minute=0, second=0, microsecond=0)
         end = start + timedelta(days=1) - timedelta(microseconds=1)
         return start, end
 
     @staticmethod
     def _yesterday_bounds(dt: datetime) -> Tuple[datetime, datetime]:
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
         start = (dt - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
         end = start + timedelta(days=1) - timedelta(microseconds=1)
         return start, end
@@ -237,7 +160,7 @@ class EventsQueryPlugin(ToolPlugin):
           - YYYY-MM-DD (ISO)
           - Oct 14, October 14, Oct 14th, October 14th (with or without year)
           - 2025/10/14
-        Returns a timezone-aware date (no time) using HA timezone if present.
+        Returns a naive local date (no tz).
         """
         if not s:
             return None
@@ -273,7 +196,6 @@ class EventsQueryPlugin(ToolPlugin):
     # ---------- Source discovery ----------
     @staticmethod
     def _discover_sources() -> List[str]:
-        # Use Redis to enumerate all event lists: tater:automations:events:<source>
         prefix = "tater:automations:events:"
         sources = []
         try:
@@ -283,7 +205,6 @@ class EventsQueryPlugin(ToolPlugin):
                     sources.append(src)
         except Exception as e:
             logger.warning(f"[events_query] source discovery failed: {e}")
-        # Fallback to a few common defaults if none found
         return sources or ["camera_event", "doorbell_alert", "door_event", "hvac_event", "motion_event", "general"]
 
     # ---------- Fetch ----------
@@ -296,7 +217,6 @@ class EventsQueryPlugin(ToolPlugin):
                 r.raise_for_status()
                 data = r.json() if r.headers.get("content-type", "").lower().startswith("application/json") else {}
                 items = (data or {}).get("items", [])
-                # Tag source for completeness
                 for it in items:
                     it.setdefault("source", source)
                 return items if isinstance(items, list) else []
@@ -311,26 +231,63 @@ class EventsQueryPlugin(ToolPlugin):
             items.extend(await self._fetch_one_source(base, src, limit=1000))
         return items
 
-    # ---------- Filtering ----------
+    # ---------- Time/Message helpers ----------
     @staticmethod
-    def _within_window(e: Dict[str, Any], start: datetime, end: datetime) -> bool:
-        # Prefer server ts (epoch seconds), fallback to ha_time (ISO)
-        ts = e.get("ts")
-        if isinstance(ts, int):
-            tdt = datetime.fromtimestamp(ts, tz=timezone.utc)
-            return start.astimezone(timezone.utc) <= tdt <= end.astimezone(timezone.utc)
+    def _parse_event_dt(e: Dict[str, Any]) -> Optional[datetime]:
+        """
+        Prefer ha_time. Treat whatever HA gave as local; strip timezone if present.
+        Fallback to ts (epoch seconds) as local naive.
+        """
         ha_time = (e.get("ha_time") or "").strip()
         if ha_time:
             try:
-                hdt = datetime.fromisoformat(ha_time)
-                return start <= hdt <= end
+                dt = datetime.fromisoformat(ha_time)
+                return dt.replace(tzinfo=None) if dt.tzinfo else dt
             except Exception:
-                return False
-        return False
+                pass
+
+        ts = e.get("ts")
+        if isinstance(ts, int):
+            try:
+                # Treat server epoch as local naive for display/windowing
+                return datetime.fromtimestamp(ts)
+            except Exception:
+                pass
+
+        return None
 
     @staticmethod
-    def _eq_ci(a: Optional[str], b: Optional[str]) -> bool:
-        return (a or "").strip().lower() == (b or "").strip().lower()
+    def _human_time(dt: datetime) -> str:
+        # Return "3:41 PM" style local time
+        try:
+            return dt.strftime("%-I:%M %p")
+        except Exception:
+            return dt.strftime("%I:%M %p").lstrip("0")
+
+    @staticmethod
+    def _minutes_ago(now: datetime, dt: datetime) -> Optional[int]:
+        try:
+            delta = now - dt  # both naive local
+            return max(0, int(delta.total_seconds() // 60))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _contains_person_text(s: str) -> bool:
+        s = (s or "").lower()
+        keywords = [
+            "person", "someone", "people", "man", "woman", "kid", "child",
+            "visitor", "delivery", "driver", "courier", "walker", "intruder"
+        ]
+        return any(k in s for k in keywords)
+
+    # ---------- Filtering ----------
+    @staticmethod
+    def _within_window(e: Dict[str, Any], start: datetime, end: datetime) -> bool:
+        dt = EventsQueryPlugin._parse_event_dt(e)
+        if not dt:
+            return False
+        return start <= dt <= end
 
     def _event_matches(self, e: Dict[str, Any], area: Optional[str], start: datetime, end: datetime) -> bool:
         if not self._within_window(e, start, end):
@@ -341,15 +298,194 @@ class EventsQueryPlugin(ToolPlugin):
                 return False
         return True
 
+    # ---------- Presence intent ----------
+    @staticmethod
+    def _is_presence_query(q: Optional[str]) -> bool:
+        if not q:
+            return False
+        s = q.lower()
+        triggers = [
+            "is anyone", "anyone there", "currently", "right now", "there now",
+            "still there", "present", "on site", "on the porch", "in the yard now"
+        ]
+        return any(t in s for t in triggers)
+
+    def _presence_answer_for_area(self, now: datetime, area_name: str, events: List[Dict[str, Any]]) -> str:
+        # Find most recent "person-like" event for this area today
+        latest: Optional[Tuple[datetime, Dict[str, Any]]] = None
+        for e in events:
+            ev_area = ((e.get("data") or {}).get("area") or "").strip()
+            if not self._areas_match(area_name, ev_area):
+                continue
+            msg = (e.get("message") or "") + " " + (e.get("title") or "")
+            if not self._contains_person_text(msg):
+                continue
+            dt = self._parse_event_dt(e)
+            if not dt:
+                continue
+            if (latest is None) or (dt > latest[0]):
+                latest = (dt, e)
+
+        if not latest:
+            return f"No one has been detected in {area_name} today."
+
+        last_dt = latest[0]
+        mins = self._minutes_ago(now, last_dt)
+        if mins is not None:
+            if mins <= 2:
+                return f"Yes — someone was just seen in {area_name}."
+            if mins <= 59:
+                return f"Yes — someone was seen in {area_name} about {mins} minutes ago."
+        # Fallback to clock time
+        return f"Yes — someone was seen in {area_name} at {self._human_time(last_dt)}."
+
+    # ---------- LLM area resolution (robust) ----------
+    @staticmethod
+    def _extract_json_array(raw: str) -> Optional[List[str]]:
+        """Be lenient: strip code fences and pull the first JSON array."""
+        if not raw:
+            return None
+        s = raw.strip()
+        # Strip ```json ... ``` or ``` ... ```
+        if s.startswith("```"):
+            s = re.sub(r"^```(?:json)?\s*|\s*```$", "", s, flags=re.IGNORECASE).strip()
+        # Try direct parse
+        try:
+            val = json.loads(s)
+            if isinstance(val, list):
+                return val
+        except Exception:
+            pass
+        # Fallback: first [...] block
+        m = re.search(r"$begin:math:display$.*$end:math:display$", s, flags=re.DOTALL)
+        if m:
+            try:
+                val = json.loads(m.group(0))
+                if isinstance(val, list):
+                    return val
+            except Exception:
+                return None
+        return None
+
+    @staticmethod
+    def _looks_like_whole_home(phrase: str) -> bool:
+        s = (phrase or "").lower()
+        return any(t in s for t in ["around the house", "the house", "house", "home", "entire", "everywhere"])
+
+    @staticmethod
+    def _looks_like_outside(phrase: str) -> bool:
+        s = (phrase or "").lower()
+        return any(t in s for t in ["outside", "yard", "outdoors", "outside the", "around the yard"])
+
+    @staticmethod
+    def _filter_outdoor_like(catalog: List[str]) -> List[str]:
+        outs = []
+        for a in catalog:
+            al = a.lower()
+            if any(k in al for k in [
+                "yard", "porch", "driveway", "garage", "garden", "deck", "patio", "courtyard", "front", "back", "sidewalk", "outside"
+            ]):
+                outs.append(a)
+        # If we filtered out everything, fall back to catalog rather than empty
+        return outs or catalog
+
+    async def _resolve_areas_with_llm(self, user_area: str, events: List[Dict[str, Any]], llm_client) -> Optional[List[str]]:
+        """
+        Ask the LLM to map a user-provided area phrase (e.g., 'outside', 'around the house')
+        to a subset of canonical areas actually present in stored events.
+        Returns a list of selected area strings (exactly as they appear in events), or None on failure.
+        """
+        # Build a catalog of known areas from events (normalized & deduped)
+        raw_catalog = [
+            ((e.get("data") or {}).get("area") or "").strip()
+            for e in events
+            if ((e.get("data") or {}).get("area") or "").strip()
+        ]
+        # Normalize trivial variants (trim spaces), keep original casing
+        cat_set = {}
+        for a in raw_catalog:
+            key = a.strip()
+            if key:
+                cat_set[key] = True
+        catalog = sorted(cat_set.keys())
+        if not catalog:
+            return None
+
+        # Heuristic short-circuit for common phrases
+        if self._looks_like_whole_home(user_area):
+            return catalog[:]  # all areas
+        if self._looks_like_outside(user_area):
+            return self._filter_outdoor_like(catalog)
+
+        # Few-shot prompt with strict instructions
+        examples = (
+            "Examples:\n"
+            "User phrase: \"around the house\"\n"
+            "Known areas: [\"front yard\",\"back yard\",\"garage\",\"living room\",\"kitchen\"]\n"
+            "Return: [\"front yard\",\"back yard\",\"garage\",\"living room\",\"kitchen\"]\n\n"
+            "User phrase: \"outside\"\n"
+            "Known areas: [\"front yard\",\"back yard\",\"garage\",\"living room\",\"kitchen\",\"porch\"]\n"
+            "Return: [\"front yard\",\"back yard\",\"porch\",\"garage\"]\n\n"
+            "User phrase: \"front porch\"\n"
+            "Known areas: [\"front yard\",\"porch\",\"back yard\"]\n"
+            "Return: [\"porch\"]\n"
+        )
+        system = (
+            "Map a user's area phrase to one or more of the known areas.\n"
+            "Output strictly a JSON array of strings (no code fences, no prose).\n"
+            "Pick multiple if implied.\n"
+            "- If the phrase implies outdoors (e.g., 'outside', 'yard'), choose all outdoor-like areas.\n"
+            "- If the phrase implies the whole home (e.g., 'house', 'home', 'around the home'), choose ALL areas.\n"
+            "- If the phrase names a specific area (e.g., 'front yard', 'porch'), pick that (and close variants if needed).\n"
+            "- If you cannot decide, return an empty list [].\n\n" + examples
+        )
+        user = json.dumps({
+            "user_area_phrase": (user_area or "").strip(),
+            "known_areas_catalog": catalog
+        }, ensure_ascii=False)
+
+        try:
+            # If your llm_client supports temperature/max_tokens, pass them; otherwise they are ignored harmlessly.
+            resp = await llm_client.chat(
+                messages=[{"role": "system", "content": system},
+                          {"role": "user", "content": user}],
+                temperature=0.1,
+                max_tokens=64,
+                timeout_ms=30_000
+            )
+
+            raw = (resp.get("message", {}) or {}).get("content", "").strip()
+            selected = self._extract_json_array(raw)
+            if selected is None or not isinstance(selected, list):
+                # fall through to heuristics below
+                selected = []
+
+            # Keep only intersections with the catalog (exact string match after strip)
+            cat_set_exact = {c.strip() for c in catalog}
+            out = []
+            for s in selected:
+                if isinstance(s, str) and s.strip() in cat_set_exact:
+                    out.append(s.strip())
+
+            # If the model gave none, try heuristic expansions
+            if not out:
+                if self._looks_like_whole_home(user_area):
+                    out = catalog[:]
+                elif self._looks_like_outside(user_area):
+                    out = self._filter_outdoor_like(catalog)
+
+            return out  # may be []
+        except Exception:
+            # As a last resort, heuristics; else None to signal fallback path
+            if self._looks_like_whole_home(user_area):
+                return catalog[:]
+            if self._looks_like_outside(user_area):
+                return self._filter_outdoor_like(catalog)
+            return None
+
     # ---------- Summarization ----------
-    async def _summarize(
-        self,
-        events: List[Dict[str, Any]],
-        area: Optional[str],
-        label: str,
-        llm_client,
-        user_query: Optional[str] = None
-    ) -> str:
+    async def _summarize(self, events: List[Dict[str, Any]], area: Optional[str],
+                         label: str, llm_client, user_query: Optional[str] = None) -> str:
         simplified = []
         for e in events:
             simplified.append({
@@ -371,7 +507,7 @@ class EventsQueryPlugin(ToolPlugin):
             "- Group related events by area (e.g., all front yard activity together).\n"
             "- If the user asks 'how many' or 'who', reason over the events and answer with counts or brief descriptions.\n"
             "- If the user asks 'how long', calculate or estimate the duration between the earliest and latest relevant events "
-            "in that area and timeframe (e.g., 'about 3 hours'). Mention it naturally (e.g., 'The dogs were playing outside for about 3 hours').\n"
+            "in that area and timeframe (e.g., 'about 3 hours'). Mention it naturally.\n"
             "- Include times when relevant, but avoid repeating them excessively.\n"
             "- Avoid technical terms, entity IDs, or raw timestamps.\n"
             "- If there are no relevant events, clearly say so."
@@ -392,6 +528,8 @@ class EventsQueryPlugin(ToolPlugin):
                     {"role": "system", "content": system},
                     {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
                 ],
+                temperature=0.2,
+                max_tokens=400,
                 timeout_ms=60_000,
             )
             text = (resp.get("message", {}) or {}).get("content", "").strip()
@@ -400,7 +538,7 @@ class EventsQueryPlugin(ToolPlugin):
         except Exception as e:
             logger.info(f"[events_query] LLM summary failed; using fallback: {e}")
 
-        # --- Fallback listing ---
+        # Fallback list
         if not events:
             return f"No events found for {area or 'all areas'} {label}."
         lines = [f"Here’s what I found for {area or 'all areas'} {label}:"]
@@ -453,61 +591,76 @@ class EventsQueryPlugin(ToolPlugin):
                 start, end = self._day_bounds(now)
                 label = f"today (unrecognized date: {tf_raw})"
             else:
-                if parsed.tzinfo is None:
-                    parsed = parsed.replace(tzinfo=now.tzinfo or timezone.utc)
+                # Always treat parsed date as local-naive
+                parsed = parsed.replace(tzinfo=None)
                 start, end = self._day_bounds(parsed)
                 label = f"on {parsed.strftime('%b %d, %Y')}"
 
-        if start.tzinfo is None: start = start.replace(tzinfo=timezone.utc)
-        if end.tzinfo is None:   end = end.replace(tzinfo=timezone.utc)
-
-        # Fetch all sources first (for both data & area catalog)
+        # Fetch all sources first
         items = await self._fetch_all_sources()
-        catalog = self._area_catalog_from_events(items)
 
-        # Resolve area phrase via LLM (if provided), else all areas
+        # Resolve area phrase via LLM (if provided)
         area_arg = (args.get("area") or "").strip()
         resolved_areas: Optional[List[str]] = None
         if area_arg:
-            # 1) Try LLM mapping against current catalog
             resolved_areas = await self._resolve_areas_with_llm(area_arg, items, llm_client)
-            logger.info("[events_query] area phrase=%r catalog=%s -> llm_selected=%s",
-                        area_arg, catalog, resolved_areas)
 
-            # 2) Heuristic bundles if LLM is unsure or returns []
-            if resolved_areas is None or len(resolved_areas) == 0:
-                if self._phrase_means_outdoors(area_arg):
-                    resolved_areas = self._guess_outdoor_areas(catalog)
-                    logger.info("[events_query] heuristic outdoors -> %s", resolved_areas)
-                elif self._phrase_means_whole_home(area_arg):
-                    resolved_areas = list(catalog)
-                    logger.info("[events_query] heuristic whole-home -> %s", resolved_areas)
+        # Presence intent?
+        user_query = (args.get("query") or "").strip()
+        if self._is_presence_query(user_query) and (area_arg or (resolved_areas and len(resolved_areas) > 0)):
+            # Use resolved areas if available; else fallback to the raw area_arg
+            areas_to_check = resolved_areas if (resolved_areas and len(resolved_areas) > 0) else [area_arg]
+            # Limit window to today regardless of timeframe (matches the requirement)
+            p_start, p_end = self._day_bounds(now)
 
-        def _norm(s: Optional[str]) -> str:
-            return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
+            # Keep only today's events for speed
+            todays = [e for e in items if self._within_window(e, p_start, p_end)]
 
-        # Filtering logic
-        if area_arg:
-            if resolved_areas is not None and len(resolved_areas) > 0:
-                target_norms = {_norm(a) for a in resolved_areas}
-                def _match_area_list(e: Dict[str, Any]) -> bool:
-                    ev_area = ((e.get("data") or {}).get("area") or "").strip()
-                    return _norm(ev_area) in target_norms
-                filtered = [e for e in items if self._within_window(e, start, end) and _match_area_list(e)]
-                label_hint = f"{label} (areas: {', '.join(resolved_areas)})"
-                # Pass the resolved areas as a readable label to the summarizer
-                resolved_label = ", ".join(resolved_areas)
-                return await self._summarize(filtered, resolved_label, label_hint, llm_client, user_query=args.get("query"))
-            else:
-                # Last resort: avoid over-filtering; show ALL areas for the timeframe
-                logger.info("[events_query] unresolved area phrase; falling back to all areas for timeframe")
-                filtered = [e for e in items if self._within_window(e, start, end)]
-                label_hint = f"{label} (all areas; unresolved phrase: {area_arg})"
-                return await self._summarize(filtered, None, label_hint, llm_client, user_query=args.get("query"))
+            answers = []
+            for a in areas_to_check:
+                answers.append(self._presence_answer_for_area(now, a, todays))
+
+            # If multiple areas (e.g., "outside"), join them on new lines
+            return "\n".join(answers)
+
+        # Otherwise: normal summarization path
+        # Filter using resolved areas if available, else fallback to legacy area matching
+        if resolved_areas is not None and len(resolved_areas) > 0:
+            target_norms = {self._norm_area(a) for a in resolved_areas}
+            def _match_area_list(e: Dict[str, Any]) -> bool:
+                ev_area = ((e.get("data") or {}).get("area") or "").strip()
+                return self._norm_area(ev_area) in target_norms
+            filtered = [e for e in items if self._within_window(e, start, end) and _match_area_list(e)]
+            label_hint = f"{label} (areas: {', '.join(resolved_areas)})"
+            return await self._summarize(filtered, area_arg or None, label_hint, llm_client, user_query=user_query)
         else:
-            # No area specified at all -> all areas
-            filtered = [e for e in items if self._within_window(e, start, end)]
-            return await self._summarize(filtered, None, label, llm_client, user_query=args.get("query"))
+            # If the phrase clearly means "whole home" or "outside" and we couldn't resolve via LLM,
+            # expand heuristically so we don't miss events.
+            heuristic_areas: Optional[List[str]] = None
+            if area_arg:
+                # Build catalog again for heuristic expansion
+                catalog = sorted({
+                    ((e.get("data") or {}).get("area") or "").strip()
+                    for e in items if ((e.get("data") or {}).get("area") or "").strip()
+                })
+                if self._looks_like_whole_home(area_arg):
+                    heuristic_areas = catalog[:]
+                elif self._looks_like_outside(area_arg):
+                    heuristic_areas = self._filter_outdoor_like(catalog)
+
+            if heuristic_areas:
+                target_norms = {self._norm_area(a) for a in heuristic_areas}
+                def _match_area_list2(e: Dict[str, Any]) -> bool:
+                    ev_area = ((e.get("data") or {}).get("area") or "").strip()
+                    return self._norm_area(ev_area) in target_norms
+                filtered = [e for e in items if self._within_window(e, start, end) and _match_area_list2(e)]
+                label_hint = f"{label} (areas: {', '.join(heuristic_areas)})"
+                return await self._summarize(filtered, area_arg, label_hint, llm_client, user_query=user_query)
+
+            # Fallback to loose area matching (or unfiltered if no area provided)
+            area = area_arg or None
+            filtered = [e for e in items if self._event_matches(e, area, start, end)]
+            return await self._summarize(filtered, area, label, llm_client, user_query=user_query)
 
     # ---------- Platform shims ----------
     async def handle_webui(self, args: Dict[str, Any], llm_client):
@@ -515,6 +668,5 @@ class EventsQueryPlugin(ToolPlugin):
 
     async def handle_homeassistant(self, args: Dict[str, Any], llm_client):
         return await self._handle(args, llm_client)
-
 
 plugin = EventsQueryPlugin()
