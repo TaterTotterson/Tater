@@ -22,13 +22,24 @@ class DoorbellAlertPlugin(ToolPlugin):
     Automation-only: When triggered, fetch a snapshot from a Home Assistant camera,
     ask a Vision LLM to describe it briefly, and speak the result via Piper TTS
     on the configured media_player entities. Also posts to notifications + events.
+
+    Notes:
+    - Uses HA's ISO time sensor value as ha_time (no timezone transforms).
+    - Stamps events with a configurable area so events_query can filter by area.
     """
     name = "doorbell_alert"
     description = "Doorbell alert tool for when the user requests or says to run a doorbell alert."
     usage = (
         "{\n"
         '  "function": "doorbell_alert",\n'
-        '  "arguments": {}\n'
+        '  "arguments": {\n'
+        '    // optional overrides\n'
+        '    "camera": "camera.doorbell_high",\n'
+        '    "players": ["media_player.kitchen"],\n'
+        '    "tts_entity": "tts.piper",\n'
+        '    "notifications": true,\n'
+        '    "area": "front door"\n'
+        "  }\n"
         "}\n"
     )
 
@@ -57,8 +68,10 @@ class DoorbellAlertPlugin(ToolPlugin):
             "default": "tts.piper",
             "description": "TTS entity to use (e.g., tts.piper)."
         },
-        "HA_TIME_ENTITY": {
-            "label": "HA Time Entity",
+
+        # Use same name as other plugins; still accept legacy HA_TIME_ENTITY if present
+        "TIME_SENSOR_ENTITY": {
+            "label": "Time Sensor (ISO)",
             "type": "string",
             "default": "sensor.date_time_iso",
             "description": "Entity that provides an ISO-like timestamp string (e.g., sensor.date_time_iso)."
@@ -69,7 +82,7 @@ class DoorbellAlertPlugin(ToolPlugin):
             "label": "Camera Entity",
             "type": "string",
             "default": "camera.doorbell_high",
-            "description": "Default camera entity for doorbell snapshots (e.g., camera.front_door)."
+            "description": "Default camera entity for doorbell snapshots."
         },
         "MEDIA_PLAYERS": {
             "label": "Media Players",
@@ -82,6 +95,12 @@ class DoorbellAlertPlugin(ToolPlugin):
             "type": "boolean",
             "default": False,
             "description": "If true, also post alerts to the HA notification queue and events."
+        },
+        "AREA_LABEL": {
+            "label": "Area Label",
+            "type": "string",
+            "default": "front door",
+            "description": "Area tag saved with events (e.g., 'front door', 'porch')."
         },
 
         # ---- Vision LLM ----
@@ -109,7 +128,7 @@ class DoorbellAlertPlugin(ToolPlugin):
     def _get_settings(self) -> Dict[str, str]:
         s = redis_client.hgetall(f"plugin_settings:{self.settings_category}") or \
             redis_client.hgetall(f"plugin_settings: {self.settings_category}")
-        return s
+        return s or {}
 
     def _ha(self, s: Dict[str, str]) -> Dict[str, str]:
         base = (s.get("HA_BASE_URL") or "http://homeassistant.local:8123").rstrip("/")
@@ -117,7 +136,8 @@ class DoorbellAlertPlugin(ToolPlugin):
         if not token:
             raise ValueError("HA_TOKEN is missing in Doorbell Alert settings.")
         tts_entity = (s.get("TTS_ENTITY") or "tts.piper").strip() or "tts.piper"
-        time_entity = (s.get("HA_TIME_ENTITY") or "sensor.date_time_iso").strip()
+        # support legacy HA_TIME_ENTITY but prefer TIME_SENSOR_ENTITY
+        time_entity = (s.get("TIME_SENSOR_ENTITY") or s.get("HA_TIME_ENTITY") or "sensor.date_time_iso").strip()
         return {"base": base, "token": token, "tts_entity": tts_entity, "time_entity": time_entity}
 
     def _vision(self, s: Dict[str, str]) -> Dict[str, Optional[str]]:
@@ -144,8 +164,8 @@ class DoorbellAlertPlugin(ToolPlugin):
 
     def _get_ha_time(self, ha_base: str, token: str, time_entity: str) -> str:
         """
-        Try to fetch a time string from a HA sensor (e.g., sensor.date_time_iso).
-        Fallback to current UTC ISO8601 if unavailable.
+        Fetch an ISO-like time string from HA (e.g., sensor.date_time_iso).
+        Returns the string AS-IS (no tz manipulation). Fallback to UTC ISO now.
         """
         try:
             if time_entity:
@@ -153,7 +173,7 @@ class DoorbellAlertPlugin(ToolPlugin):
                 r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=5)
                 if r.status_code < 400:
                     state = r.json().get("state", "")
-                    if isinstance(state, str) and state.strip():
+                    if isinstance(state, string_types := str) and state.strip():
                         return state.strip()
         except Exception:
             logger.debug("[doorbell_alert] HA time entity fetch failed", exc_info=True)
@@ -314,7 +334,8 @@ class DoorbellAlertPlugin(ToolPlugin):
             "camera": "camera.some_other_cam",
             "players": ["media_player.one", "media_player.two"],
             "tts_entity": "tts.piper",
-            "notifications": true
+            "notifications": true,
+            "area": "front door"
           }
         """
         s = self._get_settings()
@@ -326,10 +347,12 @@ class DoorbellAlertPlugin(ToolPlugin):
         players_default = self._parse_players_setting(s.get("MEDIA_PLAYERS", ""))
         notif_default = str(s.get("NOTIFICATIONS_ENABLED", "false")).strip().lower() in ("1", "true", "yes", "on")
         tts_default = ha["tts_entity"]
+        area_default = (s.get("AREA_LABEL") or "front door").strip()
 
         # Optional overrides from args
         camera = (args.get("camera") or camera_default).strip()
         tts_entity = (args.get("tts_entity") or tts_default).strip()
+        area = (args.get("area") or area_default).strip()
 
         if "players" in args and isinstance(args["players"], list):
             players = [p.strip() for p in args["players"] if isinstance(p, str) and p.strip()]
@@ -344,7 +367,7 @@ class DoorbellAlertPlugin(ToolPlugin):
         if not players:
             raise ValueError("No media players configured — set MEDIA_PLAYERS in plugin settings or pass 'players' in args.")
 
-        # HA time string
+        # HA time string (as-is)
         ha_time = self._get_ha_time(ha["base"], ha["token"], ha["time_entity"])
 
         # 1) Snapshot
@@ -355,8 +378,8 @@ class DoorbellAlertPlugin(ToolPlugin):
             generic = "Someone is at the door."
             self._tts_speak(ha["base"], ha["token"], tts_entity, players, generic)
 
-            # Notifications / Events
             if notifications:
+                extra = {"players": players, "tts_entity": tts_entity, "area": area}
                 self._notify_ha_bridge(
                     source="doorbell_alert",
                     title="Doorbell",
@@ -365,6 +388,7 @@ class DoorbellAlertPlugin(ToolPlugin):
                     entity_id=camera,
                     ha_time=ha_time,
                     level="info",
+                    data=extra,
                 )
                 self._post_automation_event(
                     source="doorbell_alert",
@@ -374,6 +398,7 @@ class DoorbellAlertPlugin(ToolPlugin):
                     entity_id=camera,
                     ha_time=ha_time,
                     level="info",
+                    data={"area": area, **extra},
                 )
             return {"ok": True, "note": "snapshot_failed_generic_alert_spoken", "players": players}
 
@@ -389,8 +414,7 @@ class DoorbellAlertPlugin(ToolPlugin):
 
         # 4) Notifications + Events (optional)
         if notifications:
-            # include a little context in data so UIs can show where it played
-            extra = {"players": players, "tts_entity": tts_entity}
+            extra = {"players": players, "tts_entity": tts_entity, "area": area}
             self._notify_ha_bridge(
                 source="doorbell_alert",
                 title="Doorbell",
@@ -409,11 +433,11 @@ class DoorbellAlertPlugin(ToolPlugin):
                 entity_id=camera,
                 ha_time=ha_time,
                 level="info",
-                data=extra,
+                data={"area": area, **extra},
             )
 
         # Platform ignores the return; for logs/tracing only
-        return {"ok": True, "spoken": True, "players": players}
+        return {"ok": True, "spoken": True, "players": players, "area": area}
 
 
 plugin = DoorbellAlertPlugin()
