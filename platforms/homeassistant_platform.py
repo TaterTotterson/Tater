@@ -13,6 +13,7 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 import uvicorn
 import requests
+import re
 
 from helpers import LLMClientWrapper, parse_function_json, get_tater_name
 from plugin_registry import plugin_registry
@@ -65,11 +66,11 @@ PLATFORM_SETTINGS = {
             "description": "Hard ceiling to prevent runaway context sizes."
         },
         "SESSION_TTL_SECONDS": {
-            "label": "Session TTL (seconds)",
+            "label": "Session TTL",
             "type": "select",
-            "options": ["900", "1800", "3600", "7200", "21600", "86400"],  # 15m, 30m, 1h, 2h, 6h, 24h
-            "default": str(DEFAULT_SESSION_TTL_SECONDS),
-            "description": "How long to keep a voice session’s history alive (15m–24h)."
+            "options": ["5m", "30m", "1h", "2h", "6h", "24h"],
+            "default": "2h",
+            "description": "How long to keep a voice session’s history alive (5m–24h)."
         },
 
         # --- Existing Voice PE fields ---
@@ -105,6 +106,29 @@ PLATFORM_SETTINGS = {
         },
     }
 }
+
+
+# --- Duration parsing (supports "5m", "2h", "24h", or raw seconds like "7200") ---
+def _parse_duration_seconds(val: str, default_seconds: int) -> int:
+    if val is None:
+        return default_seconds
+    s = str(val).strip().lower()
+    # raw integer seconds?
+    try:
+        return int(s)
+    except ValueError:
+        pass
+    m = re.match(r"^\s*(\d+)\s*([smhd])\s*$", s)
+    if not m:
+        return default_seconds
+    num = int(m.group(1))
+    unit = m.group(2)
+    mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
+    return num * mult
+
+def _get_duration_seconds_setting(name: str, default_seconds: int) -> int:
+    s = _platform_settings().get(name)
+    return _parse_duration_seconds(s, default_seconds)
 
 def _get_int_platform_setting(name: str, default: int) -> int:
     s = _platform_settings().get(name)
@@ -246,7 +270,7 @@ async def _save_message(session_id: Optional[str], role: str, content: Any, max_
     if max_store > 0:
         pipe.ltrim(key, -max_store, -1)
     # optional TTL so old voice sessions clean themselves up
-    ttl = _get_int_platform_setting("SESSION_TTL_SECONDS", DEFAULT_SESSION_TTL_SECONDS)
+    ttl = _get_duration_seconds_setting("SESSION_TTL_SECONDS", DEFAULT_SESSION_TTL_SECONDS)
     pipe.expire(key, ttl)
     pipe.execute()
 
