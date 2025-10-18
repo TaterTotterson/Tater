@@ -167,7 +167,7 @@ def build_system_prompt() -> str:
     behavior_guard = (
         "Only call a tool if the user's latest message clearly requests an action — such as 'turn on', "
         "'set', 'generate', 'summarize', or 'download'.\n"
-        "Never call a tool in response to casual or friendly messages like 'thanks', 'lol', or 'cool' — reply normally instead.\n"
+        "Never call a tool in response to casual or friendly messages like 'thanks', 'lol', or 'cool'.\n"
         "Keep normal (non-tool) replies brief and TTS-friendly.\n"
     )
 
@@ -176,7 +176,7 @@ def build_system_prompt() -> str:
         f"{base_prompt}\n\n"
         f"{tool_instructions}\n\n"
         f"{behavior_guard}"
-        "If no function is needed, reply normally."
+        "If no function is needed, reply normally. Do not use emoji's in your reply"
     )
 
 # -------------------- History shaping (Discord-style alternation) --------------------
