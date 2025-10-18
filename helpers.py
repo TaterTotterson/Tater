@@ -16,11 +16,6 @@ import websocket
 from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse, urlunparse
 
-try:
-    from jinja2 import Template
-except ImportError:
-    Template = None  # pip install jinja2 if not already
-
 load_dotenv()
 nest_asyncio.apply()
 
@@ -60,9 +55,15 @@ def run_async(coro):
     return loop.run_until_complete(coro)
 
 # ---------------------------------------------------------
-# LLM client wrapper (hardcoded template mode)
+# LLM client wrapper (OpenAI-compatible /v1/chat/completions)
 # ---------------------------------------------------------
 def _normalize_base_url(host: str) -> str:
+    """
+    Ensure base_url ends with /v1 and includes scheme.
+    Accepts: 127.0.0.1:11434  -> http://127.0.0.1:11434/v1
+             http://host:port -> http://host:port/v1 (if missing)
+             https://api.foo/v1 -> unchanged
+    """
     if not host.startswith("http://") and not host.startswith("https://"):
         host = f"http://{host}"
     parsed = urlparse(host.rstrip("/"))
@@ -85,121 +86,51 @@ class LLMClientWrapper:
         self.host = base_url.rstrip("/")
         self.model = model
 
-        # --- Hardcoded template ---
-        self.prompt_template_path = os.path.join(os.path.dirname(__file__), "lmstudio_gemma3.jinja")
-        self.prompt_template_text: Optional[str] = None
-        if Template and os.path.exists(self.prompt_template_path):
-            with open(self.prompt_template_path, "r", encoding="utf-8") as f:
-                self.prompt_template_text = f.read()
-
-        self.bos_token = ""  # no BOS token by default
-        self.add_generation_prompt = True
+        # Common generation defaults (caller can override per-call)
         self.max_tokens = int(os.getenv("LLM_MAX_TOKENS", "1024"))
         self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.7"))
 
-        # Allow disabling template mode via env if desired
-        template_enabled_env = os.getenv("LLM_TEMPLATE_ENABLED", "1").strip()
-        template_enabled = template_enabled_env not in ("0", "false", "False", "no")
-        self._template_mode = bool(self.prompt_template_text and Template is not None and template_enabled)
-
-        # Cached probe: does the server support /v1/completions?
-        # None = unknown; True/False = remembered result after first attempt.
-        self._completions_supported: Optional[bool] = None
-
-    # ---------- Template rendering helpers ----------
-    def _render_jinja_prompt(self, messages: List[Dict[str, Any]]) -> str:
-        if not self.prompt_template_text:
-            raise RuntimeError("Prompt template not found next to helpers.py")
-        tmpl = Template(self.prompt_template_text)
-        return tmpl.render(
-            bos_token=self.bos_token,
-            messages=messages,
-            add_generation_prompt=self.add_generation_prompt
-        )
-
-    def _coerce_for_template(self, messages):
-        """
-        If a plugin sends only a single system message, coerce to [system, user=<same text>]
-        so the Jinja chat template always has a user turn to render.
-        """
-        if isinstance(messages, list) and len(messages) == 1:
-            m0 = messages[0]
-            if isinstance(m0, dict) and m0.get("role") == "system":
-                sys_txt = m0.get("content", "")
-                return [m0, {"role": "user", "content": sys_txt}]
-        return messages
-
-    def _looks_like_unsupported_completions(self, err: Exception) -> bool:
-        """Heuristic: detect servers that don't support /v1/completions (e.g., Ollama OpenAI compat)."""
-        from requests import HTTPError
-        if isinstance(err, HTTPError) and err.response is not None:
-            code = err.response.status_code
-            text = (err.response.text or "").lower()
-            if code in (404, 405):
-                return True
-            # Common proxy/server messages:
-            needles = ["unknown route", "not found", "no such path", "this route does not exist"]
-            if any(n in text for n in needles):
-                return True
-        # Connection errors or JSON shape mismatches can also indicate lack of support
-        msg = str(err).lower()
-        return "endpoint" in msg and "completions" in msg or "not found" in msg
-
-    async def _complete_with_template(self, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
-        messages = self._coerce_for_template(messages)
-        prompt_text = self._render_jinja_prompt(messages)
-        url = f"{self.host}/completions"
-        headers = {"Content-Type": "application/json"}
-        payload = {
-            "model": self.model,
-            "prompt": prompt_text,
-            "max_tokens": self.max_tokens,
-            "temperature": self.temperature,
-            "stream": False
-        }
-        resp = await asyncio.to_thread(
-            requests.post, url, headers=headers, data=json.dumps(payload), timeout=600
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        text = (data.get("choices") or [{}])[0].get("text", "")
-        return {"model": data.get("model", self.model),
-                "message": {"role": "assistant", "content": text}}
-
-    # ---------- Public API ----------
     async def chat(self, messages, **kwargs):
         """
-        If template mode is enabled, try /v1/completions first.
-        If the server doesn't support it (Ollama), fall back to /v1/chat/completions and
-        remember that for future calls (so we don't keep trying /completions).
+        Thin wrapper around OpenAI-compatible /v1/chat/completions.
+        Accepts either timeout (seconds) or timeout_ms (milliseconds).
+        Returns: {"model": str, "message": {"role": "assistant", "content": "..."}}
         """
-        # Try template path if enabled and not known to be unsupported
-        if self._template_mode and self._completions_supported is not False:
+        # Normalize timeout variants
+        timeout = kwargs.pop("timeout", None)
+        timeout_ms = kwargs.pop("timeout_ms", None)
+        if timeout is None and timeout_ms is not None:
             try:
-                result = await self._complete_with_template(messages)
-                self._completions_supported = True
-                return result
-            except Exception as e:
-                # If this looks like "route unsupported", flip the bit and fall through
-                if self._looks_like_unsupported_completions(e):
-                    self._completions_supported = False
-                else:
-                    # Real error during LM Studio call; surface it
-                    raise
+                timeout = float(timeout_ms) / 1000.0
+            except Exception:
+                timeout = None
 
-        # Fallback: OpenAI-compatible /v1/chat/completions (works on Ollama et al.)
         stream = kwargs.pop("stream", False)
         model = kwargs.pop("model", self.model)
+
+        # Provide sensible defaults if not supplied
+        if "max_tokens" not in kwargs:
+            kwargs["max_tokens"] = self.max_tokens
+        if "temperature" not in kwargs:
+            kwargs["temperature"] = self.temperature
+
         response = await self.client.chat.completions.create(
             model=model,
             messages=messages,
             stream=stream,
+            timeout=timeout,
             **kwargs,
         )
+
         if stream:
+            # Caller handles the async stream iterator
             return response
+
         choice = response.choices[0].message
-        return {"model": response.model, "message": {"role": choice.role, "content": choice.content}}
+        return {
+            "model": response.model,
+            "message": {"role": choice.role, "content": choice.content}
+        }
 
 # ---------------------------------------------------------
 # Function JSON parsing helpers (unchanged)
@@ -306,7 +237,6 @@ def get_latest_file_from_history(channel_id, filetype="file", extensions=None):
             continue
 
     return None
-
 
 # ---------------------------------------------------------
 # ComfyUI websocket (no timeouts, Ctrl-C friendly)

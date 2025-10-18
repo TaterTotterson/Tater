@@ -23,14 +23,15 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("homeassistant")
 
-# -------------------- Hard-coded platform constants --------------------
+# -------------------- Platform defaults (overridable in WebUI) --------------------
 BIND_HOST = "0.0.0.0"
-
 ENABLE_PLUGINS = True
-SESSION_HISTORY_MAX = 6            # recent turns kept per HA conversation_id
-TIMEOUT_MS = 60_000               # LLM request timeout (ms)
-MAX_HISTORY_CAP = 20               # safety clamp
-SESSION_TTL_SECONDS = 2 * 60 * 60  # auto-expire session history after 2h
+TIMEOUT_SECONDS = 60  # LLM request timeout in seconds
+
+# Defaults; users can override these in WebUI platform settings
+DEFAULT_SESSION_HISTORY_MAX = 6
+DEFAULT_MAX_HISTORY_CAP = 20
+DEFAULT_SESSION_TTL_SECONDS = 2 * 60 * 60  # 2h
 
 # Redis (history + plugin toggles + notifications)
 redis_host = os.getenv("REDIS_HOST", "127.0.0.1")
@@ -49,6 +50,29 @@ PLATFORM_SETTINGS = {
             "default": 8787,
             "description": "TCP port for the Tater ↔ HA bridge"
         },
+
+        # --- NEW History and TTL controls ---
+        "SESSION_HISTORY_MAX": {
+            "label": "Session History (turns)",
+            "type": "number",
+            "default": DEFAULT_SESSION_HISTORY_MAX,
+            "description": "How many recent turns to include per HA conversation (smaller = faster)."
+        },
+        "MAX_HISTORY_CAP": {
+            "label": "Max History Cap",
+            "type": "number",
+            "default": DEFAULT_MAX_HISTORY_CAP,
+            "description": "Hard ceiling to prevent runaway context sizes."
+        },
+        "SESSION_TTL_SECONDS": {
+            "label": "Session TTL (seconds)",
+            "type": "select",
+            "options": ["900", "1800", "3600", "7200", "21600", "86400"],  # 15m, 30m, 1h, 2h, 6h, 24h
+            "default": str(DEFAULT_SESSION_TTL_SECONDS),
+            "description": "How long to keep a voice session’s history alive (15m–24h)."
+        },
+
+        # --- Existing Voice PE fields ---
         "VOICE_PE_ENTITY_1": {
             "label": "Voice PE entity #1",
             "type": "string",
@@ -81,6 +105,13 @@ PLATFORM_SETTINGS = {
         },
     }
 }
+
+def _get_int_platform_setting(name: str, default: int) -> int:
+    s = _platform_settings().get(name)
+    try:
+        return int(str(s).strip()) if s is not None and str(s).strip() != "" else default
+    except Exception:
+        return default
 
 # -------------------- FastAPI DTOs --------------------
 class HARequest(BaseModel):
@@ -215,7 +246,8 @@ async def _save_message(session_id: Optional[str], role: str, content: Any, max_
     if max_store > 0:
         pipe.ltrim(key, -max_store, -1)
     # optional TTL so old voice sessions clean themselves up
-    pipe.expire(key, SESSION_TTL_SECONDS)
+    ttl = _get_int_platform_setting("SESSION_TTL_SECONDS", DEFAULT_SESSION_TTL_SECONDS)
+    pipe.expire(key, ttl)
     pipe.execute()
 
 def _flatten_to_text(res: Any) -> str:
@@ -401,7 +433,9 @@ async def handle_message(payload: HARequest):
     if not text_in:
         return HAResponse(response="(no text provided)")
 
-    history_max = min(max(SESSION_HISTORY_MAX, 0), MAX_HISTORY_CAP)
+    session_history_max = _get_int_platform_setting("SESSION_HISTORY_MAX", DEFAULT_SESSION_HISTORY_MAX)
+    max_history_cap = _get_int_platform_setting("MAX_HISTORY_CAP", DEFAULT_MAX_HISTORY_CAP)
+    history_max = min(max(session_history_max, 0), max_history_cap)
 
     # Save the user turn (raw)
     await _save_message(payload.session_id, "user", text_in, history_max)
@@ -413,7 +447,7 @@ async def handle_message(payload: HARequest):
 
     try:
         # Ask the LLM
-        response = await _llm.chat(messages_list, timeout_ms=TIMEOUT_MS)
+        response = await _llm.chat(messages_list, timeout=TIMEOUT_SECONDS)
         text = (response.get("message", {}) or {}).get("content", "") if isinstance(response, dict) else ""
 
         if not text:
