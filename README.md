@@ -3,7 +3,7 @@
   <h1>Tater</h1>
 </div>
 
-**Tater** is an AI assistant that connects to any OpenAI API–compatible LLM, giving you a powerful set of AI-driven tools. It includes a WebUI for setup and private chats, and works across **Discord**, **IRC**, **Home Assistant**, and the **WebUI** itself.
+**Tater** is an AI assistant that connects to any OpenAI API–compatible LLM, giving you a powerful set of AI-driven tools. It includes a WebUI for setup and private chats, and works across **Discord**, **IRC** and **Home Assistant**
 
 ---
 
@@ -71,7 +71,7 @@ Here are some examples of the RSS watcher in action:
 ---
 **Note**:
 - You don't have to use a model that is tagged with tools, though they will work better, test different models if the one you are using isnt trigging the plugins.
-- Tater currently recommends using gemma3-27b-abliterated
+- Tater currently recommends using gemma3-27b
 
 ## Installation
 

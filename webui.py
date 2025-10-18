@@ -533,7 +533,7 @@ def build_system_prompt():
 
     behavior_guard = (
         "Only call a tool if the user's latest message clearly requests an action — such as 'generate', 'summarize', or 'download'.\n"
-        "Never call a tool in response to casual or friendly messages like 'thanks', 'lol', or 'cool' — reply normally instead.\n"
+        "Never call a tool in response to casual or friendly messages like 'thanks', 'lol', or 'cool'\n"
     )
     
     return (
@@ -544,7 +544,7 @@ def build_system_prompt():
         "If no function is needed, reply normally.\n"
     )
 
-# ----------------- LM-STUDIO ----------------------------
+# ----------------- UNIVERSAL MESSAGE NORMALIZATION ----------------------------
 def _to_template_msg(role, content):
     """
     Return a dict shaped for the Jinja template:
@@ -568,9 +568,10 @@ def _to_template_msg(role, content):
 
     # Media types
     if isinstance(content, dict) and content.get("type") == "image":
-        return {"role": role, "content": [{"type": "image"}]}
+        return {"role": role, "content": "[Image attached]"}  # instead of [{"type":"image"}]
+
     if isinstance(content, dict) and content.get("type") == "audio":
-        return {"role": role, "content": [{"type": "text", "text": "[Audio]"}]}
+        return {"role": role, "content": "[Audio attached]"}  # you already do similar
 
     # Strings and other fallbacks
     if isinstance(content, str):
