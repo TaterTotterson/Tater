@@ -6,12 +6,12 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 import re
 
-import httpx     # async HTTP client (prevents HA self-call deadlocks)
-import requests  # sync for HA time read
+import httpx
+import requests
 from dotenv import load_dotenv
 
 from plugin_base import ToolPlugin
-from helpers import redis_client
+from helpers import redis_client, extract_json_array
 
 load_dotenv()
 logger = logging.getLogger("events_query")
@@ -95,7 +95,7 @@ class EventsQueryPlugin(ToolPlugin):
 
     def _automation_base(self) -> str:
         try:
-            raw = redis_client.hget("automation_platform_settings", "bind_port")
+            raw = redis_client.hget("ha_automations_platform_settings", "bind_port")
             port = int(raw) if raw is not None else 8788
         except Exception:
             port = 8788
@@ -339,34 +339,6 @@ class EventsQueryPlugin(ToolPlugin):
         # Fallback to clock time
         return f"Yes — someone was seen in {area_name} at {self._human_time(last_dt)}."
 
-    # ---------- LLM area resolution (robust) ----------
-    @staticmethod
-    def _extract_json_array(raw: str) -> Optional[List[str]]:
-        """Be lenient: strip code fences and pull the first JSON array."""
-        if not raw:
-            return None
-        s = raw.strip()
-        # Strip ```json ... ``` or ``` ... ```
-        if s.startswith("```"):
-            s = re.sub(r"^```(?:json)?\s*|\s*```$", "", s, flags=re.IGNORECASE).strip()
-        # Try direct parse
-        try:
-            val = json.loads(s)
-            if isinstance(val, list):
-                return val
-        except Exception:
-            pass
-        # Fallback: first [...] block
-        m = re.search(r"$begin:math:display$.*$end:math:display$", s, flags=re.DOTALL)
-        if m:
-            try:
-                val = json.loads(m.group(0))
-                if isinstance(val, list):
-                    return val
-            except Exception:
-                return None
-        return None
-
     @staticmethod
     def _looks_like_whole_home(phrase: str) -> bool:
         s = (phrase or "").lower()
@@ -455,7 +427,7 @@ class EventsQueryPlugin(ToolPlugin):
             )
 
             raw = (resp.get("message", {}) or {}).get("content", "").strip()
-            selected = self._extract_json_array(raw)
+            selected = extract_json_array(raw)
             if selected is None or not isinstance(selected, list):
                 # fall through to heuristics below
                 selected = []
@@ -575,7 +547,16 @@ class EventsQueryPlugin(ToolPlugin):
         # Timeframe: today|yesterday|last_24h|<date>
         tf_raw = (args.get("timeframe") or "today").strip()
         tf = tf_raw.lower()
-        if tf == "today":
+        if tf in ("tonight", "this evening"):
+            # heuristic window: 5pm -> end of day (or now if earlier)
+            start = now.replace(hour=17, minute=0, second=0, microsecond=0)
+            end = max(now, start.replace(hour=23, minute=59, second=59, microsecond=999999))
+            label = "tonight"
+        elif tf in ("this morning", "morning"):
+            start = now.replace(hour=5, minute=0, second=0, microsecond=0)
+            end = now.replace(hour=12, minute=0, second=0, microsecond=0) - timedelta(microseconds=1)
+            label = "this morning"
+        elif tf == "today":
             start, end = self._day_bounds(now)
             label = "today"
         elif tf == "yesterday":

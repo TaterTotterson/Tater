@@ -118,7 +118,7 @@ class CameraEventPlugin(ToolPlugin):
           hash: 'automation_platform_settings' -> 'bind_port'
         """
         try:
-            raw_port = redis_client.hget("automation_platform_settings", "bind_port")
+            raw_port = redis_client.hget("ha_automations_platform_settings", "bind_port")
             port = int(raw_port) if raw_port is not None else 8788
         except Exception:
             port = 8788

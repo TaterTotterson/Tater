@@ -51,7 +51,7 @@ def set_main_loop(loop):
     _main_loop = loop
 
 def run_async(coro):
-    loop = _main_loop or asyncio.get_event_loop()
+    loop = _main_loop or asyncio.get_event_loop_policy().get_event_loop()
     return loop.run_until_complete(coro)
 
 # ---------------------------------------------------------
@@ -71,6 +71,39 @@ def _normalize_base_url(host: str) -> str:
     if not path.endswith("/v1"):
         path = (path + "/v1").replace("//", "/")
     return urlunparse(parsed._replace(path=path))
+
+def _coerce_content_to_text(content) -> str:
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, dict):
+        # Common places providers hide text
+        for k in ("text", "content", "value"):
+            v = content.get(k)
+            if isinstance(v, str):
+                return v.strip()
+        # Sometimes it's a list inside a dict
+        for k in ("parts", "content", "messages"):
+            v = content.get(k)
+            if isinstance(v, list):
+                return _coerce_content_to_text(v)
+        return ""
+
+    if isinstance(content, list):
+        parts = []
+        for p in content:
+            if isinstance(p, str):
+                parts.append(p)
+            elif isinstance(p, dict):
+                # Prefer explicit text/content/value keys
+                for k in ("text", "content", "value"):
+                    v = p.get(k)
+                    if isinstance(v, str):
+                        parts.append(v)
+                        break
+        return "\n".join(s for s in parts if s).strip()
+
+    return "" if content is None else str(content)
 
 class LLMClientWrapper:
     def __init__(self, host, model=None, **kwargs):
@@ -127,14 +160,16 @@ class LLMClientWrapper:
 
         # Defensive: choices can be empty in edge cases / errors
         if not getattr(response, "choices", None):
-            return {"model": getattr(response, "model", model), "message": {"role": "assistant", "content": ""}}
+            return {"model": getattr(response, "model", model),
+                    "message": {"role": "assistant", "content": ""}}
 
-        choice = response.choices[0].message
-        # Some providers can return None for content in tool-use scenarios; normalize to empty string
-        content = choice.content if isinstance(choice.content, str) else (choice.content or "")
+        choice = response.choices[0].message or {}
+        raw_content = getattr(choice, "content", "") if hasattr(choice, "content") else choice.get("content", "")
+        content_text = _coerce_content_to_text(raw_content)
+
         return {
-            "model": response.model,
-            "message": {"role": getattr(choice, "role", "assistant"), "content": content}
+            "model": getattr(response, "model", model),
+            "message": {"role": getattr(choice, "role", "assistant"), "content": content_text}
         }
 
 # ---------------------------------------------------------
