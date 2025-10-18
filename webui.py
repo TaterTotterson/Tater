@@ -618,32 +618,58 @@ async def process_message(user_name, message_content):
     max_llm = int(redis_client.get("tater:max_llm") or 8)
     history = load_chat_history()[-max_llm:]
 
-    # Start with system (your template handles an optional system at index 0)
     messages_list = [{"role": "system", "content": final_system_prompt}]
 
-    # Convert persisted history into template-ready messages
+    user_display = (get_chat_settings().get("username") or "User").strip()
+    messages_list.append({
+        "role": "system",
+        "content": f"The user's name is {user_display}. When addressing them, use their name naturally and sparingly."
+    })
+
     loop_messages = []
     for msg in history:
         role = msg["role"]
         content = msg["content"]
-
-        # Normalize assistant/user roles only; ignore others if they ever appear
         if role not in ("user", "assistant"):
-            # Convert unknown roles to 'assistant' text for safety
             role = "assistant"
-
         templ_msg = _to_template_msg(role, content)
         if templ_msg is not None:
             loop_messages.append(templ_msg)
-
-    # Merge consecutive same-role messages and ensure we start with 'user'
     loop_messages = _enforce_user_assistant_alternation(loop_messages)
-
-    # Compose final list sent to the LLM
     messages_list.extend(loop_messages)
 
-    # Call the (template-aware) client — this will hit /v1/completions when the jinja file exists
+    # --- timing + usage capture ---
+    start_ts = time.time()
     response = await llm_client.chat(messages_list)
+    elapsed = max(1e-6, time.time() - start_ts)
+
+    # Try to use real usage; fall back to rough estimate if missing
+    usage = response.get("usage") or {}
+    prompt_tok = int(usage.get("prompt_tokens") or 0)
+    comp_tok   = int(usage.get("completion_tokens") or 0)
+    total_tok  = int(usage.get("total_tokens") or (prompt_tok + comp_tok))
+
+    if total_tok == 0:
+        # heuristic: ~4 chars/token on average
+        out_text = (response.get("message", {}) or {}).get("content", "") or ""
+        total_tok = max(1, int(len(out_text) / 4))
+        comp_tok = total_tok  # best-effort; no prompt/comp split
+
+    tps_total = total_tok / elapsed
+    tps_comp  = (comp_tok / elapsed) if comp_tok else None
+
+    # Store for UI
+    redis_client.hset("webui:last_llm_stats", mapping={
+        "model": str(response.get("model") or ""),
+        "elapsed": f"{elapsed:.6f}",
+        "prompt_tokens": str(prompt_tok),
+        "completion_tokens": str(comp_tok),
+        "total_tokens": str(total_tok),
+        "tps_total": f"{tps_total:.2f}",
+        "tps_comp": f"{tps_comp:.2f}" if tps_comp is not None else "",
+        "ts": str(time.time()),
+    })
+
     return response["message"]["content"].strip()
 
 def start_plugin_job(plugin_name, args, llm_client):
@@ -773,6 +799,9 @@ with st.sidebar.expander("WebUI Settings", expanded=False):
         key="webui_display_count"
     )
 
+    show_speed_default = (redis_client.get("tater:show_speed_stats") or "true").lower() == "true"
+    show_speed = st.checkbox("Show tokens/sec", value=show_speed_default, key="show_speed_stats")
+
     uploaded_avatar = st.file_uploader(
         "Upload your avatar", type=["png", "jpg", "jpeg"], key="avatar_uploader"
     )
@@ -786,6 +815,7 @@ with st.sidebar.expander("WebUI Settings", expanded=False):
 
     if st.button("Save WebUI Settings", key="save_webui_settings"):
         redis_client.set("tater:max_display", new_display)
+        redis_client.set("tater:show_speed_stats", "true" if show_speed else "false")
         st.success("WebUI settings updated.")
 
     if st.button("Clear Chat History", key="clear_history"):
@@ -950,6 +980,26 @@ if user_input := st.chat_input(f"Chat with {first_name}…"):
 
     # Force rerun, assistant reply will render on next pass
     st.rerun()
+
+# --- Tokens/sec & latency ---
+if (redis_client.get("tater:show_speed_stats") or "true").lower() == "true":
+    stats = redis_client.hgetall("webui:last_llm_stats")
+    if stats:
+        try:
+            model = stats.get("model") or "LLM"
+            elapsed = float(stats.get("elapsed", "0"))
+            prompt_tokens = int(stats.get("prompt_tokens", "0"))
+            completion_tokens = int(stats.get("completion_tokens", "0"))
+            total_tokens = int(stats.get("total_tokens", "0"))
+            tps_total = float(stats.get("tps_total", "0"))
+            tps_comp_str = stats.get("tps_comp") or ""
+            comp_part = f" | completion: {tps_comp_str} tok/s" if tps_comp_str else ""
+            st.caption(
+                f"⚡️ {model} — {tps_total:.0f} tok/s{comp_part} • "
+                f"{total_tokens} tok in {elapsed:.2f}s (prompt {prompt_tokens}, completion {completion_tokens})"
+            )
+        except Exception:
+            pass
 
 # ---------------- Pending jobs spinner with transition-based refresh ----------------
 # Gather pending plugin names for the UI label (unchanged)
