@@ -11,7 +11,7 @@ import requests
 from dotenv import load_dotenv
 
 from plugin_base import ToolPlugin
-from helpers import redis_client, extract_json_array
+from helpers import redis_client, extract_json
 
 load_dotenv()
 logger = logging.getLogger("events_query")
@@ -427,10 +427,15 @@ class EventsQueryPlugin(ToolPlugin):
             )
 
             raw = (resp.get("message", {}) or {}).get("content", "").strip()
-            selected = extract_json_array(raw)
-            if selected is None or not isinstance(selected, list):
-                # fall through to heuristics below
-                selected = []
+            selected_raw = extract_json(raw)  # this returns a JSON string (object or array)
+            selected = []
+            if selected_raw:
+                try:
+                    parsed = json.loads(selected_raw)
+                    if isinstance(parsed, list):
+                        selected = parsed
+                except Exception:
+                    selected = []
 
             # Keep only intersections with the catalog (exact string match after strip)
             cat_set_exact = {c.strip() for c in catalog}
@@ -581,16 +586,19 @@ class EventsQueryPlugin(ToolPlugin):
         items = await self._fetch_all_sources()
 
         # Resolve area phrase via LLM (if provided)
-        area_arg = (args.get("area") or "").strip()
+        area_raw = (args.get("area") or "").strip()
+        user_query = (args.get("query") or "").strip()
+        area_phrase = area_raw or user_query  # fall back to user's natural language when area arg omitted
+
         resolved_areas: Optional[List[str]] = None
-        if area_arg:
-            resolved_areas = await self._resolve_areas_with_llm(area_arg, items, llm_client)
+        if area_phrase:
+            resolved_areas = await self._resolve_areas_with_llm(area_phrase, items, llm_client)
 
         # Presence intent?
         user_query = (args.get("query") or "").strip()
-        if self._is_presence_query(user_query) and (area_arg or (resolved_areas and len(resolved_areas) > 0)):
-            # Use resolved areas if available; else fallback to the raw area_arg
-            areas_to_check = resolved_areas if (resolved_areas and len(resolved_areas) > 0) else [area_arg]
+        if self._is_presence_query(user_query) and (area_phrase or (resolved_areas and len(resolved_areas) > 0)):
+            # Use resolved areas if available; else fallback to the raw area_phrase
+            areas_to_check = resolved_areas if (resolved_areas and len(resolved_areas) > 0) else [area_phrase]
             # Limit window to today regardless of timeframe (matches the requirement)
             p_start, p_end = self._day_bounds(now)
 
@@ -613,20 +621,20 @@ class EventsQueryPlugin(ToolPlugin):
                 return self._norm_area(ev_area) in target_norms
             filtered = [e for e in items if self._within_window(e, start, end) and _match_area_list(e)]
             label_hint = f"{label} (areas: {', '.join(resolved_areas)})"
-            return await self._summarize(filtered, area_arg or None, label_hint, llm_client, user_query=user_query)
+            return await self._summarize(filtered, area_phrase or None, label_hint, llm_client, user_query=user_query)
         else:
             # If the phrase clearly means "whole home" or "outside" and we couldn't resolve via LLM,
             # expand heuristically so we don't miss events.
             heuristic_areas: Optional[List[str]] = None
-            if area_arg:
+            if area_phrase:
                 # Build catalog again for heuristic expansion
                 catalog = sorted({
                     ((e.get("data") or {}).get("area") or "").strip()
                     for e in items if ((e.get("data") or {}).get("area") or "").strip()
                 })
-                if self._looks_like_whole_home(area_arg):
+                if self._looks_like_whole_home(area_phrase):
                     heuristic_areas = catalog[:]
-                elif self._looks_like_outside(area_arg):
+                elif self._looks_like_outside(area_phrase):
                     heuristic_areas = self._filter_outdoor_like(catalog)
 
             if heuristic_areas:
@@ -636,10 +644,10 @@ class EventsQueryPlugin(ToolPlugin):
                     return self._norm_area(ev_area) in target_norms
                 filtered = [e for e in items if self._within_window(e, start, end) and _match_area_list2(e)]
                 label_hint = f"{label} (areas: {', '.join(heuristic_areas)})"
-                return await self._summarize(filtered, area_arg, label_hint, llm_client, user_query=user_query)
+                return await self._summarize(filtered, area_phrase, label_hint, llm_client, user_query=user_query)
 
             # Fallback to loose area matching (or unfiltered if no area provided)
-            area = area_arg or None
+            area = area_phrase or None
             filtered = [e for e in items if self._event_matches(e, area, start, end)]
             return await self._summarize(filtered, area, label, llm_client, user_query=user_query)
 

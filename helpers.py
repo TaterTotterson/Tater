@@ -175,23 +175,41 @@ class LLMClientWrapper:
 # ---------------------------------------------------------
 # Function JSON parsing helpers (unchanged)
 # ---------------------------------------------------------
-def extract_json(text):
-    text = text.strip()
-    if text.startswith("```") and text.endswith("```"):
-        text = re.sub(r"^```(?:json)?\n?|```$", "", text, flags=re.MULTILINE).strip()
+def extract_json(text: str):
+    """
+    Extract the first valid JSON object or array from text.
+    Strips code fences and tolerates extra prose around it.
+    Works for both { ... } and [ ... ] blocks.
+    """
+    if not text:
+        return None
 
+    s = text.strip()
+
+    # Remove ```json fences
+    if s.startswith("```") and s.endswith("```"):
+        s = re.sub(r"^```(?:json)?\s*|\s*```$", "", s, flags=re.MULTILINE).strip()
+
+    # Try whole text first
+    try:
+        json.loads(s)
+        return s
+    except Exception:
+        pass
+
+    # Bracket scanning for either {...} or [...]
     stack = []
     start_idx = None
-    for i, char in enumerate(text):
-        if char == '{':
+    for i, char in enumerate(s):
+        if char in "{[":
             if not stack:
                 start_idx = i
-            stack.append('{')
-        elif char == '}':
+            stack.append(char)
+        elif char in "}]":
             if stack:
-                stack.pop()
+                opening = stack.pop()
                 if not stack and start_idx is not None:
-                    candidate = text[start_idx:i+1]
+                    candidate = s[start_idx:i+1]
                     try:
                         json.loads(candidate)
                         return candidate
