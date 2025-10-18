@@ -123,13 +123,18 @@ class LLMClientWrapper:
         )
 
         if stream:
-            # Caller handles the async stream iterator
             return response
 
+        # Defensive: choices can be empty in edge cases / errors
+        if not getattr(response, "choices", None):
+            return {"model": getattr(response, "model", model), "message": {"role": "assistant", "content": ""}}
+
         choice = response.choices[0].message
+        # Some providers can return None for content in tool-use scenarios; normalize to empty string
+        content = choice.content if isinstance(choice.content, str) else (choice.content or "")
         return {
             "model": response.model,
-            "message": {"role": choice.role, "content": choice.content}
+            "message": {"role": getattr(choice, "role", "assistant"), "content": content}
         }
 
 # ---------------------------------------------------------
@@ -157,26 +162,41 @@ def extract_json(text):
                         return candidate
                     except json.JSONDecodeError:
                         continue
+    return None
 
 def parse_function_json(response_text):
+    def _pick(obj):
+        # prefer "function", but allow "tool" as an alias used by some models
+        if isinstance(obj, dict):
+            if "function" in obj and isinstance(obj["function"], str):
+                return {"function": obj["function"], "arguments": obj.get("arguments", {})}
+            if "tool" in obj and isinstance(obj["tool"], str):
+                return {"function": obj["tool"], "arguments": obj.get("arguments", {})}
+        return None
+
     try:
         response_json = json.loads(response_text)
     except json.JSONDecodeError:
         json_str = extract_json(response_text)
-        if json_str:
-            try:
-                response_json = json.loads(json_str)
-            except Exception:
-                return None
-        else:
+        if not json_str:
+            return None
+        try:
+            response_json = json.loads(json_str)
+        except Exception:
             return None
 
-    if isinstance(response_json, dict) and "function" in response_json:
-        return response_json
+    # dict case
+    picked = _pick(response_json)
+    if picked:
+        return picked
+
+    # list case: return the first valid tool/function object
     if isinstance(response_json, list):
         for item in response_json:
-            if isinstance(item, dict) and "function" in item:
-                return item
+            picked = _pick(item)
+            if picked:
+                return picked
+
     return None
 
 # ---------------------------------------------------------
