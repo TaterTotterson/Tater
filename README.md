@@ -71,7 +71,7 @@ Here are some examples of the RSS watcher in action:
 ---
 **Note**:
 - You don't have to use a model that is tagged with tools, though they will work better, test different models if the one you are using isnt trigging the plugins.
-- Tater currently recommends using gemma-3-27b-it-abliterated
+- Tater currently recommends using qwen3-coder-30b
 
 ## Installation
 
