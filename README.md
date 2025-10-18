@@ -70,7 +70,7 @@ Here are some examples of the RSS watcher in action:
 - **WordPress Poster**: [TaterByets.com](https://TaterBytes.com)
 ---
 **Note**:
-- You don't have to use a model that is tagged with tools, though they will work better, test different models if the one you are using isnt trigging the plugins.
+- Do not use a thinking model with tater
 - Tater currently recommends using qwen3-next-80b(mac) or qwen3-coder-30b
 
 ## Installation
