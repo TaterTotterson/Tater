@@ -22,7 +22,7 @@ platform_registry = [
     },
     {
         **automations_settings,
-        "key": "ha_automations_platform",   # ← matches your module/runner name
-        "label": "Automation Settings",     # ← shows up in WebUI sidebar/section
+        "key": "ha_automations_platform",
+        "label": "Automation Settings",
     },
 ]

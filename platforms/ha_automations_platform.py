@@ -23,7 +23,7 @@ logger = logging.getLogger("ha_automations")
 
 # -------------------- Platform constants --------------------
 BIND_HOST = "0.0.0.0"
-TIMEOUT_MS = 60_000  # LLM request timeout (ms)
+TIMEOUT_SECONDS = 60  # LLM request timeout in seconds
 APP_VERSION = "1.1"  # events endpoints + time-based retention
 
 # -------------------- Redis --------------------
@@ -50,18 +50,22 @@ PLATFORM_SETTINGS = {
         },
     }
 }
-PLATFORM_SETTINGS_HASH = "automation_platform_settings"
 
 def _get_bind_port() -> int:
-    raw = redis_client.hget(PLATFORM_SETTINGS_HASH, "bind_port")
+    """Read port directly from Redis, fallback to default."""
+    raw = redis_client.hget("ha_automations_platform_settings", "bind_port")
     try:
         return int(raw) if raw is not None else PLATFORM_SETTINGS["required"]["bind_port"]["default"]
     except (TypeError, ValueError):
-        logger.warning(f"[Automations] Invalid bind_port '{raw}', defaulting to {PLATFORM_SETTINGS['required']['bind_port']['default']}")
+        logger.warning(
+            f"[Automations] Invalid bind_port '{raw}', defaulting to {PLATFORM_SETTINGS['required']['bind_port']['default']}"
+        )
         return PLATFORM_SETTINGS["required"]["bind_port"]["default"]
 
+
 def _get_events_retention_seconds() -> Optional[int]:
-    raw = redis_client.hget(PLATFORM_SETTINGS_HASH, "events_retention")
+    """Read retention from Redis, fallback to default."""
+    raw = redis_client.hget("ha_automations_platform_settings", "events_retention")
     val = (raw or PLATFORM_SETTINGS["required"]["events_retention"]["default"]).strip().lower()
     mapping = {
         "2d": 2 * 24 * 60 * 60,
@@ -98,7 +102,7 @@ def _trim_events_by_time(source: str) -> None:
         pipe = redis_client.pipeline()
         pipe.delete(key)
         if keep:
-            pipe.lpush(key, *keep)  # keep newest-first order
+            pipe.rpush(key, *keep)  # keep newest-first at index 0
         pipe.execute()
     except Exception:
         logger.exception("[Automations] time-trim failed for %s", key)
@@ -278,7 +282,7 @@ async def handle_message(payload: AutomationsRequest):
 
     # Ask LLM (router behavior)
     try:
-        resp = await _llm.chat(messages, timeout_ms=TIMEOUT_MS)
+        resp = await _llm.chat(messages, timeout=TIMEOUT_SECONDS)
         llm_text = (resp.get("message", {}) or {}).get("content", "") if isinstance(resp, dict) else ""
     except Exception as e:
         logger.exception("[Automations] LLM error")
