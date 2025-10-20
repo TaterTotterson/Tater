@@ -6,6 +6,7 @@ import logging
 import threading
 import time
 from typing import Optional, Dict, Any, List
+from datetime import datetime, timedelta
 
 import redis
 import uvicorn
@@ -24,7 +25,7 @@ logger = logging.getLogger("ha_automations")
 # -------------------- Platform constants --------------------
 BIND_HOST = "0.0.0.0"
 TIMEOUT_SECONDS = 60  # LLM request timeout in seconds
-APP_VERSION = "1.1"  # events endpoints + time-based retention
+APP_VERSION = "1.6"  # ISO-only ha_time, retention by ha_time, since/until, rich prompt
 
 # -------------------- Redis --------------------
 redis_host = os.getenv("REDIS_HOST", "127.0.0.1")
@@ -46,7 +47,7 @@ PLATFORM_SETTINGS = {
             "type": "select",
             "options": ["2d", "7d", "30d", "forever"],
             "default": "7d",
-            "description": "How long to keep events (by time only)."
+            "description": "How long to keep events (by ha_time only)."
         },
     }
 }
@@ -62,7 +63,6 @@ def _get_bind_port() -> int:
         )
         return PLATFORM_SETTINGS["required"]["bind_port"]["default"]
 
-
 def _get_events_retention_seconds() -> Optional[int]:
     """Read retention from Redis, fallback to default."""
     raw = redis_client.hget("ha_automations_platform_settings", "events_retention")
@@ -75,7 +75,27 @@ def _get_events_retention_seconds() -> Optional[int]:
     }
     return mapping.get(val, mapping["7d"])
 
-# -------------------- Events storage (time-based retention) --------------------
+# -------------------- Time helpers (naive ISO) --------------------
+def _parse_iso_naive(s: Optional[str]) -> Optional[datetime]:
+    """Parse ISO string like '2025-10-19T20:07:00' (no timezone)."""
+    if not s:
+        return None
+    s = s.strip()
+    try:
+        # strict: no timezone, exactly to seconds
+        return datetime.strptime(s, "%Y-%m-%dT%H:%M:%S")
+    except Exception:
+        # tolerate an incoming value that has a tz by stripping it (best-effort)
+        try:
+            dt = datetime.fromisoformat(s)
+            return dt.replace(tzinfo=None) if dt.tzinfo else dt
+        except Exception:
+            return None
+
+def _iso(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%dT%H:%M:%S")
+
+# -------------------- Events storage (time-based retention by ha_time) --------------------
 EVENTS_LIST_PREFIX = "tater:automations:events:"  # newest-first list per source
 
 def _events_key(source: str) -> str:
@@ -83,11 +103,11 @@ def _events_key(source: str) -> str:
     return f"{EVENTS_LIST_PREFIX}{src}"
 
 def _trim_events_by_time(source: str) -> None:
-    """Keep only items whose 'ts' >= now - retention_seconds. Newest-first list."""
+    """Keep only items whose ha_time >= now - retention_seconds. Newest-first list."""
     retention = _get_events_retention_seconds()
     if retention is None:
         return  # forever
-    cutoff = int(time.time()) - retention
+    cutoff_dt = datetime.now() - timedelta(seconds=retention)
     key = _events_key(source)
     try:
         raw = redis_client.lrange(key, 0, -1) or []
@@ -95,7 +115,8 @@ def _trim_events_by_time(source: str) -> None:
         for r in raw:
             try:
                 item = json.loads(r)
-                if int(item.get("ts", 0)) >= cutoff:
+                dt = _parse_iso_naive(item.get("ha_time"))
+                if dt and dt >= cutoff_dt:
                     keep.append(r)
             except Exception:
                 continue
@@ -122,14 +143,14 @@ class AutomationsRequest(BaseModel):
 class EventIn(BaseModel):
     """
     Generic house event payload posted by plugins or automations.
-    All fields except 'source' and 'title' are optional; we add 'ts' server-side.
+    NOTE: ha_time is REQUIRED (naive ISO like 2025-10-19T20:07:00). No epoch.
     """
-    source: str = Field(..., description="Logical source/plugin, e.g., 'doorbell_alert'")
+    source: str = Field(..., description="Logical source/area, e.g., 'front_yard'")
     title: str = Field(..., description="Short event title")
+    ha_time: str = Field(..., description="ISO local-naive time, e.g., 2025-10-19T20:07:00")
     type: Optional[str] = Field(None, description="Category: doorbell, motion, garage, scene, etc.")
     message: Optional[str] = Field(None, description="Human-readable description/body")
     entity_id: Optional[str] = Field(None, description="Primary HA entity related to this event")
-    ha_time: Optional[str] = Field(None, description="Timestamp string provided by HA (e.g., sensor.date_time_iso)")
     level: Optional[str] = Field("info", description="info|warn|error (free-form)")
     data: Optional[Dict[str, Any]] = Field(None, description="Arbitrary structured extras")
 
@@ -143,11 +164,11 @@ def _plugin_enabled(name: str) -> bool:
     return bool(enabled and enabled.lower() == "true")
 
 def _is_automation_plugin(p) -> bool:
-    # Only plugins that declare platforms = ["automation"] and implement handle_automation
+    # Any plugin that declares 'automation' among platforms and implements handle_automation
     platforms = getattr(p, "platforms", [])
-    return isinstance(platforms, list) and platforms == ["automation"] and hasattr(p, "handle_automation")
+    return isinstance(platforms, list) and ("automation" in platforms) and hasattr(p, "handle_automation")
 
-# -------------------- System prompt --------------------
+# -------------------- System prompt (rich; lists enabled automation tools) --------------------
 def build_system_prompt() -> str:
     """
     Strict router: MUST return exactly one tool call as JSON; no chat text allowed.
@@ -218,50 +239,76 @@ async def add_event(ev: EventIn):
     Append a house event to a per-source Redis list (newest first).
     This keeps events durable and queryable, separate from notifications.
     """
+    ha_dt = _parse_iso_naive(ev.ha_time)
+    if ha_dt is None:
+        raise HTTPException(status_code=422, detail="ha_time must be ISO like 2025-10-19T20:07:00 (no timezone)")
+
     item = {
-        "source": ev.source.strip(),
-        "title": ev.title.strip(),
+        "source": (ev.source or "").strip(),
+        "title": (ev.title or "").strip(),
         "type": (ev.type or "").strip(),
         "message": (ev.message or "").strip(),
         "entity_id": (ev.entity_id or "").strip(),
-        "ha_time": (ev.ha_time or "").strip(),
+        "ha_time": _iso(ha_dt),  # normalize to seconds
         "level": (ev.level or "info").strip(),
         "data": ev.data or {},
-        "ts": int(time.time()),  # server epoch seconds
     }
     _append_event(item["source"], item)
     return {"ok": True, "stored": True}
 
 @app.get("/tater-ha/v1/events/search", response_model=EventsOut)
 async def events_search(
-    source: str = Query("general", description="Event source/plugin, e.g., 'doorbell_alert'"),
+    source: str = Query("general", description="Event source/area bucket, e.g., 'front_yard'"),
     limit: int = Query(25, ge=1, le=1000, description="Max number of items to return (newest first)"),
+    since: Optional[str] = Query(None, description="Naive ISO start (YYYY-MM-DDTHH:MM:SS)"),
+    until: Optional[str] = Query(None, description="Naive ISO end (YYYY-MM-DDTHH:MM:SS)"),
 ):
     """
     Return the most recent events for a given source (newest first).
-    Applies time-based trimming opportunistically on read.
+    Applies time-based trimming opportunistically on read, based on ha_time.
+    Optionally filter by inclusive [since, until] window (naive ISO).
     """
     try:
         _trim_events_by_time(source)
     except Exception:
         logger.exception("[Automations] time-trim failed during search for %s", source)
 
+    since_dt = _parse_iso_naive(since) if since else None
+    until_dt = _parse_iso_naive(until) if until else None
+
     key = _events_key(source)
     raw = redis_client.lrange(key, 0, limit - 1) or []
     items: List[Dict[str, Any]] = []
     for r in raw:
         try:
-            items.append(json.loads(r))
+            ev = json.loads(r)
+            ev_dt = _parse_iso_naive(ev.get("ha_time"))
+            if ev_dt:
+                if since_dt and ev_dt < since_dt:
+                    continue
+                if until_dt and ev_dt > until_dt:
+                    continue
+            items.append(ev)
         except Exception:
             continue
     return {"source": source, "items": items}
+
+# -------------------- Function name normalizer (defensive) --------------------
+def _normalize_func_name(name: str) -> str:
+    if not isinstance(name, str):
+        return ""
+    s = name.strip().lower()
+    if s.startswith("run_"):
+        s = s[4:]
+    s = s.replace(" ", "_").replace("-", "_")
+    return s
 
 # -------------------- Main automations message endpoint --------------------
 @app.post("/tater-ha/v1/message")
 async def handle_message(payload: AutomationsRequest):
     """
     Strict tool-only router:
-    - Builds an automation-scoped system prompt
+    - Builds an automation-scoped system prompt (lists tools + usage)
     - Calls LLM with: [system, user]
     - Requires a valid single tool call JSON
     - Executes plugin.handle_automation(args, llm_client)
@@ -301,9 +348,9 @@ async def handle_message(payload: AutomationsRequest):
                 raise HTTPException(status_code=422, detail="No suitable tool selected")
         except Exception:
             pass
-        raise HTTPException(status_code=422, detail="Invalid tool call JSON")
+        raise HTTPException(status_code=422, detail="Invalid tool JSON")
 
-    func_name = fn.get("function")
+    func_name = _normalize_func_name(fn.get("function", ""))
     args = fn.get("arguments", {}) or {}
 
     # Resolve plugin
