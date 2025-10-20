@@ -3,6 +3,7 @@ import json
 import base64
 import logging
 import time
+import re
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 from datetime import datetime
@@ -25,7 +26,7 @@ class CameraEventPlugin(ToolPlugin):
     durable event via the Automations /events/add endpoint for later retrieval.
     Includes a per-camera cooldown (configured in settings).
 
-    Also stamps events with HA's local time (ha_time) for consistent querying.
+    Stores events per-area (e.g., 'front_yard', 'back_yard') and stamps with HA local-naive ISO time.
     """
     name = "camera_event"
     description = "Camera event tool for when the user requests or says to run camera event."
@@ -60,7 +61,7 @@ class CameraEventPlugin(ToolPlugin):
             "label": "Time Sensor (ISO)",
             "type": "string",
             "default": "sensor.date_time_iso",
-            "description": "Sensor with ISO-8601 time (e.g., 2025-10-16T14:05:00-05:00)."
+            "description": "Sensor with local-naive ISO time (e.g., 2025-10-19T20:07:00)."
         },
 
         # ---- Vision LLM ----
@@ -74,7 +75,7 @@ class CameraEventPlugin(ToolPlugin):
             "label": "Vision Model",
             "type": "string",
             "default": "gemma3-27b-abliterated-dpo",
-            "description": "OpenAI-compatible model name (qwen2.5-vl-7b-instruct, etc.)."
+            "description": "OpenAI-compatible model name (e.g., qwen2.5-vl-7b-instruct)."
         },
         "VISION_API_KEY": {
             "label": "Vision API Key",
@@ -115,7 +116,7 @@ class CameraEventPlugin(ToolPlugin):
     def _automation_base_url(self) -> str:
         """
         Resolve Automations bridge base URL via Redis:
-          hash: 'automation_platform_settings' -> 'bind_port'
+          hash: 'ha_automations_platform_settings' -> 'bind_port'
         """
         try:
             raw_port = redis_client.hget("ha_automations_platform_settings", "bind_port")
@@ -126,6 +127,18 @@ class CameraEventPlugin(ToolPlugin):
 
     def _ha_headers(self, token: str) -> Dict[str, str]:
         return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+    @staticmethod
+    def _slug(s: str) -> str:
+        s = (s or "").strip().lower()
+        s = re.sub(r"\s+", "_", s)
+        s = re.sub(r"[^a-z0-9_:-]", "", s)
+        return s or "unknown"
+
+    @staticmethod
+    def _format_iso_naive(dt: datetime) -> str:
+        """Ensure strict ISO without timezone or microseconds: YYYY-MM-DDTHH:MM:SS"""
+        return dt.strftime("%Y-%m-%dT%H:%M:%S")
 
     def _ha_now(self, ha_base: str, token: str, sensor_entity: str) -> datetime:
         """
@@ -222,13 +235,13 @@ class CameraEventPlugin(ToolPlugin):
         base = self._automation_base_url()
         url = f"{base}/tater-ha/v1/events/add"
         payload = {
-            "source": source,
+            "source": source,  # per-area slug (e.g., 'front_yard')
             "title": title,
             "type": "camera_motion",
             "message": message,
             "entity_id": entity_id,
             "level": "info",
-            "ha_time": ha_time,  # HA local-naive ISO time string
+            "ha_time": ha_time,  # strict local-naive ISO: YYYY-MM-DDTHH:MM:SS
             "data": {"area": (area or "").strip()},
         }
         try:
@@ -277,7 +290,7 @@ class CameraEventPlugin(ToolPlugin):
 
         # Current HA local time (naive) for event stamping
         now_local = self._ha_now(ha["base"], ha["token"], ha["time_sensor"])
-        now_iso = now_local.isoformat()
+        now_iso = self._format_iso_naive(now_local)
 
         # Fetch snapshot
         try:
@@ -288,7 +301,7 @@ class CameraEventPlugin(ToolPlugin):
             generic = "Motion event detected, but no snapshot was available."
             title = f"{area.title()} motion"
             self._post_event(
-                source="camera_event",
+                source=self._slug(area),   # <-- per-area source
                 title=title,
                 message=generic,
                 entity_id=camera,
@@ -305,10 +318,10 @@ class CameraEventPlugin(ToolPlugin):
             logger.exception("[camera_event] Vision analysis failed")
             desc = "Motion event detected."
 
-        # Store event
+        # Store event (per-area source)
         title = f"{area.title()} motion"
         self._post_event(
-            source="camera_event",
+            source=self._slug(area),   # <-- per-area source
             title=title,
             message=desc,
             entity_id=camera,
@@ -321,6 +334,5 @@ class CameraEventPlugin(ToolPlugin):
 
         # Platform ignores the return; for logs/tracing only
         return {"ok": True, "stored": True, "camera": camera, "area": area, "cooldown_seconds": cooldown_seconds}
-
 
 plugin = CameraEventPlugin()

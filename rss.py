@@ -9,23 +9,17 @@ import requests
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 from plugin_registry import plugin_registry
-from plugin_settings import get_plugin_enabled, get_plugin_settings
-from helpers import run_async
+from plugin_settings import get_plugin_enabled
 
 logger = logging.getLogger("rss")
 logger.setLevel(logging.DEBUG)
 
 # Load settings from environment variables
 load_dotenv()
+
 redis_host = os.getenv('REDIS_HOST', '127.0.0.1')
 redis_port = int(os.getenv('REDIS_PORT', 6379))
-max_response_length = int(os.getenv("MAX_RESPONSE_LENGTH", 1500))
 POLL_INTERVAL = int(os.getenv("RSS_POLL_INTERVAL", 60))  # seconds between polls
-
-LLM_HOST = os.getenv("LLM_HOST", "127.0.0.1").strip()
-LLM_PORT = os.getenv("LLM_PORT", "11434").strip()
-LLM_URL = f"http://{LLM_HOST}:{LLM_PORT}"
-LLM_MODEL = os.getenv("LLM_MODEL", "gemma3:27b").strip()
 
 # Create a Redis client
 redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
@@ -36,40 +30,43 @@ redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_respon
 
 MAX_ARTICLE_CHARS = 12000  # keep well under model context; tune per model
 
+MAX_ARTICLE_CHARS = 12000  # keep well under model context; tune per model
+
 def _build_summary_messages(title: str, source_name: str, content: str):
     """
-    Build messages compatible with the Jinja template.
-    System gives instruction, user carries the article content.
+    Build a punchy, newsletter-style brief:
+    - Short headline (keep original if good; otherwise improve)
+    - One-sentence hook
+    - 3–6 crisp bullets (facts, changes, dates, versions)
+    - A 'Why it matters' or 'TL;DR' wrap-up
+    - Keep links at the end
     """
     safe_content = (content or "")[:MAX_ARTICLE_CHARS]
-    system = "Summarize the article for a general audience. Be concise and factual; use a short title and bullet points."
-    user = (
-        f"Title: {title.strip() if title else '(untitled)'}\n"
-        f"Source: {source_name.strip() if source_name else '(unknown)'}\n\n"
-        f"{safe_content}"
+
+    system = (
+        "You are a witty, conversational news writer who crafts short, engaging summaries for a newsletter audience.\n"
+        "Write in a natural, human tone — think punchy intros, short paragraphs, light humor, and clear takeaways.\n\n"
+        "Guidelines:\n"
+        "- Be concise (about 150–200 words) but write in full sentences and short paragraphs.\n"
+        "- Start with a lively hook or observation to draw the reader in.\n"
+        "- Explain what happened and why it matters, with 2–4 short paragraphs.\n"
+        "- You can use bullet points or short lists *only if they make sense* for clarity or emphasis.\n"
+        "- Avoid repeating the title or link — the header and URL are already provided elsewhere.\n"
+        "- Keep it conversational, confident, and easy to read — like a quick newsletter blurb, not a report.\n\n"
     )
+
+    user = (
+        f"Source: {source_name.strip() if source_name else '(unknown)'}\n"
+        f"Original Title: {title.strip() if title else '(untitled)'}\n\n"
+        f"Article Content:\n{safe_content}"
+    )
+
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ]
 
-def _chunk_text(s: str, limit: int = MAX_ARTICLE_CHARS):
-    s = s or ""
-    out = []
-    start = 0
-    while start < len(s):
-        end = min(len(s), start + limit)
-        cut = s.rfind("\n", start, end)
-        if cut == -1 or cut <= start:
-            cut = s.rfind(" ", start, end)
-        if cut == -1 or cut <= start:
-            cut = end
-        out.append(s[start:cut].strip())
-        start = cut
-    return out
-
-
-def fetch_web_summary(webpage_url, model=LLM_MODEL, retries=3, backoff=2):
+def fetch_web_summary(webpage_url, retries=3, backoff=2):
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -170,27 +167,31 @@ class RSSManager:
 
     async def process_entry(self, feed_title: str, entry: dict):
         entry_title = entry.get("title", "No Title")
-        link = entry.get("link", "")
-        logger.info(f"Processing entry: {entry_title} from {feed_title}")
-        
-        loop = asyncio.get_running_loop()
-        article_text = await loop.run_in_executor(None, fetch_web_summary, link, LLM_MODEL)
-        
-        if not article_text:
-            summary_text = "Could not retrieve a summary for this article."
+        link = entry.get("link", "").strip()
+        if not link:
+            logger.info(f"[RSS] Entry has no link: '{entry_title}' from {feed_title}")
+            summary_text = "No article link was provided in this feed item."
         else:
-            try:
-                messages = _build_summary_messages(entry_title, feed_title, article_text)
-                summarization_response = await self.llm_client.chat(
-                    messages=messages,
-                    stream=False,
-                )
-                summary_text = summarization_response['message'].get('content', '').strip()
-                if not summary_text:
-                    summary_text = "Failed to generate a summary from the article."
-            except Exception as e:
-                logger.error(f"Error summarizing article {link}: {e}")
-                summary_text = f"Error summarizing article: {e}"
+            logger.info(f"Processing entry: {entry_title} from {feed_title}")
+            loop = asyncio.get_running_loop()
+            # stop passing LLM_MODEL; fetch_web_summary no longer takes it
+            article_text = await loop.run_in_executor(None, fetch_web_summary, link)
+
+            if not article_text:
+                summary_text = "Could not retrieve a summary for this article."
+            else:
+                try:
+                    messages = _build_summary_messages(entry_title, feed_title, article_text)
+                    summarization_response = await self.llm_client.chat(
+                        messages=messages,
+                        stream=False,
+                        # optional: timeout=30, max_tokens=400  # keep it tidy
+                    )
+                    summary_text = summarization_response['message'].get('content', '').strip() or \
+                                   "Failed to generate a summary from the article."
+                except Exception as e:
+                    logger.error(f"Error summarizing article {link}: {e}")
+                    summary_text = f"Error summarizing article."
 
         announcement = (
             f"📰 **New article from {feed_title}**\n"
@@ -214,35 +215,42 @@ class RSSManager:
 
     async def poll_feeds(self):
         logger.info("Starting RSS feed polling...")
-        while True:
-            if not self.any_notifier_enabled():
-                logger.debug("No notifier plugins are enabled. Skipping RSS check.")
-                await asyncio.sleep(POLL_INTERVAL)
-                continue
+        try:
+            while True:
+                if not self.any_notifier_enabled():
+                    logger.debug("No notifier plugins are enabled. Skipping RSS check.")
+                    await asyncio.sleep(POLL_INTERVAL)
+                    continue
 
-            feeds = self.get_feeds()
-            for feed_url, last_ts_str in feeds.items():
-                try:
-                    last_ts = float(last_ts_str) if last_ts_str else 0.0
-                    parsed_feed = await asyncio.to_thread(feedparser.parse, feed_url)
-                    if parsed_feed.bozo:
-                        logger.error(f"Error parsing feed {feed_url}: {parsed_feed.bozo_exception}")
-                        continue
-                    feed_title = parsed_feed.feed.get("title", feed_url)
-                    new_last_ts = last_ts
-                    sorted_entries = sorted(
-                        parsed_feed.entries,
-                        key=lambda e: time.mktime(e.published_parsed) if 'published_parsed' in e else 0
-                    )
-                    for entry in sorted_entries:
-                        if 'published_parsed' not in entry:
+                feeds = self.get_feeds()
+                for feed_url, last_ts_str in feeds.items():
+                    try:
+                        last_ts = float(last_ts_str) if last_ts_str else 0.0
+                        parsed_feed = await asyncio.to_thread(feedparser.parse, feed_url)
+                        if parsed_feed.bozo:
+                            logger.error(f"Error parsing feed {feed_url}: {parsed_feed.bozo_exception}")
                             continue
-                        entry_ts = time.mktime(entry.published_parsed)
-                        if entry_ts > last_ts:
-                            await self.process_entry(feed_title, entry)
-                            if entry_ts > new_last_ts:
-                                new_last_ts = entry_ts
-                                self.redis.hset(self.feeds_key, feed_url, new_last_ts)
-                except Exception as e:
-                    logger.error(f"Error processing feed {feed_url}: {e}")
-            await asyncio.sleep(POLL_INTERVAL)
+
+                        feed_title = parsed_feed.feed.get("title", feed_url)
+                        new_last_ts = last_ts
+
+                        sorted_entries = sorted(
+                            parsed_feed.entries,
+                            key=lambda e: time.mktime(e.published_parsed) if 'published_parsed' in e else 0
+                        )
+                        for entry in sorted_entries:
+                            if 'published_parsed' not in entry:
+                                continue
+                            entry_ts = time.mktime(entry.published_parsed)
+                            if entry_ts > last_ts:
+                                await self.process_entry(feed_title, entry)
+                                if entry_ts > new_last_ts:
+                                    new_last_ts = entry_ts
+                                    self.redis.hset(self.feeds_key, feed_url, new_last_ts)
+                    except Exception as e:
+                        logger.error(f"Error processing feed {feed_url}: {e}")
+
+                await asyncio.sleep(POLL_INTERVAL)
+        except asyncio.CancelledError:
+            logger.info("RSS polling task cancelled; exiting cleanly.")
+            return
