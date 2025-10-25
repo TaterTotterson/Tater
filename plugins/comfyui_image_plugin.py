@@ -323,14 +323,16 @@ class ComfyUIImagePlugin(ToolPlugin):
         Return an image payload (base64) plus a short message.
         The Matrix platform will upload/send the media and persist history.
         """
-        user_prompt = args.get("prompt")
+        user_prompt = (args or {}).get("prompt")
         if not user_prompt:
             return "No prompt provided for ComfyUI."
 
         try:
-            neg = args.get("negative_prompt", "") or ""
-            w = args.get("width"); h = args.get("height")
+            neg = (args or {}).get("negative_prompt", "") or ""
+            w = (args or {}).get("width")
+            h = (args or {}).get("height")
 
+            # Generate the image via your ComfyUI helper
             image_bytes = await asyncio.to_thread(
                 ComfyUIImagePlugin.process_prompt, user_prompt, neg, w, h
             )
@@ -343,15 +345,21 @@ class ComfyUIImagePlugin(ToolPlugin):
                 "mimetype": mime,
             }
 
-            safe_prompt = "".join(ch for ch in user_prompt[:300] if ch.isprintable()).strip()
-            system_msg = f'The user has just been shown an AI-generated image based on the prompt: "{safe_prompt}".'
-            final_response = await llm.chat(
-                messages=[
-                    {"role": "system", "content": system_msg},
-                    {"role": "user", "content": "Respond with a short, fun message celebrating the image. Do not include any lead-in phrases or instructions — just the message."}
-                ]
-            )
-            message_text = final_response["message"].get("content", "").strip() or "Here’s your generated image!"
+            # Optional short celebratory text via the LLM
+            message_text = "Here’s your generated image!"
+            if llm_client is not None:
+                safe_prompt = "".join(ch for ch in user_prompt[:300] if ch.isprintable()).strip()
+                system_msg = (
+                    f'The user has just been shown an AI-generated image based on the prompt: "{safe_prompt}".'
+                )
+                final_response = await llm_client.chat(
+                    messages=[
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": "Respond with a short, fun message celebrating the image. Do not include any lead-in phrases or instructions — just the message."}
+                    ]
+                )
+                message_text = (final_response["message"].get("content", "") or "").strip() or message_text
+
             return [image_payload, message_text]
 
         except Exception as e:
