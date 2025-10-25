@@ -149,7 +149,7 @@ def save_message(role, username, content):
     message_data = {
         "role": role,
         "username": username,
-        "content": content  # can be string or dict
+        "content": content
     }
 
     key = "webui:chat_history"
@@ -552,13 +552,53 @@ def _to_template_msg(role, content):
       - image  -> {"role": role, "content": [{"type":"image"}]}
       - audio  -> {"role": role, "content": [{"type":"text","text":"[Audio]"}]}
       - plugin_call -> stringify call as assistant text
-      - plugin_response -> skip (return None)
+      - plugin_response -> include final responses (skip waiting lines)
     """
-    # Skip plugin responses from LLM context
-    if isinstance(content, dict) and content.get("marker") == "plugin_response":
+
+    # --- Skip waiting lines from tools ---
+    if isinstance(content, dict) and content.get("marker") == "plugin_wait":
         return None
 
-    # Represent plugin calls as plain text (so history still makes sense)
+    # --- Include final plugin responses in context (text only / placeholders) ---
+    if isinstance(content, dict) and content.get("marker") == "plugin_response":
+        phase = content.get("phase", "final")
+        if phase != "final":
+            return None
+
+        payload = content.get("content")
+
+        # 1) Plain string
+        if isinstance(payload, str):
+            txt = payload.strip()
+            if len(txt) > 4000:
+                txt = txt[:4000] + " …"
+            return {"role": "assistant", "content": txt}
+
+        # 2) Media placeholders
+        if isinstance(payload, dict) and payload.get("type") in ("image", "audio", "video"):
+            kind = payload.get("type")
+            name = payload.get("name") or ""
+            return {"role": "assistant", "content": f"[{kind.capitalize()} from tool]{f' {name}' if name else ''}".strip()}
+
+        # 3) Structured text fields
+        if isinstance(payload, dict):
+            for key in ("summary", "text", "message", "content"):
+                if isinstance(payload.get(key), str) and payload.get(key).strip():
+                    txt = payload[key].strip()
+                    if len(txt) > 4000:
+                        txt = txt[:4000] + " …"
+                    return {"role": "assistant", "content": txt}
+
+            # Fallback: compact JSON
+            try:
+                compact = json.dumps(payload, ensure_ascii=False)
+                if len(compact) > 2000:
+                    compact = compact[:2000] + " …"
+                return {"role": "assistant", "content": compact}
+            except Exception:
+                return None
+
+    # --- Represent plugin calls as plain text (so history still makes sense) ---
     if isinstance(content, dict) and content.get("marker") == "plugin_call":
         as_text = json.dumps({
             "function": content.get("plugin"),
@@ -566,14 +606,14 @@ def _to_template_msg(role, content):
         }, indent=2)
         return {"role": "assistant", "content": as_text} if role == "assistant" else {"role": role, "content": as_text}
 
-    # Media types
+    # --- Media types ---
     if isinstance(content, dict) and content.get("type") == "image":
-        return {"role": role, "content": "[Image attached]"}  # instead of [{"type":"image"}]
+        return {"role": role, "content": "[Image attached]"}
 
     if isinstance(content, dict) and content.get("type") == "audio":
-        return {"role": role, "content": "[Audio attached]"}  # you already do similar
+        return {"role": role, "content": "[Audio attached]"}
 
-    # Strings and other fallbacks
+    # --- Strings and other fallbacks ---
     if isinstance(content, str):
         return {"role": role, "content": content}
     return {"role": role, "content": str(content)}
@@ -737,7 +777,7 @@ async def process_function_call(response_json, user_question=""):
 
             # Save waiting message to Redis
             save_message("assistant", "assistant", {
-                "marker": "plugin_response",
+                "marker": "plugin_wait",
                 "content": wait_text
             })
 
@@ -745,7 +785,7 @@ async def process_function_call(response_json, user_question=""):
             st.session_state.chat_messages.append({
                 "role": "assistant",
                 "content": {
-                    "marker": "plugin_response",
+                    "marker": "plugin_wait",
                     "content": wait_text
                 }
             })
@@ -898,6 +938,7 @@ for key in redis_client.scan_iter("webui:plugin_jobs:*"):
                     "role": "assistant",
                     "content": {
                         "marker": "plugin_response",
+                        "phase": "final",
                         "content": r
                     }
                 }
@@ -912,8 +953,8 @@ for msg in st.session_state.chat_messages:
     avatar = user_avatar if role == "user" else assistant_avatar
     content = msg["content"]
 
-    # 🔧 Robust unwrap of nested plugin_response wrappers first
-    while isinstance(content, dict) and content.get("marker") == "plugin_response":
+    # Unwrap plugin_response and plugin_wait to their text payloads
+    while isinstance(content, dict) and content.get("marker") in ("plugin_response", "plugin_wait"):
         content = content.get("content")
 
     # 🔧 After unwrap, check for plugin_call marker and skip render if needed

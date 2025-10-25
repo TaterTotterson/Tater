@@ -39,7 +39,7 @@ class YouTubeSummaryPlugin(ToolPlugin):
         }
     }
     waiting_prompt_template = "Write a friendly message telling {mention} you’re watching the video and working on it now! Only output that message."
-    platforms = ["discord", "webui", "irc"]
+    platforms = ["discord", "webui", "irc", "matrix"]
 
     def handle_setting_button(self, key):
         if key == "update_transcript_api":
@@ -87,17 +87,17 @@ class YouTubeSummaryPlugin(ToolPlugin):
 
         api = YouTubeTranscriptApi()
         try:
-            # 1) try direct fetch (library picks best track)
+            # 1) Try direct fetch
             try:
                 fetched = api.fetch(video_id)
             except Exception as e1:
                 logger.info(f"[fetch default] {e1}; trying languages…")
-                # 2) prefer English-ish; if that fails, list → pick → fetch
+                # 2) Prefer English variants; else list → pick → fetch
                 try:
                     fetched = api.fetch(video_id, languages=["en", "en-US", "en-GB"])
                 except Exception as e2:
                     logger.info(f"[fetch en*] {e2}; listing transcripts…")
-                    tl = api.list(video_id)                      # TranscriptList
+                    tl = api.list(video_id)
                     try:
                         t = tl.find_transcript(["en", "en-US", "en-GB"])
                     except Exception:
@@ -107,7 +107,6 @@ class YouTubeSummaryPlugin(ToolPlugin):
                         return None
                     fetched = t.fetch()
 
-            # Normalize to raw list of dicts and join the text
             raw = fetched.to_raw_data() if hasattr(fetched, "to_raw_data") else \
                   [{"text": getattr(sn, "text", "")} for sn in fetched]
             text = " ".join(seg.get("text", "") for seg in raw if seg.get("text"))
@@ -163,9 +162,9 @@ class YouTubeSummaryPlugin(ToolPlugin):
         chunks = self.split_text_into_chunks(transcript, DEFAULT_MAX_TOKENS)
         return await self.summarize_chunks(chunks, llm_client)
 
-# ---------------------------------------------------------
-# Discord handler
-# ---------------------------------------------------------
+    # ---------------------------------------------------------
+    # Discord handler
+    # ---------------------------------------------------------
     async def handle_discord(self, message, args, llm_client):
         video_url = args.get("video_url")
         if not video_url:
@@ -180,9 +179,9 @@ class YouTubeSummaryPlugin(ToolPlugin):
         formatted = self.format_article(summary)
         return "\n".join(self.split_message(formatted, 1500))
 
-# ---------------------------------------------------------
-# WebUI handler
-# ---------------------------------------------------------
+    # ---------------------------------------------------------
+    # WebUI handler
+    # ---------------------------------------------------------
     async def handle_webui(self, args, llm_client):
         video_url = args.get("video_url")
         if not video_url:
@@ -200,9 +199,9 @@ class YouTubeSummaryPlugin(ToolPlugin):
         formatted = self.format_article(summary)
         return self.split_message(formatted, 1500)
 
-# ---------------------------------------------------------
-# IRC handler
-# ---------------------------------------------------------
+    # ---------------------------------------------------------
+    # IRC handler
+    # ---------------------------------------------------------
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         video_url = args.get("video_url")
         nick = user
@@ -219,9 +218,27 @@ class YouTubeSummaryPlugin(ToolPlugin):
         if not summary:
             return f"{nick}: Could not generate summary."
 
-        article = self.format_article(summary)  # produce the full paragraph(s)
-        # Let the IRC platform handle paragraphization & chunking
+        article = self.format_article(summary)
         return f"{nick}: {article}"
 
+    # ---------------------------------------------------------
+    # Matrix handler
+    # ---------------------------------------------------------
+    async def handle_matrix(self, client, room, sender, body, args, llm_client=None, **kwargs):
+        llm = llm_client or kwargs.get("llm")
+        video_url = (args or {}).get("video_url")
+        if not video_url:
+            return "No YouTube URL provided."
+
+        try:
+            summary = await self._fetch_summary(video_url, llm)
+        except Exception as e:
+            return f"Failed to summarize the video: {e}"
+
+        if not summary:
+            return "Failed to summarize the video."
+
+        # Matrix platform will handle chunking; return one string.
+        return self.format_article(summary)
 
 plugin = YouTubeSummaryPlugin()

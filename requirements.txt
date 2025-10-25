@@ -18,3 +18,7 @@ irc3
 pyyaml
 fastapi
 uvicorn
+matrix-nio[aiohttp,e2e]
+python-olm
+markdown-it-py[plugins,linkify]
+mdit-py-plugins

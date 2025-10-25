@@ -205,9 +205,32 @@ def build_system_prompt() -> str:
 
 # -------------------- History shaping (Discord-style alternation) --------------------
 def _to_template_msg(role: str, content: Any) -> Optional[Dict[str, Any]]:
-    # Skip plugin_response markers from prior turns (they're side-effects)
-    if isinstance(content, dict) and content.get("marker") == "plugin_response":
+    # --- Skip waiting lines from tools (future-proof) ---
+    if isinstance(content, dict) and content.get("marker") == "plugin_wait":
         return None
+
+    # --- Include final plugin responses in context (defaults to final if missing for backward compat) ---
+    if isinstance(content, dict) and content.get("marker") == "plugin_response":
+        phase = content.get("phase", "final")
+        if phase != "final":
+            return None
+        payload = content.get("content", "")
+
+        # We mostly store a string here already (thanks to _flatten_to_text).
+        if isinstance(payload, str):
+            txt = payload.strip()
+            if len(txt) > 4000:
+                txt = txt[:4000] + " …"
+            return {"role": "assistant", "content": txt}
+
+        # Fallback: compact any structured payload to JSON string
+        try:
+            compact = json.dumps(payload, ensure_ascii=False)
+            if len(compact) > 2000:
+                compact = compact[:2000] + " …"
+            return {"role": "assistant", "content": compact}
+        except Exception:
+            return None
 
     # For plugin_call, stringify so the LLM "sees" the previous structured action
     if isinstance(content, dict) and content.get("marker") == "plugin_call":
@@ -518,7 +541,7 @@ async def handle_message(payload: HARequest):
                 await _save_message(
                     payload.session_id,
                     "assistant",
-                    {"marker": "plugin_response", "content": final_text},
+                    {"marker": "plugin_response", "phase": "final", "content": final_text},
                     history_max
                 )
                 return HAResponse(response=final_text)

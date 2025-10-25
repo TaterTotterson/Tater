@@ -23,10 +23,10 @@ class WebSummaryPlugin(ToolPlugin):
     description = "Summarizes an article from a URL provided by the user."
     pretty_name = "Summarizing Your Article"
     waiting_prompt_template = "Write a casual, friendly message telling {mention} you’re reading the article and preparing a summary now! Only output that message."
-    platforms = ["discord", "webui", "irc"]
+    platforms = ["discord", "webui", "irc", "matrix"]
 
     @staticmethod
-    def fetch_web_summary(webpage_url, model):
+    def fetch_web_summary(webpage_url, model=None):
         headers = {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -88,7 +88,7 @@ class WebSummaryPlugin(ToolPlugin):
                 await channel.send(chunk)
 
     async def _web_summary(self, url, llm_client):
-        article_text = self.fetch_web_summary(url, llm_client.model)
+        article_text = self.fetch_web_summary(url, getattr(llm_client, "model", None))
         if not article_text:
             return None
 
@@ -105,6 +105,7 @@ class WebSummaryPlugin(ToolPlugin):
         )
         return response["message"].get("content", "")
 
+    # --- Discord ---
     async def handle_discord(self, message, args, llm_client):
         url = args.get("url")
         if not url:
@@ -115,6 +116,7 @@ class WebSummaryPlugin(ToolPlugin):
         except Exception as e:
             return f"Failed to summarize the article: {e}"
 
+    # --- WebUI ---
     async def handle_webui(self, args, llm_client):
         url = args.get("url")
         if not url:
@@ -128,6 +130,7 @@ class WebSummaryPlugin(ToolPlugin):
         except Exception as e:
             return [f"Failed to summarize the article: {e}"]
 
+    # --- IRC ---
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         url = args.get("url")
         if not url:
@@ -138,5 +141,18 @@ class WebSummaryPlugin(ToolPlugin):
             return f"{user}: Failed to summarize article."
 
         return f"{user}: {summary}"
+
+    # --- Matrix ---
+    async def handle_matrix(self, client, room, sender, body, args, llm_client=None, **kwargs):
+        llm = llm_client or kwargs.get("llm")
+        url = (args or {}).get("url")
+        if not url:
+            return "No webpage URL provided."
+
+        try:
+            result = await self._web_summary(url, llm)
+            return result or "Failed to summarize the article."
+        except Exception as e:
+            return f"Failed to summarize the article: {e}"
 
 plugin = WebSummaryPlugin()

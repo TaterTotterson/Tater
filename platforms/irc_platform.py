@@ -156,7 +156,6 @@ def send_formatted(self, target, text):
     formatted = format_irc_text(text)
 
     # Ensure each numbered item starts a new paragraph even if inline
-    # e.g., "... Trending 1. Title ... 2. Title ..." -> split before every "N. "
     normalized = re.sub(r'(?<!\n)\s+(\d+\.\s+)', r'\n\n\1', formatted)
 
     # Split into paragraphs on blank lines
@@ -194,18 +193,43 @@ def send_formatted(self, target, text):
 
         if idx < len(paragraphs) - 1:
             self.privmsg(target, "")
-            
-# ---- LM-Studio template helpers ----
+
+# ---- LM template helpers ----
 def _to_template_msg(role, content, sender=None):
-    """
-    Shape messages for the Jinja template.
-    - Strings -> keep as string (optionally prefix with sender)
-    - plugin_response -> skip (return None)
-    - plugin_call -> stringify JSON as assistant text
-    """
-    if isinstance(content, dict) and content.get("marker") == "plugin_response":
+    # --- Skip waiting lines from tools ---
+    if isinstance(content, dict) and content.get("marker") == "plugin_wait":
         return None
 
+    # --- Include only FINAL plugin responses ---
+    if isinstance(content, dict) and content.get("marker") == "plugin_response":
+        phase = content.get("phase", "final")
+        if phase != "final":
+            return None
+        payload = content.get("content")
+
+        # 1) Plain string
+        if isinstance(payload, str):
+            txt = payload.strip()
+            if len(txt) > 4000:
+                txt = txt[:4000] + " …"
+            return {"role": "assistant", "content": txt}
+
+        # 2) Media placeholders
+        if isinstance(payload, dict) and payload.get("type") in ("image", "audio", "video", "file"):
+            kind = payload.get("type").capitalize()
+            name = payload.get("name") or ""
+            return {"role": "assistant", "content": f"[{kind} from tool]{f' {name}' if name else ''}".strip()}
+
+        # 3) Fallback: compact JSON
+        try:
+            compact = json.dumps(payload, ensure_ascii=False)
+            if len(compact) > 2000:
+                compact = compact[:2000] + " …"
+            return {"role": "assistant", "content": compact}
+        except Exception:
+            return None
+
+    # --- Represent plugin calls as plain text (so history still makes sense) ---
     if isinstance(content, dict) and content.get("marker") == "plugin_call":
         as_text = json.dumps({
             "function": content.get("plugin"),
@@ -213,13 +237,13 @@ def _to_template_msg(role, content, sender=None):
         }, indent=2)
         return {"role": "assistant" if role == "assistant" else role, "content": as_text}
 
-    # IRC stores plain text; treat files already as placeholders elsewhere
+    # --- Text path ---
     if isinstance(content, str):
         if role == "user" and sender:
             return {"role": "user", "content": f"{sender}: {content}"}
         return {"role": role, "content": content}
 
-    # Fallback (shouldn’t really happen on IRC)
+    # Fallback
     return {"role": role, "content": str(content)}
 
 def _enforce_user_assistant_alternation(loop_messages):
@@ -340,14 +364,15 @@ async def on_message(self, mask, event, target, data):
             if func in plugin_registry and get_plugin_enabled(func):
                 plugin = plugin_registry[func]
 
-                # Save structured plugin_call marker
-                save_irc_message(channel=target, role="assistant", username="assistant", content={
-                    "marker": "plugin_call",
-                    "plugin": func,
-                    "arguments": args
-                })
+                # Save structured plugin_call marker (corrected)
+                save_irc_message(
+                    channel=target,
+                    role="assistant",
+                    username="assistant",
+                    content={"marker": "plugin_call", "plugin": func, "arguments": args}
+                )
 
-                # Optional waiting message
+                # Optional waiting message (save as plugin_wait AFTER generated)
                 if hasattr(plugin, "waiting_prompt_template"):
                     wait_prompt = plugin.waiting_prompt_template.format(mention=mask.nick)
                     wait_response = await llm_client.chat(
@@ -358,10 +383,12 @@ async def on_message(self, mask, event, target, data):
                     )
                     wait_text = wait_response["message"]["content"].strip()
                     send_formatted(self, target, wait_text)
-                    save_irc_message(channel=target, role="assistant", username="assistant", content={
-                        "marker": "plugin_response",
-                        "content": wait_text
-                    })
+                    save_irc_message(
+                        channel=target,
+                        role="assistant",
+                        username="assistant",
+                        content={"marker": "plugin_wait", "content": wait_text}
+                    )
 
                 result = await plugin.handle_irc(self, target, mask.nick, data, args, llm_client)
 
@@ -369,27 +396,38 @@ async def on_message(self, mask, event, target, data):
                     for item in result:
                         if isinstance(item, str):
                             send_formatted(self, target, item)
-                            save_irc_message(channel=target, role="assistant", username="assistant", content={
-                                "marker": "plugin_response",
-                                "content": item
-                            })
+                            save_irc_message(
+                                channel=target,
+                                role="assistant",
+                                username="assistant",
+                                content={"marker": "plugin_response", "phase": "final", "content": item}
+                            )
 
                         elif isinstance(item, dict):
-                            kind = item.get("type", "file").capitalize()
+                            # Save a light placeholder to history
+                            kind = (item.get("type") or "file").lower()
                             name = item.get("name", "output")
-                            placeholder = f"[{kind}: {name}]"
+                            placeholder = f"[{kind.capitalize()}: {name}]"
                             self.privmsg(target, f"{mask.nick}: {placeholder}")
-                            save_irc_message(channel=target, role="assistant", username="assistant", content={
-                                "marker": "plugin_response",
-                                "content": placeholder
-                            })
+                            save_irc_message(
+                                channel=target,
+                                role="assistant",
+                                username="assistant",
+                                content={
+                                    "marker": "plugin_response",
+                                    "phase": "final",
+                                    "content": {"type": kind, "name": name}
+                                }
+                            )
 
                 elif isinstance(result, str) and result.strip():
                     send_formatted(self, target, result)
-                    save_irc_message(channel=target, role="assistant", username="assistant", content={
-                        "marker": "plugin_response",
-                        "content": result
-                    })
+                    save_irc_message(
+                        channel=target,
+                        role="assistant",
+                        username="assistant",
+                        content={"marker": "plugin_response", "phase": "final", "content": result}
+                    )
 
                 else:
                     logger.debug(f"[{func}] Plugin returned nothing or unrecognized result type: {type(result)}")

@@ -1,23 +1,33 @@
 # plugins/sftpgo_account.py
 import os
 import asyncio
-import discord
 import aiohttp
 import base64
 import redis
 import secrets
 import string
+import logging
 from plugin_base import ToolPlugin
+
+# Discord types are optional; import lazily in the Discord handler if needed
+try:
+    import discord
+except Exception:
+    discord = None
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
 
 class SFTPGoAccountPlugin(ToolPlugin):
     name = "sftpgo_account"
     usage = (
         '{\n'
         '  "function": "sftpgo_account",\n'
-        '  "arguments": { }\n'
+        '  "arguments": { "username": "<optional custom username>" }\n'
         '}\n'
     )
-    description = ("Creates an SFTPGo account on the server for the user.")
+    description = "Creates an SFTPGo account for the user and returns their credentials."
     pretty_name = "Creating Account"
     settings_category = "SFTPGo"
     required_settings = {
@@ -25,62 +35,66 @@ class SFTPGoAccountPlugin(ToolPlugin):
             "label": "SFTPGo API URL",
             "type": "text",
             "default": "https://localhost",
-            "description": "Enter the base URL for the SFTPGo API (do not include /api/v2)."
+            "description": "Base URL for the SFTPGo API (do not include /api/v2)."
         },
         "SFTPGO_USERNAME": {
             "label": "SFTPGo Username",
             "type": "text",
             "default": "username",
-            "description": "The username to authenticate with the SFTPGo API."
+            "description": "Username to authenticate with the SFTPGo API."
         },
         "SFTPGO_PASSWORD": {
             "label": "SFTPGo Password",
             "type": "password",
             "default": "password",
-            "description": "The password to authenticate with the SFTPGo API."
+            "description": "Password to authenticate with the SFTPGo API."
         },
         "SFTPGO_GROUP_NAME": {
             "label": "SFTPGo Group Name",
             "type": "text",
             "default": "DNServ",
-            "description": "Enter the group name to assign to new SFTP accounts."
+            "description": "Group name to assign to new SFTP accounts."
         },
         "DEFAULT_HOME_DIR": {
             "label": "Default Home Directory",
             "type": "text",
             "default": "/your/default/home/dir",
-            "description": "The default home directory for new SFTP accounts."
+            "description": "Default home directory for new SFTP accounts."
         }
     }
     waiting_prompt_template = "Write a friendly message telling {mention} you’re creating their account now! Only output that message."
-    platforms = ["discord", "irc"]
+    platforms = ["discord", "webui", "irc", "matrix"]
 
+    @staticmethod
     async def safe_send(channel, content: str, **kwargs):
+        if not channel:
+            return
         if len(content) > 2000:
             content = content[:1997] + "..."
         await channel.send(content, **kwargs)
 
+    @staticmethod
+    def _redis():
+        redis_host = os.getenv("REDIS_HOST", "127.0.0.1")
+        redis_port = int(os.getenv("REDIS_PORT", 6379))
+        return redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
+
     def get_sftpgo_settings(self):
         """
-        Retrieves SFTPGo settings from Redis for the 'SFTPGo' settings category.
-        Fallback defaults are used if settings are missing.
-        If the provided API URL does not contain "/api/v2", it is appended.
+        Get SFTPGo settings from Redis. Append '/api/v2' to API URL if missing.
         """
-        redis_host = os.getenv('REDIS_HOST', '127.0.0.1')
-        redis_port = int(os.getenv('REDIS_PORT', 6379))
-        redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
-        key = "plugin_settings:SFTPGo"
-        settings = redis_client.hgetall(key)
+        rc = self._redis()
+        settings = rc.hgetall("plugin_settings:SFTPGo") or {}
         defaults = {
             "SFTPGO_API_URL": "https://localhost",
             "SFTPGO_USERNAME": "username",
             "SFTPGO_PASSWORD": "password",
             "SFTPGO_GROUP_NAME": "DNServ",
-            "DEFAULT_HOME_DIR": ""
+            "DEFAULT_HOME_DIR": "/your/default/home/dir",
         }
-        for k, default_value in defaults.items():
-            if k not in settings or not settings[k]:
-                settings[k] = default_value
+        for k, v in defaults.items():
+            if not settings.get(k):
+                settings[k] = v
 
         api_url = settings["SFTPGO_API_URL"].rstrip("/")
         if "/api/v2" not in api_url:
@@ -90,128 +104,226 @@ class SFTPGoAccountPlugin(ToolPlugin):
 
     async def get_jwt_token(self):
         """Obtain a JWT token from the SFTPGo API."""
-        settings = self.get_sftpgo_settings()
-        auth_header = base64.b64encode(
-            f"{settings['SFTPGO_USERNAME']}:{settings['SFTPGO_PASSWORD']}".encode("utf-8")
-        ).decode("ascii")
+        s = self.get_sftpgo_settings()
+        auth_header = base64.b64encode(f"{s['SFTPGO_USERNAME']}:{s['SFTPGO_PASSWORD']}".encode("utf-8")).decode("ascii")
         connector = aiohttp.TCPConnector(ssl=False)
         try:
             async with aiohttp.ClientSession(connector=connector) as session:
                 async with session.get(
-                    f"{settings['SFTPGO_API_URL']}/token",
+                    f"{s['SFTPGO_API_URL']}/token",
                     headers={"Authorization": f"Basic {auth_header}"}
-                ) as response:
-                    if response.status == 200:
-                        json_response = await response.json()
-                        return json_response.get("access_token")
-                    else:
-                        print(f"Failed to obtain JWT token. Status code: {response.status}")
-                        return None
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return data.get("access_token")
+                    logger.error(f"SFTPGo token error HTTP {resp.status}")
         except Exception as e:
-            print(f"An error occurred while obtaining JWT token: {e}")
-            return None
+            logger.exception(f"SFTPGo token exception: {e}")
+        return None
 
-    def generate_random_password(self, length=12):
-        """Generate a secure random password of given length."""
+    @staticmethod
+    def generate_random_password(length=14):
+        """Generate a secure random password."""
         alphabet = string.ascii_letters + string.digits + string.punctuation
-        return ''.join(secrets.choice(alphabet) for _ in range(length))
+        return "".join(secrets.choice(alphabet) for _ in range(length))
 
-    async def create_sftp_account(self, username, password, message_obj):
+    @staticmethod
+    def _sanitize_username(raw: str) -> str:
+        """
+        Restrict to a safe subset for SFTPGo. Replace anything else with '_'.
+        Limit length to 32 chars.
+        """
+        raw = (raw or "").strip()
+        safe = []
+        for ch in raw:
+            if ch.isalnum() or ch in ("-", "_", "."):
+                safe.append(ch)
+            else:
+                safe.append("_")
+        out = "".join(safe).strip("._")  # avoid leading/trailing dots
+        return (out or "user")[:32]
+
+    @staticmethod
+    def _matrix_localpart(sender_mxid: str) -> str:
+        """
+        Extract localpart from a Matrix user ID like '@alice:example.org' -> 'alice'.
+        """
+        if not sender_mxid:
+            return "user"
+        if sender_mxid.startswith("@"):
+            return sender_mxid[1:].split(":", 1)[0] or "user"
+        return sender_mxid
+
+    async def create_sftp_account(self, username: str, password: str, message_obj=None):
+        """
+        Create the SFTPGo user. Returns ('created', welcome_text) on success;
+        otherwise ('exists'|'error'|'token_error', None).
+        """
         settings = self.get_sftpgo_settings()
-        jwt_token = await self.get_jwt_token()
-        connector = aiohttp.TCPConnector(ssl=False)  # Always disable SSL verification.
+        jwt = await self.get_jwt_token()
+        if jwt is None:
+            try:
+                await self.safe_send(getattr(message_obj, "channel", None), "Failed to obtain JWT token.")
+            except Exception:
+                pass
+            return "token_error", None
 
-        if jwt_token is None:
-            await safe_send(message_obj.channel, "Failed to obtain JWT token.")
-            return "token_error"
-
+        connector = aiohttp.TCPConnector(ssl=False)
         async with aiohttp.ClientSession(connector=connector) as session:
-            # Check if the user already exists.
-            async with session.get(
-                f"{settings['SFTPGO_API_URL']}/users/{username}",
-                headers={"Authorization": f"Bearer {jwt_token}"}
-            ) as user_check_response:
-                if user_check_response.status == 200:
-                    return "exists"
+            # Check if exists
+            try:
+                async with session.get(
+                    f"{settings['SFTPGO_API_URL']}/users/{username}",
+                    headers={"Authorization": f"Bearer {jwt}"}
+                ) as chk:
+                    if chk.status == 200:
+                        return "exists", None
+            except Exception as e:
+                logger.exception(f"SFTPGo user check error: {e}")
+                return "error", None
 
-            # Create the new user account.
-            async with session.post(
-                f"{settings['SFTPGO_API_URL']}/users",
-                headers={"Authorization": f"Bearer {jwt_token}"},
-                json={
-                    "username": username,
-                    "password": password,
-                    "status": 1,
-                    "permissions": {"/": ["list", "download", "upload", "create_dirs", "rename"]},
-                    "home_dir": settings["DEFAULT_HOME_DIR"],
-                    "groups": [{"name": settings["SFTPGO_GROUP_NAME"], "type": 1}]
-                }
-            ) as response:
-                if response.status == 201:
-                    welcome_message = (
-                        f"Welcome '{username}'\n"
-                        f"Your account has been created.\n"
-                        f"Login: {username}\n"
-                        f"Password: {password}\n"
-                        "You now have access to the server."
-                    )
-                    try:
-                        await message_obj.author.send(welcome_message)
-                    except Exception as e:
-                        print(f"Failed to send DM to {username}: {e}")
-                    return "created"
-                else:
-                    error_text = await response.text()
-                    await safe_send(message_obj.channel, f"Failed to create user. Status code: {response.status}, Error: {error_text}")
-                    return "error"
+            # Create user
+            payload = {
+                "username": username,
+                "password": password,
+                "status": 1,
+                "permissions": {"/": ["list", "download", "upload", "create_dirs", "rename"]},
+                "home_dir": settings["DEFAULT_HOME_DIR"],
+                "groups": [{"name": settings["SFTPGO_GROUP_NAME"], "type": 1}],
+            }
+            try:
+                async with session.post(
+                    f"{settings['SFTPGO_API_URL']}/users",
+                    headers={"Authorization": f"Bearer {jwt}"},
+                    json=payload
+                ) as resp:
+                    if resp.status == 201:
+                        welcome = (
+                            f"Welcome '{username}'\n"
+                            f"Your SFTP account has been created.\n"
+                            f"Login: {username}\n"
+                            f"Password: {password}\n"
+                            "You now have access to the server."
+                        )
+                        # Discord DM if possible
+                        try:
+                            author = getattr(message_obj, "author", None)
+                            if author and hasattr(author, "send"):
+                                await author.send(welcome)
+                        except Exception as e:
+                            logger.info(f"Unable to DM credentials to {username}: {e}")
+                        return "created", welcome
+                    else:
+                        errtxt = await resp.text()
+                        logger.error(f"SFTPGo create error HTTP {resp.status}: {errtxt}")
+                        try:
+                            await self.safe_send(getattr(message_obj, "channel", None),
+                                                 f"Failed to create user. HTTP {resp.status}")
+                        except Exception:
+                            pass
+                        return "error", None
+            except Exception as e:
+                logger.exception(f"SFTPGo create exception: {e}")
+                return "error", None
 
-    # --- Discord Handler ---
+    # ---------------- Platform handlers ----------------
+
     async def handle_discord(self, message, args, llm_client):
-        user = message.author
+        desired = (args or {}).get("username")
+        username = (desired or getattr(message.author, "name", "user")).strip()
+        username = self._sanitize_username(username)
         password = self.generate_random_password()
 
-        result = await self.create_sftp_account(user.name, password, message)
+        state, _welcome = await self.create_sftp_account(username, password, message)
 
-        if result == "created":
-            prompt = f"Generate a brief message stating that an account for '{user.name}' has been successfully created."
-        elif result == "exists":
-            prompt = f"Generate a brief message stating that '{user.name}' already has an account but is trying to make a new one!"
+        if state == "created":
+            prompt = f"Generate a brief message stating that an account for '{username}' has been successfully created."
+        elif state == "exists":
+            prompt = f"Generate a brief message stating that '{username}' already has an account but is trying to make a new one!"
+        elif state == "token_error":
+            prompt = f"Generate a brief apology: we couldn't authenticate with SFTPGo while creating '{username}'."
         else:
-            prompt = f"Generate a brief message stating that an error occurred while creating the account for '{user.name}'."
+            prompt = f"Generate a brief message stating that an error occurred while creating the account for '{username}'."
 
-        response_data = await llm_client.chat(
-            messages=[{"role": "user", "content": prompt}]
-        )
+        try:
+            resp = await llm_client.chat(messages=[{"role": "user", "content": prompt}])
+            text = (resp.get("message", {}) or {}).get("content", "").strip()
+        except Exception:
+            text = ""
 
-        response_text = response_data['message'].get('content', '').strip()
-        if password:
-            response_text += f"\n\n🔐 Password: `{password}`"
-        return response_text
+        if state == "created":
+            if text:
+                text += f"\n\n🔐 Password: `{password}`"
+            else:
+                text = f"Account created for **{username}**.\n🔐 Password: `{password}`"
+        elif not text:
+            text = "There was a problem creating your account."
 
+        return text
 
-    # --- WebUI Handler ---
     async def handle_webui(self, args, llm_client):
-        return "❌ SFTPGo account creation is not supported on the web UI."
+        desired = (args or {}).get("username", "").strip()
+        if not desired:
+            desired = f"guest-{secrets.token_hex(3)}"
+        username = self._sanitize_username(desired)
 
-
-    # --- IRC Handler ---
-    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         password = self.generate_random_password()
-        result = await self.create_sftp_account(user, password, None)
+        state, _welcome = await self.create_sftp_account(username, password, message_obj=None)
 
-        if result == "created":
-            prompt = f"Generate a brief message stating that an account for '{user}' has been successfully created."
-        elif result == "exists":
-            prompt = f"Generate a brief message stating that '{user}' already has an account but is trying to make a new one!"
-        else:
-            prompt = f"Generate a brief message stating that an error occurred while creating the account for '{user}'."
+        if state == "created":
+            return (
+                f"✅ Account created for **{username}**.\n"
+                f"🔐 Password: `{password}`\n"
+                "You can now log in via SFTP."
+            )
+        if state == "exists":
+            return f"ℹ️ The account **{username}** already exists."
+        if state == "token_error":
+            return "❌ Could not authenticate with SFTPGo. Please check the SFTPGo plugin settings."
+        return "❌ Failed to create the SFTP account. Please try again later."
 
-        response_data = await llm_client.chat(messages=[{"role": "user", "content": prompt}])
-        response_text = response_data['message'].get("content", "").strip()
-        if password:
-            # keep it on the same paragraph so the platform sends it as one message
-            response_text += f" Password: {password}"
+    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
+        desired = (args or {}).get("username", "").strip() or user
+        username = self._sanitize_username(desired)
+        password = self.generate_random_password()
 
-        return f"{user}: {response_text}"
+        state, _welcome = await self.create_sftp_account(username, password, message_obj=None)
+
+        if state == "created":
+            return f"{user}: Account created for {username}. Password: {password}"
+        if state == "exists":
+            return f"{user}: The account {username} already exists."
+        if state == "token_error":
+            return f"{user}: Could not authenticate with SFTPGo. Check settings."
+        return f"{user}: Failed to create the SFTP account."
+
+    # -------- Matrix handler --------
+    async def handle_matrix(self, client, room, sender, body, args, llm_client):
+        """
+        Matrix: derive a sane default username from the sender's MXID localpart,
+        allow override via args['username'], sanitize, create the account, and
+        return a plain text message (the Matrix platform will post it).
+        """
+        desired = (args or {}).get("username", "").strip()
+        if not desired:
+            # Use Matrix localpart (e.g., @alice:example.org -> alice)
+            desired = self._matrix_localpart(sender)
+        username = self._sanitize_username(desired)
+
+        password = self.generate_random_password()
+        state, _welcome = await self.create_sftp_account(username, password, message_obj=None)
+
+        if state == "created":
+            return (
+                f"✅ Account created for **{username}**.\n"
+                f"🔐 Password: `{password}`\n"
+                "You can now log in via SFTP."
+            )
+        if state == "exists":
+            return f"ℹ️ The account **{username}** already exists."
+        if state == "token_error":
+            return "❌ Could not authenticate with SFTPGo. Please check the SFTPGo plugin settings."
+        return "❌ Failed to create the SFTP account. Please try again later."
+
 
 plugin = SFTPGoAccountPlugin()

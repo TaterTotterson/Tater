@@ -28,7 +28,8 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
     description = "Generates music using ComfyUI Audio Ace."
     pretty_name = "Your Song"
     settings_category = "ComfyUI Audio Ace"
-    platforms = ["discord", "webui", "homeassistant"]
+    # ✅ Add Matrix support
+    platforms = ["discord", "webui", "homeassistant", "matrix"]
 
     required_settings = {
         "COMFYUI_AUDIO_ACE_URL": {
@@ -64,7 +65,7 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
 
     @staticmethod
     def get_base_ws(base_http: str) -> str:
-        # http://host:8188 -> ws://host:8188
+        # http://host:8188 -> ws://host:8188 ; https -> wss
         scheme = "wss" if base_http.startswith("https://") else "ws"
         return base_http.replace("http", scheme, 1)
 
@@ -248,7 +249,7 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
     def process_prompt_sync(tags: str, lyrics: str):
         """
         Returns (media_url, audio_bytes_or_None).
-        Prefer ComfyUI /view URL; also return bytes as a fallback for Discord/WebUI.
+        Prefer ComfyUI /view URL; also return bytes as a fallback for Discord/WebUI/Matrix.
         """
         base_http = ComfyUIAudioAcePlugin.get_base_http()
         base_ws   = ComfyUIAudioAcePlugin.get_base_ws(base_http)
@@ -272,7 +273,7 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
                         media_url = ComfyUIAudioAcePlugin.build_comfy_view_url(
                             base_http, filename, subfolder, folder_type
                         )
-                        # Also try fetching bytes for Discord/WebUI inline upload
+                        # Also try fetching bytes for inline upload
                         try:
                             audio_bytes = ComfyUIAudioAcePlugin.get_audio_bytes(base_http, filename, subfolder, folder_type)
                         except Exception:
@@ -282,11 +283,10 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         raise Exception("No audio returned.")
 
     async def _generate(self, prompt: str, llm_client):
-        # Full async pipeline (for Discord/WebUI)
+        # Full async pipeline (shared by Discord/WebUI/Matrix)
         tags, lyrics = await self.generate_tags_and_lyrics(prompt, llm_client)
         media_url, audio_bytes = await asyncio.to_thread(self.process_prompt_sync, tags, lyrics)
 
-        # Prefer sending the audio bytes inline to Discord/WebUI (plus a short message)
         audio_data = None
         if audio_bytes:
             audio_data = {
@@ -305,7 +305,6 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         )
         message_text = response["message"].get("content", "").strip() or "Hope you enjoy the track!"
 
-        # If we didn’t get bytes, at least share a link
         if audio_data:
             return [audio_data, message_text]
         else:
@@ -339,6 +338,24 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         except Exception as e:
             logger.exception("ComfyUIAudioAcePlugin WebUI error: %s", e)
             return [f"Failed to create song: {e}"]
+
+    # ---------------------------------------
+    # Matrix
+    # ---------------------------------------
+    async def handle_matrix(self, client, room, sender, body, args, llm_client):
+        """
+        Return an audio payload (base64) plus a short message.
+        The Matrix platform will upload/send the media (handling E2EE automatically) and persist history.
+        """
+        prompt = (args.get("prompt") or "").strip()
+        if not prompt:
+            return "No prompt provided."
+        try:
+            # Reuse the shared generator so behavior matches Discord/WebUI
+            return await self._generate(prompt, llm_client)
+        except Exception as e:
+            logger.exception("ComfyUIAudioAcePlugin Matrix error: %s", e)
+            return f"Failed to create song: {e}"
 
     # ---------------------------------------
     # Home Assistant (non-blocking: quick ack, background job)

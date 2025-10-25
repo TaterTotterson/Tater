@@ -59,7 +59,7 @@ class VisionDescriberPlugin(ToolPlugin):
         }
     }
     waiting_prompt_template = "Write a playful message telling {mention} you’re using your magnifying glass to inspect their image now! Only output that message."
-    platforms = ["discord", "webui"]
+    platforms = ["discord", "webui", "matrix", "irc"]
 
     def get_vision_settings(self):
         s = get_plugin_settings(self.settings_category)
@@ -154,8 +154,22 @@ class VisionDescriberPlugin(ToolPlugin):
         except RuntimeError:
             return asyncio.run(self._describe_latest_image("webui:chat_history"))
 
+    # --- Matrix Handler ---
+    async def handle_matrix(self, client, room, sender, body, args, llm_client):
+        """
+        Look up the most recent image from this Matrix room's stored history and describe it.
+        """
+        key = f"tater:matrix:{room.room_id}:history"
+        try:
+            asyncio.get_running_loop()
+            result = await self._describe_latest_image(key)
+        except RuntimeError:
+            result = asyncio.run(self._describe_latest_image(key))
+        # Matrix platform will post strings directly (and chunk if needed)
+        return result
+
     # --- IRC Handler ---
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
-        return f"{user}: This plugin only works via Discord and WebUI. IRC support is not available yet."
+        return f"{user}: This plugin only works via Discord, WebUI, and Matrix. IRC support is not available yet."
 
 plugin = VisionDescriberPlugin()

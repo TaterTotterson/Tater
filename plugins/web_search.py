@@ -7,7 +7,6 @@ import re
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 from dotenv import load_dotenv
-import streamlit as st
 import time
 import random
 import requests
@@ -26,7 +25,7 @@ class WebSearchPlugin(ToolPlugin):
         '  "arguments": {"query": "<search query>"}\n'
         "}\n"
     )
-    description = "Searches the web and returns summarized answers to user questions."
+    description = "Web search tool, search for more info to help answer the users questions."
     pretty_name = "Searching For More Info"
     settings_category = "Web Search"
     required_settings = {
@@ -41,8 +40,12 @@ class WebSearchPlugin(ToolPlugin):
             "default": "",
         }
     }
-    waiting_prompt_template = "Write a friendly message telling {mention} you’re searching the web for more information now! Only output that message."
-    platforms = ["discord", "webui", "irc", "homeassistant"]  # ← added HA
+    waiting_prompt_template = (
+        "Write a friendly message telling {mention} you’re searching the web for more information now! "
+        "Only output that message."
+    )
+    # ← added "matrix"
+    platforms = ["discord", "webui", "irc", "homeassistant", "matrix"]
 
     def search_web(self, query, num_results=10):
         settings = redis_client.hgetall("plugin_settings:Web Search")
@@ -50,7 +53,8 @@ class WebSearchPlugin(ToolPlugin):
         cx = settings.get("GOOGLE_CX", "")
 
         if not api_key or not cx:
-            warning = "Search is not configured. Please set your Google API key and Search Engine ID in the plugin settings."
+            warning = ("Search is not configured. Please set your Google API key and "
+                       "Search Engine ID in the plugin settings.")
             logger.warning(f"[Google CSE] {warning}")
             return [{"title": "Missing configuration", "href": "", "body": warning}]
 
@@ -98,6 +102,7 @@ class WebSearchPlugin(ToolPlugin):
             if resp.status_code != 200:
                 logger.error(f"Request failed: {resp.status_code} - {url}")
                 return None
+            from bs4 import BeautifulSoup  # local import to keep deps light elsewhere
             soup = BeautifulSoup(resp.text, "html.parser")
             for tag in soup(["script", "style", "header", "footer", "nav", "aside"]):
                 tag.decompose()
@@ -119,13 +124,6 @@ class WebSearchPlugin(ToolPlugin):
             text = text[split:].strip()
         chunks.append(text)
         return chunks
-
-    async def safe_send(self, channel, content):
-        if len(content) <= 2000:
-            await channel.send(content)
-        else:
-            for chunk in self.split_message(content, 1900):
-                await channel.send(chunk)
 
     async def _pick_link_and_summarize(self, results, query, user_question, llm_client, max_attempts=3):
         attempted_links = set()
@@ -167,7 +165,7 @@ class WebSearchPlugin(ToolPlugin):
             if not link:
                 continue
 
-            summary = await asyncio.to_thread(self.fetch_web_summary, link, llm_client.model)
+            summary = await asyncio.to_thread(self.fetch_web_summary, link, getattr(llm_client, "model", ""))
             if summary:
                 first, last = get_tater_name()
                 final_prompt = (
@@ -240,7 +238,22 @@ class WebSearchPlugin(ToolPlugin):
 
         user_q = args.get("user_question", "")
         answer = await self._pick_link_and_summarize(results, query, user_q, llm_client)
-        # keep it concise for TTS
         return (answer or "No answer available.").strip()
+
+    async def handle_matrix(self, client, room, sender, body, args, llm_client):
+        if not llm_client:
+            return "Search failed: LLM client not provided."
+
+        query = (args or {}).get("query")
+        if not query:
+            return "No search query provided."
+
+        results = self.search_web(query)
+        if not results:
+            return "No results found."
+
+        user_q = body or ""
+        answer = await self._pick_link_and_summarize(results, query, user_q, llm_client)
+        return answer
 
 plugin = WebSearchPlugin()
