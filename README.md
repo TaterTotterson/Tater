@@ -3,7 +3,7 @@
   <h1>Tater</h1>
 </div>
 
-**Tater** is an AI assistant that connects to any OpenAI API–compatible LLM, giving you a powerful set of AI-driven tools. It includes a WebUI for setup and private chats, and works across **Discord**, **IRC** and **Home Assistant**
+**Tater** is an AI assistant that connects to any OpenAI API–compatible LLM, giving you a powerful set of AI-driven tools. It includes a WebUI for setup and private chats, and works across **Discord**, **IRC**, **Matrx** and **Home Assistant**
 
 ---
 
