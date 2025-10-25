@@ -24,7 +24,7 @@ class TaterGitsAddFeedPlugin(ToolPlugin):
     description = "Adds a GitHub releases feed to the tater-gits watcher. Infers title prefix and category via LLM."
     pretty_name = "Add Git Feed"
     waiting_prompt_template = "Tell {mention} I’m analyzing that repo and adding the feed now. Output only that friendly message."
-    platforms = ["webui"]
+    platforms = ["webui", "discord", "irc", "matrix"]
     settings_category = "Tater Gits"
 
     required_settings = {
@@ -188,5 +188,29 @@ class TaterGitsAddFeedPlugin(ToolPlugin):
     # ───────────────────────── handlers ─────────────────────────
     async def handle_webui(self, args, llm_client):
         return await self._run(args.get("url"), llm_client)
+
+    async def handle_discord(self, message, args, llm_client):
+        url = (args or {}).get("url")
+        if not url:
+            return f"{message.author.mention}: ❌ Please provide a GitHub releases feed URL."
+        result = await self._run(url, llm_client)
+        return result  # Matrix/Discord layer will send/segment as needed
+
+    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
+        url = (args or {}).get("url")
+        if not url:
+            return f"{user}: ❌ Please provide a GitHub releases feed URL."
+        result = await self._run(url, llm_client)
+        return f"{user}: {result}"
+
+    async def handle_matrix(self, client, room, sender, body, args, llm_client):
+        """
+        Return plain text; Matrix platform will post it (and chunk if needed).
+        """
+        url = (args or {}).get("url")
+        if not url:
+            return "❌ Please provide a GitHub releases feed URL."
+        return await self._run(url, llm_client)
+
 
 plugin = TaterGitsAddFeedPlugin()

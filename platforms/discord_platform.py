@@ -54,19 +54,61 @@ PLATFORM_SETTINGS = {
     }
 }
 
-# ---- LM-Studio template helpers ----
+# ---- LM template helpers ----
 def _to_template_msg(role, content, sender=None):
     """
     Shape messages for the Jinja template.
     - Strings -> keep as string (optionally prefix with sender for multi-user rooms)
-    - Images  -> [{"type":"image"}]
-    - Audio   -> [{"type":"text","text":"[Audio]"}]
-    - plugin_response -> skip (return None)
+    - Images  -> [{"type":"image"}] (placeholder)
+    - Audio   -> [{"type":"text","text":"[Audio]"}] (placeholder)
+    - plugin_wait -> skip
+    - plugin_response (final) -> include text / placeholders / compact JSON
     - plugin_call -> stringify JSON as assistant text
     """
-    if isinstance(content, dict) and content.get("marker") == "plugin_response":
+
+    # --- Skip waiting lines from tools ---
+    if isinstance(content, dict) and content.get("marker") == "plugin_wait":
         return None
 
+    # --- Include final plugin responses in context (text only / placeholders) ---
+    if isinstance(content, dict) and content.get("marker") == "plugin_response":
+        phase = content.get("phase", "final")
+        if phase != "final":
+            return None
+
+        payload = content.get("content")
+
+        # 1) Plain string
+        if isinstance(payload, str):
+            txt = payload.strip()
+            if len(txt) > 4000:
+                txt = txt[:4000] + " …"
+            return {"role": "assistant", "content": txt}
+
+        # 2) Media placeholders
+        if isinstance(payload, dict) and payload.get("type") in ("image", "audio", "video"):
+            kind = payload.get("type")
+            name = payload.get("name") or ""
+            return {"role": "assistant", "content": f"[{kind.capitalize()} from tool]{f' {name}' if name else ''}".strip()}
+
+        # 3) Structured text fields
+        if isinstance(payload, dict):
+            for key in ("summary", "text", "message", "content"):
+                if isinstance(payload.get(key), str) and payload.get(key).strip():
+                    txt = payload[key].strip()
+                    if len(txt) > 4000:
+                        txt = txt[:4000] + " …"
+                    return {"role": "assistant", "content": txt}
+            # Fallback: compact JSON
+            try:
+                compact = json.dumps(payload, ensure_ascii=False)
+                if len(compact) > 2000:
+                    compact = compact[:2000] + " …"
+                return {"role": "assistant", "content": compact}
+            except Exception:
+                return None
+
+    # --- Represent plugin calls as plain text (so history still makes sense) ---
     if isinstance(content, dict) and content.get("marker") == "plugin_call":
         as_text = json.dumps({
             "function": content.get("plugin"),
@@ -74,12 +116,15 @@ def _to_template_msg(role, content, sender=None):
         }, indent=2)
         return {"role": "assistant" if role == "assistant" else role, "content": as_text}
 
+    # --- Media placeholders ---
     if isinstance(content, dict) and content.get("type") == "image":
         return {"role": role, "content": [{"type": "image"}]}
     if isinstance(content, dict) and content.get("type") == "audio":
         return {"role": role, "content": [{"type": "text", "text": "[Audio]"}]}
+    if isinstance(content, dict) and content.get("type") == "video":
+        return {"role": role, "content": [{"type": "text", "text": "[Video]"}]}
 
-    # Text + fallback
+    # --- Text + fallback ---
     if isinstance(content, str):
         if role == "user" and sender:
             return {"role": "user", "content": f"{sender}: {content}"}
@@ -319,7 +364,7 @@ class discord_platform(commands.Bot):
                             # Save waiting message to Redis
                             await self.save_message(
                                 message.channel.id, "assistant", "assistant",
-                                {"marker": "plugin_response", "content": wait_text}
+                                {"marker": "plugin_wait", "content": wait_text}
                             )
 
                             # Send waiting message to Discord
@@ -333,7 +378,7 @@ class discord_platform(commands.Bot):
                                     await safe_send(message.channel, item, self.max_response_length)
                                     await self.save_message(
                                         message.channel.id, "assistant", "assistant",
-                                        {"marker": "plugin_response", "content": item}
+                                        {"marker": "plugin_response", "phase": "final", "content": item}
                                     )
 
                                 elif isinstance(item, dict):
@@ -361,7 +406,7 @@ class discord_platform(commands.Bot):
 
                                         await self.save_message(
                                             message.channel.id, "assistant", "assistant",
-                                            {"marker": "plugin_response", "content": content_obj}
+                                            {"marker": "plugin_response", "phase": "final", "content": content_obj}
                                         )
 
                                     except Exception as e:
@@ -369,7 +414,10 @@ class discord_platform(commands.Bot):
 
                         elif isinstance(result, str):
                             await safe_send(message.channel, result, self.max_response_length)
-                            await self.save_message(message.channel.id, "assistant", "assistant", result)
+                            await self.save_message(
+                                message.channel.id, "assistant", "assistant",
+                                {"marker": "plugin_response", "phase": "final", "content": result}
+                            )
 
                     else:
                         error = await self.generate_error_message(

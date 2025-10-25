@@ -5,7 +5,6 @@ import aiohttp
 import base64
 import redis
 from plugin_base import ToolPlugin
-from helpers import redis_client
 
 class SFTPGoActivityPlugin(ToolPlugin):
     name = "sftpgo_activity"
@@ -15,11 +14,11 @@ class SFTPGoActivityPlugin(ToolPlugin):
         '  "arguments": {} \n'
         '}\n'
     )
-    description = "Retrieves current connection activity from the SFTPGo."
+    description = "Retrieves current connection activity from the SFTPGo server."
     pretty_name = "Checking FTP Activity"
     settings_category = "SFTPGo"
     waiting_prompt_template = "Write a friendly message telling {mention} you’re accessing the server to see who’s using it now! Only output that message."
-    platforms = ["discord", "webui", "irc"]
+    platforms = ["discord", "webui", "irc", "matrix"]
     required_settings = {
         "SFTPGO_API_URL": {
             "label": "SFTPGo API URL",
@@ -60,7 +59,9 @@ class SFTPGoActivityPlugin(ToolPlugin):
         return settings
 
     async def get_jwt_token(self, settings):
-        auth_header = base64.b64encode(f"{settings['SFTPGO_USERNAME']}:{settings['SFTPGO_PASSWORD']}".encode("utf-8")).decode("ascii")
+        auth_header = base64.b64encode(
+            f"{settings['SFTPGO_USERNAME']}:{settings['SFTPGO_PASSWORD']}".encode("utf-8")
+        ).decode("ascii")
         connector = aiohttp.TCPConnector(ssl=False)
         try:
             async with aiohttp.ClientSession(connector=connector) as session:
@@ -97,8 +98,10 @@ class SFTPGoActivityPlugin(ToolPlugin):
                     lines = ["Active Connections:"]
                     for c in conns:
                         lines.append(
-                            f"User: {c.get('username')}, Client: {c.get('client_version')}, "
-                            f"Protocol: {c.get('protocol')}, Last Activity: {c.get('last_activity')}"
+                            f"User: {c.get('username')}, "
+                            f"Client: {c.get('client_version')}, "
+                            f"Protocol: {c.get('protocol')}, "
+                            f"Last Activity: {c.get('last_activity')}"
                         )
                     joined = "\n".join(lines)
 
@@ -120,10 +123,10 @@ class SFTPGoActivityPlugin(ToolPlugin):
     async def handle_discord(self, message, args, llm_client):
         return await self._get_activity_summary(llm_client)
 
-    # IRC
+    # IRC (return string; the platform will send it)
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         msg = await self._get_activity_summary(llm_client)
-        await bot.privmsg(channel, f"{user}: {msg}")
+        return f"{user}: {msg}"
 
     # WebUI
     async def handle_webui(self, args, llm_client):
@@ -132,5 +135,13 @@ class SFTPGoActivityPlugin(ToolPlugin):
             return [await self._get_activity_summary(llm_client)]
         except RuntimeError:
             return [asyncio.run(self._get_activity_summary(llm_client))]
+
+    # Matrix
+    async def handle_matrix(self, client, room, sender, body, args, llm_client):
+        """
+        Return plain text; Matrix platform will post it (and chunk if needed).
+        """
+        return await self._get_activity_summary(llm_client)
+
 
 plugin = SFTPGoActivityPlugin()

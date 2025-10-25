@@ -5,16 +5,11 @@ import logging
 import asyncio
 from urllib.parse import quote
 from plugin_base import ToolPlugin
-from discord import ui, ButtonStyle
-from io import BytesIO
-import requests
-import streamlit as st
-from PIL import Image
 from helpers import redis_client
-
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
+
 
 class PremiumizeDownloadPlugin(ToolPlugin):
     name = "premiumize_download"
@@ -24,7 +19,9 @@ class PremiumizeDownloadPlugin(ToolPlugin):
         '  "arguments": {"url": "<URL to check>"}\n'
         "}\n"
     )
-    description = "Checks if a file link provided by the user is cached on Premiumize.me."
+    description = (
+        "Checks if a link (HTTP/HTTPS or magnet) is cached on Premiumize.me and, if so, returns direct download links."
+    )
     pretty_name = "Getting Links"
     settings_category = "Premiumize"
     required_settings = {
@@ -35,181 +32,136 @@ class PremiumizeDownloadPlugin(ToolPlugin):
             "description": "Your Premiumize.me API key."
         }
     }
-    waiting_prompt_template = "Write a friendly message telling {mention} you’re checking Premiumize and retrieving download links now! Only output that message."
-    platforms = ["discord", "webui", "irc"]
+    waiting_prompt_template = (
+        "Write a friendly message telling {mention} you’re checking Premiumize and retrieving download links now! "
+        "Only output that message."
+    )
+    platforms = ["discord", "webui", "irc", "matrix"]
 
+    # ------------------- API -------------------
     @staticmethod
     async def get_premiumize_download_links(item: str, api_key: str):
         """
-        Fetch download links for an item (URL or magnet link) from Premiumize.me.
-        Returns a list of file dictionaries if successful; otherwise, returns None.
+        Fetch download links for an item (URL or magnet) from Premiumize.me.
+        Returns a list of file dicts on success, else None.
         """
         api_url = "https://www.premiumize.me/api/transfer/directdl"
-        payload = {
-            "apikey": api_key,
-            "src": item
-        }
-        logger.debug(f"Fetching download links for item: {item} with payload: {payload}")
-        async with aiohttp.ClientSession() as session:
-            async with session.post(api_url, data=payload) as response:
-                logger.debug(f"Download links response status: {response.status}")
-                if response.status == 200:
-                    data = await response.json()
-                    logger.debug(f"Download links response: {data}")
-                    if data.get("status") == "success":
-                        return data.get("content", [])
-                    else:
-                        logger.error(f"Download links error: {data.get('message')}")
+        payload = {"apikey": api_key, "src": item}
+        logger.debug(f"[Premiumize] directdl payload: {payload}")
+
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            try:
+                async with session.post(api_url, data=payload) as resp:
+                    logger.debug(f"[Premiumize] status={resp.status}")
+                    if resp.status != 200:
+                        logger.error(f"[Premiumize] HTTP {resp.status}")
                         return None
-                else:
-                    logger.error(f"Failed to connect to Premiumize.me: {response.status}")
-                    return None
+                    data = await resp.json()
+            except Exception as e:
+                logger.error(f"[Premiumize] request error: {e}")
+                return None
+
+        if data.get("status") == "success":
+            return data.get("content", [])
+        logger.error(f"[Premiumize] API error: {data.get('message')}")
+        return None
 
     @staticmethod
     def encode_filename(filename: str) -> str:
+        # Encode only the path portion to avoid breaking query/fragment
         return quote(filename)
 
+    # ------------------- Renderers -------------------
     @classmethod
-    async def _process_download_web(cls, url: str, max_response_length=2000):
+    def _links_to_message(cls, url: str, links: list, max_len: int = 2000) -> str:
+        header = f"**Download Links for `{url}`:**\n"
+        body = ""
+        for f in links:
+            path = f.get("path", "")
+            link = f.get("link", "")
+            if not path or not link:
+                continue
+            encoded_path = cls.encode_filename(path)
+            safe_link = link.replace(path, encoded_path)
+            line = f"- [{path}]({safe_link})\n"
+            if len(header) + len(body) + len(line) > max_len:
+                break
+            body += line
+        return header + (body or "_No files returned by Premiumize._")
+
+    # ------------------- Core worker -------------------
+    @classmethod
+    async def _process_download_web(cls, url: str, max_response_length=2000) -> str:
         """
-        Process a Premiumize download request for the Web UI.
-        Returns a text message with download links.
+        Process a Premiumize download request and return a markdown string with links.
         """
-        # Retrieve API key from plugin settings in Redis.
-        key = "plugin_settings:Premiumize"
-        settings = redis_client.hgetall(key)
-        api_key = settings.get("PREMIUMIZE_API_KEY", "")
+        settings = redis_client.hgetall("plugin_settings:Premiumize")
+        api_key = (settings.get("PREMIUMIZE_API_KEY") or "").strip()
         if not api_key:
             return "Premiumize API key not configured."
-        logger.debug(f"Processing web download for URL: {url}")
-        download_links = await cls.get_premiumize_download_links(url, api_key)
-        if download_links:
-            links_message = f"**Download Links for `{url}`:**\n"
-            for file in download_links:
-                encoded_filename = cls.encode_filename(file['path'])
-                encoded_link = file['link'].replace(file['path'], encoded_filename)
-                new_line = f"- [{file['path']}]({encoded_link})\n"
-                if len(links_message) + len(new_line) > max_response_length:
-                    break
-                links_message += new_line
-            return links_message
-        else:
-            return f"The URL `{url}` is not cached on Premiumize.me."
 
-    @classmethod
-    async def process_download_discord(cls, channel, url: str, max_response_length=2000):
-        """
-        Process a Premiumize download request for Discord.
-        Sends download links to the provided channel.
-        """
-        key = "plugin_settings:Premiumize"
-        settings = redis_client.hgetall(key)
-        api_key = settings.get("PREMIUMIZE_API_KEY", "")
-        if not api_key:
-            await channel.send("Premiumize API key not configured.")
-            return
-        logger.debug(f"Processing download for URL: {url}")
-        download_links = await cls.get_premiumize_download_links(url, api_key)
-        if download_links:
-            if len(download_links) > 10:
-                view = cls.PaginatedLinks(download_links, f"Download Links for `{url}`")
-                await channel.send(content=view.get_page_content(), view=view)
-            else:
-                links_message = f"**Download Links for `{url}`:**\n"
-                for file in download_links:
-                    encoded_filename = cls.encode_filename(file['path'])
-                    encoded_link = file['link'].replace(file['path'], encoded_filename)
-                    new_line = f"- [{file['path']}]({encoded_link})\n"
-                    if len(links_message) + len(new_line) > max_response_length:
-                        break
-                    links_message += new_line
-                await channel.send(content=links_message)
-        else:
-            await channel.send(content=f"The URL `{url}` is not cached on Premiumize.me.")
+        logger.debug(f"[Premiumize] checking: {url}")
+        links = await cls.get_premiumize_download_links(url, api_key)
+        if links:
+            return cls._links_to_message(url, links, max_len=max_response_length)
+        return f"The URL `{url}` is not cached on Premiumize.me."
 
-    class PaginatedLinks(ui.View):
-        def __init__(self, links, title, page_size=10):
-            super().__init__()
-            self.links = links
-            self.title = title
-            self.page_size = page_size
-            self.current_page = 0
-            self.update_buttons()
-
-        def get_page_content(self):
-            start = self.current_page * self.page_size
-            end = start + self.page_size
-            page_links = self.links[start:end]
-            links_message = f"**{self.title} (Page {self.current_page + 1}):**\n"
-            for file in page_links:
-                encoded_filename = PremiumizeDownloadPlugin.encode_filename(file['path'])
-                encoded_link = file['link'].replace(file['path'], encoded_filename)
-                new_line = f"- [{file['path']}]({encoded_link})\n"
-                if len(links_message) + len(new_line) > 2000:
-                    break
-                links_message += new_line
-            return links_message
-
-        def update_buttons(self):
-            self.previous_button.disabled = self.current_page == 0
-            self.next_button.disabled = (self.current_page + 1) * self.page_size >= len(self.links)
-
-        @ui.button(label="Previous", style=ButtonStyle.grey)
-        async def previous_button(self, interaction, button):
-            if self.current_page > 0:
-                self.current_page -= 1
-                self.update_buttons()
-                await interaction.response.edit_message(content=self.get_page_content(), view=self)
-
-        @ui.button(label="Next", style=ButtonStyle.grey)
-        async def next_button(self, interaction, button):
-            if (self.current_page + 1) * self.page_size < len(self.links):
-                self.current_page += 1
-                self.update_buttons()
-                await interaction.response.edit_message(content=self.get_page_content(), view=self)
-
-    # --- Discord Handler ---
+    # ------------------- Platform handlers -------------------
     async def handle_discord(self, message, args, llm_client):
-        url = args.get("url")
+        url = (args or {}).get("url")
         if not url:
-            return f"{message.author.mention}: No URL provided for Premiumize download check."
-
+            return f"{getattr(message.author, 'mention', '')}: No URL provided for Premiumize download check."
         try:
-            result = await PremiumizeDownloadPlugin.process_download_web(url)
+            result = await self._process_download_web(url)
             return result
         except Exception as e:
-            return f"{message.author.mention}: Failed to retrieve Premiumize download links: {e}"
+            logger.exception("[Premiumize handle_discord] %s", e)
+            return f"{getattr(message.author, 'mention', '')}: Failed to retrieve Premiumize download links: {e}"
 
-    # --- WebUI Handler ---
     async def handle_webui(self, args, llm_client):
-        url = args.get("url")
+        url = (args or {}).get("url")
         if not url:
             return ["No URL provided for Premiumize download check."]
-
         try:
             asyncio.get_running_loop()
             result = await self._process_download_web(url)
         except RuntimeError:
             result = asyncio.run(self._process_download_web(url))
         except Exception as e:
+            logger.exception("[Premiumize handle_webui] %s", e)
             return [f"❌ Failed to check download: {e}"]
+        # WebUI expects a list of strings to render
+        return [result]
 
-        return result if isinstance(result, list) else [result]
-
-    # --- IRC Handler ---
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
-        url = args.get("url")
+        url = (args or {}).get("url")
         if not url:
             return f"{user}: No URL provided for Premiumize download check."
-
         try:
             asyncio.get_running_loop()
             result = await self._process_download_web(url)
         except RuntimeError:
             result = asyncio.run(self._process_download_web(url))
         except Exception as e:
+            logger.exception("[Premiumize handle_irc] %s", e)
             return f"{user}: Error checking download: {e}"
-
         return f"{user}: {result}"
+
+    async def handle_matrix(self, client, room, sender, body, args, ll_client=None, **kwargs):
+        """
+        Matrix returns a plain string; the platform will handle chunking and sending.
+        """
+        url = (args or {}).get("url")
+        prefix = f"{sender}: " if sender else ""
+        if not url:
+            return f"{prefix}No URL provided for Premiumize download check."
+        try:
+            result = await self._process_download_web(url)
+            return f"{prefix}{result}"
+        except Exception as e:
+            logger.exception("[Premiumize handle_matrix] %s", e)
+            return f"{prefix}Failed to retrieve Premiumize download links: {e}"
+
 
 plugin = PremiumizeDownloadPlugin()

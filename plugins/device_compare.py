@@ -30,8 +30,8 @@ class DeviceComparePlugin(ToolPlugin):
     description = "Compares two devices by fetching specs and per-game FPS from multiple sources, then renders image tables."
     pretty_name = "Comparing Devices"
     settings_category = "Device Compare"
-    # 🚫 IRC disabled because we’re returning images
-    platforms = ["discord", "webui"]
+    # Matrix supported (images only). IRC still not supported (images).
+    platforms = ["discord", "webui", "matrix"]
 
     required_settings = {
         "GOOGLE_API_KEY": {"label": "Google API Key", "type": "string", "default": ""},
@@ -89,11 +89,6 @@ class DeviceComparePlugin(ToolPlugin):
         results: List[Dict[str, str]],
         max_attempts: int = 3,
     ) -> tuple[dict, list[str]]:
-        """
-        Iteratively ask LLM to pick 3 spec links for THIS device by INDEX (1-based).
-        If empty or fetch fails, remove tried links and pick again from remaining.
-        Returns (specs_dict, used_sources).
-        """
         tried: set[str] = set()
         remaining = [r for r in results if r.get("href")]
 
@@ -118,11 +113,9 @@ class DeviceComparePlugin(ToolPlugin):
                 js = json.loads(extract_json(content) or "{}")
 
             raw_idxs = (js.get("arguments", {}) or {}).get("indexes", [])
-            # Fallback: first 3 candidates
             if not isinstance(raw_idxs, list) or not raw_idxs:
                 urls = [r["href"] for r in candidates[:3] if r.get("href")]
             else:
-                # Map indexes -> urls (1-based to 0-based)
                 urls = []
                 for idx in raw_idxs:
                     try:
@@ -134,7 +127,6 @@ class DeviceComparePlugin(ToolPlugin):
                     except Exception:
                         continue
 
-            # Drop already-tried and dedupe
             urls = [u for u in urls if u not in tried]
             seen = set()
             urls = [u for u in urls if not (u in seen or seen.add(u))]
@@ -209,7 +201,6 @@ class DeviceComparePlugin(ToolPlugin):
                         except Exception:
                             continue
 
-                # Drop already-tried and dedupe
                 urls = [u for u in urls if u not in tried]
                 seen = set()
                 urls = [u for u in urls if not (u in seen or seen.add(u))]
@@ -236,10 +227,8 @@ class DeviceComparePlugin(ToolPlugin):
                         "_sources": used
                     }, used
 
-            # Match specs style: include title and _sources keys even if empty
             return {"title": device, "fps_by_game": {}, "_sources": []}, []
 
-        # Try only base results (no alt queries)
         got, used = await attempt_on_results(base_results)
         if got and any(got.get("fps_by_game", {}).values()):
             return got, used
@@ -444,7 +433,6 @@ class DeviceComparePlugin(ToolPlugin):
         # Word-wrap that respects pixel widths
         def wrap_text(draw, text, font, max_px):
             text = str(text or "")
-            # Preserve explicit newlines first
             paragraphs = text.split("\n")
             out_lines = []
             for p in paragraphs:
@@ -458,11 +446,8 @@ class DeviceComparePlugin(ToolPlugin):
                     if text_width(draw, test, font) <= max_px:
                         line = test
                     else:
-                        # If a single word is too long, hard-split it
                         if text_width(draw, w, font) > max_px:
-                            # flush current line
                             out_lines.append(line)
-                            # split long word
                             chunk = ""
                             for ch in w:
                                 if text_width(draw, chunk + ch, font) <= max_px:
@@ -470,14 +455,13 @@ class DeviceComparePlugin(ToolPlugin):
                                 else:
                                     out_lines.append(chunk)
                                     chunk = ch
-                            line = chunk  # start a new line with remainder
+                            line = chunk
                         else:
                             out_lines.append(line)
                             line = w
                 out_lines.append(line)
             return out_lines
 
-        # temp draw
         tmp = Image.new("RGB", (10,10))
         d0 = ImageDraw.Draw(tmp)
 
@@ -485,31 +469,24 @@ class DeviceComparePlugin(ToolPlugin):
         row_pad_y     = 10
         header_pad_y  = 12
         col_min_px    = 150
-        line_spacing  = 4  # extra pixels between wrapped lines
+        line_spacing  = 4
 
         cols = len(headers)
 
-        # First pass: estimate column widths from header + single-line body
         col_w = [max(col_min_px, int(text_width(d0, h, header_font) + col_pad_x*2)) for h in headers]
         for r in rows:
             for i, cell in enumerate(r[:cols]):
                 col_w[i] = max(col_w[i], int(text_width(d0, cell, body_font) + col_pad_x*2))
 
-        # Scale table if too wide
         table_w = sum(col_w)
         if table_w > max_width:
             scale = max_width / table_w
             col_w = [max(col_min_px, int(w*scale)) for w in col_w]
             table_w = sum(col_w)
 
-        # Now compute WRAPPED lines per cell based on final col widths
-        # and dynamic row heights from the tallest cell in each row
-        # (draw body in a top-aligned padded block; no vertical center for multi-line)
         wrapped_rows: list[list[list[str]]] = []
         row_heights: list[int] = []
-        # line height in pixels
         line_h = text_height(d0, "Ag", body_font)
-
         header_h = max(text_height(d0, h, header_font) for h in headers) + header_pad_y*2
 
         for r in rows:
@@ -534,20 +511,16 @@ class DeviceComparePlugin(ToolPlugin):
         img = Image.new("RGB", (img_w, img_h), PALETTE["bg"])
         d = ImageDraw.Draw(img)
 
-        # card
         def rr(xy, r, fill): d.rounded_rectangle(xy, radius=r, fill=fill)
         rr((card_pad, card_pad + title_h, card_pad+table_w, card_pad + title_h + grid_h), 18, PALETTE["card"])
 
-        # title
         if title:
             d.text((card_pad, card_pad), title, font=title_font, fill=PALETTE["accent"])
 
-        # header bg
         x = card_pad
         y = card_pad + title_h
         d.rectangle((x, y, x+table_w, y+header_h), fill=PALETTE["header_bg"])
 
-        # grid lines (outer + column separators)
         cx = x
         for w in col_w:
             d.line((cx, y, cx, y+grid_h), fill=PALETTE["grid"], width=1)
@@ -555,20 +528,17 @@ class DeviceComparePlugin(ToolPlugin):
         d.line((x+table_w, y, x+table_w, y+grid_h), fill=PALETTE["grid"],  width=1)
         d.line((x, y+header_h, x+table_w, y+header_h), fill=PALETTE["grid"], width=1)
 
-        # per-row horizontal lines
         ry = y + header_h
         for rh in row_heights:
             d.line((x, ry+rh, x+table_w, ry+rh), fill=PALETTE["grid"], width=1)
             ry += rh
 
-        # header text (vertically centered in header band)
         cx = x
         for i, h in enumerate(headers):
             hh = text_height(d0, h, header_font)
             d.text((cx + col_pad_x, y + (header_h - hh)//2), str(h), font=header_font, fill=PALETTE["muted"])
             cx += col_w[i]
 
-        # body text (wrapped)
         ry = y + header_h
         for r_idx, wrapped_row in enumerate(wrapped_rows):
             cx = x
@@ -576,7 +546,6 @@ class DeviceComparePlugin(ToolPlugin):
             inner_top = ry + row_pad_y
             for i in range(cols):
                 lines = wrapped_row[i]
-                # draw each line inside the cell bounds
                 ly = inner_top
                 for line in lines:
                     d.text((cx + col_pad_x, ly), line, font=body_font, fill=PALETTE["text"])
@@ -589,11 +558,6 @@ class DeviceComparePlugin(ToolPlugin):
         return buf.getvalue()
     
     async def _should_fetch_fps(self, llm_client, device: str, specs: Dict[str, Any]) -> bool:
-        """
-        Ask the LLM to decide if per-game FPS search is appropriate for this device.
-        It must return ONLY JSON:
-          {"function":"decide","arguments":{"allow_fps":true|false,"reason":"..."}}
-        """
         summary = {
             "device": device,
             "title": specs.get("title", ""),
@@ -608,7 +572,7 @@ class DeviceComparePlugin(ToolPlugin):
             "refresh_rate": specs.get("refresh_rate", ""),
             "ports": specs.get("ports", ""),
             "os": specs.get("os", ""),
-            "category_hint": "",  # keep for future if you add category detection
+            "category_hint": "",
         }
 
         first, last = get_tater_name()
@@ -642,7 +606,6 @@ class DeviceComparePlugin(ToolPlugin):
         if not cfg["api_key"] or not cfg["cx"]:
             return {"error": "Search is not configured. Please add GOOGLE_API_KEY and GOOGLE_CX in Device Compare settings."}
 
-        # SPEC side (per device, with retries)
         results_a = self.google_search(f"{device_a} official hardware specifications tech specs", cfg["spec_results"])
         results_b = self.google_search(f"{device_b} official hardware specifications tech specs", cfg["spec_results"])
         if not results_a or not results_b:
@@ -651,13 +614,11 @@ class DeviceComparePlugin(ToolPlugin):
         specs_a, spec_src_a = await self._pick_specs_with_retries(llm_client, device_a, results_a, max_attempts=3)
         specs_b, spec_src_b = await self._pick_specs_with_retries(llm_client, device_b, results_b, max_attempts=3)
 
-        # FPS side
         fps_sources_a = []
         fps_sources_b = []
         fps_rows = []
 
         if cfg["enable_fps"]:
-            # Ask if FPS makes sense for each device
             should_a = await self._should_fetch_fps(llm_client, device_a, specs_a)
             should_b = await self._should_fetch_fps(llm_client, device_b, specs_b)
 
@@ -667,7 +628,6 @@ class DeviceComparePlugin(ToolPlugin):
                 fps_a, fps_src_a = await self._pick_fps_with_retries(
                     llm_client, device_a, fps_res_a, max_attempts=3
                 )
-                # Always attach the dict (it includes title/fps_by_game/_sources)
                 specs_a["fps_by_game"] = fps_a.get("fps_by_game", {})
                 fps_sources_a = fps_src_a
 
@@ -680,21 +640,17 @@ class DeviceComparePlugin(ToolPlugin):
                 specs_b["fps_by_game"] = fps_b.get("fps_by_game", {})
                 fps_sources_b = fps_src_b
 
-            # Build FPS rows only if we actually found any game entries
             if (specs_a.get("fps_by_game") and any(specs_a["fps_by_game"].values())) or \
                (specs_b.get("fps_by_game") and any(specs_b["fps_by_game"].values())):
                 fps_rows = self._build_fps_rows(specs_a, specs_b, cfg["max_fps_rows"])
 
-        # ensure titles+sources
         specs_a.setdefault("title", device_a)
         specs_b.setdefault("title", device_b)
         specs_a.setdefault("_sources", spec_src_a)
         specs_b.setdefault("_sources", spec_src_b)
 
-        # build rows for images
         spec_rows = self._build_rows(specs_a, specs_b)
 
-        # sources text
         sources_lines = []
         if specs_a.get("_sources"):     sources_lines.append("- Device A (specs): " + "; ".join(specs_a["_sources"]))
         if fps_sources_a:               sources_lines.append("- Device A (FPS): "   + "; ".join(fps_sources_a))
@@ -711,6 +667,16 @@ class DeviceComparePlugin(ToolPlugin):
             "sources_text": sources_text
         }
 
+    # ---------- platform helpers ----------
+    def _img_payload(self, png_bytes: bytes, name: str = "image.png") -> Dict[str, Any]:
+        """Return a cross-platform image payload (Matrix/Discord/WebUI compatible)."""
+        return {
+            "type": "image",
+            "mimetype": "image/png",
+            "name": name,
+            "data": base64.b64encode(png_bytes).decode("ascii"),
+        }
+
     # ---------- platform handlers ----------
     async def handle_discord(self, message, args, llm_client):
         a = args.get("device_a","").strip()
@@ -724,39 +690,25 @@ class DeviceComparePlugin(ToolPlugin):
 
         out = []
 
-        # spec image
         spec_png = self._render_table_image(
             headers=data["spec_headers"],
             rows=data["spec_rows"],
             title=data["title"]
         )
-        out.append({
-            "type": "image",
-            "mimetype": "image/png",
-            "name": "comparison.png",
-            "bytes": spec_png,
-        })
+        out.append(self._img_payload(spec_png, "comparison.png"))
 
-        # optional FPS image
         if data.get("fps_rows"):
             fps_png = self._render_table_image(
                 headers=data["fps_headers"],
                 rows=data["fps_rows"],
                 title="Per-Game FPS"
             )
-            out.append({
-                "type": "image",
-                "mimetype": "image/png",
-                "name": "fps.png",
-                "bytes": fps_png,
-            })
+            out.append(self._img_payload(fps_png, "fps.png"))
 
-        # sources text
         if data.get("sources_text"):
             out.append("**Sources**\n" + data["sources_text"])
 
         return out
-
 
     async def handle_webui(self, args, llm_client):
         a = args.get("device_a","").strip()
@@ -770,34 +722,60 @@ class DeviceComparePlugin(ToolPlugin):
 
         out = []
 
-        # spec image
         spec_png = self._render_table_image(
             headers=data["spec_headers"],
             rows=data["spec_rows"],
             title=data["title"]
         )
-        out.append({
-            "type": "image",
-            "mimetype": "image/png",
-            "name": "comparison.png",
-            "data": base64.b64encode(spec_png).decode("ascii"),
-        })
+        out.append(self._img_payload(spec_png, "comparison.png"))
 
-        # optional FPS image
         if data.get("fps_rows"):
             fps_png = self._render_table_image(
                 headers=data["fps_headers"],
                 rows=data["fps_rows"],
                 title="Per-Game FPS"
             )
-            out.append({
-                "type": "image",
-                "mimetype": "image/png",
-                "name": "fps.png",
-                "data": base64.b64encode(fps_png).decode("ascii"),
-            })
+            out.append(self._img_payload(fps_png, "fps.png"))
 
-        # sources text
+        if data.get("sources_text"):
+            out.append("**Sources**\n" + data["sources_text"])
+
+        return out
+
+    # ---------- Matrix ----------
+    async def handle_matrix(self, client, room, sender, body, args, llm_client=None, **kwargs):
+        """
+        Returns image payloads with base64 'data' so the Matrix platform can upload them
+        (and auto-encrypt via 'file' when the room is E2EE).
+        """
+        if llm_client is None:
+            llm_client = kwargs.get("llm") or kwargs.get("ll_client") or kwargs.get("llm_client")
+        a = (args or {}).get("device_a","").strip()
+        b = (args or {}).get("device_b","").strip()
+        if not a or not b:
+            return ['Please provide two devices: {"device_a": "...", "device_b": "..."}']
+
+        data = await self._pipeline(a, b, llm_client)
+        if "error" in data:
+            return [data["error"]]
+
+        out = []
+
+        spec_png = self._render_table_image(
+            headers=data["spec_headers"],
+            rows=data["spec_rows"],
+            title=data["title"]
+        )
+        out.append(self._img_payload(spec_png, "comparison.png"))
+
+        if data.get("fps_rows"):
+            fps_png = self._render_table_image(
+                headers=data["fps_headers"],
+                rows=data["fps_rows"],
+                title="Per-Game FPS"
+            )
+            out.append(self._img_payload(fps_png, "fps.png"))
+
         if data.get("sources_text"):
             out.append("**Sources**\n" + data["sources_text"])
 

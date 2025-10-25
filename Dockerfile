@@ -9,12 +9,16 @@ ENV PIP_NO_CACHE_DIR=1 \
 WORKDIR /app
 
 # Install system dependencies + CA certs (for HTTPS)
+# + libolm-dev + libffi-dev + pkg-config to build python-olm (Matrix E2EE)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     build-essential \
     libpq-dev \
     wget \
     ffmpeg \
+    libolm-dev \
+    libffi-dev \
+    pkg-config \
  && update-ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
