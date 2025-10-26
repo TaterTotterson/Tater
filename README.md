@@ -15,42 +15,43 @@
 | `homeassistant`   | Native integration for [Home Assistant](https://github.com/TaterTotterson/Tater-HomeAssistant), allowing Tater to act as a voice-enabled AI assistant through the Assist pipeline and control smart devices directly. |
 | `automations`     | AI-powered [Home Assistant](https://github.com/TaterTotterson/Tater-HomeAssistant) automation endpoint that interprets structured commands and executes automation-specific plugins — designed for instant, no-chat actions like doorbell alerts or triggered events. |
 | `irc`             | Lightweight IRC bot that responds to mentions and runs compatible plugins.                      |
+| `matrix`          | Modern Matrix client with end-to-end encryption support, Markdown rendering, and full plugin compatibility — bringing Tater to federated chat networks like Element and Cinny. |
 | `webui`           | Streamlit-based WebUI for chatting, configuring plugins, and managing settings.                 |
 
 ## 🧩 Tater Plugin Overview
 
 The following plugins can be triggerd simple by asking Tater after you enable them, ex: ``` Tater summarize this youtube video http://youtube.com/watch?v=000000 ```
 
-| Plugin Name                   | Description                                                                 | Platform              |
-|-------------------------------|-----------------------------------------------------------------------------|-----------------------|
-| `automatic_plugin`            | Generates images using AUTOMATIC1111 API based on user prompt               | discord, webui        |
-| `camera_event`                | Detects motion, describes it with Vision AI, and logs structured events with cooldown. | automations           |
-| `comfyui_audio_ace`           | Composes full-length songs using AceStep. Generates lyrics, tags, and MP3s  | discord, webui, homeassistant |
-| `comfyui_image_plugin`        | Generates images with ComfyUI using custom workflow templates               | discord, webui        |
-| `comfyui_image_video`         | Animates images into WebP loops using ComfyUI.                              | webui                 |
-| `comfyui_music_video_plugin`  | Generates complete AI music videos with lyrics, audio, and visuals          | webui                 |
-| `comfyui_video_plugin`        | Creates videos from prompts using ComfyUI and video workflows               | webui                 |
-| `device_compare`              | Compares two devices, fetching specs and FPS benchmarks from online sources | discord, webui        |
-| `doorbell_alert`              | Triggers when the doorbell rings — captures a snapshot from a Home Assistant camera, analyzes it with Vision AI, announces who or what is at the door via Piper TTS, and now logs events to the Automations Platform. | automations           |
-| `emoji_ai_responder`          | Picks a relevant emoji based on a message when someone reacts to it         | discord               |
-| `events_query`                | Summarizes all stored events by time, area, or activity.                    | webui, homeassistant  |
-| `ftp_browser`                 | Allows users to browse FTP servers via Discord                              | discord               |
-| `ha_control`                  | Controls Home Assistant devices via domain, service, entity, or area (e.g., turn lights on, toggle switches, set temperatures). | webui, homeassistant  |
-| `lowfi_video`                 | Generates lofi music videos, outputs 20-min MP4                             | webui                 |
-| `obsidian_note`               | Creates new notes in your Obsidian vault with AI-generated titles and content | webui                 |
-| `obsidian_search`             | Searches your entire Obsidian vault and extracts relevant notes to answer questions | webui                 |
-| `overseerr_request`           | Adds a movie or TV show to Overseerr by title, creating a new request for it. Example: add the movie F1, request the TV show One Piece. | webui, homeassistant  |
-| `overseerr_trending`          | Fetches Trending or Upcoming movies/TV shows from Overseerr. Example: what movies are trending, what TV shows are upcoming. | webui, homeassistant  |
-| `premiumize_download`         | Checks Premiumize for cached file links and returns downloads               | discord, webui, irc   |
-| `premiumize_torrent`          | Checks if a torrent is cached on Premiumize and returns download links      | discord               |
-| `sftpgo_account`              | Creates SFTPGo user accounts and their credentials                          | discord, irc          |
-| `sftpgo_activity`             | Views SFTPGo user activity like file transfers and sessions                 | discord, irc          |
-| `tater_gits_add_feed`         | Adds a GitHub releases feed to the Tater Gits watcher with auto category    | discord, webui, irc   |
-| `vision_describer`            | Analyzes uploaded images and returns AI-generated descriptions              | discord, webui        |
-| `web_search`                  | Performs web search to help answer user questions                           | discord, webui, irc, homeassistant |
-| `web_summary`                 | Summarizes content from a provided URL                                      | discord, webui, irc   |
-| `webdav_browser`              | Allows browsing and downloading files from WebDAV servers                   | discord               |
-| `youtube_summary`             | Summarizes YouTube videos.                                                  | discord, webui, irc   |
+| Plugin Name                   | Description                                                                 | Platform                                   |
+|-------------------------------|-----------------------------------------------------------------------------|--------------------------------------------|
+| `automatic_plugin`            | Generates images using AUTOMATIC1111 API based on user prompt               | discord, webui                             |
+| `camera_event`                | Detects motion, describes it with Vision AI, and logs structured events with cooldown. | automations                                |
+| `comfyui_audio_ace`           | Composes full-length songs using AceStep. Generates lyrics, tags, and MP3s  | discord, webui, homeassistant, matrix      |
+| `comfyui_image_plugin`        | Generates images with ComfyUI using custom workflow templates               | discord, webui, matrix                     |
+| `comfyui_image_video`         | Animates images into WebP loops using ComfyUI.                              | webui                                      |
+| `comfyui_music_video_plugin`  | Generates complete AI music videos with lyrics, audio, and visuals          | webui                                      |
+| `comfyui_video_plugin`        | Creates videos from prompts using ComfyUI and video workflows               | webui                                      |
+| `device_compare`              | Compares two devices, fetching specs and FPS benchmarks from online sources | discord, webui, matrix                     |
+| `doorbell_alert`              | Triggers when the doorbell rings — captures a snapshot from a Home Assistant camera, analyzes it with Vision AI, announces who or what is at the door via Piper TTS, and now logs events to the Automations Platform. | automations                                |
+| `emoji_ai_responder`          | Picks a relevant emoji based on a message when someone reacts to it         | discord                                   |
+| `events_query`                | Summarizes all stored events by time, area, or activity.                    | webui, homeassistant                       |
+| `ftp_browser`                 | Allows users to browse FTP servers via Discord                              | discord                                   |
+| `ha_control`                  | Controls Home Assistant devices via domain, service, entity, or area (e.g., turn lights on, toggle switches, set temperatures). | webui, homeassistant                       |
+| `lowfi_video`                 | Generates lofi music videos, outputs 20-min MP4                             | webui                                      |
+| `obsidian_note`               | Creates new notes in your Obsidian vault with AI-generated titles and content | webui                                      |
+| `obsidian_search`             | Searches your entire Obsidian vault and extracts relevant notes to answer questions | webui                                 |
+| `overseerr_request`           | Adds a movie or TV show to Overseerr by title, creating a new request for it. Example: add the movie F1, request the TV show One Piece. | webui, homeassistant                       |
+| `overseerr_trending`          | Fetches Trending or Upcoming movies/TV shows from Overseerr. Example: what movies are trending, what TV shows are upcoming. | webui, homeassistant, matrix               |
+| `premiumize_download`         | Checks Premiumize for cached file links and returns downloads               | discord, webui, irc, matrix                |
+| `premiumize_torrent`          | Checks if a torrent is cached on Premiumize and returns download links      | discord                                   |
+| `sftpgo_account`              | Creates SFTPGo user accounts and their credentials                          | discord, irc                              |
+| `sftpgo_activity`             | Views SFTPGo user activity like file transfers and sessions                 | discord, irc, matrix                       |
+| `tater_gits_add_feed`         | Adds a GitHub releases feed to the Tater Gits watcher with auto category    | discord, webui, irc                        |
+| `vision_describer`            | Analyzes uploaded images and returns AI-generated descriptions              | discord, webui, matrix                     |
+| `web_search`                  | Performs web search to help answer user questions                           | discord, webui, irc, homeassistant, matrix |
+| `web_summary`                 | Summarizes content from a provided URL                                      | discord, webui, irc, matrix                |
+| `webdav_browser`              | Allows browsing and downloading files from WebDAV servers                   | discord                                   |
+| `youtube_summary`             | Summarizes YouTube videos.                                                  | discord, webui, irc, matrix                |
 
 ### 📡 RSS Feed Watcher (Built-in)
 
