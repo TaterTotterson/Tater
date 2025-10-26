@@ -13,7 +13,7 @@
 |-------------------|-------------------------------------------------------------------------------------------------|
 | `discord`         | Full-featured Discord bot that runs compatible plugins.                                         |
 | `homeassistant`   | Native integration for [Home Assistant](https://github.com/TaterTotterson/Tater-HomeAssistant), allowing Tater to act as a voice-enabled AI assistant through the Assist pipeline and control smart devices directly. |
-| `automations`     | AI-powered [Home Assistant](https://github.com/TaterTotterson/Tater-HomeAssistant) automation endpoint that interprets structured commands and executes automation-specific plugins — designed for instant, no-chat actions like doorbell alerts or triggered events. |
+| `ha_automations`     | AI-powered [Home Assistant](https://github.com/TaterTotterson/Tater-HomeAssistant) automation endpoint that interprets structured commands and executes automation-specific plugins — designed for instant, no-chat actions like doorbell alerts or triggered events. |
 | `irc`             | Lightweight IRC bot that responds to mentions and runs compatible plugins.                      |
 | `matrix`          | Modern Matrix client with end-to-end encryption support, Markdown rendering, and full plugin compatibility — bringing Tater to federated chat networks like Element and Cinny. |
 | `webui`           | Streamlit-based WebUI for chatting, configuring plugins, and managing settings.                 |
