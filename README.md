@@ -41,11 +41,11 @@ The following plugins can be triggerd simple by asking Tater after you enable th
 | `obsidian_note`               | Creates new notes in your Obsidian vault with AI-generated titles and content | webui                                      |
 | `obsidian_search`             | Searches your entire Obsidian vault and extracts relevant notes to answer questions | webui                                 |
 | `overseerr_request`           | Adds a movie or TV show to Overseerr by title, creating a new request for it. Example: add the movie F1, request the TV show One Piece. | webui, homeassistant                       |
-| `overseerr_trending`          | Fetches Trending or Upcoming movies/TV shows from Overseerr. Example: what movies are trending, what TV shows are upcoming. | webui, homeassistant, matrix               |
+| `overseerr_trending`          | Fetches Trending or Upcoming movies/TV shows from Overseerr. Example: what movies are trending, what TV shows are upcoming. | discord, webui, irc, matrix               |
 | `premiumize_download`         | Checks Premiumize for cached file links and returns downloads               | discord, webui, irc, matrix                |
 | `premiumize_torrent`          | Checks if a torrent is cached on Premiumize and returns download links      | discord                                   |
-| `sftpgo_account`              | Creates SFTPGo user accounts and their credentials                          | discord, irc                              |
-| `sftpgo_activity`             | Views SFTPGo user activity like file transfers and sessions                 | discord, irc, matrix                       |
+| `sftpgo_account`              | Creates SFTPGo user accounts and their credentials                          | discord, webui, irc, matrix                              |
+| `sftpgo_activity`             | Views SFTPGo user activity like file transfers and sessions                 | discord, webui, irc, matrix                       |
 | `tater_gits_add_feed`         | Adds a GitHub releases feed to the Tater Gits watcher with auto category    | discord, webui, irc                        |
 | `vision_describer`            | Analyzes uploaded images and returns AI-generated descriptions              | discord, webui, matrix                     |
 | `web_search`                  | Performs web search to help answer user questions                           | discord, webui, irc, homeassistant, matrix |
