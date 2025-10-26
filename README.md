@@ -38,6 +38,7 @@ The following plugins can be triggerd simple by asking Tater after you enable th
 | `ftp_browser`                 | Allows users to browse FTP servers via Discord                              | discord                                   |
 | `ha_control`                  | Controls Home Assistant devices via domain, service, entity, or area (e.g., turn lights on, toggle switches, set temperatures). | webui, homeassistant                       |
 | `lowfi_video`                 | Generates lofi music videos, outputs 20-min MP4                             | webui                                      |
+| `mister_remote`               | Controls MiSTer FPGA via MiSTer Remote API — play, menu, now-playing, and screenshots. Natural language parsing and per-platform output (Discord uploads, WebUI inline, Matrix embedded, voice-safe for HA). | discord, webui, irc, homeassistant, matrix |
 | `obsidian_note`               | Creates new notes in your Obsidian vault with AI-generated titles and content | webui                                      |
 | `obsidian_search`             | Searches your entire Obsidian vault and extracts relevant notes to answer questions | webui                                 |
 | `overseerr_request`           | Adds a movie or TV show to Overseerr by title, creating a new request for it. Example: add the movie F1, request the TV show One Piece. | webui, homeassistant                       |
