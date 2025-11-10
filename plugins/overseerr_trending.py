@@ -46,7 +46,7 @@ class OverseerrTrendingPlugin(ToolPlugin):
         },
     }
     waiting_prompt_template = "Give {mention} a short, cheerful note that you’re fetching the latest lists from Overseerr now. Only output that message."
-    platforms = ["discord", "webui", "irc", "homeassistant", "matrix"]  # ← added matrix
+    platforms = ["discord", "webui", "irc", "homeassistant", "matrix", "homekit"]
 
     # ---------- Internals ----------
     @staticmethod
@@ -240,7 +240,6 @@ class OverseerrTrendingPlugin(ToolPlugin):
             logger.exception("[Overseerr handle_homeassistant] %s", e)
             return "There was an error fetching results."
 
-    # ----- NEW: Matrix -----
     async def handle_matrix(self, client, room, sender, body, args, llm_client=None, **kwargs):
         """
         Matrix returns a plain string; the Matrix platform will send it (and encrypt if the room is E2EE).
@@ -253,6 +252,17 @@ class OverseerrTrendingPlugin(ToolPlugin):
         except Exception as e:
             logger.exception("[Overseerr handle_matrix] %s", e)
             return f"Error: {e}"
+
+    async def handle_homekit(self, args, llm_client):
+        """
+        HomeKit/Siri output: concise, TTS-friendly summary of trending/upcoming.
+        """
+        try:
+            answer = await self._answer(args or {}, llm_client)
+            return self._siri_flatten(answer)
+        except Exception as e:
+            logger.exception("[Overseerr handle_homekit] %s", e)
+            return "There was an error fetching results."
 
     # ---------- Utilities ----------
     def split_message(self, text, chunk_size=1500):
@@ -270,6 +280,30 @@ class OverseerrTrendingPlugin(ToolPlugin):
         else:
             for chunk in self.split_message(content, 1900):
                 await channel.send(chunk)
+
+    def _siri_flatten(self, text: str | None) -> str:
+        """Make responses clean for Siri TTS (no markdown noise, compact one-liner or short list)."""
+        if not text:
+            return "No results right now."
+        out = str(text).strip()
+
+        # Strip heavy markdown/emphasis
+        out = re.sub(r"[`*_]{1,3}", "", out)
+
+        # If it looks like a list, keep the first ~6 items as a short, comma-separated line.
+        lines = [ln.strip("-• ").strip() for ln in out.splitlines() if ln.strip()]
+        if len(lines) > 1:
+            # Keep first 6 items to avoid long TTS
+            head = lines[:6]
+            # If items contain years already (Title (Year)), keep as-is.
+            joined = ", ".join(head)
+            if len(lines) > 6:
+                joined += " …"
+            return joined[:500]
+
+        # Otherwise return a compact single line
+        out = re.sub(r"\s+", " ", out)
+        return out[:500]            
 
 
 plugin = OverseerrTrendingPlugin()

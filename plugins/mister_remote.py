@@ -35,7 +35,7 @@ class MisterRemotePlugin(ToolPlugin):
         "Examples users might say: 'play super mario 3 on mister', 'what’s playing?', 'go to menu', 'take a screenshot'."
     )
 
-    platforms = ["discord", "webui", "irc", "homeassistant", "matrix"]
+    platforms = ["discord", "webui", "irc", "homeassistant", "matrix", "homekit"]
 
     usage = (
         "{\n"
@@ -398,6 +398,24 @@ class MisterRemotePlugin(ToolPlugin):
 
         return ["Screenshot requested, but I couldn’t find the new file yet."]
 
+    def _siri_flatten(self, out):
+        # Prefer a plain string; if list (e.g., screenshot result), pick a text caption.
+        if isinstance(out, list):
+            for item in out:
+                if isinstance(item, str):
+                    out = item
+                    break
+            else:
+                return "Done."
+        if not isinstance(out, str):
+            out = str(out)
+
+        # Strip simple markdown so Siri reads cleanly.
+        out = re.sub(r"[`*_]{1,3}", "", out)
+        out = re.sub(r"\s+", " ", out).strip()
+        # Keep it short-ish for TTS; tweak if you like.
+        return out[:350]
+
     # ---------------- Dispatcher -----------------
     async def _handle_async(self, args: dict, llm_client):
         cmd = _strip((args or {}).get("command", ""))
@@ -477,5 +495,10 @@ class MisterRemotePlugin(ToolPlugin):
         if not _strip(args.get("utterance","")):
             args["utterance"] = (body or "").strip()
         return await self._handle_async(args, llm_client)
+
+    async def handle_homekit(self, args, llm_client):
+        args = args or {}
+        out = await self._handle_async(args, llm_client)
+        return self._siri_flatten(out)
 
 plugin = MisterRemotePlugin()

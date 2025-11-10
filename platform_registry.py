@@ -4,6 +4,7 @@ from platforms.irc_platform import PLATFORM_SETTINGS as irc_settings
 from platforms.homeassistant_platform import PLATFORM_SETTINGS as ha_settings
 from platforms.ha_automations_platform import PLATFORM_SETTINGS as automations_settings
 from platforms.matrix_platform import PLATFORM_SETTINGS as matrix_settings
+from platforms.homekit_platform import PLATFORM_SETTINGS as homekit_settings  # 🆕 added
 
 platform_registry = [
     {
@@ -30,5 +31,10 @@ platform_registry = [
         **automations_settings,
         "key": "ha_automations_platform",
         "label": "Automation Settings",
+    },
+    {
+        **homekit_settings,
+        "key": "homekit_platform",
+        "label": "HomeKit / Siri Settings",
     },
 ]
