@@ -45,7 +45,7 @@ class WebSearchPlugin(ToolPlugin):
         "Only output that message."
     )
     # ← added "matrix"
-    platforms = ["discord", "webui", "irc", "homeassistant", "matrix"]
+    platforms = ["discord", "webui", "irc", "homeassistant", "matrix", "homekit"]
 
     def search_web(self, query, num_results=10):
         settings = redis_client.hgetall("plugin_settings:Web Search")
@@ -182,6 +182,19 @@ class WebSearchPlugin(ToolPlugin):
 
         return "Sorry, I couldn't extract content from any of the top results."
 
+
+    def _siri_flatten(self, text: str | None) -> str:
+        """Make responses clean for Siri TTS (no markdown noise, compact, short-ish)."""
+        if not text:
+            return "No answer available."
+        out = str(text)
+        # strip simple markdown emphasis/backticks
+        out = re.sub(r"[`*_]{1,3}", "", out)
+        # collapse whitespace
+        out = re.sub(r"\s+", " ", out).strip()
+        # keep it reasonably short for spoken response
+        return out[:450]
+
     # -------- Platform handlers --------
     async def handle_discord(self, message, args, llm_client):
         query = args.get("query")
@@ -255,5 +268,20 @@ class WebSearchPlugin(ToolPlugin):
         user_q = body or ""
         answer = await self._pick_link_and_summarize(results, query, user_q, llm_client)
         return answer
+    
+    async def handle_homekit(self, args, llm_client):
+        args = args or {}
+        query = args.get("query")
+        if not query:
+            return "No search query provided."
+
+        results = self.search_web(query)
+        if not results:
+            return "No results found."
+
+        user_q = args.get("user_question", "")
+        answer = await self._pick_link_and_summarize(results, query, user_q, llm_client)
+        return self._siri_flatten(answer)
+
 
 plugin = WebSearchPlugin()

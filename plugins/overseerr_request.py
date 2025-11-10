@@ -57,7 +57,7 @@ class OverseerrRequestPlugin(ToolPlugin):
         "Tell {mention} you’re adding their title to Overseerr now. "
         "Keep it short and friendly. Only output that message."
     )
-    platforms = ["webui", "homeassistant"]  # simplified: no Discord/IRC
+    platforms = ["webui", "homeassistant", "homekit"]  # simplified: no Discord/IRC
 
     # ---------- Settings ----------
     @staticmethod
@@ -344,6 +344,20 @@ class OverseerrRequestPlugin(ToolPlugin):
         clean = re.sub(r"[()]", "", clean)  # remove parentheses
         clean = clean.strip(" .")
 
+        return f"{clean} has been added to your requests."
+
+    async def handle_homekit(self, args, llm_client):
+        """
+        HomeKit/Siri TTS output:
+          e.g. "One Battle After Another 2025 has been added to your requests"
+        (Same style as Home Assistant, parentheses removed for cleaner speech.)
+        """
+        raw = self._do_request_flow(args)
+        clean = re.sub(r"^Requested\s+", "", raw)
+        clean = re.sub(r"\(status:.*?\)", "", clean, flags=re.IGNORECASE)
+        clean = re.sub(r"\[request #.*?\]", "", clean)
+        clean = re.sub(r"[()]", "", clean)  # remove parentheses
+        clean = clean.strip(" .")
         return f"{clean} has been added to your requests."
 
 
