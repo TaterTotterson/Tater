@@ -9,14 +9,15 @@
 
 ## 🌐 Tater Platform Overview
 
-| Platform          | Description                                                                                     |
-|-------------------|-------------------------------------------------------------------------------------------------|
-| `discord`         | Full-featured Discord bot that runs compatible plugins.                                         |
-| `homeassistant`   | Native integration for [Home Assistant](https://github.com/TaterTotterson/Tater-HomeAssistant), allowing Tater to act as a voice-enabled AI assistant through the Assist pipeline and control smart devices directly. |
-| `ha_automations`     | AI-powered [Home Assistant](https://github.com/TaterTotterson/Tater-HomeAssistant) automation endpoint that interprets structured commands and executes automation-specific plugins — designed for instant, no-chat actions like doorbell alerts or triggered events. |
-| `irc`             | Lightweight IRC bot that responds to mentions and runs compatible plugins.                      |
-| `matrix`          | Modern Matrix client with end-to-end encryption support, Markdown rendering, and full plugin compatibility — bringing Tater to federated chat networks like Element and Cinny. |
-| `webui`           | Streamlit-based WebUI for chatting, configuring plugins, and managing settings.                 |
+| Platform          | Description                                                                                                                                                                                                                       |
+|-------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `discord`         | Full-featured Discord bot that runs compatible plugins.                                                                                                                                                                           |
+| `homeassistant`   | Native integration for [Home Assistant](https://github.com/TaterTotterson/Tater-HomeAssistant), allowing Tater to act as a voice-enabled AI assistant through the Assist pipeline and control smart devices directly.             |
+| `ha_automations`  | AI-powered [Home Assistant](https://github.com/TaterTotterson/Tater-HomeAssistant) automation endpoint that interprets structured commands and executes automation-specific plugins — designed for instant, no-chat actions like doorbell alerts or triggered events. |
+| `homekit`         | Siri / Apple Shortcuts integration for [HomeKit](https://github.com/TaterTotterson/Tater/wiki/How-to-Build-the-%E2%80%9CTater%E2%80%9D-Shortcut), enabling “Hey Siri, ask Tater…” voice commands, per-device conversation sessions, and plugin-backed actions. |
+| `irc`             | Lightweight IRC bot that responds to mentions and runs compatible plugins.                                                                                                                                                        |
+| `matrix`          | Modern Matrix client with end-to-end encryption support, Markdown rendering, and full plugin compatibility — bringing Tater to federated chat networks like Element and Cinny.                                                    |
+| `webui`           | Streamlit-based WebUI for chatting, configuring plugins, and managing settings.                                                                                                                                                  |
 
 ## 🧩 Tater Plugin Overview
 
@@ -38,18 +39,18 @@ The following plugins can be triggerd simple by asking Tater after you enable th
 | `ftp_browser`                 | Allows users to browse FTP servers via Discord                              | discord                                   |
 | `ha_control`                  | Controls Home Assistant devices via domain, service, entity, or area (e.g., turn lights on, toggle switches, set temperatures). | webui, homeassistant                       |
 | `lowfi_video`                 | Generates lofi music videos, outputs 20-min MP4                             | webui                                      |
-| `mister_remote`               | Controls MiSTer FPGA via MiSTer Remote API — play, menu, now-playing, and screenshots. Natural language parsing and per-platform output (Discord uploads, WebUI inline, Matrix embedded, voice-safe for HA). | discord, webui, irc, homeassistant, matrix |
+| `mister_remote`               | Controls MiSTer FPGA via MiSTer Remote API — play, menu, now-playing, and screenshots. Natural language parsing and per-platform output (Discord uploads, WebUI inline, Matrix embedded, voice-safe for HA). | discord, webui, irc, homeassistant, matrix, homekit |
 | `obsidian_note`               | Creates new notes in your Obsidian vault with AI-generated titles and content | webui                                      |
 | `obsidian_search`             | Searches your entire Obsidian vault and extracts relevant notes to answer questions | webui                                 |
-| `overseerr_request`           | Adds a movie or TV show to Overseerr by title, creating a new request for it. Example: add the movie F1, request the TV show One Piece. | webui, homeassistant                       |
-| `overseerr_trending`          | Fetches Trending or Upcoming movies/TV shows from Overseerr. Example: what movies are trending, what TV shows are upcoming. | discord, webui, irc, matrix               |
+| `overseerr_request`           | Adds a movie or TV show to Overseerr by title, creating a new request for it. Example: add the movie F1, request the TV show One Piece. | webui, homeassistant, homekit                       |
+| `overseerr_trending`          | Fetches Trending or Upcoming movies/TV shows from Overseerr. Example: what movies are trending, what TV shows are upcoming. | discord, webui, irc, matrix, homekit               |
 | `premiumize_download`         | Checks Premiumize for cached file links and returns downloads               | discord, webui, irc, matrix                |
 | `premiumize_torrent`          | Checks if a torrent is cached on Premiumize and returns download links      | discord                                   |
 | `sftpgo_account`              | Creates SFTPGo user accounts and their credentials                          | discord, webui, irc, matrix                              |
 | `sftpgo_activity`             | Views SFTPGo user activity like file transfers and sessions                 | discord, webui, irc, matrix                       |
 | `tater_gits_add_feed`         | Adds a GitHub releases feed to the Tater Gits watcher with auto category    | discord, webui, irc                        |
 | `vision_describer`            | Analyzes uploaded images and returns AI-generated descriptions              | discord, webui, matrix                     |
-| `web_search`                  | Performs web search to help answer user questions                           | discord, webui, irc, homeassistant, matrix |
+| `web_search`                  | Performs web search to help answer user questions                           | discord, webui, irc, homeassistant, matrix, homekit |
 | `web_summary`                 | Summarizes content from a provided URL                                      | discord, webui, irc, matrix                |
 | `webdav_browser`              | Allows browsing and downloading files from WebDAV servers                   | discord                                   |
 | `youtube_summary`             | Summarizes YouTube videos.                                                  | discord, webui, irc, matrix                |
