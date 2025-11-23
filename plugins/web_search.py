@@ -44,8 +44,7 @@ class WebSearchPlugin(ToolPlugin):
         "Write a friendly message telling {mention} you’re searching the web for more information now! "
         "Only output that message."
     )
-    # ← added "matrix"
-    platforms = ["discord", "webui", "irc", "homeassistant", "matrix", "homekit"]
+    platforms = ["discord", "webui", "irc", "homeassistant", "matrix", "homekit". "xbmc"]
 
     def search_web(self, query, num_results=10):
         settings = redis_client.hgetall("plugin_settings:Web Search")
@@ -282,6 +281,20 @@ class WebSearchPlugin(ToolPlugin):
         user_q = args.get("user_question", "")
         answer = await self._pick_link_and_summarize(results, query, user_q, llm_client)
         return self._siri_flatten(answer)
+
+    async def handle_xbmc(self, args, llm_client):
+        args = args or {}
+        query = args.get("query")
+        if not query:
+            return "No search query provided."
+
+        results = self.search_web(query)
+        if not results:
+            return "No results found."
+
+        user_q = args.get("user_question", "")
+        answer = await self._pick_link_and_summarize(results, query, user_q, llm_client)
+        return (answer or "No answer available.").strip()
 
 
 plugin = WebSearchPlugin()
