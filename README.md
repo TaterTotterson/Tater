@@ -3,7 +3,7 @@
   <h1>Tater</h1>
 </div>
 
-**Tater** is an AI assistant that connects to any OpenAI API–compatible LLM, giving you a powerful set of AI-driven tools. It includes a WebUI for setup and private chats, and works across **Discord**, **IRC**, **Matrx** and **Home Assistant**
+**Tater** is an AI assistant that connects to any OpenAI-compatible LLM, giving you a powerful set of AI-driven tools. It includes a WebUI for setup and private chats, and works across **Discord**, **IRC**, **Matrix**, **Home Assistant**, **HomeKit**, and even the **OG Xbox via XBMC4Xbox**
 
 ---
 
@@ -17,7 +17,8 @@
 | `homekit`         | Siri / Apple Shortcuts integration for [HomeKit](https://github.com/TaterTotterson/Tater/wiki/How-to-Build-the-%E2%80%9CTater%E2%80%9D-Shortcut), enabling “Hey Siri, ask Tater…” voice commands, per-device conversation sessions, and plugin-backed actions. |
 | `irc`             | Lightweight IRC bot that responds to mentions and runs compatible plugins.                                                                                                                                                        |
 | `matrix`          | Modern Matrix client with end-to-end encryption support, Markdown rendering, and full plugin compatibility — bringing Tater to federated chat networks like Element and Cinny.                                                    |
-| `webui`           | Streamlit-based WebUI for chatting, configuring plugins, and managing settings.                                                                                                                                                  |
+| `xbmc`            | OG Xbox integration for **XBMC4Xbox**, provided by the custom Cortana-powered skin and script at [skin.cortana.tater-xbmc](https://github.com/TaterTotterson/skin.cortana.tater-xbmc), enabling an on-console AI assistant with chat history, quick asks, and plugin-powered actions. |
+| `webui`           | Streamlit-based WebUI for chatting, configuring plugins, and managing settings.                                                                                                            |                                                                                                                                     |
 
 ## 🧩 Tater Plugin Overview
 
@@ -37,7 +38,7 @@ The following plugins can be triggerd simple by asking Tater after you enable th
 | `emoji_ai_responder`          | Picks a relevant emoji based on a message when someone reacts to it         | discord                                   |
 | `events_query`                | Summarizes all stored events by time, area, or activity.                    | webui, homeassistant                       |
 | `ftp_browser`                 | Allows users to browse FTP servers via Discord                              | discord                                   |
-| `ha_control`                  | Controls Home Assistant devices via domain, service, entity, or area (e.g., turn lights on, toggle switches, set temperatures). | webui, homeassistant                       |
+| `ha_control`                  | Controls Home Assistant devices via domain, service, entity, or area (e.g., turn lights on, toggle switches, set temperatures). | webui, homeassistant, xbmc                       |
 | `lowfi_video`                 | Generates lofi music videos, outputs 20-min MP4                             | webui                                      |
 | `mister_remote`               | Controls MiSTer FPGA via MiSTer Remote API — play, menu, now-playing, and screenshots. Natural language parsing and per-platform output (Discord uploads, WebUI inline, Matrix embedded, voice-safe for HA). | discord, webui, irc, homeassistant, matrix, homekit |
 | `obsidian_note`               | Creates new notes in your Obsidian vault with AI-generated titles and content | webui                                      |

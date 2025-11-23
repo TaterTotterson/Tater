@@ -75,7 +75,7 @@ class HAControlPlugin(ToolPlugin):
     pretty_name = "Home Assistant Control"
     settings_category = "Home Assistant"
     waiting_prompt_template = "Write a friendly message telling {mention} you’re controlling their Home Assistant devices now! Only output that message."
-    platforms = ["homeassistant", "webui"]
+    platforms = ["homeassistant", "webui", "xbmc"]
 
     required_settings = {
         "HA_BASE_URL": {
@@ -354,6 +354,9 @@ class HAControlPlugin(ToolPlugin):
         return await self._handle(args, llm_client)
 
     async def handle_webui(self, args, llm_client):
+        return await self._handle(args, llm_client)
+
+    async def handle_xbmc(self, args, llm_client):
         return await self._handle(args, llm_client)
 
     # ----------------------------
