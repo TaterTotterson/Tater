@@ -4,7 +4,8 @@ from platforms.irc_platform import PLATFORM_SETTINGS as irc_settings
 from platforms.homeassistant_platform import PLATFORM_SETTINGS as ha_settings
 from platforms.ha_automations_platform import PLATFORM_SETTINGS as automations_settings
 from platforms.matrix_platform import PLATFORM_SETTINGS as matrix_settings
-from platforms.homekit_platform import PLATFORM_SETTINGS as homekit_settings  # 🆕 added
+from platforms.homekit_platform import PLATFORM_SETTINGS as homekit_settings
+from platforms.xbmc_platform import PLATFORM_SETTINGS as xbmc_settings        
 
 platform_registry = [
     {
@@ -36,5 +37,10 @@ platform_registry = [
         **homekit_settings,
         "key": "homekit_platform",
         "label": "HomeKit / Siri Settings",
+    },
+    {
+        **xbmc_settings,
+        "key": "xbmc_platform",
+        "label": "XBMC / Original Xbox Settings",
     },
 ]
