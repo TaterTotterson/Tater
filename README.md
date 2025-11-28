@@ -36,9 +36,9 @@ The following plugins can be triggerd simple by asking Tater after you enable th
 | `device_compare`              | Compares two devices, fetching specs and FPS benchmarks from online sources | discord, webui, matrix                     |
 | `doorbell_alert`              | Triggers when the doorbell rings — captures a snapshot from a Home Assistant camera, analyzes it with Vision AI, announces who or what is at the door via Piper TTS, and now logs events to the Automations Platform. | automations                                |
 | `emoji_ai_responder`          | Picks a relevant emoji based on a message when someone reacts to it         | discord                                   |
-| `events_query`                | Summarizes all stored events by time, area, or activity.                    | webui, homeassistant                       |
+| `events_query`                | Summarizes all stored events by time, area, or activity.                    | webui, homeassistant, homekit                       |
 | `ftp_browser`                 | Allows users to browse FTP servers via Discord                              | discord                                   |
-| `ha_control`                  | Controls Home Assistant devices via domain, service, entity, or area (e.g., turn lights on, toggle switches, set temperatures). | webui, homeassistant, xbmc                       |
+| `ha_control`                  | Controls Home Assistant devices via domain, service, entity, or area (e.g., turn lights on, toggle switches, set temperatures). | webui, homeassistant, homekit, xbmc                       |
 | `lowfi_video`                 | Generates lofi music videos, outputs 20-min MP4                             | webui                                      |
 | `mister_remote`               | Controls MiSTer FPGA via MiSTer Remote API — play, menu, now-playing, and screenshots. Natural language parsing and per-platform output (Discord uploads, WebUI inline, Matrix embedded, voice-safe for HA). | discord, webui, irc, homeassistant, matrix, homekit |
 | `obsidian_note`               | Creates new notes in your Obsidian vault with AI-generated titles and content | webui                                      |
@@ -51,7 +51,7 @@ The following plugins can be triggerd simple by asking Tater after you enable th
 | `sftpgo_activity`             | Views SFTPGo user activity like file transfers and sessions                 | discord, webui, irc, matrix                       |
 | `tater_gits_add_feed`         | Adds a GitHub releases feed to the Tater Gits watcher with auto category    | discord, webui, irc                        |
 | `vision_describer`            | Analyzes uploaded images and returns AI-generated descriptions              | discord, webui, matrix                     |
-| `web_search`                  | Performs web search to help answer user questions                           | discord, webui, irc, homeassistant, matrix, homekit |
+| `web_search`                  | Performs web search to help answer user questions                           | discord, webui, irc, homeassistant, matrix, homekit, xbmc |
 | `web_summary`                 | Summarizes content from a provided URL                                      | discord, webui, irc, matrix                |
 | `webdav_browser`              | Allows browsing and downloading files from WebDAV servers                   | discord                                   |
 | `youtube_summary`             | Summarizes YouTube videos.                                                  | discord, webui, irc, matrix                |

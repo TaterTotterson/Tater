@@ -75,7 +75,7 @@ class HAControlPlugin(ToolPlugin):
     pretty_name = "Home Assistant Control"
     settings_category = "Home Assistant"
     waiting_prompt_template = "Write a friendly message telling {mention} you’re controlling their Home Assistant devices now! Only output that message."
-    platforms = ["homeassistant", "webui", "xbmc"]
+    platforms = ["homeassistant", "webui", "xbmc", "homekit"]
 
     required_settings = {
         "HA_BASE_URL": {
@@ -359,6 +359,9 @@ class HAControlPlugin(ToolPlugin):
     async def handle_xbmc(self, args, llm_client):
         return await self._handle(args, llm_client)
 
+    async def handle_homekit(self, args, llm_client):
+        return await self._handle(args, llm_client)
+
     # ----------------------------
     # Core handler
     # ----------------------------
@@ -377,10 +380,10 @@ class HAControlPlugin(ToolPlugin):
         if not target:
             return "Please provide a 'target' (e.g., 'office lights' or 'thermostat set to 72')."
 
-        # 1) Ask LLM: area+domain OR object(+domain hint)
+        # Ask LLM: area+domain OR object(+domain hint)
         info = await self._classify_target(target, llm_client)
 
-        # 2) get_state → must resolve to a single entity
+        # get_state → must resolve to a single entity
         if action == "get_state":
             domain_hint = info.get("domain") or self._infer_domain_hint(target, action)
             try:
