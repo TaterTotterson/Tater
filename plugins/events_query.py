@@ -50,7 +50,7 @@ class EventsQueryPlugin(ToolPlugin):
         "}\n"
     )
 
-    platforms = ["webui", "homeassistant"]
+    platforms = ["webui", "homeassistant", "homekit"]
     settings_category = "Events Query"
 
     required_settings = {
@@ -669,6 +669,9 @@ class EventsQueryPlugin(ToolPlugin):
         return await self._handle(args, llm_client)
 
     async def handle_homeassistant(self, args: Dict[str, Any], llm_client):
+        return await self._handle(args, llm_client)
+
+    async def handle_homekit(self, args: Dict[str, Any], llm_client):
         return await self._handle(args, llm_client)
 
 plugin = EventsQueryPlugin()
