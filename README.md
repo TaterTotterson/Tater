@@ -76,7 +76,7 @@ Here are some examples of the RSS watcher in action:
 ---
 **Note**:
 - Do not use a thinking model with tater
-- Tater currently recommends using qwen3-next-80b(mac) or qwen3-coder-30b
+- Tater currently recommends using qwen3-next-80b, qwen3-coder-30b or Gemma3-27b
 
 ## Installation
 
