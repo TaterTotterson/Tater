@@ -72,6 +72,7 @@ This system runs in the background and posts summarized RSS feed updates. The fo
 
 Here are some examples of the RSS watcher in action:
 - **WordPress Poster**: [TaterByets.com](https://TaterBytes.com)
+- **WordPress Poster**: [ThePotatoConsole.com](https://ThePotatoConsole..com)
 ---
 **Note**:
 - Do not use a thinking model with tater
@@ -81,7 +82,7 @@ Here are some examples of the RSS watcher in action:
 
 ### Prerequisites
 - Python 3.11
-- **Redis-Stack**
+- **[Redis-Stack](https://hub.docker.com/r/redis/redis-stack)**
 - OpenAI API–compatible LLM app (such as **Ollama**, **LocalAI**, **LM Studio**, **Lemonade**, or **OpenAI API**)
 - Docker (optional, for containerized deployment)
 
