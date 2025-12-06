@@ -73,6 +73,7 @@ This system runs in the background and posts summarized RSS feed updates. The fo
 Here are some examples of the RSS watcher in action:
 - **WordPress Poster**: [TaterByets.com](https://TaterBytes.com)
 - **WordPress Poster**: [ThePotatoConsole.com](https://ThePotatoConsole.com)
+- - **WordPress Poster**: [TaterNews.com](https://TaterNews.com)
 ---
 **Note**:
 - Do not use a thinking model with tater
