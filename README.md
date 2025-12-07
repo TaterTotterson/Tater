@@ -203,6 +203,9 @@ Example: Local backend (Ollama, LM Studio, LocalAI)
 docker run -d --name tater_webui \
   -p 8501:8501 \
   -p 8787:8787 \
+  -p 8788:8788 \
+  -p 8789:8789 \
+  -p 8790:8790 \
   -e LLM_HOST=127.0.0.1 \
   -e LLM_PORT=11434 \
   -e LLM_MODEL=gemma3-27b-abliterated \
@@ -217,6 +220,9 @@ Example: ChatGPT (GPT-4o, etc.)
 docker run -d --name tater_webui \
   -p 8501:8501 \
   -p 8787:8787 \
+  -p 8788:8788 \
+  -p 8789:8789 \
+  -p 8790:8790 \
   -e LLM_HOST=https://api.openai.com \
   -e LLM_PORT= \
   -e LLM_MODEL=gpt-4o \
