@@ -108,7 +108,7 @@ Once added, the following add-ons will appear in the Home Assistant Add-on Store
 
 1. Install and **start Redis Stack**
 2. Install **Tater AI Assistant**
-3. Configure your LLM settings in the Tater add-on
+3. Configure your LLM and Redis settings in the Tater add-on
 4. Start Tater
 
 This is the recommended setup for most users and provides the smoothest experience.
