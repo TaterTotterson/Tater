@@ -81,6 +81,42 @@ Here are some examples of the RSS watcher in action:
 
 ## Installation
 
+### 🏠 Home Assistant (Recommended)
+
+The easiest way to run **Tater** is as a Home Assistant add-on.  
+This method requires no manual Docker setup and integrates cleanly with Home Assistant,
+including networking, persistence, and add-on management.
+
+A dedicated Home Assistant add-on repository is available here:
+
+https://github.com/TaterTotterson/hassio-addons-tater
+
+#### Add the Tater add-on repository
+
+Click the button below to add the repository to Home Assistant:
+
+[![Add Repository to Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](
+https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https://github.com/TaterTotterson/hassio-addons-tater
+)
+
+Once added, the following add-ons will appear in the Home Assistant Add-on Store:
+
+- **Redis Stack** – required for Tater memory, plugins, and automations
+- **Tater AI Assistant** – the main Tater service
+
+#### Install order
+
+1. Install and **start Redis Stack**
+2. Install **Tater AI Assistant**
+3. Configure your LLM settings in the Tater add-on
+4. Start Tater
+
+This is the recommended setup for most users and provides the smoothest experience.
+
+---
+
+### Local Installation (Advanced)
+
 ### Prerequisites
 - Python 3.11
 - **[Redis-Stack](https://hub.docker.com/r/redis/redis-stack)**
