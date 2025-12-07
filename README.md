@@ -81,7 +81,7 @@ Here are some examples of the RSS watcher in action:
 
 ## Installation
 
-### 🏠 Home Assistant (User Friendly, will be slow on pi devices)
+### 🏠 Home Assistant (User Friendly)
 
 The easiest way to run **Tater** is as a Home Assistant add-on.  
 This method requires no manual Docker setup and integrates cleanly with Home Assistant,
