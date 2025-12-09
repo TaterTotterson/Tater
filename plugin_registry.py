@@ -35,6 +35,7 @@ from plugins.doorbell_alert import plugin as doorbell_alert_plugin
 from plugins.camera_event import plugin as camera_event_plugin
 from plugins.events_query import plugin as events_query_plugin
 from plugins.mister_remote import plugin as mister_remote_plugin
+from plugins.events_query_brief import plugin as events_query_brief_plugin
 
 plugin_registry = {
     youtube_plugin.name: youtube_plugin,
@@ -74,4 +75,5 @@ plugin_registry = {
     camera_event_plugin.name: camera_event_plugin,
     events_query_plugin.name: events_query_plugin,
     mister_remote_plugin.name: mister_remote_plugin,
+    events_query_brief_plugin.name: events_query_brief_plugin,
 }

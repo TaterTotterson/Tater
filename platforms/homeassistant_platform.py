@@ -15,7 +15,7 @@ import uvicorn
 import requests
 import re
 
-from helpers import LLMClientWrapper, parse_function_json, get_tater_name
+from helpers import LLMClientWrapper, parse_function_json, get_tater_name, get_tater_personality
 from plugin_registry import plugin_registry
 
 from dotenv import load_dotenv
@@ -168,12 +168,24 @@ def get_plugin_enabled(plugin_name: str) -> bool:
     return bool(enabled and enabled.lower() == "true")
 
 # -------------------- System prompt (Discord/IRC style, HA scoped) --------------------
+# -------------------- System prompt (Discord/IRC style, HA scoped) --------------------
 def build_system_prompt() -> str:
     now = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
     first, last = get_tater_name()
+    personality = get_tater_personality()
+
+    persona_clause = ""
+    if personality:
+        persona_clause = (
+            f"You should speak and behave like {personality} "
+            "while still being helpful, concise, and easy to understand. "
+            "Keep the style subtle rather than over-the-top. "
+            "Even while staying in character, you must strictly follow the tool-calling rules below.\n\n"
+        )
 
     base_prompt = (
         f"You are {first} {last}, a Home Assistant–savvy AI assistant with access to various tools and plugins.\n\n"
+        f"{persona_clause}"
         "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
     )
 
@@ -189,10 +201,8 @@ def build_system_prompt() -> str:
     )
 
     behavior_guard = (
-        "Only call a tool if the user's latest message clearly requests an action — such as 'turn on', "
-        "'set', 'generate', 'summarize', or 'download'.\n"
-        "Never call a tool in response to casual or friendly messages like 'thanks', 'lol', or 'cool'.\n"
-        "Keep normal (non-tool) replies brief and TTS-friendly.\n"
+        "Only call a tool if the user's latest message clearly requests an action — such as 'generate', 'summarize', or 'download'.\n"
+        "Never call a tool in response to casual or friendly messages like 'thanks', 'lol', or 'cool' — reply normally instead.\n"
     )
 
     return (

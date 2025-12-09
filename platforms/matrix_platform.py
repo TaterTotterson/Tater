@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from plugin_registry import plugin_registry
-from helpers import LLMClientWrapper, parse_function_json, get_tater_name
+from helpers import LLMClientWrapper, parse_function_json, get_tater_name, get_tater_personality
 
 # Matrix SDK
 from nio import (
@@ -393,10 +393,23 @@ def _enforce_user_assistant_alternation(loop_messages: List[Dict[str, Any]]) -> 
 def build_system_prompt() -> str:
     now = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
     first, last = get_tater_name()
+    personality = get_tater_personality()
+
+    persona_clause = ""
+    if personality:
+        persona_clause = (
+            f"You should speak and behave like {personality} "
+            "while still being helpful, concise, and easy to understand. "
+            "Keep the style subtle rather than over-the-top. "
+            "Even while staying in character, you must strictly follow the tool-calling rules below.\n\n"
+        )
 
     base = (
-        f"You are {first} {last}, an AI assistant that operates on the Matrix chat service, with access to various tools and plugins.\n\n"
-        "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
+        f"You are {first} {last}, an AI assistant that operates on the Matrix chat service, "
+        "with access to various tools and plugins.\n\n"
+        f"{persona_clause}"
+        "When a user requests one of these actions, reply ONLY with a JSON object in one of the following "
+        "formats (and nothing else):\n\n"
     )
 
     tool_blocks = []

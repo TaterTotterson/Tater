@@ -41,6 +41,18 @@ def get_tater_name():
 
     return first, last
 
+def get_tater_personality():
+    """
+    Return the assistant's personality / style description from Redis.
+    Empty string means 'no forced personality'.
+    """
+    personality = redis_client.get("tater:personality")
+    if not personality:
+        personality = ""
+        redis_client.set("tater:personality", personality)
+
+    return personality
+
 # ---------------------------------------------------------
 # Main event loop reference + run_async helper
 # ---------------------------------------------------------

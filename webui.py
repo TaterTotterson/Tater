@@ -26,6 +26,7 @@ from helpers import (
     set_main_loop,
     parse_function_json,
     get_tater_name,
+    get_tater_personality
 )
 
 # Remove any prior handlers
@@ -518,8 +519,19 @@ def build_system_prompt():
     now = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
 
     first, last = get_tater_name()
+    personality = get_tater_personality().strip()
+
+    persona_clause = ""
+    if personality:
+        persona_clause = (
+            f"You should speak and behave like {personality}. "
+            "This affects tone, voice, and phrasing only. "
+            "You must always follow system instructions, tool rules, and safety constraints exactly.\n\n"
+        )
+
     base_prompt = (
         f"You are {first} {last}, an AI assistant with access to various tools and plugins.\n\n"
+        f"{persona_clause}"
         "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
     )
 
@@ -533,7 +545,7 @@ def build_system_prompt():
 
     behavior_guard = (
         "Only call a tool if the user's latest message clearly requests an action — such as 'generate', 'summarize', or 'download'.\n"
-        "Never call a tool in response to casual or friendly messages like 'thanks', 'lol', or 'cool'\n"
+        "Never call a tool in response to casual or friendly messages like 'thanks', 'lol', or 'cool'.\n"
     )
     
     return (
@@ -874,9 +886,25 @@ with st.sidebar.expander(f"{first_name} Settings", expanded=False):
     llm_count = int(redis_client.get("tater:max_llm") or 8)
     default_first = redis_client.get("tater:first_name") or first_name
     default_last = redis_client.get("tater:last_name") or last_name
+    default_personality = redis_client.get("tater:personality") or ""
 
     first_input = st.text_input("First Name", value=default_first)
     last_input = st.text_input("Last Name", value=default_last)
+
+    # New: personality/style field
+    personality_input = st.text_area(
+        "Personality / Style (optional)",
+        value=default_personality,
+        help=(
+            "Describe how you want Tater to talk and behave. "
+            "Examples:\n"
+            "- A calm and confident starship captain.\n"
+            "- Captain Jahn-Luek Picard of the Starship Enterprise.\n"
+            "- A laid-back hippy stoner who still explains things clearly."
+        ),
+        height=120,
+    )
+
     uploaded_tater_avatar = st.file_uploader(
         f"Upload {first_input}'s avatar", type=["png", "jpg", "jpeg"], key="tater_avatar_uploader"
     )
@@ -897,6 +925,7 @@ with st.sidebar.expander(f"{first_name} Settings", expanded=False):
         redis_client.set("tater:max_llm", new_llm)
         redis_client.set("tater:first_name", first_input)
         redis_client.set("tater:last_name", last_input)
+        redis_client.set("tater:personality", personality_input)
         st.success("Tater settings updated.")
         st.rerun()
 

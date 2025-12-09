@@ -366,15 +366,16 @@ async def handle_message(payload: AutomationsRequest):
 
     # Execute
     try:
-        await plugin.handle_automation(args, _llm)
+        result = await plugin.handle_automation(args, _llm)
     except ValueError as ve:
         raise HTTPException(status_code=422, detail=f"Validation error: {ve}")
     except Exception as e:
         logger.exception(f"[Automations] Plugin '{func_name}' error")
         raise HTTPException(status_code=500, detail=f"Plugin error: {e}")
 
-    # Success: no content
-    return Response(status_code=204)
+    # Success: return plugin result as JSON for HA
+    # result is typically a short string from events_query_brief
+    return {"result": result}
 
 # -------------------- Runner (mirrors other platforms’ graceful stop) --------------------
 def run(stop_event: Optional[threading.Event] = None):

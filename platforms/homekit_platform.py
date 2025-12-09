@@ -15,7 +15,12 @@ from fastapi import FastAPI, HTTPException
 from dotenv import load_dotenv
 load_dotenv()
 
-from helpers import LLMClientWrapper, parse_function_json, get_tater_name
+from helpers import (
+    LLMClientWrapper,
+    parse_function_json,
+    get_tater_name,
+    get_tater_personality,
+)
 from plugin_registry import plugin_registry
 
 logging.basicConfig(level=logging.INFO)
@@ -197,10 +202,21 @@ async def _save_message(session_id: Optional[str], role: str, content: Any, max_
 def build_system_prompt() -> str:
     now = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
     first, last = get_tater_name()
+    personality = get_tater_personality()
+
+    persona_clause = ""
+    if personality:
+        persona_clause = (
+            f"You should speak and behave like {personality} "
+            "while still being helpful, concise, and easy to understand. "
+            "Keep the style subtle rather than over-the-top. "
+            "Even while staying in character, you must strictly follow the tool-calling rules below.\n\n"
+        )
 
     base_prompt = (
         f"You are {first} {last}, an AI assistant being accessed through Apple Siri or the Shortcuts app.\n"
         "Your responses are spoken aloud by Siri, so keep them short, natural, and free of emojis.\n\n"
+        f"{persona_clause}"
         "When the user requests an action that needs a plugin or tool, reply ONLY with a valid JSON tool call.\n"
         "For simple questions or small talk, answer briefly in one friendly sentence.\n"
     )
@@ -218,10 +234,8 @@ def build_system_prompt() -> str:
     )
 
     behavior_guard = (
-        "Only call a tool if the user's message clearly requests an action — such as 'turn on', 'set', "
-        "'summarize', 'download', 'generate', or 'post'.\n"
-        "Never call a tool for casual messages like 'thanks', 'ok', or 'goodnight'.\n"
-        "Keep non-tool replies under 25 words so Siri can read them naturally.\n"
+        "Only call a tool if the user's latest message clearly requests an action — such as 'generate', 'summarize', or 'download'.\n"
+        "Never call a tool in response to casual or friendly messages like 'thanks', 'lol', or 'cool' — reply normally instead.\n"
     )
 
     return (
