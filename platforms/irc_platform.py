@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 import re
 import threading
 from plugin_registry import plugin_registry
-from helpers import LLMClientWrapper, parse_function_json, get_tater_name
+from helpers import LLMClientWrapper, parse_function_json, get_tater_name, get_tater_personality
 import time
 import sys
 import irc3
@@ -313,8 +313,20 @@ def build_system_prompt():
     now = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
 
     first, last = get_tater_name()
+    personality = get_tater_personality()
+
+    persona_clause = ""
+    if personality:
+        persona_clause = (
+            f"You should speak and behave like {personality} "
+            "while still being helpful, concise, and easy to understand. "
+            "Keep the style subtle rather than over-the-top. "
+            "Even while staying in character, you must strictly follow the tool-calling rules below.\n\n"
+        )
+
     base_prompt = (
         f"You are {first} {last}, an IRC-savvy AI assistant with access to various tools and plugins.\n\n"
+        f"{persona_clause}"
         "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
     )
 

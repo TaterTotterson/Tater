@@ -16,7 +16,7 @@ import uvicorn
 from dotenv import load_dotenv
 load_dotenv()
 
-from helpers import LLMClientWrapper, parse_function_json, get_tater_name
+from helpers import LLMClientWrapper, parse_function_json, get_tater_name, get_tater_personality
 from plugin_registry import plugin_registry
 
 logging.basicConfig(level=logging.INFO)
@@ -24,7 +24,6 @@ logger = logging.getLogger("xbmc")
 
 # -------------------- Platform defaults (overridable in WebUI) --------------------
 BIND_HOST = "0.0.0.0"
-ENABLE_PLUGINS = True
 TIMEOUT_SECONDS = 60
 
 DEFAULT_SESSION_HISTORY_MAX = 6
@@ -116,40 +115,50 @@ def build_system_prompt() -> str:
     now = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
     first, last = get_tater_name()
 
-    base_prompt = (
-        f"You are {first} {last}, the core AI assistant that powers the multi-platform Tater bot.\n\n"
-        "On this platform you are running on an original Xbox using XBMC4Xbox, shown on a TV screen.\n"
-        "Here, you MUST roleplay as the Xbox assistant named 'Cortana':\n"
-        "- Introduce yourself as Cortana.\n"
-        "- Refer to yourself as Cortana in casual conversation.\n"
-        "- Keep answers short, readable, and friendly — ideal for a TV at a distance.\n"
-        "- Avoid long walls of text; aim for 1–3 short paragraphs at most.\n\n"
-        "However, if the user explicitly asks who you REALLY are, what your REAL name is, or mentions 'Tater', "
-        f"you should honestly explain that your real name is {first} {last} (nicknamed Tater), and you are just "
-        "pretending to be Cortana on this original Xbox for fun.\n\n"
+    personality = redis_client.get("tater:personality") or ""
+
+    # If the user has set a personality, use ONLY that (no Cortana)
+    if personality:
+        base_prompt = (
+            f"You are {first} {last}, the core AI assistant that powers the multi-platform Tater bot.\n\n"
+            f"You should speak and behave like {personality} "
+            "while still being helpful, concise, and easy to understand. "
+            "Keep the style subtle rather than over-the-top.\n\n"
+            "You are running on an original Xbox using XBMC4Xbox, shown on a TV screen.\n"
+            "Keep responses short, readable, and suitable for viewing from across the room.\n"
+            "Avoid long walls of text; aim for 1–3 short paragraphs at most.\n\n"
+            "Even while staying in character, you must strictly follow the tool-calling rules below.\n\n"
+        )
+
+    # Otherwise, use the built-in Cortana personality
+    else:
+        base_prompt = (
+            f"You are {first} {last}, the core AI assistant that powers the multi-platform Tater bot.\n\n"
+            "On this platform you are running on an original Xbox using XBMC4Xbox, shown on a TV screen.\n"
+            "Here, you MUST roleplay as the Xbox assistant named 'Cortana':\n"
+            "- Introduce yourself as Cortana.\n"
+            "- Refer to yourself as Cortana in casual conversation.\n"
+            "- Keep answers short, readable, and friendly — ideal for a TV at a distance.\n"
+            "- Avoid long walls of text; aim for 1–3 short paragraphs at most.\n\n"
+            "However, if the user explicitly asks who you REALLY are, what your REAL name is, or mentions 'Tater', "
+            f"you should honestly explain that your real name is {first} {last} (nicknamed Tater), and you are just "
+            "pretending to be Cortana on this original Xbox for fun.\n\n"
+        )
+
+    # Tool instructions (always included, no fake 'no tools' branch)
+    tool_instructions = "\n\n".join(
+        f"Tool: {plugin.name}\n"
+        f"Description: {getattr(plugin, 'description', 'No description provided.')}\n"
+        f"{plugin.usage}"
+        for plugin in plugin_registry.values()
+        if (("xbmc" in getattr(plugin, "platforms", [])) or ("both" in getattr(plugin, "platforms", [])))
+        and hasattr(plugin, "handle_xbmc")
     )
 
-    if ENABLE_PLUGINS:
-        # Only show tools that actually support XBMC (future-proof)
-        tool_instructions = "\n\n".join(
-            f"Tool: {plugin.name}\n"
-            f"Description: {getattr(plugin, 'description', 'No description provided.')}\n"
-            f"{plugin.usage}"
-            for plugin in plugin_registry.values()
-            if (("xbmc" in getattr(plugin, 'platforms', [])) or ("both" in getattr(plugin, 'platforms', [])))
-            and hasattr(plugin, "handle_xbmc")
-        )
-
-        behavior_guard = (
-            "You can optionally call tools for actions like controlling devices, downloading content, or summarizing "
-            "external resources. Only call a tool if the user clearly asks for an action; otherwise answer directly.\n"
-            "When you DO call a tool, reply ONLY with a JSON object as described in the tool instructions (no extra text).\n"
-        )
-    else:
-        tool_instructions = ""
-        behavior_guard = (
-            "You do NOT have access to any tools on this platform right now; always answer directly in natural language.\n"
-        )
+    behavior_guard = (
+        "Only call a tool if the user clearly asks for an action.\n"
+        "When calling a tool, reply ONLY with a JSON object as defined in the tool instructions.\n"
+    )
 
     style_guard = (
         "Avoid emoji and markdown formatting, as the UI is a simple text list.\n"
@@ -332,8 +341,8 @@ async def handle_message(payload: XBMCRequest):
             return XBMCResponse(response="Sorry, I didn't catch that.")
 
         # In the future, if you enable tools:
-        fn = parse_function_json(text) if ENABLE_PLUGINS else None
-        if fn and ENABLE_PLUGINS:
+        fn = parse_function_json(text)
+        if fn:
             func = fn.get("function")
             args = fn.get("arguments", {}) or {}
 
