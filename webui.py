@@ -117,11 +117,15 @@ def _start_rss(_llm_client):
     return t
 
 @st.cache_resource(show_spinner=False)
-def _start_platform(key):
-    stop_flag = st.session_state.setdefault("platform_stop_flags", {}).get(key)
-    thread = st.session_state.setdefault("platform_threads", {}).get(key)
+def _runtime():
+    return {"threads": {}, "stop_flags": {}}
 
-    # Don't start again if already running
+def _start_platform(key):
+    rt = _runtime()
+
+    thread = rt["threads"].get(key)
+    stop_flag = rt["stop_flags"].get(key)
+
     if thread and thread.is_alive():
         return thread, stop_flag
 
@@ -140,11 +144,15 @@ def _start_platform(key):
     thread = threading.Thread(target=runner, daemon=True)
     thread.start()
 
-    # Save for future shutdown/restart
-    st.session_state["platform_threads"][key] = thread
-    st.session_state["platform_stop_flags"][key] = stop_flag
-
+    rt["threads"][key] = thread
+    rt["stop_flags"][key] = stop_flag
     return thread, stop_flag
+
+def _stop_platform(key):
+    rt = _runtime()
+    stop_flag = rt["stop_flags"].get(key)
+    if stop_flag:
+        stop_flag.set()
 
 def save_message(role, username, content):
     message_data = {
@@ -288,9 +296,7 @@ def render_platform_controls(platform, redis_client):
 
     # --- TURNING OFF ---
     elif not is_enabled and is_running:
-        _, stop_flag = _start_platform(key)
-        stop_flag.set()
-        _start_platform.clear()
+        _stop_platform(key)
         redis_client.set(state_key, "false")
         redis_client.set(cooldown_key, str(time.time()))
         st.success(f"{short_name} stopped.")
