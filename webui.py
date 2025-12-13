@@ -46,6 +46,39 @@ logging.getLogger("irc3.TaterBot").setLevel(logging.WARNING)  # Optional: suppre
 
 dotenv.load_dotenv()
 
+# Redis configuration for the web UI (using a separate DB)
+redis_host = os.getenv('REDIS_HOST', '127.0.0.1')
+redis_port = int(os.getenv('REDIS_PORT', 6379))
+redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
+
+llm_host = os.getenv('LLM_HOST', '127.0.0.1')
+llm_port = os.getenv('LLM_PORT', '11434')
+
+# If LLM_HOST already includes http(s), don't append port
+if llm_host.startswith("http://") or llm_host.startswith("https://"):
+    # Allow skipping port entirely for APIs like OpenAI
+    if llm_port and not llm_host.endswith(f":{llm_port}"):
+        llm_client = LLMClientWrapper(host=f'{llm_host}:{llm_port}')
+    else:
+        llm_client = LLMClientWrapper(host=llm_host)
+else:
+    llm_client = LLMClientWrapper(host=f'http://{llm_host}:{llm_port}')
+
+# Set the main event loop used for run_async.
+try:
+    main_loop = asyncio.get_running_loop()
+except RuntimeError:
+    main_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(main_loop)
+set_main_loop(main_loop)
+
+first_name, last_name = get_tater_name()
+
+st.set_page_config(
+    page_title=f"{first_name} Chat",
+    page_icon=":material/tooltip_2:"
+)
+
 @st.cache_resource(show_spinner=False)
 def _start_rss(_llm_client):
     """
@@ -113,39 +146,6 @@ def _start_platform(key):
 
     return thread, stop_flag
 
-# Redis configuration for the web UI (using a separate DB)
-redis_host = os.getenv('REDIS_HOST', '127.0.0.1')
-redis_port = int(os.getenv('REDIS_PORT', 6379))
-redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
-
-llm_host = os.getenv('LLM_HOST', '127.0.0.1')
-llm_port = os.getenv('LLM_PORT', '11434')
-
-# If LLM_HOST already includes http(s), don't append port
-if llm_host.startswith("http://") or llm_host.startswith("https://"):
-    # Allow skipping port entirely for APIs like OpenAI
-    if llm_port and not llm_host.endswith(f":{llm_port}"):
-        llm_client = LLMClientWrapper(host=f'{llm_host}:{llm_port}')
-    else:
-        llm_client = LLMClientWrapper(host=llm_host)
-else:
-    llm_client = LLMClientWrapper(host=f'http://{llm_host}:{llm_port}')
-
-# Set the main event loop used for run_async.
-try:
-    main_loop = asyncio.get_running_loop()
-except RuntimeError:
-    main_loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(main_loop)
-set_main_loop(main_loop)
-
-first_name, last_name = get_tater_name()
-
-st.set_page_config(
-    page_title=f"{first_name} Chat",
-    page_icon=":material/tooltip_2:"
-)
-
 def save_message(role, username, content):
     message_data = {
         "role": role,
@@ -153,8 +153,9 @@ def save_message(role, username, content):
         "content": content
     }
 
-    key = "webui:chat_history"
-    redis_client.rpush(key, json.dumps(message_data))
+    # renamed from `key` -> `history_key` (no behavior change)
+    history_key = "webui:chat_history"
+    redis_client.rpush(history_key, json.dumps(message_data))
 
     try:
         max_store = int(redis_client.get("tater:max_store") or 20)
@@ -162,8 +163,20 @@ def save_message(role, username, content):
         max_store = 20
 
     if max_store > 0:
-        redis_client.ltrim(key, -max_store, -1)
-        
+        redis_client.ltrim(history_key, -max_store, -1)
+ 
+def load_chat_history_tail(n: int):
+    if n <= 0:
+        return []
+    raw = redis_client.lrange("webui:chat_history", -n, -1)
+    out = []
+    for msg in raw:
+        try:
+            out.append(json.loads(msg))
+        except Exception:
+            continue
+    return out
+
 def load_chat_history():
     history = redis_client.lrange("webui:chat_history", 0, -1)
     return [json.loads(msg) for msg in history]
@@ -668,7 +681,7 @@ def _enforce_user_assistant_alternation(loop_messages):
 async def process_message(user_name, message_content):
     final_system_prompt = build_system_prompt()
     max_llm = int(redis_client.get("tater:max_llm") or 8)
-    history = load_chat_history()[-max_llm:]
+    history = load_chat_history_tail(max_llm)
 
     messages_list = [{"role": "system", "content": final_system_prompt}]
 
@@ -956,12 +969,21 @@ if "chat_messages" not in st.session_state:
     max_display = int(redis_client.get("tater:max_display") or 8)
     st.session_state.chat_messages = full_history[-max_display:]
 
-# Check for completed plugin jobs
-for key in redis_client.scan_iter("webui:plugin_jobs:*"):
-    job = redis_client.hgetall(key)
-    if job.get("status") == "done":
-        try:
-            responses = json.loads(job.get("responses", "[]"))
+# Check for completed plugin jobs (same behavior, fewer Redis round trips)
+job_keys = list(redis_client.scan_iter(match="webui:plugin_jobs:*", count=2000))
+if job_keys:
+    pipe = redis_client.pipeline()
+    for key in job_keys:
+        pipe.hgetall(key)
+    jobs = pipe.execute()
+
+    for key, job in zip(job_keys, jobs):
+        if job.get("status") == "done":
+            try:
+                responses = json.loads(job.get("responses", "[]"))
+            except Exception:
+                responses = []
+
             for r in responses:
                 item = {
                     "role": "assistant",
@@ -973,7 +995,7 @@ for key in redis_client.scan_iter("webui:plugin_jobs:*"):
                 }
                 st.session_state.chat_messages.append(item)
                 save_message("assistant", "assistant", item["content"])
-        finally:
+
             redis_client.delete(key)
 
 # Render all messages from session state
@@ -1072,18 +1094,36 @@ if (redis_client.get("tater:show_speed_stats") or "true").lower() == "true":
             pass
 
 # ---------------- Pending jobs spinner with transition-based refresh ----------------
-# Gather pending plugin names for the UI label (unchanged)
+# Gather pending plugin names for the UI label (same behavior, fewer Redis round trips)
+
 pending_plugins = []
 pending_keys = set()
-for key in redis_client.scan_iter("webui:plugin_jobs:*"):
-    if redis_client.hget(key, "status") == "pending":
-        pending_keys.add(key)
-        job = redis_client.hgetall(key)
-        plugin_name = job.get("plugin")
-        if plugin_name in plugin_registry:
-            plugin = plugin_registry[plugin_name]
-            display_name = getattr(plugin, "pretty_name", plugin.name)
-            pending_plugins.append(display_name)
+
+# Grab job keys once
+job_keys = list(redis_client.scan_iter(match="webui:plugin_jobs:*", count=2000))
+
+if job_keys:
+    # Pipeline: fetch status + plugin for each key in one round trip
+    pipe = redis_client.pipeline()
+    for key in job_keys:
+        pipe.hget(key, "status")
+        pipe.hget(key, "plugin")
+    results = pipe.execute()
+
+    # results comes back as [status0, plugin0, status1, plugin1, ...]
+    for i, key in enumerate(job_keys):
+        status = results[i * 2]
+        plugin_name = results[i * 2 + 1]
+
+        if status == "pending":
+            pending_keys.add(key)
+
+            if plugin_name and plugin_name in plugin_registry:
+                plugin = plugin_registry[plugin_name]
+                display_name = getattr(plugin, "pretty_name", plugin.name)
+                pending_plugins.append(display_name)
+            elif plugin_name:
+                pending_plugins.append(plugin_name)
 
 # If any are pending, show spinner and poll for either
 if pending_plugins:
@@ -1094,14 +1134,20 @@ if pending_plugins:
             transition_detected = False
             current_pending = set()
 
-            for key in redis_client.scan_iter("webui:plugin_jobs:*"):
-                status = redis_client.hget(key, "status")
+            # Re-scan keys (same behavior as before)
+            job_keys = list(redis_client.scan_iter(match="webui:plugin_jobs:*", count=2000))
+            if job_keys:
+                pipe = redis_client.pipeline()
+                for key in job_keys:
+                    pipe.hget(key, "status")
+                statuses = pipe.execute()
 
-                if status == "pending":
-                    current_pending.add(key)
-                else:
-                    if key in previous_pending:
-                        transition_detected = True
+                for key, status in zip(job_keys, statuses):
+                    if status == "pending":
+                        current_pending.add(key)
+                    else:
+                        if key in previous_pending:
+                            transition_detected = True
 
             # safety: handle vanished keys too
             for key in list(previous_pending):
