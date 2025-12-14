@@ -14,6 +14,7 @@ import importlib
 import threading
 import sys
 import uuid
+import socket
 from datetime import datetime
 from PIL import Image
 from io import BytesIO
@@ -76,6 +77,62 @@ def _release_platform_lock(key: str, token: str) -> None:
     except Exception:
         # worst case, lock expires by TTL
         pass
+
+# ----------------- PLATFORM ENABLED STATE (NO _running KEYS) -----------------
+def _platform_enabled_key(key: str) -> str:
+    return f"tater:platform_enabled:{key}"
+
+def get_platform_enabled(key: str) -> bool:
+    return (redis_client.get(_platform_enabled_key(key)) or "").lower() == "true"
+
+def set_platform_enabled(key: str, enabled: bool) -> None:
+    redis_client.set(_platform_enabled_key(key), "true" if enabled else "false")
+
+def _is_port_in_use(port: int, host: str = "127.0.0.1", timeout: float = 0.25) -> bool:
+    try:
+        port = int(port)
+    except Exception:
+        return False
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        return sock.connect_ex((host, port)) == 0
+    finally:
+        sock.close()
+
+def _get_platform_port(key: str, required: dict) -> int | None:
+    """
+    Try to determine a platform port:
+      1) From Redis settings hash: f"{key}_settings"
+      2) From required settings default
+      3) From known fallbacks (if you want)
+    """
+    settings = redis_client.hgetall(f"{key}_settings") or {}
+
+    # Common port keys in your platforms/settings
+    candidates = ("PORT", "port", "HTTP_PORT", "http_port", "INGRESS_PORT", "ingress_port")
+
+    for k in candidates:
+        if k in settings:
+            try:
+                return int(float(str(settings[k]).strip()))
+            except Exception:
+                pass
+
+    for k in candidates:
+        if k in required:
+            try:
+                return int(float(str(required[k].get("default")).strip()))
+            except Exception:
+                pass
+
+    # Optional explicit fallbacks (safe defaults) — adjust/remove if you prefer
+    fallbacks = {
+        "homeassistant_platform": 8787,
+        "ha_automations_platform": 8788,
+    }
+    return fallbacks.get(key)
 
 # If LLM_HOST already includes http(s), don't append port
 if llm_host.startswith("http://") or llm_host.startswith("https://"):
@@ -205,7 +262,7 @@ def save_message(role, username, content):
 
     if max_store > 0:
         redis_client.ltrim(history_key, -max_store, -1)
- 
+
 def load_chat_history_tail(n: int):
     if n <= 0:
         return []
@@ -231,7 +288,6 @@ def clear_chat_history():
 def load_default_tater_avatar():
     return Image.open("images/tater.png")
 
-
 def get_tater_avatar():
     avatar_b64 = redis_client.get("tater:avatar")
     if avatar_b64:
@@ -241,7 +297,6 @@ def get_tater_avatar():
         except Exception:
             redis_client.delete("tater:avatar")
     return load_default_tater_avatar()
-
 
 assistant_avatar = get_tater_avatar()
 
@@ -287,17 +342,27 @@ def render_plugin_controls(plugin_name):
         st.rerun()
 
 def render_platform_controls(platform, redis_client):
-    category     = platform["label"]
-    key          = platform["key"]
-    required     = platform["required"]
-    short_name   = category.replace(" Settings", "").strip()
-    state_key    = f"{key}_running"
-    cooldown_key = f"tater:cooldown:{key}"
+    category      = platform["label"]
+    key           = platform["key"]
+    required      = platform["required"]
+    short_name    = category.replace(" Settings", "").strip()
+    cooldown_key  = f"tater:cooldown:{key}"
     cooldown_secs = 10
 
-    # read current on/off from Redis
-    is_running = (redis_client.get(state_key) == "true")
-    emoji      = "🟢" if is_running else "🔴"
+    # persisted desired state (NOT runtime)
+    enabled = get_platform_enabled(key)
+
+    # runtime is port-in-use ONLY
+    port = _get_platform_port(key, required)
+    port_in_use = _is_port_in_use(port) if port else False
+
+    # emoji shows intent + reality
+    if enabled and port_in_use:
+        emoji = "🟢"
+    elif enabled and not port_in_use:
+        emoji = "🟡"
+    else:
+        emoji = "🔴"
 
     # force‐off gadget for cooldown toggle feedback
     force_off_key = f"{category}_toggle_force_off"
@@ -306,33 +371,48 @@ def render_platform_controls(platform, redis_client):
         is_enabled = False
         new_toggle = False
     else:
-        new_toggle = st.toggle(f"{emoji} Enable {short_name}",
-                               value=is_running,
-                               key=f"{category}_toggle")
+        label = f"{emoji} Enable {short_name}"
+        if port:
+            label += f" (port {port})"
+        new_toggle = st.toggle(label, value=enabled, key=f"{category}_toggle")
         is_enabled = new_toggle
 
     # --- TURNING ON ---
-    if is_enabled and not is_running:
-        # cooldown check
+    if is_enabled and not enabled:
+        # cooldown check (prevents rapid flip-flops)
         last = redis_client.get(cooldown_key)
         now  = time.time()
-        if last and now - float(last) < cooldown_secs:
-            remaining = int(cooldown_secs - (now - float(last)))
-            st.warning(f"⏳ Wait {remaining}s before restarting {short_name}.")
-            st.session_state[force_off_key] = True
-            st.rerun()
+        if last:
+            try:
+                if now - float(last) < cooldown_secs:
+                    remaining = int(cooldown_secs - (now - float(last)))
+                    st.warning(f"⏳ Wait {remaining}s before restarting {short_name}.")
+                    st.session_state[force_off_key] = True
+                    st.rerun()
+            except Exception:
+                pass
 
-        # actually start it
-        _start_platform(key)
-        redis_client.set(state_key, "true")
-        st.success(f"{short_name} started.")
+        # persist "enabled"
+        set_platform_enabled(key, True)
+
+        # only start if port is NOT already bound
+        port = _get_platform_port(key, required)
+        port_in_use = _is_port_in_use(port) if port else False
+        if port and port_in_use:
+            st.info(f"{short_name} is already running (port {port} in use). Not starting again.")
+        else:
+            _start_platform(key)
+            st.success(f"{short_name} started.")
+
+        st.rerun()
 
     # --- TURNING OFF ---
-    elif not is_enabled and is_running:
+    elif (not is_enabled) and enabled:
+        set_platform_enabled(key, False)
         _stop_platform(key)
-        redis_client.set(state_key, "false")
         redis_client.set(cooldown_key, str(time.time()))
         st.success(f"{short_name} stopped.")
+        st.rerun()
 
     # --- SETTINGS FORM ---
     redis_key = f"{key}_settings"
@@ -436,10 +516,6 @@ def render_platform_controls(platform, redis_client):
         }
         redis_client.hset(redis_key, mapping=save_map)
         st.success(f"{short_name} settings saved.")
-
-    # Trigger refresh if toggle changed
-    if new_toggle != is_running:
-        st.rerun()
 
 # ----------------- PLUGIN SETTINGS -----------------
 def get_plugin_settings(category):
@@ -599,7 +675,7 @@ def build_system_prompt():
         "Only call a tool if the user's latest message clearly requests an action — such as 'generate', 'summarize', or 'download'.\n"
         "Never call a tool in response to casual or friendly messages like 'thanks', 'lol', or 'cool'.\n"
     )
-    
+
     return (
         f"Current Date and Time is: {now}\n\n"
         f"{base_prompt}\n\n"
@@ -682,7 +758,6 @@ def _to_template_msg(role, content):
         return {"role": role, "content": content}
     return {"role": role, "content": str(content)}
 
-
 def _enforce_user_assistant_alternation(loop_messages):
     """
     Your template enforces strict alternation and requires the first message to be 'user'.
@@ -704,9 +779,9 @@ def _enforce_user_assistant_alternation(loop_messages):
                 merged[-1]["content"] = a + b
             else:
                 # Coerce to string merge if mixed
-                merged[-1]["content"] = ( (a if isinstance(a, str) else str(a)) +
-                                          "\n\n" +
-                                          (b if isinstance(b, str) else str(b)) ).strip()
+                merged[-1]["content"] = ((a if isinstance(a, str) else str(a)) +
+                                         "\n\n" +
+                                         (b if isinstance(b, str) else str(b))).strip()
         else:
             merged.append(m)
 
@@ -987,14 +1062,17 @@ _start_rss(llm_client)
 # ------------------ PLATFORM MANAGEMENT ------------------
 for platform in platform_registry:
     key = platform["key"]  # e.g. irc_platform
-    state_key = f"{key}_running"
+    required = platform.get("required") or {}
 
-    # Check Redis to determine if this platform should be running
-    platform_should_run = redis_client.get(state_key) == "true"
-
-    if platform_should_run:
-        _start_platform(key)
-        st.success(f"{platform['category']} auto-connected.")
+    # Only auto-start if enabled, and ONLY if port isn't already in use
+    if get_platform_enabled(key):
+        port = _get_platform_port(key, required)
+        if port and _is_port_in_use(port):
+            # already running elsewhere, don't start again
+            pass
+        else:
+            _start_platform(key)
+            st.success(f"{platform['category']} auto-connected.")
 
 # ------------------ Chat ------------------
 st.title(f"{first_name} Chat Web UI")
@@ -1133,23 +1211,18 @@ if (redis_client.get("tater:show_speed_stats") or "true").lower() == "true":
             pass
 
 # ---------------- Pending jobs spinner with transition-based refresh ----------------
-# Gather pending plugin names for the UI label (same behavior, fewer Redis round trips)
-
 pending_plugins = []
 pending_keys = set()
 
-# Grab job keys once
 job_keys = list(redis_client.scan_iter(match="webui:plugin_jobs:*", count=2000))
 
 if job_keys:
-    # Pipeline: fetch status + plugin for each key in one round trip
     pipe = redis_client.pipeline()
     for key in job_keys:
         pipe.hget(key, "status")
         pipe.hget(key, "plugin")
     results = pipe.execute()
 
-    # results comes back as [status0, plugin0, status1, plugin1, ...]
     for i, key in enumerate(job_keys):
         status = results[i * 2]
         plugin_name = results[i * 2 + 1]
@@ -1164,7 +1237,6 @@ if job_keys:
             elif plugin_name:
                 pending_plugins.append(plugin_name)
 
-# If any are pending, show spinner and poll for either
 if pending_plugins:
     names_str = ", ".join(pending_plugins)
     with st.spinner(f"{first_name} is working on: {names_str}"):
@@ -1173,7 +1245,6 @@ if pending_plugins:
             transition_detected = False
             current_pending = set()
 
-            # Re-scan keys (same behavior as before)
             job_keys = list(redis_client.scan_iter(match="webui:plugin_jobs:*", count=2000))
             if job_keys:
                 pipe = redis_client.pipeline()
@@ -1188,7 +1259,6 @@ if pending_plugins:
                         if key in previous_pending:
                             transition_detected = True
 
-            # safety: handle vanished keys too
             for key in list(previous_pending):
                 if not redis_client.exists(key):
                     transition_detected = True
