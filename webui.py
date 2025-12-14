@@ -120,14 +120,44 @@ def _start_rss(_llm_client):
 def _runtime():
     return {"threads": {}, "stop_flags": {}}
 
+    def _platform_lock_key(key: str) -> str:
+        return f"tater:platform_lock:{key}"
+
+    # Safe "delete only if owned" (prevents clobbering another process's lock)
+    _RELEASE_LOCK_LUA = """
+    if redis.call("GET", KEYS[1]) == ARGV[1] then
+      return redis.call("DEL", KEYS[1])
+    else
+      return 0
+    end
+    """
+
+    def _acquire_platform_lock(key: str, token: str, ttl_seconds: int = 3600) -> bool:
+        # NX = only set if not exists, EX = TTL so it self-heals if process dies
+        return bool(redis_client.set(_platform_lock_key(key), token, nx=True, ex=ttl_seconds))
+
+    def _release_platform_lock(key: str, token: str) -> None:
+        try:
+            redis_client.eval(_RELEASE_LOCK_LUA, 1, _platform_lock_key(key), token)
+        except Exception:
+            # worst case, lock expires by TTL
+            pass
+
 def _start_platform(key):
     rt = _runtime()
 
     thread = rt["threads"].get(key)
     stop_flag = rt["stop_flags"].get(key)
 
+    # If already running in THIS process, return
     if thread and thread.is_alive():
         return thread, stop_flag
+
+    # Cross-process lock
+    token = f"{os.getpid()}:{uuid.uuid4()}"
+    if not _acquire_platform_lock(key, token, ttl_seconds=3600):
+        # Another process already started it (or is starting it)
+        return None, None
 
     stop_flag = threading.Event()
 
@@ -140,6 +170,9 @@ def _start_platform(key):
                 print(f"⚠️ No run(stop_event) in platforms.{key}")
         except Exception as e:
             print(f"❌ Error in platform {key}: {e}")
+        finally:
+            # release lock when the platform thread exits
+            _release_platform_lock(key, token)
 
     thread = threading.Thread(target=runner, daemon=True)
     thread.start()
