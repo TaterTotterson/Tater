@@ -54,6 +54,29 @@ redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_respon
 llm_host = os.getenv('LLM_HOST', '127.0.0.1')
 llm_port = os.getenv('LLM_PORT', '11434')
 
+def _platform_lock_key(key: str) -> str:
+    return f"tater:platform_lock:{key}"
+
+# Safe "delete only if owned" (prevents clobbering another process's lock)
+_RELEASE_LOCK_LUA = """
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+  return redis.call("DEL", KEYS[1])
+else
+  return 0
+end
+"""
+
+def _acquire_platform_lock(key: str, token: str, ttl_seconds: int = 3600) -> bool:
+    # NX = only set if not exists, EX = TTL so it self-heals if process dies
+    return bool(redis_client.set(_platform_lock_key(key), token, nx=True, ex=ttl_seconds))
+
+def _release_platform_lock(key: str, token: str) -> None:
+    try:
+        redis_client.eval(_RELEASE_LOCK_LUA, 1, _platform_lock_key(key), token)
+    except Exception:
+        # worst case, lock expires by TTL
+        pass
+
 # If LLM_HOST already includes http(s), don't append port
 if llm_host.startswith("http://") or llm_host.startswith("https://"):
     # Allow skipping port entirely for APIs like OpenAI
@@ -119,29 +142,6 @@ def _start_rss(_llm_client):
 @st.cache_resource(show_spinner=False)
 def _runtime():
     return {"threads": {}, "stop_flags": {}}
-
-    def _platform_lock_key(key: str) -> str:
-        return f"tater:platform_lock:{key}"
-
-    # Safe "delete only if owned" (prevents clobbering another process's lock)
-    _RELEASE_LOCK_LUA = """
-    if redis.call("GET", KEYS[1]) == ARGV[1] then
-      return redis.call("DEL", KEYS[1])
-    else
-      return 0
-    end
-    """
-
-    def _acquire_platform_lock(key: str, token: str, ttl_seconds: int = 3600) -> bool:
-        # NX = only set if not exists, EX = TTL so it self-heals if process dies
-        return bool(redis_client.set(_platform_lock_key(key), token, nx=True, ex=ttl_seconds))
-
-    def _release_platform_lock(key: str, token: str) -> None:
-        try:
-            redis_client.eval(_RELEASE_LOCK_LUA, 1, _platform_lock_key(key), token)
-        except Exception:
-            # worst case, lock expires by TTL
-            pass
 
 def _start_platform(key):
     rt = _runtime()
