@@ -123,7 +123,7 @@ class CameraEventPlugin(ToolPlugin):
             port = int(raw_port) if raw_port is not None else 8788
         except Exception:
             port = 8788
-        return f"http://127.0.0.1:{port}"
+        return f"http://localhost:{port}"
 
     def _ha_headers(self, token: str) -> Dict[str, str]:
         return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}

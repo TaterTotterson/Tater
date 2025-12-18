@@ -117,6 +117,41 @@ def _coerce_content_to_text(content) -> str:
 
     return "" if content is None else str(content)
 
+def build_llm_host_from_env(default_host="127.0.0.1", default_port="11434") -> str:
+    """
+    Build a usable host string for LLMClientWrapper from env vars.
+
+    Supports:
+      - LLM_HOST=192.168.1.50, LLM_PORT=11434 -> http://192.168.1.50:11434
+      - LLM_HOST=http://192.168.1.50, LLM_PORT=11434 -> http://192.168.1.50:11434
+      - LLM_HOST=http://192.168.1.50:11434, LLM_PORT=11434 -> http://192.168.1.50:11434
+      - LLM_HOST=https://example.com/v1, LLM_PORT= -> https://example.com/v1
+    """
+    llm_host = (os.getenv("LLM_HOST", default_host) or "").strip()
+    llm_port = (os.getenv("LLM_PORT", default_port) or "").strip()
+
+    # If the user included scheme, don't prepend http://
+    if llm_host.startswith("http://") or llm_host.startswith("https://"):
+        # If a port is specified and the URL doesn't already end with that port, append it.
+        # This is mainly for "http://host" + LLM_PORT=11434 style configs.
+        if llm_port:
+            # Parse to see if port already present
+            p = urlparse(llm_host)
+            if p.port is None:
+                # No port present -> append
+                return f"{llm_host.rstrip('/') }:{llm_port}"
+        return llm_host.rstrip("/")
+
+    # No scheme provided -> assume http:// and append port
+    return f"http://{llm_host}:{llm_port}"
+
+def get_llm_client_from_env(**kwargs) -> "LLMClientWrapper":
+    """
+    Construct an LLMClientWrapper using LLM_HOST/LLM_PORT env vars.
+    """
+    host = build_llm_host_from_env()
+    return LLMClientWrapper(host=host, **kwargs)
+
 class LLMClientWrapper:
     def __init__(self, host, model=None, **kwargs):
         model = model or os.getenv("LLM_MODEL", "gemma-3-27b-it-abliterated")

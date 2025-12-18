@@ -11,13 +11,18 @@ from dotenv import load_dotenv
 import re
 from datetime import datetime
 from plugin_registry import plugin_registry
-from helpers import LLMClientWrapper, parse_function_json, get_tater_name, get_tater_personality
-import logging
 import threading
 import signal
 import time
 import base64
 from io import BytesIO
+from helpers import (
+    parse_function_json,
+    get_tater_name,
+    get_tater_personality,
+    get_llm_client_from_env,
+    build_llm_host_from_env
+)
 
 
 load_dotenv()
@@ -162,9 +167,9 @@ def _enforce_user_assistant_alternation(loop_messages):
         merged.insert(0, {"role": "user", "content": ""})
     return merged
 
-def get_plugin_enabled(plugin_name):
+def get_plugin_enabled(plugin_name: str) -> bool:
     enabled = redis_client.hget("plugin_enabled", plugin_name)
-    return enabled and enabled.lower() == "true"
+    return bool(enabled and enabled.lower() == "true")
 
 def clear_channel_history(channel_id):
     key = f"tater:channel:{channel_id}:history"
@@ -491,10 +496,8 @@ def run(stop_event=None):
     admin_id  = redis_client.hget("discord_platform_settings", "admin_user_id")
     channel_id= redis_client.hget("discord_platform_settings", "response_channel_id")
 
-    # Build LLM client
-    llm_host = os.getenv("LLM_HOST", "127.0.0.1")
-    llm_port = os.getenv("LLM_PORT", "11434")
-    llm_client = LLMClientWrapper(host=f"http://{llm_host}:{llm_port}")
+    llm_client = get_llm_client_from_env()
+    logger.info(f"[Discord] LLM client → {build_llm_host_from_env()}")
 
     if not (token and admin_id and channel_id):
         print("⚠️ Missing Discord settings in Redis. Bot not started.")

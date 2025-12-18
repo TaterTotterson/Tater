@@ -15,7 +15,13 @@ import uvicorn
 import requests
 import re
 
-from helpers import LLMClientWrapper, parse_function_json, get_tater_name, get_tater_personality
+from helpers import (
+    get_llm_client_from_env,
+    build_llm_host_from_env,
+    parse_function_json,
+    get_tater_name,
+    get_tater_personality
+)
 from plugin_registry import plugin_registry
 
 from dotenv import load_dotenv
@@ -26,7 +32,6 @@ logger = logging.getLogger("homeassistant")
 
 # -------------------- Platform defaults (overridable in WebUI) --------------------
 BIND_HOST = "0.0.0.0"
-ENABLE_PLUGINS = True
 TIMEOUT_SECONDS = 60  # LLM request timeout in seconds
 
 # Defaults; users can override these in WebUI platform settings
@@ -167,7 +172,6 @@ def get_plugin_enabled(plugin_name: str) -> bool:
     enabled = redis_client.hget("plugin_enabled", plugin_name)
     return bool(enabled and enabled.lower() == "true")
 
-# -------------------- System prompt (Discord/IRC style, HA scoped) --------------------
 # -------------------- System prompt (Discord/IRC style, HA scoped) --------------------
 def build_system_prompt() -> str:
     now = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
@@ -401,15 +405,12 @@ def _ring_off():
 # -------------------- App + LLM client --------------------
 app = FastAPI(title="Tater Home Assistant Bridge", version="1.5")  # 🔼 simplified ring logic
 
-_llm: Optional[LLMClientWrapper] = None
+_llm = None
 
 @app.on_event("startup")
 async def _on_startup():
     global _llm
-    llm_host = os.getenv("LLM_HOST", "127.0.0.1")
-    llm_port = os.getenv("LLM_PORT", "11434")
-    _llm = LLMClientWrapper(host=f"http://{llm_host}:{llm_port}")
-    logger.info(f"[HA Bridge] LLM client → http://{llm_host}:{llm_port}")
+    _llm = get_llm_client_from_env()
 
 @app.get("/tater-ha/v1/health")
 async def health():
@@ -512,7 +513,7 @@ async def handle_message(payload: HARequest):
             return HAResponse(response="Sorry, I didn't catch that.")
 
         # Detect tool call JSON
-        fn = parse_function_json(text) if ENABLE_PLUGINS else None
+        fn = parse_function_json(text)
         if fn:
             func = fn.get("function")
             args = fn.get("arguments", {}) or {}
