@@ -19,7 +19,14 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from plugin_registry import plugin_registry
-from helpers import LLMClientWrapper, parse_function_json, get_tater_name, get_tater_personality
+
+from helpers import (
+    parse_function_json,
+    get_tater_name,
+    get_tater_personality,
+    get_llm_client_from_env,
+    build_llm_host_from_env,
+)
 
 # Matrix SDK
 from nio import (
@@ -180,9 +187,7 @@ redis_client = redis.Redis(
 )
 
 # ---------------- LLM ----------------
-llm_host = os.getenv("LLM_HOST", "127.0.0.1")
-llm_port = os.getenv("LLM_PORT", "11434")
-llm_client = LLMClientWrapper(host=f"http://{llm_host}:{llm_port}")
+llm_client = None
 
 # ---------------- Helpers ----------------
 def _md_to_html(text: str) -> str:
@@ -1171,6 +1176,9 @@ class MatrixPlatform:
 
 # ---------------- Runner ----------------
 def run(stop_event: Optional[threading.Event] = None):
+    global llm_client
+    llm_client = get_llm_client_from_env()
+
     bot = MatrixPlatform()
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)

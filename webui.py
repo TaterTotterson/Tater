@@ -21,12 +21,13 @@ from plugin_registry import plugin_registry
 from rss import RSSManager
 from platform_registry import platform_registry
 from helpers import (
-    LLMClientWrapper,
     run_async,
     set_main_loop,
     parse_function_json,
     get_tater_name,
-    get_tater_personality
+    get_tater_personality,
+    get_llm_client_from_env,
+    build_llm_host_from_env
 )
 
 # Remove any prior handlers
@@ -118,18 +119,8 @@ redis_host = os.getenv('REDIS_HOST', '127.0.0.1')
 redis_port = int(os.getenv('REDIS_PORT', 6379))
 redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
 
-llm_host = os.getenv('LLM_HOST', '127.0.0.1')
-llm_port = os.getenv('LLM_PORT', '11434')
-
-# If LLM_HOST already includes http(s), don't append port
-if llm_host.startswith("http://") or llm_host.startswith("https://"):
-    # Allow skipping port entirely for APIs like OpenAI
-    if llm_port and not llm_host.endswith(f":{llm_port}"):
-        llm_client = LLMClientWrapper(host=f'{llm_host}:{llm_port}')
-    else:
-        llm_client = LLMClientWrapper(host=llm_host)
-else:
-    llm_client = LLMClientWrapper(host=f'http://{llm_host}:{llm_port}')
+llm_client = get_llm_client_from_env()
+logging.getLogger("webui").info(f"LLM client → {build_llm_host_from_env()}")
 
 # Set the main event loop used for run_async.
 try:

@@ -7,17 +7,20 @@ import threading
 import time
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta
-
 import redis
 import uvicorn
 from fastapi import FastAPI, HTTPException, Response, Query
 from pydantic import BaseModel, Field
-
 from dotenv import load_dotenv
-load_dotenv()
-
-from helpers import LLMClientWrapper, parse_function_json, get_tater_name
 from plugin_registry import plugin_registry
+from helpers import (
+    parse_function_json,
+    get_tater_name,
+    get_llm_client_from_env,
+    build_llm_host_from_env,
+)
+
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ha_automations")
@@ -218,15 +221,13 @@ def build_system_prompt() -> str:
 # -------------------- FastAPI app --------------------
 app = FastAPI(title="Tater Automations Bridge", version=APP_VERSION)
 
-_llm: Optional[LLMClientWrapper] = None
+_llm = None
 
 @app.on_event("startup")
 async def _on_startup():
     global _llm
-    llm_host = os.getenv("LLM_HOST", "127.0.0.1")
-    llm_port = os.getenv("LLM_PORT", "11434")
-    _llm = LLMClientWrapper(host=f"http://{llm_host}:{llm_port}")
-    logger.info(f"[Automations] LLM client → http://{llm_host}:{llm_port}")
+    _llm = get_llm_client_from_env()
+    logger.info(f"[Automations] LLM client → {build_llm_host_from_env()}")
 
 @app.get("/tater-ha/v1/health")
 async def health():

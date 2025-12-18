@@ -7,21 +7,20 @@ import threading
 import time
 from typing import Optional, Dict, Any, List
 from datetime import datetime
-
 import redis
 import uvicorn
-from fastapi import FastAPI, HTTPException
-
+from fastapi import FastAPI, HTTPException, Header
 from dotenv import load_dotenv
-load_dotenv()
-
+from plugin_registry import plugin_registry
 from helpers import (
-    LLMClientWrapper,
     parse_function_json,
     get_tater_name,
     get_tater_personality,
+    get_llm_client_from_env,
+    build_llm_host_from_env,
 )
-from plugin_registry import plugin_registry
+
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("homekit")
@@ -247,18 +246,17 @@ def build_system_prompt() -> str:
 
 # -------------------- FastAPI app --------------------
 app = FastAPI(title="Tater HomeKit / Siri Bridge", version="1.0")
-_llm: Optional[LLMClientWrapper] = None
+
+_llm = None
 
 @app.on_event("startup")
 async def _on_startup():
     global _llm
-    llm_host = os.getenv("LLM_HOST", "127.0.0.1")
-    llm_port = os.getenv("LLM_PORT", "11434")
-    _llm = LLMClientWrapper(host=f"http://{llm_host}:{llm_port}")
-    logger.info(f"[HomeKit] LLM client → http://{llm_host}:{llm_port}")
+    _llm = get_llm_client_from_env()
+    logger.info(f"[HomeKit] LLM client → {build_llm_host_from_env()}")
 
 @app.post("/tater-homekit/v1/message")
-async def handle_message(payload: Dict[str, Any], x_tater_token: Optional[str] = None):
+async def handle_message(payload: Dict[str, Any], x_tater_token: Optional[str] = Header(None)):
     """
     Expected JSON from Shortcut:
     {
@@ -284,12 +282,11 @@ async def handle_message(payload: Dict[str, Any], x_tater_token: Optional[str] =
     history_max = min(max(session_history_max, 0), max_history_cap)
     session_ttl = _get_int_setting("SESSION_TTL_SECONDS", DEFAULT_SESSION_TTL_SECONDS)
 
-    await _save_message(session_id, "user", text_in, history_max, session_ttl)
-
     system_prompt = build_system_prompt()
     loop_messages = await _load_history(session_id, history_max)
-    messages_list = [{"role": "system", "content": system_prompt}] + loop_messages
-    messages_list.append({"role": "user", "content": text_in})
+    messages_list = [{"role": "system", "content": system_prompt}] + loop_messages + [{"role": "user", "content": text_in}]
+
+    await _save_message(session_id, "user", text_in, history_max, session_ttl)
 
     try:
         resp = await _llm.chat(messages_list, timeout=TIMEOUT_SECONDS)
@@ -317,34 +314,51 @@ async def handle_message(payload: Dict[str, Any], x_tater_token: Optional[str] =
                             history_max, session_ttl)
 
         plugin = plugin_registry.get(func)
+
+        # Plugin must exist AND be enabled
         if not plugin or not _get_plugin_enabled(func):
             msg = f"Function `{func}` is not available for HomeKit/Siri."
             await _save_message(session_id, "assistant", msg, history_max, session_ttl)
             return {"reply": msg}
 
+        # Plugin must explicitly support HomeKit
+        platforms = getattr(plugin, "platforms", []) or []
+        if "homekit" not in platforms and "both" not in platforms:
+            msg = f"Function `{func}` does not support HomeKit/Siri."
+            await _save_message(session_id, "assistant", msg, history_max, session_ttl)
+            return {"reply": msg}
+
+        # Plugin must implement handle_homekit
+        if not hasattr(plugin, "handle_homekit"):
+            msg = f"Function `{func}` is not implemented for HomeKit/Siri."
+            await _save_message(session_id, "assistant", msg, history_max, session_ttl)
+            return {"reply": msg}
+
+        # Execute HomeKit handler ONLY
         try:
-            if hasattr(plugin, "handle_homeassistant"):
-                result = await plugin.handle_homeassistant(args, _llm)
-            elif hasattr(plugin, "handle_webui"):
-                result = await plugin.handle_webui(args=args)
-            elif hasattr(plugin, "handle_discord"):
-                result = await plugin.handle_discord(None, None, args)
-            else:
-                result = f"Plugin `{func}` does not support this platform."
+            result = await plugin.handle_homekit(args, _llm)
         except Exception as e:
             logger.exception(f"[HomeKit] plugin {func} error")
-            result = f"I tried to run {func} but hit an error: {e}"
+            msg = f"I tried to run {func} but hit an error."
+            await _save_message(session_id, "assistant", msg, history_max, session_ttl)
+            return {"reply": msg}
 
+        # Normalize result to spoken text
         if isinstance(result, str):
             final_text = result
-        elif isinstance(result, dict) and "message" in result:
-            final_text = str(result["message"])
+        elif isinstance(result, dict) and isinstance(result.get("message"), str):
+            final_text = result["message"]
         else:
-            final_text = json.dumps(result)[:2000]
+            final_text = json.dumps(result, ensure_ascii=False)[:2000]
 
-        await _save_message(session_id, "assistant",
-                            {"marker": "plugin_response", "phase": "final", "content": final_text},
-                            history_max, session_ttl)
+        await _save_message(
+            session_id,
+            "assistant",
+            {"marker": "plugin_response", "phase": "final", "content": final_text},
+            history_max,
+            session_ttl,
+        )
+
         return {"reply": final_text}
 
     final_text = text.strip()

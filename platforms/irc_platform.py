@@ -9,12 +9,18 @@ from dotenv import load_dotenv
 import re
 import threading
 from plugin_registry import plugin_registry
-from helpers import LLMClientWrapper, parse_function_json, get_tater_name, get_tater_personality
 import time
 import sys
 import irc3
 from irc3.plugins.command import command
 import textwrap
+from helpers import (
+    parse_function_json,
+    get_tater_name,
+    get_tater_personality,
+    get_llm_client_from_env,
+    build_llm_host_from_env,
+)
 
 load_dotenv()
 logger = logging.getLogger("irc.tater")
@@ -69,10 +75,7 @@ redis_client = redis.Redis(
 )
 
 MAX_RESPONSE_LENGTH = int(os.getenv("MAX_RESPONSE_LENGTH", 1500))
-LLM_MODEL = os.getenv("LLM_MODEL", "llama3")
-llm_host = os.getenv("LLM_HOST", "127.0.0.1")
-llm_port = os.getenv("LLM_PORT", "11434")
-llm_client = LLMClientWrapper(host=f"http://{llm_host}:{llm_port}")
+llm_client = None
 
 # ---- Fresh settings + formatting helpers ----
 IRC_PRIVMSG_LIMIT = int(os.getenv("IRC_PRIVMSG_LIMIT", 430))  # safe default for IRC line length
@@ -192,7 +195,7 @@ def send_formatted(self, target, text):
             send_chunked(one_line)
 
         if idx < len(paragraphs) - 1:
-            self.privmsg(target, "")
+            self.privmsg(target, " ")
 
 # ---- LM template helpers ----
 def _to_template_msg(role, content, sender=None):
@@ -455,10 +458,14 @@ async def on_message(self, mask, event, target, data):
         self.privmsg(target, f"{mask.nick}: Sorry, I ran into an error while thinking.")
 
 def run(stop_event=None):
-    # 1) Load fresh settings each time the platform starts
+
+    global llm_client
+    llm_client = get_llm_client_from_env()
+
+    # Load fresh settings each time the platform starts
     cfg = _load_irc_settings()
 
-    # 2) Build your IRC config from current Redis values
+    # Build your IRC config from current Redis values
     config = {
         "nick": cfg["nick"],
         "autojoins": [cfg["channel"]],
@@ -476,13 +483,13 @@ def run(stop_event=None):
         f"as {cfg['nick']} in {cfg['channel']} (SSL={cfg['ssl']})"
     )
 
-    # 3) Spin up a fresh event loop for this platform
+    # Spin up a fresh event loop for this platform
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
     bot = irc3.IrcBot(loop=loop, **config)
 
-    # 4) Single coroutine to run the bot and watch for stop_event
+    # Single coroutine to run the bot and watch for stop_event
     async def bot_runner():
         try:
             bot.create_connection()
@@ -505,7 +512,7 @@ def run(stop_event=None):
         except Exception as e:
             logger.error(f"❌ IRC bot error: {e}")
 
-    # 5) Run it & ensure clean loop shutdown
+    # Run it & ensure clean loop shutdown
     try:
         loop.run_until_complete(bot_runner())
     finally:

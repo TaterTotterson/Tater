@@ -16,7 +16,13 @@ import uvicorn
 from dotenv import load_dotenv
 load_dotenv()
 
-from helpers import LLMClientWrapper, parse_function_json, get_tater_name, get_tater_personality
+from helpers import (
+    parse_function_json,
+    get_tater_name,
+    get_tater_personality,
+    get_llm_client_from_env,
+    build_llm_host_from_env,
+)
 from plugin_registry import plugin_registry
 
 logging.basicConfig(level=logging.INFO)
@@ -290,15 +296,13 @@ def _flatten_to_text(res: Any) -> str:
 # -------------------- App + LLM client --------------------
 app = FastAPI(title="Tater XBMC Bridge", version="1.0")
 
-_llm: Optional[LLMClientWrapper] = None
+_llm = None
 
 @app.on_event("startup")
 async def _on_startup():
     global _llm
-    llm_host = os.getenv("LLM_HOST", "127.0.0.1")
-    llm_port = os.getenv("LLM_PORT", "11434")
-    _llm = LLMClientWrapper(host=f"http://{llm_host}:{llm_port}")
-    logger.info(f"[XBMC Bridge] LLM client → http://{llm_host}:{llm_port}")
+    _llm = get_llm_client_from_env()
+    logger.info(f"[XBMC Bridge] LLM client → {build_llm_host_from_env()}")
 
 @app.get("/tater-xbmc/v1/health")
 async def health():
