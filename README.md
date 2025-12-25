@@ -27,6 +27,7 @@ The following plugins can be triggerd simple by asking Tater after you enable th
 | Plugin Name                   | Description                                                                 | Platform                                   |
 |-------------------------------|-----------------------------------------------------------------------------|--------------------------------------------|
 | `automatic_plugin`            | Generates images using AUTOMATIC1111 API based on user prompt               | discord, webui                             |
+| `broadcast`                   | Sends a whole-house spoken announcement using Home Assistant TTS (Piper, Cloud, etc.) to configured media_player devices. Triggered by phrases like “broadcast”, “announce”, or “page the house”. | webui, homeassistant, homekit, xbmc        |
 | `camera_event`                | Detects motion, describes it with Vision AI, and logs structured events with cooldown. | automations                                |
 | `comfyui_audio_ace`           | Composes full-length songs using AceStep. Generates lyrics, tags, and MP3s  | discord, webui, homeassistant, matrix      |
 | `comfyui_image_plugin`        | Generates images with ComfyUI using custom workflow templates               | discord, webui, matrix                     |
@@ -38,6 +39,7 @@ The following plugins can be triggerd simple by asking Tater after you enable th
 | `emoji_ai_responder`          | Picks a relevant emoji based on a message when someone reacts to it         | discord                                   |
 | `events_query`                | Summarizes all stored events by time, area, or activity.                    | webui, homeassistant, homekit              |
 | `events_query_brief`          | Automation-focused event summary plugin. Returns a very short, sensor-safe summary of recent household events by area and timeframe. | automations                                |
+| `find_my_phone`               | Rings your phone using the Home Assistant Companion App notify service to help locate a misplaced device. Sends high-priority alerts that can repeat until you find it. | webui, homeassistant, homekit, xbmc        |
 | `ftp_browser`                 | Allows users to browse FTP servers via Discord                              | discord                                   |
 | `ha_control`                  | Controls Home Assistant devices via domain, service, entity, or area (e.g., turn lights on, toggle switches, set temperatures). | webui, homeassistant, homekit, xbmc        |
 | `lowfi_video`                 | Generates lofi music videos, outputs 20-min MP4                             | webui                                      |
