@@ -37,6 +37,8 @@ from plugins.events_query import plugin as events_query_plugin
 from plugins.mister_remote import plugin as mister_remote_plugin
 from plugins.events_query_brief import plugin as events_query_brief_plugin
 from plugins.weather_brief import plugin as weather_brief_plugin
+from plugins.find_my_phone import plugin as find_my_phone_plugin
+from plugins.broadcast import plugin as broadcast_plugin
 
 plugin_registry = {
     youtube_plugin.name: youtube_plugin,
@@ -78,4 +80,6 @@ plugin_registry = {
     mister_remote_plugin.name: mister_remote_plugin,
     events_query_brief_plugin.name: events_query_brief_plugin,
     weather_brief_plugin.name: weather_brief_plugin,
+    find_my_phone_plugin.name: find_my_phone_plugin,
+    broadcast_plugin.name: broadcast_plugin,
 }
