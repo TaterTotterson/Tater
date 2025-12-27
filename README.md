@@ -54,6 +54,7 @@ The following plugins can be triggerd simple by asking Tater after you enable th
 | `sftpgo_activity`             | Views SFTPGo user activity like file transfers and sessions                 | discord, webui, irc, matrix                |
 | `tater_gits_add_feed`         | Adds a GitHub releases feed to the Tater Gits watcher with auto category    | discord, webui, irc                        |
 | `vision_describer`            | Analyzes uploaded images and returns AI-generated descriptions              | discord, webui, matrix                     |
+| `voicepe_remote_timer`        | Starts a device-local timer on a Voice PE using ESPHome-exposed entities (seconds + start/cancel). Requires updated Voice PE config: https://github.com/TaterTotterson/microWakeWords/blob/main/voicePE-TaterTimer.yaml | webui, homeassistant, homekit, xbmc |
 | `weather_query_brief`         | Automation-focused weather summary plugin. Reads recent Home Assistant weather sensors (temperature, wind, rain, etc.) and returns a short, dashboard-safe summary. | automations                                |
 | `web_search`                  | Performs web search to help answer user questions                           | discord, webui, irc, homeassistant, matrix, homekit, xbmc |
 | `web_summary`                 | Summarizes content from a provided URL                                      | discord, webui, irc, matrix                |
