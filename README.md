@@ -13,13 +13,12 @@
 |-------------------|-------------|
 | `discord`         | Full-featured Discord bot that runs compatible plugins and supports rich interactions, media output, and background jobs. |
 | `homeassistant`   | Native Home Assistant integration via the Assist pipeline, allowing Tater to act as a voice-enabled AI assistant and control devices directly. <br>🔗 https://github.com/TaterTotterson/Tater-HomeAssistant |
-| `ha_automations`  | Lightweight Home Assistant automation endpoint for **direct tool execution** (no AI routing). Designed for fast, reliable automations like camera events, doorbell alerts, weather summaries, and dashboard sensors. Pairs with the **Tater Automations** custom component for easy setup. |
-| `tater_automations` | Home Assistant custom component that adds a native **“Call Tater automation tool”** action. Eliminates YAML and REST calls by letting automations directly invoke Tater automation plugins with structured arguments. <br>🔗 https://github.com/TaterTotterson/tater_automations |
+| `ha_automations`  | Lightweight Home Assistant **automation-only** endpoint for direct tool execution (no AI routing). Designed for fast, reliable automations like camera events, doorbell alerts, weather summaries, and dashboard sensors. Intended to be used via the **Tater Automations** Home Assistant custom component, which provides a native “Call Tater automation tool” action. <br>🔗 https://github.com/TaterTotterson/tater_automations |
 | `homekit`         | Siri / Apple Shortcuts integration for HomeKit, enabling “Hey Siri, ask Tater…” voice commands, per-device conversation sessions, and plugin-backed actions. <br>🔗 https://github.com/TaterTotterson/Tater/wiki/How-to-Build-the-%E2%80%9CTater%E2%80%9D-Shortcut |
 | `irc`             | Lightweight IRC bot that responds to mentions and runs compatible plugins with minimal overhead. |
 | `matrix`          | Modern Matrix client with end-to-end encryption support, Markdown rendering, and full plugin compatibility for federated chat networks like Element and Cinny. |
 | `xbmc`            | OG Xbox integration for **XBMC4Xbox**, provided by a custom Cortana-powered skin and script, enabling an on-console AI assistant with chat history and plugin-powered actions. <br>🔗 https://github.com/TaterTotterson/skin.cortana.tater-xbmc |
-| `webui`           | Streamlit-based WebUI for chatting with Tater, configuring plugins, managing platforms, and monitoring automation activity. |.                                                                                                            |                                                                                                                                     |
+| `webui`           | Streamlit-based WebUI for chatting with Tater, configuring plugins, managing platforms, and monitoring automation activity. |
 
 ## 🧩 Tater Plugin Overview
 
