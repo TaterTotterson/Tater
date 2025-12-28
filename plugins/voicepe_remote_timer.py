@@ -25,6 +25,7 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
     Behavior:
       - If a timer is already running, starting a new one is BLOCKED.
         The user must cancel first.
+      - Uses the dedicated RUNNING binary_sensor as the primary source of truth.
     """
 
     name = "voicepe_remote_timer"
@@ -84,6 +85,12 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
             "type": "string",
             "default": "sensor.voicepe_remote_timer_remaining_seconds",
             "description": "The ESPHome sensor entity that reports remaining seconds.",
+        },
+        "RUNNING_SENSOR_ENTITY": {
+            "label": "Remote Timer Running (binary_sensor.*)",
+            "type": "string",
+            "default": "binary_sensor.voicepe_remote_timer_running",
+            "description": "Binary sensor that reports if a timer is currently running (ON/OFF).",
         },
         "MAX_SECONDS": {
             "label": "Max Seconds",
@@ -253,7 +260,17 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
         )
         return await self._llm_phrase(llm_client, prompt, fallback)
 
-    async def _llm_block_new_timer_message(self, remaining_seconds: int, llm_client) -> str:
+    async def _llm_block_new_timer_message(self, remaining_seconds: int | None, llm_client) -> str:
+        if remaining_seconds is None:
+            fallback = "A timer is already running. Cancel it first if you want to start a new one."
+            prompt = (
+                "The user asked to start a timer, but a timer is already running.\n\n"
+                "Write ONE short, friendly sentence telling the user they need to cancel the current timer first.\n"
+                "Rules:\n- No emojis\n- No markdown\n- Keep it concise\n"
+                "Only output the sentence."
+            )
+            return await self._llm_phrase(llm_client, prompt, fallback)
+
         remaining_text = self._format_remaining(remaining_seconds)
         fallback = f"A timer is already running with {remaining_text} remaining. Cancel it first if you want to start a new one."
         prompt = (
@@ -266,8 +283,34 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
         return await self._llm_phrase(llm_client, prompt, fallback)
 
     # ─────────────────────────────────────────────────────────────
-    # Read remaining time
+    # Read timer state (running + remaining)
     # ─────────────────────────────────────────────────────────────
+
+    async def _is_timer_running(self) -> bool | None:
+        s = self._get_settings()
+
+        ha_base = (s.get("HA_BASE_URL") or "http://homeassistant.local:8123").rstrip("/")
+        token = (s.get("HA_TOKEN") or "").strip()
+        running_entity = (s.get("RUNNING_SENSOR_ENTITY") or "").strip()
+
+        if not token or not running_entity:
+            return None
+
+        def do_get():
+            st = self._get_state(ha_base, token, running_entity)
+            raw = (st.get("state") or "").strip().lower()
+            # HA binary sensors typically "on"/"off"
+            if raw in ("on", "true", "1", "yes"):
+                return True
+            if raw in ("off", "false", "0", "no"):
+                return False
+            return None
+
+        try:
+            return await asyncio.to_thread(do_get)
+        except Exception as e:
+            logger.error(f"[voicepe_remote_timer] Failed reading running sensor: {e}")
+            return None
 
     async def _get_remaining_seconds(self) -> int | None:
         s = self._get_settings()
@@ -308,8 +351,9 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
         seconds_entity = (s.get("TIMER_SECONDS_ENTITY") or "").strip()
         start_entity = (s.get("START_BUTTON_ENTITY") or "").strip()
         remaining_entity = (s.get("REMAINING_SENSOR_ENTITY") or "").strip()
-        if not seconds_entity or not start_entity or not remaining_entity:
-            return "Voice PE Remote Timer is missing TIMER_SECONDS_ENTITY, START_BUTTON_ENTITY, or REMAINING_SENSOR_ENTITY."
+        running_entity = (s.get("RUNNING_SENSOR_ENTITY") or "").strip()
+        if not seconds_entity or not start_entity or not remaining_entity or not running_entity:
+            return "Voice PE Remote Timer is missing required entity IDs in settings."
 
         try:
             max_seconds = int(s.get("MAX_SECONDS") or 7200)
@@ -320,13 +364,14 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
         if new_seconds <= 0:
             return "Please provide a valid timer duration (examples: 20s, 2min, 5 minutes, 1h 10m)."
 
-        current_remaining = await self._get_remaining_seconds()
-        if current_remaining is None:
-            return "I couldn't read the Voice PE remaining-time sensor (check plugin settings)."
+        running = await self._is_timer_running()
+        if running is None:
+            return "I couldn't read the Voice PE running sensor (check plugin settings)."
 
-        # BLOCK if already running
-        if current_remaining > 0:
-            return (await self._llm_block_new_timer_message(current_remaining, llm_client)).strip()
+        # BLOCK if already running (use running sensor as source of truth)
+        if running:
+            remaining = await self._get_remaining_seconds()
+            return (await self._llm_block_new_timer_message(remaining, llm_client)).strip()
 
         def do_calls():
             self._post_service(
@@ -347,11 +392,40 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
         return (await self._llm_started_message(new_seconds, llm_client)).strip()
 
     async def _status(self, llm_client) -> str:
-        remaining = await self._get_remaining_seconds()
-        if remaining is None:
-            return "I couldn't read the Voice PE remaining-time sensor (check plugin settings)."
-        if remaining <= 0:
+        running = await self._is_timer_running()
+        if running is None:
+            return "I couldn't read the Voice PE running sensor (check plugin settings)."
+
+        if not running:
             return (await self._llm_no_timer_message(llm_client)).strip()
+
+        remaining = await self._get_remaining_seconds()
+        # if remaining is missing/unknown but running is ON, still respond sanely
+        if remaining is None:
+            fallback = "A timer is running, but I couldn't read the remaining time."
+            return (await self._llm_phrase(
+                llm_client,
+                "The user asked how much time is left on a timer.\n\n"
+                "Fact: A timer is running, but remaining time is unavailable.\n\n"
+                "Write ONE short sentence explaining that.\n"
+                "Rules:\n- No emojis\n- No markdown\n- Friendly but concise\n"
+                "Only output the sentence.",
+                fallback
+            )).strip()
+
+        if remaining <= 0:
+            # edge case: running true but remaining 0 (transition/ringing). Keep it simple.
+            fallback = "The timer is running, but it’s at the end right now."
+            return (await self._llm_phrase(
+                llm_client,
+                "The user asked how much time is left on a timer.\n\n"
+                "Fact: The timer is running but remaining time is 0 (end/transition).\n\n"
+                "Write ONE short, natural sentence explaining it.\n"
+                "Rules:\n- No emojis\n- No markdown\n- Friendly but concise\n"
+                "Only output the sentence.",
+                fallback
+            )).strip()
+
         return (await self._llm_time_left_message(remaining, llm_client)).strip()
 
     async def _cancel(self, llm_client) -> str:
@@ -360,13 +434,14 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
         ha_base = (s.get("HA_BASE_URL") or "http://homeassistant.local:8123").rstrip("/")
         token = (s.get("HA_TOKEN") or "").strip()
         cancel_entity = (s.get("CANCEL_BUTTON_ENTITY") or "").strip()
-        if not token or not cancel_entity:
-            return "Voice PE Remote Timer is missing CANCEL_BUTTON_ENTITY or HA_TOKEN in settings."
+        running_entity = (s.get("RUNNING_SENSOR_ENTITY") or "").strip()
+        if not token or not cancel_entity or not running_entity:
+            return "Voice PE Remote Timer is missing CANCEL_BUTTON_ENTITY / RUNNING_SENSOR_ENTITY / HA_TOKEN in settings."
 
-        remaining = await self._get_remaining_seconds()
-        if remaining is None:
-            return "I couldn't read the Voice PE remaining-time sensor (check plugin settings)."
-        if remaining <= 0:
+        running = await self._is_timer_running()
+        if running is None:
+            return "I couldn't read the Voice PE running sensor (check plugin settings)."
+        if not running:
             return (await self._llm_cancel_nothing_message(llm_client)).strip()
 
         def do_cancel():
@@ -395,6 +470,7 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
         if action in ("cancel", "stop", "clear"):
             return await self._cancel(llm_client)
 
+        # no duration -> status
         if not duration:
             return await self._status(llm_client)
 
