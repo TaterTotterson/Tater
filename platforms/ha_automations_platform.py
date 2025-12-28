@@ -7,18 +7,15 @@ import threading
 import time
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta
+
 import redis
 import uvicorn
-from fastapi import FastAPI, HTTPException, Response, Query
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
+
 from plugin_registry import plugin_registry
-from helpers import (
-    parse_function_json,
-    get_tater_name,
-    get_llm_client_from_env,
-    build_llm_host_from_env,
-)
+from helpers import get_llm_client_from_env, build_llm_host_from_env
 
 load_dotenv()
 
@@ -27,8 +24,7 @@ logger = logging.getLogger("ha_automations")
 
 # -------------------- Platform constants --------------------
 BIND_HOST = "0.0.0.0"
-TIMEOUT_SECONDS = 60  # LLM request timeout in seconds
-APP_VERSION = "1.6"  # ISO-only ha_time, retention by ha_time, since/until, rich prompt
+APP_VERSION = "1.7"  # direct tool calls only (no AI router)
 
 # -------------------- Redis --------------------
 redis_host = os.getenv("REDIS_HOST", "127.0.0.1")
@@ -56,7 +52,6 @@ PLATFORM_SETTINGS = {
 }
 
 def _get_bind_port() -> int:
-    """Read port directly from Redis, fallback to default."""
     raw = redis_client.hget("ha_automations_platform_settings", "bind_port")
     try:
         return int(raw) if raw is not None else PLATFORM_SETTINGS["required"]["bind_port"]["default"]
@@ -67,7 +62,6 @@ def _get_bind_port() -> int:
         return PLATFORM_SETTINGS["required"]["bind_port"]["default"]
 
 def _get_events_retention_seconds() -> Optional[int]:
-    """Read retention from Redis, fallback to default."""
     raw = redis_client.hget("ha_automations_platform_settings", "events_retention")
     val = (raw or PLATFORM_SETTINGS["required"]["events_retention"]["default"]).strip().lower()
     mapping = {
@@ -85,10 +79,8 @@ def _parse_iso_naive(s: Optional[str]) -> Optional[datetime]:
         return None
     s = s.strip()
     try:
-        # strict: no timezone, exactly to seconds
         return datetime.strptime(s, "%Y-%m-%dT%H:%M:%S")
     except Exception:
-        # tolerate an incoming value that has a tz by stripping it (best-effort)
         try:
             dt = datetime.fromisoformat(s)
             return dt.replace(tzinfo=None) if dt.tzinfo else dt
@@ -126,7 +118,7 @@ def _trim_events_by_time(source: str) -> None:
         pipe = redis_client.pipeline()
         pipe.delete(key)
         if keep:
-            pipe.rpush(key, *keep)  # keep newest-first at index 0
+            pipe.rpush(key, *keep)
         pipe.execute()
     except Exception:
         logger.exception("[Automations] time-trim failed for %s", key)
@@ -135,13 +127,13 @@ def _append_event(source: str, item: Dict[str, Any]) -> None:
     key = _events_key(source)
     try:
         redis_client.lpush(key, json.dumps(item))
-        _trim_events_by_time(source)  # prune old entries after append
+        _trim_events_by_time(source)
     except Exception:
         logger.exception("[Automations] Failed to append event for %s", key)
 
 # -------------------- Pydantic DTOs --------------------
-class AutomationsRequest(BaseModel):
-    text: str  # plain user instruction, e.g. "turn the office lights green"
+class ToolCallRequest(BaseModel):
+    arguments: Dict[str, Any] = Field(default_factory=dict, description="Arguments for the tool/plugin call")
 
 class EventIn(BaseModel):
     """
@@ -167,56 +159,18 @@ def _plugin_enabled(name: str) -> bool:
     return bool(enabled and enabled.lower() == "true")
 
 def _is_automation_plugin(p) -> bool:
-    # Any plugin that declares 'automation' among platforms and implements handle_automation
     platforms = getattr(p, "platforms", [])
     return isinstance(platforms, list) and ("automation" in platforms) and hasattr(p, "handle_automation")
 
-# -------------------- System prompt (rich; lists enabled automation tools) --------------------
-def build_system_prompt() -> str:
-    """
-    Strict router: MUST return exactly one tool call as JSON; no chat text allowed.
-    Only includes automation plugins that are enabled and implement handle_automation.
-    """
-    first, last = get_tater_name()
-
-    header = (
-        f"You are {first} {last}, an automation-only tool router.\n"
-        "You MUST respond with a single JSON object describing exactly one tool call.\n"
-        "NEVER write normal prose or explanations. If you cannot pick a tool with confident arguments, "
-        "return the JSON: {\"error\":\"no_tool\"}.\n"
-        "Valid tool call format:\n"
-        "{\n"
-        '  "function": "<tool_name>",\n'
-        '  "arguments": { }\n'
-        "}\n"
-    )
-
-    tool_blocks = []
-    for plugin in plugin_registry.values():
-        if not _is_automation_plugin(plugin):
-            continue
-        if not _plugin_enabled(plugin.name):
-            continue
-        desc = getattr(plugin, "description", "No description provided.")
-        usage = getattr(plugin, "usage", "").strip()
-        block = (
-            f"Tool: {plugin.name}\n"
-            f"Description: {desc}\n"
-            f"{usage}\n"
-        )
-        tool_blocks.append(block)
-
-    tool_section = "\n".join(tool_blocks) if tool_blocks else "No tools are currently available."
-
-    guardrails = (
-        "Rules:\n"
-        "- Only return the JSON for one tool call; no Markdown, no backticks, no extra keys.\n"
-        "- Choose a tool ONLY if the user's latest message clearly requests an action that the tool can perform.\n"
-        "- If the tool requires structured arguments, construct them carefully from the user's message.\n"
-        "- If uncertain, return {\"error\":\"no_tool\"}.\n"
-    )
-
-    return f"{header}\n{tool_section}\n\n{guardrails}"
+# -------------------- Function name normalizer (defensive) --------------------
+def _normalize_func_name(name: str) -> str:
+    if not isinstance(name, str):
+        return ""
+    s = name.strip().lower()
+    if s.startswith("run_"):
+        s = s[4:]
+    s = s.replace(" ", "_").replace("-", "_")
+    return s
 
 # -------------------- FastAPI app --------------------
 app = FastAPI(title="Tater Automations Bridge", version=APP_VERSION)
@@ -236,10 +190,6 @@ async def health():
 # -------------------- Events APIs --------------------
 @app.post("/tater-ha/v1/events/add")
 async def add_event(ev: EventIn):
-    """
-    Append a house event to a per-source Redis list (newest first).
-    This keeps events durable and queryable, separate from notifications.
-    """
     ha_dt = _parse_iso_naive(ev.ha_time)
     if ha_dt is None:
         raise HTTPException(status_code=422, detail="ha_time must be ISO like 2025-10-19T20:07:00 (no timezone)")
@@ -250,7 +200,7 @@ async def add_event(ev: EventIn):
         "type": (ev.type or "").strip(),
         "message": (ev.message or "").strip(),
         "entity_id": (ev.entity_id or "").strip(),
-        "ha_time": _iso(ha_dt),  # normalize to seconds
+        "ha_time": _iso(ha_dt),
         "level": (ev.level or "info").strip(),
         "data": ev.data or {},
     }
@@ -264,11 +214,6 @@ async def events_search(
     since: Optional[str] = Query(None, description="Naive ISO start (YYYY-MM-DDTHH:MM:SS)"),
     until: Optional[str] = Query(None, description="Naive ISO end (YYYY-MM-DDTHH:MM:SS)"),
 ):
-    """
-    Return the most recent events for a given source (newest first).
-    Applies time-based trimming opportunistically on read, based on ha_time.
-    Optionally filter by inclusive [since, until] window (naive ISO).
-    """
     try:
         _trim_events_by_time(source)
     except Exception:
@@ -294,67 +239,24 @@ async def events_search(
             continue
     return {"source": source, "items": items}
 
-# -------------------- Function name normalizer (defensive) --------------------
-def _normalize_func_name(name: str) -> str:
-    if not isinstance(name, str):
-        return ""
-    s = name.strip().lower()
-    if s.startswith("run_"):
-        s = s[4:]
-    s = s.replace(" ", "_").replace("-", "_")
-    return s
-
-# -------------------- Main automations message endpoint --------------------
-@app.post("/tater-ha/v1/message")
-async def handle_message(payload: AutomationsRequest):
+# -------------------- Direct tool endpoint (NO AI ROUTING) --------------------
+@app.post("/tater-ha/v1/tools/{tool_name}")
+async def call_tool(tool_name: str, payload: ToolCallRequest):
     """
-    Strict tool-only router:
-    - Builds an automation-scoped system prompt (lists tools + usage)
-    - Calls LLM with: [system, user]
-    - Requires a valid single tool call JSON
-    - Executes plugin.handle_automation(args, llm_client)
-    - On success: returns 204 No Content (no chat)
+    Direct tool call endpoint for Home Assistant automations.
+
+    POST /tater-ha/v1/tools/<tool_name>
+    Body: {"arguments": {...}}
+
+    Returns: {"result": <plugin_result>}
     """
     if _llm is None:
         raise HTTPException(status_code=503, detail="LLM backend not initialized")
 
-    text = (payload.text or "").strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="Missing 'text'")
+    func_name = _normalize_func_name(tool_name)
+    if not func_name:
+        raise HTTPException(status_code=400, detail="Missing tool_name")
 
-    system_prompt = build_system_prompt()
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": text},
-    ]
-
-    # Ask LLM (router behavior)
-    try:
-        resp = await _llm.chat(messages, timeout=TIMEOUT_SECONDS)
-        llm_text = (resp.get("message", {}) or {}).get("content", "") if isinstance(resp, dict) else ""
-    except Exception as e:
-        logger.exception("[Automations] LLM error")
-        raise HTTPException(status_code=503, detail=f"LLM error: {e}")
-
-    if not llm_text:
-        raise HTTPException(status_code=422, detail="Empty LLM response")
-
-    # Parse function JSON
-    fn = parse_function_json(llm_text)
-    if not fn:
-        # Detect explicit no_tool error
-        try:
-            obj = json.loads(llm_text)
-            if isinstance(obj, dict) and obj.get("error") == "no_tool":
-                raise HTTPException(status_code=422, detail="No suitable tool selected")
-        except Exception:
-            pass
-        raise HTTPException(status_code=422, detail="Invalid tool JSON")
-
-    func_name = _normalize_func_name(fn.get("function", ""))
-    args = fn.get("arguments", {}) or {}
-
-    # Resolve plugin
     plugin = plugin_registry.get(func_name)
     if not plugin:
         raise HTTPException(status_code=404, detail=f"Tool '{func_name}' not found")
@@ -365,17 +267,16 @@ async def handle_message(payload: AutomationsRequest):
     if not _is_automation_plugin(plugin):
         raise HTTPException(status_code=404, detail=f"Tool '{func_name}' is not available on 'automation' platform")
 
-    # Execute
+    args = payload.arguments or {}
+
     try:
         result = await plugin.handle_automation(args, _llm)
     except ValueError as ve:
         raise HTTPException(status_code=422, detail=f"Validation error: {ve}")
     except Exception as e:
-        logger.exception(f"[Automations] Plugin '{func_name}' error")
+        logger.exception(f"[Automations] Tool '{func_name}' error")
         raise HTTPException(status_code=500, detail=f"Plugin error: {e}")
 
-    # Success: return plugin result as JSON for HA
-    # result is typically a short string from events_query_brief
     return {"result": result}
 
 # -------------------- Runner (mirrors other platforms’ graceful stop) --------------------
