@@ -655,11 +655,9 @@ def render_tater_settings():
 
 def render_settings_page():
     st.title("Settings")
-    col1, col2 = st.columns(2)
-    with col1:
-        render_webui_settings()
-    with col2:
-        render_tater_settings()
+    render_webui_settings()
+    st.markdown("---")
+    render_tater_settings()
 
 def render_plugin_list(plugins, empty_message):
     sorted_plugins = sorted(
