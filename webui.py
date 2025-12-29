@@ -660,10 +660,7 @@ def render_settings_page():
     render_tater_settings()
 
 def render_plugin_list(plugins, empty_message):
-    sorted_plugins = sorted(
-        plugins,
-        key=lambda p: getattr(p, "pretty_name", p.name).lower()
-    )
+    sorted_plugins = sorted(plugins, key=lambda p: (getattr(p, "plugin_name", None) or getattr(p, "pretty_name", None) or p.name).lower())
     if not sorted_plugins:
         st.info(empty_message)
         return
