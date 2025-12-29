@@ -40,6 +40,7 @@ from plugins.weather_brief import plugin as weather_brief_plugin
 from plugins.find_my_phone import plugin as find_my_phone_plugin
 from plugins.broadcast import plugin as broadcast_plugin
 from plugins.voicepe_remote_timer import plugin as voicepe_remote_timer_plugin
+from plugins.zen_greeting import plugin as zen_greeting_plugin
 
 plugin_registry = {
     youtube_plugin.name: youtube_plugin,
@@ -84,4 +85,5 @@ plugin_registry = {
     find_my_phone_plugin.name: find_my_phone_plugin,
     broadcast_plugin.name: broadcast_plugin,
     voicepe_remote_timer_plugin.name: voicepe_remote_timer_plugin,
+    zen_greeting_plugin.name: zen_greeting_plugin,
 }

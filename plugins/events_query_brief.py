@@ -1,7 +1,7 @@
 # plugins/events_query_brief.py
 import logging
 import json
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
 import re
@@ -11,7 +11,7 @@ import requests
 from dotenv import load_dotenv
 
 from plugin_base import ToolPlugin
-from helpers import redis_client, extract_json
+from helpers import redis_client
 
 load_dotenv()
 logger = logging.getLogger("events_query_brief")
@@ -20,37 +20,41 @@ logger.setLevel(logging.INFO)
 
 class EventsQueryBriefPlugin(ToolPlugin):
     """
-    Automation-only version of events_query.
+    Automation-only: generates a short, plain-text summary of stored events.
 
-    Produces a very short, plain-text summary of household events
-    suitable for automation variables or sensor states.
+    (push mode):
+      - Optionally writes the summary directly into an HA input_text entity via:
+        POST /api/services/input_text/set_value
+
+    Result:
+      - Still returns the compact string (useful for logs/tests)
+      - Can also "set" input_text.* without needing YAML templates.
     """
+
     name = "events_query_brief"
     pretty_name = "Events Query (Brief)"
 
     description = (
-        "Use this to generate a brief, plain-text summary of household events for automations. "
-        "Call this when the user explicitly asks to run events query brief, or when an automation "
-        "needs a short summary of what happened in a specific area and timeframe. "
-        "Always extract the area and timeframe from the user’s request, and pass the full original "
-        "user request as the query argument so context is preserved."
+        "Automation tool that returns a very short summary of recent events "
+        "(safe for dashboards). Can optionally write the summary into a Home Assistant "
+        "input_text entity automatically."
     )
 
+    # Cleaner: automation users usually just pick the tool name.
+    # Args are optional overrides.
     usage = (
         "{\n"
         '  "function": "events_query_brief",\n'
         '  "arguments": {\n'
-        '    "area": "front yard",            // optional: specific location or area\n'
-        '    "timeframe": "today|yesterday|last_24h|<date like Oct 14 or 2025-10-14>",\n'
-        '    "query": "run events query brief for the front yard today"  // full original user request\n'
+        '    "area": "front yard",\n'
+        '    "timeframe": "today|yesterday|last_24h|<date>",\n'
+        '    "query": "brief summary",\n'
+        '    "input_text_entity": "input_text.front_yard_events_brief"\n'
         "  }\n"
         "}\n"
     )
 
-    # Automation platform only
     platforms = ["automation"]
-
-    # Share config with events_query
     settings_category = "Events Query"
 
     required_settings = {
@@ -58,36 +62,49 @@ class EventsQueryBriefPlugin(ToolPlugin):
             "label": "Home Assistant Base URL",
             "type": "string",
             "default": "http://homeassistant.local:8123",
+            "description": "Base URL of your Home Assistant instance.",
         },
         "HA_TOKEN": {
             "label": "Home Assistant Long-Lived Token",
             "type": "string",
             "default": "",
+            "description": "Create in HA: Profile → Long-Lived Access Tokens.",
         },
         "TIME_SENSOR_ENTITY": {
             "label": "Time Sensor (ISO)",
             "type": "string",
             "default": "sensor.date_time_iso",
+            "description": "Entity that provides local-naive ISO time like 2025-10-19T20:07:00.",
+        },
+
+        # where to write the brief (optional)
+        "INPUT_TEXT_ENTITY": {
+            "label": "Input Text Entity to Update (optional)",
+            "type": "string",
+            "default": "",
+            "description": "If set (example: input_text.event_brief), this plugin will write the summary into it.",
         },
     }
 
-    waiting_prompt_template = (
-        "Checking recent home events now. This will be quick."
-    )
+    waiting_prompt_template = "Checking recent home events now. This will be quick."
 
     # ─────────────────────────────────────────────────────────────
     # Settings / HA helpers
     # ─────────────────────────────────────────────────────────────
 
     def _s(self) -> Dict[str, str]:
-        return redis_client.hgetall(f"plugin_settings:{self.settings_category}") or {}
+        return (
+            redis_client.hgetall(f"plugin_settings:{self.settings_category}")
+            or redis_client.hgetall(f"plugin_settings: {self.settings_category}")
+            or {}
+        )
 
     def _ha(self, s: Dict[str, str]) -> Dict[str, str]:
-        base = (s.get("HA_BASE_URL") or "").rstrip("/")
+        base = (s.get("HA_BASE_URL") or "http://homeassistant.local:8123").rstrip("/")
         token = s.get("HA_TOKEN") or ""
         if not token:
             raise ValueError("Missing HA_TOKEN in Events Query settings")
-        sensor = s.get("TIME_SENSOR_ENTITY") or "sensor.date_time_iso"
+        sensor = (s.get("TIME_SENSOR_ENTITY") or "sensor.date_time_iso").strip()
         return {"base": base, "token": token, "time_sensor": sensor}
 
     def _automation_base(self) -> str:
@@ -96,10 +113,6 @@ class EventsQueryBriefPlugin(ToolPlugin):
         except Exception:
             port = 8788
         return f"http://127.0.0.1:{port}"
-
-    # ─────────────────────────────────────────────────────────────
-    # Time helpers
-    # ─────────────────────────────────────────────────────────────
 
     def _ha_headers(self, token: str) -> Dict[str, str]:
         return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
@@ -132,7 +145,7 @@ class EventsQueryBriefPlugin(ToolPlugin):
 
     def _discover_sources(self) -> List[str]:
         prefix = "tater:automations:events:"
-        sources = []
+        sources: List[str] = []
         for key in redis_client.scan_iter(match=f"{prefix}*", count=500):
             src = key.split(":", maxsplit=3)[-1]
             if src and src not in sources:
@@ -160,7 +173,7 @@ class EventsQueryBriefPlugin(ToolPlugin):
 
     async def _fetch(self, sources: List[str], start: datetime, end: datetime):
         base = self._automation_base()
-        events = []
+        events: List[Dict[str, Any]] = []
         for src in sources:
             events.extend(await self._fetch_one(base, src, start, end))
         return events
@@ -226,6 +239,22 @@ class EventsQueryBriefPlugin(ToolPlugin):
         return cut.rstrip(". ,;:") + "…"
 
     # ─────────────────────────────────────────────────────────────
+    # write result into input_text
+    # ─────────────────────────────────────────────────────────────
+
+    def _set_input_text(self, ha_base: str, token: str, entity_id: str, value: str) -> None:
+        entity_id = (entity_id or "").strip()
+        if not entity_id:
+            return
+
+        url = f"{ha_base}/api/services/input_text/set_value"
+        payload = {"entity_id": entity_id, "value": value}
+
+        r = requests.post(url, headers=self._ha_headers(token), json=payload, timeout=10)
+        if r.status_code >= 400:
+            raise RuntimeError(f"input_text.set_value HTTP {r.status_code}: {r.text[:200]}")
+
+    # ─────────────────────────────────────────────────────────────
     # Core handler
     # ─────────────────────────────────────────────────────────────
 
@@ -252,11 +281,21 @@ class EventsQueryBriefPlugin(ToolPlugin):
         events = await self._fetch(sources, start, end)
 
         summary = await self._summarize(events, area, label, llm_client, query)
-        return self._compact(summary)
+        summary = self._compact(summary, limit=240)
 
-    # ─────────────────────────────────────────────────────────────
-    # Automation platform entry
-    # ─────────────────────────────────────────────────────────────
+        # push to input_text if configured
+        # Priority:
+        #   1) automation args override
+        #   2) plugin setting default
+        input_text_entity = (args.get("input_text_entity") or s.get("INPUT_TEXT_ENTITY") or "").strip()
+        if input_text_entity:
+            try:
+                self._set_input_text(ha["base"], ha["token"], input_text_entity, summary)
+            except Exception as e:
+                # Don't break the automation result just because HA write failed
+                logger.warning("[events_query_brief] Failed to set %s: %s", input_text_entity, e)
+
+        return summary
 
     async def handle_automation(self, args: Dict[str, Any], llm_client):
         return await self._handle(args, llm_client)
