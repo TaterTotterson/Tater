@@ -21,14 +21,15 @@ class WeatherBriefPlugin(ToolPlugin):
     Automation-only: summarize recent weather conditions (temp, wind, rain)
     from Home Assistant sensors over the last N hours (default: 12) into a
     very short, HA-safe text summary.
+
+    Optional: write the result directly into an input_text helper in HA.
     """
     name = "weather_brief"
     pretty_name = "Weather Brief"
 
     description = (
-        "Run this when the user says something like 'run weather brief' or asks for a "
-        "very short summary of recent weather conditions (temperature, wind, rain) "
-        "over the last N hours using Home Assistant sensors."
+        "Automation-only: returns a very short summary of recent weather conditions "
+        "(temperature, wind, rain) over the last N hours using Home Assistant sensors."
     )
 
     usage = (
@@ -41,9 +42,7 @@ class WeatherBriefPlugin(ToolPlugin):
         "}\n"
     )
 
-    # Automation-only plugin
     platforms = ["automation"]
-
     settings_category = "Weather Brief"
 
     required_settings = {
@@ -65,6 +64,7 @@ class WeatherBriefPlugin(ToolPlugin):
             "default": "sensor.date_time_iso",
             "description": "Sensor with local-naive ISO time (e.g., 2025-10-19T20:07:00)."
         },
+
         # Weather sensors
         "TEMP_ENTITY": {
             "label": "Temperature Entity",
@@ -83,6 +83,14 @@ class WeatherBriefPlugin(ToolPlugin):
             "type": "string",
             "default": "sensor.outdoor_rain_rate",
             "description": "Rain/precip sensor entity_id (optional)."
+        },
+
+        # NEW: optional HA helper to write into
+        "INPUT_TEXT_ENTITY": {
+            "label": "Input Text Entity to Update (optional)",
+            "type": "string",
+            "default": "",
+            "description": "If set (e.g., input_text.weather_brief), the plugin will write the summary into this helper."
         },
     }
 
@@ -108,6 +116,26 @@ class WeatherBriefPlugin(ToolPlugin):
     def _ha_headers(self, token: str) -> Dict[str, str]:
         return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
+    # ---------- NEW: Write to input_text ----------
+    def _set_input_text(self, ha_base: str, token: str, entity_id: str, value: str) -> None:
+        """
+        Writes a value into an HA input_text helper using the service call:
+          input_text.set_value
+        """
+        entity_id = (entity_id or "").strip()
+        if not entity_id:
+            return
+
+        url = f"{ha_base}/api/services/input_text/set_value"
+        payload = {"entity_id": entity_id, "value": value}
+
+        try:
+            r = requests.post(url, headers=self._ha_headers(token), json=payload, timeout=10)
+            if r.status_code >= 400:
+                logger.warning("[weather_brief] input_text.set_value failed %s: %s", r.status_code, r.text[:200])
+        except Exception as e:
+            logger.warning("[weather_brief] input_text.set_value error: %s", e)
+
     # ---------- Time helpers ----------
     @staticmethod
     def _parse_iso_naive(s: Optional[str]) -> Optional[datetime]:
@@ -115,10 +143,8 @@ class WeatherBriefPlugin(ToolPlugin):
             return None
         s = s.strip()
         try:
-            # strict: no timezone, exactly to seconds
             return datetime.strptime(s, "%Y-%m-%dT%H:%M:%S")
         except Exception:
-            # tolerate offset by stripping tz
             try:
                 dt = datetime.fromisoformat(s)
                 return dt.replace(tzinfo=None) if dt.tzinfo else dt
@@ -130,10 +156,6 @@ class WeatherBriefPlugin(ToolPlugin):
         return dt.strftime("%Y-%m-%dT%H:%M:%S")
 
     def _ha_now(self, ha_base: str, token: str, sensor_entity: str) -> datetime:
-        """
-        Use HA's reported time exactly as local-naive time.
-        If HA includes a timezone offset, strip it. Fallback to local system time.
-        """
         try:
             url = f"{ha_base}/api/states/{sensor_entity}"
             r = requests.get(url, headers=self._ha_headers(token), timeout=5)
@@ -156,10 +178,6 @@ class WeatherBriefPlugin(ToolPlugin):
         start: datetime,
         end: datetime,
     ) -> Dict[str, List[Dict[str, Any]]]:
-        """
-        Call /api/history/period/<start> with filter_entity_id & end_time.
-        Returns dict[entity_id] -> list of state dicts.
-        """
         entities = [e.strip() for e in entities if e and isinstance(e, str)]
         if not entities:
             return {}
@@ -168,14 +186,10 @@ class WeatherBriefPlugin(ToolPlugin):
         end_iso = self._format_iso_naive(end)
 
         url = f"{ha_base}/api/history/period/{start_iso}"
-        params = {
-            "filter_entity_id": ",".join(entities),
-            "end_time": end_iso,
-        }
-        headers = self._ha_headers(token)
+        params = {"filter_entity_id": ",".join(entities), "end_time": end_iso}
 
         try:
-            r = requests.get(url, headers=headers, params=params, timeout=15)
+            r = requests.get(url, headers=self._ha_headers(token), params=params, timeout=15)
             if r.status_code >= 400:
                 logger.warning("[weather_brief] history HTTP %s: %s", r.status_code, r.text[:200])
                 return {}
@@ -185,7 +199,6 @@ class WeatherBriefPlugin(ToolPlugin):
             return {}
 
         out: Dict[str, List[Dict[str, Any]]] = {}
-        # response is list-of-lists, each list is states for one entity
         for series in data:
             if not isinstance(series, list) or not series:
                 continue
@@ -220,10 +233,6 @@ class WeatherBriefPlugin(ToolPlugin):
     # ---------- HA-safe compact helper ----------
     @staticmethod
     def _compact_for_ha(text: str, limit: int = 240) -> str:
-        """
-        Normalize whitespace and hard-cap the string so it stays safely
-        under Home Assistant's 255 char sensor state limit.
-        """
         if not text:
             return ""
         t = re.sub(r"\s+", " ", text).strip()
@@ -244,23 +253,14 @@ class WeatherBriefPlugin(ToolPlugin):
         user_query: Optional[str],
         llm_client,
     ) -> str:
-        """
-        metrics = {
-          "temperature": {"entity_id": "...", "min":..., "max":..., "avg":...} | None,
-          "wind": {...} | None,
-          "rain": {"entity_id": "...", "total":..., "max":..., "rained": bool} | None
-        }
-        """
         system = (
             "You are summarizing recent outdoor weather conditions for a smart home dashboard.\n"
-            "Your response will be stored in a very small text field in Home Assistant.\n"
             "HARD REQUIREMENTS:\n"
-            "- Plain text only (no markdown, no bullet lists).\n"
-            "- At most 3 SHORT sentences.\n"
-            "- ABSOLUTE MAX: about 240 characters total.\n"
-            "- Be very concise and natural (e.g., 'In the last 12 hours...').\n"
-            "- Mention roughly how warm/cold it was, wind conditions, and whether it rained.\n"
-            "- If there is no data at all, say 'No recent weather data available.'\n"
+            "- Plain text only.\n"
+            "- At most 3 short sentences.\n"
+            "- Max ~240 characters.\n"
+            "- Mention temperature range, wind, and whether it rained (if available).\n"
+            "- If no data, say 'No recent weather data available.'\n"
         )
 
         payload = {
@@ -285,33 +285,20 @@ class WeatherBriefPlugin(ToolPlugin):
         except Exception as e:
             logger.info(f"[weather_brief] LLM summary failed; using fallback: {e}")
 
-        # Fallback summary without LLM
         temp = metrics.get("temperature")
         wind = metrics.get("wind")
         rain = metrics.get("rain")
 
-        parts: List[str] = []
-        parts.append(f"In the last {hours} hours")
-
+        parts: List[str] = [f"In the last {hours} hours"]
         if temp:
-            parts.append(
-                f"temps ranged roughly {round(temp['min'])}–{round(temp['max'])}"
-            )
+            parts.append(f"temps ranged {round(temp['min'])}–{round(temp['max'])}")
         if wind:
-            parts.append(
-                f"winds up to about {round(wind['max'])}"
-            )
+            parts.append(f"winds up to {round(wind['max'])}")
         if rain:
-            if rain.get("rained"):
-                parts.append(
-                    f"rain totaled around {round(rain['total'], 1)}"
-                )
-            else:
-                parts.append("no rain fell")
+            parts.append(f"rain ~{round(rain['total'], 1)}" if rain.get("rained") else "no rain")
 
         if len(parts) == 1:
             return f"No recent weather data available for the last {hours} hours."
-
         return ". ".join(parts) + "."
 
     # ---------- Core ----------
@@ -324,12 +311,11 @@ class WeatherBriefPlugin(ToolPlugin):
             hours = int(args.get("hours", 12))
         except Exception:
             hours = 12
-        hours = max(1, min(hours, 72))  # safety clamp
+        hours = max(1, min(hours, 72))
 
         now = self._ha_now(ha["base"], ha["token"], ha["time_sensor"])
         start = now - timedelta(hours=hours)
 
-        # Sensor entities from settings
         temp_entity = (s.get("TEMP_ENTITY") or "").strip()
         wind_entity = (s.get("WIND_ENTITY") or "").strip()
         rain_entity = (s.get("RAIN_ENTITY") or "").strip()
@@ -343,46 +329,35 @@ class WeatherBriefPlugin(ToolPlugin):
             entities.append(rain_entity)
 
         if not entities:
-            raise ValueError(
-                "No weather sensors configured. Set TEMP_ENTITY, WIND_ENTITY, or RAIN_ENTITY in Weather Brief settings."
-            )
+            raise ValueError("No weather sensors configured. Set TEMP_ENTITY, WIND_ENTITY, or RAIN_ENTITY.")
 
         history = self._fetch_history(ha["base"], ha["token"], entities, start, now)
 
-        metrics: Dict[str, Any] = {
-            "temperature": None,
-            "wind": None,
-            "rain": None,
-        }
+        metrics: Dict[str, Any] = {"temperature": None, "wind": None, "rain": None}
 
-        # Temperature metrics
         if temp_entity and temp_entity in history:
             vals = self._extract_numeric_values(history[temp_entity])
             summary = self._summarize_series(vals)
             if summary:
                 metrics["temperature"] = {"entity_id": temp_entity, **summary}
 
-        # Wind metrics
         if wind_entity and wind_entity in history:
             vals = self._extract_numeric_values(history[wind_entity])
             summary = self._summarize_series(vals)
             if summary:
                 metrics["wind"] = {"entity_id": wind_entity, **summary}
 
-        # Rain metrics (total + max, plus boolean)
         if rain_entity and rain_entity in history:
             vals = self._extract_numeric_values(history[rain_entity])
             if vals:
                 total = sum(v for v in vals if v >= 0)
-                rmax = max(vals)
                 metrics["rain"] = {
                     "entity_id": rain_entity,
                     "total": total,
-                    "max": rmax,
+                    "max": max(vals),
                     "rained": total > 0,
                 }
 
-        # If literally nothing, bail early
         if not any(metrics.values()):
             raw = f"No recent weather data available for the last {hours} hours."
         else:
@@ -394,21 +369,22 @@ class WeatherBriefPlugin(ToolPlugin):
                 llm_client=llm_client,
             )
 
-        return self._compact_for_ha(raw, limit=240) or "No recent weather data available."
+        compact = self._compact_for_ha(raw, limit=240) or "No recent weather data available."
+
+        # NEW: write into input_text if configured (or overridden by args)
+        input_text_entity = (args.get("input_text_entity") or s.get("INPUT_TEXT_ENTITY") or "").strip()
+        if input_text_entity:
+            self._set_input_text(ha["base"], ha["token"], input_text_entity, compact)
+
+        return compact
 
     # ---------- Automation entrypoint ----------
     async def handle_automation(self, args: Dict[str, Any], llm_client):
         """
-        Entry point for the Automations platform.
-
-        Expects args like:
-        {
-          "hours": 12,   // optional, default 12
-          "query": "What was the weather like outside in the last 12 hours?"
-        }
-
-        Returns a single compact string (< 255 chars) suitable for storing
-        in an automation sensor or variable.
+        Args:
+          - hours (optional)
+          - query (optional)
+          - input_text_entity (optional override; otherwise uses plugin setting INPUT_TEXT_ENTITY)
         """
         return await self._handle(args, llm_client)
 

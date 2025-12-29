@@ -251,4 +251,3 @@ The Streamlit-based web UI will be available for interacting with Tater.
 
 
 https://github.com/user-attachments/assets/9138f485-ccd6-46e0-9295-f5617c079fea
-
