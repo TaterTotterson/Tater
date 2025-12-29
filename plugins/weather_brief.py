@@ -25,12 +25,14 @@ class WeatherBriefPlugin(ToolPlugin):
     Optional: write the result directly into an input_text helper in HA.
     """
     name = "weather_brief"
+    plugin_name = "Weather Brief"
     pretty_name = "Weather Brief"
 
     description = (
         "Automation-only: returns a very short summary of recent weather conditions "
         "(temperature, wind, rain) over the last N hours using Home Assistant sensors."
     )
+    plugin_dec = "Give a short automation-friendly recap of recent weather conditions."
 
     usage = (
         "{\n"

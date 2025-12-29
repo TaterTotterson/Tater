@@ -16,6 +16,7 @@ redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_respon
 
 class UnwatchFeedPlugin(ToolPlugin):
     name = "unwatch_feed"
+    plugin_name = "Unwatch Feed"
     usage = (
         "{\n"
         '  "function": "unwatch_feed",\n'
@@ -23,6 +24,7 @@ class UnwatchFeedPlugin(ToolPlugin):
         "}\n"
     )
     description = "Removes an RSS feed provided by the user from the RSS watch list."
+    plugin_dec = "Remove an RSS feed from the watch list."
     pretty_name = "Unwatch RSS Feed"
     waiting_prompt_template = (
         "Write a friendly message telling {mention} you’re removing the feed from the watch list now! "

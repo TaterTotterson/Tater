@@ -12,7 +12,9 @@ logger = logging.getLogger("ntfy_notifier")
 
 class NtfyNotifierPlugin(ToolPlugin):
     name = "ntfy_notifier"
+    plugin_name = "ntfy Notifier"
     description = "Sends RSS announcements to an ntfy topic (self-hosted or ntfy.sh)."
+    plugin_dec = "Send RSS announcements to an ntfy topic."
     usage = ""
     platforms = []
     settings_category = "NTFY Notifier"

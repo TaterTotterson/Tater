@@ -17,6 +17,7 @@ async def safe_send(channel, content: str, **kwargs):
 
 class FtpBrowserPlugin(ToolPlugin):
     name = "ftp_browser"
+    plugin_name = "FTP Browser"
     usage = (
         "{\n"
         '  "function": "ftp_browser",\n'
@@ -24,6 +25,7 @@ class FtpBrowserPlugin(ToolPlugin):
         "}\n"
     )
     description = "Lets the user browse and download files from the FTP server."
+    plugin_dec = "Browse and download files from the configured FTP server."
     pretty_name = "Connecting to FTP"
     settings_category = "FTPBrowser"
     required_settings = {

@@ -8,6 +8,7 @@ from plugin_base import ToolPlugin
 
 class SFTPGoActivityPlugin(ToolPlugin):
     name = "sftpgo_activity"
+    plugin_name = "SFTPGo Activity"
     usage = (
         '{\n'
         '  "function": "sftpgo_activity",\n'
@@ -15,6 +16,7 @@ class SFTPGoActivityPlugin(ToolPlugin):
         '}\n'
     )
     description = "Retrieves current connection activity from the SFTPGo server."
+    plugin_dec = "Show current connection activity on the SFTPGo server."
     pretty_name = "Checking FTP Activity"
     settings_category = "SFTPGo"
     waiting_prompt_template = "Write a friendly message telling {mention} you’re accessing the server to see who’s using it now! Only output that message."

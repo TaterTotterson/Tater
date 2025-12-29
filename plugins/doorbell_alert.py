@@ -30,7 +30,9 @@ class DoorbellAlertPlugin(ToolPlugin):
     - ha_time is strict naive ISO 'YYYY-MM-DDTHH:MM:SS' (no timezone).
     """
     name = "doorbell_alert"
+    plugin_name = "Doorbell Alert"
     description = "Doorbell alert tool for when the user requests or says to run a doorbell alert."
+    plugin_dec = "Handle doorbell events: snapshot, describe with vision, announce, and log notifications."
     usage = (
         "{\n"
         '  "function": "doorbell_alert",\n'

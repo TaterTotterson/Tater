@@ -16,6 +16,7 @@ from helpers import redis_client, run_comfy_prompt
 
 class ComfyUIImagePlugin(ToolPlugin):
     name = "comfyui_image_plugin"
+    plugin_name = "ComfyUI Image"
     usage = (
         "{\n"
         '  "function": "comfyui_image_plugin",\n'
@@ -28,6 +29,7 @@ class ComfyUIImagePlugin(ToolPlugin):
         "}\n"
     )
     description = "Draws a picture using a prompt provided by the user using ComfyUI."
+    plugin_dec = "Generate a still image from a text prompt using your ComfyUI workflow."
     pretty_name = "Your Image"
     settings_category = "ComfyUI Image"
     required_settings = {
