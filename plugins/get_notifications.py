@@ -11,6 +11,7 @@ logger.setLevel(logging.INFO)
 
 class GetNotificationsPlugin(ToolPlugin):
     name = "get_notifications"
+    plugin_name = "Get Notifications"
     usage = (
         "{\n"
         '  "function": "get_notifications",\n'
@@ -21,6 +22,7 @@ class GetNotificationsPlugin(ToolPlugin):
         "Fetches queued notifications from the Home Assistant bridge. "
         "Call this when the user asks for notifications or recent alerts."
     )
+    plugin_dec = "Fetch queued notifications from the Home Assistant bridge."
     pretty_name = "Get Notifications"
     settings_category = "Notifications"
     platforms = ["webui", "homeassistant"]

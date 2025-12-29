@@ -31,6 +31,7 @@ class EventsQueryPlugin(ToolPlugin):
       - "anything happen around the house today?"
     """
     name = "events_query"
+    plugin_name = "Events Query"
     pretty_name = "Events Query"
     description = (
         "Answer questions about stored household events (all sources) by area and timeframe. "
@@ -38,6 +39,7 @@ class EventsQueryPlugin(ToolPlugin):
         "or whether someone is currently there. The model should always include the original user question "
         "as the 'query' argument so context is preserved."
     )
+    plugin_dec = "Answer questions about stored household events by area and timeframe."
 
     usage = (
         "{\n"

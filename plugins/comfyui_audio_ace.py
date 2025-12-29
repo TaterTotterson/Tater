@@ -19,6 +19,7 @@ logger.setLevel(logging.INFO)
 
 class ComfyUIAudioAcePlugin(ToolPlugin):
     name = "comfyui_audio_ace"
+    plugin_name = "ComfyUI Audio Ace"
     usage = (
         '{\n'
         '  "function": "comfyui_audio_ace",\n'
@@ -26,6 +27,7 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         '}\n'
     )
     description = "Generates music using ComfyUI Audio Ace."
+    plugin_dec = "Compose a music track from a prompt with ComfyUI Audio Ace."
     pretty_name = "Your Song"
     settings_category = "ComfyUI Audio Ace"
     # ✅ Add Matrix support
