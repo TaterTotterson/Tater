@@ -10,9 +10,11 @@ from plugin_settings import get_plugin_enabled, get_plugin_settings
 
 class WordPressPosterPlugin(ToolPlugin):
     name = "wordpress_poster"
+    plugin_name = "WordPress Poster"
     platforms = []
     usage = ""
     description = "Posts RSS summaries to WordPress using its REST API."
+    plugin_dec = "Post RSS summaries to a WordPress site via its REST API."
     settings_category = "WordPress Poster"
     notifier = True
 
