@@ -26,6 +26,7 @@ class OverseerrRequestPlugin(ToolPlugin):
       - request "Dune"
     """
     name = "overseerr_request"
+    plugin_name = "Overseerr Request"
     usage = (
         "{\n"
         '  "function": "overseerr_request",\n'

@@ -31,6 +31,7 @@ class EventsQueryPlugin(ToolPlugin):
       - "anything happen around the house today?"
     """
     name = "events_query"
+    plugin_name = "Events Query"
     pretty_name = "Events Query"
     description = (
         "Answer questions about stored household events (all sources) by area and timeframe. "

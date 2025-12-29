@@ -15,6 +15,7 @@ logger.setLevel(logging.INFO)
 
 class TaterGitsAddFeedPlugin(ToolPlugin):
     name = "tater_gits_add_feed"
+    plugin_name = "Tater Gits Add Feed"
     usage = (
         "{\n"
         '  "function": "tater_gits_add_feed",\n'

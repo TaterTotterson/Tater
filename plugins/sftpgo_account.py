@@ -21,6 +21,7 @@ logger.setLevel(logging.INFO)
 
 class SFTPGoAccountPlugin(ToolPlugin):
     name = "sftpgo_account"
+    plugin_name = "SFTPGo Account"
     usage = (
         '{\n'
         '  "function": "sftpgo_account",\n'

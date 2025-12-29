@@ -11,6 +11,7 @@ logger = logging.getLogger("discord_notifier")
 
 class DiscordNotifierPlugin(ToolPlugin):
     name = "discord_notifier"
+    plugin_name = "Discord Notifier"
     description = "Posts RSS summaries to a Discord channel via webhook."
     plugin_dec = "Post RSS summaries to a Discord channel via webhook."
     usage = ""

@@ -19,6 +19,7 @@ redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_respon
 
 class WatchFeedPlugin(ToolPlugin):
     name = "watch_feed"
+    plugin_name = "Watch Feed"
     usage = (
         "{\n"
         '  "function": "watch_feed",\n'

@@ -19,6 +19,7 @@ logger.setLevel(logging.INFO)
 
 class WebSearchPlugin(ToolPlugin):
     name = "web_search"
+    plugin_name = "Web Search"
     usage = (
         "{\n"
         '  "function": "web_search",\n'

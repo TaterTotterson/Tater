@@ -18,6 +18,7 @@ async def safe_send(channel, content: str, **kwargs):
 
 class WebDAVBrowserPlugin(ToolPlugin):
     name = "webdav_browser"
+    plugin_name = "WebDAV Browser"
     usage = (
         "{\n"
         '  "function": "webdav_browser",\n'

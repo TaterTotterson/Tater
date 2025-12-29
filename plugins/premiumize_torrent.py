@@ -21,6 +21,7 @@ logger.setLevel(logging.INFO)
 
 class PremiumizeTorrentPlugin(ToolPlugin):
     name = "premiumize_torrent"
+    plugin_name = "Premiumize Torrent"
     usage = (
         "{\n"
         '  "function": "premiumize_torrent",\n'

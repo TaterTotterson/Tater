@@ -16,6 +16,7 @@ redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_respon
 
 class UnwatchFeedPlugin(ToolPlugin):
     name = "unwatch_feed"
+    plugin_name = "Unwatch Feed"
     usage = (
         "{\n"
         '  "function": "unwatch_feed",\n'

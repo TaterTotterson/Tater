@@ -27,6 +27,7 @@ class FindMyPhonePlugin(ToolPlugin):
     """
 
     name = "find_my_phone"
+    plugin_name = "Find My Phone"
     usage = (
         "{\n"
         '  "function": "find_my_phone",\n'

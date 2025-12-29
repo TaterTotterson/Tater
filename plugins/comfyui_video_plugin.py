@@ -15,6 +15,7 @@ from plugins.comfyui_image_video_plugin import ComfyUIImageVideoPlugin
 
 class ComfyUIVideoPlugin(ToolPlugin):
     name = "comfyui_video_plugin"
+    plugin_name = "ComfyUI Video"
     usage = (
         '{\n'
         '  "function": "comfyui_video_plugin",\n'

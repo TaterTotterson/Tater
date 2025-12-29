@@ -1,5 +1,6 @@
 class ToolPlugin:
     name = ""
+    plugin_name = ""
     usage = ""
     platforms = []
     notifier = False

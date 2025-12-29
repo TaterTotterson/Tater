@@ -525,7 +525,7 @@ def render_plugin_settings_form(plugin):
             st.rerun()
 
 def render_plugin_card(plugin):
-    display_name = getattr(plugin, "pretty_name", plugin.name)
+    display_name = getattr(plugin, "plugin_name", None) or getattr(plugin, "pretty_name", None) or plugin.name
     description = get_plugin_description(plugin)
     platforms = getattr(plugin, "platforms", []) or []
 
@@ -1152,7 +1152,7 @@ if active_view == "Chat":
 
                 if plugin_name and plugin_name in plugin_registry:
                     plugin = plugin_registry[plugin_name]
-                    display_name = getattr(plugin, "pretty_name", plugin.name)
+                    display_name = getattr(plugin, "plugin_name", None) or getattr(plugin, "pretty_name", None) or plugin.name
                     pending_plugins.append(display_name)
                 elif plugin_name:
                     pending_plugins.append(plugin_name)

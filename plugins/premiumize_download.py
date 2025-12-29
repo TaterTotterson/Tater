@@ -13,6 +13,7 @@ logger.setLevel(logging.DEBUG)
 
 class PremiumizeDownloadPlugin(ToolPlugin):
     name = "premiumize_download"
+    plugin_name = "Premiumize Download"
     usage = (
         "{\n"
         '  "function": "premiumize_download",\n'

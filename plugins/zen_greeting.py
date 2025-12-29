@@ -26,6 +26,7 @@ class ZenGreetingPlugin(ToolPlugin):
     - Uses HA time sensor so the greeting matches HA's local time.
     """
     name = "zen_greeting"
+    plugin_name = "Zen Greeting"
     pretty_name = "Zen Greeting"
 
     description = (

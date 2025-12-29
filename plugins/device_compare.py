@@ -21,6 +21,7 @@ logger.setLevel(logging.INFO)
 
 class DeviceComparePlugin(ToolPlugin):
     name = "device_compare"
+    plugin_name = "Device Compare"
     usage = (
         "{\n"
         '  "function": "device_compare",\n'

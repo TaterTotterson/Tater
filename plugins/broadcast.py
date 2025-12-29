@@ -19,6 +19,7 @@ class BroadcastPlugin(ToolPlugin):
     Mimics the doorbell_alert TTS behavior (tts/speak with fallback to tts/piper_say).
     """
     name = "broadcast"
+    plugin_name = "Broadcast"
     usage = (
         "{\n"
         '  "function": "broadcast",\n'

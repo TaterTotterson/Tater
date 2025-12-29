@@ -16,6 +16,7 @@ logger.setLevel(logging.INFO)
 
 class OverseerrTrendingPlugin(ToolPlugin):
     name = "overseerr_trending"
+    plugin_name = "Overseerr Trending"
     usage = (
         "{\n"
         '  "function": "overseerr_trending",\n'

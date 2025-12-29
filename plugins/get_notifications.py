@@ -11,6 +11,7 @@ logger.setLevel(logging.INFO)
 
 class GetNotificationsPlugin(ToolPlugin):
     name = "get_notifications"
+    plugin_name = "Get Notifications"
     usage = (
         "{\n"
         '  "function": "get_notifications",\n'

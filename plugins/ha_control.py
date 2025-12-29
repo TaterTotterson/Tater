@@ -57,6 +57,7 @@ class HAClient:
 
 class HAControlPlugin(ToolPlugin):
     name = "ha_control"
+    plugin_name = "Home Assistant Control"
     usage = (
         "{\n"
         '  "function": "ha_control",\n'

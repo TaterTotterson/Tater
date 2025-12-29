@@ -25,6 +25,7 @@ class WeatherBriefPlugin(ToolPlugin):
     Optional: write the result directly into an input_text helper in HA.
     """
     name = "weather_brief"
+    plugin_name = "Weather Brief"
     pretty_name = "Weather Brief"
 
     description = (

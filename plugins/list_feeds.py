@@ -16,6 +16,7 @@ redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_respon
 
 class ListFeedsPlugin(ToolPlugin):
     name = "list_feeds"
+    plugin_name = "List Feeds"
     usage = (
         "{\n"
         '  "function": "list_feeds",\n'

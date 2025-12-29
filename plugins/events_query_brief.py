@@ -32,6 +32,7 @@ class EventsQueryBriefPlugin(ToolPlugin):
     """
 
     name = "events_query_brief"
+    plugin_name = "Events Query Brief"
     pretty_name = "Events Query (Brief)"
 
     description = (

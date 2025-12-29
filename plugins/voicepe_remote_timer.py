@@ -29,6 +29,7 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
     """
 
     name = "voicepe_remote_timer"
+    plugin_name = "Voice PE Remote Timer"
     pretty_name = "Voice PE Remote Timer"
     settings_category = "Voice PE Remote Timer"
 
