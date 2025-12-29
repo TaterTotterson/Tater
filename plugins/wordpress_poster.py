@@ -13,6 +13,7 @@ class WordPressPosterPlugin(ToolPlugin):
     platforms = []
     usage = ""
     description = "Posts RSS summaries to WordPress using its REST API."
+    plugin_dec = "Post RSS summaries to a WordPress site via its REST API."
     settings_category = "WordPress Poster"
     notifier = True
 

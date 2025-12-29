@@ -39,6 +39,7 @@ class OverseerrRequestPlugin(ToolPlugin):
         "Adds a movie or TV show to Overseerr by title, creating a new request for it. "
         "Example: add the movie F1, request the TV show One Piece, request the movie Dune."
     )
+    plugin_dec = "Request a movie or TV show in Overseerr by title."
     pretty_name = "Overseerr: Add Request"
     settings_category = "Overseerr"
     required_settings = {

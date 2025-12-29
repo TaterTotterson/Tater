@@ -21,6 +21,7 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
         '}'
     )
     description = "Animates the most recent image in chat into a looping WebP or MP4 using ComfyUI."
+    plugin_dec = "Animate the most recent image in chat into a looping WebP or MP4 via ComfyUI."
     pretty_name = "Animating Your Image"
     settings_category = "ComfyUI Animate Image"
     required_settings = {

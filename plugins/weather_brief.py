@@ -31,6 +31,7 @@ class WeatherBriefPlugin(ToolPlugin):
         "Automation-only: returns a very short summary of recent weather conditions "
         "(temperature, wind, rain) over the last N hours using Home Assistant sensors."
     )
+    plugin_dec = "Give a short automation-friendly recap of recent weather conditions."
 
     usage = (
         "{\n"

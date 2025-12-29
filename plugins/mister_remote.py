@@ -34,6 +34,7 @@ class MisterRemotePlugin(ToolPlugin):
         "ALWAYS include the user's FULL original message in the `utterance` field when calling this tool.\n"
         "Examples users might say: 'play super mario 3 on mister', 'what’s playing?', 'go to menu', 'take a screenshot'."
     )
+    plugin_dec = "Control your MiSTer FPGA setup\u2014launch games, check status, or take screenshots."
 
     platforms = ["discord", "webui", "irc", "homeassistant", "matrix", "homekit"]
 

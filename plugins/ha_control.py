@@ -72,6 +72,7 @@ class HAControlPlugin(ToolPlugin):
         "}\n"
     )
     description = "Call this when the user wants to control or check a Home Assistant device, such as turning lights on or off, setting temperatures, or checking a sensor state."
+    plugin_dec = "Control or check Home Assistant devices like lights, thermostats, and sensors."
     pretty_name = "Home Assistant Control"
     settings_category = "Home Assistant"
     waiting_prompt_template = "Write a friendly message telling {mention} you’re controlling their Home Assistant devices now! Only output that message."

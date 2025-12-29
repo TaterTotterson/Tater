@@ -31,6 +31,7 @@ class OverseerrTrendingPlugin(ToolPlugin):
         "You can ask for current trending or upcoming titles (e.g., 'what movies are trending', 'what TV shows are coming soon'), "
         "or request details about a specific movie or show (e.g., 'tell me about Dune 2'). "
     )
+    plugin_dec = "List trending or upcoming movies and shows from Overseerr and answer related questions."
     pretty_name = "Overseerr: Trending & Upcoming"
     settings_category = "Overseerr"
     required_settings = {

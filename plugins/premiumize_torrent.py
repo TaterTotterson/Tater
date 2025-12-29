@@ -28,6 +28,7 @@ class PremiumizeTorrentPlugin(ToolPlugin):
         "}\n"
     )
     description = "Checks if a .torrent file in recent chat history is cached on Premiumize.me and returns direct links if available."
+    plugin_dec = "Check the latest torrent or magnet against Premiumize cache and provide direct links."
     pretty_name = "Getting Links"
     settings_category = "Premiumize"
     required_settings = {

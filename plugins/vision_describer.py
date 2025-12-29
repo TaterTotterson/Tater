@@ -42,6 +42,7 @@ class VisionDescriberPlugin(ToolPlugin):
         "Uses an OpenAI-compatible *vision* model to describe the most recent image. "
         "No input needed — it automatically finds the latest uploaded or generated image."
     )
+    plugin_dec = "Describe the most recent image using a vision-capable model."
     pretty_name = "Describing Your Image"
     settings_category = "Vision"
     required_settings = {

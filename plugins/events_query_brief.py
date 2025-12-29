@@ -39,6 +39,7 @@ class EventsQueryBriefPlugin(ToolPlugin):
         "(safe for dashboards). Can optionally write the summary into a Home Assistant "
         "input_text entity automatically."
     )
+    plugin_dec = "Produce a terse dashboard-friendly summary of recent home events and optionally write it to Home Assistant."
 
     # Cleaner: automation users usually just pick the tool name.
     # Args are optional overrides.

@@ -23,6 +23,7 @@ class AutomaticPlugin(ToolPlugin):
         "}\n"
     )
     description = "Draws a picture using a prompt provided by the user using AUTOMATIC1111 API."
+    plugin_dec = "Generate an image from a text prompt using your Automatic1111 server."
     settings_category = "Automatic111"
     pretty_name = "Your Image"
     required_settings = {

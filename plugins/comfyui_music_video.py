@@ -23,6 +23,7 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
         '}\n'
     )
     description = "Generates a complete AI music video including lyrics, music, and animated visuals by orchestrating ComfyUI plugins."
+    plugin_dec = "Build a full AI music video\u2014lyrics, music, and animated visuals\u2014using ComfyUI."
     pretty_name = "Your Music Video"
     platforms = ["webui"]
     waiting_prompt_template = "Generate a fun, upbeat message saying you're composing the full music video now! Only output that message."

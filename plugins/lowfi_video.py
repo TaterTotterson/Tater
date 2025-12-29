@@ -28,6 +28,7 @@ class LowfiVideoPlugin(ToolPlugin):
         "}\n"
     )
     description = "Generates lofi audio via AceStep and loops a cozy animation to full length (MP4)."
+    plugin_dec = "Create a cozy lofi video by generating music and looping a matching animation."
     pretty_name = "Your Lofi Video"
     waiting_prompt_template = "Generate a fun, cozy message telling the user you're creating their lofi music video right now. Only output that message."
     settings_category = "Lofi Video"

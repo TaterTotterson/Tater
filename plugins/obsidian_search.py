@@ -26,6 +26,7 @@ class ObsidianSearchPlugin(ToolPlugin):
     name = "obsidian_search"
     pretty_name = "Search Obsidian"
     description = "Searches all notes in your vault. Extracts relevant info from each file and combines into one answer."
+    plugin_dec = "Search your Obsidian vault and summarize matching notes."
     usage = (
         "{\n"
         '  "function": "obsidian_search",\n'

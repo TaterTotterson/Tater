@@ -19,6 +19,7 @@ logger = logging.getLogger("emoji_ai_responder")
 class EmojiAIResponderPlugin(ToolPlugin):
     name = "emoji_ai_responder"
     description = "Uses LLM to pick an appropriate emoji when a user reacts to a message."
+    plugin_dec = "Pick an emoji reaction that matches a user's message."
     platforms = ["passive"]
 
     async def on_reaction_add(self, reaction, user):

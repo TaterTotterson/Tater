@@ -23,6 +23,7 @@ class UnwatchFeedPlugin(ToolPlugin):
         "}\n"
     )
     description = "Removes an RSS feed provided by the user from the RSS watch list."
+    plugin_dec = "Remove an RSS feed from the watch list."
     pretty_name = "Unwatch RSS Feed"
     waiting_prompt_template = (
         "Write a friendly message telling {mention} you’re removing the feed from the watch list now! "

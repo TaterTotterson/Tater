@@ -26,6 +26,7 @@ class WatchFeedPlugin(ToolPlugin):
         "}\n"
     )
     description = "Adds an RSS/Atom feed to the watch list and records the latest seen item so future checks only post new entries."
+    plugin_dec = "Add an RSS/Atom feed to the watch list and track new items."
     pretty_name = "Adding Your Feed"
     waiting_prompt_template = (
         "Write a friendly message telling {mention} you’re adding the feed to the watch list now! "

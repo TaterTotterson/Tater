@@ -22,6 +22,7 @@ class PremiumizeDownloadPlugin(ToolPlugin):
     description = (
         "Checks if a link (HTTP/HTTPS or magnet) is cached on Premiumize.me and, if so, returns direct download links."
     )
+    plugin_dec = "Check if a link is cached on Premiumize and return direct download links."
     pretty_name = "Getting Links"
     settings_category = "Premiumize"
     required_settings = {

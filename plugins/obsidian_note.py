@@ -24,6 +24,7 @@ class ObsidianNotePlugin(ToolPlugin):
     name = "obsidian_note"
     pretty_name = "Add to Obsidian"
     description = "Always creates a new note with an AI-generated title at the vault root."
+    plugin_dec = "Create a new Obsidian note with an AI-generated title and content."
     usage = (
         "{\n"
         '  "function": "obsidian_note",\n'

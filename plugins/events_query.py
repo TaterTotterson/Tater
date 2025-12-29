@@ -38,6 +38,7 @@ class EventsQueryPlugin(ToolPlugin):
         "or whether someone is currently there. The model should always include the original user question "
         "as the 'query' argument so context is preserved."
     )
+    plugin_dec = "Answer questions about stored household events by area and timeframe."
 
     usage = (
         "{\n"

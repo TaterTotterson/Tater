@@ -32,6 +32,7 @@ class ZenGreetingPlugin(ToolPlugin):
         "Automation-only: creates a short, calming greeting and zen message of the day. "
         "Uses the LLM so the message varies a bit each run. Designed for dashboards."
     )
+    plugin_dec = "Generate a calming daily greeting and message for dashboards."
 
     usage = (
         "{\n"

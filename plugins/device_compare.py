@@ -28,6 +28,7 @@ class DeviceComparePlugin(ToolPlugin):
         "}\n"
     )
     description = "Compares two devices by fetching specs and per-game FPS from multiple sources, then renders image tables."
+    plugin_dec = "Compare two devices with spec tables and per-game FPS benchmarks."
     pretty_name = "Comparing Devices"
     settings_category = "Device Compare"
     # Matrix supported (images only). IRC still not supported (images).

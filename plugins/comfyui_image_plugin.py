@@ -28,6 +28,7 @@ class ComfyUIImagePlugin(ToolPlugin):
         "}\n"
     )
     description = "Draws a picture using a prompt provided by the user using ComfyUI."
+    plugin_dec = "Generate a still image from a text prompt using your ComfyUI workflow."
     pretty_name = "Your Image"
     settings_category = "ComfyUI Image"
     required_settings = {

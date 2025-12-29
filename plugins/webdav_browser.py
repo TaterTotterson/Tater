@@ -25,6 +25,7 @@ class WebDAVBrowserPlugin(ToolPlugin):
         "}\n"
     )
     description = "Lets the user browse and download files from the WebDAV server."
+    plugin_dec = "Browse and download files from the configured WebDAV server."
     pretty_name = "Connecting to WebDAV"
     settings_category = "WebDAV Browser"
     platforms = ["discord"]

@@ -29,6 +29,7 @@ class YouTubeSummaryPlugin(ToolPlugin):
         '}'
     )
     description = "Summarizes a YouTube video using its transcript."
+    plugin_dec = "Summarize a YouTube video using its transcript."
     pretty_name = "Summarizing Your Video"
     settings_category = "YouTube Summary"
     required_settings = {

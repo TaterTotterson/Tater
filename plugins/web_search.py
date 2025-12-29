@@ -26,6 +26,7 @@ class WebSearchPlugin(ToolPlugin):
         "}\n"
     )
     description = "Web search tool, search for more info to help answer the users questions."
+    plugin_dec = "Search the web via Google CSE and summarize a relevant result."
     pretty_name = "Searching For More Info"
     settings_category = "Web Search"
     required_settings = {

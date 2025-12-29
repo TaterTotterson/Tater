@@ -3,6 +3,7 @@ class ToolPlugin:
     usage = ""
     platforms = []
     notifier = False
+    plugin_dec = ""
     settings_category = None
     required_settings = {}
 

@@ -22,6 +22,7 @@ class ComfyUIVideoPlugin(ToolPlugin):
         '}\n'
     )
     description = "Generates a video from a text prompt by creating multiple animated clips using ComfyUI, then merging them into one MP4."
+    plugin_dec = "Create a short video from a text prompt by stitching ComfyUI-generated clips."
     pretty_name = "Your Video"
     platforms = ["webui"]
     settings_category = "ComfyUI Video"

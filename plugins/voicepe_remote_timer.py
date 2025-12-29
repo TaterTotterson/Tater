@@ -48,6 +48,7 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
         "If duration is omitted, reports remaining time. "
         "If action is 'cancel', cancels the current timer."
     )
+    plugin_dec = "Start, cancel, or check a Voice PE (ESPHome) timer device."
 
     required_settings = {
         "HA_BASE_URL": {
