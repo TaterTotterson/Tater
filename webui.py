@@ -228,9 +228,9 @@ def get_plugin_enabled(plugin_name):
 def set_plugin_enabled(plugin_name, enabled):
     redis_client.hset("plugin_enabled", plugin_name, "true" if enabled else "false")
 
-def render_plugin_controls(plugin_name):
+def render_plugin_controls(plugin_name, label=None):
     current_state = get_plugin_enabled(plugin_name)
-    toggle_state = st.toggle(plugin_name, value=current_state, key=f"plugin_toggle_{plugin_name}")
+    toggle_state = st.toggle(label or plugin_name, value=current_state, key=f"plugin_toggle_{plugin_name}")
 
     if toggle_state != current_state:
         set_plugin_enabled(plugin_name, toggle_state)
@@ -404,68 +404,51 @@ def save_plugin_settings(category, settings_dict):
     str_settings = {k: str(v) for k, v in settings_dict.items()}
     redis_client.hset(key, mapping=str_settings)
 
-# Updated: Gather distinct plugin settings categories from the plugin registry,
-# only including plugins that are enabled.
-plugin_categories = {}
+def get_plugin_description(plugin):
+    return getattr(plugin, "plugin_dec", None) or getattr(plugin, "description", "")
 
-for plugin in plugin_registry.values():
-    if not get_plugin_enabled(plugin.name):
-        continue
+def render_plugin_settings_form(plugin):
+    category = getattr(plugin, "settings_category", None)
+    settings = getattr(plugin, "required_settings", None) or {}
+    if not category or not settings:
+        return
 
-    cat = getattr(plugin, "settings_category", None)
-    settings = getattr(plugin, "required_settings", None)
-
-    if not cat or not settings:
-        continue  # Skip plugins with no settings UI
-
-    if cat not in plugin_categories:
-        plugin_categories[cat] = {}
-
-    plugin_categories[cat].update(settings)
-
-# Display an expander for each plugin settings category.
-for category, settings in sorted(plugin_categories.items()):
-    with st.sidebar.expander(category, expanded=False):
-        st.subheader(f"{category} Settings")
+    with st.expander("Settings", expanded=False):
         current_settings = get_plugin_settings(category)
         new_settings = {}
+        has_fields = False
 
         for key, info in settings.items():
             input_type    = info.get("type", "text")
+            label         = info.get("label", key)
+            desc          = info.get("description", "")
             default_value = current_settings.get(key, info.get("default", ""))
 
-            # --- BUTTONS go first ---
             if input_type == "button":
-                if st.button(info["label"], key=f"{category}_{key}_button"):
-                    plugin_obj = next(
-                        (p for p in plugin_registry.values()
-                         if getattr(p, "settings_category", "") == category),
-                        None
-                    )
-                    if plugin_obj and hasattr(plugin_obj, "handle_setting_button"):
-                        result = plugin_obj.handle_setting_button(key)
+                if st.button(label, key=f"{plugin.name}_{category}_{key}_button"):
+                    if hasattr(plugin, "handle_setting_button"):
+                        result = plugin.handle_setting_button(key)
                         if result:
                             st.success(result)
-                if info.get("description"):
-                    st.caption(info["description"])
-                continue  # skip saving a value for buttons
+                if desc:
+                    st.caption(desc)
+                continue
 
-            # PASSWORD
+            has_fields = True
+
             if input_type == "password":
                 new_value = st.text_input(
-                    info.get("label", key),
-                    value=default_value,
-                    help=info.get("description", ""),
+                    label,
+                    value=str(default_value),
+                    help=desc,
                     type="password",
-                    key=f"{category}_{key}"
+                    key=f"{plugin.name}_{category}_{key}"
                 )
-
-            # FILE
             elif input_type == "file":
                 uploaded_file = st.file_uploader(
-                    info.get("label", key),
+                    label,
                     type=["json"],
-                    key=f"{category}_{key}"
+                    key=f"{plugin.name}_{category}_{key}"
                 )
                 if uploaded_file is not None:
                     try:
@@ -477,46 +460,217 @@ for category, settings in sorted(plugin_categories.items()):
                         new_value = default_value
                 else:
                     new_value = default_value
-
-            # SELECT
             elif input_type == "select":
                 options = info.get("options", []) or ["Option 1", "Option 2"]
                 current_index = options.index(default_value) if default_value in options else 0
                 new_value = st.selectbox(
-                    info.get("label", key),
+                    label,
                     options,
                     index=current_index,
-                    help=info.get("description", ""),
-                    key=f"{category}_{key}"
+                    help=desc,
+                    key=f"{plugin.name}_{category}_{key}"
                 )
-
-            # CHECKBOX
             elif input_type == "checkbox":
                 is_checked = (
                     default_value if isinstance(default_value, bool)
                     else str(default_value).lower() in ("true", "1", "yes")
                 )
                 new_value = st.checkbox(
-                    info.get("label", key),
+                    label,
                     value=is_checked,
-                    help=info.get("description", ""),
-                    key=f"{category}_{key}"
+                    help=desc,
+                    key=f"{plugin.name}_{category}_{key}"
                 )
-
-            # TEXT (fallback)
+            elif input_type == "number":
+                raw_value = str(default_value).strip()
+                is_int_like = bool(re.fullmatch(r"-?\d+", raw_value))
+                if is_int_like:
+                    try:
+                        current_num = int(raw_value)
+                    except Exception:
+                        current_num = 0
+                    new_value = st.number_input(
+                        label,
+                        value=current_num,
+                        step=1,
+                        format="%d",
+                        help=desc,
+                        key=f"{plugin.name}_{category}_{key}"
+                    )
+                else:
+                    try:
+                        current_num = float(raw_value) if raw_value else 0.0
+                    except Exception:
+                        current_num = 0.0
+                    new_value = st.number_input(
+                        label,
+                        value=current_num,
+                        step=1.0,
+                        help=desc,
+                        key=f"{plugin.name}_{category}_{key}"
+                    )
             else:
                 new_value = st.text_input(
-                    info.get("label", key),
-                    value=default_value,
-                    help=info.get("description", ""),
-                    key=f"{category}_{key}"  # 🔹 unique per plugin+setting
+                    label,
+                    value=str(default_value),
+                    help=desc,
+                    key=f"{plugin.name}_{category}_{key}"
                 )
 
             new_settings[key] = new_value
 
-        if st.button(f"Save {category} Settings", key=f"save_{category}_unique"):
+        if has_fields and st.button(f"Save {category} Settings", key=f"save_{plugin.name}_{category}"):
             save_plugin_settings(category, new_settings)
             st.success(f"{category} settings saved.")
+            st.rerun()
+
+def render_plugin_card(plugin):
+    display_name = getattr(plugin, "plugin_name", None) or getattr(plugin, "pretty_name", None) or plugin.name
+    description = get_plugin_description(plugin)
+    platforms = getattr(plugin, "platforms", []) or []
+
+    with st.container(border=True):
+        header_cols = st.columns([4, 1])
+        with header_cols[0]:
+            st.subheader(display_name)
+            st.caption(f"ID: {plugin.name}")
+        with header_cols[1]:
+            render_plugin_controls(plugin.name, label="Enabled")
+
+        st.write(description)
+        if platforms:
+            st.caption(f"Platforms: {', '.join(platforms)}")
+
+        render_plugin_settings_form(plugin)
+
+def render_platforms_panel(auto_connected=None):
+    st.subheader("Platforms")
+    if auto_connected:
+        st.success(f"{', '.join(auto_connected)} auto-connected.")
+    for platform in sorted(platform_registry, key=lambda p: p["category"].lower()):
+        label = platform["label"]
+        with st.expander(label, expanded=False):
+            render_platform_controls(platform, redis_client)
+
+def render_webui_settings():
+    st.subheader("WebUI Settings")
+    current_chat = get_chat_settings()
+    username = st.text_input("Username", value=current_chat["username"], key="webui_username")
+
+    raw_display = redis_client.get("tater:max_display") or 8
+    try:
+        display_count = int(float(raw_display))
+    except (TypeError, ValueError):
+        display_count = 8
+
+    new_display = st.number_input(
+        "Messages Shown in WebUI",
+        min_value=1,
+        max_value=500,
+        value=display_count,
+        step=1,
+        format="%d",
+        key="webui_display_count"
+    )
+
+    show_speed_default = (redis_client.get("tater:show_speed_stats") or "true").lower() == "true"
+    show_speed = st.checkbox("Show tokens/sec", value=show_speed_default, key="show_speed_stats")
+
+    uploaded_avatar = st.file_uploader(
+        "Upload your avatar", type=["png", "jpg", "jpeg"], key="avatar_uploader"
+    )
+
+    if st.button("Save WebUI Settings", key="save_webui_settings"):
+        if uploaded_avatar is not None:
+            avatar_bytes = uploaded_avatar.read()
+            avatar_b64 = base64.b64encode(avatar_bytes).decode("utf-8")
+            save_chat_settings(username, avatar_b64)
+        else:
+            save_chat_settings(username)
+
+        redis_client.set("tater:max_display", new_display)
+        redis_client.set("tater:show_speed_stats", "true" if show_speed else "false")
+        st.success("WebUI settings updated.")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Clear Chat History", key="clear_history"):
+            clear_chat_history()
+            st.success("Chat history cleared.")
+    with col2:
+        if st.button("Clear Active Plugin Jobs", key="clear_plugin_jobs"):
+            for key in redis_client.scan_iter("webui:plugin_jobs:*"):
+                redis_client.delete(key)
+            st.success("All active plugin jobs have been cleared.")
+            st.rerun()
+
+def render_tater_settings():
+    st.subheader(f"{first_name} Settings")
+    stored_count = int(redis_client.get("tater:max_store") or 20)
+    llm_count = int(redis_client.get("tater:max_llm") or 8)
+    default_first = redis_client.get("tater:first_name") or first_name
+    default_last = redis_client.get("tater:last_name") or last_name
+    default_personality = redis_client.get("tater:personality") or ""
+
+    first_input = st.text_input("First Name", value=default_first, key="tater_first_name")
+    last_input = st.text_input("Last Name", value=default_last, key="tater_last_name")
+
+    personality_input = st.text_area(
+        "Personality / Style (optional)",
+        value=default_personality,
+        help=(
+            "Describe how you want Tater to talk and behave. "
+            "Examples:\n"
+            "- A calm and confident starship captain.\n"
+            "- Captain Jahn-Luek Picard of the Starship Enterprise.\n"
+            "- A laid-back hippy stoner who still explains things clearly."
+        ),
+        height=120,
+        key="tater_personality"
+    )
+
+    uploaded_tater_avatar = st.file_uploader(
+        f"Upload {first_input}'s avatar", type=["png", "jpg", "jpeg"], key="tater_avatar_uploader"
+    )
+    if uploaded_tater_avatar is not None:
+        avatar_bytes = uploaded_tater_avatar.read()
+        avatar_b64 = base64.b64encode(avatar_bytes).decode("utf-8")
+        redis_client.set("tater:avatar", avatar_b64)
+
+    new_store = st.number_input("Max Stored Messages (0 = unlimited)", min_value=0, value=stored_count, key="tater_store_limit")
+    if new_store == 0:
+        st.warning("⚠️ Unlimited history enabled — this may grow Redis memory usage over time.")
+    new_llm = st.number_input("Messages Sent to LLM", min_value=1, value=llm_count, key="tater_llm_limit")
+    if new_store > 0 and new_llm > new_store:
+        st.warning("⚠️ You're trying to send more messages to LLM than you’re storing. Consider increasing Max Stored Messages.")
+
+    if st.button("Save Tater Settings", key="save_tater_settings"):
+        redis_client.set("tater:max_store", new_store)
+        redis_client.set("tater:max_llm", new_llm)
+        redis_client.set("tater:first_name", first_input)
+        redis_client.set("tater:last_name", last_input)
+        redis_client.set("tater:personality", personality_input)
+        st.success("Tater settings updated.")
+        st.rerun()
+
+def render_settings_page():
+    st.title("Settings")
+    col1, col2 = st.columns(2)
+    with col1:
+        render_webui_settings()
+    with col2:
+        render_tater_settings()
+
+def render_plugin_list(plugins, empty_message):
+    sorted_plugins = sorted(
+        plugins,
+        key=lambda p: getattr(p, "pretty_name", p.name).lower()
+    )
+    if not sorted_plugins:
+        st.info(empty_message)
+        return
+    for plugin in sorted_plugins:
+        render_plugin_card(plugin)
 
 # ----------------- SYSTEM PROMPT -----------------
 def build_system_prompt():
@@ -819,124 +973,25 @@ async def process_function_call(response_json, user_question=""):
     else:
         return "Received an unknown function call."
 
-# ------------------ SIDEBAR EXPANDERS ------------------
+# ------------------ NAVIGATION ------------------
+nav_options = ["Chat", "Plugins", "Auto Plugins", "Platforms", "Settings"]
+if "active_view" not in st.session_state:
+    st.session_state.active_view = nav_options[0]
+
+st.sidebar.markdown("**Navigation**")
+for opt in nav_options:
+    if st.sidebar.button(opt, use_container_width=True, key=f"nav_btn_{opt}"):
+        st.session_state.active_view = opt
+        st.rerun()
+
+active_view = st.session_state.active_view
 st.sidebar.markdown("---")
-
-with st.sidebar.expander("Plugin Settings", expanded=False):
-    st.subheader("Enable/Disable Plugins")
-    for plugin_name in sorted(plugin_registry.keys(), key=lambda n: n.lower()):
-        render_plugin_controls(plugin_name)
-
-for platform in sorted(platform_registry, key=lambda p: p["category"].lower()):
-    label = platform["label"]
-    with st.sidebar.expander(label, expanded=False):
-        render_platform_controls(platform, redis_client)
-
-with st.sidebar.expander("WebUI Settings", expanded=False):
-    st.subheader("WebUI Settings")
-    current_chat = get_chat_settings()
-    username = st.text_input("USERNAME", value=current_chat["username"])
-
-    # safely cast to int — handles strings or floats in Redis
-    raw_display = redis_client.get("tater:max_display") or 8
-    try:
-        display_count = int(float(raw_display))
-    except (TypeError, ValueError):
-        display_count = 8
-
-    # number input with integer step & format
-    new_display = st.number_input(
-        "Messages Shown in WebUI",
-        min_value=1,
-        max_value=500,
-        value=display_count,
-        step=1,
-        format="%d",
-        key="webui_display_count"
-    )
-
-    show_speed_default = (redis_client.get("tater:show_speed_stats") or "true").lower() == "true"
-    show_speed = st.checkbox("Show tokens/sec", value=show_speed_default, key="show_speed_stats")
-
-    uploaded_avatar = st.file_uploader(
-        "Upload your avatar", type=["png", "jpg", "jpeg"], key="avatar_uploader"
-    )
-
-    if uploaded_avatar is not None:
-        avatar_bytes = uploaded_avatar.read()
-        avatar_b64 = base64.b64encode(avatar_bytes).decode("utf-8")
-        save_chat_settings(username, avatar_b64)
-    else:
-        save_chat_settings(username)
-
-    if st.button("Save WebUI Settings", key="save_webui_settings"):
-        redis_client.set("tater:max_display", new_display)
-        redis_client.set("tater:show_speed_stats", "true" if show_speed else "false")
-        st.success("WebUI settings updated.")
-
-    if st.button("Clear Chat History", key="clear_history"):
-        clear_chat_history()
-        st.success("Chat history cleared.")
-
-    if st.button("Clear Active Plugin Jobs", key="clear_plugin_jobs"):
-        for key in redis_client.scan_iter("webui:plugin_jobs:*"):
-            redis_client.delete(key)
-        st.success("All active plugin jobs have been cleared.")
-        st.rerun()
-
-with st.sidebar.expander(f"{first_name} Settings", expanded=False):
-    st.subheader("Tater Runtime Configuration")
-    stored_count = int(redis_client.get("tater:max_store") or 20)
-    llm_count = int(redis_client.get("tater:max_llm") or 8)
-    default_first = redis_client.get("tater:first_name") or first_name
-    default_last = redis_client.get("tater:last_name") or last_name
-    default_personality = redis_client.get("tater:personality") or ""
-
-    first_input = st.text_input("First Name", value=default_first)
-    last_input = st.text_input("Last Name", value=default_last)
-
-    # New: personality/style field
-    personality_input = st.text_area(
-        "Personality / Style (optional)",
-        value=default_personality,
-        help=(
-            "Describe how you want Tater to talk and behave. "
-            "Examples:\n"
-            "- A calm and confident starship captain.\n"
-            "- Captain Jahn-Luek Picard of the Starship Enterprise.\n"
-            "- A laid-back hippy stoner who still explains things clearly."
-        ),
-        height=120,
-    )
-
-    uploaded_tater_avatar = st.file_uploader(
-        f"Upload {first_input}'s avatar", type=["png", "jpg", "jpeg"], key="tater_avatar_uploader"
-    )
-    if uploaded_tater_avatar is not None:
-        avatar_bytes = uploaded_tater_avatar.read()
-        avatar_b64 = base64.b64encode(avatar_bytes).decode("utf-8")
-        redis_client.set("tater:avatar", avatar_b64)
-
-    new_store = st.number_input("Max Stored Messages (0 = unlimited)", min_value=0, value=stored_count)
-    if new_store == 0:
-        st.warning("⚠️ Unlimited history enabled — this may grow Redis memory usage over time.")
-    new_llm = st.number_input("Messages Sent to LLM", min_value=1, value=llm_count)
-    if new_store > 0 and new_llm > new_store:
-        st.warning("⚠️ You're trying to send more messages to LLM than you’re storing. Consider increasing Max Stored Messages.")
-
-    if st.button("Save Tater Settings"):
-        redis_client.set("tater:max_store", new_store)
-        redis_client.set("tater:max_llm", new_llm)
-        redis_client.set("tater:first_name", first_input)
-        redis_client.set("tater:last_name", last_input)
-        redis_client.set("tater:personality", personality_input)
-        st.success("Tater settings updated.")
-        st.rerun()
 
 # ------------------ RSS ------------------
 _start_rss(llm_client)
 
 # ------------------ PLATFORM MANAGEMENT ------------------
+auto_connected = []
 for platform in platform_registry:
     key = platform["key"]  # e.g. irc_platform
     state_key = f"{key}_running"
@@ -946,15 +1001,19 @@ for platform in platform_registry:
 
     if platform_should_run:
         _start_platform(key)
-        st.success(f"{platform['category']} auto-connected.")
+        auto_connected.append(platform["category"])
 
-# ------------------ Chat ------------------
-st.title(f"{first_name} Chat Web UI")
+# Prepare plugin groupings
+automation_plugins = [
+    p for p in plugin_registry.values()
+    if set(getattr(p, "platforms", []) or []) == {"automation"}
+]
+regular_plugins = [
+    p for p in plugin_registry.values()
+    if set(getattr(p, "platforms", []) or []) != {"automation"}
+]
 
-chat_settings = get_chat_settings()
-avatar_b64  = chat_settings.get("avatar")
-user_avatar = load_avatar_image(avatar_b64) if avatar_b64 else None
-
+# Ensure chat history is available for any view
 if "chat_messages" not in st.session_state:
     full_history = load_chat_history()
     max_display = int(redis_client.get("tater:max_display") or 8)
@@ -989,168 +1048,170 @@ if job_keys:
 
             redis_client.delete(key)
 
-# Render all messages from session state
-for msg in st.session_state.chat_messages:
-    role = msg["role"]
-    avatar = user_avatar if role == "user" else assistant_avatar
-    content = msg["content"]
+if active_view == "Chat":
+    st.title(f"{first_name} Chat Web UI")
 
-    # Unwrap plugin_response and plugin_wait to their text payloads
-    while isinstance(content, dict) and content.get("marker") in ("plugin_response", "plugin_wait"):
-        content = content.get("content")
+    chat_settings = get_chat_settings()
+    avatar_b64  = chat_settings.get("avatar")
+    user_avatar = load_avatar_image(avatar_b64) if avatar_b64 else None
 
-    # 🔧 After unwrap, check for plugin_call marker and skip render if needed
-    if isinstance(content, dict) and content.get("marker") == "plugin_call":
-        continue
+    for msg in st.session_state.chat_messages:
+        role = msg["role"]
+        avatar = user_avatar if role == "user" else assistant_avatar
+        content = msg["content"]
 
-    with st.chat_message(role, avatar=avatar):
-        if isinstance(content, dict) and content.get("type") == "image":
-            if content.get("mimetype") == "image/webp":
-                st.markdown(
-                    f'''
-                    <img src="data:image/webp;base64,{content["data"]}"
-                         alt="{content.get("name", "")}"
-                         style="max-width: 100%; border-radius: 0.5rem;" autoplay loop>
-                    ''',
-                    unsafe_allow_html=True
-                )
-            else:
+        while isinstance(content, dict) and content.get("marker") in ("plugin_response", "plugin_wait"):
+            content = content.get("content")
+
+        if isinstance(content, dict) and content.get("marker") == "plugin_call":
+            continue
+
+        with st.chat_message(role, avatar=avatar):
+            if isinstance(content, dict) and content.get("type") == "image":
+                if content.get("mimetype") == "image/webp":
+                    st.markdown(
+                        f'''
+                        <img src="data:image/webp;base64,{content["data"]}"
+                             alt="{content.get("name", "")}"
+                             style="max-width: 100%; border-radius: 0.5rem;" autoplay loop>
+                        ''',
+                        unsafe_allow_html=True
+                    )
+                else:
+                    data = base64.b64decode(content["data"])
+                    st.image(Image.open(BytesIO(data)), caption=content.get("name", ""))
+
+            elif isinstance(content, dict) and content.get("type") == "audio":
                 data = base64.b64decode(content["data"])
-                st.image(Image.open(BytesIO(data)), caption=content.get("name", ""))
+                st.audio(data, format=content.get("mimetype", "audio/mpeg"))
 
-        elif isinstance(content, dict) and content.get("type") == "audio":
-            data = base64.b64decode(content["data"])
-            st.audio(data, format=content.get("mimetype", "audio/mpeg"))
+            elif isinstance(content, dict) and content.get("type") == "video":
+                data = base64.b64decode(content["data"])
+                st.video(data, format=content.get("mimetype", "video/mp4"))
 
-        elif isinstance(content, dict) and content.get("type") == "video":
-            data = base64.b64decode(content["data"])
-            st.video(data, format=content.get("mimetype", "video/mp4"))
+            else:
+                st.write(content)
 
-        else:
-            st.write(content)
+    if user_input := st.chat_input(f"Chat with {first_name}…"):
+        uname = chat_settings["username"]
 
-if user_input := st.chat_input(f"Chat with {first_name}…"):
-    uname = chat_settings["username"]
-
-    # Save and append user message right away
-    save_message("user", uname, user_input)
-    st.session_state.chat_messages.append({
-        "role": "user",
-        "content": user_input
-    })
-
-    # Show user's message immediately for feedback
-    st.chat_message("user", avatar=user_avatar or "🦖").write(user_input)
-
-    # Show spinner while thinking
-    with st.spinner(f"{first_name} is thinking..."):
-        response_text = run_async(process_message(uname, user_input))
-
-    func_call = parse_function_json(response_text)
-    if func_call:
-        func_result = run_async(process_function_call(func_call, user_input))
-        responses = func_result if isinstance(func_result, list) else [func_result]
-    else:
-        responses = [response_text]
-
-    # Just append assistant responses — no immediate rendering
-    for item in responses:
+        save_message("user", uname, user_input)
         st.session_state.chat_messages.append({
-            "role": "assistant",
-            "content": item
+            "role": "user",
+            "content": user_input
         })
-        save_message("assistant", "assistant", item)
 
-    # Force rerun, assistant reply will render on next pass
-    st.rerun()
+        st.chat_message("user", avatar=user_avatar or "🦖").write(user_input)
 
-# --- Tokens/sec & latency ---
-if (redis_client.get("tater:show_speed_stats") or "true").lower() == "true":
-    stats = redis_client.hgetall("webui:last_llm_stats")
-    if stats:
-        try:
-            model = stats.get("model") or "LLM"
-            elapsed = float(stats.get("elapsed", "0"))
-            prompt_tokens = int(stats.get("prompt_tokens", "0"))
-            completion_tokens = int(stats.get("completion_tokens", "0"))
-            total_tokens = int(stats.get("total_tokens", "0"))
-            tps_total = float(stats.get("tps_total", "0"))
-            tps_comp_str = stats.get("tps_comp") or ""
-            comp_part = f" | completion: {tps_comp_str} tok/s" if tps_comp_str else ""
-            st.caption(
-                f"⚡️ {model} — {tps_total:.0f} tok/s{comp_part} • "
-                f"{total_tokens} tok in {elapsed:.2f}s (prompt {prompt_tokens}, completion {completion_tokens})"
-            )
-        except Exception:
-            pass
+        with st.spinner(f"{first_name} is thinking..."):
+            response_text = run_async(process_message(uname, user_input))
 
-# ---------------- Pending jobs spinner with transition-based refresh ----------------
-# Gather pending plugin names for the UI label (same behavior, fewer Redis round trips)
+        func_call = parse_function_json(response_text)
+        if func_call:
+            func_result = run_async(process_function_call(func_call, user_input))
+            responses = func_result if isinstance(func_result, list) else [func_result]
+        else:
+            responses = [response_text]
 
-pending_plugins = []
-pending_keys = set()
-
-# Grab job keys once
-job_keys = list(redis_client.scan_iter(match="webui:plugin_jobs:*", count=2000))
-
-if job_keys:
-    # Pipeline: fetch status + plugin for each key in one round trip
-    pipe = redis_client.pipeline()
-    for key in job_keys:
-        pipe.hget(key, "status")
-        pipe.hget(key, "plugin")
-    results = pipe.execute()
-
-    # results comes back as [status0, plugin0, status1, plugin1, ...]
-    for i, key in enumerate(job_keys):
-        status = results[i * 2]
-        plugin_name = results[i * 2 + 1]
-
-        if status == "pending":
-            pending_keys.add(key)
-
-            if plugin_name and plugin_name in plugin_registry:
-                plugin = plugin_registry[plugin_name]
-                display_name = getattr(plugin, "pretty_name", plugin.name)
-                pending_plugins.append(display_name)
-            elif plugin_name:
-                pending_plugins.append(plugin_name)
-
-# If any are pending, show spinner and poll for either
-if pending_plugins:
-    names_str = ", ".join(pending_plugins)
-    with st.spinner(f"{first_name} is working on: {names_str}"):
-        previous_pending = set(pending_keys)
-        while True:
-            transition_detected = False
-            current_pending = set()
-
-            # Re-scan keys (same behavior as before)
-            job_keys = list(redis_client.scan_iter(match="webui:plugin_jobs:*", count=2000))
-            if job_keys:
-                pipe = redis_client.pipeline()
-                for key in job_keys:
-                    pipe.hget(key, "status")
-                statuses = pipe.execute()
-
-                for key, status in zip(job_keys, statuses):
-                    if status == "pending":
-                        current_pending.add(key)
-                    else:
-                        if key in previous_pending:
-                            transition_detected = True
-
-            # safety: handle vanished keys too
-            for key in list(previous_pending):
-                if not redis_client.exists(key):
-                    transition_detected = True
-
-            if transition_detected:
-                break
-            if not current_pending:
-                break
-
-            previous_pending = current_pending
-            time.sleep(1)
+        for item in responses:
+            st.session_state.chat_messages.append({
+                "role": "assistant",
+                "content": item
+            })
+            save_message("assistant", "assistant", item)
 
         st.rerun()
+
+    if (redis_client.get("tater:show_speed_stats") or "true").lower() == "true":
+        stats = redis_client.hgetall("webui:last_llm_stats")
+        if stats:
+            try:
+                model = stats.get("model") or "LLM"
+                elapsed = float(stats.get("elapsed", "0"))
+                prompt_tokens = int(stats.get("prompt_tokens", "0"))
+                completion_tokens = int(stats.get("completion_tokens", "0"))
+                total_tokens = int(stats.get("total_tokens", "0"))
+                tps_total = float(stats.get("tps_total", "0"))
+                tps_comp_str = stats.get("tps_comp") or ""
+                comp_part = f" | completion: {tps_comp_str} tok/s" if tps_comp_str else ""
+                st.caption(
+                    f"⚡️ {model} — {tps_total:.0f} tok/s{comp_part} • "
+                    f"{total_tokens} tok in {elapsed:.2f}s (prompt {prompt_tokens}, completion {completion_tokens})"
+                )
+            except Exception:
+                pass
+
+    pending_plugins = []
+    pending_keys = set()
+    job_keys = list(redis_client.scan_iter(match="webui:plugin_jobs:*", count=2000))
+
+    if job_keys:
+        pipe = redis_client.pipeline()
+        for key in job_keys:
+            pipe.hget(key, "status")
+            pipe.hget(key, "plugin")
+        results = pipe.execute()
+
+        for i, key in enumerate(job_keys):
+            status = results[i * 2]
+            plugin_name = results[i * 2 + 1]
+
+            if status == "pending":
+                pending_keys.add(key)
+
+                if plugin_name and plugin_name in plugin_registry:
+                    plugin = plugin_registry[plugin_name]
+                    display_name = getattr(plugin, "plugin_name", None) or getattr(plugin, "pretty_name", None) or plugin.name
+                    pending_plugins.append(display_name)
+                elif plugin_name:
+                    pending_plugins.append(plugin_name)
+
+    if pending_plugins:
+        names_str = ", ".join(pending_plugins)
+        with st.spinner(f"{first_name} is working on: {names_str}"):
+            previous_pending = set(pending_keys)
+            while True:
+                transition_detected = False
+                current_pending = set()
+
+                job_keys = list(redis_client.scan_iter(match="webui:plugin_jobs:*", count=2000))
+                if job_keys:
+                    pipe = redis_client.pipeline()
+                    for key in job_keys:
+                        pipe.hget(key, "status")
+                    statuses = pipe.execute()
+
+                    for key, status in zip(job_keys, statuses):
+                        if status == "pending":
+                            current_pending.add(key)
+                        else:
+                            if key in previous_pending:
+                                transition_detected = True
+
+                for key in list(previous_pending):
+                    if not redis_client.exists(key):
+                        transition_detected = True
+
+                if transition_detected:
+                    break
+                if not current_pending:
+                    break
+
+                previous_pending = current_pending
+                time.sleep(1)
+
+            st.rerun()
+
+elif active_view == "Plugins":
+    st.title("Plugins")
+    st.write("Browse available plugins. Automation-only tools are listed separately.")
+    render_plugin_list(regular_plugins, "No plugins available.")
+elif active_view == "Auto Plugins":
+    st.title("Automation Plugins")
+    st.write("These plugins are available to the automation platform.")
+    render_plugin_list(automation_plugins, "No automation plugins available.")
+elif active_view == "Platforms":
+    st.title("Platforms")
+    render_platforms_panel(auto_connected)
+elif active_view == "Settings":
+    render_settings_page()

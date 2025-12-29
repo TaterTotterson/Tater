@@ -18,6 +18,7 @@ async def safe_send(channel, content: str, **kwargs):
 
 class WebDAVBrowserPlugin(ToolPlugin):
     name = "webdav_browser"
+    plugin_name = "WebDAV Browser"
     usage = (
         "{\n"
         '  "function": "webdav_browser",\n'
@@ -25,6 +26,7 @@ class WebDAVBrowserPlugin(ToolPlugin):
         "}\n"
     )
     description = "Lets the user browse and download files from the WebDAV server."
+    plugin_dec = "Browse and download files from the configured WebDAV server."
     pretty_name = "Connecting to WebDAV"
     settings_category = "WebDAV Browser"
     platforms = ["discord"]

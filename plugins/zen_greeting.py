@@ -26,12 +26,14 @@ class ZenGreetingPlugin(ToolPlugin):
     - Uses HA time sensor so the greeting matches HA's local time.
     """
     name = "zen_greeting"
+    plugin_name = "Zen Greeting"
     pretty_name = "Zen Greeting"
 
     description = (
         "Automation-only: creates a short, calming greeting and zen message of the day. "
         "Uses the LLM so the message varies a bit each run. Designed for dashboards."
     )
+    plugin_dec = "Generate a calming daily greeting and message for dashboards."
 
     usage = (
         "{\n"

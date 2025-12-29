@@ -19,6 +19,7 @@ class BroadcastPlugin(ToolPlugin):
     Mimics the doorbell_alert TTS behavior (tts/speak with fallback to tts/piper_say).
     """
     name = "broadcast"
+    plugin_name = "Broadcast"
     usage = (
         "{\n"
         '  "function": "broadcast",\n'
@@ -32,6 +33,7 @@ class BroadcastPlugin(ToolPlugin):
         "Use ONLY when the user explicitly asks to broadcast/announce/page an audio message (e.g., 'announce dinner is ready', "
         "'broadcast this', 'page the house') and provides what to say."
     )
+    plugin_dec = "Send a one-time spoken announcement to your Home Assistant media players."
     pretty_name = "Broadcast Announcement"
     settings_category = "Broadcast"
 

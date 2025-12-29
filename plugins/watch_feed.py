@@ -19,6 +19,7 @@ redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_respon
 
 class WatchFeedPlugin(ToolPlugin):
     name = "watch_feed"
+    plugin_name = "Watch Feed"
     usage = (
         "{\n"
         '  "function": "watch_feed",\n'
@@ -26,6 +27,7 @@ class WatchFeedPlugin(ToolPlugin):
         "}\n"
     )
     description = "Adds an RSS/Atom feed to the watch list and records the latest seen item so future checks only post new entries."
+    plugin_dec = "Add an RSS/Atom feed to the watch list and track new items."
     pretty_name = "Adding Your Feed"
     waiting_prompt_template = (
         "Write a friendly message telling {mention} you’re adding the feed to the watch list now! "
