@@ -20,60 +20,81 @@
 | `xbmc`            | OG Xbox integration for **XBMC4Xbox**, provided by the custom Cortana-powered skin and script at [skin.cortana.tater-xbmc](https://github.com/TaterTotterson/skin.cortana.tater-xbmc), enabling an on-console AI assistant with chat history, quick asks, and plugin-powered actions. |
 | `webui`           | Streamlit-based WebUI for chatting, configuring plugins, and managing settings. |
 
+---
+
 ## 🧩 Tater Plugin Overview
 
-The following plugins can be triggerd simple by asking Tater after you enable them, ex: ``` Tater summarize this youtube video http://youtube.com/watch?v=000000 ```
+The following plugins can be triggered simply by **asking Tater** (after enabling them), for example:  
+Tater summarize this YouTube video https://youtube.com/watch?v=000000
 
-| Plugin Name                   | Description                                                                 | Platform                                   |
-|-------------------------------|-----------------------------------------------------------------------------|--------------------------------------------|
-| `automatic_plugin`            | Generates images using AUTOMATIC1111 API based on user prompt               | discord, webui                             |
-| `broadcast`                   | Sends a whole-house spoken announcement using Home Assistant TTS (Piper, Cloud, etc.) to configured media_player devices. Triggered by phrases like “broadcast”, “announce”, or “page the house”. | webui, homeassistant, homekit, xbmc        |
-| `camera_event`                | Detects motion, describes it with Vision AI, and logs structured events with cooldown. | automations                                |
-| `comfyui_audio_ace`           | Composes full-length songs using AceStep. Generates lyrics, tags, and MP3s  | discord, webui, homeassistant, matrix      |
-| `comfyui_image_plugin`        | Generates images with ComfyUI using custom workflow templates               | discord, webui, matrix                     |
-| `comfyui_image_video`         | Animates images into WebP loops using ComfyUI.                              | webui                                      |
-| `comfyui_music_video_plugin`  | Generates complete AI music videos with lyrics, audio, and visuals          | webui                                      |
-| `comfyui_video_plugin`        | Creates videos from prompts using ComfyUI and video workflows               | webui                                      |
-| `device_compare`              | Compares two devices, fetching specs and FPS benchmarks from online sources | discord, webui, matrix                     |
-| `doorbell_alert`              | Triggers when the doorbell rings — captures a snapshot from a Home Assistant camera, analyzes it with Vision AI, announces who or what is at the door via Piper TTS, and logs events to the Automations Platform. | automations                                |
-| `emoji_ai_responder`          | Picks a relevant emoji based on a message when someone reacts to it         | discord                                   |
-| `events_query`                | Summarizes all stored events by time, area, or activity.                    | webui, homeassistant, homekit              |
-| `events_query_brief`          | Automation-focused event summary plugin. Returns a very short, sensor-safe summary of recent household events by area and timeframe. | automations                                |
-| `find_my_phone`               | Rings your phone using the Home Assistant Companion App notify service to help locate a misplaced device. Sends high-priority alerts that can repeat until you find it. | webui, homeassistant, homekit, xbmc        |
-| `ftp_browser`                 | Allows users to browse FTP servers via Discord                              | discord                                   |
-| `ha_control`                  | Controls Home Assistant devices via domain, service, entity, or area (e.g., turn lights on, toggle switches, set temperatures). | webui, homeassistant, homekit, xbmc        |
-| `lowfi_video`                 | Generates lofi music videos, outputs 20-min MP4                             | webui                                      |
-| `mister_remote`               | Controls MiSTer FPGA via MiSTer Remote API — play, menu, now-playing, and screenshots. Natural language parsing and per-platform output (Discord uploads, WebUI inline, Matrix embedded, voice-safe for HA). | discord, webui, irc, homeassistant, matrix, homekit |
-| `obsidian_note`               | Creates new notes in your Obsidian vault with AI-generated titles and content | webui                                      |
-| `obsidian_search`             | Searches your entire Obsidian vault and extracts relevant notes to answer questions | webui                                 |
-| `overseerr_request`           | Adds a movie or TV show to Overseerr by title, creating a new request for it. Example: add the movie F1, request the TV show One Piece. | webui, homeassistant, homekit              |
-| `overseerr_trending`          | Fetches Trending or Upcoming movies/TV shows from Overseerr. Example: what movies are trending, what TV shows are upcoming. | discord, webui, irc, matrix, homekit       |
-| `premiumize_download`         | Checks Premiumize for cached file links and returns downloads               | discord, webui, irc, matrix                |
-| `premiumize_torrent`          | Checks if a torrent is cached on Premiumize and returns download links      | discord                                   |
-| `sftpgo_account`              | Creates SFTPGo user accounts and their credentials                          | discord, webui, irc, matrix                |
-| `sftpgo_activity`             | Views SFTPGo user activity like file transfers and sessions                 | discord, webui, irc, matrix                |
-| `tater_gits_add_feed`         | Adds a GitHub releases feed to the Tater Gits watcher with auto category    | discord, webui, irc                        |
-| `vision_describer`            | Analyzes uploaded images and returns AI-generated descriptions              | discord, webui, matrix                     |
-| `voicepe_remote_timer`        | Starts a device-local timer on a Voice PE using ESPHome-exposed entities (seconds + start/cancel). Requires updated Voice PE config: [voicePE-TaterTimer.yaml](https://github.com/TaterTotterson/microWakeWords/blob/main/voicePE-TaterTimer.yaml) | webui, homeassistant, homekit, xbmc |
-| `weather_query_brief`         | Automation-focused weather summary plugin. Reads recent Home Assistant weather sensors (temperature, wind, rain, etc.) and returns a short, dashboard-safe summary. | automations                                |
-| `web_search`                  | Performs web search to help answer user questions                           | discord, webui, irc, homeassistant, matrix, homekit, xbmc |
-| `web_summary`                 | Summarizes content from a provided URL                                      | discord, webui, irc, matrix                |
-| `webdav_browser`              | Allows browsing and downloading files from WebDAV servers                   | discord                                   |
-| `youtube_summary`             | Summarizes YouTube videos                                                   | discord, webui, irc, matrix                |
+### 💬 Interactive / Conversational Plugins
 
-### 📡 RSS Feed Watcher (Built-in)
+| Plugin Name                  | Description                                                                 | Platform                                   |
+|------------------------------|-----------------------------------------------------------------------------|--------------------------------------------|
+| `automatic_plugin`           | Generates images using AUTOMATIC1111 API based on user prompt               | discord, webui                             |
+| `broadcast`                  | Sends a whole-house spoken announcement using Home Assistant TTS (Piper, Cloud, etc.) | webui, homeassistant, homekit, xbmc        |
+| `comfyui_audio_ace`          | Composes full-length songs using AceStep. Generates lyrics, tags, and MP3s  | discord, webui, homeassistant, matrix      |
+| `comfyui_image_plugin`       | Generates images with ComfyUI using custom workflow templates               | discord, webui, matrix                     |
+| `comfyui_image_video`        | Animates images into WebP loops using ComfyUI.                              | webui                                      |
+| `comfyui_music_video_plugin` | Generates complete AI music videos with lyrics, audio, and visuals          | webui                                      |
+| `comfyui_video_plugin`       | Creates videos from prompts using ComfyUI and video workflows               | webui                                      |
+| `device_compare`             | Compares two devices, fetching specs and FPS benchmarks from online sources | discord, webui, matrix                     |
+| `emoji_ai_responder`         | Picks a relevant emoji based on a message when someone reacts to it         | discord                                   |
+| `events_query`               | Summarizes all stored events by time, area, or activity                     | webui, homeassistant, homekit              |
+| `find_my_phone`              | Rings your phone using the Home Assistant Companion App notify service      | webui, homeassistant, homekit, xbmc        |
+| `ftp_browser`                | Allows users to browse FTP servers via Discord                              | discord                                   |
+| `ha_control`                 | Controls Home Assistant devices (lights, switches, climate, etc.)           | webui, homeassistant, homekit, xbmc        |
+| `lowfi_video`                | Generates lofi music videos, outputs 20-minute MP4s                        | webui                                      |
+| `mister_remote`              | Controls MiSTer FPGA via MiSTer Remote API                                  | discord, webui, irc, homeassistant, matrix, homekit |
+| `obsidian_note`              | Creates new notes in your Obsidian vault with AI-generated content          | webui                                      |
+| `obsidian_search`            | Searches your Obsidian vault and extracts relevant notes                    | webui                                      |
+| `overseerr_request`          | Adds a movie or TV show request to Overseerr                                | webui, homeassistant, homekit              |
+| `overseerr_trending`         | Fetches trending or upcoming movies / TV shows                              | discord, webui, irc, matrix, homekit       |
+| `premiumize_download`        | Checks Premiumize for cached file links and returns downloads               | discord, webui, irc, matrix                |
+| `premiumize_torrent`         | Checks if a torrent is cached on Premiumize                                 | discord                                   |
+| `sftpgo_account`             | Creates SFTPGo user accounts and credentials                                 | discord, webui, irc, matrix                |
+| `sftpgo_activity`            | Views SFTPGo user activity like transfers and sessions                      | discord, webui, irc, matrix                |
+| `tater_gits_add_feed`        | Adds a GitHub releases feed to the Tater Gits watcher                        | discord, webui, irc                        |
+| `vision_describer`           | Analyzes uploaded images and returns AI-generated descriptions              | discord, webui, matrix                     |
+| `voicepe_remote_timer`       | Starts a device-local timer on a Voice PE via ESPHome                        | webui, homeassistant, homekit, xbmc        |
+| `web_search`                 | Performs web searches to help answer questions                              | discord, webui, irc, homeassistant, matrix, homekit, xbmc |
+| `web_summary`                | Summarizes content from a provided URL                                      | discord, webui, irc, matrix                |
+| `webdav_browser`             | Allows browsing and downloading files from WebDAV servers                   | discord                                   |
+| `youtube_summary`            | Summarizes YouTube videos                                                   | discord, webui, irc, matrix                |
 
-This system runs in the background and posts summarized RSS feed updates. The following plugins enhance or interact with this watcher:
+---
 
-| Plugin Name              | Description                                                                 | Type              | Platform               |
-|--------------------------|-----------------------------------------------------------------------------|-------------------|------------------------|
-| `discord_notifier`       | Posts RSS updates directly to a configured Discord channel                  | RSS Notifier      | plugin-triggered       |
-| `telegram_notifier`      | Sends RSS updates to a Telegram channel using the internal feed watcher     | RSS Notifier      | plugin-triggered       |
-| `wordpress_poster`       | Posts RSS updates to WordPress using the internal feed watcher              | RSS Notifier      | plugin-triggered       |
-| `ntfy_notifier`          | Sends RSS updates to an ntfy topic for instant push notifications           | RSS Notifier      | plugin-triggered       |
-| `list_feeds`             | Lists all RSS feeds being watched by the internal feed watcher              | RSS Management    | discord, webui, irc    |
-| `watch_feed`             | Adds a feed to the internal RSS watcher                                     | RSS Management    | discord, webui, irc    |
-| `unwatch_feed`           | Removes a feed from the internal RSS watcher                                | RSS Management    | discord, webui, irc    |
+## ⚙️ Automation Plugins (Home Assistant)
+
+These plugins are **not conversational**.  
+They are designed to be triggered from **Home Assistant automations** using the  
+**“Call Tater automation tool”** action provided by the  
+[Tater Automations](https://github.com/TaterTotterson/tater_automations) custom component.
+
+| Plugin Name              | Description |
+|--------------------------|-------------|
+| `camera_event`           | Captures a camera snapshot on motion, describes it with Vision AI, and logs a structured event with cooldown. |
+| `doorbell_alert`         | Doorbell-triggered snapshot + Vision AI description, spoken announcement, and event logging. |
+| `events_query_brief`     | Returns a very short, sensor-safe summary of recent household events by area and timeframe. |
+| `phone_events_alert`     | Captures a camera snapshot on trigger, describes what’s happening with Vision AI, and sends a high-priority phone notification with cooldown control. |
+| `weather_query_brief`    | Reads recent Home Assistant weather sensors and returns a short, dashboard-safe weather summary. |
+| `zen_greeting`           | Generates a calm, AI-written Zen-style message of the day for dashboards and daily automations. |
+
+---
+
+## 📡 RSS Feed Watcher (Built-in)
+
+This system runs in the background and posts summarized RSS feed updates.
+
+| Plugin Name        | Description                                           | Type            | Platform            |
+|--------------------|-------------------------------------------------------|------------------|---------------------|
+| `discord_notifier` | Posts RSS updates directly to a Discord channel       | RSS Notifier     | plugin-triggered    |
+| `telegram_notifier`| Sends RSS updates to Telegram                         | RSS Notifier     | plugin-triggered    |
+| `wordpress_poster` | Posts RSS updates to WordPress                        | RSS Notifier     | plugin-triggered    |
+| `ntfy_notifier`    | Sends RSS updates to an ntfy topic                    | RSS Notifier     | plugin-triggered    |
+| `list_feeds`       | Lists all watched RSS feeds                           | RSS Management   | discord, webui, irc |
+| `watch_feed`       | Adds a feed to the RSS watcher                        | RSS Management   | discord, webui, irc |
+| `unwatch_feed`     | Removes a feed from the RSS watcher                   | RSS Management   | discord, webui, irc |
 
 Here are some examples of the RSS watcher in action:
 - **WordPress Poster**: [TaterByets.com](https://TaterBytes.com)
