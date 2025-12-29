@@ -14,6 +14,7 @@ logger.setLevel(logging.INFO)
 
 class WebSummaryPlugin(ToolPlugin):
     name = "web_summary"
+    plugin_name = "Web Summary"
     usage = (
         "{\n"
         '  "function": "web_summary",\n'
@@ -21,6 +22,7 @@ class WebSummaryPlugin(ToolPlugin):
         "}\n"
     )
     description = "Summarizes an article from a URL provided by the user."
+    plugin_dec = "Summarize the main points of a webpage from its URL."
     pretty_name = "Summarizing Your Article"
     waiting_prompt_template = "Write a casual, friendly message telling {mention} you’re reading the article and preparing a summary now! Only output that message."
     platforms = ["discord", "webui", "irc", "matrix"]

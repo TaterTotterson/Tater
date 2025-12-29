@@ -15,6 +15,7 @@ logger.setLevel(logging.INFO)
 
 class TaterGitsAddFeedPlugin(ToolPlugin):
     name = "tater_gits_add_feed"
+    plugin_name = "Tater Gits Add Feed"
     usage = (
         "{\n"
         '  "function": "tater_gits_add_feed",\n'
@@ -22,6 +23,7 @@ class TaterGitsAddFeedPlugin(ToolPlugin):
         "}\n"
     )
     description = "Adds a GitHub releases feed to the tater-gits watcher. Infers title prefix and category via LLM."
+    plugin_dec = "Add a GitHub releases feed to the tater-gits watcher with smart naming."
     pretty_name = "Add Git Feed"
     waiting_prompt_template = "Tell {mention} I’m analyzing that repo and adding the feed now. Output only that friendly message."
     platforms = ["webui", "discord", "irc", "matrix"]

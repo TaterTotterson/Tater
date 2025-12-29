@@ -16,6 +16,7 @@ redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_respon
 
 class ListFeedsPlugin(ToolPlugin):
     name = "list_feeds"
+    plugin_name = "List Feeds"
     usage = (
         "{\n"
         '  "function": "list_feeds",\n'
@@ -23,6 +24,7 @@ class ListFeedsPlugin(ToolPlugin):
         "}\n"
     )
     description = "Lists the RSS feeds currently being watched."
+    plugin_dec = "Show the RSS feeds currently being watched."
     pretty_name = "Getting RSS Feeds"
     waiting_prompt_template = (
         "Write a friendly, casual message telling {mention} you’re grabbing the current watched feeds now! Only output that message."

@@ -20,6 +20,7 @@ DEFAULT_MAX_TOKENS = 2048
 
 class YouTubeSummaryPlugin(ToolPlugin):
     name = "youtube_summary"
+    plugin_name = "YouTube Summary"
     usage = (
         '{\n'
         '  "function": "youtube_summary",\n'
@@ -29,6 +30,7 @@ class YouTubeSummaryPlugin(ToolPlugin):
         '}'
     )
     description = "Summarizes a YouTube video using its transcript."
+    plugin_dec = "Summarize a YouTube video using its transcript."
     pretty_name = "Summarizing Your Video"
     settings_category = "YouTube Summary"
     required_settings = {

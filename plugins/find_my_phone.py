@@ -27,6 +27,7 @@ class FindMyPhonePlugin(ToolPlugin):
     """
 
     name = "find_my_phone"
+    plugin_name = "Find My Phone"
     usage = (
         "{\n"
         '  "function": "find_my_phone",\n'
@@ -37,6 +38,7 @@ class FindMyPhonePlugin(ToolPlugin):
         "Use this when the user asks where their phone is, or asks to find, ring, "
         "locate, or make their phone play a sound."
     )
+    plugin_dec = "Ping or ring your phone through Home Assistant so you can locate it."
     pretty_name = "Finding Your Phone"
     settings_category = "Find My Phone"
     required_settings = {

@@ -21,6 +21,7 @@ logger.setLevel(logging.INFO)
 
 class SFTPGoAccountPlugin(ToolPlugin):
     name = "sftpgo_account"
+    plugin_name = "SFTPGo Account"
     usage = (
         '{\n'
         '  "function": "sftpgo_account",\n'
@@ -28,6 +29,7 @@ class SFTPGoAccountPlugin(ToolPlugin):
         '}\n'
     )
     description = "Creates an SFTPGo account for the user and returns their credentials."
+    plugin_dec = "Create an SFTPGo account for the user and return login details."
     pretty_name = "Creating Account"
     settings_category = "SFTPGo"
     required_settings = {
