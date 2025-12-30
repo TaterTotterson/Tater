@@ -111,8 +111,9 @@ class PhoneEventsAlertPlugin(ToolPlugin):
         },
         "PER_CAMERA_COOLDOWN": {
             "label": "Cooldown is per camera (instead of global)",
-            "type": "bool",
-            "default": False,
+            "type": "select",
+            "default": "false",
+            "options": ["true", "false"],
             "description": "If enabled, each camera has its own cooldown timer.",
         },
         "DEFAULT_PRIORITY": {
