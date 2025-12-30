@@ -107,7 +107,13 @@ class PhoneEventsAlertPlugin(ToolPlugin):
             "label": "Cooldown seconds (how often notifications may be sent)",
             "type": "int",
             "default": 120,
-            "description": "Minimum seconds between alerts (per plugin).",
+            "description": "Minimum seconds between alerts.",
+        },
+        "PER_CAMERA_COOLDOWN": {
+            "label": "Cooldown is per camera (instead of global)",
+            "type": "bool",
+            "default": False,
+            "description": "If enabled, each camera has its own cooldown timer.",
         },
         "DEFAULT_PRIORITY": {
             "label": "Default priority",
@@ -136,15 +142,36 @@ class PhoneEventsAlertPlugin(ToolPlugin):
             raw = raw.split("notify.", 1)[1].strip()
         return raw
 
+    @staticmethod
+    def _truthy(v: Any) -> bool:
+        if isinstance(v, bool):
+            return v
+        if v is None:
+            return False
+        s = str(v).strip().lower()
+        return s in ("1", "true", "yes", "y", "on", "enabled")
+
+    @staticmethod
+    def _safe_key_part(v: str) -> str:
+        # Redis key-safe, stable per camera entity id.
+        # camera.front_door_high -> camera_front_door_high
+        t = (v or "").strip().lower()
+        t = re.sub(r"[^a-z0-9_]+", "_", t.replace(".", "_"))
+        t = re.sub(r"_+", "_", t).strip("_")
+        return t or "unknown"
+
     # ─────────────────────────────────────────
-    # Cooldown (plugin-wide)
+    # Cooldown (global or per camera)
     # ─────────────────────────────────────────
-    def _cooldown_key(self) -> str:
+    def _cooldown_key(self, camera_entity: Optional[str] = None, per_camera: bool = False) -> str:
+        if per_camera:
+            cam = self._safe_key_part(camera_entity or "")
+            return f"tater:plugin_cooldown:{self.name}:camera:{cam}"
         return f"tater:plugin_cooldown:{self.name}"
 
-    def _cooldown_remaining(self, cooldown_seconds: int) -> int:
+    def _cooldown_remaining(self, cooldown_seconds: int, *, camera_entity: Optional[str] = None, per_camera: bool = False) -> int:
         try:
-            last = redis_client.get(self._cooldown_key())
+            last = redis_client.get(self._cooldown_key(camera_entity, per_camera))
             last_ts = float(last) if last else 0.0
         except Exception:
             last_ts = 0.0
@@ -153,9 +180,9 @@ class PhoneEventsAlertPlugin(ToolPlugin):
         remaining = int((last_ts + float(cooldown_seconds)) - now)
         return max(0, remaining)
 
-    def _mark_sent_now(self) -> None:
+    def _mark_sent_now(self, *, camera_entity: Optional[str] = None, per_camera: bool = False) -> None:
         try:
-            redis_client.set(self._cooldown_key(), str(time.time()))
+            redis_client.set(self._cooldown_key(camera_entity, per_camera), str(time.time()))
         except Exception:
             pass
 
@@ -242,9 +269,6 @@ class PhoneEventsAlertPlugin(ToolPlugin):
 
     @staticmethod
     def _build_notify_data(priority: str) -> Dict[str, Any]:
-        """
-        Maps to HA Companion notify 'data' fields (best-effort; varies by device/OS/permissions).
-        """
         p = (priority or "critical").strip().lower()
         if p not in ("critical", "high", "normal", "low"):
             p = "critical"
@@ -342,12 +366,15 @@ class PhoneEventsAlertPlugin(ToolPlugin):
             cooldown = 120
         cooldown = max(0, min(cooldown, 86_400))
 
-        remaining = self._cooldown_remaining(cooldown)
+        per_cam = self._truthy(s.get("PER_CAMERA_COOLDOWN", False))
+
+        remaining = self._cooldown_remaining(cooldown, camera_entity=camera, per_camera=per_cam)
         if remaining > 0:
             return {
                 "ok": True,
                 "sent": False,
                 "skipped": "cooldown",
+                "cooldown_scope": "camera" if per_cam else "global",
                 "cooldown_remaining_seconds": remaining,
             }
 
@@ -362,7 +389,6 @@ class PhoneEventsAlertPlugin(ToolPlugin):
             jpeg = await asyncio.to_thread(self._get_camera_jpeg, ha_base, ha_token, camera)
         except Exception as e:
             logger.exception("[phone_events_alert] Failed to fetch camera snapshot: %s", e)
-            # Keep it simple: send a failure notice anyway (still useful to know it fired)
             message = "Motion triggered, but the camera snapshot was not available."
             result = await asyncio.to_thread(
                 self._send_phone_notification,
@@ -374,7 +400,7 @@ class PhoneEventsAlertPlugin(ToolPlugin):
                 priority=priority,
             )
             if result.get("ok"):
-                self._mark_sent_now()
+                self._mark_sent_now(camera_entity=camera, per_camera=per_cam)
             return {"ok": bool(result.get("ok")), "sent": bool(result.get("ok")), "summary": message, "error": result.get("error", "")}
 
         # Vision
@@ -407,7 +433,7 @@ class PhoneEventsAlertPlugin(ToolPlugin):
         )
 
         if result.get("ok"):
-            self._mark_sent_now()
+            self._mark_sent_now(camera_entity=camera, per_camera=per_cam)
 
         return {"ok": bool(result.get("ok")), "sent": bool(result.get("ok")), "summary": desc, "error": result.get("error", "")}
 
