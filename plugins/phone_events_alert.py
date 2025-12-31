@@ -31,6 +31,7 @@ class PhoneEventsAlertPlugin(ToolPlugin):
     - Optional per-camera cooldown (toggle in settings)
     - Optional ignore_cars / ignore vehicles (per-call arg + optional default setting)
     - Improved delivery detection instructions (UPS/FedEx/USPS/Amazon/DHL)
+    - Avoids "negative" summaries like "no pets/no delivery seen"
     """
 
     name = "phone_events_alert"
@@ -127,7 +128,7 @@ class PhoneEventsAlertPlugin(ToolPlugin):
             "type": "select",
             "default": "false",
             "options": ["true", "false"],
-            "description": "If enabled, the vision prompt will avoid mentioning vehicles unless delivery branding is clearly identifiable.",
+            "description": "If enabled, the vision prompt will not mention vehicles/cars at all.",
         },
         "DEFAULT_PRIORITY": {
             "label": "Default priority",
@@ -167,8 +168,6 @@ class PhoneEventsAlertPlugin(ToolPlugin):
 
     @staticmethod
     def _safe_key_part(v: str) -> str:
-        # Redis key-safe, stable per camera entity id.
-        # camera.front_door_high -> camera_front_door_high
         t = (v or "").strip().lower()
         t = re.sub(r"[^a-z0-9_]+", "_", t.replace(".", "_"))
         t = re.sub(r"_+", "_", t).strip("_")
@@ -231,25 +230,24 @@ class PhoneEventsAlertPlugin(ToolPlugin):
         b64 = base64.b64encode(image_bytes).decode("utf-8")
         data_url = f"data:image/jpeg;base64,{b64}"
 
-        base_rules = (
-            "Describe what is happening in this camera snapshot for a phone notification. "
-            "Be specific (people, packages, pets). "
-            "If a person is visible, mention clothing and what they appear to be doing. "
-            "If nothing notable is happening, clearly say so. "
-            "Output 1 short sentence (max ~200 characters). "
+        prompt = (
+            "Write exactly ONE short sentence for a phone notification describing what is happening in this snapshot. "
+            "Be specific and ONLY mention things you can actually see. "
+            "DO NOT mention what is NOT present (no 'no pets', 'no delivery', etc). "
+            "DO NOT add disclaimers, guesses, or filler. "
+            "If a person is visible, mention clothing and what they are doing. "
+            "If a package is visible, say so. "
             "If you can identify a delivery service by uniform, logo, or clear branding, be explicit: "
             "UPS, FedEx, USPS, Amazon, DHL, etc. "
             "Prefer phrasing like: 'UPS is delivering a package' or 'FedEx driver at the door.' "
+            "If nothing notable is happening, output exactly: 'Nothing notable.' "
+            f"User hint: {query or 'brief alert'}"
         )
 
         if ignore_cars:
-            base_rules += (
-                "Do NOT mention, describe, or reference vehicles or cars at all. "
-                "Completely ignore vehicles in the scene unless they are clearly being used for a delivery "
-                "and the delivery service can be identified by uniform, logo, or branding. "
+            prompt += (
+                " Do NOT mention, describe, or reference vehicles or cars under any circumstances."
             )
-
-        prompt = base_rules + f"User hint: {query or 'brief alert'}"
 
         payload = {
             "model": model,
@@ -290,6 +288,24 @@ class PhoneEventsAlertPlugin(ToolPlugin):
         if " " in cut[40:]:
             cut = cut[: cut.rfind(" ")]
         return cut.rstrip(". ,;:") + "…"
+
+    @staticmethod
+    def _clean_negative_filler(text: str) -> str:
+        t = re.sub(r"\s+", " ", (text or "")).strip()
+
+        patterns = [
+            r"\bno (delivery|deliveries|delivery service|pets?|animals?|vehicles?|cars?) (seen|visible|present)\b\.?",
+            r"\bno (one|person|people) (seen|visible|present)\b\.?",
+            r"\bno (packages?|parcels?) (seen|visible|present)\b\.?",
+        ]
+        for p in patterns:
+            t = re.sub(p, "", t, flags=re.IGNORECASE).strip()
+
+        t = re.sub(r"\s+,", ",", t)
+        t = re.sub(r"\s+\.", ".", t)
+        t = re.sub(r"\s{2,}", " ", t).strip(" ,;:-")
+
+        return t
 
     # ─────────────────────────────────────────
     # HA Notify
@@ -460,9 +476,13 @@ class PhoneEventsAlertPlugin(ToolPlugin):
             )
         except Exception as e:
             logger.exception("[phone_events_alert] Vision analysis failed: %s", e)
-            raw_desc = "Motion triggered, but vision analysis failed."
+            raw_desc = "Motion triggered."
 
-        desc = self._compact(raw_desc)
+        # Final cleanup
+        desc = self._compact(self._clean_negative_filler(raw_desc))
+        if not desc:
+            desc = "Motion detected."
+
         if area and area.lower() not in desc.lower():
             desc = self._compact(f"{area.title()}: {desc}")
 
