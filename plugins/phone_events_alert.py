@@ -26,6 +26,11 @@ class PhoneEventsAlertPlugin(ToolPlugin):
     - Fetch a Home Assistant camera snapshot
     - Describe snapshot with a Vision LLM (OpenAI-compatible)
     - Send the description to your phone using HA notify service
+
+    Updates:
+    - Optional per-camera cooldown (toggle in settings)
+    - Optional ignore_cars / ignore vehicles (per-call arg + optional default setting)
+    - Improved delivery detection instructions (UPS/FedEx/USPS/Amazon/DHL)
     """
 
     name = "phone_events_alert"
@@ -48,7 +53,8 @@ class PhoneEventsAlertPlugin(ToolPlugin):
         '    "query": "brief alert description",\n'
         '    "title": "Optional override title",\n'
         '    "priority": "critical|high|normal|low",\n'
-        '    "cooldown_seconds": 120\n'
+        '    "cooldown_seconds": 120,\n'
+        '    "ignore_cars": true\n'
         "  }\n"
         "}\n"
     )
@@ -115,6 +121,13 @@ class PhoneEventsAlertPlugin(ToolPlugin):
             "default": "false",
             "options": ["true", "false"],
             "description": "If enabled, each camera has its own cooldown timer.",
+        },
+        "IGNORE_CARS_DEFAULT": {
+            "label": "Ignore vehicles by default",
+            "type": "select",
+            "default": "false",
+            "options": ["true", "false"],
+            "description": "If enabled, the vision prompt will avoid mentioning vehicles unless delivery branding is clearly identifiable.",
         },
         "DEFAULT_PRIORITY": {
             "label": "Default priority",
@@ -205,18 +218,38 @@ class PhoneEventsAlertPlugin(ToolPlugin):
     # ─────────────────────────────────────────
     # Vision describe
     # ─────────────────────────────────────────
-    def _vision_describe(self, *, image_bytes: bytes, api_base: str, model: str, api_key: Optional[str], query: str) -> str:
+    def _vision_describe(
+        self,
+        *,
+        image_bytes: bytes,
+        api_base: str,
+        model: str,
+        api_key: Optional[str],
+        query: str,
+        ignore_cars: bool,
+    ) -> str:
         b64 = base64.b64encode(image_bytes).decode("utf-8")
         data_url = f"data:image/jpeg;base64,{b64}"
 
-        prompt = (
+        base_rules = (
             "Describe what is happening in this camera snapshot for a phone notification. "
-            "Be specific (people, packages, vehicles, pets). "
+            "Be specific (people, packages, pets). "
             "If a person is visible, mention clothing and what they appear to be doing. "
             "If nothing notable is happening, clearly say so. "
             "Output 1 short sentence (max ~200 characters). "
-            f"User hint: {query or 'brief alert'}"
+            "If you can identify a delivery service by uniform, logo, or clear branding, be explicit: "
+            "UPS, FedEx, USPS, Amazon, DHL, etc. "
+            "Prefer phrasing like: 'UPS is delivering a package' or 'FedEx driver at the door.' "
         )
+
+        if ignore_cars:
+            base_rules += (
+                "Do NOT mention, describe, or reference vehicles or cars at all. "
+                "Completely ignore vehicles in the scene unless they are clearly being used for a delivery "
+                "and the delivery service can be identified by uniform, logo, or branding. "
+            )
+
+        prompt = base_rules + f"User hint: {query or 'brief alert'}"
 
         payload = {
             "model": model,
@@ -367,7 +400,7 @@ class PhoneEventsAlertPlugin(ToolPlugin):
             cooldown = 120
         cooldown = max(0, min(cooldown, 86_400))
 
-        per_cam = self._truthy(s.get("PER_CAMERA_COOLDOWN", False))
+        per_cam = self._truthy(s.get("PER_CAMERA_COOLDOWN", "false"))
 
         remaining = self._cooldown_remaining(cooldown, camera_entity=camera, per_camera=per_cam)
         if remaining > 0:
@@ -378,6 +411,11 @@ class PhoneEventsAlertPlugin(ToolPlugin):
                 "cooldown_scope": "camera" if per_cam else "global",
                 "cooldown_remaining_seconds": remaining,
             }
+
+        # Ignore vehicles (default setting, overridable per-call via args.ignore_cars)
+        ignore_default = self._truthy(s.get("IGNORE_CARS_DEFAULT", "false"))
+        ignore_arg = args.get("ignore_cars", None)
+        ignore_cars = ignore_default if ignore_arg is None else self._truthy(ignore_arg)
 
         priority = (args.get("priority") or s.get("DEFAULT_PRIORITY") or "critical").strip().lower()
 
@@ -402,7 +440,12 @@ class PhoneEventsAlertPlugin(ToolPlugin):
             )
             if result.get("ok"):
                 self._mark_sent_now(camera_entity=camera, per_camera=per_cam)
-            return {"ok": bool(result.get("ok")), "sent": bool(result.get("ok")), "summary": message, "error": result.get("error", "")}
+            return {
+                "ok": bool(result.get("ok")),
+                "sent": bool(result.get("ok")),
+                "summary": message,
+                "error": result.get("error", ""),
+            }
 
         # Vision
         try:
@@ -413,6 +456,7 @@ class PhoneEventsAlertPlugin(ToolPlugin):
                 model=vis_model,
                 api_key=vis_key,
                 query=query,
+                ignore_cars=ignore_cars,
             )
         except Exception as e:
             logger.exception("[phone_events_alert] Vision analysis failed: %s", e)
@@ -436,7 +480,13 @@ class PhoneEventsAlertPlugin(ToolPlugin):
         if result.get("ok"):
             self._mark_sent_now(camera_entity=camera, per_camera=per_cam)
 
-        return {"ok": bool(result.get("ok")), "sent": bool(result.get("ok")), "summary": desc, "error": result.get("error", "")}
+        return {
+            "ok": bool(result.get("ok")),
+            "sent": bool(result.get("ok")),
+            "summary": desc,
+            "ignore_cars": bool(ignore_cars),
+            "error": result.get("error", ""),
+        }
 
     async def handle_automation(self, args: Dict[str, Any], llm_client):
         return await self._run(args or {})
