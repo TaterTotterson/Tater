@@ -33,6 +33,7 @@ class PhoneEventsAlertPlugin(ToolPlugin):
     - Delivery detection instructions (UPS/FedEx/USPS/Amazon/DHL)
     - Supports multiple notify services (up to 5) in settings
     - Prompt explicitly describes animals/pets including color and what they are doing
+    - Skip sending notification if model responds with "Nothing notable"
     """
 
     name = "phone_events_alert"
@@ -549,6 +550,17 @@ class PhoneEventsAlertPlugin(ToolPlugin):
         desc = self._compact(raw_desc)
         if not desc:
             desc = "Motion detected."
+
+        # NEW: if model says "Nothing notable...", skip sending and do NOT mark cooldown
+        if desc.strip().lower().startswith("nothing notable"):
+            logger.info("[phone_events_alert] Skipping notification (nothing notable)")
+            return {
+                "ok": True,
+                "sent": False,
+                "skipped": "nothing_notable",
+                "summary": desc,
+                "ignore_cars": bool(ignore_cars),
+            }
 
         if area and area.lower() not in desc.lower():
             desc = self._compact(f"{area.title()}: {desc}")
