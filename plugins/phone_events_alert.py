@@ -5,7 +5,7 @@ import json
 import logging
 import re
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 from urllib.parse import quote
 
 import requests
@@ -25,13 +25,14 @@ class PhoneEventsAlertPlugin(ToolPlugin):
     - Cooldown check FIRST (skip everything if still cooling down)
     - Fetch a Home Assistant camera snapshot
     - Describe snapshot with a Vision LLM (OpenAI-compatible)
-    - Send the description to your phone using HA notify service
+    - Send the description to your phone(s) using HA notify service(s)
 
     Updates:
     - Optional per-camera cooldown (toggle in settings)
     - Optional ignore_cars / ignore vehicles (per-call arg + optional default setting)
-    - Improved delivery detection instructions (UPS/FedEx/USPS/Amazon/DHL)
-    - Avoids "negative" summaries like "no pets/no delivery seen"
+    - Delivery detection instructions (UPS/FedEx/USPS/Amazon/DHL)
+    - Supports multiple notify services (up to 5) in settings
+    - Prompt explicitly describes animals/pets including color and what they are doing
     """
 
     name = "phone_events_alert"
@@ -76,11 +77,37 @@ class PhoneEventsAlertPlugin(ToolPlugin):
             "default": "",
             "description": "Create in HA: Profile → Long-Lived Access Tokens.",
         },
+
+        # Primary + additional notify services (up to 5)
         "MOBILE_NOTIFY_SERVICE": {
-            "label": "Notify service (ex: notify.mobile_app_taters_iphone)",
+            "label": "Notify service #1 (ex: notify.mobile_app_taters_iphone)",
             "type": "string",
             "default": "",
             "description": "Your HA Companion App notify service.",
+        },
+        "MOBILE_NOTIFY_SERVICE_2": {
+            "label": "Notify service #2 (optional)",
+            "type": "string",
+            "default": "",
+            "description": "Optional additional notify service.",
+        },
+        "MOBILE_NOTIFY_SERVICE_3": {
+            "label": "Notify service #3 (optional)",
+            "type": "string",
+            "default": "",
+            "description": "Optional additional notify service.",
+        },
+        "MOBILE_NOTIFY_SERVICE_4": {
+            "label": "Notify service #4 (optional)",
+            "type": "string",
+            "default": "",
+            "description": "Optional additional notify service.",
+        },
+        "MOBILE_NOTIFY_SERVICE_5": {
+            "label": "Notify service #5 (optional)",
+            "type": "string",
+            "default": "",
+            "description": "Optional additional notify service.",
         },
 
         # ---- Vision LLM ----
@@ -157,6 +184,31 @@ class PhoneEventsAlertPlugin(ToolPlugin):
             raw = raw.split("notify.", 1)[1].strip()
         return raw
 
+    def _get_notify_services(self, s: Dict[str, str]) -> List[str]:
+        keys = [
+            "MOBILE_NOTIFY_SERVICE",
+            "MOBILE_NOTIFY_SERVICE_2",
+            "MOBILE_NOTIFY_SERVICE_3",
+            "MOBILE_NOTIFY_SERVICE_4",
+            "MOBILE_NOTIFY_SERVICE_5",
+        ]
+        out: List[str] = []
+        seen = set()
+
+        for k in keys:
+            raw = (s.get(k) or "").strip()
+            if not raw:
+                continue
+            svc = self._normalize_notify_service(raw)
+            if not svc:
+                continue
+            if svc in seen:
+                continue
+            seen.add(svc)
+            out.append(svc)
+
+        return out
+
     @staticmethod
     def _truthy(v: Any) -> bool:
         if isinstance(v, bool):
@@ -202,10 +254,6 @@ class PhoneEventsAlertPlugin(ToolPlugin):
     # ─────────────────────────────────────────
     # HA helpers
     # ─────────────────────────────────────────
-    @staticmethod
-    def _ha_headers(token: str) -> Dict[str, str]:
-        return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-
     def _get_camera_jpeg(self, ha_base: str, token: str, camera_entity: str) -> bytes:
         ha_base = (ha_base or "").rstrip("/")
         url = f"{ha_base}/api/camera_proxy/{quote(camera_entity, safe='')}"
@@ -236,6 +284,8 @@ class PhoneEventsAlertPlugin(ToolPlugin):
             "DO NOT mention what is NOT present (no 'no pets', 'no delivery', etc). "
             "DO NOT add disclaimers, guesses, or filler. "
             "If a person is visible, mention clothing and what they are doing. "
+            "If an animal/pet is visible (dog, cat, etc), mention what it is, its color (black, brown, white, gray, etc), "
+            "and what it is doing (running, sniffing, sitting at the door, etc). "
             "If a package is visible, say so. "
             "If you can identify a delivery service by uniform, logo, or clear branding, be explicit: "
             "UPS, FedEx, USPS, Amazon, DHL, etc. "
@@ -245,9 +295,7 @@ class PhoneEventsAlertPlugin(ToolPlugin):
         )
 
         if ignore_cars:
-            prompt += (
-                " Do NOT mention, describe, or reference vehicles or cars under any circumstances."
-            )
+            prompt += " Do NOT mention, describe, or reference vehicles or cars under any circumstances."
 
         payload = {
             "model": model,
@@ -288,24 +336,6 @@ class PhoneEventsAlertPlugin(ToolPlugin):
         if " " in cut[40:]:
             cut = cut[: cut.rfind(" ")]
         return cut.rstrip(". ,;:") + "…"
-
-    @staticmethod
-    def _clean_negative_filler(text: str) -> str:
-        t = re.sub(r"\s+", " ", (text or "")).strip()
-
-        patterns = [
-            r"\bno (delivery|deliveries|delivery service|pets?|animals?|vehicles?|cars?) (seen|visible|present)\b\.?",
-            r"\bno (one|person|people) (seen|visible|present)\b\.?",
-            r"\bno (packages?|parcels?) (seen|visible|present)\b\.?",
-        ]
-        for p in patterns:
-            t = re.sub(p, "", t, flags=re.IGNORECASE).strip()
-
-        t = re.sub(r"\s+,", ",", t)
-        t = re.sub(r"\s+\.", ".", t)
-        t = re.sub(r"\s{2,}", " ", t).strip(" ,;:-")
-
-        return t
 
     # ─────────────────────────────────────────
     # HA Notify
@@ -352,19 +382,15 @@ class PhoneEventsAlertPlugin(ToolPlugin):
         *,
         ha_base: str,
         ha_token: str,
-        notify_service_raw: str,
+        notify_service: str,
         title: str,
         message: str,
         priority: str,
     ) -> Dict[str, Any]:
         if not ha_base or not ha_token:
             return {"ok": False, "error": "HA_BASE_URL / HA_TOKEN not configured."}
-        if not notify_service_raw:
-            return {"ok": False, "error": "MOBILE_NOTIFY_SERVICE not configured."}
-
-        service = self._normalize_notify_service(notify_service_raw)
-        if not service:
-            return {"ok": False, "error": "MOBILE_NOTIFY_SERVICE is invalid."}
+        if not notify_service:
+            return {"ok": False, "error": "No notify service configured."}
 
         payload = {
             "title": (title or "Phone Events Alert").strip(),
@@ -376,15 +402,57 @@ class PhoneEventsAlertPlugin(ToolPlugin):
             base_url=ha_base,
             token=ha_token,
             domain="notify",
-            service=service,
+            service=notify_service,
             payload=payload,
         )
 
         if status not in (200, 201):
-            logger.error("[phone_events_alert] HA notify failed HTTP %s: %s", status, text[:200])
-            return {"ok": False, "error": f"Home Assistant notify failed (HTTP {status})."}
+            logger.error("[phone_events_alert] HA notify failed (%s) HTTP %s: %s", notify_service, status, text[:200])
+            return {"ok": False, "error": f"Home Assistant notify failed (HTTP {status}) for {notify_service}."}
 
         return {"ok": True, "error": ""}
+
+    async def _send_to_all_devices(
+        self,
+        *,
+        ha_base: str,
+        ha_token: str,
+        services: List[str],
+        title: str,
+        message: str,
+        priority: str,
+    ) -> Dict[str, Any]:
+        if not services:
+            return {"ok": False, "sent_count": 0, "errors": ["No notify services configured."]}
+
+        results = await asyncio.gather(
+            *[
+                asyncio.to_thread(
+                    self._send_phone_notification,
+                    ha_base=ha_base,
+                    ha_token=ha_token,
+                    notify_service=svc,
+                    title=title,
+                    message=message,
+                    priority=priority,
+                )
+                for svc in services
+            ],
+            return_exceptions=True,
+        )
+
+        sent = 0
+        errors: List[str] = []
+        for i, r in enumerate(results):
+            if isinstance(r, Exception):
+                errors.append(f"{services[i]}: {str(r)}")
+                continue
+            if r.get("ok"):
+                sent += 1
+            else:
+                errors.append(r.get("error") or f"{services[i]}: failed")
+
+        return {"ok": sent > 0, "sent_count": sent, "errors": errors}
 
     # ─────────────────────────────────────────
     # Core
@@ -394,7 +462,7 @@ class PhoneEventsAlertPlugin(ToolPlugin):
 
         ha_base = (s.get("HA_BASE_URL") or "").strip()
         ha_token = (s.get("HA_TOKEN") or "").strip()
-        notify_service = (s.get("MOBILE_NOTIFY_SERVICE") or "").strip()
+        notify_services = self._get_notify_services(s)
 
         vis_base = (s.get("VISION_API_BASE") or "http://127.0.0.1:1234").strip()
         vis_model = (s.get("VISION_MODEL") or "qwen2.5-vl-7b-instruct").strip()
@@ -445,11 +513,10 @@ class PhoneEventsAlertPlugin(ToolPlugin):
         except Exception as e:
             logger.exception("[phone_events_alert] Failed to fetch camera snapshot: %s", e)
             message = "Motion triggered, but the camera snapshot was not available."
-            result = await asyncio.to_thread(
-                self._send_phone_notification,
+            result = await self._send_to_all_devices(
                 ha_base=ha_base,
                 ha_token=ha_token,
-                notify_service_raw=notify_service,
+                services=notify_services,
                 title=title,
                 message=message,
                 priority=priority,
@@ -459,8 +526,9 @@ class PhoneEventsAlertPlugin(ToolPlugin):
             return {
                 "ok": bool(result.get("ok")),
                 "sent": bool(result.get("ok")),
+                "sent_count": int(result.get("sent_count", 0)),
                 "summary": message,
-                "error": result.get("error", ""),
+                "errors": result.get("errors", []),
             }
 
         # Vision
@@ -478,20 +546,18 @@ class PhoneEventsAlertPlugin(ToolPlugin):
             logger.exception("[phone_events_alert] Vision analysis failed: %s", e)
             raw_desc = "Motion triggered."
 
-        # Final cleanup
-        desc = self._compact(self._clean_negative_filler(raw_desc))
+        desc = self._compact(raw_desc)
         if not desc:
             desc = "Motion detected."
 
         if area and area.lower() not in desc.lower():
             desc = self._compact(f"{area.title()}: {desc}")
 
-        # Send
-        result = await asyncio.to_thread(
-            self._send_phone_notification,
+        # Send to all devices
+        result = await self._send_to_all_devices(
             ha_base=ha_base,
             ha_token=ha_token,
-            notify_service_raw=notify_service,
+            services=notify_services,
             title=title,
             message=desc,
             priority=priority,
@@ -503,9 +569,10 @@ class PhoneEventsAlertPlugin(ToolPlugin):
         return {
             "ok": bool(result.get("ok")),
             "sent": bool(result.get("ok")),
+            "sent_count": int(result.get("sent_count", 0)),
             "summary": desc,
             "ignore_cars": bool(ignore_cars),
-            "error": result.get("error", ""),
+            "errors": result.get("errors", []),
         }
 
     async def handle_automation(self, args: Dict[str, Any], llm_client):
