@@ -155,6 +155,7 @@ Key benefits:
 - Maintains conversation context for more natural, multi-turn interactions
 
 This integration is required if you want Tater to participate directly in Home Assistant conversations or voice control.
+
 ---
 
 ### ⚙️ tater_automations
@@ -169,6 +170,7 @@ Key benefits:
 - Integrates cleanly into Home Assistant’s automation editor and UI
 
 This component is required if you want to trigger Tater tools directly from Home Assistant automations.
+
 ---
 
 ### Local Installation (Advanced)
