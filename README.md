@@ -155,7 +155,6 @@ Key benefits:
 - Maintains conversation context for more natural, multi-turn interactions
 
 This integration is required if you want Tater to participate directly in Home Assistant conversations or voice control.
-
 ---
 
 ### ⚙️ tater_automations
