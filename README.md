@@ -139,6 +139,41 @@ Once added, the following add-ons will appear in the Home Assistant Add-on Store
 
 This is the recommended setup for most users and provides the smoothest experience.
 
+## 🔌 Home Assistant Integration (Optional Enhancements)
+
+Tater AI supports deeper integration with Home Assistant through a couple of companion repositories. These extend Tater’s usefulness in smart home setups by enabling voice/text conversation control and native automation triggers.
+
+### 📍 Tater-HomeAssistant
+https://github.com/TaterTotterson/Tater-HomeAssistant
+
+A Home Assistant **custom integration** that allows Tater to function as a **Conversation Agent** inside Home Assistant’s Assist pipeline. This enables voice or text interactions from Home Assistant to be routed directly to your Tater backend, where plugins can be executed and contextual responses returned.
+
+Key benefits:
+- Use Tater as a native **voice and text assistant** within Home Assistant
+- Routes Assist queries directly to your running Tater AI backend
+- Supports plugins that implement `handle_homeassistant(...)`
+- Maintains conversation context for more natural, multi-turn interactions
+
+This integration is required if you want Tater to participate directly in Home Assistant conversations or voice control.
+
+---
+
+### ⚙️ tater_automations
+https://github.com/TaterTotterson/tater_automations
+
+A Home Assistant **automation-focused custom component** that exposes Tater’s tools as **native Home Assistant automation actions**. This allows Home Assistant automations to call specific Tater tools directly, without REST calls, scripts, or YAML workarounds.
+
+Key benefits:
+- Adds a native **“Call Tater automation tool”** action in Home Assistant automations
+- Designed for fast, reliable, automation-only execution
+- Ideal for camera events, alerts, summaries, and AI-driven logic
+- Integrates cleanly into Home Assistant’s automation editor and UI
+
+This component is required if you want to trigger Tater tools directly from Home Assistant automations.
+
+---
+
+Installation and configuration instructions for each integration are provided in their respective repositories.
 ---
 
 ### Local Installation (Advanced)
