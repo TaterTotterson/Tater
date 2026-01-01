@@ -170,10 +170,6 @@ Key benefits:
 - Integrates cleanly into Home Assistant’s automation editor and UI
 
 This component is required if you want to trigger Tater tools directly from Home Assistant automations.
-
----
-
-Installation and configuration instructions for each integration are provided in their respective repositories.
 ---
 
 ### Local Installation (Advanced)
