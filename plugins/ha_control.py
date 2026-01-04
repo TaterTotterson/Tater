@@ -4,7 +4,7 @@ import re
 import json as _json
 import time
 import requests
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from plugin_base import ToolPlugin
 from helpers import redis_client
@@ -17,12 +17,10 @@ class HAClient:
     """Simple Home Assistant REST API helper (settings from Redis)."""
 
     def __init__(self):
-        # IMPORTANT: WebUI saves to "plugin_settings:{category}" (no space after colon)
         settings = redis_client.hgetall("plugin_settings:Home Assistant Control") or {}
 
         self.base_url = (settings.get("HA_BASE_URL") or "http://homeassistant.local:8123").rstrip("/")
         self.token = settings.get("HA_TOKEN")
-
         if not self.token:
             raise ValueError("Home Assistant token (HA_TOKEN) not set in plugin settings.")
 
@@ -51,43 +49,38 @@ class HAClient:
         return self._req("GET", f"/api/states/{entity_id}")
 
     def list_states(self):
-        """Returns full state list for grounding."""
         return self._req("GET", "/api/states") or []
 
 
 class HAControlPlugin(ToolPlugin):
     name = "ha_control"
     plugin_name = "Home Assistant Control"
+    pretty_name = "Home Assistant Control"
+
+    settings_category = "Home Assistant Control"
+    platforms = ["homeassistant", "webui", "xbmc", "homekit"]
+
+    # ONLY pass the user's exact request. Plugin infers everything else.
     usage = (
         "{\n"
         '  "function": "ha_control",\n'
         '  "arguments": {\n'
-        '    "action": "turn_on | turn_off | open | close | set_temperature | get_state",\n'
-        '    "target": "office lights | game room lights | thermostat | temp outside",\n'
-        '    "data": {\n'
-        '      "brightness_pct": 80,\n'
-        '      "color_name": "blue",\n'
-        '      "temperature": 72\n'
-        '    }\n'
+        '    "query": "The user’s request in natural language. If the user uses pronouns (it/them/those/that), '
+        'restate the request with the previously mentioned device or group."\n'
         "  }\n"
         "}\n"
     )
+
     description = (
-        "Call this when the user wants to control or check a Home Assistant device, "
-        "such as turning lights on or off, setting temperatures, or checking a sensor state."
+        "Control or check Home Assistant devices like lights, switches, thermostats, locks, covers, "
+        "inside temperatures, outside temperatures, room temperatures, and sensors."
     )
     plugin_dec = "Control or check Home Assistant devices like lights, thermostats, and sensors."
-    pretty_name = "Home Assistant Control"
-
-    # ✅ This must exactly match what you see in the WebUI settings header
-    # and the WebUI will save under: plugin_settings:Home Assistant Control
-    settings_category = "Home Assistant Control"
 
     waiting_prompt_template = (
-        "Write a friendly message telling {mention} you’re controlling their Home Assistant devices now! "
+        "Write a friendly message telling {mention} you’re accessing Home Assistant devices now! "
         "Only output that message."
     )
-    platforms = ["homeassistant", "webui", "xbmc", "homekit"]
 
     required_settings = {
         "HA_BASE_URL": {
@@ -106,27 +99,32 @@ class HAControlPlugin(ToolPlugin):
             "label": "Catalog Cache Seconds",
             "type": "string",
             "default": "60",
-            "description": "How long to cache the compact entity catalog in Redis (recommended: 30-120)."
+            "description": "How long to cache the compact entity catalog in Redis."
         },
         "HA_MAX_CANDIDATES": {
             "label": "Max Candidates Sent to LLM",
             "type": "string",
+            "default": "400",
+            "description": "Max candidates to send in a single LLM call (tournament chunking used above this)."
+        },
+        "HA_CHUNK_SIZE": {
+            "label": "LLM Tournament Chunk Size",
+            "type": "string",
             "default": "120",
-            "description": "Upper bound for candidates passed to the LLM (recommended: 60-150)."
+            "description": "Chunk size for tournament selection when candidate list is very large."
         },
     }
 
     # ----------------------------
-    # Settings helpers (ONE category only)
+    # Settings helpers
     # ----------------------------
     def _get_plugin_settings(self) -> dict:
         return redis_client.hgetall("plugin_settings:Home Assistant Control") or {}
 
     def _get_int_setting(self, key: str, default: int) -> int:
-        s = self._get_plugin_settings()
-        raw = (s.get(key) or "").strip()
+        raw = (self._get_plugin_settings().get(key) or "").strip()
         try:
-            return int(raw)
+            return int(float(raw))
         except Exception:
             return default
 
@@ -143,7 +141,7 @@ class HAControlPlugin(ToolPlugin):
     def _excluded_entities_set(self) -> set[str]:
         """
         Read up to five Voice PE entity IDs from platform settings and exclude them
-        from light control calls. Handles both UPPER and lower keys.
+        from light control calls.
         """
         plat = redis_client.hgetall("homeassistant_platform_settings") or {}
         ids = []
@@ -156,107 +154,111 @@ class HAControlPlugin(ToolPlugin):
         logger.debug(f"[ha_control] excluded voice PE entities: {excluded}")
         return excluded
 
-    def _normalize_action_and_data(self, action: str, target: str, data: dict) -> tuple[str, dict]:
-        a = (action or "").strip().lower()
-        d = dict(data or {})
-        t = (target or "").lower()
+    @staticmethod
+    def _contains_any(text: str, words: List[str]) -> bool:
+        t = (text or "").lower()
+        return any(w in t for w in words)
 
-        a_norm = a.replace("-", "_").replace(" ", "_")
-        colorish = {"set_color", "change_color", "set_colour", "change_colour", "color", "colour"}
-        power_on = {"switch_on", "power_on", "enable", "brighten", "dim"}
-        power_off = {"switch_off", "power_off", "disable"}
+    # ---- CRITICAL FIX: hard guard so "lights to blue" never routes to thermostat temperature ----
+    def _is_light_color_command(self, text: str) -> bool:
+        """
+        True when the user is clearly changing light color.
+        This must take precedence over any thermostat/set_temperature logic.
+        """
+        t = (text or "").lower()
+        if not t:
+            return False
 
-        if a_norm in colorish:
-            a = "turn_on"
-        elif a_norm in power_on:
-            a = "turn_on"
-        elif a_norm in power_off:
-            a = "turn_off"
+        # must be about lights
+        is_lightish = any(w in t for w in [" light", " lights", "lamp", "bulb", "led", "hue", "sconce"])
+        if not is_lightish:
+            return False
 
-        for k in ("color", "colour"):
-            if k in d and isinstance(d[k], str) and d[k].strip():
-                d["color_name"] = d.pop(k).strip().lower()
+        # must mention a known color phrase (or "color" itself)
+        has_color_word = bool(re.search(
+            r"\b(red|orange|yellow|green|cyan|blue|purple|magenta|pink|white|warm white|cool white)\b",
+            t
+        )) or (" color" in t)
 
-        if isinstance(d.get("hs_color"), str):
-            parts = [p.strip() for p in d["hs_color"].split(",")]
-            if len(parts) == 2:
-                try:
-                    d["hs_color"] = [float(parts[0]), float(parts[1])]
-                except Exception:
-                    d.pop("hs_color", None)
+        if not has_color_word:
+            return False
 
-        if isinstance(d.get("rgb_color"), str):
-            parts = [p.strip() for p in d["rgb_color"].split(",")]
-            if len(parts) == 3:
-                try:
-                    d["rgb_color"] = [int(parts[0]), int(parts[1]), int(parts[2])]
-                except Exception:
-                    d.pop("rgb_color", None)
+        # if they explicitly say thermostat/hvac, it's not a light command
+        if any(w in t for w in ["thermostat", "hvac", "heat", "cool", "setpoint", "climate"]):
+            return False
 
-        if isinstance(d.get("brightness"), (int, float)) and 0 <= d["brightness"] <= 100:
-            d["brightness_pct"] = int(d.pop("brightness"))
-        if "brightness_percent" in d and "brightness_pct" not in d:
-            try:
-                d["brightness_pct"] = int(d.pop("brightness_percent"))
-            except Exception:
-                d.pop("brightness_percent", None)
+        return True
 
-        if not d.get("color_name"):
-            m = re.search(
-                r"\b(red|orange|yellow|green|cyan|blue|purple|magenta|pink|white|warm white|cool white)\b",
-                t,
-                re.I,
-            )
-            if m:
-                d["color_name"] = m.group(1).lower()
-
-        if a not in ("turn_on", "turn_off", "open", "close", "set_temperature", "get_state"):
-            if d.get("color_name") or d.get("hs_color") or d.get("rgb_color"):
-                a = "turn_on"
-
-        return a, d
-
-    def _extract_temperature(self, data: dict) -> float | None:
-        if not isinstance(data, dict):
+    def _parse_color_name_from_text(self, text: str) -> Optional[str]:
+        if not text:
             return None
-        for k in ("temperature", "temp", "setpoint", "degrees"):
-            v = data.get(k)
+        m = re.search(
+            r"\b(red|orange|yellow|green|cyan|blue|purple|magenta|pink|white|warm white|cool white)\b",
+            text,
+            re.I,
+        )
+        return m.group(1).lower() if m else None
+
+    def _parse_brightness_pct_from_text(self, text: str) -> Optional[int]:
+        """
+        Matches:
+          - "to 50%" / "at 50%" / "50 percent"
+          - "brightness 50"
+        """
+        if not text:
+            return None
+        m = re.search(r"\b(\d{1,3})\s*(%|percent)\b", text, re.I)
+        if m:
             try:
-                if v is None:
-                    continue
-                return float(v)
+                v = int(m.group(1))
+                if 0 <= v <= 100:
+                    return v
             except Exception:
-                continue
+                pass
+        m2 = re.search(r"\bbrightness\s*(\d{1,3})\b", text, re.I)
+        if m2:
+            try:
+                v = int(m2.group(1))
+                if 0 <= v <= 100:
+                    return v
+            except Exception:
+                pass
         return None
 
-    def _service_for_action(self, action: str, entity_domain: str) -> tuple[str, dict] | None:
-        a = action.lower()
-        d = entity_domain.lower()
-        if a in ("turn_on", "turn_off"):
-            return a, {}
-        if a == "open":
-            if d == "cover":
-                return "open_cover", {}
-            if d == "lock":
-                return "unlock", {}
-            return "open", {}
-        if a == "close":
-            if d == "cover":
-                return "close_cover", {}
-            if d == "lock":
-                return "lock", {}
-            return "close", {}
-        if a == "set_temperature" and d == "climate":
-            return "set_temperature", {}
+    def _parse_temperature_from_text(self, text: str) -> Optional[float]:
+        """
+        Matches:
+          - "set to 74"
+          - "to 74 degrees"
+          - "74°"
+        """
+        if not text:
+            return None
+        m = re.search(r"\b(?:to|set to|set)\s*(\d{2,3})(?:\s*(?:degrees|°|deg))?\b", text, re.I)
+        if m:
+            try:
+                return float(m.group(1))
+            except Exception:
+                return None
+        m2 = re.search(r"\b(\d{2,3})\s*(?:degrees|°|deg)\b", text, re.I)
+        if m2:
+            try:
+                return float(m2.group(1))
+            except Exception:
+                return None
         return None
 
     # ----------------------------
-    # Catalog (grounding) + filtering
+    # Catalog (grounding)
     # ----------------------------
     def _catalog_cache_key(self) -> str:
-        return "ha_control:catalog:v2"
+        return "ha_control:catalog:v4"
 
     def _build_catalog_from_states(self, states: List[dict]) -> List[dict]:
+        """
+        Build a compact catalog that the LLM can choose from.
+        NOTE: we intentionally do NOT rely on 'state' to decide temperature sensors, etc.
+        """
         catalog: List[dict] = []
         for s in states:
             if not isinstance(s, dict):
@@ -264,19 +266,18 @@ class HAControlPlugin(ToolPlugin):
             eid = s.get("entity_id", "")
             if "." not in eid:
                 continue
+
             dom = eid.split(".", 1)[0]
             attrs = s.get("attributes") or {}
             if not isinstance(attrs, dict):
                 attrs = {}
 
-            name = attrs.get("friendly_name") or eid
             catalog.append({
                 "entity_id": eid,
                 "domain": dom,
-                "name": name,
+                "name": attrs.get("friendly_name") or eid,
                 "device_class": attrs.get("device_class"),
                 "unit": attrs.get("unit_of_measurement"),
-                "state_class": attrs.get("state_class"),
             })
         return catalog
 
@@ -311,179 +312,127 @@ class HAControlPlugin(ToolPlugin):
 
         return catalog
 
-    def _intent_filters(self, phrase: str, action: str, data: dict) -> Dict[str, Any]:
-        p = (phrase or "").lower()
-        a = (action or "").lower()
+    # ----------------------------
+    # Step 1: LLM interprets query → intent
+    # ----------------------------
+    async def _interpret_query(self, query: str, llm_client) -> dict:
+        """
+        Turn the user's raw query into:
+          - intent: get_temp | get_state | control | set_temperature
+          - action: turn_on|turn_off|open|close|get_state|set_temperature
+          - scope: inside|outside|area:<name>|device:<phrase>|unknown
+          - domain_hint: light|switch|climate|sensor|cover|lock|fan|media_player|scene|script|binary_sensor
+          - desired: {temperature,color_name,brightness_pct,hvac_mode}
+        """
+        allowed_domain = "light,switch,climate,sensor,binary_sensor,cover,lock,fan,media_player,scene,script,select"
+        system = (
+            "You are interpreting a smart-home request for Home Assistant.\n"
+            "Return STRICT JSON only. No explanation.\n"
+            "Schema:\n"
+            "{\n"
+            '  "intent": "get_temp|get_state|control|set_temperature",\n'
+            '  "action": "turn_on|turn_off|open|close|get_state|set_temperature",\n'
+            '  "scope": "inside|outside|area:<name>|device:<phrase>|unknown",\n'
+            f'  "domain_hint": "one of: {allowed_domain}",\n'
+            '  "desired": {\n'
+            '     "temperature": <number or null>,\n'
+            '     "brightness_pct": <int 0-100 or null>,\n'
+            '     "color_name": <string or null>\n'
+            "  }\n"
+            "}\n"
+            "Rules:\n"
+            "- If user asks 'what's the temp inside' or 'temp in the kitchen', intent=get_temp, action=get_state.\n"
+            "- If user asks 'thermostat set to' or 'thermostat temp', intent=get_state, domain_hint=climate.\n"
+            "- If user says 'set thermostat to 74', intent=set_temperature, action=set_temperature, domain_hint=climate.\n"
+            "- For lights, domain_hint=light and action turn_on/turn_off accordingly.\n"
+            "- If user says 'set lights to blue' / 'turn lights blue', that's lights (domain_hint=light), NOT thermostat.\n"
+            "- If scope is a room/area (kitchen, living room), use scope=area:<name>.\n"
+            "- If it's a named device (christmas tree lights), use scope=device:<phrase>.\n"
+        )
 
-        wants_temp = any(w in p for w in ("temp", "temperature"))
-        wants_humidity = "humidity" in p
-        wants_lights = "light" in p or "lights" in p or "lamp" in p
-
-        allowed_domains: Optional[set] = None
-
-        if a == "set_temperature":
-            allowed_domains = {"climate"}
-        elif a in ("open", "close"):
-            if "lock" in p or "door" in p:
-                allowed_domains = {"lock"}
-            else:
-                allowed_domains = {"cover", "lock"}
-        elif a in ("turn_on", "turn_off"):
-            if wants_lights:
-                allowed_domains = {"light", "switch"}
-            else:
-                allowed_domains = {"light", "switch", "fan", "media_player", "scene", "script", "cover", "lock"}
-        elif a == "get_state":
-            if wants_temp or wants_humidity:
-                allowed_domains = {"sensor", "binary_sensor", "climate"}
-            else:
-                allowed_domains = {"sensor", "binary_sensor", "climate", "light", "switch", "fan", "media_player", "cover", "lock"}
-
-        return {
-            "allowed_domains": allowed_domains,
-            "wants_temp": wants_temp,
-            "wants_humidity": wants_humidity,
-            "wants_lights": wants_lights,
-        }
-
-    def _filter_catalog(self, catalog: List[dict], phrase: str, action: str, data: dict) -> List[dict]:
-        max_candidates = self._get_int_setting("HA_MAX_CANDIDATES", 120)
-        intent = self._intent_filters(phrase, action, data)
-
-        allowed_domains = intent["allowed_domains"]
-        p = (phrase or "").lower()
-        tokens = [t for t in re.split(r"[\s_\-]+", p) if t]
-
-        def token_hit(text: str) -> bool:
-            if not tokens:
-                return True
-            tl = (text or "").lower()
-            return any(t in tl for t in tokens)
-
-        filtered = []
-        for c in catalog:
-            dom = (c.get("domain") or "").lower()
-            if allowed_domains and dom not in allowed_domains:
-                continue
-            filtered.append(c)
-
-        if action.lower() == "get_state":
-            if intent["wants_temp"]:
-                temp_sensors = [
-                    c for c in filtered
-                    if (c.get("domain") == "sensor" and (c.get("device_class") or "").lower() == "temperature")
-                ]
-                if len(temp_sensors) >= 3:
-                    filtered = temp_sensors + [c for c in filtered if c.get("domain") == "climate"]
-
-            if intent["wants_humidity"]:
-                hum_sensors = [
-                    c for c in filtered
-                    if (c.get("domain") == "sensor" and (c.get("device_class") or "").lower() == "humidity")
-                ]
-                if len(hum_sensors) >= 3:
-                    filtered = hum_sensors
-
-        if len(filtered) > max_candidates:
-            keyword_filtered = []
-            for c in filtered:
-                blob = f'{c.get("entity_id","")} {c.get("name","")}'
-                if token_hit(blob):
-                    keyword_filtered.append(c)
-            if len(keyword_filtered) >= 10:
-                filtered = keyword_filtered
-
-        if len(filtered) > max_candidates:
-            filtered = filtered[:max_candidates]
-
-        return filtered
+        resp = await llm_client.chat(messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": query.strip()},
+        ])
+        content = (resp.get("message", {}) or {}).get("content", "").strip()
+        content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.MULTILINE).strip()
+        data = _json.loads(content)
+        if not isinstance(data, dict):
+            raise ValueError("LLM interpret_query did not return JSON object")
+        return data
 
     # ----------------------------
-    # LLM chooser (grounded)
+    # Step 2: Candidate building (grounded)
     # ----------------------------
-    async def _choose_entity_llm(self, phrase: str, action: str, candidates: List[dict], llm_client) -> Optional[str]:
+    def _candidates_temperature(self, catalog: List[dict], scope: str) -> List[dict]:
+        temps = [
+            c for c in catalog
+            if (c.get("domain") == "sensor" and (c.get("device_class") or "").lower() == "temperature")
+        ]
+        if not temps:
+            return []
+
+        scope_l = (scope or "").lower()
+
+        # For inside, remove obvious outdoors to avoid "outside" winning.
+        if scope_l == "inside":
+            outdoor_words = ("outside", "outdoor", "yard", "back yard", "backyard", "front yard", "porch", "patio", "driveway")
+            filtered = []
+            for c in temps:
+                name = (c.get("name") or "").lower()
+                eid = (c.get("entity_id") or "").lower()
+                blob = f"{name} {eid}"
+                if any(w in blob for w in outdoor_words):
+                    continue
+                filtered.append(c)
+            return filtered if filtered else temps
+
+        return temps
+
+    def _candidates_for_domains(self, catalog: List[dict], domains: Set[str]) -> List[dict]:
+        doms = {d.lower().strip() for d in (domains or set()) if d}
+        return [c for c in catalog if (c.get("domain") or "").lower() in doms]
+
+    def _domains_for_control(self, domain_hint: str) -> Set[str]:
+        dh = (domain_hint or "").lower().strip()
+        if dh:
+            return {dh}
+        return {"light", "switch", "fan", "media_player", "scene", "script", "cover", "lock"}
+
+    # ----------------------------
+    # Step 3: LLM chooser (grounded) + tournament chunking
+    # ----------------------------
+    async def _choose_entity_llm(self, query: str, intent: dict, candidates: List[dict], llm_client) -> Optional[str]:
         if not candidates:
             return None
 
-        mini = []
-        for c in candidates:
-            mini.append({
-                "entity_id": c.get("entity_id"),
-                "domain": c.get("domain"),
-                "name": c.get("name"),
-                "device_class": c.get("device_class"),
-                "unit": c.get("unit"),
-            })
+        mini = [{
+            "entity_id": c.get("entity_id"),
+            "domain": c.get("domain"),
+            "name": c.get("name"),
+            "device_class": c.get("device_class"),
+            "unit": c.get("unit"),
+        } for c in candidates if c.get("entity_id")]
 
-        system = (
-            "You select the single best Home Assistant entity for the user's request.\n"
-            "You MUST choose an entity_id from the provided candidates (no inventions).\n"
-            "Selection rules:\n"
-            "- For temperature readings (what's the temp, outside temp, current temperature), prefer domain 'sensor' with device_class 'temperature'.\n"
-            "- For humidity readings, prefer sensor device_class 'humidity'.\n"
-            "- For requests that mention 'lights', prefer domain 'light' over 'switch' when both exist.\n"
-            "- For set_temperature, choose a 'climate' entity (thermostat).\n"
-            "Return strict JSON only: {\"entity_id\":\"...\"}. No explanation."
-        )
-
-        user = _json.dumps({"phrase": phrase, "action": action, "candidates": mini}, ensure_ascii=False)
-        candidate_set = {c.get("entity_id") for c in candidates if c.get("entity_id")}
-
-        async def _call(sys_text: str) -> Optional[str]:
-            resp = await llm_client.chat(messages=[
-                {"role": "system", "content": sys_text},
-                {"role": "user", "content": user},
-            ])
-            content = (resp.get("message", {}) or {}).get("content", "").strip()
-            content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.MULTILINE).strip()
-            data = _json.loads(content)
-            eid = data.get("entity_id")
-            if isinstance(eid, str) and eid.strip():
-                return eid.strip()
+        if not mini:
             return None
 
-        try:
-            eid = await _call(system)
-            if eid in candidate_set:
-                return eid
-        except Exception as e:
-            logger.warning(f"[ha_control] LLM choose failed (attempt 1): {e}")
+        candidate_set = {c["entity_id"] for c in mini if c.get("entity_id")}
 
-        try:
-            stronger = system + "\nIMPORTANT: entity_id must be exactly one of the candidates."
-            eid = await _call(stronger)
-            if eid in candidate_set:
-                return eid
-        except Exception as e:
-            logger.warning(f"[ha_control] LLM choose failed (attempt 2): {e}")
-
-        return next(iter(candidate_set), None)
-
-    # ----------------------------
-    # Target classifier (area vs entity)
-    # ----------------------------
-    async def _classify_target(self, target: str, action: str, llm_client) -> dict:
-        target = (target or "").strip()
-        if not target:
-            return {}
-
-        allowed = "light, switch, media_player, fan, climate, cover, lock, scene, script, sensor, binary_sensor"
         system = (
-            "You classify a Home Assistant request into either area control or a single entity selection.\n"
-            "Return strict JSON with ONE of these forms:\n"
-            f'  {{"mode":"area","area":"<Area Name>","domain":"<one of: {allowed}>"}}, OR\n'
-            f'  {{"mode":"entity","phrase":"<what to match>","domain_hint":"<optional domain from: {allowed}>"}}, OR\n'
-            '  {"mode":"entity","phrase":"<what to match>"}\n'
-            "Rules:\n"
-            "- If the user says '<area> lights' or '<area> covers', prefer mode=area.\n"
-            "- If it sounds like a named decoration/device (e.g. 'christmas lights', 'tree', 'blow ups'), prefer mode=entity.\n"
-            "- If action is get_state for temperature/humidity, prefer mode=entity.\n"
-            "No explanation."
+            "Pick the SINGLE best Home Assistant entity for this user request.\n"
+            "You MUST choose an entity_id from the provided candidates (no inventions).\n"
+            "Return strict JSON only: {\"entity_id\":\"...\"}. No explanation.\n"
+            "Use the user's exact words to match rooms/devices.\n"
+            "If the request is temperature inside, do NOT pick obvious outside/outdoor sensors.\n"
         )
 
-        user = _json.dumps({"target": target, "action": action}, ensure_ascii=False)
-
-        try:
+        async def ask_pick(chunk: List[dict]) -> Optional[str]:
+            user = _json.dumps({
+                "query": query,
+                "intent": intent,
+                "candidates": chunk
+            }, ensure_ascii=False)
             resp = await llm_client.chat(messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -491,80 +440,118 @@ class HAControlPlugin(ToolPlugin):
             content = (resp.get("message", {}) or {}).get("content", "").strip()
             content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.MULTILINE).strip()
             data = _json.loads(content)
-            if isinstance(data, dict):
-                mode = (data.get("mode") or "").strip().lower()
-                if mode == "area" and isinstance(data.get("area"), str) and isinstance(data.get("domain"), str):
-                    return {"mode": "area", "area": data["area"].strip(), "domain": data["domain"].strip()}
-                if mode == "entity" and isinstance(data.get("phrase"), str):
-                    out = {"mode": "entity", "phrase": data["phrase"].strip()}
-                    if isinstance(data.get("domain_hint"), str) and data["domain_hint"].strip():
-                        out["domain_hint"] = data["domain_hint"].strip()
-                    return out
+            eid = data.get("entity_id")
+            if isinstance(eid, str) and eid.strip():
+                eid = eid.strip()
+                return eid if eid in candidate_set else None
+            return None
+
+        max_single = self._get_int_setting("HA_MAX_CANDIDATES", 400)
+        chunk_size = self._get_int_setting("HA_CHUNK_SIZE", 120)
+
+        if len(mini) <= max_single:
+            try:
+                eid = await ask_pick(mini)
+                if eid:
+                    return eid
+            except Exception as e:
+                logger.warning(f"[ha_control] LLM choose failed single-shot: {e}")
+
+        try:
+            winners: List[dict] = []
+            for i in range(0, len(mini), chunk_size):
+                chunk = mini[i:i + chunk_size]
+                eid = await ask_pick(chunk)
+                if eid:
+                    winners.append(next(c for c in chunk if c["entity_id"] == eid))
+
+            if not winners:
+                return next(iter(candidate_set), None)
+
+            eid = await ask_pick(winners)
+            if eid:
+                return eid
+
+            return winners[0]["entity_id"]
         except Exception as e:
-            logger.warning(f"[ha_control] target classification failed, falling back: {e}")
-
-        tl = target.lower()
-        if action in ("turn_on", "turn_off") and (" lights" in tl or tl.endswith(" lights") or " light" in tl):
-            area_guess = tl.replace("lights", "").replace("light", "").strip().title()
-            if area_guess:
-                return {"mode": "area", "area": area_guess, "domain": "light"}
-        return {"mode": "entity", "phrase": target}
+            logger.warning(f"[ha_control] LLM choose failed tournament: {e}")
+            return next(iter(candidate_set), None)
 
     # ----------------------------
-    # Improved confirmation prompt builder (AREA)
+    # Service mapping + confirmation
     # ----------------------------
-    def _build_confirmation_prompt_area(
-        self,
-        user_target: str,
-        domain: str,
-        area_name: str,
-        entity_count: int,
-        payload: dict,
-        service_used: str,
-    ) -> str:
-        action_spoken = service_used.replace("_", " ").strip()
-        if action_spoken in ("turn on", "turn off"):
-            action_spoken = "turned on" if "on" in action_spoken else "turned off"
-        elif action_spoken.startswith("open"):
-            action_spoken = "opened"
-        elif action_spoken.startswith("close"):
-            action_spoken = "closed"
+    def _service_for_action(self, action: str, entity_domain: str) -> Optional[Tuple[str, dict]]:
+        a = (action or "").lower().strip()
+        d = (entity_domain or "").lower().strip()
 
-        extras = []
-        if isinstance(payload, dict):
-            if payload.get("color_name"):
-                extras.append(f"color {payload.get('color_name')}")
-            if payload.get("brightness_pct") is not None:
-                try:
-                    extras.append(f"brightness {int(payload.get('brightness_pct'))} percent")
-                except Exception:
-                    pass
+        if a in ("turn_on", "turn_off"):
+            return a, {}
 
-        extras_text = ""
-        if extras:
-            extras_text = " with " + " and ".join(extras[:2])
+        if a == "open":
+            if d == "cover":
+                return "open_cover", {}
+            if d == "lock":
+                return "unlock", {}
+            return "open", {}
 
-        domain_label = domain
-        if not domain_label.endswith("s") and entity_count != 1:
-            domain_label += "s"
+        if a == "close":
+            if d == "cover":
+                return "close_cover", {}
+            if d == "lock":
+                return "lock", {}
+            return "close", {}
 
-        system_msg = (
+        if a == "set_temperature" and d == "climate":
+            return "set_temperature", {}
+
+        return None
+
+    async def _speak_response_state(self, user_query: str, friendly: str, value: str, unit: str, llm_client) -> str:
+        system = (
+            "You are a smart home voice assistant.\n"
+            "Write exactly ONE short, natural spoken response.\n"
+            "- No emojis. No technical wording. No entity IDs.\n"
+            "- If the value is numeric and a unit is provided, include it naturally.\n\n"
+            f"User asked: {user_query}\n"
+            f"Entity: {friendly}\n"
+            f"Value: {value}\n"
+            f"Unit: {unit}\n"
+        )
+        try:
+            resp = await llm_client.chat(messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": "Say it now."},
+            ])
+            msg = (resp.get("message", {}) or {}).get("content", "").strip()
+            return msg or f"{friendly} is {value}{(' ' + unit) if unit else ''}."
+        except Exception:
+            return f"{friendly} is {value}{(' ' + unit) if unit else ''}."
+
+    async def _speak_response_confirm(self, user_query: str, friendly: str, action_spoken: str, extras: str, llm_client) -> str:
+        system = (
             "You are a smart home voice assistant.\n"
             "Write exactly ONE short, natural confirmation sentence.\n"
             "Constraints:\n"
             "- Sound conversational and spoken aloud.\n"
-            "- Mention the area name naturally.\n"
-            "- Mention what was controlled (device type) and how many, if plural.\n"
-            "- Include extra details only if provided (like color or brightness).\n"
-            "- No emojis. No technical wording. No entity IDs. No quotes.\n\n"
-            f"User request: {user_target}\n"
-            f"Result: {action_spoken} {entity_count} {domain_label} in {area_name}{extras_text}.\n"
-            "Now produce the single confirmation sentence."
+            "- Mention the device name naturally.\n"
+            "- Include extra details only if provided.\n"
+            "- No emojis. No technical wording. No entity IDs.\n\n"
+            f"User asked: {user_query}\n"
+            f"Result: {action_spoken} {friendly}.\n"
+            f"Extras: {extras}\n"
         )
-        return system_msg
+        try:
+            resp = await llm_client.chat(messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": "Say it now."},
+            ])
+            msg = (resp.get("message", {}) or {}).get("content", "").strip()
+            return msg or f"Okay, {action_spoken} {friendly}."
+        except Exception:
+            return f"Okay, {action_spoken} {friendly}."
 
     # ----------------------------
-    # Platform handlers
+    # Handlers
     # ----------------------------
     async def handle_homeassistant(self, args, llm_client):
         return await self._handle(args, llm_client)
@@ -579,277 +566,236 @@ class HAControlPlugin(ToolPlugin):
         return await self._handle(args, llm_client)
 
     # ----------------------------
-    # Core handler
+    # Core logic
     # ----------------------------
     async def _handle(self, args, llm_client):
         client = self._get_client()
         if not client:
             return "Home Assistant is not configured. Please set HA_BASE_URL and HA_TOKEN in the plugin settings."
 
-        action = (args.get("action") or "").strip()
-        target = (args.get("target") or "").strip()
-        data = args.get("data", {}) or {}
-        action, data = self._normalize_action_and_data(action, target, data)
-
-        if not action:
-            return "Missing 'action'. Use turn_on, turn_off, open, close, set_temperature, or get_state."
-        if not target:
-            return "Please provide a 'target' (e.g., 'office lights' or 'temp outside')."
+        query = (args.get("query") or "").strip()
+        if not query:
+            return "Please provide 'query' with the user's exact request."
 
         excluded = self._excluded_entities_set()
-        info = await self._classify_target(target, action, llm_client)
 
-        # get_state (entity lane)
-        if action == "get_state":
-            phrase = (info.get("phrase") or target).strip()
-
-            try:
-                catalog = self._get_catalog_cached(client)
-            except Exception as e:
-                logger.error(f"[ha_control] catalog build failed: {e}")
-                return "I couldn't access Home Assistant states."
-
-            candidates = self._filter_catalog(catalog, phrase, action, data)
-
-            dom_hint = (info.get("domain_hint") or "").strip().lower()
-            if dom_hint:
-                hinted = [c for c in candidates if (c.get("domain") or "").lower() == dom_hint]
-                if hinted:
-                    candidates = hinted
-
-            if excluded:
-                candidates = [c for c in candidates if (c.get("entity_id") or "").lower() not in excluded]
-
-            entity_id = await self._choose_entity_llm(phrase, action, candidates, llm_client)
-            if not entity_id:
-                return "I couldn’t find a device or sensor matching that."
-
-            try:
-                st = client.get_state(entity_id)
-                val = st.get("state", "unknown") if isinstance(st, dict) else str(st)
-
-                friendly = entity_id
-                try:
-                    friendly = (st.get("attributes", {}) or {}).get("friendly_name") or entity_id
-                except Exception:
-                    pass
-
-                system_msg = (
-                    f"The user asked: {target}\n"
-                    f"You checked: {friendly}\n"
-                    f"Current value/state: {val}\n"
-                    "Write exactly ONE short, natural spoken response.\n"
-                    "If it's a measurement, include units naturally if obvious.\n"
-                    "No emojis. No technical wording. No entity IDs."
-                )
-
-                msg = ""
-                try:
-                    resp = await llm_client.chat(messages=[
-                        {"role": "system", "content": system_msg},
-                        {"role": "user", "content": "Say it now."},
-                    ])
-                    msg = (resp.get("message", {}) or {}).get("content", "").strip()
-                except Exception:
-                    msg = ""
-
-                if not msg:
-                    msg = f"The {friendly} is currently {val}."
-                return msg
-
-            except Exception as e:
-                logger.error(f"[ha_control] get_state error: {e}")
-                return f"Error reading {entity_id}: {e}"
-
-        # Control path
-        if action not in ("turn_on", "turn_off", "open", "close", "set_temperature"):
-            return f"Unsupported action: {action}"
-
-        # AREA lane
-        if info.get("mode") == "area" and info.get("area") and info.get("domain"):
-            area_arg = info["area"]
-            domain = info["domain"].lower()
-
-            if action in ("open", "close") and domain != "cover":
-                return f"'{action}' is only supported for area control when domain is 'cover'."
-            if action == "set_temperature":
-                return "Setting temperature requires a specific thermostat/device, not an area."
-
-            try:
-                jinja = "{{ (area_entities(%r) | select('match', '^%s\\\\.') | list) | tojson }}" % (area_arg, domain)
-                rendered = client.render_template(jinja)
-
-                entities = []
-                if isinstance(rendered, list):
-                    entities = rendered
-                elif isinstance(rendered, str):
-                    r = rendered.strip()
-                    if r.startswith("["):
-                        try:
-                            entities = _json.loads(r)
-                        except Exception:
-                            entities = []
-                    if not entities and r:
-                        entities = [e.strip() for e in r.split(",") if e.strip()]
-
-                if not entities:
-                    return f"I couldn’t find any {domain} entities in '{area_arg}'."
-
-                if domain == "light" and excluded:
-                    entities = [e for e in entities if e.lower() not in excluded]
-                    if not entities:
-                        return f"Nothing to control — all lights in {area_arg} are excluded."
-
-                service = action
-                if action in ("open", "close"):
-                    service = "open_cover" if action == "open" else "close_cover"
-
-                payload = {"entity_id": entities}
-                if isinstance(data, dict) and data:
-                    payload.update(data)
-
-                client.call_service(domain, service, payload)
-
-                system_msg = self._build_confirmation_prompt_area(
-                    user_target=target,
-                    domain=domain,
-                    area_name=area_arg,
-                    entity_count=len(entities),
-                    payload=payload,
-                    service_used=service,
-                )
-
-                msg = ""
-                try:
-                    resp = await llm_client.chat(messages=[
-                        {"role": "system", "content": system_msg},
-                        {"role": "user", "content": "Say it now."},
-                    ])
-                    msg = (resp.get("message", {}) or {}).get("content", "").strip()
-                except Exception:
-                    msg = ""
-
-                if not msg:
-                    verb = service.replace("_", " ")
-                    msg = f"Okay, {verb} the {domain} in {area_arg}."
-                return msg
-
-            except Exception as e:
-                logger.error(f"[ha_control] area control error: {e}")
-                return f"Error performing {action} in area '{area_arg}': {e}"
-
-        # ENTITY lane
-        phrase = (info.get("phrase") or target).strip()
+        # catalog (cached)
         try:
             catalog = self._get_catalog_cached(client)
         except Exception as e:
             logger.error(f"[ha_control] catalog build failed: {e}")
             return "I couldn't access Home Assistant states."
 
-        candidates = self._filter_catalog(catalog, phrase, action, data)
-
-        dom_hint = (info.get("domain_hint") or "").strip().lower()
-        if dom_hint:
-            hinted = [c for c in candidates if (c.get("domain") or "").lower() == dom_hint]
-            if hinted:
-                candidates = hinted
-
-        if excluded and action in ("turn_on", "turn_off"):
-            candidates = [
-                c for c in candidates
-                if not ((c.get("domain") or "").lower() == "light" and (c.get("entity_id") or "").lower() in excluded)
-            ]
-
-        entity_id = await self._choose_entity_llm(phrase, action, candidates, llm_client)
-        if not entity_id:
-            return "I couldn’t find a device matching that."
-
-        return await self._execute_on_entity_id(client, action, target, entity_id, data, llm_client, excluded)
-
-    async def _execute_on_entity_id(
-        self,
-        client: HAClient,
-        action: str,
-        user_target: str,
-        entity_id: str,
-        data: dict,
-        llm_client,
-        excluded: set,
-    ) -> str:
-        if not entity_id or "." not in entity_id:
-            return "I couldn’t find a valid Home Assistant entity to control."
-
-        entity_domain = entity_id.split(".", 1)[0].lower()
-
-        if entity_domain == "light" and entity_id.lower() in excluded and action in ("turn_on", "turn_off"):
-            return "That light is excluded from control."
-
-        mapped = self._service_for_action(action, entity_domain)
-        if not mapped:
-            return f"The action '{action}' is not supported for {entity_domain}."
-
-        service, extra = mapped
-
-        if action == "set_temperature":
-            temperature = self._extract_temperature(data)
-            if temperature is None:
-                return "Please provide a temperature (e.g., data.temperature=72)."
-            payload = {"entity_id": entity_id, "temperature": temperature}
-            for k in ("hvac_mode", "target_temp_high", "target_temp_low"):
-                if isinstance(data, dict) and k in data:
-                    payload[k] = data[k]
-        else:
-            payload = {"entity_id": entity_id}
-            payload.update(extra)
-            if isinstance(data, dict) and data:
-                payload.update(data)
-
+        # 1) interpret intent
         try:
-            client.call_service(entity_domain, service, payload)
+            intent = await self._interpret_query(query, llm_client)
+        except Exception as e:
+            logger.error(f"[ha_control] interpret_query failed: {e}")
+            return "I couldn't understand that request."
+
+        intent_type = (intent.get("intent") or "").strip()
+        action = (intent.get("action") or "").strip()
+        scope = (intent.get("scope") or "").strip()
+        domain_hint = (intent.get("domain_hint") or "").strip()
+
+        desired = intent.get("desired") or {}
+        if not isinstance(desired, dict):
+            desired = {}
+
+        # Backstop parse from raw query (helps when LLM misses)
+        if desired.get("color_name") in (None, "", "null"):
+            cn = self._parse_color_name_from_text(query)
+            if cn:
+                desired["color_name"] = cn
+        if desired.get("brightness_pct") in (None, "", "null"):
+            bp = self._parse_brightness_pct_from_text(query)
+            if bp is not None:
+                desired["brightness_pct"] = bp
+        if desired.get("temperature") in (None, "", "null"):
+            tp = self._parse_temperature_from_text(query)
+            if tp is not None:
+                desired["temperature"] = tp
+
+        if self._is_light_color_command(query):
+            intent_type = "control"
+            action = "turn_on"  # setting a color implies ON
+            domain_hint = "light"
+            # keep scope if LLM provided it; otherwise leave it
+            if not scope:
+                scope = "unknown"
+            # ensure we have a color if any was present
+            if not desired.get("color_name"):
+                desired["color_name"] = self._parse_color_name_from_text(query) or "white"
+
+        # IMPORTANT:
+        # Temperature questions run BEFORE thermostat/climate interpretation.
+        is_temp_question = self._contains_any(query, ["temp", "temperature", "degrees"])
+        if intent_type == "get_temp" or (is_temp_question and intent_type in ("get_state", "control", "set_temperature")):
+            scope_l = (scope or "").lower()
+            if not scope_l or scope_l == "unknown":
+                if self._contains_any(query, ["outside", "outdoor"]):
+                    scope = "outside"
+                elif self._contains_any(query, ["inside", "in the house", "indoors"]):
+                    scope = "inside"
+
+            candidates = self._candidates_temperature(catalog, scope.lower() if scope else "unknown")
+            if excluded:
+                candidates = [c for c in candidates if (c.get("entity_id") or "").lower() not in excluded]
+
+            entity_id = await self._choose_entity_llm(query, {"intent": "get_temp", "scope": scope}, candidates, llm_client)
+            if not entity_id:
+                return "I couldn’t find a temperature sensor for that."
 
             try:
                 st = client.get_state(entity_id)
-                friendly = (st.get("attributes", {}) or {}).get("friendly_name") or entity_id
-            except Exception:
-                friendly = entity_id
+                val = st.get("state", "unknown") if isinstance(st, dict) else str(st)
+                attrs = (st.get("attributes") or {}) if isinstance(st, dict) else {}
+                friendly = (attrs.get("friendly_name") or entity_id)
+                unit = (attrs.get("unit_of_measurement") or "")
+                return await self._speak_response_state(query, friendly, str(val), str(unit), llm_client)
+            except Exception as e:
+                logger.error(f"[ha_control] temp get_state error: {e}")
+                return f"Error reading {entity_id}: {e}"
 
-            nice_action = (
-                f"set to {payload.get('temperature')} degrees"
-                if action == "set_temperature"
-                else service.replace("_", " ")
-            )
+        # --- thermostat setpoint vs mode handling ---
+        wants_thermostat = self._contains_any(query, ["thermostat", "hvac"])
+        if wants_thermostat and intent_type in ("get_state", "control") and action == "get_state":
+            climate_candidates = self._candidates_for_domains(catalog, {"climate"})
+            if excluded:
+                climate_candidates = [c for c in climate_candidates if (c.get("entity_id") or "").lower() not in excluded]
 
-            system_msg = (
-                "You are a smart home voice assistant.\n"
-                "Write exactly ONE short, natural confirmation sentence.\n"
-                "Constraints:\n"
-                "- Sound conversational and spoken aloud.\n"
-                "- Mention the device name naturally.\n"
-                "- Include extra details only if provided (color/brightness/temperature).\n"
-                "- No emojis. No technical wording. No entity IDs.\n\n"
-                f"User request: {user_target}\n"
-                f"Result: {nice_action} for {friendly}.\n"
-                f"Extras: color_name={payload.get('color_name','')}, brightness_pct={payload.get('brightness_pct','')}\n"
-                "Now produce the single confirmation sentence."
-            )
+            entity_id = await self._choose_entity_llm(query, {"intent": "get_state", "domain_hint": "climate"}, climate_candidates, llm_client)
+            if not entity_id:
+                return "I couldn’t find a thermostat."
 
-            msg = ""
             try:
-                resp = await llm_client.chat(messages=[
-                    {"role": "system", "content": system_msg},
-                    {"role": "user", "content": "Say it now."},
-                ])
-                msg = (resp.get("message", {}) or {}).get("content", "").strip()
+                st = client.get_state(entity_id)
+                attrs = (st.get("attributes") or {}) if isinstance(st, dict) else {}
+                friendly = (attrs.get("friendly_name") or entity_id)
+
+                if self._contains_any(query, ["temp set", "temperature set", "set to", "setpoint"]):
+                    temp_val = attrs.get("temperature")
+                    unit = attrs.get("unit_of_measurement") or "°F"
+                    if temp_val is not None:
+                        return await self._speak_response_state(query, friendly, str(temp_val), str(unit), llm_client)
+
+                val = st.get("state", "unknown") if isinstance(st, dict) else str(st)
+                return await self._speak_response_state(query, friendly, str(val), "", llm_client)
+            except Exception as e:
+                logger.error(f"[ha_control] thermostat read error: {e}")
+                return f"Error reading {entity_id}: {e}"
+
+        # 2) set_temperature intent
+        if intent_type == "set_temperature" or action == "set_temperature":
+            candidates = self._candidates_for_domains(catalog, {"climate"})
+            if excluded:
+                candidates = [c for c in candidates if (c.get("entity_id") or "").lower() not in excluded]
+
+            entity_id = await self._choose_entity_llm(query, intent, candidates, llm_client)
+            if not entity_id:
+                return "I couldn’t find a thermostat to set."
+
+            temperature = desired.get("temperature")
+            try:
+                temperature = float(temperature) if temperature is not None else None
             except Exception:
-                msg = ""
+                temperature = None
+            if temperature is None:
+                return "Tell me what temperature you want, like 'set the thermostat to 74'."
 
-            if not msg:
-                msg = f"Okay, {nice_action} {friendly}."
-            return msg
+            payload = {"entity_id": entity_id, "temperature": temperature}
+            try:
+                client.call_service("climate", "set_temperature", payload)
+                st = client.get_state(entity_id)
+                attrs = (st.get("attributes") or {}) if isinstance(st, dict) else {}
+                friendly = (attrs.get("friendly_name") or entity_id)
+                return await self._speak_response_confirm(query, friendly, f"set to {int(temperature)} degrees", "", llm_client)
+            except Exception as e:
+                logger.error(f"[ha_control] set_temperature error: {e}")
+                return f"Error setting {entity_id}: {e}"
 
-        except Exception as e:
-            logger.error(f"[ha_control] entity control error: {e}")
-            return f"Error performing {service} on {entity_id}: {e}"
+        # 3) control intent (turn_on/off/open/close)
+        if intent_type == "control":
+            domains = self._domains_for_control(domain_hint)
+            candidates = self._candidates_for_domains(catalog, domains)
+
+            if excluded and "light" in {d.lower() for d in domains}:
+                candidates = [
+                    c for c in candidates
+                    if not ((c.get("domain") or "").lower() == "light" and (c.get("entity_id") or "").lower() in excluded)
+                ]
+
+            entity_id = await self._choose_entity_llm(query, intent, candidates, llm_client)
+            if not entity_id:
+                return "I couldn’t find a device matching that."
+
+            if "." not in entity_id:
+                return "I couldn’t find a valid Home Assistant entity to control."
+
+            entity_domain = entity_id.split(".", 1)[0].lower()
+            mapped = self._service_for_action(action, entity_domain)
+            if not mapped:
+                return f"The action '{action}' is not supported for {entity_domain}."
+
+            service, extra = mapped
+
+            payload = {"entity_id": entity_id}
+            payload.update(extra)
+
+            extras_txt_parts = []
+            if entity_domain == "light" and action in ("turn_on", "turn_off"):
+                if desired.get("color_name"):
+                    payload["color_name"] = str(desired["color_name"])
+                    extras_txt_parts.append(f"color {payload['color_name']}")
+                if desired.get("brightness_pct") is not None:
+                    try:
+                        payload["brightness_pct"] = int(desired["brightness_pct"])
+                        extras_txt_parts.append(f"brightness {payload['brightness_pct']} percent")
+                    except Exception:
+                        pass
+
+            try:
+                client.call_service(entity_domain, service, payload)
+                st = client.get_state(entity_id)
+                attrs = (st.get("attributes") or {}) if isinstance(st, dict) else {}
+                friendly = (attrs.get("friendly_name") or entity_id)
+
+                spoken_action = service.replace("_", " ")
+                if spoken_action == "turn on":
+                    spoken_action = "turned on"
+                elif spoken_action == "turn off":
+                    spoken_action = "turned off"
+
+                extras_txt = ", ".join(extras_txt_parts) if extras_txt_parts else ""
+                return await self._speak_response_confirm(query, friendly, spoken_action, extras_txt, llm_client)
+
+            except Exception as e:
+                logger.error(f"[ha_control] control error: {e}")
+                return f"Error performing {service} on {entity_id}: {e}"
+
+        # 4) generic get_state fallback (non-temp, non-thermostat)
+        if intent_type == "get_state" or action == "get_state":
+            allowed = {"sensor", "binary_sensor", "lock", "cover", "light", "switch", "fan", "media_player", "climate"}
+            candidates = self._candidates_for_domains(catalog, allowed)
+            if excluded:
+                candidates = [c for c in candidates if (c.get("entity_id") or "").lower() not in excluded]
+
+            entity_id = await self._choose_entity_llm(query, intent, candidates, llm_client)
+            if not entity_id:
+                return "I couldn’t find a device or sensor matching that."
+
+            try:
+                st = client.get_state(entity_id)
+                val = st.get("state", "unknown") if isinstance(st, dict) else str(st)
+                attrs = (st.get("attributes") or {}) if isinstance(st, dict) else {}
+                friendly = (attrs.get("friendly_name") or entity_id)
+                unit = (attrs.get("unit_of_measurement") or "")
+                return await self._speak_response_state(query, friendly, str(val), str(unit), llm_client)
+            except Exception as e:
+                logger.error(f"[ha_control] get_state error: {e}")
+                return f"Error reading {entity_id}: {e}"
+
+        return "I couldn't understand that request."
 
 
 plugin = HAControlPlugin()
