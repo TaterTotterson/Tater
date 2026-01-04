@@ -295,10 +295,8 @@ async def handle_message(payload: Dict[str, Any], x_tater_token: Optional[str] =
         await _save_message(session_id, "assistant", f"LLM error: {e}", history_max, session_ttl)
         return {"reply": "Sorry, I had a problem talking to Tater."}
 
-    if isinstance(resp, dict):
-        text = (resp.get("message") or {}).get("content", "") or ""
-    else:
-        text = str(resp)
+    text = (resp.get("message", {}) or {}).get("content", "") or ""
+    text = text.strip()
 
     if not text:
         await _save_message(session_id, "assistant", "", history_max, session_ttl)
