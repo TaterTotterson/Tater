@@ -47,12 +47,20 @@ logging.getLogger("irc3.TaterBot").setLevel(logging.WARNING)  # Optional: suppre
 
 dotenv.load_dotenv()
 
-@st.cache_resource(show_spinner=False)
 def _start_rss(_llm_client):
     """
     Start the RSS poller in a resilient background thread.
     If poll_feeds() exits or throws, we log it and restart after a short backoff.
     """
+    stop_event = st.session_state.setdefault("rss_stop_event", threading.Event())
+    thread = st.session_state.get("rss_thread")
+
+    # Don't start again if already running
+    if thread and thread.is_alive():
+        return thread, stop_event
+
+    stop_event.clear()
+
     def _run():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -60,11 +68,13 @@ def _start_rss(_llm_client):
         backoff = 1.0  # seconds (will grow up to 10s)
         max_backoff = 10.0
 
-        while True:
+        while not stop_event.is_set():
             try:
                 rss_manager = RSSManager(llm_client=_llm_client)
                 # If poll_feeds() is a long-lived loop, this blocks until it raises or returns.
-                loop.run_until_complete(rss_manager.poll_feeds())
+                loop.run_until_complete(rss_manager.poll_feeds(stop_event=stop_event))
+                if stop_event.is_set():
+                    break
                 # If it returned cleanly, restart after a tiny pause to avoid hot-looping.
                 logging.getLogger("RSS").warning("poll_feeds() returned; restarting shortly…")
                 time.sleep(1.0)
@@ -82,7 +92,22 @@ def _start_rss(_llm_client):
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
-    return t
+    st.session_state["rss_thread"] = t
+    st.session_state["rss_stop_event"] = stop_event
+    return t, stop_event
+
+def _stop_rss():
+    stop_event = st.session_state.get("rss_stop_event")
+    thread = st.session_state.get("rss_thread")
+
+    if stop_event:
+        stop_event.set()
+
+    if thread and thread.is_alive():
+        thread.join(timeout=0.1)
+
+    st.session_state["rss_thread"] = None
+    return thread, stop_event
 
 @st.cache_resource(show_spinner=False)
 def _start_platform(key):
@@ -227,6 +252,15 @@ def get_plugin_enabled(plugin_name):
 
 def set_plugin_enabled(plugin_name, enabled):
     redis_client.hset("plugin_enabled", plugin_name, "true" if enabled else "false")
+
+def get_rss_enabled():
+    enabled = redis_client.get("rss:enabled")
+    if enabled is None:
+        return True
+    return enabled.lower() == "true"
+
+def set_rss_enabled(enabled):
+    redis_client.set("rss:enabled", "true" if enabled else "false")
 
 def render_plugin_controls(plugin_name, label=None):
     current_state = get_plugin_enabled(plugin_name)
@@ -659,6 +693,30 @@ def render_settings_page():
     st.markdown("---")
     render_tater_settings()
 
+def render_rss_settings_page(rss_plugins, rss_enabled):
+    st.title("RSS Feed")
+    st.write("Control RSS feed monitoring and manage notification plugins.")
+
+    toggle_state = st.toggle(
+        "Enable RSS feed watcher",
+        value=rss_enabled,
+        help="When enabled, RSS feeds will be polled and new items will be sent to the selected notifier plugins.",
+        key="rss_enabled_toggle"
+    )
+
+    if toggle_state != rss_enabled:
+        set_rss_enabled(toggle_state)
+        if toggle_state:
+            _start_rss(llm_client)
+        else:
+            _stop_rss()
+        st.rerun()
+
+    st.markdown("---")
+    st.subheader("RSS Notifier Plugins")
+    st.caption("These plugins deliver RSS updates. Enable at least one to receive notifications.")
+    render_plugin_list(rss_plugins, "No RSS notifier plugins available.")
+
 def _sort_plugins_for_display(plugins):
     return sorted(
         plugins,
@@ -979,7 +1037,7 @@ async def process_function_call(response_json, user_question=""):
         return "Received an unknown function call."
 
 # ------------------ NAVIGATION ------------------
-nav_options = ["Chat", "Plugins", "Auto Plugins", "Platforms", "Settings"]
+nav_options = ["Chat", "Plugins", "Auto Plugins", "Platforms", "RSS Feed", "Settings"]
 if "active_view" not in st.session_state:
     st.session_state.active_view = nav_options[0]
 
@@ -993,7 +1051,11 @@ active_view = st.session_state.active_view
 st.sidebar.markdown("---")
 
 # ------------------ RSS ------------------
-_start_rss(llm_client)
+rss_enabled = get_rss_enabled()
+if rss_enabled:
+    _start_rss(llm_client)
+else:
+    _stop_rss()
 
 # ------------------ PLATFORM MANAGEMENT ------------------
 auto_connected = []
@@ -1009,13 +1071,17 @@ for platform in platform_registry:
         auto_connected.append(platform["category"])
 
 # Prepare plugin groupings
+rss_plugins = _sort_plugins_for_display([
+    p for p in plugin_registry.values()
+    if getattr(p, "notifier", False)
+])
 automation_plugins = _sort_plugins_for_display([
     p for p in plugin_registry.values()
-    if set(getattr(p, "platforms", []) or []) == {"automation"}
+    if set(getattr(p, "platforms", []) or []) == {"automation"} and not getattr(p, "notifier", False)
 ])
 regular_plugins = _sort_plugins_for_display([
     p for p in plugin_registry.values()
-    if set(getattr(p, "platforms", []) or []) != {"automation"}
+    if set(getattr(p, "platforms", []) or []) != {"automation"} and not getattr(p, "notifier", False)
 ])
 
 # Ensure chat history is available for any view
@@ -1218,5 +1284,7 @@ elif active_view == "Auto Plugins":
 elif active_view == "Platforms":
     st.title("Platforms")
     render_platforms_panel(auto_connected)
+elif active_view == "RSS Feed":
+    render_rss_settings_page(rss_plugins, rss_enabled)
 elif active_view == "Settings":
     render_settings_page()

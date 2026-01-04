@@ -213,10 +213,10 @@ class RSSManager:
                 return True
         return False
 
-    async def poll_feeds(self):
+    async def poll_feeds(self, stop_event=None):
         logger.info("Starting RSS feed polling...")
         try:
-            while True:
+            while not (stop_event and stop_event.is_set()):
                 if not self.any_notifier_enabled():
                     logger.debug("No notifier plugins are enabled. Skipping RSS check.")
                     await asyncio.sleep(POLL_INTERVAL)
@@ -224,6 +224,8 @@ class RSSManager:
 
                 feeds = self.get_feeds()
                 for feed_url, last_ts_str in feeds.items():
+                    if stop_event and stop_event.is_set():
+                        break
                     try:
                         last_ts = float(last_ts_str) if last_ts_str else 0.0
                         parsed_feed = await asyncio.to_thread(feedparser.parse, feed_url)
@@ -239,6 +241,8 @@ class RSSManager:
                             key=lambda e: time.mktime(e.published_parsed) if 'published_parsed' in e else 0
                         )
                         for entry in sorted_entries:
+                            if stop_event and stop_event.is_set():
+                                break
                             if 'published_parsed' not in entry:
                                 continue
                             entry_ts = time.mktime(entry.published_parsed)
@@ -250,6 +254,8 @@ class RSSManager:
                     except Exception as e:
                         logger.error(f"Error processing feed {feed_url}: {e}")
 
+                if stop_event and stop_event.is_set():
+                    break
                 await asyncio.sleep(POLL_INTERVAL)
         except asyncio.CancelledError:
             logger.info("RSS polling task cancelled; exiting cleanly.")
