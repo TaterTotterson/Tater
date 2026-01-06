@@ -47,17 +47,68 @@ logging.getLogger("irc3.TaterBot").setLevel(logging.WARNING)  # Optional: suppre
 
 dotenv.load_dotenv()
 
+# Redis configuration for the web UI (using a separate DB)
+redis_host = os.getenv('REDIS_HOST', '127.0.0.1')
+redis_port = int(os.getenv('REDIS_PORT', 6379))
+redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
+
+# ----------------- GLOBAL REDIS LOCK HELPERS -----------------
+# These make RSS + Platforms singletons across all Streamlit sessions/tabs.
+def redis_lock_acquire(key: str, ttl: int = 90) -> str | None:
+    owner = str(uuid.uuid4())
+    ok = redis_client.set(key, owner, nx=True, ex=ttl)
+    return owner if ok else None
+
+def redis_lock_refresh(key: str, owner: str, ttl: int = 90) -> bool:
+    lua = """
+    if redis.call("GET", KEYS[1]) == ARGV[1] then
+      return redis.call("EXPIRE", KEYS[1], ARGV[2])
+    else
+      return 0
+    end
+    """
+    try:
+        return bool(redis_client.eval(lua, 1, key, owner, ttl))
+    except Exception:
+        return False
+
+def redis_lock_release(key: str, owner: str):
+    lua = """
+    if redis.call("GET", KEYS[1]) == ARGV[1] then
+      return redis.call("DEL", KEYS[1])
+    else
+      return 0
+    end
+    """
+    try:
+        redis_client.eval(lua, 1, key, owner)
+    except Exception:
+        pass
+
+# ----------------- RSS START/STOP (SINGLETON) -----------------
+RSS_LOCK_KEY = "rss:poller_lock"
+RSS_LOCK_TTL = 120  # seconds
+
 def _start_rss(_llm_client):
     """
     Start the RSS poller in a resilient background thread.
-    If poll_feeds() exits or throws, we log it and restart after a short backoff.
+    GLOBAL singleton enforced by Redis lock (prevents multi-tab duplicates).
     """
     stop_event = st.session_state.setdefault("rss_stop_event", threading.Event())
     thread = st.session_state.get("rss_thread")
 
-    # Don't start again if already running
+    # If this session already has a running RSS thread, keep it
     if thread and thread.is_alive():
         return thread, stop_event
+
+    # Try to become the one RSS poller across all sessions
+    owner = redis_lock_acquire(RSS_LOCK_KEY, ttl=RSS_LOCK_TTL)
+    st.session_state["rss_lock_owner"] = owner
+
+    if not owner:
+        logging.getLogger("RSS").info("RSS lock held by another session; not starting RSS poller here.")
+        st.session_state["rss_thread"] = None
+        return None, stop_event
 
     stop_event.clear()
 
@@ -68,27 +119,51 @@ def _start_rss(_llm_client):
         backoff = 1.0  # seconds (will grow up to 10s)
         max_backoff = 10.0
 
-        while not stop_event.is_set():
-            try:
-                rss_manager = RSSManager(llm_client=_llm_client)
-                # If poll_feeds() is a long-lived loop, this blocks until it raises or returns.
-                loop.run_until_complete(rss_manager.poll_feeds(stop_event=stop_event))
-                if stop_event.is_set():
+        last_refresh = 0.0
+        refresh_every = 30.0  # seconds
+
+        try:
+            while not stop_event.is_set():
+                # Keep RSS lock alive
+                now = time.time()
+                if now - last_refresh >= refresh_every:
+                    if not redis_lock_refresh(RSS_LOCK_KEY, owner, ttl=RSS_LOCK_TTL):
+                        logging.getLogger("RSS").warning("Lost RSS lock; exiting poller thread.")
+                        break
+                    last_refresh = now
+
+                # Honor global rss:enabled as well (so any session toggle-off stops it)
+                if (redis_client.get("rss:enabled") or "true").lower() != "true":
+                    logging.getLogger("RSS").info("rss:enabled=false; exiting poller thread.")
                     break
-                # If it returned cleanly, restart after a tiny pause to avoid hot-looping.
-                logging.getLogger("RSS").warning("poll_feeds() returned; restarting shortly…")
-                time.sleep(1.0)
-                backoff = 1.0  # reset backoff after a clean return
-            except asyncio.CancelledError:
-                logging.getLogger("RSS").info("RSS poller cancelled; exiting thread.")
-                break
-            except KeyboardInterrupt:
-                logging.getLogger("RSS").info("RSS poller interrupted; exiting thread.")
-                break
-            except Exception as e:
-                logging.getLogger("RSS").error(f"RSS crashed: {e}", exc_info=True)
-                time.sleep(backoff)
-                backoff = min(max_backoff, backoff * 2)  # exponential backoff
+
+                try:
+                    rss_manager = RSSManager(llm_client=_llm_client)
+                    # blocks until stop_event or exception/return
+                    loop.run_until_complete(rss_manager.poll_feeds(stop_event=stop_event))
+                    if stop_event.is_set():
+                        break
+
+                    logging.getLogger("RSS").warning("poll_feeds() returned; restarting shortly…")
+                    time.sleep(1.0)
+                    backoff = 1.0
+
+                except asyncio.CancelledError:
+                    logging.getLogger("RSS").info("RSS poller cancelled; exiting thread.")
+                    break
+                except KeyboardInterrupt:
+                    logging.getLogger("RSS").info("RSS poller interrupted; exiting thread.")
+                    break
+                except Exception as e:
+                    logging.getLogger("RSS").error(f"RSS crashed: {e}", exc_info=True)
+                    time.sleep(backoff)
+                    backoff = min(max_backoff, backoff * 2)
+
+        finally:
+            try:
+                redis_lock_release(RSS_LOCK_KEY, owner)
+            except Exception:
+                pass
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
@@ -97,53 +172,136 @@ def _start_rss(_llm_client):
     return t, stop_event
 
 def _stop_rss():
+    """
+    Stop RSS thread in this session (if present) and release the global lock if owned here.
+    """
     stop_event = st.session_state.get("rss_stop_event")
     thread = st.session_state.get("rss_thread")
+    owner = st.session_state.get("rss_lock_owner")
 
     if stop_event:
         stop_event.set()
 
     if thread and thread.is_alive():
-        thread.join(timeout=0.1)
+        thread.join(timeout=0.5)
+
+    if owner:
+        redis_lock_release(RSS_LOCK_KEY, owner)
 
     st.session_state["rss_thread"] = None
+    st.session_state["rss_lock_owner"] = None
     return thread, stop_event
 
-@st.cache_resource(show_spinner=False)
-def _start_platform(key):
-    stop_flag = st.session_state.setdefault("platform_stop_flags", {}).get(key)
-    thread = st.session_state.setdefault("platform_threads", {}).get(key)
+# ----------------- PLATFORMS START/STOP (SINGLETON) -----------------
+PLATFORM_LOCK_TTL = 120
+PLATFORM_LOCK_REFRESH_EVERY = 30.0
 
-    # Don't start again if already running
+def _ensure_platform_state():
+    st.session_state.setdefault("platform_threads", {})
+    st.session_state.setdefault("platform_stop_flags", {})
+    st.session_state.setdefault("platform_lock_owner", {})
+
+def _start_platform(key: str):
+    """
+    Start a platform module in a background thread.
+    GLOBAL singleton enforced by Redis lock per platform key.
+    """
+    _ensure_platform_state()
+
+    stop_flag = st.session_state["platform_stop_flags"].get(key)
+    thread = st.session_state["platform_threads"].get(key)
+
+    # If already running in this session, keep it
     if thread and thread.is_alive():
         return thread, stop_flag
+
+    # Acquire a global lock so only one session starts this platform
+    lock_key = f"platform:lock:{key}"
+    owner = redis_lock_acquire(lock_key, ttl=PLATFORM_LOCK_TTL)
+    st.session_state["platform_lock_owner"][key] = owner
+
+    if not owner:
+        logging.getLogger("webui").info(f"Platform '{key}' lock held by another session; not starting here.")
+        st.session_state["platform_threads"][key] = None
+        st.session_state["platform_stop_flags"][key] = None
+        return None, None
 
     stop_flag = threading.Event()
 
     def runner():
+        last_refresh = 0.0
         try:
             module = importlib.import_module(f"platforms.{key}")
             if hasattr(module, "run"):
+                # While the platform is running, keep refreshing our lock
+                # We'll do refresh in a side loop if module.run blocks forever.
+                def _lock_refresher():
+                    nonlocal last_refresh
+                    while not stop_flag.is_set():
+                        now = time.time()
+                        if now - last_refresh >= PLATFORM_LOCK_REFRESH_EVERY:
+                            if not redis_lock_refresh(lock_key, owner, ttl=PLATFORM_LOCK_TTL):
+                                logging.getLogger("webui").warning(f"Lost lock for platform '{key}'; requesting stop.")
+                                stop_flag.set()
+                                break
+                            last_refresh = now
+                        time.sleep(1.0)
+
+                refresher_t = threading.Thread(target=_lock_refresher, daemon=True)
+                refresher_t.start()
+
+                # Run platform (should honor stop_event)
                 module.run(stop_event=stop_flag)
+
             else:
                 print(f"⚠️ No run(stop_event) in platforms.{key}")
+
         except Exception as e:
             print(f"❌ Error in platform {key}: {e}")
+
+        finally:
+            # Release global lock so another session can restart if desired
+            try:
+                redis_lock_release(lock_key, owner)
+            except Exception:
+                pass
+
+            # Clear local references
+            _ensure_platform_state()
+            st.session_state["platform_threads"][key] = None
+            st.session_state["platform_stop_flags"][key] = None
+            st.session_state["platform_lock_owner"][key] = None
 
     thread = threading.Thread(target=runner, daemon=True)
     thread.start()
 
-    # Save for future shutdown/restart
     st.session_state["platform_threads"][key] = thread
     st.session_state["platform_stop_flags"][key] = stop_flag
 
     return thread, stop_flag
 
-# Redis configuration for the web UI (using a separate DB)
-redis_host = os.getenv('REDIS_HOST', '127.0.0.1')
-redis_port = int(os.getenv('REDIS_PORT', 6379))
-redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
+def _stop_platform(key: str):
+    """
+    Stop a platform in this session (if we own it).
+    If another session owns it, we still set the desired-state flag in Redis
+    so it won't be restarted automatically, but we cannot force-stop the other session thread.
+    """
+    _ensure_platform_state()
 
+    stop_flag = st.session_state["platform_stop_flags"].get(key)
+    thread = st.session_state["platform_threads"].get(key)
+
+    if stop_flag:
+        stop_flag.set()
+
+    if thread and thread.is_alive():
+        thread.join(timeout=0.5)
+
+    st.session_state["platform_threads"][key] = None
+    st.session_state["platform_stop_flags"][key] = None
+    st.session_state["platform_lock_owner"][key] = None
+
+# ----------------- LLM + LOOP SETUP -----------------
 llm_client = get_llm_client_from_env()
 logging.getLogger("webui").info(f"LLM client → {build_llm_host_from_env()}")
 
@@ -180,7 +338,7 @@ def save_message(role, username, content):
 
     if max_store > 0:
         redis_client.ltrim(history_key, -max_store, -1)
- 
+
 def load_chat_history_tail(n: int):
     if n <= 0:
         return []
@@ -206,7 +364,6 @@ def clear_chat_history():
 def load_default_tater_avatar():
     return Image.open("images/tater.png")
 
-
 def get_tater_avatar():
     avatar_b64 = redis_client.get("tater:avatar")
     if avatar_b64:
@@ -216,7 +373,6 @@ def get_tater_avatar():
         except Exception:
             redis_client.delete("tater:avatar")
     return load_default_tater_avatar()
-
 
 assistant_avatar = get_tater_avatar()
 
@@ -279,7 +435,7 @@ def render_platform_controls(platform, redis_client):
     cooldown_key = f"tater:cooldown:{key}"
     cooldown_secs = 10
 
-    # read current on/off from Redis
+    # read current on/off from Redis (desired state)
     is_running = (redis_client.get(state_key) == "true")
     emoji      = "🟢" if is_running else "🔴"
 
@@ -306,17 +462,22 @@ def render_platform_controls(platform, redis_client):
             st.session_state[force_off_key] = True
             st.rerun()
 
-        # actually start it
-        _start_platform(key)
+        # mark desired state ON first (global)
         redis_client.set(state_key, "true")
+
+        # start (only lock-holder will actually launch)
+        _start_platform(key)
         st.success(f"{short_name} started.")
 
     # --- TURNING OFF ---
     elif not is_enabled and is_running:
-        _, stop_flag = _start_platform(key)
-        stop_flag.set()
-        _start_platform.clear()
+        # mark desired state OFF (global)
         redis_client.set(state_key, "false")
+
+        # stop local session instance if we own it
+        _stop_platform(key)
+
+        # cooldown
         redis_client.set(cooldown_key, str(time.time()))
         st.success(f"{short_name} stopped.")
 
@@ -768,7 +929,7 @@ def build_system_prompt():
         "Only call a tool if the user's latest message clearly requests an action — such as 'generate', 'summarize', or 'download'.\n"
         "Never call a tool in response to casual or friendly messages like 'thanks', 'lol', or 'cool'.\n"
     )
-    
+
     return (
         f"Current Date and Time is: {now}\n\n"
         f"{base_prompt}\n\n"
@@ -851,7 +1012,6 @@ def _to_template_msg(role, content):
         return {"role": role, "content": content}
     return {"role": role, "content": str(content)}
 
-
 def _enforce_user_assistant_alternation(loop_messages):
     """
     Your template enforces strict alternation and requires the first message to be 'user'.
@@ -873,9 +1033,9 @@ def _enforce_user_assistant_alternation(loop_messages):
                 merged[-1]["content"] = a + b
             else:
                 # Coerce to string merge if mixed
-                merged[-1]["content"] = ( (a if isinstance(a, str) else str(a)) +
-                                          "\n\n" +
-                                          (b if isinstance(b, str) else str(b)) ).strip()
+                merged[-1]["content"] = ((a if isinstance(a, str) else str(a)) +
+                                         "\n\n" +
+                                         (b if isinstance(b, str) else str(b))).strip()
         else:
             merged.append(m)
 
@@ -923,15 +1083,13 @@ async def process_message(user_name, message_content):
     total_tok  = int(usage.get("total_tokens") or (prompt_tok + comp_tok))
 
     if total_tok == 0:
-        # heuristic: ~4 chars/token on average
         out_text = (response.get("message", {}) or {}).get("content", "") or ""
         total_tok = max(1, int(len(out_text) / 4))
-        comp_tok = total_tok  # best-effort; no prompt/comp split
+        comp_tok = total_tok
 
     tps_total = total_tok / elapsed
     tps_comp  = (comp_tok / elapsed) if comp_tok else None
 
-    # Store for UI
     redis_client.hset("webui:last_llm_stats", mapping={
         "model": str(response.get("model") or ""),
         "elapsed": f"{elapsed:.6f}",
@@ -976,7 +1134,6 @@ def start_plugin_job(plugin_name, args, llm_client):
                 "error": str(e)
             })
         finally:
-            # one-shot refresh signal (any job finishing should refresh)
             redis_client.set("webui:needs_rerun", "true")
 
     threading.Thread(target=job_runner, daemon=True).start()
@@ -988,7 +1145,6 @@ async def process_function_call(response_json, user_question=""):
     from plugin_registry import plugin_registry
 
     if func in plugin_registry:
-        # Save structured plugin_call marker
         save_message("assistant", "assistant", {
             "marker": "plugin_call",
             "plugin": func,
@@ -999,7 +1155,6 @@ async def process_function_call(response_json, user_question=""):
         if hasattr(plugin, "waiting_prompt_template"):
             wait_msg = plugin.waiting_prompt_template.format(mention="User")
 
-            # Ask LLM for a natural "waiting" message
             wait_response = await llm_client.chat(
                 messages=[
                     {"role": "system", "content": "Write one short, friendly status line for the user."},
@@ -1008,13 +1163,11 @@ async def process_function_call(response_json, user_question=""):
             )
             wait_text = wait_response["message"]["content"].strip()
 
-            # Save waiting message to Redis
             save_message("assistant", "assistant", {
                 "marker": "plugin_wait",
                 "content": wait_text
             })
 
-            # Append waiting message to session state for persistence
             st.session_state.chat_messages.append({
                 "role": "assistant",
                 "content": {
@@ -1023,14 +1176,10 @@ async def process_function_call(response_json, user_question=""):
                 }
             })
 
-            # Immediate feedback: render waiting message now before rerun
             with st.chat_message("assistant", avatar=assistant_avatar):
                 st.write(wait_text)
 
-        # Start background plugin job (new logic)
         start_plugin_job(func, args, llm_client)
-
-        # Let the job return its response later
         return []
 
     else:
@@ -1063,9 +1212,7 @@ for platform in platform_registry:
     key = platform["key"]  # e.g. irc_platform
     state_key = f"{key}_running"
 
-    # Check Redis to determine if this platform should be running
     platform_should_run = redis_client.get(state_key) == "true"
-
     if platform_should_run:
         _start_platform(key)
         auto_connected.append(platform["category"])
@@ -1090,7 +1237,7 @@ if "chat_messages" not in st.session_state:
     max_display = int(redis_client.get("tater:max_display") or 8)
     st.session_state.chat_messages = full_history[-max_display:]
 
-# Check for completed plugin jobs (same behavior, fewer Redis round trips)
+# Check for completed plugin jobs
 job_keys = list(redis_client.scan_iter(match="webui:plugin_jobs:*", count=2000))
 if job_keys:
     pipe = redis_client.pipeline()
