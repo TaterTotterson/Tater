@@ -264,33 +264,82 @@ def extract_json(text: str):
                         continue
     return None
 
-def parse_function_json(response_text):
+def parse_function_json(response_text: str):
     def _pick(obj):
-        # prefer "function", but allow "tool" as an alias used by some models
         if isinstance(obj, dict):
             if "function" in obj and isinstance(obj["function"], str):
-                return {"function": obj["function"], "arguments": obj.get("arguments", {})}
+                return {"function": obj["function"], "arguments": obj.get("arguments", {}) or {}}
             if "tool" in obj and isinstance(obj["tool"], str):
-                return {"function": obj["tool"], "arguments": obj.get("arguments", {})}
+                return {"function": obj["tool"], "arguments": obj.get("arguments", {}) or {}}
         return None
 
+    if not response_text:
+        return None
+
+    s = str(response_text).strip()
+
+    # strip code fences early so shorthand/prefix parsing still works
+    if s.startswith("```"):
+        s = re.sub(r"^```(?:json)?\s*", "", s, flags=re.MULTILINE).strip()
+    if s.endswith("```"):
+        s = re.sub(r"\s*```$", "", s, flags=re.MULTILINE).strip()
+
+    # ---------------------------------------------------------
+    # NEW: Embedded shorthand support:
+    #   "Sure, here you go ha_control{...}"
+    # ---------------------------------------------------------
+    m_anywhere = re.search(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\s*(\{[^{}]*\})', s)
+    if m_anywhere:
+        func = m_anywhere.group(1)
+        blob = m_anywhere.group(2)
+        try:
+            args = json.loads(blob)
+            if isinstance(args, dict):
+                return {"function": func, "arguments": args}
+        except Exception:
+            pass
+
+    # Accept shorthand ONLY when it's the whole message: ha_control{"query":"..."}
+    m = re.match(r'^([a-zA-Z0-9_]+)\s*(\{.*\})\s*$', s, re.DOTALL)
+    if m:
+        func = m.group(1)
+        blob = m.group(2)
+        try:
+            args = json.loads(blob)
+            if isinstance(args, dict):
+                return {"function": func, "arguments": args}
+        except Exception:
+            pass
+
     try:
-        response_json = json.loads(response_text)
+        response_json = json.loads(s)
     except json.JSONDecodeError:
-        json_str = extract_json(response_text)
+        json_str = extract_json(s)
         if not json_str:
             return None
+
+        prefix = s.split(json_str, 1)[0].strip()
+
+        # Slightly stricter "possible func" match
+        m2 = re.search(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\s*[:(]*\s*$', prefix)
+        if m2:
+            possible_func = m2.group(1)
+            try:
+                args = json.loads(json_str)
+                if isinstance(args, dict):
+                    return {"function": possible_func, "arguments": args}
+            except Exception:
+                pass
+
         try:
             response_json = json.loads(json_str)
         except Exception:
             return None
 
-    # dict case
     picked = _pick(response_json)
     if picked:
         return picked
 
-    # list case: return the first valid tool/function object
     if isinstance(response_json, list):
         for item in response_json:
             picked = _pick(item)
