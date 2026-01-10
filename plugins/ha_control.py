@@ -346,7 +346,7 @@ class HAControlPlugin(ToolPlugin):
             "- If user says 'set thermostat to 74', intent=set_temperature, action=set_temperature, domain_hint=climate.\n"
             "- For lights, domain_hint=light and action turn_on/turn_off accordingly.\n"
             "- If user says 'set lights to blue' / 'turn lights blue', that's lights (domain_hint=light), NOT thermostat.\n"
-            "- ✅ If user asks to set lights to a percent (brightness), you MUST use intent=control and action=turn_on,\n"
+            "- If user asks to set lights to a percent (brightness), you MUST use intent=control and action=turn_on,\n"
             "  and put the percent into desired.brightness_pct. Do NOT use actions like set_brightness.\n"
             "- If scope is a room/area (kitchen, living room), use scope=area:<name>.\n"
             "- If it's a named device (christmas tree lights), use scope=device:<phrase>.\n"
