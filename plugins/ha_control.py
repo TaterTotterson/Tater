@@ -346,6 +346,8 @@ class HAControlPlugin(ToolPlugin):
             "- If user says 'set thermostat to 74', intent=set_temperature, action=set_temperature, domain_hint=climate.\n"
             "- For lights, domain_hint=light and action turn_on/turn_off accordingly.\n"
             "- If user says 'set lights to blue' / 'turn lights blue', that's lights (domain_hint=light), NOT thermostat.\n"
+            "- ✅ If user asks to set lights to a percent (brightness), you MUST use intent=control and action=turn_on,\n"
+            "  and put the percent into desired.brightness_pct. Do NOT use actions like set_brightness.\n"
             "- If scope is a room/area (kitchen, living room), use scope=area:<name>.\n"
             "- If it's a named device (christmas tree lights), use scope=device:<phrase>.\n"
         )
@@ -374,7 +376,6 @@ class HAControlPlugin(ToolPlugin):
 
         scope_l = (scope or "").lower()
 
-        # For inside, remove obvious outdoors to avoid "outside" winning.
         if scope_l == "inside":
             outdoor_words = ("outside", "outdoor", "yard", "back yard", "backyard", "front yard", "porch", "patio", "driveway")
             filtered = []
@@ -484,6 +485,10 @@ class HAControlPlugin(ToolPlugin):
         a = (action or "").lower().strip()
         d = (entity_domain or "").lower().strip()
 
+        # ✅ (A) Brightness is implemented via light.turn_on with brightness_pct
+        if a in ("set_brightness", "brightness", "dim", "set_level") and d == "light":
+            return "turn_on", {}
+
         if a in ("turn_on", "turn_off"):
             return a, {}
 
@@ -579,14 +584,12 @@ class HAControlPlugin(ToolPlugin):
 
         excluded = self._excluded_entities_set()
 
-        # catalog (cached)
         try:
             catalog = self._get_catalog_cached(client)
         except Exception as e:
             logger.error(f"[ha_control] catalog build failed: {e}")
             return "I couldn't access Home Assistant states."
 
-        # 1) interpret intent
         try:
             intent = await self._interpret_query(query, llm_client)
         except Exception as e:
@@ -602,7 +605,6 @@ class HAControlPlugin(ToolPlugin):
         if not isinstance(desired, dict):
             desired = {}
 
-        # Backstop parse from raw query (helps when LLM misses)
         if desired.get("color_name") in (None, "", "null"):
             cn = self._parse_color_name_from_text(query)
             if cn:
@@ -618,17 +620,13 @@ class HAControlPlugin(ToolPlugin):
 
         if self._is_light_color_command(query):
             intent_type = "control"
-            action = "turn_on"  # setting a color implies ON
+            action = "turn_on"
             domain_hint = "light"
-            # keep scope if LLM provided it; otherwise leave it
             if not scope:
                 scope = "unknown"
-            # ensure we have a color if any was present
             if not desired.get("color_name"):
                 desired["color_name"] = self._parse_color_name_from_text(query) or "white"
 
-        # IMPORTANT:
-        # Temperature questions run BEFORE thermostat/climate interpretation.
         is_temp_question = self._contains_any(query, ["temp", "temperature", "degrees"])
         if intent_type == "get_temp" or (is_temp_question and intent_type in ("get_state", "control", "set_temperature")):
             scope_l = (scope or "").lower()
@@ -657,7 +655,6 @@ class HAControlPlugin(ToolPlugin):
                 logger.error(f"[ha_control] temp get_state error: {e}")
                 return f"Error reading {entity_id}: {e}"
 
-        # --- thermostat setpoint vs mode handling ---
         wants_thermostat = self._contains_any(query, ["thermostat", "hvac"])
         if wants_thermostat and intent_type in ("get_state", "control") and action == "get_state":
             climate_candidates = self._candidates_for_domains(catalog, {"climate"})
@@ -685,7 +682,6 @@ class HAControlPlugin(ToolPlugin):
                 logger.error(f"[ha_control] thermostat read error: {e}")
                 return f"Error reading {entity_id}: {e}"
 
-        # 2) set_temperature intent
         if intent_type == "set_temperature" or action == "set_temperature":
             candidates = self._candidates_for_domains(catalog, {"climate"})
             if excluded:
@@ -714,7 +710,6 @@ class HAControlPlugin(ToolPlugin):
                 logger.error(f"[ha_control] set_temperature error: {e}")
                 return f"Error setting {entity_id}: {e}"
 
-        # 3) control intent (turn_on/off/open/close)
         if intent_type == "control":
             domains = self._domains_for_control(domain_hint)
             candidates = self._candidates_for_domains(catalog, domains)
@@ -773,7 +768,6 @@ class HAControlPlugin(ToolPlugin):
                 logger.error(f"[ha_control] control error: {e}")
                 return f"Error performing {service} on {entity_id}: {e}"
 
-        # 4) generic get_state fallback (non-temp, non-thermostat)
         if intent_type == "get_state" or action == "get_state":
             allowed = {"sensor", "binary_sensor", "lock", "cover", "light", "switch", "fan", "media_player", "climate"}
             candidates = self._candidates_for_domains(catalog, allowed)
