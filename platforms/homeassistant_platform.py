@@ -14,6 +14,7 @@ from pydantic import BaseModel
 import uvicorn
 import requests
 import re
+import inspect
 
 from helpers import (
     get_llm_client_from_env,
@@ -57,7 +58,7 @@ PLATFORM_SETTINGS = {
             "description": "TCP port for the Tater ↔ HA bridge"
         },
 
-        # --- NEW History and TTL controls ---
+        # --- History and TTL controls ---
         "SESSION_HISTORY_MAX": {
             "label": "Session History (turns)",
             "type": "number",
@@ -142,13 +143,22 @@ def _get_int_platform_setting(name: str, default: int) -> int:
     except Exception:
         return default
 
+
 # -------------------- FastAPI DTOs --------------------
+class HAContext(BaseModel):
+    device_id: Optional[str] = None
+    device_name: Optional[str] = None
+    area_id: Optional[str] = None
+    area_name: Optional[str] = None
+    language: Optional[str] = None
+
 class HARequest(BaseModel):
     text: str
     user_id: Optional[str] = None
     device_id: Optional[str] = None
     area_id: Optional[str] = None
     session_id: Optional[str] = None  # Usually HA's conversation_id
+    context: Optional[HAContext] = None
 
 class HAResponse(BaseModel):
     response: str
@@ -167,16 +177,33 @@ class NotificationIn(BaseModel):
 class NotificationsOut(BaseModel):
     notifications: List[Dict[str, Any]]
 
+
 # -------------------- Plugin gating --------------------
 def get_plugin_enabled(plugin_name: str) -> bool:
     enabled = redis_client.hget("plugin_enabled", plugin_name)
     return bool(enabled and enabled.lower() == "true")
 
+
 # -------------------- System prompt (Discord/IRC style, HA scoped) --------------------
-def build_system_prompt() -> str:
+def build_system_prompt(ctx: Optional[Dict[str, Any]] = None) -> str:
     now = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
     first, last = get_tater_name()
     personality = get_tater_personality()
+
+    # ---- Voice PE / room context ----
+    room_clause = ""
+    if ctx:
+        area_name = (ctx.get("area_name") or "").strip()
+        device_name = (ctx.get("device_name") or "").strip()
+        if area_name or device_name:
+            room_clause = (
+                "VOICE CONTEXT:\n"
+                f"- Device: {device_name or '(unknown)'}\n"
+                f"- Area/Room: {area_name or '(unknown)'}\n\n"
+                "DEFAULT ROOM RULE:\n"
+                "If the user asks to control lights/switches/fans/etc and does NOT specify a room, "
+                "assume they mean the Area/Room shown above.\n\n"
+            )
 
     persona_clause = ""
     if personality:
@@ -190,6 +217,7 @@ def build_system_prompt() -> str:
     base_prompt = (
         f"You are {first} {last}, a Home Assistant–savvy AI assistant with access to various tools and plugins.\n\n"
         f"{persona_clause}"
+        f"{room_clause}"
         "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
     )
 
@@ -217,11 +245,20 @@ def build_system_prompt() -> str:
         "If no function is needed, reply normally. Do not use emoji's in your reply"
     )
 
+
 # -------------------- History shaping (Discord-style alternation) --------------------
 def _to_template_msg(role: str, content: Any) -> Optional[Dict[str, Any]]:
     # --- Skip waiting lines from tools (future-proof) ---
     if isinstance(content, dict) and content.get("marker") == "plugin_wait":
         return None
+
+    # --- Persisted HA context marker: show compactly to the LLM ---
+    if isinstance(content, dict) and content.get("marker") == "ha_context":
+        c = content.get("content") or {}
+        area = (c.get("area_name") or c.get("area_id") or "").strip()
+        dev = (c.get("device_name") or c.get("device_id") or "").strip()
+        txt = f"[Voice context: device={dev or 'unknown'}, area={area or 'unknown'}]"
+        return {"role": "assistant", "content": txt}
 
     # --- Include final plugin responses in context (defaults to final if missing for backward compat) ---
     if isinstance(content, dict) and content.get("marker") == "plugin_response":
@@ -277,6 +314,7 @@ def _enforce_user_assistant_alternation(loop_messages: list[Dict[str, Any]]) -> 
     if merged and merged[0]["role"] != "user":
         merged.insert(0, {"role": "user", "content": ""})
     return merged
+
 
 # -------------------- Redis history helpers --------------------
 def _sess_key(session_id: Optional[str]) -> str:
@@ -337,6 +375,7 @@ def _flatten_to_text(res: Any) -> str:
             return str(res)
     return str(res)
 
+
 # -------------------- Minimal HA client (platform local) --------------------
 class _HA:
     def __init__(self):
@@ -362,6 +401,7 @@ class _HA:
 
     def call_service(self, domain: str, service: str, data: dict):
         return self._req("POST", f"/api/services/{domain}/{service}", json=data)
+
 
 # -------------------- Voice PE helpers --------------------
 def _platform_settings() -> Dict[str, str]:
@@ -402,8 +442,9 @@ def _ring_off():
         except Exception as e:
             logger.warning(f"[notify] failed to turn off ring {eid}: {e}")
 
+
 # -------------------- App + LLM client --------------------
-app = FastAPI(title="Tater Home Assistant Bridge", version="1.5")  # 🔼 simplified ring logic
+app = FastAPI(title="Tater Home Assistant Bridge", version="1.6")  # 🔼 room context + plugin context
 
 _llm = None
 
@@ -414,7 +455,8 @@ async def _on_startup():
 
 @app.get("/tater-ha/v1/health")
 async def health():
-    return {"ok": True, "version": "1.5"}
+    return {"ok": True, "version": "1.6"}
+
 
 # -------------------- Notifications API --------------------
 @app.post("/tater-ha/v1/notifications/add")
@@ -474,14 +516,17 @@ async def pull_notifications(background_tasks: BackgroundTasks):
 
     return {"notifications": notifications}
 
-# -------------------- Main HA chat endpoint (unchanged logic) --------------------
+
+# -------------------- Main HA chat endpoint --------------------
 @app.post("/tater-ha/v1/message", response_model=HAResponse)
 async def handle_message(payload: HARequest):
     """
     Home Assistant bridge:
     - Builds a Discord/IRC-style system prompt (HA-scoped)
+    - Injects Voice PE room/device context (if provided)
     - Shapes loop history
     - Executes ONLY plugins that implement handle_homeassistant
+    - Passes room/device context to plugins (optional, backward compatible)
     - Normalizes results to simple TTS-friendly text
     """
     if _llm is None:
@@ -495,11 +540,31 @@ async def handle_message(payload: HARequest):
     max_history_cap = _get_int_platform_setting("MAX_HISTORY_CAP", DEFAULT_MAX_HISTORY_CAP)
     history_max = min(max(session_history_max, 0), max_history_cap)
 
+    # ---- canonical context merge (backward compatible) ----
+    ctx: Dict[str, Any] = {}
+    if payload.context:
+        ctx = payload.context.model_dump(exclude_none=True)
+
+    # Fall back to old top-level fields if context is missing pieces
+    if payload.device_id and not ctx.get("device_id"):
+        ctx["device_id"] = payload.device_id
+    if payload.area_id and not ctx.get("area_id"):
+        ctx["area_id"] = payload.area_id
+
     # Save the user turn (raw)
     await _save_message(payload.session_id, "user", text_in, history_max)
 
+    # Persist context into history (so room can stick across the session)
+    if ctx:
+        await _save_message(
+            payload.session_id,
+            "assistant",
+            {"marker": "ha_context", "content": ctx},
+            history_max
+        )
+
     # Build the messages list: system + shaped history
-    system_prompt = build_system_prompt()
+    system_prompt = build_system_prompt(ctx if ctx else None)
     loop_messages = await _load_history(payload.session_id, history_max)
     messages_list = [{"role": "system", "content": system_prompt}] + loop_messages
 
@@ -542,13 +607,24 @@ async def handle_message(payload: HARequest):
                 return HAResponse(response=msg)
 
             try:
-                result = await plugin.handle_homeassistant(args, _llm)
+                # ---- pass context to plugins if they support it (no mass plugin updates needed) ----
+                handle = plugin.handle_homeassistant
+                sig = None
+                try:
+                    sig = inspect.signature(handle)
+                except Exception:
+                    sig = None
+
+                if sig and "context" in sig.parameters:
+                    result = await handle(args, _llm, context=ctx)
+                else:
+                    result = await handle(args, _llm)
 
                 final_text = _flatten_to_text(result).strip() or f"Done with {func}."
                 if len(final_text) > 4000:
                     final_text = final_text[:4000] + "…"
 
-                # Save plugin_response marker (not fed back to LLM; for traceability)
+                # Save plugin_response marker (fed back to LLM as assistant text via _to_template_msg)
                 await _save_message(
                     payload.session_id,
                     "assistant",
@@ -575,6 +651,7 @@ async def handle_message(payload: HARequest):
         msg = "Sorry, I ran into a problem processing that."
         await _save_message(payload.session_id, "assistant", msg, history_max)
         return HAResponse(response=msg)
+
 
 def run(stop_event: Optional[threading.Event] = None):
     """Match your other platforms’ run signature and graceful stop behavior."""
