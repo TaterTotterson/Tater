@@ -30,7 +30,6 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
     plugin_dec = "Compose a music track from a prompt with ComfyUI Audio Ace."
     pretty_name = "Your Song"
     settings_category = "ComfyUI Audio Ace"
-    # ✅ Add Matrix support
     platforms = ["discord", "webui", "homeassistant", "matrix"]
 
     required_settings = {
@@ -44,11 +43,17 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
             "label": "Default media_player entity",
             "type": "string",
             "default": "",
-            "description": "Required for Home Assistant. Ex: media_player.living_room_speaker"
+            "description": (
+                "Optional for Home Assistant. If unset, Tater will try to play on the Voice PE device "
+                "that spoke (based on device_name/device_id context). Example: media_player.living_room_speaker"
+            )
         }
     }
 
-    waiting_prompt_template = "Write a fun, upbeat message saying you’re writing lyrics and calling in a virtual band now! Only output that message."
+    waiting_prompt_template = (
+        "Write a fun, upbeat message saying you’re writing lyrics and calling in a virtual band now! "
+        "Only output that message."
+    )
 
     # ---------------------------
     # Settings / URL helpers
@@ -67,7 +72,6 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
 
     @staticmethod
     def get_base_ws(base_http: str) -> str:
-        # http://host:8188 -> ws://host:8188 ; https -> wss
         scheme = "wss" if base_http.startswith("https://") else "ws"
         return base_http.replace("http", scheme, 1)
 
@@ -258,10 +262,8 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
 
         workflow = ComfyUIAudioAcePlugin.build_workflow(tags, lyrics)
 
-        # Run the ComfyUI prompt (client_id handled inside run_comfy_prompt)
         prompt_id, _ = run_comfy_prompt(base_http, base_ws, workflow)
 
-        # Pull history and locate produced audio
         history = ComfyUIAudioAcePlugin.get_history(base_http, prompt_id).get(prompt_id, {})
         outputs = history.get("outputs", {}) if isinstance(history, dict) else {}
 
@@ -275,7 +277,6 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
                         media_url = ComfyUIAudioAcePlugin.build_comfy_view_url(
                             base_http, filename, subfolder, folder_type
                         )
-                        # Also try fetching bytes for inline upload
                         try:
                             audio_bytes = ComfyUIAudioAcePlugin.get_audio_bytes(base_http, filename, subfolder, folder_type)
                         except Exception:
@@ -285,7 +286,6 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         raise Exception("No audio returned.")
 
     async def _generate(self, prompt: str, llm_client):
-        # Full async pipeline (shared by Discord/WebUI/Matrix)
         tags, lyrics = await self.generate_tags_and_lyrics(prompt, llm_client)
         media_url, audio_bytes = await asyncio.to_thread(self.process_prompt_sync, tags, lyrics)
 
@@ -345,39 +345,43 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
     # Matrix
     # ---------------------------------------
     async def handle_matrix(self, client, room, sender, body, args, llm_client):
-        """
-        Return an audio payload (base64) plus a short message.
-        The Matrix platform will upload/send the media (handling E2EE automatically) and persist history.
-        """
         prompt = (args.get("prompt") or "").strip()
         if not prompt:
             return "No prompt provided."
         try:
-            # Reuse the shared generator so behavior matches Discord/WebUI
             return await self._generate(prompt, llm_client)
         except Exception as e:
             logger.exception("ComfyUIAudioAcePlugin Matrix error: %s", e)
             return f"Failed to create song: {e}"
 
     # ---------------------------------------
-    # Home Assistant (non-blocking: quick ack, background job)
+    # Home Assistant
     # ---------------------------------------
-    async def handle_homeassistant(self, args, llm_client):
+    async def handle_homeassistant(self, args, llm_client, context: dict | None = None):
         """
         Quick ACK to HA; do heavy work off the pipeline:
           - generate audio via ComfyUI
           - build direct ComfyUI /view URL
-          - play on configured media_player
+          - play on configured media_player OR (if unset) try to play on the speaking Voice PE device
+            using the HA room/device context passed from the conversation agent.
         """
         prompt = (args.get("prompt") or "").strip()
         if not prompt:
             return "No prompt provided."
 
-        target_player = self._pick_target_player()
+        target_player = self._pick_target_player(context=context)
         if not target_player:
+            # Give a helpful hint including what we saw from context
+            dev = ((context or {}).get("device_name") or (context or {}).get("device_id") or "").strip()
+            area = ((context or {}).get("area_name") or (context or {}).get("area_id") or "").strip()
+            hint = ""
+            if dev or area:
+                hint = f" (I heard you from device={dev or 'unknown'}, area={area or 'unknown'}.)"
             return (
-                "I can create your song, but I need a media player configured. "
-                "Set **Default media_player entity** in the ComfyUI Audio Ace plugin settings."
+                "I can create your song, but I couldn't find a media player to play it on."
+                f"{hint} "
+                "Set **Default media_player entity** in the ComfyUI Audio Ace plugin settings, "
+                "or make sure your Voice PE device exposes a media_player entity in Home Assistant."
             )
 
         # Fire-and-forget the heavy work
@@ -386,7 +390,7 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         except Exception as e:
             logger.exception("Failed to schedule background job: %s", e)
 
-        # AI-generated, upbeat ACK
+        # Upbeat ACK (keep it short for TTS)
         system_msg = (
             f"The user asked for a song that will be played on {target_player}. "
             "Write a short, fun, upbeat message telling them the track is being created and "
@@ -412,7 +416,6 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
          - build ComfyUI /view URL
          - play on media_player
         """
-        # 1) generate audio
         try:
             tags, lyrics = await self.generate_tags_and_lyrics(prompt, llm_client)
             media_url, _audio_bytes = await asyncio.to_thread(self.process_prompt_sync, tags, lyrics)
@@ -424,7 +427,6 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
             logger.error("No media URL returned from ComfyUI.")
             return
 
-        # 2) play it
         try:
             ha = self._HA()
             ha.play_media(target_player, media_url, mimetype="music")
@@ -435,18 +437,99 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
     # ---------------------------------------
     # Helpers for HA
     # ---------------------------------------
-    def _pick_target_player(self) -> str | None:
+    @staticmethod
+    def _slugify(s: str) -> str:
+        s = (s or "").strip().lower()
+        # HA entity_id friendly: lowercase, underscores
+        s = re.sub(r"[^a-z0-9]+", "_", s)
+        s = re.sub(r"_+", "_", s).strip("_")
+        return s
+
+    def _pick_target_player(self, context: dict | None = None) -> str | None:
         """
-        Resolve media_player strictly from plugin settings.
+        Pick a media_player in this order:
+          1) Explicit plugin setting HA_DEFAULT_MEDIA_PLAYER
+          2) If unset, try to find a media_player that matches the speaking device context:
+              - try media_player.<slug(device_name)>
+              - else search all media_player states and match by friendly_name or entity_id containing the slug
         """
         sett = self._settings()
         default_mp = (sett.get("HA_DEFAULT_MEDIA_PLAYER") or "").strip()
-        return default_mp or None
+        if default_mp:
+            return default_mp
+
+        ctx = context or {}
+        device_name = (ctx.get("device_name") or "").strip()
+        device_id = (ctx.get("device_id") or "").strip()
+
+        # If we have a device_name, try a couple of very common entity_id patterns first.
+        if device_name:
+            slug = self._slugify(device_name)
+            candidates = [
+                f"media_player.{slug}",
+                f"media_player.{slug}_speaker",
+                f"media_player.{slug}_media_player",
+            ]
+            ha = self._HA()
+            for eid in candidates:
+                try:
+                    st = ha.get_state(eid)
+                    if isinstance(st, dict) and st.get("entity_id", "").startswith("media_player."):
+                        return eid
+                except Exception:
+                    pass
+
+            # Fallback: scan all states and best-match by name/slug
+            try:
+                all_states = ha.list_states()
+                best = self._find_best_media_player(all_states, device_name=device_name)
+                if best:
+                    return best
+            except Exception:
+                logger.exception("Failed scanning HA states for a matching media_player.")
+
+        # If we only have device_id, we can’t reliably map it to an entity via REST-only APIs.
+        # (HA device registry is not available through the normal /api/states endpoint.)
+        if device_id and not device_name:
+            logger.info("No device_name in context; cannot infer media_player from device_id via REST-only APIs.")
+
+        return None
+
+    def _find_best_media_player(self, all_states: list[dict], device_name: str) -> str | None:
+        """
+        Try to find a media_player whose friendly_name matches the device_name.
+        """
+        want = (device_name or "").strip()
+        if not want:
+            return None
+        want_lower = want.lower()
+        want_slug = self._slugify(want)
+
+        exact = []
+        contains = []
+        slug_matches = []
+
+        for st in all_states or []:
+            eid = st.get("entity_id") or ""
+            if not eid.startswith("media_player."):
+                continue
+            attrs = st.get("attributes") or {}
+            fname = (attrs.get("friendly_name") or "").strip()
+            fname_lower = fname.lower()
+
+            if fname and fname_lower == want_lower:
+                exact.append(eid)
+            elif fname and want_lower in fname_lower:
+                contains.append(eid)
+            elif want_slug and want_slug in eid:
+                slug_matches.append(eid)
+
+        # Prefer exact name match, then contains, then entity_id slug match
+        return (exact[0] if exact else (contains[0] if contains else (slug_matches[0] if slug_matches else None)))
 
     class _HA:
         def __init__(self):
             s = redis_client.hgetall("plugin_settings: Home Assistant") or redis_client.hgetall("plugin_settings:Home Assistant")
-            # Handle both key variants just in case
             if not s:
                 s = {}
             self.base = (s.get("HA_BASE_URL") or "http://homeassistant.local:8123").rstrip("/")
@@ -464,12 +547,14 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
             except Exception:
                 return r.text
 
+        def list_states(self) -> list[dict]:
+            return self._req("GET", "/api/states", timeout=30)
+
+        def get_state(self, entity_id: str):
+            return self._req("GET", f"/api/states/{entity_id}", timeout=10)
+
         def play_media(self, entity_id: str, url: str, mimetype="music"):
-            data = {
-                "entity_id": entity_id,
-                "media_content_id": url,
-                "media_content_type": mimetype
-            }
+            data = {"entity_id": entity_id, "media_content_id": url, "media_content_type": mimetype}
             return self._req("POST", "/api/services/media_player/play_media", json=data, timeout=30)
 
 
