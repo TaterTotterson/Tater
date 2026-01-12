@@ -731,7 +731,7 @@ def _start_satellite_conversation(entity_id: str) -> None:
         "start_conversation",
         {
             "entity_id": entity_id,
-            "start_message": "",
+            "start_message": " ",
             "preannounce": False,
         },
     )
