@@ -5,23 +5,22 @@ import asyncio
 import logging
 import threading
 import time
-from pydantic import Field
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 import redis
 from fastapi import FastAPI, HTTPException, BackgroundTasks
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import uvicorn
 import requests
 import re
 import inspect
+import aiohttp
 
 from helpers import (
     get_llm_client_from_env,
-    build_llm_host_from_env,
     parse_function_json,
     get_tater_name,
-    get_tater_personality
+    get_tater_personality,
 )
 from plugin_registry import plugin_registry
 
@@ -40,6 +39,11 @@ DEFAULT_SESSION_HISTORY_MAX = 6
 DEFAULT_MAX_HISTORY_CAP = 20
 DEFAULT_SESSION_TTL_SECONDS = 2 * 60 * 60  # 2h
 
+# Follow-up defaults
+DEFAULT_FOLLOWUP_MAX_PER_SESSION = 3
+DEFAULT_FOLLOWUP_IDLE_TIMEOUT_S = 12.0
+DEFAULT_SATELLITE_MAP_CACHE_TTL_S = 3600  # 1h
+
 # Redis (history + plugin toggles + notifications)
 redis_host = os.getenv("REDIS_HOST", "127.0.0.1")
 redis_port = int(os.getenv("REDIS_PORT", 6379))
@@ -48,6 +52,9 @@ redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_respon
 # Notification keys
 REDIS_NOTIF_LIST = "tater:ha:notifications"  # LPUSH new, LRANGE read, then clear
 
+# Cache keys
+REDIS_SATELLITE_MAP_KEY = "tater:ha:assist_satellite_map:v1"  # json map: area_id -> entity_id
+
 PLATFORM_SETTINGS = {
     "category": "Home Assistant Settings",
     "required": {
@@ -55,7 +62,7 @@ PLATFORM_SETTINGS = {
             "label": "Bind Port",
             "type": "number",
             "default": 8787,
-            "description": "TCP port for the Tater ↔ HA bridge"
+            "description": "TCP port for the Tater ↔ HA bridge",
         },
 
         # --- History and TTL controls ---
@@ -63,56 +70,77 @@ PLATFORM_SETTINGS = {
             "label": "Session History (turns)",
             "type": "number",
             "default": DEFAULT_SESSION_HISTORY_MAX,
-            "description": "How many recent turns to include per HA conversation (smaller = faster)."
+            "description": "How many recent turns to include per HA conversation (smaller = faster).",
         },
         "MAX_HISTORY_CAP": {
             "label": "Max History Cap",
             "type": "number",
             "default": DEFAULT_MAX_HISTORY_CAP,
-            "description": "Hard ceiling to prevent runaway context sizes."
+            "description": "Hard ceiling to prevent runaway context sizes.",
         },
         "SESSION_TTL_SECONDS": {
             "label": "Session TTL",
             "type": "select",
             "options": ["5m", "30m", "1h", "2h", "6h", "24h"],
             "default": "2h",
-            "description": "How long to keep a voice session’s history alive (5m–24h)."
+            "description": "How long to keep a voice session’s history alive (5m–24h).",
         },
 
-        # --- Existing Voice PE fields ---
+        # --- Follow-up behavior ---
+        "FOLLOWUP_MAX_PER_SESSION": {
+            "label": "Max follow-ups per session",
+            "type": "number",
+            "default": DEFAULT_FOLLOWUP_MAX_PER_SESSION,
+            "description": "Safety limit to prevent infinite follow-up loops.",
+        },
+        "FOLLOWUP_IDLE_TIMEOUT_S": {
+            "label": "Follow-up idle wait (seconds)",
+            "type": "number",
+            "default": int(DEFAULT_FOLLOWUP_IDLE_TIMEOUT_S),
+            "description": "How long to wait for the satellite to return to idle before re-opening the mic.",
+        },
+
+        # --- Assist satellite resolution ---
+        "SATELLITE_MAP_CACHE_TTL_S": {
+            "label": "Assist satellite map cache TTL (seconds)",
+            "type": "number",
+            "default": DEFAULT_SATELLITE_MAP_CACHE_TTL_S,
+            "description": "How long to cache the area→assist_satellite mapping (registry lookups).",
+        },
+
+        # --- Existing Voice PE ring fields (optional) ---
         "VOICE_PE_ENTITY_1": {
             "label": "Voice PE entity #1",
             "type": "string",
             "default": "",
-            "description": "Entity ID of a Voice PE light/LED (e.g., light.voice_pe_office)"
+            "description": "Entity ID of a Voice PE light/LED (e.g., light.voice_pe_office)",
         },
         "VOICE_PE_ENTITY_2": {
             "label": "Voice PE entity #2",
             "type": "string",
             "default": "",
-            "description": "Entity ID of a Voice PE light/LED (e.g., light.voice_pe_office)"
+            "description": "Entity ID of a Voice PE light/LED (e.g., light.voice_pe_office)",
         },
         "VOICE_PE_ENTITY_3": {
             "label": "Voice PE entity #3",
             "type": "string",
             "default": "",
-            "description": "Entity ID of a Voice PE light/LED (e.g., light.voice_pe_office)"
+            "description": "Entity ID of a Voice PE light/LED (e.g., light.voice_pe_office)",
         },
         "VOICE_PE_ENTITY_4": {
             "label": "Voice PE entity #4",
             "type": "string",
             "default": "",
-            "description": "Entity ID of a Voice PE light/LED (e.g., light.voice_pe_office)"
+            "description": "Entity ID of a Voice PE light/LED (e.g., light.voice_pe_office)",
         },
         "VOICE_PE_ENTITY_5": {
             "label": "Voice PE entity #5",
             "type": "string",
             "default": "",
-            "description": "Entity ID of a Voice PE light/LED (e.g., light.voice_pe_office)"
+            "description": "Entity ID of a Voice PE light/LED (e.g., light.voice_pe_office)",
         },
     }
 }
-
 
 # --- Duration parsing (supports "5m", "2h", "24h", or raw seconds like "7200") ---
 def _parse_duration_seconds(val: str, default_seconds: int) -> int:
@@ -132,6 +160,9 @@ def _parse_duration_seconds(val: str, default_seconds: int) -> int:
     mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
     return num * mult
 
+def _platform_settings() -> Dict[str, str]:
+    return redis_client.hgetall("homeassistant_platform_settings") or {}
+
 def _get_duration_seconds_setting(name: str, default_seconds: int) -> int:
     s = _platform_settings().get(name)
     return _parse_duration_seconds(s, default_seconds)
@@ -143,6 +174,12 @@ def _get_int_platform_setting(name: str, default: int) -> int:
     except Exception:
         return default
 
+def _get_float_platform_setting(name: str, default: float) -> float:
+    s = _platform_settings().get(name)
+    try:
+        return float(str(s).strip()) if s is not None and str(s).strip() != "" else default
+    except Exception:
+        return default
 
 # -------------------- FastAPI DTOs --------------------
 class HAContext(BaseModel):
@@ -177,12 +214,10 @@ class NotificationIn(BaseModel):
 class NotificationsOut(BaseModel):
     notifications: List[Dict[str, Any]]
 
-
 # -------------------- Plugin gating --------------------
 def get_plugin_enabled(plugin_name: str) -> bool:
     enabled = redis_client.hget("plugin_enabled", plugin_name)
     return bool(enabled and enabled.lower() == "true")
-
 
 # -------------------- System prompt (Discord/IRC style, HA scoped) --------------------
 def build_system_prompt(ctx: Optional[Dict[str, Any]] = None) -> str:
@@ -190,7 +225,7 @@ def build_system_prompt(ctx: Optional[Dict[str, Any]] = None) -> str:
     first, last = get_tater_name()
     personality = get_tater_personality()
 
-    # ---- Voice PE / room context ----
+    # ---- Voice / room context ----
     room_clause = ""
     if ctx:
         area_name = (ctx.get("area_name") or "").strip()
@@ -221,7 +256,6 @@ def build_system_prompt(ctx: Optional[Dict[str, Any]] = None) -> str:
         "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
     )
 
-    # Only show enabled tools usable on HA, and only those that actually implement handle_homeassistant
     tool_instructions = "\n\n".join(
         f"Tool: {plugin.name}\n"
         f"Description: {getattr(plugin, 'description', 'No description provided.')}\n"
@@ -245,14 +279,11 @@ def build_system_prompt(ctx: Optional[Dict[str, Any]] = None) -> str:
         "If no function is needed, reply normally. Do not use emoji's in your reply"
     )
 
-
 # -------------------- History shaping (Discord-style alternation) --------------------
 def _to_template_msg(role: str, content: Any) -> Optional[Dict[str, Any]]:
-    # --- Skip waiting lines from tools (future-proof) ---
     if isinstance(content, dict) and content.get("marker") == "plugin_wait":
         return None
 
-    # --- Persisted HA context marker: show compactly to the LLM ---
     if isinstance(content, dict) and content.get("marker") == "ha_context":
         c = content.get("content") or {}
         area = (c.get("area_name") or c.get("area_id") or "").strip()
@@ -260,21 +291,16 @@ def _to_template_msg(role: str, content: Any) -> Optional[Dict[str, Any]]:
         txt = f"[Voice context: device={dev or 'unknown'}, area={area or 'unknown'}]"
         return {"role": "assistant", "content": txt}
 
-    # --- Include final plugin responses in context (defaults to final if missing for backward compat) ---
     if isinstance(content, dict) and content.get("marker") == "plugin_response":
         phase = content.get("phase", "final")
         if phase != "final":
             return None
         payload = content.get("content", "")
-
-        # We mostly store a string here already (thanks to _flatten_to_text).
         if isinstance(payload, str):
             txt = payload.strip()
             if len(txt) > 4000:
                 txt = txt[:4000] + " …"
             return {"role": "assistant", "content": txt}
-
-        # Fallback: compact any structured payload to JSON string
         try:
             compact = json.dumps(payload, ensure_ascii=False)
             if len(compact) > 2000:
@@ -283,12 +309,11 @@ def _to_template_msg(role: str, content: Any) -> Optional[Dict[str, Any]]:
         except Exception:
             return None
 
-    # For plugin_call, stringify so the LLM "sees" the previous structured action
     if isinstance(content, dict) and content.get("marker") == "plugin_call":
-        as_text = json.dumps({
-            "function": content.get("plugin"),
-            "arguments": content.get("arguments", {})
-        }, indent=2)
+        as_text = json.dumps(
+            {"function": content.get("plugin"), "arguments": content.get("arguments", {})},
+            indent=2,
+        )
         return {"role": "assistant", "content": as_text}
 
     if isinstance(content, str):
@@ -302,7 +327,8 @@ def _enforce_user_assistant_alternation(loop_messages: list[Dict[str, Any]]) -> 
         if not m:
             continue
         if not merged:
-            merged.append(m); continue
+            merged.append(m)
+            continue
         if merged[-1]["role"] == m["role"]:
             a, b = merged[-1]["content"], m["content"]
             if isinstance(a, str) and isinstance(b, str):
@@ -314,7 +340,6 @@ def _enforce_user_assistant_alternation(loop_messages: list[Dict[str, Any]]) -> 
     if merged and merged[0]["role"] != "user":
         merged.insert(0, {"role": "user", "content": ""})
     return merged
-
 
 # -------------------- Redis history helpers --------------------
 def _sess_key(session_id: Optional[str]) -> str:
@@ -344,7 +369,6 @@ async def _save_message(session_id: Optional[str], role: str, content: Any, max_
     pipe.rpush(key, json.dumps({"role": role, "content": content}))
     if max_store > 0:
         pipe.ltrim(key, -max_store, -1)
-    # optional TTL so old voice sessions clean themselves up
     ttl = _get_duration_seconds_setting("SESSION_TTL_SECONDS", DEFAULT_SESSION_TTL_SECONDS)
     pipe.expire(key, ttl)
     pipe.execute()
@@ -375,20 +399,19 @@ def _flatten_to_text(res: Any) -> str:
             return str(res)
     return str(res)
 
-
 # -------------------- Minimal HA client (platform local) --------------------
 class _HA:
     def __init__(self):
-        # Reuse Home Assistant plugin settings for base URL & token
         s = redis_client.hgetall("plugin_settings: Home Assistant") or redis_client.hgetall("plugin_settings:Home Assistant")
         self.base = (s.get("HA_BASE_URL") or "http://homeassistant.local:8123").rstrip("/")
-        token = s.get("HA_TOKEN")
+        token = (s.get("HA_TOKEN") or "").strip()
         if not token:
             raise ValueError("HA_TOKEN missing in 'Home Assistant' plugin settings.")
+        self.token = token
         self.headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
-    def _req(self, method: str, path: str, json=None, timeout=10):
-        r = requests.request(method, f"{self.base}{path}", headers=self.headers, json=json, timeout=timeout)
+    def _req(self, method: str, path: str, json_body=None, timeout=10):
+        r = requests.request(method, f"{self.base}{path}", headers=self.headers, json=json_body, timeout=timeout)
         if r.status_code >= 400:
             raise RuntimeError(f"HTTP {r.status_code}: {r.text}")
         try:
@@ -400,13 +423,15 @@ class _HA:
         return self._req("GET", f"/api/states/{entity_id}")
 
     def call_service(self, domain: str, service: str, data: dict):
-        return self._req("POST", f"/api/services/{domain}/{service}", json=data)
+        return self._req("POST", f"/api/services/{domain}/{service}", json_body=data)
 
+    def ws_url(self) -> str:
+        # http://host:8123 -> ws://host:8123
+        if self.base.startswith("https://"):
+            return self.base.replace("https://", "wss://", 1) + "/api/websocket"
+        return self.base.replace("http://", "ws://", 1) + "/api/websocket"
 
-# -------------------- Voice PE helpers --------------------
-def _platform_settings() -> Dict[str, str]:
-    return redis_client.hgetall("homeassistant_platform_settings") or {}
-
+# -------------------- Voice PE ring helpers --------------------
 def _voice_pe_entities() -> List[str]:
     s = _platform_settings()
     ids = [
@@ -419,7 +444,6 @@ def _voice_pe_entities() -> List[str]:
     return [e for e in ids if e]
 
 def _ring_on():
-    """Turn ON all configured Voice PE LED entities."""
     ents = _voice_pe_entities()
     if not ents:
         return
@@ -431,7 +455,6 @@ def _ring_on():
             logger.warning(f"[notify] failed to turn on ring {eid}: {e}")
 
 def _ring_off():
-    """Turn OFF all configured Voice PE LED entities."""
     ents = _voice_pe_entities()
     if not ents:
         return
@@ -442,9 +465,326 @@ def _ring_off():
         except Exception as e:
             logger.warning(f"[notify] failed to turn off ring {eid}: {e}")
 
+# -------------------- Assist satellite resolver (area→entity) --------------------
+_satellite_refresh_lock = asyncio.Lock()
+_satellite_map_mem: Dict[str, str] = {}
+_satellite_map_mem_ts: float = 0.0
+
+async def _ha_ws_call(session: aiohttp.ClientSession, ws: aiohttp.ClientWebSocketResponse, msg: dict, expect_id: int, timeout: float = 20.0) -> Any:
+    await ws.send_json(msg)
+    end = time.time() + timeout
+    while time.time() < end:
+        m = await ws.receive(timeout=timeout)
+        if m.type == aiohttp.WSMsgType.TEXT:
+            data = json.loads(m.data)
+            if data.get("type") == "result" and data.get("id") == expect_id:
+                if not data.get("success"):
+                    raise RuntimeError(f"HA WS call failed: {data}")
+                return data.get("result")
+        elif m.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+            break
+    raise TimeoutError("Timed out waiting for HA WS result")
+
+async def _fetch_satellite_map_from_ha() -> Dict[str, str]:
+    """
+    Build a map of:
+      area_id -> assist_satellite.entity_id
+    using HA entity registry + device registry.
+    """
+    ha = _HA()
+    ws_url = ha.ws_url()
+
+    async with aiohttp.ClientSession() as session:
+        async with session.ws_connect(ws_url, heartbeat=30) as ws:
+            # auth_required
+            first = await ws.receive(timeout=10)
+            if first.type != aiohttp.WSMsgType.TEXT:
+                raise RuntimeError("Unexpected HA WS message during auth_required")
+            hello = json.loads(first.data)
+            if hello.get("type") != "auth_required":
+                # Some HA instances may send auth_required then another; be strict-ish.
+                raise RuntimeError(f"Unexpected HA WS hello: {hello}")
+
+            await ws.send_json({"type": "auth", "access_token": ha.token})
+            auth_resp = await ws.receive(timeout=10)
+            if auth_resp.type != aiohttp.WSMsgType.TEXT:
+                raise RuntimeError("Unexpected HA WS message during auth")
+            auth_data = json.loads(auth_resp.data)
+            if auth_data.get("type") != "auth_ok":
+                raise RuntimeError(f"HA WS auth failed: {auth_data}")
+
+            entity_reg = await _ha_ws_call(
+                session, ws,
+                {"id": 1, "type": "config/entity_registry/list"},
+                expect_id=1,
+                timeout=30,
+            )
+            device_reg = await _ha_ws_call(
+                session, ws,
+                {"id": 2, "type": "config/device_registry/list"},
+                expect_id=2,
+                timeout=30,
+            )
+
+    # device_id -> area_id
+    dev_area: Dict[str, str] = {}
+    if isinstance(device_reg, list):
+        for d in device_reg:
+            try:
+                did = d.get("id")
+                aid = d.get("area_id")
+                if did and aid:
+                    dev_area[str(did)] = str(aid)
+            except Exception:
+                continue
+
+    # area_id -> assist_satellite entity_id (pick first; stable enough, can refine later)
+    area_sat: Dict[str, str] = {}
+    if isinstance(entity_reg, list):
+        for e in entity_reg:
+            try:
+                ent = (e.get("entity_id") or "").strip()
+                if not ent.startswith("assist_satellite."):
+                    continue
+                did = e.get("device_id")
+                if not did:
+                    continue
+                aid = dev_area.get(str(did))
+                if not aid:
+                    continue
+                # first one wins (most rooms have 1 satellite)
+                if aid not in area_sat:
+                    area_sat[aid] = ent
+            except Exception:
+                continue
+
+    return area_sat
+
+def _satellite_cache_ttl_s() -> int:
+    return _get_int_platform_setting("SATELLITE_MAP_CACHE_TTL_S", DEFAULT_SATELLITE_MAP_CACHE_TTL_S)
+
+def _load_satellite_map_from_redis() -> Tuple[Dict[str, str], bool]:
+    """
+    Returns (map, ok). ok=False means missing/invalid.
+    """
+    try:
+        raw = redis_client.get(REDIS_SATELLITE_MAP_KEY)
+        if not raw:
+            return {}, False
+        obj = json.loads(raw)
+        if not isinstance(obj, dict):
+            return {}, False
+        # ensure str->str
+        clean = {str(k): str(v) for k, v in obj.items() if k and v}
+        return clean, True
+    except Exception:
+        return {}, False
+
+def _save_satellite_map_to_redis(m: Dict[str, str]) -> None:
+    try:
+        ttl = _satellite_cache_ttl_s()
+        redis_client.setex(REDIS_SATELLITE_MAP_KEY, ttl, json.dumps(m))
+    except Exception:
+        pass
+
+async def _get_satellite_map(force_refresh: bool = False) -> Dict[str, str]:
+    """
+    Uses:
+      memory -> redis -> HA WS
+    """
+    global _satellite_map_mem, _satellite_map_mem_ts
+
+    ttl = float(_satellite_cache_ttl_s())
+
+    # memory cache
+    if not force_refresh and _satellite_map_mem and (time.time() - _satellite_map_mem_ts) < ttl:
+        return _satellite_map_mem
+
+    async with _satellite_refresh_lock:
+        # check again inside lock
+        if not force_refresh and _satellite_map_mem and (time.time() - _satellite_map_mem_ts) < ttl:
+            return _satellite_map_mem
+
+        # redis cache
+        if not force_refresh:
+            cached, ok = _load_satellite_map_from_redis()
+            if ok and cached:
+                _satellite_map_mem = cached
+                _satellite_map_mem_ts = time.time()
+                return cached
+
+        # HA WS refresh
+        try:
+            fresh = await _fetch_satellite_map_from_ha()
+            if fresh:
+                _satellite_map_mem = fresh
+                _satellite_map_mem_ts = time.time()
+                _save_satellite_map_to_redis(fresh)
+                logger.info(f"[followup] refreshed assist satellite map ({len(fresh)} areas)")
+                return fresh
+        except Exception as e:
+            logger.warning(f"[followup] failed refreshing satellite map: {e}")
+
+        # last resort: whatever redis had (even empty)
+        cached, ok = _load_satellite_map_from_redis()
+        if ok:
+            _satellite_map_mem = cached
+            _satellite_map_mem_ts = time.time()
+            return cached
+
+        return {}
+
+async def _resolve_assist_satellite_entity(ctx: Dict[str, Any]) -> Optional[str]:
+    """
+    Prefer resolving by ctx.area_id (no naming conventions).
+    """
+    if not ctx:
+        return None
+    area_id = (ctx.get("area_id") or "").strip()
+    if not area_id:
+        return None
+
+    m = await _get_satellite_map(force_refresh=False)
+    ent = (m.get(area_id) or "").strip()
+    if ent:
+        return ent
+
+    # Try a forced refresh once (maybe just added / renamed)
+    m2 = await _get_satellite_map(force_refresh=True)
+    ent2 = (m2.get(area_id) or "").strip()
+    return ent2 or None
+
+def _followup_counter_key(session_id: Optional[str]) -> str:
+    return f"tater:ha:session:{session_id or 'default'}:followup_count"
+
+def _get_followup_count(session_id: Optional[str]) -> int:
+    try:
+        raw = redis_client.get(_followup_counter_key(session_id))
+        return int(raw) if raw is not None else 0
+    except Exception:
+        return 0
+
+def _inc_followup_count(session_id: Optional[str]) -> int:
+    """
+    increment and set TTL aligned with session TTL
+    """
+    key = _followup_counter_key(session_id)
+    ttl = _get_duration_seconds_setting("SESSION_TTL_SECONDS", DEFAULT_SESSION_TTL_SECONDS)
+    try:
+        pipe = redis_client.pipeline()
+        pipe.incr(key)
+        pipe.expire(key, ttl)
+        val, _ = pipe.execute()
+        return int(val)
+    except Exception:
+        return _get_followup_count(session_id) + 1
+
+async def _wait_for_satellite_idle(entity_id: str, timeout_s: float) -> bool:
+    """
+    Poll the entity state until it appears idle (or timeout).
+    Different HA versions/integrations use slightly different state words.
+    We treat these as "idle-like".
+    """
+    idle_like = {"idle", "off", "ready", "standby"}
+    busy_like = {"listening", "processing", "responding", "speaking", "replying", "playing", "on"}
+
+    ha = _HA()
+    end = time.time() + max(1.0, timeout_s)
+
+    while time.time() < end:
+        try:
+            st = ha.get_state(entity_id)
+            state = str(st.get("state") or "").strip().lower()
+
+            # if unknown/unavailable, keep waiting briefly (it may settle)
+            if state in ("unknown", "unavailable", ""):
+                await asyncio.sleep(0.35)
+                continue
+
+            if state in idle_like:
+                return True
+
+            # sometimes satellites report "on"/"off". "on" means busy-like.
+            if state in busy_like:
+                await asyncio.sleep(0.35)
+                continue
+
+            # fallback: if it isn't explicitly busy, allow it
+            # (prevents perma-wait if HA introduces new words)
+            if state not in busy_like:
+                return True
+
+        except Exception:
+            await asyncio.sleep(0.35)
+
+    return False
+
+def _start_satellite_conversation(entity_id: str) -> None:
+    """
+    Start listening again (wake follow-up) using the HA API:
+      assist_satellite.start_conversation
+    Must include start_message (empty string is fine).
+    """
+    ha = _HA()
+    ha.call_service(
+        "assist_satellite",
+        "start_conversation",
+        {
+            "entity_id": entity_id,
+            "start_message": "",
+            "preannounce": False,
+        },
+    )
+
+def _should_follow_up(text: str) -> bool:
+    """
+    Lightweight heuristic: treat as follow-up if assistant ends with a question mark.
+    Keep it simple/cheap; you can add an LLM classifier later if you want.
+    """
+    t = (text or "").strip()
+    if not t:
+        return False
+    # If it contains a "?" near the end, count it as a question.
+    # Avoid matching URLs like "?x=y" by focusing on tail.
+    tail = t[-200:]
+    return "?" in tail and tail.rstrip().endswith("?")
+
+async def _maybe_reopen_listening(session_id: Optional[str], ctx: Dict[str, Any], assistant_text: str):
+    """
+    If assistant ended in a question, and we have area context,
+    reopen listening on the correct satellite entity for that area.
+    Wait until the satellite is idle before reopening.
+    """
+    if not _should_follow_up(assistant_text):
+        return
+
+    max_f = _get_int_platform_setting("FOLLOWUP_MAX_PER_SESSION", DEFAULT_FOLLOWUP_MAX_PER_SESSION)
+    count = _get_followup_count(session_id)
+    if count >= max_f:
+        logger.info(f"[followup] skip (max per session reached: {count}/{max_f})")
+        return
+
+    sat = await _resolve_assist_satellite_entity(ctx)
+    if not sat:
+        logger.info("[followup] skip (no assist satellite found for area)")
+        return
+
+    idle_timeout = _get_float_platform_setting("FOLLOWUP_IDLE_TIMEOUT_S", DEFAULT_FOLLOWUP_IDLE_TIMEOUT_S)
+
+    ok = await _wait_for_satellite_idle(sat, idle_timeout)
+    if not ok:
+        logger.info(f"[followup] skip (satellite not idle within {idle_timeout}s): {sat}")
+        return
+
+    try:
+        await asyncio.to_thread(_start_satellite_conversation, sat)
+        new_count = _inc_followup_count(session_id)
+        logger.info(f"[followup] re-opened listening on {sat} ({new_count}/{max_f})")
+    except Exception as e:
+        logger.warning(f"[followup] failed to start conversation on {sat}: {e}")
 
 # -------------------- App + LLM client --------------------
-app = FastAPI(title="Tater Home Assistant Bridge", version="1.6")  # 🔼 room context + plugin context
+app = FastAPI(title="Tater Home Assistant Bridge", version="1.7")  # 🔼 registry-based satellite resolution + idle wait
 
 _llm = None
 
@@ -455,8 +795,7 @@ async def _on_startup():
 
 @app.get("/tater-ha/v1/health")
 async def health():
-    return {"ok": True, "version": "1.6"}
-
+    return {"ok": True, "version": "1.7"}
 
 # -------------------- Notifications API --------------------
 @app.post("/tater-ha/v1/notifications/add")
@@ -470,13 +809,11 @@ async def add_notification(n: NotificationIn):
         "ha_time": (n.ha_time or "").strip(),
         "level": (n.level or "info").strip(),
         "data": n.data or {},
-        "ts": int(time.time()),  # server epoch seconds
+        "ts": int(time.time()),
     }
 
-    # Push newest first
     redis_client.lpush(REDIS_NOTIF_LIST, json.dumps(item))
 
-    # Light up rings
     try:
         _ring_on()
     except Exception:
@@ -486,10 +823,6 @@ async def add_notification(n: NotificationIn):
 
 @app.get("/tater-ha/v1/notifications", response_model=NotificationsOut)
 async def pull_notifications(background_tasks: BackgroundTasks):
-    """
-    Return all pending notifications (most recent first) and clear the queue.
-    Turn the rings OFF afterward (async) or immediately if queue is empty.
-    """
     raw = redis_client.lrange(REDIS_NOTIF_LIST, 0, -1) or []
     notifications = []
     for r in raw:
@@ -498,17 +831,14 @@ async def pull_notifications(background_tasks: BackgroundTasks):
         except Exception:
             continue
 
-    # Clear the queue
     try:
         redis_client.delete(REDIS_NOTIF_LIST)
     except Exception:
         logger.warning("[notify] failed to clear notification list")
 
-    # If there were any notifications, turn rings OFF asynchronously
     if notifications:
         background_tasks.add_task(_ring_off)
     else:
-        # No notifications: ensure ring is off right away
         try:
             _ring_off()
         except Exception:
@@ -516,18 +846,18 @@ async def pull_notifications(background_tasks: BackgroundTasks):
 
     return {"notifications": notifications}
 
-
 # -------------------- Main HA chat endpoint --------------------
 @app.post("/tater-ha/v1/message", response_model=HAResponse)
 async def handle_message(payload: HARequest):
     """
     Home Assistant bridge:
     - Builds a Discord/IRC-style system prompt (HA-scoped)
-    - Injects Voice PE room/device context (if provided)
+    - Injects voice room/device context (if provided)
     - Shapes loop history
     - Executes ONLY plugins that implement handle_homeassistant
-    - Passes room/device context to plugins (optional, backward compatible)
-    - Normalizes results to simple TTS-friendly text
+    - Passes room/device context to plugins if they accept context=...
+    - If assistant ends with a question, re-open listening on the correct assist_satellite for that AREA (registry lookup)
+      and waits for satellite to become idle before re-opening.
     """
     if _llm is None:
         raise HTTPException(status_code=503, detail="LLM backend not initialized")
@@ -545,7 +875,6 @@ async def handle_message(payload: HARequest):
     if payload.context:
         ctx = payload.context.model_dump(exclude_none=True)
 
-    # Fall back to old top-level fields if context is missing pieces
     if payload.device_id and not ctx.get("device_id"):
         ctx["device_id"] = payload.device_id
     if payload.area_id and not ctx.get("area_id"):
@@ -556,12 +885,7 @@ async def handle_message(payload: HARequest):
 
     # Persist context into history (so room can stick across the session)
     if ctx:
-        await _save_message(
-            payload.session_id,
-            "assistant",
-            {"marker": "ha_context", "content": ctx},
-            history_max
-        )
+        await _save_message(payload.session_id, "assistant", {"marker": "ha_context", "content": ctx}, history_max)
 
     # Build the messages list: system + shaped history
     system_prompt = build_system_prompt(ctx if ctx else None)
@@ -569,30 +893,27 @@ async def handle_message(payload: HARequest):
     messages_list = [{"role": "system", "content": system_prompt}] + loop_messages
 
     try:
-        # Ask the LLM
         response = await _llm.chat(messages_list, timeout=TIMEOUT_SECONDS)
         text = (response.get("message", {}) or {}).get("content", "") if isinstance(response, dict) else ""
+        text = (text or "").strip()
 
         if not text:
             await _save_message(payload.session_id, "assistant", "", history_max)
             return HAResponse(response="Sorry, I didn't catch that.")
 
-        # Detect tool call JSON
         fn = parse_function_json(text)
         if fn:
             func = fn.get("function")
             args = fn.get("arguments", {}) or {}
 
-            # Save structured plugin_call marker (for continuity with Discord template style)
             await _save_message(
                 payload.session_id,
                 "assistant",
                 {"marker": "plugin_call", "plugin": func, "arguments": args},
-                history_max
+                history_max,
             )
 
             plugin = plugin_registry.get(func)
-            # Only allow enabled plugins, usable on Home Assistant, AND implementing handle_homeassistant
             is_ha_plugin = plugin and (
                 ("homeassistant" in getattr(plugin, "platforms", [])) or ("both" in getattr(plugin, "platforms", []))
             )
@@ -607,7 +928,6 @@ async def handle_message(payload: HARequest):
                 return HAResponse(response=msg)
 
             try:
-                # ---- pass context to plugins if they support it (no mass plugin updates needed) ----
                 handle = plugin.handle_homeassistant
                 sig = None
                 try:
@@ -624,13 +944,16 @@ async def handle_message(payload: HARequest):
                 if len(final_text) > 4000:
                     final_text = final_text[:4000] + "…"
 
-                # Save plugin_response marker (fed back to LLM as assistant text via _to_template_msg)
                 await _save_message(
                     payload.session_id,
                     "assistant",
                     {"marker": "plugin_response", "phase": "final", "content": final_text},
-                    history_max
+                    history_max,
                 )
+
+                # Follow-up reopen if needed (uses the plugin output text)
+                asyncio.create_task(_maybe_reopen_listening(payload.session_id, ctx, final_text))
+
                 return HAResponse(response=final_text)
 
             except Exception:
@@ -640,10 +963,15 @@ async def handle_message(payload: HARequest):
                 return HAResponse(response=msg)
 
         # Plain text answer
-        final_text = text.strip()
+        final_text = text
         if len(final_text) > 4000:
             final_text = final_text[:4000] + "…"
+
         await _save_message(payload.session_id, "assistant", final_text, history_max)
+
+        # Follow-up reopen if needed
+        asyncio.create_task(_maybe_reopen_listening(payload.session_id, ctx, final_text))
+
         return HAResponse(response=final_text)
 
     except Exception:
@@ -652,10 +980,8 @@ async def handle_message(payload: HARequest):
         await _save_message(payload.session_id, "assistant", msg, history_max)
         return HAResponse(response=msg)
 
-
 def run(stop_event: Optional[threading.Event] = None):
     """Match your other platforms’ run signature and graceful stop behavior."""
-    # Pull port from Redis settings (set via WebUI) with a safe fallback
     raw_port = redis_client.hget("homeassistant_platform_settings", "bind_port")
     try:
         port = int(raw_port) if raw_port is not None else 8787
