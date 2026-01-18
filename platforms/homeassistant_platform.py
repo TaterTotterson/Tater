@@ -338,6 +338,15 @@ def _to_template_msg(role: str, content: Any) -> Optional[Dict[str, Any]]:
     return {"role": role, "content": str(content)}
 
 def _enforce_user_assistant_alternation(loop_messages: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+    """
+    Keep the history compact and readable by merging consecutive messages
+    with the same role.
+
+    IMPORTANT:
+    We intentionally do NOT insert a blank user message at the beginning.
+    Some LLM backends/models can respond with empty completions when they
+    see an empty user turn (content="").
+    """
     merged: list[Dict[str, Any]] = []
     for m in loop_messages:
         if not m:
@@ -345,6 +354,7 @@ def _enforce_user_assistant_alternation(loop_messages: list[Dict[str, Any]]) -> 
         if not merged:
             merged.append(m)
             continue
+
         if merged[-1]["role"] == m["role"]:
             a, b = merged[-1]["content"], m["content"]
             if isinstance(a, str) and isinstance(b, str):
@@ -353,8 +363,7 @@ def _enforce_user_assistant_alternation(loop_messages: list[Dict[str, Any]]) -> 
                 merged[-1]["content"] = (str(a) + "\n\n" + str(b)).strip()
         else:
             merged.append(m)
-    if merged and merged[0]["role"] != "user":
-        merged.insert(0, {"role": "user", "content": ""})
+
     return merged
 
 # -------------------- Redis history helpers --------------------

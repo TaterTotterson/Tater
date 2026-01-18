@@ -154,19 +154,27 @@ def _to_template_msg(role: str, content: Any) -> Optional[Dict[str, Any]]:
     return {"role": role, "content": _flatten_to_text(content)}
 
 def _enforce_user_assistant_alternation(loop_messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Merge consecutive same-role turns to keep history compact.
+
+    IMPORTANT:
+    Do NOT insert a blank user message at the beginning.
+    Some LLM backends/models can return empty completions when an empty
+    user turn (content="") appears in the prompt.
+    """
     merged: List[Dict[str, Any]] = []
     for m in loop_messages:
         if not m:
             continue
         if not merged:
-            merged.append(m); continue
+            merged.append(m)
+            continue
         if merged[-1]["role"] == m["role"]:
             a, b = merged[-1]["content"], m["content"]
             merged[-1]["content"] = (str(a) + "\n\n" + str(b)).strip()
         else:
             merged.append(m)
-    if merged and merged[0]["role"] != "user":
-        merged.insert(0, {"role": "user", "content": ""})
+
     return merged
 
 def _sess_key(session_id: Optional[str]) -> str:
