@@ -39,6 +39,9 @@ DEFAULT_SESSION_HISTORY_MAX = 6
 DEFAULT_MAX_HISTORY_CAP = 20
 DEFAULT_SESSION_TTL_SECONDS = 2 * 60 * 60  # 2h
 
+# Continued chat (auto follow-up) defaults
+DEFAULT_CONTINUED_CHAT_ENABLED = False
+
 # Follow-up defaults
 DEFAULT_FOLLOWUP_IDLE_TIMEOUT_S = 12.0
 DEFAULT_SATELLITE_MAP_CACHE_TTL_S = 3600  # 1h
@@ -83,6 +86,15 @@ PLATFORM_SETTINGS = {
             "options": ["5m", "30m", "1h", "2h", "6h", "24h"],
             "default": "2h",
             "description": "How long to keep a voice session’s history alive (5m–24h).",
+        },
+
+        # --- Continued chat toggle ---
+        "CONTINUED_CHAT_ENABLED": {
+            "label": "Continued chat (auto re-open mic)",
+            "type": "select",
+            "options": ["true", "false"],
+            "default": "false",
+            "description": "If enabled, Tater automatically re-opens the Assist satellite mic when it ends with a question.",
         },
 
         # --- Follow-up behavior ---
@@ -173,6 +185,17 @@ def _get_float_platform_setting(name: str, default: float) -> float:
         return float(str(s).strip()) if s is not None and str(s).strip() != "" else default
     except Exception:
         return default
+
+def _get_bool_platform_setting(name: str, default: bool) -> bool:
+    s = _platform_settings().get(name)
+    if s is None:
+        return default
+    v = str(s).strip().lower()
+    if v in ("1", "true", "yes", "y", "on", "enabled"):
+        return True
+    if v in ("0", "false", "no", "n", "off", "disabled"):
+        return False
+    return default
 
 # -------------------- FastAPI DTOs --------------------
 class HAContext(BaseModel):
@@ -912,8 +935,9 @@ async def handle_message(payload: HARequest):
                     history_max,
                 )
 
-                # Follow-up reopen if needed (uses the plugin output text)
-                asyncio.create_task(_maybe_reopen_listening(payload.session_id, ctx, final_text))
+                # Follow-up reopen if enabled (uses the plugin output text)
+                if _get_bool_platform_setting("CONTINUED_CHAT_ENABLED", DEFAULT_CONTINUED_CHAT_ENABLED):
+                    asyncio.create_task(_maybe_reopen_listening(payload.session_id, ctx, final_text))
 
                 return HAResponse(response=final_text)
 
@@ -930,8 +954,9 @@ async def handle_message(payload: HARequest):
 
         await _save_message(payload.session_id, "assistant", final_text, history_max)
 
-        # Follow-up reopen if needed
-        asyncio.create_task(_maybe_reopen_listening(payload.session_id, ctx, final_text))
+        # Follow-up reopen if enabled
+        if _get_bool_platform_setting("CONTINUED_CHAT_ENABLED", DEFAULT_CONTINUED_CHAT_ENABLED):
+            asyncio.create_task(_maybe_reopen_listening(payload.session_id, ctx, final_text))
 
         return HAResponse(response=final_text)
 
