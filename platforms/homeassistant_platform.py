@@ -709,60 +709,79 @@ async def _wait_for_satellite_idle(entity_id: str, timeout_s: float) -> bool:
 
 async def _generate_followup_question(assistant_text: str) -> str:
     """
-    Generate a VERY short spoken prompt for assist_satellite.ask_question.
-    This is NOT fed back into the LLM loop and will not re-trigger follow-ups.
+    Generate a VERY short spoken follow-up cue for start_conversation.start_message.
+
+    IMPORTANT:
+    - This MUST NOT be a question (no '?'), to avoid creating weird loops.
+    - This text is NOT saved into Redis history and is NOT passed to _should_follow_up().
     """
     t = (assistant_text or "").strip()
     tail = t[-300:] if len(t) > 300 else t
 
     prompt = (
-        "Write a very short spoken follow-up question for a voice assistant.\n"
+        "Write a very short spoken cue that tells the user the mic is open.\n"
         "Rules:\n"
-        "- 4 to 10 words\n"
-        "- Exactly one sentence\n"
-        "- Must end with a question mark\n"
-        "- Must NOT introduce new actions or topics\n"
-        "- Must NOT mention devices, rooms, or names\n"
-        "- No emojis, no markdown\n\n"
-        f"The assistant previously asked:\n{tail!r}\n"
+        "- 1 to 4 words\n"
+        "- Exactly one sentence fragment (no extra punctuation)\n"
+        "- MUST NOT be a question (do not use '?')\n"
+        "- MUST NOT include emojis\n"
+        "- MUST NOT mention devices, rooms, or names\n"
+        "- MUST NOT introduce new actions or topics\n"
+        "- Avoid filler like 'Okay' if possible\n"
+        "Good examples:\n"
+        "- Go ahead.\n"
+        "- I'm listening.\n"
+        "- Tell me.\n"
+        "- Say it.\n"
+        "Bad examples:\n"
+        "- Just say yes or no?\n"
+        "- Which one?\n\n"
+        f"Context (assistant just spoke):\n{tail!r}\n"
     )
 
     try:
         r = await _llm.chat(
             [
-                {"role": "system", "content": "You write ultra-short voice prompts. No emojis."},
+                {"role": "system", "content": "You write ultra-short voice cues. No emojis. No questions."},
                 {"role": "user", "content": prompt},
             ],
             timeout=6,
         )
         text = (r.get("message", {}) or {}).get("content", "") if isinstance(r, dict) else ""
         text = (text or "").strip()
-
         text = text.split("\n")[0].strip()
-        text = text[:80].strip()
+        text = text[:40].strip()
 
-        if not text.endswith("?"):
-            text += "?"
+        # Hard safety: never allow a question mark
+        text = text.replace("?", "").strip()
 
-        # hard fallback if something weird happens
-        if len(text) < 4 or "?" not in text:
-            return "Just say yes or no?"
+        # Ensure it ends with a period for TTS cadence (optional but nice)
+        if text and text[-1].isalnum():
+            text += "."
+
+        # Fallbacks
+        if not text or len(text) < 2:
+            return "I'm listening."
 
         return text
     except Exception:
-        return "Just say yes or no?"
+        return "I'm listening."
 
-def _start_satellite_followup(entity_id: str, question: str) -> None:
+def _start_satellite_followup(entity_id: str, start_message: str) -> None:
+    msg = (start_message or "").strip()
+    msg = msg.replace("?", "").strip()
+    if not msg:
+        msg = "I'm listening."
+
     ha = _HA()
     ha.call_service(
         "assist_satellite",
-        "ask_question",
+        "start_conversation",
         {
             "entity_id": entity_id,
-            "question": (question or "").strip(),
+            "start_message": msg,
             "preannounce": False,
         },
-        return_response=True,
     )
 
 def _should_follow_up(text: str) -> bool:
@@ -776,8 +795,12 @@ async def _maybe_reopen_listening(session_id: Optional[str], ctx: Dict[str, Any]
     """
     If assistant ended in a question, and we have area context,
     reopen listening on the correct satellite entity for that area.
-    Wait until the satellite is idle before reopening, then use ask_question
-    with a short AI-generated prompt.
+
+    Flow:
+    - Trigger ONLY based on assistant_text (the real assistant reply)
+    - Wait for satellite idle
+    - Call assist_satellite.start_conversation with a short AI-generated *cue*
+      that is NOT a question (no '?') so it can't cause weird loops.
     """
     if not _should_follow_up(assistant_text):
         return
@@ -795,11 +818,21 @@ async def _maybe_reopen_listening(session_id: Optional[str], ctx: Dict[str, Any]
         return
 
     try:
-        q = await _generate_followup_question(assistant_text)
-        await asyncio.to_thread(_start_satellite_followup, sat, q)
-        logger.info(f"[followup] ask_question on {sat}: {q!r}")
+        cue = await _generate_followup_question(assistant_text)
+
+        # Hard safety: never allow a question mark in start_message
+        cue = (cue or "").strip().replace("?", "").strip()
+        if not cue:
+            cue = "I'm listening."
+
+        # IMPORTANT:
+        # - We DO NOT pass `cue` into _should_follow_up()
+        # - We DO NOT save `cue` into history
+        await asyncio.to_thread(_start_satellite_followup, sat, cue)
+
+        logger.info(f"[followup] start_conversation on {sat} (cue={cue!r})")
     except Exception as e:
-        logger.warning(f"[followup] failed to ask_question on {sat}: {e}")
+        logger.warning(f"[followup] failed to start_conversation on {sat}: {e}")
 
 # -------------------- App + LLM client --------------------
 app = FastAPI(title="Tater Home Assistant Bridge", version="1.8")  # ask_question follow-up + no-emoji prompt
