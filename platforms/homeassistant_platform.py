@@ -287,12 +287,20 @@ def build_system_prompt(ctx: Optional[Dict[str, Any]] = None) -> str:
         "Never call a tool in response to casual or friendly messages like 'thanks', 'lol', or 'cool' — reply normally instead.\n"
     )
 
+    no_emoji_guard = (
+        "IMPORTANT:\n"
+        "- Do not use emojis.\n"
+        "- Do not include markdown formatting.\n"
+        "- Keep replies concise and easy to understand.\n"
+    )
+
     return (
         f"Current Date and Time is: {now}\n\n"
         f"{base_prompt}\n\n"
         f"{tool_instructions}\n\n"
-        f"{behavior_guard}"
-        "If no function is needed, reply normally. Do not use emoji's in your reply"
+        f"{behavior_guard}\n"
+        f"{no_emoji_guard}"
+        "If no function is needed, reply normally."
     )
 
 # -------------------- History shaping (Discord-style alternation) --------------------
@@ -527,7 +535,6 @@ async def _fetch_satellite_map_from_ha() -> Dict[str, str]:
                 raise RuntimeError("Unexpected HA WS message during auth_required")
             hello = json.loads(first.data)
             if hello.get("type") != "auth_required":
-                # Some HA instances may send auth_required then another; be strict-ish.
                 raise RuntimeError(f"Unexpected HA WS hello: {hello}")
 
             await ws.send_json({"type": "auth", "access_token": ha.token})
@@ -563,7 +570,7 @@ async def _fetch_satellite_map_from_ha() -> Dict[str, str]:
             except Exception:
                 continue
 
-    # area_id -> assist_satellite entity_id (pick first; stable enough, can refine later)
+    # area_id -> assist_satellite entity_id
     area_sat: Dict[str, str] = {}
     if isinstance(entity_reg, list):
         for e in entity_reg:
@@ -577,7 +584,6 @@ async def _fetch_satellite_map_from_ha() -> Dict[str, str]:
                 aid = dev_area.get(str(did))
                 if not aid:
                     continue
-                # first one wins (most rooms have 1 satellite)
                 if aid not in area_sat:
                     area_sat[aid] = ent
             except Exception:
@@ -599,7 +605,6 @@ def _load_satellite_map_from_redis() -> Tuple[Dict[str, str], bool]:
         obj = json.loads(raw)
         if not isinstance(obj, dict):
             return {}, False
-        # ensure str->str
         clean = {str(k): str(v) for k, v in obj.items() if k and v}
         return clean, True
     except Exception:
@@ -621,16 +626,13 @@ async def _get_satellite_map(force_refresh: bool = False) -> Dict[str, str]:
 
     ttl = float(_satellite_cache_ttl_s())
 
-    # memory cache
     if not force_refresh and _satellite_map_mem and (time.time() - _satellite_map_mem_ts) < ttl:
         return _satellite_map_mem
 
     async with _satellite_refresh_lock:
-        # check again inside lock
         if not force_refresh and _satellite_map_mem and (time.time() - _satellite_map_mem_ts) < ttl:
             return _satellite_map_mem
 
-        # redis cache
         if not force_refresh:
             cached, ok = _load_satellite_map_from_redis()
             if ok and cached:
@@ -638,7 +640,6 @@ async def _get_satellite_map(force_refresh: bool = False) -> Dict[str, str]:
                 _satellite_map_mem_ts = time.time()
                 return cached
 
-        # HA WS refresh
         try:
             fresh = await _fetch_satellite_map_from_ha()
             if fresh:
@@ -650,7 +651,6 @@ async def _get_satellite_map(force_refresh: bool = False) -> Dict[str, str]:
         except Exception as e:
             logger.warning(f"[followup] failed refreshing satellite map: {e}")
 
-        # last resort: whatever redis had (even empty)
         cached, ok = _load_satellite_map_from_redis()
         if ok:
             _satellite_map_mem = cached
@@ -660,9 +660,6 @@ async def _get_satellite_map(force_refresh: bool = False) -> Dict[str, str]:
         return {}
 
 async def _resolve_assist_satellite_entity(ctx: Dict[str, Any]) -> Optional[str]:
-    """
-    Prefer resolving by ctx.area_id (no naming conventions).
-    """
     if not ctx:
         return None
     area_id = (ctx.get("area_id") or "").strip()
@@ -674,17 +671,11 @@ async def _resolve_assist_satellite_entity(ctx: Dict[str, Any]) -> Optional[str]
     if ent:
         return ent
 
-    # Try a forced refresh once (maybe just added / renamed)
     m2 = await _get_satellite_map(force_refresh=True)
     ent2 = (m2.get(area_id) or "").strip()
     return ent2 or None
 
 async def _wait_for_satellite_idle(entity_id: str, timeout_s: float) -> bool:
-    """
-    Poll the entity state until it appears idle (or timeout).
-    Different HA versions/integrations use slightly different state words.
-    We treat these as "idle-like".
-    """
     idle_like = {"idle", "off", "ready", "standby"}
     busy_like = {"listening", "processing", "responding", "speaking", "replying", "playing", "on"}
 
@@ -696,7 +687,6 @@ async def _wait_for_satellite_idle(entity_id: str, timeout_s: float) -> bool:
             st = ha.get_state(entity_id)
             state = str(st.get("state") or "").strip().lower()
 
-            # if unknown/unavailable, keep waiting briefly (it may settle)
             if state in ("unknown", "unavailable", ""):
                 await asyncio.sleep(0.35)
                 continue
@@ -704,13 +694,10 @@ async def _wait_for_satellite_idle(entity_id: str, timeout_s: float) -> bool:
             if state in idle_like:
                 return True
 
-            # sometimes satellites report "on"/"off". "on" means busy-like.
             if state in busy_like:
                 await asyncio.sleep(0.35)
                 continue
 
-            # fallback: if it isn't explicitly busy, allow it
-            # (prevents perma-wait if HA introduces new words)
             if state not in busy_like:
                 return True
 
@@ -719,33 +706,71 @@ async def _wait_for_satellite_idle(entity_id: str, timeout_s: float) -> bool:
 
     return False
 
-def _start_satellite_conversation(entity_id: str) -> None:
+async def _generate_followup_question(assistant_text: str) -> str:
     """
-    Start listening again (wake follow-up) using the HA API:
-      assist_satellite.start_conversation
-    Must include start_message (empty string is fine).
+    Generate a VERY short spoken prompt for assist_satellite.ask_question.
+    This is NOT fed back into the LLM loop and will not re-trigger follow-ups.
+    """
+    t = (assistant_text or "").strip()
+    tail = t[-300:] if len(t) > 300 else t
+
+    prompt = (
+        "Write a very short spoken follow-up question for a voice assistant.\n"
+        "Rules:\n"
+        "- 4 to 10 words\n"
+        "- Exactly one sentence\n"
+        "- Must end with a question mark\n"
+        "- Must NOT introduce new actions or topics\n"
+        "- Must NOT mention devices, rooms, or names\n"
+        "- No emojis, no markdown\n\n"
+        f"The assistant previously asked:\n{tail!r}\n"
+    )
+
+    try:
+        r = await _llm.chat(
+            [
+                {"role": "system", "content": "You write ultra-short voice prompts. No emojis."},
+                {"role": "user", "content": prompt},
+            ],
+            timeout=6,
+        )
+        text = (r.get("message", {}) or {}).get("content", "") if isinstance(r, dict) else ""
+        text = (text or "").strip()
+
+        text = text.split("\n")[0].strip()
+        text = text[:80].strip()
+
+        if not text.endswith("?"):
+            text += "?"
+
+        # hard fallback if something weird happens
+        if len(text) < 4 or "?" not in text:
+            return "Just say yes or no?"
+
+        return text
+    except Exception:
+        return "Just say yes or no?"
+
+def _start_satellite_followup(entity_id: str, question: str) -> None:
+    """
+    Follow-up reopen using the best available Voice PE service:
+      assist_satellite.ask_question
     """
     ha = _HA()
     ha.call_service(
         "assist_satellite",
-        "start_conversation",
+        "ask_question",
         {
-            "entity_id": entity_id,
-            "start_message": " ",
+            "entity_id": entity_id,  # ask_question requires entity_id (not target)
+            "question": (question or "").strip(),
             "preannounce": False,
         },
     )
 
 def _should_follow_up(text: str) -> bool:
-    """
-    Lightweight heuristic: treat as follow-up if assistant ends with a question mark.
-    Keep it simple/cheap; you can add an LLM classifier later if you want.
-    """
     t = (text or "").strip()
     if not t:
         return False
-    # If it contains a "?" near the end, count it as a question.
-    # Avoid matching URLs like "?x=y" by focusing on tail.
     tail = t[-200:]
     return "?" in tail and tail.rstrip().endswith("?")
 
@@ -753,7 +778,8 @@ async def _maybe_reopen_listening(session_id: Optional[str], ctx: Dict[str, Any]
     """
     If assistant ended in a question, and we have area context,
     reopen listening on the correct satellite entity for that area.
-    Wait until the satellite is idle before reopening.
+    Wait until the satellite is idle before reopening, then use ask_question
+    with a short AI-generated prompt.
     """
     if not _should_follow_up(assistant_text):
         return
@@ -771,13 +797,14 @@ async def _maybe_reopen_listening(session_id: Optional[str], ctx: Dict[str, Any]
         return
 
     try:
-        await asyncio.to_thread(_start_satellite_conversation, sat)
-        logger.info(f"[followup] re-opened listening on {sat}")
+        q = await _generate_followup_question(assistant_text)
+        await asyncio.to_thread(_start_satellite_followup, sat, q)
+        logger.info(f"[followup] ask_question on {sat}: {q!r}")
     except Exception as e:
-        logger.warning(f"[followup] failed to start conversation on {sat}: {e}")
+        logger.warning(f"[followup] failed to ask_question on {sat}: {e}")
 
 # -------------------- App + LLM client --------------------
-app = FastAPI(title="Tater Home Assistant Bridge", version="1.7")  # 🔼 registry-based satellite resolution + idle wait
+app = FastAPI(title="Tater Home Assistant Bridge", version="1.8")  # ask_question follow-up + no-emoji prompt
 
 _llm = None
 
@@ -788,7 +815,7 @@ async def _on_startup():
 
 @app.get("/tater-ha/v1/health")
 async def health():
-    return {"ok": True, "version": "1.7"}
+    return {"ok": True, "version": "1.8"}
 
 # -------------------- Notifications API --------------------
 @app.post("/tater-ha/v1/notifications/add")
@@ -849,8 +876,9 @@ async def handle_message(payload: HARequest):
     - Shapes loop history
     - Executes ONLY plugins that implement handle_homeassistant
     - Passes room/device context to plugins if they accept context=...
-    - If assistant ends with a question, re-open listening on the correct assist_satellite for that AREA (registry lookup)
-      and waits for satellite to become idle before re-opening.
+    - If assistant ends with a question and continued chat is enabled:
+      wait for the satellite to become idle, then call assist_satellite.ask_question
+      with a short AI-generated spoken prompt to re-open the mic.
     """
     if _llm is None:
         raise HTTPException(status_code=503, detail="LLM backend not initialized")
