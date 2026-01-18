@@ -57,6 +57,7 @@ REDIS_NOTIF_LIST = "tater:ha:notifications"  # LPUSH new, LRANGE read, then clea
 # Cache keys
 REDIS_SATELLITE_MAP_KEY = "tater:ha:assist_satellite_map:v1"  # json map: area_id -> entity_id
 
+
 PLATFORM_SETTINGS = {
     "category": "Home Assistant Settings",
     "required": {
@@ -305,16 +306,15 @@ def build_system_prompt(ctx: Optional[Dict[str, Any]] = None) -> str:
 
 # -------------------- History shaping (Discord-style alternation) --------------------
 def _to_template_msg(role: str, content: Any) -> Optional[Dict[str, Any]]:
+    # Skip waiting lines from tools
     if isinstance(content, dict) and content.get("marker") == "plugin_wait":
         return None
 
+    # Do NOT inject HA context markers into the LLM prompt
     if isinstance(content, dict) and content.get("marker") == "ha_context":
-        c = content.get("content") or {}
-        area = (c.get("area_name") or c.get("area_id") or "").strip()
-        dev = (c.get("device_name") or c.get("device_id") or "").strip()
-        txt = f"[Voice context: device={dev or 'unknown'}, area={area or 'unknown'}]"
-        return {"role": "assistant", "content": txt}
+        return None
 
+    # Include final plugin responses in context
     if isinstance(content, dict) and content.get("marker") == "plugin_response":
         phase = content.get("phase", "final")
         if phase != "final":
@@ -333,6 +333,7 @@ def _to_template_msg(role: str, content: Any) -> Optional[Dict[str, Any]]:
         except Exception:
             return None
 
+    # Represent plugin calls as plain text (so history still makes sense)
     if isinstance(content, dict) and content.get("marker") == "plugin_call":
         as_text = json.dumps(
             {"function": content.get("plugin"), "arguments": content.get("arguments", {})},
@@ -340,12 +341,13 @@ def _to_template_msg(role: str, content: Any) -> Optional[Dict[str, Any]]:
         )
         return {"role": "assistant", "content": as_text}
 
+    # Text + fallback
     if isinstance(content, str):
         return {"role": role, "content": content}
 
     return {"role": role, "content": str(content)}
 
-def _enforce_user_assistant_alternation(loop_messages: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+def _enforce_user_assistant_alternation(loop_messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Keep the history compact and readable by merging consecutive messages
     with the same role.
@@ -355,7 +357,7 @@ def _enforce_user_assistant_alternation(loop_messages: list[Dict[str, Any]]) -> 
     Some LLM backends/models can respond with empty completions when they
     see an empty user turn (content="").
     """
-    merged: list[Dict[str, Any]] = []
+    merged: List[Dict[str, Any]] = []
     for m in loop_messages:
         if not m:
             continue
@@ -374,14 +376,36 @@ def _enforce_user_assistant_alternation(loop_messages: list[Dict[str, Any]]) -> 
 
     return merged
 
-# -------------------- Redis history helpers --------------------
+# -------------------- Redis history + context helpers --------------------
 def _sess_key(session_id: Optional[str]) -> str:
     return f"tater:ha:session:{session_id or 'default'}:history"
 
-async def _load_history(session_id: Optional[str], limit: int) -> list[Dict[str, Any]]:
+def _ctx_key(session_id: Optional[str]) -> str:
+    return f"tater:ha:session:{session_id or 'default'}:ctx"
+
+def _load_ctx(session_id: Optional[str]) -> Dict[str, Any]:
+    raw = redis_client.get(_ctx_key(session_id))
+    if not raw:
+        return {}
+    try:
+        obj = json.loads(raw)
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        return {}
+
+def _save_ctx(session_id: Optional[str], ctx: Dict[str, Any]) -> None:
+    if not ctx:
+        return
+    ttl = _get_duration_seconds_setting("SESSION_TTL_SECONDS", DEFAULT_SESSION_TTL_SECONDS)
+    try:
+        redis_client.setex(_ctx_key(session_id), ttl, json.dumps(ctx))
+    except Exception:
+        pass
+
+async def _load_history(session_id: Optional[str], limit: int) -> List[Dict[str, Any]]:
     key = _sess_key(session_id)
     raw = redis_client.lrange(key, -limit, -1)
-    loop_messages: list[Dict[str, Any]] = []
+    loop_messages: List[Dict[str, Any]] = []
     for entry in raw:
         try:
             obj = json.loads(entry)
@@ -835,7 +859,7 @@ async def _maybe_reopen_listening(session_id: Optional[str], ctx: Dict[str, Any]
         logger.warning(f"[followup] failed to start_conversation on {sat}: {e}")
 
 # -------------------- App + LLM client --------------------
-app = FastAPI(title="Tater Home Assistant Bridge", version="1.8")  # ask_question follow-up + no-emoji prompt
+app = FastAPI(title="Tater Home Assistant Bridge", version="1.9")  # ctx stored separately; history stays user/assistant only
 
 _llm = None
 
@@ -846,7 +870,7 @@ async def _on_startup():
 
 @app.get("/tater-ha/v1/health")
 async def health():
-    return {"ok": True, "version": "1.8"}
+    return {"ok": True, "version": "1.9"}
 
 # -------------------- Notifications API --------------------
 @app.post("/tater-ha/v1/notifications/add")
@@ -903,13 +927,13 @@ async def handle_message(payload: HARequest):
     """
     Home Assistant bridge:
     - Builds a Discord/IRC-style system prompt (HA-scoped)
-    - Injects voice room/device context (if provided)
-    - Shapes loop history
+    - Injects voice room/device context via system prompt only
+    - Shapes loop history (real user/assistant turns only)
     - Executes ONLY plugins that implement handle_homeassistant
     - Passes room/device context to plugins if they accept context=...
     - If assistant ends with a question and continued chat is enabled:
-      wait for the satellite to become idle, then call assist_satellite.ask_question
-      with a short AI-generated spoken prompt to re-open the mic.
+      wait for the satellite to become idle, then call assist_satellite.start_conversation
+      with a short AI-generated spoken cue (NOT a question) to re-open the mic.
     """
     if _llm is None:
         raise HTTPException(status_code=503, detail="LLM backend not initialized")
@@ -922,27 +946,33 @@ async def handle_message(payload: HARequest):
     max_history_cap = _get_int_platform_setting("MAX_HISTORY_CAP", DEFAULT_MAX_HISTORY_CAP)
     history_max = min(max(session_history_max, 0), max_history_cap)
 
-    # ---- canonical context merge (backward compatible) ----
-    ctx: Dict[str, Any] = {}
+    # ---- canonical context merge (Discord-style: store ctx separately, not in chat history) ----
+    ctx: Dict[str, Any] = _load_ctx(payload.session_id)
+
     if payload.context:
-        ctx = payload.context.model_dump(exclude_none=True)
+        incoming = payload.context.model_dump(exclude_none=True)
+        if isinstance(incoming, dict):
+            ctx.update(incoming)
 
     if payload.device_id and not ctx.get("device_id"):
         ctx["device_id"] = payload.device_id
     if payload.area_id and not ctx.get("area_id"):
         ctx["area_id"] = payload.area_id
 
+    if ctx:
+        _save_ctx(payload.session_id, ctx)
+
     # Save the user turn (raw)
     await _save_message(payload.session_id, "user", text_in, history_max)
-
-    # Persist context into history (so room can stick across the session)
-    if ctx:
-        await _save_message(payload.session_id, "assistant", {"marker": "ha_context", "content": ctx}, history_max)
 
     # Build the messages list: system + shaped history
     system_prompt = build_system_prompt(ctx if ctx else None)
     loop_messages = await _load_history(payload.session_id, history_max)
     messages_list = [{"role": "system", "content": system_prompt}] + loop_messages
+
+    # Hard guard: some backends can return empty output if the last turn is not the user.
+    if not messages_list or messages_list[-1].get("role") != "user":
+        messages_list.append({"role": "user", "content": text_in})
 
     try:
         response = await _llm.chat(messages_list, timeout=TIMEOUT_SECONDS)
@@ -981,7 +1011,6 @@ async def handle_message(payload: HARequest):
 
             try:
                 handle = plugin.handle_homeassistant
-                sig = None
                 try:
                     sig = inspect.signature(handle)
                 except Exception:
