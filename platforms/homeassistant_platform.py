@@ -40,7 +40,6 @@ DEFAULT_MAX_HISTORY_CAP = 20
 DEFAULT_SESSION_TTL_SECONDS = 2 * 60 * 60  # 2h
 
 # Follow-up defaults
-DEFAULT_FOLLOWUP_MAX_PER_SESSION = 3
 DEFAULT_FOLLOWUP_IDLE_TIMEOUT_S = 12.0
 DEFAULT_SATELLITE_MAP_CACHE_TTL_S = 3600  # 1h
 
@@ -87,12 +86,6 @@ PLATFORM_SETTINGS = {
         },
 
         # --- Follow-up behavior ---
-        "FOLLOWUP_MAX_PER_SESSION": {
-            "label": "Max follow-ups per session",
-            "type": "number",
-            "default": DEFAULT_FOLLOWUP_MAX_PER_SESSION,
-            "description": "Safety limit to prevent infinite follow-up loops.",
-        },
         "FOLLOWUP_IDLE_TIMEOUT_S": {
             "label": "Follow-up idle wait (seconds)",
             "type": "number",
@@ -654,31 +647,6 @@ async def _resolve_assist_satellite_entity(ctx: Dict[str, Any]) -> Optional[str]
     ent2 = (m2.get(area_id) or "").strip()
     return ent2 or None
 
-def _followup_counter_key(session_id: Optional[str]) -> str:
-    return f"tater:ha:session:{session_id or 'default'}:followup_count"
-
-def _get_followup_count(session_id: Optional[str]) -> int:
-    try:
-        raw = redis_client.get(_followup_counter_key(session_id))
-        return int(raw) if raw is not None else 0
-    except Exception:
-        return 0
-
-def _inc_followup_count(session_id: Optional[str]) -> int:
-    """
-    increment and set TTL aligned with session TTL
-    """
-    key = _followup_counter_key(session_id)
-    ttl = _get_duration_seconds_setting("SESSION_TTL_SECONDS", DEFAULT_SESSION_TTL_SECONDS)
-    try:
-        pipe = redis_client.pipeline()
-        pipe.incr(key)
-        pipe.expire(key, ttl)
-        val, _ = pipe.execute()
-        return int(val)
-    except Exception:
-        return _get_followup_count(session_id) + 1
-
 async def _wait_for_satellite_idle(entity_id: str, timeout_s: float) -> bool:
     """
     Poll the entity state until it appears idle (or timeout).
@@ -758,12 +726,6 @@ async def _maybe_reopen_listening(session_id: Optional[str], ctx: Dict[str, Any]
     if not _should_follow_up(assistant_text):
         return
 
-    max_f = _get_int_platform_setting("FOLLOWUP_MAX_PER_SESSION", DEFAULT_FOLLOWUP_MAX_PER_SESSION)
-    count = _get_followup_count(session_id)
-    if count >= max_f:
-        logger.info(f"[followup] skip (max per session reached: {count}/{max_f})")
-        return
-
     sat = await _resolve_assist_satellite_entity(ctx)
     if not sat:
         logger.info("[followup] skip (no assist satellite found for area)")
@@ -778,8 +740,7 @@ async def _maybe_reopen_listening(session_id: Optional[str], ctx: Dict[str, Any]
 
     try:
         await asyncio.to_thread(_start_satellite_conversation, sat)
-        new_count = _inc_followup_count(session_id)
-        logger.info(f"[followup] re-opened listening on {sat} ({new_count}/{max_f})")
+        logger.info(f"[followup] re-opened listening on {sat}")
     except Exception as e:
         logger.warning(f"[followup] failed to start conversation on {sat}: {e}")
 
