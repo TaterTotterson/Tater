@@ -455,8 +455,9 @@ class _HA:
     def get_state(self, entity_id: str):
         return self._req("GET", f"/api/states/{entity_id}")
 
-    def call_service(self, domain: str, service: str, data: dict):
-        return self._req("POST", f"/api/services/{domain}/{service}", json_body=data)
+    def call_service(self, domain: str, service: str, data: dict, return_response: bool = False):
+        qs = "?return_response=true" if return_response else ""
+        return self._req("POST", f"/api/services/{domain}/{service}{qs}", json_body=data)
 
     def ws_url(self) -> str:
         # http://host:8123 -> ws://host:8123
@@ -752,19 +753,16 @@ async def _generate_followup_question(assistant_text: str) -> str:
         return "Just say yes or no?"
 
 def _start_satellite_followup(entity_id: str, question: str) -> None:
-    """
-    Follow-up reopen using the best available Voice PE service:
-      assist_satellite.ask_question
-    """
     ha = _HA()
     ha.call_service(
         "assist_satellite",
         "ask_question",
         {
-            "entity_id": entity_id,  # ask_question requires entity_id (not target)
+            "entity_id": entity_id,
             "question": (question or "").strip(),
             "preannounce": False,
         },
+        return_response=True,
     )
 
 def _should_follow_up(text: str) -> bool:
