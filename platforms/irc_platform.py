@@ -251,8 +251,12 @@ def _to_template_msg(role, content, sender=None):
 
 def _enforce_user_assistant_alternation(loop_messages):
     """
-    Merge consecutive same-role turns and ensure first turn is 'user'.
-    Prevents the template's alternation error.
+    Merge consecutive same-role turns to keep history compact.
+
+    IMPORTANT:
+    Do NOT insert a blank user message at the beginning.
+    Some LLM backends (LM Studio, Qwen, etc.) can return empty
+    completions when an empty user turn (content="") appears.
     """
     merged = []
     for m in loop_messages:
@@ -261,6 +265,7 @@ def _enforce_user_assistant_alternation(loop_messages):
         if not merged:
             merged.append(m)
             continue
+
         if merged[-1]["role"] == m["role"]:
             a, b = merged[-1]["content"], m["content"]
             if isinstance(a, str) and isinstance(b, str):
@@ -270,8 +275,6 @@ def _enforce_user_assistant_alternation(loop_messages):
         else:
             merged.append(m)
 
-    if merged and merged[0]["role"] != "user":
-        merged.insert(0, {"role": "user", "content": ""})
     return merged
 
 def get_plugin_enabled(name):

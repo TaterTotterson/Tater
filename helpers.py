@@ -84,6 +84,50 @@ def _normalize_base_url(host: str) -> str:
         path = (path + "/v1").replace("//", "/")
     return urlunparse(parsed._replace(path=path))
 
+def _sanitize_chat_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Defensive sanitizer for OpenAI-compatible chat endpoints.
+
+    - Drops empty user turns (content == "" after coercion)
+      These can cause some backends (LM Studio / some Qwen templates) to return empty completions.
+    - Coerces non-string message content (lists/dicts) into plain text,
+      so we don't send multimodal structures to backends that don't support them.
+    - Drops messages with missing role/content.
+    """
+    if not isinstance(messages, list):
+        return []
+
+    cleaned: List[Dict[str, Any]] = []
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+
+        role = (m.get("role") or "").strip()
+        if role not in ("system", "user", "assistant", "tool"):
+            # keep it strict; unknown roles can confuse some servers
+            continue
+
+        raw_content = m.get("content", None)
+
+        # Convert any non-string (list/dict/etc) to text for maximum compatibility
+        content_text = _coerce_content_to_text(raw_content).strip()
+
+        # Drop empty user turns entirely (this is the big one)
+        if role == "user" and content_text == "":
+            continue
+
+        # Also drop empty assistant/tool turns (optional but generally helpful)
+        if role in ("assistant", "tool") and content_text == "":
+            continue
+
+        # System messages should not be empty either
+        if role == "system" and content_text == "":
+            continue
+
+        cleaned.append({"role": role, "content": content_text})
+
+    return cleaned
+
 def _coerce_content_to_text(content) -> str:
     if isinstance(content, str):
         return content
@@ -193,6 +237,13 @@ class LLMClientWrapper:
             kwargs["max_tokens"] = self.max_tokens
         if "temperature" not in kwargs:
             kwargs["temperature"] = self.temperature
+
+        # sanitize messages (prevents empty-user poison + normalizes non-string content)
+        try:
+            messages = _sanitize_chat_messages(messages if isinstance(messages, list) else [])
+        except Exception:
+            # fail open: at least avoid crashing
+            messages = messages if isinstance(messages, list) else []
 
         response = await self.client.chat.completions.create(
             model=model,
