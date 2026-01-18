@@ -3,7 +3,7 @@ import logging
 import json
 import re
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import requests
 from dotenv import load_dotenv
@@ -21,7 +21,7 @@ class ZenGreetingPlugin(ToolPlugin):
     Automation-only: generates a peaceful "zen greeting" + message of the day via LLM.
 
     Notes:
-    - Designed for Home Assistant dashboards (short output).
+    - Designed for Home Assistant dashboards (very short output).
     - Optionally writes directly into an input_text helper in Home Assistant.
     - Uses HA time sensor so the greeting matches HA's local time.
     """
@@ -74,12 +74,14 @@ class ZenGreetingPlugin(ToolPlugin):
             "label": "Input Text Entity to Update (optional)",
             "type": "string",
             "default": "",
-            "description": "If set (e.g., input_text.daily_zen_greeting), the plugin writes the result into this helper."
+            "description": (
+                "If set (e.g., input_text.daily_zen_greeting), the plugin writes the result into this helper."
+            )
         },
         "MAX_CHARS": {
             "label": "Max Characters",
             "type": "number",
-            "default": 240,
+            "default": 100,
             "description": "Hard limit to keep output safe for HA text fields."
         },
     }
@@ -148,22 +150,34 @@ class ZenGreetingPlugin(ToolPlugin):
             return text
         cut = text[:limit]
         last_space = cut.rfind(" ")
-        if last_space > 40:
+        if last_space > 30:
             cut = cut[:last_space]
         return cut.rstrip(". ,;:") + "…"
 
-    async def _generate(self, *, now: datetime, greeting: str, include_date: bool,
-                        tone: str, prompt_hint: str, llm_client, max_chars: int) -> str:
-        # Keep this very constrained for HA dashboards.
+    async def _generate(
+        self,
+        *,
+        now: datetime,
+        greeting: str,
+        include_date: bool,
+        tone: str,
+        prompt_hint: str,
+        llm_client,
+        max_chars: int
+    ) -> str:
+        # Keep this extremely constrained for HA dashboards.
         system = (
             "You write short, calming messages for a smart-home dashboard.\n"
             "HARD RULES:\n"
             "- Plain text only (no markdown, no emojis).\n"
-            "- 1–2 short sentences.\n"
-            f"- Keep it under {max_chars} characters.\n"
+            "- Output MUST be a single line.\n"
+            "- Output MUST be ONE sentence only.\n"
+            f"- Output MUST be {max_chars} characters or fewer (count every character).\n"
+            "- Do not use quotes.\n"
             "- Gentle, peaceful, grounded.\n"
             "- No metaphysics, no medical advice, no therapy talk.\n"
             "- Avoid clichés like 'journey' and 'universe' if possible.\n"
+            "Return ONLY the final message text. No extra commentary.\n"
         )
 
         date_str = now.strftime("%A, %B %d") if include_date else ""
@@ -186,27 +200,53 @@ class ZenGreetingPlugin(ToolPlugin):
                     {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
                 ],
                 temperature=0.8,   # a bit of variety
-                max_tokens=120,
+                max_tokens=90,
                 timeout_ms=30_000,
             )
             text = (resp.get("message", {}) or {}).get("content", "").strip()
             if text:
-                return text
+                text = self._clamp(text, max_chars)
+                if len(text) <= max_chars:
+                    return text
+
+                # One quick retry: force a shorter version.
+                tighten = (
+                    f"Shorten the message to {max_chars} characters or fewer. "
+                    "One sentence, plain text, keep the same meaning. "
+                    "Return only the shortened message."
+                )
+                resp2 = await llm_client.chat(
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": tighten + "\n\n" + text},
+                    ],
+                    temperature=0.2,
+                    max_tokens=60,
+                    timeout_ms=30_000,
+                )
+                text2 = (resp2.get("message", {}) or {}).get("content", "").strip()
+                text2 = self._clamp(text2, max_chars)
+                if text2:
+                    return text2
+
         except Exception as e:
             logger.info(f"[zen_greeting] LLM generation failed; using fallback: {e}")
 
-        # Simple fallback if LLM is unavailable
-        if include_date:
-            return f"{greeting}. {date_str}. Take one slow breath, then continue gently."
-        return f"{greeting}. Take one slow breath, then continue gently."
+        # Fallback if LLM is unavailable
+        if include_date and date_str:
+            fallback = f"{greeting} — {date_str}. Breathe and begin gently."
+        else:
+            fallback = f"{greeting}. Breathe and begin gently."
+        return self._clamp(fallback, max_chars)
 
     # ---------- Automation entrypoint ----------
     async def handle_automation(self, args: Dict[str, Any], llm_client) -> Any:
         s = self._get_settings()
         ha = self._ha(s)
 
-        max_chars = int(s.get("MAX_CHARS") or 240)
-        max_chars = max(80, min(max_chars, 255))
+        # Enforce a strict ceiling that matches HA input_text constraints (your target: 100 chars).
+        max_chars = int(s.get("MAX_CHARS") or 100)
+        max_chars = max(40, min(max_chars, 100))
 
         now = self._get_ha_time(ha["base"], ha["token"], ha["time_sensor"])
         greeting = self._time_greeting(now)
@@ -225,14 +265,14 @@ class ZenGreetingPlugin(ToolPlugin):
             max_chars=max_chars,
         )
 
-        out = self._clamp(raw, max_chars) or self._clamp(f"{greeting}. Breathe, soften, and begin.", max_chars)
+        out = self._clamp(raw, max_chars) or self._clamp(f"{greeting}. Breathe and begin gently.", max_chars)
 
-        # write to input_text if configured (or overridden)
+        # Write to input_text if configured (or overridden)
         input_text_entity = (args.get("input_text_entity") or s.get("INPUT_TEXT_ENTITY") or "").strip()
         if input_text_entity:
             self._set_input_text(ha["base"], ha["token"], input_text_entity, out)
 
-        # also return the string (useful for logs / tracing)
+        # Also return the string (useful for logs / tracing)
         return out
 
 
