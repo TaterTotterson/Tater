@@ -57,7 +57,6 @@ REDIS_NOTIF_LIST = "tater:ha:notifications"  # LPUSH new, LRANGE read, then clea
 # Cache keys
 REDIS_SATELLITE_MAP_KEY = "tater:ha:assist_satellite_map:v1"  # json map: area_id -> entity_id
 
-
 PLATFORM_SETTINGS = {
     "category": "Home Assistant Settings",
     "required": {
@@ -211,7 +210,7 @@ class HARequest(BaseModel):
     user_id: Optional[str] = None
     device_id: Optional[str] = None
     area_id: Optional[str] = None
-    session_id: Optional[str] = None  # Usually HA's conversation_id
+    session_id: Optional[str] = None  # Usually HA's conversation_id (NOT stable across start_conversation)
     context: Optional[HAContext] = None
 
 class HAResponse(BaseModel):
@@ -235,6 +234,34 @@ class NotificationsOut(BaseModel):
 def get_plugin_enabled(plugin_name: str) -> bool:
     enabled = redis_client.hget("plugin_enabled", plugin_name)
     return bool(enabled and enabled.lower() == "true")
+
+# -------------------- Stable conversation key (CRITICAL for continued chat) --------------------
+def _conv_key(payload: HARequest, ctx: Dict[str, Any]) -> str:
+    """
+    Home Assistant's conversation_id/session_id can change when we call
+    assist_satellite.start_conversation. To keep chat history consistent,
+    we use a stable key.
+
+    Priority:
+      1) device_id (best for a specific satellite)
+      2) ctx.device_id
+      3) area_id (room fallback)
+      4) session_id (last resort)
+      5) default
+    """
+    did = (payload.device_id or "").strip() or (ctx.get("device_id") or "").strip()
+    if did:
+        return f"device:{did}"
+
+    aid = (payload.area_id or "").strip() or (ctx.get("area_id") or "").strip()
+    if aid:
+        return f"area:{aid}"
+
+    sid = (payload.session_id or "").strip()
+    if sid:
+        return f"session:{sid}"
+
+    return "default"
 
 # -------------------- System prompt (Discord/IRC style, HA scoped) --------------------
 def build_system_prompt(ctx: Optional[Dict[str, Any]] = None) -> str:
@@ -377,14 +404,14 @@ def _enforce_user_assistant_alternation(loop_messages: List[Dict[str, Any]]) -> 
     return merged
 
 # -------------------- Redis history + context helpers --------------------
-def _sess_key(session_id: Optional[str]) -> str:
-    return f"tater:ha:session:{session_id or 'default'}:history"
+def _sess_key(conv_key: str) -> str:
+    return f"tater:ha:session:{conv_key}:history"
 
-def _ctx_key(session_id: Optional[str]) -> str:
-    return f"tater:ha:session:{session_id or 'default'}:ctx"
+def _ctx_key(conv_key: str) -> str:
+    return f"tater:ha:session:{conv_key}:ctx"
 
-def _load_ctx(session_id: Optional[str]) -> Dict[str, Any]:
-    raw = redis_client.get(_ctx_key(session_id))
+def _load_ctx(conv_key: str) -> Dict[str, Any]:
+    raw = redis_client.get(_ctx_key(conv_key))
     if not raw:
         return {}
     try:
@@ -393,17 +420,17 @@ def _load_ctx(session_id: Optional[str]) -> Dict[str, Any]:
     except Exception:
         return {}
 
-def _save_ctx(session_id: Optional[str], ctx: Dict[str, Any]) -> None:
+def _save_ctx(conv_key: str, ctx: Dict[str, Any]) -> None:
     if not ctx:
         return
     ttl = _get_duration_seconds_setting("SESSION_TTL_SECONDS", DEFAULT_SESSION_TTL_SECONDS)
     try:
-        redis_client.setex(_ctx_key(session_id), ttl, json.dumps(ctx))
+        redis_client.setex(_ctx_key(conv_key), ttl, json.dumps(ctx))
     except Exception:
         pass
 
-async def _load_history(session_id: Optional[str], limit: int) -> List[Dict[str, Any]]:
-    key = _sess_key(session_id)
+async def _load_history(conv_key: str, limit: int) -> List[Dict[str, Any]]:
+    key = _sess_key(conv_key)
     raw = redis_client.lrange(key, -limit, -1)
     loop_messages: List[Dict[str, Any]] = []
     for entry in raw:
@@ -420,8 +447,8 @@ async def _load_history(session_id: Optional[str], limit: int) -> List[Dict[str,
             continue
     return _enforce_user_assistant_alternation(loop_messages)
 
-async def _save_message(session_id: Optional[str], role: str, content: Any, max_store: int):
-    key = _sess_key(session_id)
+async def _save_message(conv_key: str, role: str, content: Any, max_store: int):
+    key = _sess_key(conv_key)
     pipe = redis_client.pipeline()
     pipe.rpush(key, json.dumps({"role": role, "content": content}))
     if max_store > 0:
@@ -815,7 +842,7 @@ def _should_follow_up(text: str) -> bool:
     tail = t[-200:]
     return "?" in tail and tail.rstrip().endswith("?")
 
-async def _maybe_reopen_listening(session_id: Optional[str], ctx: Dict[str, Any], assistant_text: str):
+async def _maybe_reopen_listening(conv_key: str, ctx: Dict[str, Any], assistant_text: str):
     """
     If assistant ended in a question, and we have area context,
     reopen listening on the correct satellite entity for that area.
@@ -825,6 +852,9 @@ async def _maybe_reopen_listening(session_id: Optional[str], ctx: Dict[str, Any]
     - Wait for satellite idle
     - Call assist_satellite.start_conversation with a short AI-generated *cue*
       that is NOT a question (no '?') so it can't cause weird loops.
+
+    NOTE:
+    conv_key is only used for logging/clarity (history continuity is handled by _conv_key()).
     """
     if not _should_follow_up(assistant_text):
         return
@@ -854,12 +884,12 @@ async def _maybe_reopen_listening(session_id: Optional[str], ctx: Dict[str, Any]
         # - We DO NOT save `cue` into history
         await asyncio.to_thread(_start_satellite_followup, sat, cue)
 
-        logger.info(f"[followup] start_conversation on {sat} (cue={cue!r})")
+        logger.info(f"[followup] start_conversation on {sat} (conv_key={conv_key}, cue={cue!r})")
     except Exception as e:
         logger.warning(f"[followup] failed to start_conversation on {sat}: {e}")
 
 # -------------------- App + LLM client --------------------
-app = FastAPI(title="Tater Home Assistant Bridge", version="1.9")  # ctx stored separately; history stays user/assistant only
+app = FastAPI(title="Tater Home Assistant Bridge", version="2.0")  # stable conv_key for continued chat
 
 _llm = None
 
@@ -870,7 +900,7 @@ async def _on_startup():
 
 @app.get("/tater-ha/v1/health")
 async def health():
-    return {"ok": True, "version": "1.9"}
+    return {"ok": True, "version": "2.0"}
 
 # -------------------- Notifications API --------------------
 @app.post("/tater-ha/v1/notifications/add")
@@ -934,6 +964,9 @@ async def handle_message(payload: HARequest):
     - If assistant ends with a question and continued chat is enabled:
       wait for the satellite to become idle, then call assist_satellite.start_conversation
       with a short AI-generated spoken cue (NOT a question) to re-open the mic.
+
+    IMPORTANT:
+    We key history/ctx by a stable conv_key so follow-up mic re-open does NOT reset context.
     """
     if _llm is None:
         raise HTTPException(status_code=503, detail="LLM backend not initialized")
@@ -946,33 +979,45 @@ async def handle_message(payload: HARequest):
     max_history_cap = _get_int_platform_setting("MAX_HISTORY_CAP", DEFAULT_MAX_HISTORY_CAP)
     history_max = min(max(session_history_max, 0), max_history_cap)
 
-    # ---- canonical context merge (Discord-style: store ctx separately, not in chat history) ----
-    ctx: Dict[str, Any] = _load_ctx(payload.session_id)
-
+    # ---- canonical context merge (ctx stored separately; not in chat history) ----
+    incoming_ctx: Dict[str, Any] = {}
     if payload.context:
-        incoming = payload.context.model_dump(exclude_none=True)
-        if isinstance(incoming, dict):
-            ctx.update(incoming)
+        incoming_ctx = payload.context.model_dump(exclude_none=True)
 
+    # Start with stored ctx from the STABLE conv_key (not HA's session_id)
+    conv_key = _conv_key(payload, incoming_ctx)
+    ctx: Dict[str, Any] = _load_ctx(conv_key)
+
+    # Merge incoming context
+    if isinstance(incoming_ctx, dict) and incoming_ctx:
+        ctx.update(incoming_ctx)
+
+    # Backward compatible fallbacks
     if payload.device_id and not ctx.get("device_id"):
         ctx["device_id"] = payload.device_id
     if payload.area_id and not ctx.get("area_id"):
         ctx["area_id"] = payload.area_id
 
     if ctx:
-        _save_ctx(payload.session_id, ctx)
+        _save_ctx(conv_key, ctx)
 
-    # Save the user turn (raw)
-    await _save_message(payload.session_id, "user", text_in, history_max)
+    logger.debug(
+        f"[HA Bridge] conv_key={conv_key} session_id={payload.session_id} device_id={payload.device_id} area_id={payload.area_id}"
+    )
+
+    # Save the user turn
+    await _save_message(conv_key, "user", text_in, history_max)
 
     # Build the messages list: system + shaped history
     system_prompt = build_system_prompt(ctx if ctx else None)
-    loop_messages = await _load_history(payload.session_id, history_max)
+    loop_messages = await _load_history(conv_key, history_max)
     messages_list = [{"role": "system", "content": system_prompt}] + loop_messages
 
-    # Hard guard: some backends can return empty output if the last turn is not the user.
+    # Hard guard: ensure last turn is user
     if not messages_list or messages_list[-1].get("role") != "user":
         messages_list.append({"role": "user", "content": text_in})
+
+    logger.debug(f"[HA Bridge] LLM last role = {messages_list[-1]['role']} (conv_key={conv_key})")
 
     try:
         response = await _llm.chat(messages_list, timeout=TIMEOUT_SECONDS)
@@ -980,7 +1025,7 @@ async def handle_message(payload: HARequest):
         text = (text or "").strip()
 
         if not text:
-            await _save_message(payload.session_id, "assistant", "", history_max)
+            await _save_message(conv_key, "assistant", "", history_max)
             return HAResponse(response="Sorry, I didn't catch that.")
 
         fn = parse_function_json(text)
@@ -989,7 +1034,7 @@ async def handle_message(payload: HARequest):
             args = fn.get("arguments", {}) or {}
 
             await _save_message(
-                payload.session_id,
+                conv_key,
                 "assistant",
                 {"marker": "plugin_call", "plugin": func, "arguments": args},
                 history_max,
@@ -1001,12 +1046,12 @@ async def handle_message(payload: HARequest):
             )
             if not plugin or not get_plugin_enabled(func) or not is_ha_plugin:
                 msg = f"Function `{func}` is not available for Home Assistant."
-                await _save_message(payload.session_id, "assistant", msg, history_max)
+                await _save_message(conv_key, "assistant", msg, history_max)
                 return HAResponse(response=msg)
 
             if not hasattr(plugin, "handle_homeassistant"):
                 msg = f"Function `{func}` is not supported in this platform."
-                await _save_message(payload.session_id, "assistant", msg, history_max)
+                await _save_message(conv_key, "assistant", msg, history_max)
                 return HAResponse(response=msg)
 
             try:
@@ -1026,22 +1071,21 @@ async def handle_message(payload: HARequest):
                     final_text = final_text[:4000] + "…"
 
                 await _save_message(
-                    payload.session_id,
+                    conv_key,
                     "assistant",
                     {"marker": "plugin_response", "phase": "final", "content": final_text},
                     history_max,
                 )
 
-                # Follow-up reopen if enabled (uses the plugin output text)
                 if _get_bool_platform_setting("CONTINUED_CHAT_ENABLED", DEFAULT_CONTINUED_CHAT_ENABLED):
-                    asyncio.create_task(_maybe_reopen_listening(payload.session_id, ctx, final_text))
+                    asyncio.create_task(_maybe_reopen_listening(conv_key, ctx, final_text))
 
                 return HAResponse(response=final_text)
 
             except Exception:
                 logger.exception(f"[HA Bridge] Plugin '{func}' error")
                 msg = f"I tried to run {func} but hit an error."
-                await _save_message(payload.session_id, "assistant", msg, history_max)
+                await _save_message(conv_key, "assistant", msg, history_max)
                 return HAResponse(response=msg)
 
         # Plain text answer
@@ -1049,18 +1093,17 @@ async def handle_message(payload: HARequest):
         if len(final_text) > 4000:
             final_text = final_text[:4000] + "…"
 
-        await _save_message(payload.session_id, "assistant", final_text, history_max)
+        await _save_message(conv_key, "assistant", final_text, history_max)
 
-        # Follow-up reopen if enabled
         if _get_bool_platform_setting("CONTINUED_CHAT_ENABLED", DEFAULT_CONTINUED_CHAT_ENABLED):
-            asyncio.create_task(_maybe_reopen_listening(payload.session_id, ctx, final_text))
+            asyncio.create_task(_maybe_reopen_listening(conv_key, ctx, final_text))
 
         return HAResponse(response=final_text)
 
     except Exception:
         logger.exception("[HA Bridge] LLM error")
         msg = "Sorry, I ran into a problem processing that."
-        await _save_message(payload.session_id, "assistant", msg, history_max)
+        await _save_message(conv_key, "assistant", msg, history_max)
         return HAResponse(response=msg)
 
 def run(stop_event: Optional[threading.Event] = None):
