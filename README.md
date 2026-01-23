@@ -109,8 +109,6 @@ Here are some examples of the RSS watcher in action:
 
 <img width="100" height="44" alt="unraid_logo_black-339076895" src="https://github.com/user-attachments/assets/87351bed-3321-4a43-924f-fecf2e4e700f" />
 
-### 🟠 Unraid (User Friendly)
-
 Tater is available in the **Unraid Community Apps** store.
 
 You can install both:
