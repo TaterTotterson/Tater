@@ -122,10 +122,6 @@ directly from the Unraid App Store with a one-click template.
 
 ### 🏠 Home Assistant (User Friendly)
 
-The easiest way to run **Tater** is as a Home Assistant add-on.  
-This method requires no manual Docker setup and integrates cleanly with Home Assistant,
-including networking, persistence, and add-on management.
-
 A dedicated Home Assistant add-on repository is available here:
 
 https://github.com/TaterTotterson/hassio-addons-tater
