@@ -119,7 +119,7 @@ directly from the Unraid App Store with a one-click template.
 
 ---
 
-### 🏠 Home Assistant (User Friendly)
+### 🏠 Home Assistant
 
 A dedicated Home Assistant add-on repository is available here:
 
