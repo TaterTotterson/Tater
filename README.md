@@ -106,6 +106,19 @@ Here are some examples of the RSS watcher in action:
 - Tater currently recommends using qwen3-next-80b, qwen3-coder-30b or Gemma3-27b
 
 ## Installation
+<img width="100" height="44" alt="unraid_logo_black-339076895" src="https://github.com/user-attachments/assets/87351bed-3321-4a43-924f-fecf2e4e700f" />
+
+### 🟠 Unraid (User Friendly)
+
+Tater is available in the **Unraid Community Apps** store.
+
+You can install both:
+- **Tater**
+- **Redis Stack**
+
+directly from the Unraid App Store with a one-click template.
+
+---
 
 ### 🏠 Home Assistant (User Friendly)
 
