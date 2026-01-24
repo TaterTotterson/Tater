@@ -48,8 +48,9 @@ Tater summarize this YouTube video https://youtube.com/watch?v=000000
 | `mister_remote`              | Controls MiSTer FPGA via MiSTer Remote API                                  | discord, webui, irc, homeassistant, matrix, homekit |
 | `obsidian_note`              | Creates new notes in your Obsidian vault with AI-generated content          | webui                                      |
 | `obsidian_search`            | Searches your Obsidian vault and extracts relevant notes                    | webui                                      |
+| `overseerr_trending`         | Lists trending or upcoming movies / TV shows from Overseerr                | discord, webui, irc, matrix, homekit       |
+| `overseerr_details`          | Fetches full details for a specific movie or TV show from Overseerr        | discord, webui, irc, matrix, homeassistant, homekit |
 | `overseerr_request`          | Adds a movie or TV show request to Overseerr                                | webui, homeassistant, homekit              |
-| `overseerr_trending`         | Fetches trending or upcoming movies / TV shows                              | discord, webui, irc, matrix, homekit       |
 | `premiumize_download`        | Checks Premiumize for cached file links and returns downloads               | discord, webui, irc, matrix                |
 | `premiumize_torrent`         | Checks if a torrent is cached on Premiumize                                 | discord                                   |
 | `sftpgo_account`             | Creates SFTPGo user accounts and credentials                                 | discord, webui, irc, matrix                |
