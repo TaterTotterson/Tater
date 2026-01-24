@@ -47,6 +47,41 @@ logging.getLogger("irc3.TaterBot").setLevel(logging.WARNING)  # Optional: suppre
 
 dotenv.load_dotenv()
 
+# ------------------ Upload / Attachment Limits ------------------
+# Per-file max upload size (MB) for st.chat_input + our Redis storage
+WEBUI_ATTACH_MAX_MB_EACH = int(os.getenv("WEBUI_ATTACH_MAX_MB_EACH", "25"))
+# Total max bytes allowed per message (sum of uploaded files)
+WEBUI_ATTACH_MAX_MB_TOTAL = int(os.getenv("WEBUI_ATTACH_MAX_MB_TOTAL", "50"))
+# Optional TTL for stored file blobs (0 = keep forever)
+WEBUI_ATTACH_TTL_SECONDS = int(os.getenv("WEBUI_ATTACH_TTL_SECONDS", "0"))
+# Store only a limited number of recent attachment ids (index)
+WEBUI_ATTACH_INDEX_MAX = int(os.getenv("WEBUI_ATTACH_INDEX_MAX", "500"))
+
+FILE_BLOB_KEY_PREFIX = "webui:file:"          # webui:file:<uuid> -> base64 blob
+FILE_INDEX_KEY = "webui:file_index"           # list of recent file ids (for cleanup / plugins)
+
+def _bytes_to_mb(n: int) -> float:
+    return n / (1024 * 1024)
+
+def _store_file_blob_in_redis(file_id: str, b64: str):
+    key = f"{FILE_BLOB_KEY_PREFIX}{file_id}"
+    redis_client.set(key, b64)
+    if WEBUI_ATTACH_TTL_SECONDS and WEBUI_ATTACH_TTL_SECONDS > 0:
+        redis_client.expire(key, WEBUI_ATTACH_TTL_SECONDS)
+
+    # Track recent ids for optional cleanup
+    redis_client.rpush(FILE_INDEX_KEY, file_id)
+    redis_client.ltrim(FILE_INDEX_KEY, -WEBUI_ATTACH_INDEX_MAX, -1)
+
+def _load_file_blob_from_redis(file_id: str) -> bytes | None:
+    b64 = redis_client.get(f"{FILE_BLOB_KEY_PREFIX}{file_id}")
+    if not b64:
+        return None
+    try:
+        return base64.b64decode(b64)
+    except Exception:
+        return None
+
 # ------------------ RSS (PLATFORM-STYLE SINGLETON) ------------------
 
 @st.cache_resource(show_spinner=False)
@@ -201,7 +236,7 @@ def save_message(role, username, content):
 
     if max_store > 0:
         redis_client.ltrim(history_key, -max_store, -1)
- 
+
 def load_chat_history_tail(n: int):
     if n <= 0:
         return []
@@ -227,7 +262,6 @@ def clear_chat_history():
 def load_default_tater_avatar():
     return Image.open("images/tater.png")
 
-
 def get_tater_avatar():
     avatar_b64 = redis_client.get("tater:avatar")
     if avatar_b64:
@@ -237,7 +271,6 @@ def get_tater_avatar():
         except Exception:
             redis_client.delete("tater:avatar")
     return load_default_tater_avatar()
-
 
 assistant_avatar = get_tater_avatar()
 
@@ -486,7 +519,7 @@ def render_plugin_settings_form(plugin):
             default_value = current_settings.get(key, info.get("default", ""))
 
             if input_type == "button":
-                if st.button(label, key=f"{plugin.name}_{category}_{key}_button"):
+                if st.Button(label, key=f"{plugin.name}_{category}_{key}_button"):
                     if hasattr(plugin, "handle_setting_button"):
                         result = plugin.handle_setting_button(key)
                         if result:
@@ -665,6 +698,22 @@ def render_webui_settings():
             st.success("All active plugin jobs have been cleared.")
             st.rerun()
 
+    st.markdown("---")
+    st.subheader("Attachments")
+    st.caption("Uploaded files are stored in Redis. Images/audio/video render inline. Other files appear as attachments with a download button.")
+    st.caption(f"Per-file limit: {WEBUI_ATTACH_MAX_MB_EACH}MB • Per-message total limit: {WEBUI_ATTACH_MAX_MB_TOTAL}MB • TTL: {'none' if WEBUI_ATTACH_TTL_SECONDS<=0 else str(WEBUI_ATTACH_TTL_SECONDS)+'s'}")
+
+    if st.button("Clear Stored Attachment Blobs", key="clear_attachment_blobs"):
+        ids = redis_client.lrange(FILE_INDEX_KEY, 0, -1)
+        if ids:
+            pipe = redis_client.pipeline()
+            for fid in ids:
+                pipe.delete(f"{FILE_BLOB_KEY_PREFIX}{fid}")
+            pipe.delete(FILE_INDEX_KEY)
+            pipe.execute()
+        st.success("Attachment blobs cleared (chat history entries remain).")
+        st.rerun()
+
 def render_tater_settings():
     st.subheader(f"{first_name} Settings")
     stored_count = int(redis_client.get("tater:max_store") or 20)
@@ -798,7 +847,7 @@ def build_system_prompt():
         "Only call a tool if the user's latest message clearly requests an action — such as 'generate', 'summarize', or 'download'.\n"
         "Never call a tool in response to casual or friendly messages like 'thanks', 'lol', or 'cool'.\n"
     )
-    
+
     return (
         f"Current Date and Time is: {now}\n\n"
         f"{base_prompt}\n\n"
@@ -812,8 +861,10 @@ def _to_template_msg(role, content):
     """
     Return a dict shaped for the Jinja template:
       - string -> {"role": role, "content": "text"}
-      - image  -> {"role": role, "content": [{"type":"image"}]}
-      - audio  -> {"role": role, "content": [{"type":"text","text":"[Audio]"}]}
+      - image  -> {"role": role, "content": "[Image attached]"}
+      - audio  -> {"role": role, "content": "[Audio attached]"}
+      - video  -> {"role": role, "content": "[Video attached]"}
+      - file   -> {"role": role, "content": "[File attached] name (mimetype, size)"}
       - plugin_call -> stringify call as assistant text
       - plugin_response -> include final responses (skip waiting lines)
     """
@@ -872,15 +923,20 @@ def _to_template_msg(role, content):
     # --- Media types ---
     if isinstance(content, dict) and content.get("type") == "image":
         return {"role": role, "content": "[Image attached]"}
-
     if isinstance(content, dict) and content.get("type") == "audio":
         return {"role": role, "content": "[Audio attached]"}
+    if isinstance(content, dict) and content.get("type") == "video":
+        return {"role": role, "content": "[Video attached]"}
+    if isinstance(content, dict) and content.get("type") == "file":
+        name = content.get("name") or "file"
+        mimetype = content.get("mimetype") or ""
+        size = content.get("size") or ""
+        return {"role": role, "content": f"[File attached] {name} ({mimetype}, {size} bytes)"}
 
     # --- Strings and other fallbacks ---
     if isinstance(content, str):
         return {"role": role, "content": content}
     return {"role": role, "content": str(content)}
-
 
 def _enforce_user_assistant_alternation(loop_messages):
     """
@@ -1197,26 +1253,105 @@ if active_view == "Chat":
                 data = base64.b64decode(content["data"])
                 st.video(data, format=content.get("mimetype", "video/mp4"))
 
+            elif isinstance(content, dict) and content.get("type") == "file":
+                file_id = content.get("id")
+                name = content.get("name") or "file"
+                mimetype = content.get("mimetype") or "application/octet-stream"
+                size = int(content.get("size") or 0)
+
+                st.caption(f"📎 {name} ({_bytes_to_mb(size):.2f} MB)")
+
+                blob = _load_file_blob_from_redis(file_id) if file_id else None
+                if blob is not None:
+                    st.download_button(
+                        label=f"Download {name}",
+                        data=blob,
+                        file_name=name,
+                        mime=mimetype,
+                        use_container_width=True
+                    )
+                else:
+                    st.warning("Attachment expired or missing.")
+
             else:
                 st.write(content)
 
-    if user_input := st.chat_input(f"Chat with {first_name}…"):
+    # ---- Chat Input (NOW SUPPORTS FILES) ----
+    prompt = st.chat_input(
+        f"Chat with {first_name}…",
+        accept_file="multiple",              # change to "directory" if you want folder uploads
+        max_upload_size=WEBUI_ATTACH_MAX_MB_EACH
+    )
+
+    if prompt:
         uname = chat_settings["username"]
 
-        save_message("user", uname, user_input)
-        st.session_state.chat_messages.append({
-            "role": "user",
-            "content": user_input
-        })
+        # With accept_file enabled, Streamlit returns a dict-like object with text + files
+        user_text = (getattr(prompt, "text", None) or "").strip()
+        files = list(getattr(prompt, "files", None) or [])
 
-        st.chat_message("user", avatar=user_avatar or "🦖").write(user_input)
+        # Validate total size early
+        total_bytes = 0
+        for uf in files:
+            try:
+                total_bytes += len(uf.getvalue())
+            except Exception:
+                pass
+        if _bytes_to_mb(total_bytes) > WEBUI_ATTACH_MAX_MB_TOTAL:
+            st.error(f"Total upload size ({_bytes_to_mb(total_bytes):.2f}MB) exceeds limit of {WEBUI_ATTACH_MAX_MB_TOTAL}MB.")
+            st.stop()
 
+        # 1) Save text message (if any)
+        if user_text:
+            save_message("user", uname, user_text)
+            st.session_state.chat_messages.append({"role": "user", "content": user_text})
+            st.chat_message("user", avatar=user_avatar or "🦖").write(user_text)
+
+        # 2) Save each uploaded file as a chat message
+        for uf in files:
+            data = uf.getvalue()
+            b64 = base64.b64encode(data).decode("utf-8")
+            mimetype = getattr(uf, "type", "") or "application/octet-stream"
+            name = getattr(uf, "name", None) or "file"
+
+            # Inline preview media types (stored directly in chat history)
+            if mimetype.startswith("image/"):
+                msg = {"type": "image", "name": name, "mimetype": mimetype, "data": b64}
+                save_message("user", uname, msg)
+                st.session_state.chat_messages.append({"role": "user", "content": msg})
+
+            elif mimetype.startswith("audio/"):
+                msg = {"type": "audio", "name": name, "mimetype": mimetype, "data": b64}
+                save_message("user", uname, msg)
+                st.session_state.chat_messages.append({"role": "user", "content": msg})
+
+            elif mimetype.startswith("video/"):
+                msg = {"type": "video", "name": name, "mimetype": mimetype, "data": b64}
+                save_message("user", uname, msg)
+                st.session_state.chat_messages.append({"role": "user", "content": msg})
+
+            else:
+                # Store blob outside chat list; keep chat message as lightweight attachment
+                file_id = str(uuid.uuid4())
+                _store_file_blob_in_redis(file_id, b64)
+
+                msg = {
+                    "type": "file",
+                    "id": file_id,
+                    "name": name,
+                    "mimetype": mimetype,
+                    "size": len(data)
+                }
+                save_message("user", uname, msg)
+                st.session_state.chat_messages.append({"role": "user", "content": msg})
+
+        # ---- Send to LLM (even if only files were uploaded) ----
         with st.spinner(f"{first_name} is thinking..."):
-            response_text = run_async(process_message(uname, user_input))
+            response_text = run_async(process_message(uname, user_text))
 
         func_call = parse_function_json(response_text)
         if func_call:
-            func_result = run_async(process_function_call(func_call, user_input))
+            func_result = run_async(process_function_call(func_call, user_text))
             responses = func_result if isinstance(func_result, list) else [func_result]
         else:
             responses = [response_text]
