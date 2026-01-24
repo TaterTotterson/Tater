@@ -519,11 +519,16 @@ def render_plugin_settings_form(plugin):
             default_value = current_settings.get(key, info.get("default", ""))
 
             if input_type == "button":
-                if st.Button(label, key=f"{plugin.name}_{category}_{key}_button"):
+                if st.button(label, key=f"{plugin.name}_{category}_{key}_button"):
                     if hasattr(plugin, "handle_setting_button"):
-                        result = plugin.handle_setting_button(key)
-                        if result:
-                            st.success(result)
+                        try:
+                            result = plugin.handle_setting_button(key)
+                            if asyncio.iscoroutine(result):
+                                result = run_async(result)
+                            if result:
+                                st.success(result)
+                        except Exception as e:
+                            st.error(f"Error running {label}: {e}")
                 if desc:
                     st.caption(desc)
                 continue
