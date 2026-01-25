@@ -249,6 +249,76 @@ class HAControlPlugin(ToolPlugin):
         return None
 
     # ----------------------------
+    # Power intent helpers (TVs usually live under media_player/switch)
+    # ----------------------------
+    def _is_power_request(self, action: str, query: str) -> bool:
+        a = (action or "").lower().strip()
+        q = (query or "").lower()
+        if a in ("turn_on", "turn_off"):
+            return True
+        return any(p in q for p in ["turn on", "turn off", "power on", "power off"])
+
+    @staticmethod
+    def _state_key(st: Any) -> str:
+        """
+        Build a stable-ish representation of state to detect changes.
+        Useful because many remotes report activity/current_activity rather than state.
+        """
+        if not isinstance(st, dict):
+            return str(st or "")
+        attrs = st.get("attributes") or {}
+        if not isinstance(attrs, dict):
+            attrs = {}
+        return "|".join([
+            str(st.get("state", "") or ""),
+            str(attrs.get("current_activity") or attrs.get("activity") or ""),
+            str(attrs.get("source") or ""),
+            str(attrs.get("app_id") or ""),
+        ])
+
+    def _find_related_media_player(self, catalog: List[dict], remote_friendly: str, query: str) -> Optional[str]:
+        """
+        Best-effort: find a media_player that looks like the same device as a remote.
+        This is a fallback when remote.turn_on doesn't actually power the device.
+        """
+        rf = (remote_friendly or "").strip().lower()
+        q = (query or "").strip().lower()
+
+        mps = [c for c in catalog if (c.get("domain") == "media_player" and c.get("entity_id"))]
+        if not mps:
+            return None
+
+        def score(c: dict) -> int:
+            name = (c.get("name") or "").strip().lower()
+            eid = (c.get("entity_id") or "").strip().lower()
+            blob = f"{name} {eid}"
+
+            s = 0
+            # strongest matches
+            if rf and (name == rf or rf in blob or name in rf):
+                s += 50
+            # query overlap
+            for w in ["tv", "television", "oled", "lg", "samsung", "sony", "roku", "apple tv", "appletv", "shield"]:
+                if w in q and w in blob:
+                    s += 10
+            # generic boosts if user said "tv"
+            if "tv" in q and "tv" in blob:
+                s += 5
+            return s
+
+        best = None
+        best_score = -1
+        for c in mps:
+            sc = score(c)
+            if sc > best_score:
+                best_score = sc
+                best = c
+
+        if best and best_score >= 10:
+            return best.get("entity_id")
+        return None
+
+    # ----------------------------
     # Remote helpers (broad compatibility)
     # ----------------------------
     def _normalize_remote_command(self, text: str) -> Optional[str]:
@@ -294,8 +364,6 @@ class HAControlPlugin(ToolPlugin):
         if not raw:
             return []
 
-        # If the LLM gave us a specific command (like "VolumeUp"), try it first.
-        # Then also try common variants derived from a normalized base command.
         variants: List[str] = []
 
         def add(v: str):
@@ -305,17 +373,13 @@ class HAControlPlugin(ToolPlugin):
 
         add(raw)
 
-        # Derive a base token for variant generation
         base = raw.strip().lower()
         base = base.replace("-", "_").replace(" ", "_")
 
-        # If it looks like CamelCase, also compute a normalized base from it
-        # (e.g., VolumeUp -> volume_up)
         camel_to_snake = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", raw).lower().replace("-", "_").replace(" ", "_")
         if camel_to_snake and camel_to_snake != base:
             base = camel_to_snake
 
-        # Pre-canned common sets
         common = {
             "volume_up": ["VolumeUp", "VOLUMEUP", "volume_up", "volumeUp", "KEY_VOLUMEUP", "KEY_VOLUP", "VOLUP"],
             "volume_down": ["VolumeDown", "VOLUMEDOWN", "volume_down", "volumeDown", "KEY_VOLUMEDOWN", "KEY_VOLDOWN", "VOLDOWN"],
@@ -339,16 +403,9 @@ class HAControlPlugin(ToolPlugin):
             for v in common[base]:
                 add(v)
         else:
-            # Generic variants for unknown commands
-            # - raw
-            # - UPPER
-            # - lower
-            # - snake_case
-            # - CamelCase-ish
             add(raw.upper())
             add(raw.lower())
             add(base)
-            # snake -> CamelCase
             parts = [p for p in base.split("_") if p]
             if parts:
                 camel = "".join(p[:1].upper() + p[1:] for p in parts)
@@ -357,10 +414,6 @@ class HAControlPlugin(ToolPlugin):
         return variants
 
     def _guess_activity_from_text(self, text: str) -> Optional[str]:
-        """
-        Heuristic to guess an activity from casual phrases.
-        We'll also try to align to the remote entity's real activity_list later.
-        """
         t = (text or "").lower()
         if not t:
             return None
@@ -383,11 +436,9 @@ class HAControlPlugin(ToolPlugin):
         if not wanted or not options:
             return None
         w = wanted.strip().lower()
-        # exact match
         for o in options:
             if isinstance(o, str) and o.strip().lower() == w:
                 return o
-        # contains match
         for o in options:
             if isinstance(o, str) and w in o.strip().lower():
                 return o
@@ -400,10 +451,6 @@ class HAControlPlugin(ToolPlugin):
         return "ha_control:catalog:v4"
 
     def _build_catalog_from_states(self, states: List[dict]) -> List[dict]:
-        """
-        Build a compact catalog that the LLM can choose from.
-        NOTE: we intentionally do NOT rely on 'state' to decide temperature sensors, etc.
-        """
         catalog: List[dict] = []
         for s in states:
             if not isinstance(s, dict):
@@ -461,14 +508,6 @@ class HAControlPlugin(ToolPlugin):
     # Step 1: LLM interprets query → intent
     # ----------------------------
     async def _interpret_query(self, query: str, llm_client) -> dict:
-        """
-        Turn the user's raw query into:
-          - intent: get_temp | get_state | control | set_temperature
-          - action: turn_on|turn_off|open|close|get_state|set_temperature|send_command
-          - scope: inside|outside|area:<name>|device:<phrase>|unknown
-          - domain_hint: light|switch|climate|sensor|cover|lock|fan|media_player|scene|script|binary_sensor|remote
-          - desired: {temperature,color_name,brightness_pct,activity,command}
-        """
         allowed_domain = "light,switch,climate,sensor,binary_sensor,cover,lock,fan,media_player,scene,script,select,remote"
         system = (
             "You are interpreting a smart-home request for Home Assistant.\n"
@@ -496,8 +535,7 @@ class HAControlPlugin(ToolPlugin):
             "- If user asks to set lights to a percent (brightness), you MUST use intent=control and action=turn_on,\n"
             "  and put the percent into desired.brightness_pct. Do NOT use actions like set_brightness.\n"
             "- For remotes, domain_hint=remote.\n"
-            "- 'turn on the tv/roku/apple tv' usually means remote turn_on; put a likely activity in desired.activity.\n"
-            "- 'turn off the tv/roku/apple tv' means remote turn_off.\n"
+            "- 'turn on the tv/roku/apple tv' usually means device power; it may be media_player.turn_on.\n"
             "- 'mute', 'volume up', 'pause', 'play', 'home', 'back', 'menu' means action=send_command and desired.command.\n"
             "- If scope is a room/area (kitchen, living room), use scope=area:<name>.\n"
             "- If it's a named device (christmas tree lights), use scope=device:<phrase>.\n"
@@ -545,10 +583,23 @@ class HAControlPlugin(ToolPlugin):
         doms = {d.lower().strip() for d in (domains or set()) if d}
         return [c for c in catalog if (c.get("domain") or "").lower() in doms]
 
-    def _domains_for_control(self, domain_hint: str) -> Set[str]:
+    def _domains_for_control(self, domain_hint: str, action: str, query: str) -> Set[str]:
+        """
+        Domain prioritization:
+        - For power requests (turn on/off), prefer media_player/switch first (TVs commonly live there)
+        - For button presses, remote is correct
+        """
         dh = (domain_hint or "").lower().strip()
+
+        if self._is_power_request(action, query):
+            return {"media_player", "switch", "remote"}
+
+        if dh == "remote":
+            return {"remote", "media_player"}  # allow fallback for odd setups
+
         if dh:
             return {dh}
+
         return {"light", "switch", "fan", "media_player", "scene", "script", "cover", "lock", "remote"}
 
     # ----------------------------
@@ -577,7 +628,8 @@ class HAControlPlugin(ToolPlugin):
             "Return strict JSON only: {\"entity_id\":\"...\"}. No explanation.\n"
             "Use the user's exact words to match rooms/devices.\n"
             "If the request is temperature inside, do NOT pick obvious outside/outdoor sensors.\n"
-            "If the request is about TV/Roku/remote control and a remote.* candidate matches, prefer the remote.*.\n"
+            "If the request is to TURN ON/OFF a TV/device, prefer a matching media_player or switch first.\n"
+            "Use remote.* mainly for button presses (volume/mute/home/back/menu/select) or starting activities.\n"
         )
 
         async def ask_pick(chunk: List[dict]) -> Optional[str]:
@@ -766,7 +818,7 @@ class HAControlPlugin(ToolPlugin):
         if not isinstance(desired, dict):
             desired = {}
 
-        # Fill missing "desired" fields from the raw query (helps when LLM omits fields)
+        # Fill missing "desired" fields from the raw query
         if desired.get("color_name") in (None, "", "null"):
             cn = self._parse_color_name_from_text(query)
             if cn:
@@ -884,7 +936,7 @@ class HAControlPlugin(ToolPlugin):
                 return f"Error setting {entity_id}: {e}"
 
         if intent_type == "control":
-            domains = self._domains_for_control(domain_hint)
+            domains = self._domains_for_control(domain_hint, action, query)
             candidates = self._candidates_for_domains(catalog, domains)
 
             if excluded and "light" in {d.lower() for d in domains}:
@@ -926,11 +978,16 @@ class HAControlPlugin(ToolPlugin):
 
             # Remote (Harmony/Apple TV/etc.) extras/payload with compatibility retries
             if entity_domain == "remote":
-                # Grab current attributes (for activity_list matching)
+                # Snapshot state before (to detect "no-op")
                 try:
-                    st_now = client.get_state(entity_id)
-                    attrs_now = (st_now.get("attributes") or {}) if isinstance(st_now, dict) else {}
+                    st_before = client.get_state(entity_id)
                 except Exception:
+                    st_before = None
+                before_key = self._state_key(st_before)
+
+                # Grab current attributes (for activity_list matching + friendly name)
+                attrs_now = (st_before.get("attributes") or {}) if isinstance(st_before, dict) else {}
+                if not isinstance(attrs_now, dict):
                     attrs_now = {}
 
                 activity_list = attrs_now.get("activity_list") or attrs_now.get("activities") or []
@@ -949,27 +1006,81 @@ class HAControlPlugin(ToolPlugin):
                     if match:
                         desired_activity = match
 
-                # We execute remote calls separately so we can do fallback retries.
                 try:
                     if service == "turn_on":
-                        # Try with activity first (if any), then retry without activity if HA rejects it.
-                        if desired_activity:
-                            payload_with_activity = dict(payload)
-                            payload_with_activity["activity"] = desired_activity
-                            try:
+                        did_work = False
+
+                        # Try remote.turn_on first (with activity if any)
+                        try:
+                            if desired_activity:
+                                payload_with_activity = dict(payload)
+                                payload_with_activity["activity"] = desired_activity
                                 client.call_service("remote", "turn_on", payload_with_activity)
                                 extras_txt_parts.append(desired_activity)
-                            except Exception as e:
-                                logger.info(f"[ha_control] remote.turn_on with activity failed; retrying without activity: {e}")
+                            else:
                                 client.call_service("remote", "turn_on", payload)
-                        else:
-                            client.call_service("remote", "turn_on", payload)
+
+                            # Detect effect
+                            try:
+                                st_after = client.get_state(entity_id)
+                                after_key = self._state_key(st_after)
+                                did_work = bool(after_key and after_key != before_key)
+                            except Exception:
+                                did_work = True  # we successfully called the service; assume ok
+
+                        except Exception as e:
+                            logger.info(f"[ha_control] remote.turn_on failed: {e}")
+
+                        # If the remote didn't show any change, try powering a related media_player
+                        if not did_work:
+                            remote_friendly = attrs_now.get("friendly_name") or entity_id
+                            mp_eid = self._find_related_media_player(catalog, str(remote_friendly), query)
+                            if mp_eid:
+                                try:
+                                    client.call_service("media_player", "turn_on", {"entity_id": mp_eid})
+                                    extras_txt_parts.append("power")
+                                    did_work = True
+                                except Exception as e:
+                                    logger.info(f"[ha_control] media_player.turn_on fallback failed: {e}")
+
+                        if not did_work:
+                            return (
+                                "I tried to turn it on, but that remote didn’t report any change. "
+                                "If you tell me which Home Assistant entity actually powers that TV on, I can use it."
+                            )
 
                     elif service == "turn_off":
-                        client.call_service("remote", "turn_off", payload)
+                        # remote.turn_off sometimes works; if not, we can fall back to media_player.turn_off
+                        did_work = False
+                        try:
+                            client.call_service("remote", "turn_off", payload)
+                            try:
+                                st_after = client.get_state(entity_id)
+                                after_key = self._state_key(st_after)
+                                did_work = bool(after_key and after_key != before_key)
+                            except Exception:
+                                did_work = True
+                        except Exception as e:
+                            logger.info(f"[ha_control] remote.turn_off failed: {e}")
+
+                        if not did_work:
+                            remote_friendly = attrs_now.get("friendly_name") or entity_id
+                            mp_eid = self._find_related_media_player(catalog, str(remote_friendly), query)
+                            if mp_eid:
+                                try:
+                                    client.call_service("media_player", "turn_off", {"entity_id": mp_eid})
+                                    extras_txt_parts.append("power")
+                                    did_work = True
+                                except Exception as e:
+                                    logger.info(f"[ha_control] media_player.turn_off fallback failed: {e}")
+
+                        if not did_work:
+                            return (
+                                "I tried to turn it off, but that remote didn’t report any change. "
+                                "If you tell me which Home Assistant entity actually powers that TV off, I can use it."
+                            )
 
                     elif service == "send_command":
-                        # Build variants from either an explicit command or normalized base.
                         if not desired_command:
                             desired_command = self._normalize_remote_command(query) or ""
                         if not desired_command:
@@ -982,7 +1093,6 @@ class HAControlPlugin(ToolPlugin):
                         for cmd in variants:
                             tried.append(cmd)
                             payload_cmd = dict(payload)
-                            # HA usually accepts list; safest to always send list.
                             payload_cmd["command"] = [cmd]
                             try:
                                 client.call_service("remote", "send_command", payload_cmd)
@@ -995,24 +1105,23 @@ class HAControlPlugin(ToolPlugin):
 
                         if last_error is not None:
                             logger.info(f"[ha_control] remote.send_command failed. Tried: {tried}. Last error: {last_error}")
-                            return "I tried a few command names for that remote, but none worked. If you tell me what the button is called in Home Assistant, I can use it."
-
+                            return (
+                                "I tried a few command names for that remote, but none worked. "
+                                "If you tell me what the button is called in Home Assistant, I can use it."
+                            )
                     else:
-                        # Shouldn't happen, but fallback to original behavior
                         client.call_service(entity_domain, service, payload)
 
                 except Exception as e:
                     logger.error(f"[ha_control] remote control error: {e}")
                     return f"Error performing {service} on {entity_id}: {e}"
 
-                # After remote action succeeds, continue to fetch state + speak confirm below.
-                # (Skip the generic call_service below by jumping into the common success flow.)
+                # Confirm
                 try:
                     st = client.get_state(entity_id)
                     attrs = (st.get("attributes") or {}) if isinstance(st, dict) else {}
                     friendly = (attrs.get("friendly_name") or entity_id)
 
-                    # Nicer spoken action for remotes
                     if service == "turn_on":
                         spoken_action = "turned on"
                     elif service == "turn_off":
@@ -1065,7 +1174,6 @@ class HAControlPlugin(ToolPlugin):
                 friendly = (attrs.get("friendly_name") or entity_id)
                 unit = (attrs.get("unit_of_measurement") or "")
 
-                # If this is a remote entity and it has an "activity" attribute, prefer that for readability
                 if (entity_id or "").startswith("remote.") and isinstance(attrs, dict):
                     current_activity = attrs.get("current_activity") or attrs.get("activity")
                     if isinstance(current_activity, str) and current_activity.strip():

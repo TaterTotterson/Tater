@@ -7,6 +7,7 @@ import threading
 import time
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Tuple
+
 import redis
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel, Field
@@ -65,6 +66,20 @@ PLATFORM_SETTINGS = {
             "type": "number",
             "default": 8787,
             "description": "TCP port for the Tater ↔ HA bridge",
+        },
+
+        # --- Home Assistant connection (platform-owned) ---
+        "HA_BASE_URL": {
+            "label": "Home Assistant Base URL",
+            "type": "string",
+            "default": "http://homeassistant.local:8123",
+            "description": "Example: http://homeassistant.local:8123 or http://192.168.1.50:8123",
+        },
+        "HA_TOKEN": {
+            "label": "Home Assistant Long-Lived Access Token",
+            "type": "string",
+            "default": "",
+            "description": "Create in Home Assistant Profile → Long-Lived Access Tokens.",
         },
 
         # --- History and TTL controls ---
@@ -486,11 +501,24 @@ def _flatten_to_text(res: Any) -> str:
 # -------------------- Minimal HA client (platform local) --------------------
 class _HA:
     def __init__(self):
-        s = redis_client.hgetall("plugin_settings: Home Assistant") or redis_client.hgetall("plugin_settings:Home Assistant")
-        self.base = (s.get("HA_BASE_URL") or "http://homeassistant.local:8123").rstrip("/")
-        token = (s.get("HA_TOKEN") or "").strip()
+        # Prefer platform settings first
+        ps = _platform_settings() or {}
+        base = (ps.get("HA_BASE_URL") or "").strip()
+        token = (ps.get("HA_TOKEN") or "").strip()
+
+        # Backward-compatible fallback (legacy storage)
+        if not base or not token:
+            legacy = (
+                redis_client.hgetall("plugin_settings: Home Assistant")
+                or redis_client.hgetall("plugin_settings:Home Assistant")
+                or {}
+            )
+            base = base or (legacy.get("HA_BASE_URL") or "").strip()
+            token = token or (legacy.get("HA_TOKEN") or "").strip()
+
+        self.base = (base or "http://homeassistant.local:8123").rstrip("/")
         if not token:
-            raise ValueError("HA_TOKEN missing in 'Home Assistant' plugin settings.")
+            raise ValueError("HA_TOKEN missing in Home Assistant platform settings.")
         self.token = token
         self.headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
