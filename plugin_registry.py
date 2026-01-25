@@ -43,6 +43,9 @@ from plugins.broadcast import plugin as broadcast_plugin
 from plugins.voicepe_remote_timer import plugin as voicepe_remote_timer_plugin
 from plugins.zen_greeting import plugin as zen_greeting_plugin
 from plugins.phone_events_alert import plugin as phone_events_alert_plugin
+from plugins.weather_forecast import plugin as weather_forecast_plugin
+from plugins.unifi_network import plugin as unifi_network_plugin
+from plugins.unifi_protect import plugin as unifi_protect_plugin
 
 plugin_registry = {
     youtube_plugin.name: youtube_plugin,
@@ -90,4 +93,7 @@ plugin_registry = {
     voicepe_remote_timer_plugin.name: voicepe_remote_timer_plugin,
     zen_greeting_plugin.name: zen_greeting_plugin,
     phone_events_alert_plugin.name: phone_events_alert_plugin,
+    weather_forecast_plugin.name: weather_forecast_plugin,
+    unifi_network_plugin.name: unifi_network_plugin,
+    unifi_protect_plugin.name: unifi_protect_plugin,
 }
