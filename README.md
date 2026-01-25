@@ -44,20 +44,23 @@ Tater summarize this YouTube video https://youtube.com/watch?v=000000
 | `find_my_phone`              | Rings your phone using the Home Assistant Companion App notify service      | webui, homeassistant, homekit, xbmc        |
 | `ftp_browser`                | Allows users to browse FTP servers via Discord                              | discord                                   |
 | `ha_control`                 | Controls Home Assistant devices (lights, switches, climate, etc.)           | webui, homeassistant, homekit, xbmc        |
-| `lowfi_video`                | Generates lofi music videos, outputs 20-minute MP4s                        | webui                                      |
+| `lowfi_video`                | Generates lofi music videos, outputs 20-minute MP4s                         | webui                                      |
 | `mister_remote`              | Controls MiSTer FPGA via MiSTer Remote API                                  | discord, webui, irc, homeassistant, matrix, homekit |
 | `obsidian_note`              | Creates new notes in your Obsidian vault with AI-generated content          | webui                                      |
 | `obsidian_search`            | Searches your Obsidian vault and extracts relevant notes                    | webui                                      |
-| `overseerr_trending`         | Lists trending or upcoming movies / TV shows from Overseerr                | discord, webui, irc, matrix, homekit       |
-| `overseerr_details`          | Fetches full details for a specific movie or TV show from Overseerr        | discord, webui, irc, matrix, homeassistant, homekit |
+| `overseerr_trending`         | Lists trending or upcoming movies / TV shows from Overseerr                 | discord, webui, irc, matrix, homekit       |
+| `overseerr_details`          | Fetches full details for a specific movie or TV show from Overseerr         | discord, webui, irc, matrix, homeassistant, homekit |
 | `overseerr_request`          | Adds a movie or TV show request to Overseerr                                | webui, homeassistant, homekit              |
 | `premiumize_download`        | Checks Premiumize for cached file links and returns downloads               | discord, webui, irc, matrix                |
 | `premiumize_torrent`         | Checks if a torrent is cached on Premiumize                                 | discord                                   |
-| `sftpgo_account`             | Creates SFTPGo user accounts and credentials                                 | discord, webui, irc, matrix                |
+| `sftpgo_account`             | Creates SFTPGo user accounts and credentials                                | discord, webui, irc, matrix                |
 | `sftpgo_activity`            | Views SFTPGo user activity like transfers and sessions                      | discord, webui, irc, matrix                |
 | `tater_gits_add_feed`        | Adds a GitHub releases feed to the Tater Gits watcher                        | discord, webui, irc                        |
+| `unifi_network`              | Queries UniFi Network (clients/devices/site health) via the Integration API | webui, homeassistant, homekit, xbmc        |
+| `unifi_protect`              | Queries UniFi Protect sensors and camera snapshots via the Integration API  | webui, homeassistant, homekit, xbmc        |
 | `vision_describer`           | Analyzes uploaded images and returns AI-generated descriptions              | discord, webui, matrix                     |
-| `voicepe_remote_timer`       | Starts a device-local timer on a Voice PE via ESPHome                        | webui, homeassistant, homekit, xbmc        |
+| `voicepe_remote_timer`       | Starts a device-local timer on a Voice PE via ESPHome                       | webui, homeassistant, homekit, xbmc        |
+| `weather_forecast`           | Gets current weather + forecast (optional AQI/pollen/alerts) from WeatherAPI.com | discord, webui, irc, homeassistant, matrix, homekit, xbmc |
 | `web_search`                 | Performs web searches to help answer questions                              | discord, webui, irc, homeassistant, matrix, homekit, xbmc |
 | `web_summary`                | Summarizes content from a provided URL                                      | discord, webui, irc, matrix                |
 | `webdav_browser`             | Allows browsing and downloading files from WebDAV servers                   | discord                                   |
