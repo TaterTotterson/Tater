@@ -113,6 +113,24 @@ class HAControlPlugin(ToolPlugin):
             "default": "120",
             "description": "Chunk size for tournament selection when candidate list is very large."
         },
+        "HA_INTERPRET_CACHE_SECONDS": {
+            "label": "Interpret Cache Seconds",
+            "type": "string",
+            "default": "45",
+            "description": "Cache LLM interpret results per-query (seconds). Fast-path rules still run first."
+        },
+        "HA_CHOOSE_CACHE_SECONDS": {
+            "label": "Choose Cache Seconds",
+            "type": "string",
+            "default": "45",
+            "description": "Cache LLM chosen entity per-query+catalog (seconds)."
+        },
+        "HA_FASTPATH_ENABLED": {
+            "label": "Enable Fast-Path Parsing",
+            "type": "string",
+            "default": "true",
+            "description": "If true, common commands (lights, brightness, color, thermostat set, remote buttons) skip the interpret LLM."
+        },
     }
 
     # ----------------------------
@@ -127,6 +145,14 @@ class HAControlPlugin(ToolPlugin):
             return int(float(raw))
         except Exception:
             return default
+
+    def _get_bool_setting(self, key: str, default: bool) -> bool:
+        raw = (self._get_plugin_settings().get(key) or "").strip().lower()
+        if raw in ("1", "true", "yes", "on"):
+            return True
+        if raw in ("0", "false", "no", "off"):
+            return False
+        return default
 
     # ----------------------------
     # Internal helpers
@@ -249,14 +275,78 @@ class HAControlPlugin(ToolPlugin):
         return None
 
     # ----------------------------
+    # Fast-path intent parsing (skip interpret LLM for common commands)
+    # ----------------------------
+    def _fast_intent_from_text(self, query: str) -> Optional[dict]:
+        """
+        Returns a full intent dict when we're confident.
+        Otherwise returns None to fall back to the LLM interpreter.
+        """
+        q = (query or "").strip()
+        t = q.lower()
+
+        def mk(intent: str, action: str, domain_hint: str, desired: Optional[dict] = None, scope: str = "unknown") -> dict:
+            d = desired or {}
+            # ensure desired keys exist
+            out = {
+                "intent": intent,
+                "action": action,
+                "scope": scope,
+                "domain_hint": domain_hint,
+                "desired": {
+                    "temperature": d.get("temperature"),
+                    "brightness_pct": d.get("brightness_pct"),
+                    "color_name": d.get("color_name"),
+                    "activity": d.get("activity"),
+                    "command": d.get("command"),
+                }
+            }
+            return out
+
+        # Remote button presses
+        cmd = self._normalize_remote_command(q)
+        if cmd:
+            return mk("control", "send_command", "remote", {"command": cmd})
+
+        # Light color changes
+        if self._is_light_color_command(q):
+            cn = self._parse_color_name_from_text(q) or "white"
+            return mk("control", "turn_on", "light", {"color_name": cn})
+
+        # Light brightness changes
+        bp = self._parse_brightness_pct_from_text(q)
+        if bp is not None and any(w in t for w in ["light", "lights", "lamp", "bulb", "led", "hue", "sconce"]):
+            return mk("control", "turn_on", "light", {"brightness_pct": bp})
+
+        # Thermostat setpoint
+        tp = self._parse_temperature_from_text(q)
+        if tp is not None and any(w in t for w in ["thermostat", "hvac", "climate", "heat", "cool"]):
+            return mk("set_temperature", "set_temperature", "climate", {"temperature": tp})
+
+        # Generic on/off lights
+        if ("turn on" in t or "turn off" in t) and any(w in t for w in ["light", "lights", "lamp", "bulb", "led", "hue", "sconce"]):
+            act = "turn_on" if "turn on" in t else "turn_off"
+            return mk("control", act, "light")
+
+        return None
+
+    # ----------------------------
     # Power intent helpers (TVs usually live under media_player/switch)
     # ----------------------------
     def _is_power_request(self, action: str, query: str) -> bool:
-        a = (action or "").lower().strip()
+        """
+        Only treat as a "power" request when the text implies AV gear.
+        Do NOT treat generic turn_on/turn_off as "power" automatically.
+        """
         q = (query or "").lower()
-        if a in ("turn_on", "turn_off"):
-            return True
-        return any(p in q for p in ["turn on", "turn off", "power on", "power off"])
+        a = (action or "").lower().strip()
+
+        power_words = ("turn on", "turn off", "power on", "power off")
+        if not any(p in q for p in power_words) and a not in ("turn_on", "turn_off"):
+            return False
+
+        tv_words = ("tv", "television", "roku", "apple tv", "appletv", "shield", "fire tv", "chromecast", "receiver", "soundbar")
+        return any(w in q for w in tv_words)
 
     @staticmethod
     def _state_key(st: Any) -> str:
@@ -294,14 +384,11 @@ class HAControlPlugin(ToolPlugin):
             blob = f"{name} {eid}"
 
             s = 0
-            # strongest matches
             if rf and (name == rf or rf in blob or name in rf):
                 s += 50
-            # query overlap
-            for w in ["tv", "television", "oled", "lg", "samsung", "sony", "roku", "apple tv", "appletv", "shield"]:
+            for w in ["tv", "television", "oled", "lg", "samsung", "sony", "roku", "apple tv", "appletv", "shield", "receiver", "soundbar"]:
                 if w in q and w in blob:
                     s += 10
-            # generic boosts if user said "tv"
             if "tv" in q and "tv" in blob:
                 s += 5
             return s
@@ -333,8 +420,8 @@ class HAControlPlugin(ToolPlugin):
         mapping = [
             (["volume up", "vol up", "turn it up", "louder"], "volume_up"),
             (["volume down", "vol down", "turn it down", "quieter"], "volume_down"),
-            (["mute"], "mute"),
             (["unmute"], "mute"),
+            (["mute"], "mute"),
             (["pause"], "pause"),
             (["play"], "play"),
             (["stop"], "stop"),
@@ -504,11 +591,58 @@ class HAControlPlugin(ToolPlugin):
 
         return catalog
 
+    def _catalog_ts(self) -> Optional[float]:
+        """
+        Read catalog timestamp from cache if available (used for choose-cache keying).
+        """
+        key = self._catalog_cache_key()
+        try:
+            raw = redis_client.get(key)
+            if raw:
+                data = _json.loads(raw)
+                if isinstance(data, dict) and "ts" in data:
+                    return float(data["ts"])
+        except Exception:
+            pass
+        return None
+
     # ----------------------------
-    # Step 1: LLM interprets query → intent
+    # LLM caching helpers
+    # ----------------------------
+    def _cache_get_json(self, key: str) -> Optional[dict]:
+        try:
+            raw = redis_client.get(key)
+            if not raw:
+                return None
+            data = _json.loads(raw)
+            return data if isinstance(data, dict) else None
+        except Exception:
+            return None
+
+    def _cache_set_json(self, key: str, value: dict, ttl_seconds: int):
+        try:
+            redis_client.set(key, _json.dumps(value, ensure_ascii=False))
+            if ttl_seconds and ttl_seconds > 0:
+                try:
+                    redis_client.expire(key, int(ttl_seconds))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    # ----------------------------
+    # Step 1: LLM interprets query → intent (with cache)
     # ----------------------------
     async def _interpret_query(self, query: str, llm_client) -> dict:
         allowed_domain = "light,switch,climate,sensor,binary_sensor,cover,lock,fan,media_player,scene,script,select,remote"
+
+        cache_ttl = self._get_int_setting("HA_INTERPRET_CACHE_SECONDS", 45)
+        cache_key = f"ha_control:interpret:v1:{query.strip().lower()}"
+        if cache_ttl > 0:
+            cached = self._cache_get_json(cache_key)
+            if cached and isinstance(cached, dict) and cached.get("intent"):
+                return cached
+
         system = (
             "You are interpreting a smart-home request for Home Assistant.\n"
             "Return STRICT JSON only. No explanation.\n"
@@ -550,6 +684,10 @@ class HAControlPlugin(ToolPlugin):
         data = _json.loads(content)
         if not isinstance(data, dict):
             raise ValueError("LLM interpret_query did not return JSON object")
+
+        if cache_ttl > 0:
+            self._cache_set_json(cache_key, data, cache_ttl)
+
         return data
 
     # ----------------------------
@@ -586,28 +724,40 @@ class HAControlPlugin(ToolPlugin):
     def _domains_for_control(self, domain_hint: str, action: str, query: str) -> Set[str]:
         """
         Domain prioritization:
-        - For power requests (turn on/off), prefer media_player/switch first (TVs commonly live there)
-        - For button presses, remote is correct
+        - If we KNOW it's lights, always stay in light.
+        - Remote is for button presses/activities.
+        - "Power" routing only for TV-ish requests.
         """
         dh = (domain_hint or "").lower().strip()
 
+        # ✅ Never override a light intent
+        if dh == "light":
+            return {"light"}
+
+        # Remote requests stay remote-first
+        if dh == "remote":
+            return {"remote", "media_player"}
+
+        # Only TV-ish "power" requests prefer media_player/switch/remote
         if self._is_power_request(action, query):
             return {"media_player", "switch", "remote"}
 
-        if dh == "remote":
-            return {"remote", "media_player"}  # allow fallback for odd setups
-
+        # Respect other domain hints
         if dh:
             return {dh}
 
         return {"light", "switch", "fan", "media_player", "scene", "script", "cover", "lock", "remote"}
 
     # ----------------------------
-    # Step 3: LLM chooser (grounded) + tournament chunking
+    # Step 3: LLM chooser (grounded) + tournament chunking + cache + single-candidate shortcut
     # ----------------------------
     async def _choose_entity_llm(self, query: str, intent: dict, candidates: List[dict], llm_client) -> Optional[str]:
         if not candidates:
             return None
+
+        # ✅ If only one candidate, skip the LLM entirely
+        if len(candidates) == 1 and candidates[0].get("entity_id"):
+            return candidates[0]["entity_id"]
 
         mini = [{
             "entity_id": c.get("entity_id"),
@@ -621,6 +771,21 @@ class HAControlPlugin(ToolPlugin):
             return None
 
         candidate_set = {c["entity_id"] for c in mini if c.get("entity_id")}
+
+        # ✅ Choose-cache keyed by query + (approx) catalog timestamp
+        cache_ttl = self._get_int_setting("HA_CHOOSE_CACHE_SECONDS", 45)
+        cat_ts = self._catalog_ts()
+        cache_key = None
+        if cache_ttl > 0:
+            cache_key = f"ha_control:choose:v2:{(query or '').strip().lower()}:{str(cat_ts or 'none')}:{_json.dumps(intent, sort_keys=True, ensure_ascii=False)}"
+            try:
+                cached = self._cache_get_json(cache_key)
+                if cached and isinstance(cached, dict):
+                    ceid = cached.get("entity_id")
+                    if isinstance(ceid, str) and ceid in candidate_set:
+                        return ceid
+            except Exception:
+                pass
 
         system = (
             "Pick the SINGLE best Home Assistant entity for this user request.\n"
@@ -654,33 +819,37 @@ class HAControlPlugin(ToolPlugin):
         max_single = self._get_int_setting("HA_MAX_CANDIDATES", 400)
         chunk_size = self._get_int_setting("HA_CHUNK_SIZE", 120)
 
+        # Prefer single-shot when reasonable
+        picked: Optional[str] = None
         if len(mini) <= max_single:
             try:
-                eid = await ask_pick(mini)
-                if eid:
-                    return eid
+                picked = await ask_pick(mini)
             except Exception as e:
                 logger.warning(f"[ha_control] LLM choose failed single-shot: {e}")
 
-        try:
-            winners: List[dict] = []
-            for i in range(0, len(mini), chunk_size):
-                chunk = mini[i:i + chunk_size]
-                eid = await ask_pick(chunk)
-                if eid:
-                    winners.append(next(c for c in chunk if c["entity_id"] == eid))
+        # Tournament fallback
+        if not picked:
+            try:
+                winners: List[dict] = []
+                for i in range(0, len(mini), chunk_size):
+                    chunk = mini[i:i + chunk_size]
+                    eid = await ask_pick(chunk)
+                    if eid:
+                        winners.append(next(c for c in chunk if c["entity_id"] == eid))
 
-            if not winners:
-                return next(iter(candidate_set), None)
+                if winners:
+                    eid = await ask_pick(winners)
+                    picked = eid or winners[0]["entity_id"]
+                else:
+                    picked = next(iter(candidate_set), None)
+            except Exception as e:
+                logger.warning(f"[ha_control] LLM choose failed tournament: {e}")
+                picked = next(iter(candidate_set), None)
 
-            eid = await ask_pick(winners)
-            if eid:
-                return eid
+        if picked and cache_key and cache_ttl > 0:
+            self._cache_set_json(cache_key, {"entity_id": picked}, cache_ttl)
 
-            return winners[0]["entity_id"]
-        except Exception as e:
-            logger.warning(f"[ha_control] LLM choose failed tournament: {e}")
-            return next(iter(candidate_set), None)
+        return picked
 
     # ----------------------------
     # Service mapping + confirmation
@@ -803,11 +972,20 @@ class HAControlPlugin(ToolPlugin):
             logger.error(f"[ha_control] catalog build failed: {e}")
             return "I couldn't access Home Assistant states."
 
-        try:
-            intent = await self._interpret_query(query, llm_client)
-        except Exception as e:
-            logger.error(f"[ha_control] interpret_query failed: {e}")
-            return "I couldn't understand that request."
+        # ✅ Fast-path: try deterministic intent parsing first (skips interpret LLM for common commands)
+        intent: Optional[dict] = None
+        if self._get_bool_setting("HA_FASTPATH_ENABLED", True):
+            try:
+                intent = self._fast_intent_from_text(query)
+            except Exception:
+                intent = None
+
+        if not intent:
+            try:
+                intent = await self._interpret_query(query, llm_client)
+            except Exception as e:
+                logger.error(f"[ha_control] interpret_query failed: {e}")
+                return "I couldn't understand that request."
 
         intent_type = (intent.get("intent") or "").strip()
         action = (intent.get("action") or "").strip()
@@ -842,7 +1020,7 @@ class HAControlPlugin(ToolPlugin):
             if act:
                 desired["activity"] = act
 
-        # Light color hard-guard
+        # Light color hard-guard (extra safety)
         if self._is_light_color_command(query):
             intent_type = "control"
             action = "turn_on"
