@@ -20,91 +20,63 @@
 | `xbmc`            | OG Xbox integration for **XBMC4Xbox**, provided by the custom Cortana-powered skin and script at [skin.cortana.tater-xbmc](https://github.com/TaterTotterson/skin.cortana.tater-xbmc), enabling an on-console AI assistant with chat history, quick asks, and plugin-powered actions. |
 | `webui`           | Streamlit-based WebUI for chatting, configuring plugins, and managing settings. |
 
----
 
-## 🧩 Tater Plugin Overview
+## 🧩 Tater Plugin Ecosystem
 
-The following plugins can be triggered simply by **asking Tater** (after enabling them), for example:  
-Tater summarize this YouTube video https://youtube.com/watch?v=000000
+Tater now uses a **remote plugin store**.  
+Plugins are no longer bundled with Tater — they are installed, updated, and restored automatically from the Tater Shop.
 
-### 💬 Interactive / Conversational Plugins
+This means:
 
-| Plugin Name                  | Description                                                                 | Platform                                   |
-|------------------------------|-----------------------------------------------------------------------------|--------------------------------------------|
-| `automatic_plugin`           | Generates images using AUTOMATIC1111 API based on user prompt               | discord, webui                             |
-| `broadcast`                  | Sends a whole-house spoken announcement using Home Assistant TTS (Piper, Cloud, etc.) | webui, homeassistant, homekit, xbmc        |
-| `comfyui_audio_ace`          | Composes full-length songs using AceStep. Generates lyrics, tags, and MP3s  | discord, webui, homeassistant, matrix      |
-| `comfyui_image_plugin`       | Generates images with ComfyUI using custom workflow templates               | discord, webui, matrix                     |
-| `comfyui_image_video`        | Animates images into WebP loops using ComfyUI.                              | webui                                      |
-| `comfyui_music_video_plugin` | Generates complete AI music videos with lyrics, audio, and visuals          | webui                                      |
-| `comfyui_video_plugin`       | Creates videos from prompts using ComfyUI and video workflows               | webui                                      |
-| `device_compare`             | Compares two devices, fetching specs and FPS benchmarks from online sources | discord, webui, matrix                     |
-| `emoji_ai_responder`         | Picks a relevant emoji based on a message when someone reacts to it         | discord                                   |
-| `events_query`               | Summarizes all stored events by time, area, or activity                     | webui, homeassistant, homekit              |
-| `find_my_phone`              | Rings your phone using the Home Assistant Companion App notify service      | webui, homeassistant, homekit, xbmc        |
-| `ftp_browser`                | Allows users to browse FTP servers via Discord                              | discord                                   |
-| `ha_control`                 | Controls Home Assistant devices (lights, switches, climate, etc.)           | webui, homeassistant, homekit, xbmc        |
-| `lowfi_video`                | Generates lofi music videos, outputs 20-minute MP4s                         | webui                                      |
-| `mister_remote`              | Controls MiSTer FPGA via MiSTer Remote API                                  | discord, webui, irc, homeassistant, matrix, homekit |
-| `obsidian_note`              | Creates new notes in your Obsidian vault with AI-generated content          | webui                                      |
-| `obsidian_search`            | Searches your Obsidian vault and extracts relevant notes                    | webui                                      |
-| `overseerr_trending`         | Lists trending or upcoming movies / TV shows from Overseerr                 | discord, webui, irc, matrix, homekit       |
-| `overseerr_details`          | Fetches full details for a specific movie or TV show from Overseerr         | discord, webui, irc, matrix, homeassistant, homekit |
-| `overseerr_request`          | Adds a movie or TV show request to Overseerr                                | webui, homeassistant, homekit              |
-| `premiumize_download`        | Checks Premiumize for cached file links and returns downloads               | discord, webui, irc, matrix                |
-| `premiumize_torrent`         | Checks if a torrent is cached on Premiumize                                 | discord                                   |
-| `sftpgo_account`             | Creates SFTPGo user accounts and credentials                                | discord, webui, irc, matrix                |
-| `sftpgo_activity`            | Views SFTPGo user activity like transfers and sessions                      | discord, webui, irc, matrix                |
-| `tater_gits_add_feed`        | Adds a GitHub releases feed to the Tater Gits watcher                        | discord, webui, irc                        |
-| `unifi_network`              | Queries UniFi Network (clients/devices/site health) via the Integration API | webui, homeassistant, homekit, xbmc        |
-| `unifi_protect`              | Queries UniFi Protect sensors and camera snapshots via the Integration API  | webui, homeassistant, homekit, xbmc        |
-| `vision_describer`           | Analyzes uploaded images and returns AI-generated descriptions              | discord, webui, matrix                     |
-| `voicepe_remote_timer`       | Starts a device-local timer on a Voice PE via ESPHome                       | webui, homeassistant, homekit, xbmc        |
-| `weather_forecast`           | Gets current weather + forecast (optional AQI/pollen/alerts) from WeatherAPI.com | discord, webui, irc, homeassistant, matrix, homekit, xbmc |
-| `web_search`                 | Performs web searches to help answer questions                              | discord, webui, irc, homeassistant, matrix, homekit, xbmc |
-| `web_summary`                | Summarizes content from a provided URL                                      | discord, webui, irc, matrix                |
-| `webdav_browser`             | Allows browsing and downloading files from WebDAV servers                   | discord                                   |
-| `youtube_summary`            | Summarizes YouTube videos                                                   | discord, webui, irc, matrix                |
+- New plugins appear instantly
+- Plugin updates do **not** require a Tater update
+- Your enabled plugins auto-restore after rebuilds
+- No Docker data directory is required
 
 ---
 
-## ⚙️ Automation Plugins (Home Assistant)
+### 🛒 Tater Plugin Store
 
-These plugins are **not conversational**.  
-They are designed to be triggered from **Home Assistant automations** using the  
-**“Call Tater automation tool”** action provided by the  
-[Tater Automations](https://github.com/TaterTotterson/tater_automations) custom component.
+All plugins, versions, descriptions, and update history now live here:
 
-| Plugin Name              | Description |
-|--------------------------|-------------|
-| `camera_event`           | Captures a camera snapshot on motion, describes it with Vision AI, and logs a structured event with cooldown. |
-| `doorbell_alert`         | Doorbell-triggered snapshot + Vision AI description, spoken announcement, and event logging. |
-| `events_query_brief`     | Returns a very short, sensor-safe summary of recent household events by area and timeframe. |
-| `phone_events_alert`     | Captures a camera snapshot on trigger, describes what’s happening with Vision AI, and sends a high-priority phone notification with cooldown control. |
-| `weather_query_brief`    | Reads recent Home Assistant weather sensors and returns a short, dashboard-safe weather summary. |
-| `zen_greeting`           | Generates a calm, AI-written Zen-style message of the day for dashboards and daily automations. |
+👉 **https://github.com/TaterTotterson/Tater_Shop**
+
+This repository is the single source of truth for:
+
+- Interactive plugins  
+- Automation plugins  
+- RSS notifier plugins  
+- Platform compatibility  
+- Minimum Tater versions  
+- Checksums & secure updates  
+
+The WebUI reads directly from this manifest.
 
 ---
 
-## 📡 RSS Feed Watcher (Built-in)
+### 🔍 Browsing Plugins
 
-This system runs in the background and posts summarized RSS feed updates.
+From the WebUI you can:
 
-| Plugin Name        | Description                                           | Type            | Platform            |
-|--------------------|-------------------------------------------------------|------------------|---------------------|
-| `discord_notifier` | Posts RSS updates directly to a Discord channel       | RSS Notifier     | plugin-triggered    |
-| `telegram_notifier`| Sends RSS updates to Telegram                         | RSS Notifier     | plugin-triggered    |
-| `wordpress_poster` | Posts RSS updates to WordPress                        | RSS Notifier     | plugin-triggered    |
-| `ntfy_notifier`    | Sends RSS updates to an ntfy topic                    | RSS Notifier     | plugin-triggered    |
-| `list_feeds`       | Lists all watched RSS feeds                           | RSS Management   | discord, webui, irc |
-| `watch_feed`       | Adds a feed to the RSS watcher                        | RSS Management   | discord, webui, irc |
-| `unwatch_feed`     | Removes a feed from the RSS watcher                   | RSS Management   | discord, webui, irc |
+- Search by name or description  
+- Filter by platform (Discord, WebUI, Home Assistant, etc.)  
+- See installed vs store versions  
+- One-click install, update, remove  
+- Bulk “Update All”  
 
-Here are some examples of the RSS watcher in action:
-- **WordPress Poster**: [TaterByets.com](https://TaterBytes.com)
-- **WordPress Poster**: [ThePotatoConsole.com](https://ThePotatoConsole.com)
-- **WordPress Poster**: [TaterNews.com](https://TaterNews.com)
 ---
+
+### ♻️ Auto-Restore
+
+When Tater starts:
+
+> Any plugin that was **enabled** in Redis but missing on disk  
+> is automatically re-downloaded from the store.
+
+No config loss. No manual installs. No volume mapping required.
+
+---
+
 **Note**:
 - Do not use a thinking model with tater
 - Tater currently recommends using qwen3-next-80b, qwen3-coder-30b or Gemma3-27b

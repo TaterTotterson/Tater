@@ -8,14 +8,13 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 from dotenv import load_dotenv
-import re
 from datetime import datetime
 from plugin_registry import plugin_registry
 import threading
-import signal
 import time
-import base64
 from io import BytesIO
+import uuid
+
 from helpers import (
     parse_function_json,
     get_tater_name,
@@ -24,15 +23,15 @@ from helpers import (
     build_llm_host_from_env
 )
 
-
 load_dotenv()
-redis_host = os.getenv('REDIS_HOST', '127.0.0.1')
-redis_port = int(os.getenv('REDIS_PORT', 6379))
+redis_host = os.getenv("REDIS_HOST", "127.0.0.1")
+redis_port = int(os.getenv("REDIS_PORT", 6379))
 max_response_length = int(os.getenv("MAX_RESPONSE_LENGTH", 1500))
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger('discord')
+logger = logging.getLogger("discord")
 
+# NOTE: decode_responses=True means redis-py returns strings, not bytes.
 redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
 
 PLATFORM_SETTINGS = {
@@ -42,22 +41,53 @@ PLATFORM_SETTINGS = {
             "label": "Discord Bot Token",
             "type": "string",
             "default": "",
-            "description": "Your Discord bot token"
+            "description": "Your Discord bot token",
         },
         "admin_user_id": {
             "label": "Admin User ID",
             "type": "string",
             "default": "",
-            "description": "User ID allowed to DM the bot"
+            "description": "User ID allowed to DM the bot",
         },
         "response_channel_id": {
             "label": "Response Channel ID",
             "type": "string",
             "default": "",
-            "description": "Channel where the assistant replies"
-        }
-    }
+            "description": "Channel where the assistant replies",
+        },
+    },
 }
+
+# -------------------------
+# Attachment storage (NO base64 in history)
+# -------------------------
+ATTACH_PREFIX = "tater:blob:discord"
+
+
+def _blob_key():
+    return f"{ATTACH_PREFIX}:{uuid.uuid4().hex}"
+
+
+def store_blob(binary: bytes, ttl_seconds: int = 60 * 60 * 24 * 7) -> str:
+    """
+    Store raw bytes in Redis under a random key. Returns key.
+    Uses redis_client with decode_responses=True, so we must use a separate bytes client
+    OR encode via redis-py using a pipeline with a bytes client.
+
+    Easiest/cleanest: create a second client with decode_responses=False for blobs.
+    """
+    blob_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=False)
+    key = _blob_key().encode("utf-8")
+    blob_client.set(key, binary)
+    if ttl_seconds and ttl_seconds > 0:
+        blob_client.expire(key, int(ttl_seconds))
+    return key.decode("utf-8")
+
+
+def load_blob(key: str) -> bytes | None:
+    blob_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=False)
+    return blob_client.get(key.encode("utf-8"))
+
 
 # ---- LM template helpers ----
 def _to_template_msg(role, content, sender=None):
@@ -90,11 +120,14 @@ def _to_template_msg(role, content, sender=None):
                 txt = txt[:4000] + " …"
             return {"role": "assistant", "content": txt}
 
-        # 2) Media placeholders
-        if isinstance(payload, dict) and payload.get("type") in ("image", "audio", "video"):
+        # 2) Media placeholders (now stored as refs)
+        if isinstance(payload, dict) and payload.get("type") in ("image", "audio", "video", "file"):
             kind = payload.get("type")
             name = payload.get("name") or ""
-            return {"role": "assistant", "content": f"[{kind.capitalize()} from tool]{f' {name}' if name else ''}".strip()}
+            return {
+                "role": "assistant",
+                "content": f"[{kind.capitalize()} from tool]{f' {name}' if name else ''}".strip(),
+            }
 
         # 3) Structured text fields
         if isinstance(payload, dict):
@@ -115,19 +148,28 @@ def _to_template_msg(role, content, sender=None):
 
     # --- Represent plugin calls as plain text (so history still makes sense) ---
     if isinstance(content, dict) and content.get("marker") == "plugin_call":
-        as_text = json.dumps({
-            "function": content.get("plugin"),
-            "arguments": content.get("arguments", {})
-        }, indent=2)
+        as_text = json.dumps(
+            {"function": content.get("plugin"), "arguments": content.get("arguments", {})},
+            indent=2,
+        )
         return {"role": "assistant" if role == "assistant" else role, "content": as_text}
 
     # --- Media placeholders ---
     if isinstance(content, dict) and content.get("type") == "image":
-        return {"role": role, "content": [{"type": "image"}]}
+        name = content.get("name") or ""
+        return {"role": role, "content": f"[Image attached]{f' {name}' if name else ''}".strip()}
+
     if isinstance(content, dict) and content.get("type") == "audio":
-        return {"role": role, "content": [{"type": "text", "text": "[Audio]"}]}
+        name = content.get("name") or ""
+        return {"role": role, "content": f"[Audio attached]{f' {name}' if name else ''}".strip()}
+
     if isinstance(content, dict) and content.get("type") == "video":
-        return {"role": role, "content": [{"type": "text", "text": "[Video]"}]}
+        name = content.get("name") or ""
+        return {"role": role, "content": f"[Video attached]{f' {name}' if name else ''}".strip()}
+
+    if isinstance(content, dict) and content.get("type") == "file":
+        name = content.get("name") or ""
+        return {"role": role, "content": f"[File attached]{f' {name}' if name else ''}".strip()}
 
     # --- Text + fallback ---
     if isinstance(content, str):
@@ -172,13 +214,11 @@ def _enforce_user_assistant_alternation(loop_messages):
 
     return merged
 
-    if merged and merged[0]["role"] != "user":
-        merged.insert(0, {"role": "user", "content": ""})
-    return merged
 
 def get_plugin_enabled(plugin_name: str) -> bool:
     enabled = redis_client.hget("plugin_enabled", plugin_name)
     return bool(enabled and enabled.lower() == "true")
+
 
 def clear_channel_history(channel_id):
     key = f"tater:channel:{channel_id}:history"
@@ -189,9 +229,11 @@ def clear_channel_history(channel_id):
         logger.error(f"Error clearing chat history for channel {channel_id}: {e}")
         raise
 
+
 async def safe_send(channel, content, max_length=2000):
     for i in range(0, len(content), max_length):
-        await channel.send(content[i:i+max_length])
+        await channel.send(content[i : i + max_length])
+
 
 class discord_platform(commands.Bot):
     def __init__(self, llm_client, admin_user_id, response_channel_id, *args, **kwargs):
@@ -227,14 +269,15 @@ class discord_platform(commands.Bot):
             f"Description: {getattr(plugin, 'description', 'No description provided.')}\n"
             f"{plugin.usage}"
             for plugin in plugin_registry.values()
-            if ("discord" in plugin.platforms or "both" in plugin.platforms) and get_plugin_enabled(plugin.name)
+            if ("discord" in plugin.platforms or "both" in plugin.platforms)
+            and get_plugin_enabled(plugin.name)
         )
 
         behavior_guard = (
             "Only call a tool if the user's latest message clearly requests an action — such as 'generate', 'summarize', or 'download'.\n"
             "Never call a tool in response to casual or friendly messages like 'thanks', 'lol', or 'cool' — reply normally instead.\n"
         )
-        
+
         return (
             f"Current Date and Time is: {now}\n\n"
             f"{base_prompt}\n\n"
@@ -253,19 +296,23 @@ class discord_platform(commands.Bot):
 
     async def on_ready(self):
         first, last = get_tater_name()
-        activity = discord.Activity(name=first.lower(), state=last, type=discord.ActivityType.custom)
+        activity = discord.Activity(
+            name=first.lower(), state=last, type=discord.ActivityType.custom
+        )
         await self.change_presence(activity=activity)
-        logger.info(f"Bot is ready. Admin: {self.admin_user_id}, Response Channel: {self.response_channel_id}")
+        logger.info(
+            f"Bot is ready. Admin: {self.admin_user_id}, Response Channel: {self.response_channel_id}"
+        )
 
     async def generate_error_message(self, prompt: str, fallback: str, message: discord.Message):
         try:
             error_response = await self.llm.chat(
                 messages=[
                     {"role": "system", "content": "Write a short, friendly, plain-English error note."},
-                    {"role": "user", "content": prompt}
+                    {"role": "user", "content": prompt},
                 ]
             )
-            return error_response['message'].get('content', '').strip() or fallback
+            return error_response["message"].get("content", "").strip() or fallback
         except Exception as e:
             logger.error(f"Error generating error message: {e}")
             return fallback
@@ -292,7 +339,6 @@ class discord_platform(commands.Bot):
             if templ is not None:
                 loop_messages.append(templ)
 
-        # Merge consecutive same-role turns and ensure we start with 'user'
         return _enforce_user_assistant_alternation(loop_messages)
 
     async def save_message(self, channel_id, role, username, content):
@@ -306,7 +352,9 @@ class discord_platform(commands.Bot):
         if message.author == self.user:
             return
 
-        # Handle text + attachments
+        # -------------------------
+        # Save user message + attachments (NO base64 in history)
+        # -------------------------
         if message.attachments:
             for attachment in message.attachments:
                 try:
@@ -314,7 +362,6 @@ class discord_platform(commands.Bot):
                         continue
 
                     file_bytes = await attachment.read()
-                    file_b64 = base64.b64encode(file_bytes).decode("utf-8")
 
                     if attachment.content_type.startswith("image/"):
                         file_type = "image"
@@ -325,20 +372,27 @@ class discord_platform(commands.Bot):
                     else:
                         file_type = "file"
 
+                    blob_key = store_blob(file_bytes)
+
                     file_obj = {
                         "type": file_type,
                         "name": attachment.filename,
                         "mimetype": attachment.content_type,
-                        "data": file_b64
+                        "blob_key": blob_key,
+                        "size": len(file_bytes),
                     }
 
                     await self.save_message(message.channel.id, "user", message.author.name, file_obj)
                 except Exception as e:
                     logger.warning(f"Failed to store attachment ({attachment.filename}): {e}")
         else:
-            # Just a text message
-            await self.save_message(message.channel.id, "user", message.author.display_name, message.content)
+            await self.save_message(
+                message.channel.id, "user", message.author.display_name, message.content
+            )
 
+        # -------------------------
+        # Permission checks
+        # -------------------------
         if isinstance(message.channel, discord.DMChannel):
             if message.author.id != self.admin_user_id:
                 return
@@ -352,9 +406,8 @@ class discord_platform(commands.Bot):
 
         async with message.channel.typing():
             try:
-                logger.debug(f"Sending messages to LLM: {messages_list}")
                 response = await self.llm.chat(messages_list)
-                response_text = response['message'].get('content', '').strip()
+                response_text = response["message"].get("content", "").strip()
                 if not response_text:
                     await message.channel.send("I'm not sure how to respond to that.")
                     return
@@ -367,8 +420,10 @@ class discord_platform(commands.Bot):
 
                     # Save structured plugin_call marker
                     await self.save_message(
-                        message.channel.id, "assistant", "assistant",
-                        {"marker": "plugin_call", "plugin": func, "arguments": args}
+                        message.channel.id,
+                        "assistant",
+                        "assistant",
+                        {"marker": "plugin_call", "plugin": func, "arguments": args},
                     )
 
                     if func in plugin_registry and get_plugin_enabled(func):
@@ -376,24 +431,24 @@ class discord_platform(commands.Bot):
 
                         # Show waiting message if defined
                         if hasattr(plugin, "waiting_prompt_template"):
-                            wait_msg = plugin.waiting_prompt_template.format(mention=message.author.mention)
+                            wait_msg = plugin.waiting_prompt_template.format(
+                                mention=message.author.mention
+                            )
 
-                            # Directly fetch the waiting message text from LLM
                             wait_response = await self.llm.chat(
                                 messages=[
                                     {"role": "system", "content": "Write one short, friendly status line."},
-                                    {"role": "user", "content": wait_msg}
+                                    {"role": "user", "content": wait_msg},
                                 ]
                             )
                             wait_text = wait_response["message"]["content"].strip()
 
-                            # Save waiting message to Redis
                             await self.save_message(
-                                message.channel.id, "assistant", "assistant",
-                                {"marker": "plugin_wait", "content": wait_text}
+                                message.channel.id,
+                                "assistant",
+                                "assistant",
+                                {"marker": "plugin_wait", "content": wait_text},
                             )
-
-                            # Send waiting message to Discord
                             await safe_send(message.channel, wait_text, self.max_response_length)
 
                         result = await plugin.handle_discord(message, args, self.llm)
@@ -403,36 +458,52 @@ class discord_platform(commands.Bot):
                                 if isinstance(item, str):
                                     await safe_send(message.channel, item, self.max_response_length)
                                     await self.save_message(
-                                        message.channel.id, "assistant", "assistant",
-                                        {"marker": "plugin_response", "phase": "final", "content": item}
+                                        message.channel.id,
+                                        "assistant",
+                                        "assistant",
+                                        {"marker": "plugin_response", "phase": "final", "content": item},
                                     )
 
                                 elif isinstance(item, dict):
-                                    content_type = item.get("type")
+                                    content_type = item.get("type", "file")
                                     filename = item.get("name", "output.bin")
+                                    mimetype = item.get("mimetype", "")
 
                                     try:
-                                        if "bytes" in item:
-                                            binary = item["bytes"]
-                                        elif "data" in item:
-                                            binary = base64.b64decode(item["data"])
+                                        # Prefer bytes; support legacy blob_key; (no base64)
+                                        binary = None
+                                        if "bytes" in item and isinstance(item["bytes"], (bytes, bytearray)):
+                                            binary = bytes(item["bytes"])
+                                        elif "blob_key" in item and isinstance(item["blob_key"], str):
+                                            binary = load_blob(item["blob_key"])
                                         else:
-                                            logger.warning(f"Missing 'bytes' or 'data' for {content_type} content.")
+                                            logger.warning(
+                                                f"Missing 'bytes' or 'blob_key' for {content_type} content."
+                                            )
+                                            continue
+
+                                        if binary is None:
+                                            logger.warning(f"Blob load failed for {filename}")
                                             continue
 
                                         file = discord.File(BytesIO(binary), filename=filename)
                                         await message.channel.send(file=file)
 
+                                        # Store only a lightweight ref in history
+                                        blob_key = store_blob(binary)
                                         content_obj = {
                                             "type": content_type,
                                             "name": filename,
-                                            "mimetype": item.get("mimetype", ""),
-                                            "data": base64.b64encode(binary).decode("utf-8")
+                                            "mimetype": mimetype,
+                                            "blob_key": blob_key,
+                                            "size": len(binary),
                                         }
 
                                         await self.save_message(
-                                            message.channel.id, "assistant", "assistant",
-                                            {"marker": "plugin_response", "phase": "final", "content": content_obj}
+                                            message.channel.id,
+                                            "assistant",
+                                            "assistant",
+                                            {"marker": "plugin_response", "phase": "final", "content": content_obj},
                                         )
 
                                     except Exception as e:
@@ -441,15 +512,17 @@ class discord_platform(commands.Bot):
                         elif isinstance(result, str):
                             await safe_send(message.channel, result, self.max_response_length)
                             await self.save_message(
-                                message.channel.id, "assistant", "assistant",
-                                {"marker": "plugin_response", "phase": "final", "content": result}
+                                message.channel.id,
+                                "assistant",
+                                "assistant",
+                                {"marker": "plugin_response", "phase": "final", "content": result},
                             )
 
                     else:
                         error = await self.generate_error_message(
                             f"Unknown or disabled function call: {func}.",
                             f"Function `{func}` is not available or disabled.",
-                            message
+                            message,
                         )
                         await message.channel.send(error)
                         return
@@ -461,21 +534,20 @@ class discord_platform(commands.Bot):
             except Exception as e:
                 logger.error(f"Exception in message handler: {e}")
                 fallback = "An error occurred while processing your request."
-                error_prompt = f"Generate a friendly error message to {message.author.mention} explaining that an error occurred while processing the request."
+                error_prompt = (
+                    f"Generate a friendly error message to {message.author.mention} "
+                    "explaining that an error occurred while processing the request."
+                )
                 error_msg = await self.generate_error_message(error_prompt, fallback, message)
                 await message.channel.send(error_msg)
-
 
     async def on_reaction_add(self, reaction, user):
         if user.bot:
             return
 
         for plugin in plugin_registry.values():
-            # Only call plugins that implement on_reaction_add
             if not hasattr(plugin, "on_reaction_add"):
                 continue
-
-            # Respect plugin toggle (even for passive ones)
             if not get_plugin_enabled(plugin.name):
                 continue
 
@@ -483,6 +555,7 @@ class discord_platform(commands.Bot):
                 await plugin.on_reaction_add(reaction, user)
             except Exception as e:
                 logger.error(f"[{plugin.name}] Error in on_reaction_add: {e}")
+
 
 class AdminCommands(commands.Cog):
     def __init__(self, bot: discord_platform):
@@ -497,13 +570,15 @@ class AdminCommands(commands.Cog):
             await interaction.response.send_message("Failed to clear channel history.")
             logger.error(f"Error in /wipe command: {e}")
 
+
 async def setup_commands(client: commands.Bot):
     logger.info("Commands setup complete.")
 
+
 def run(stop_event=None):
-    token     = redis_client.hget("discord_platform_settings", "discord_token")
-    admin_id  = redis_client.hget("discord_platform_settings", "admin_user_id")
-    channel_id= redis_client.hget("discord_platform_settings", "response_channel_id")
+    token = redis_client.hget("discord_platform_settings", "discord_token")
+    admin_id = redis_client.hget("discord_platform_settings", "admin_user_id")
+    channel_id = redis_client.hget("discord_platform_settings", "response_channel_id")
 
     llm_client = get_llm_client_from_env()
     logger.info(f"[Discord] LLM client → {build_llm_host_from_env()}")
@@ -517,7 +592,7 @@ def run(stop_event=None):
         admin_user_id=int(admin_id),
         response_channel_id=int(channel_id),
         command_prefix="!",
-        intents=discord.Intents.all()
+        intents=discord.Intents.all(),
     )
 
     loop = asyncio.new_event_loop()
@@ -527,13 +602,11 @@ def run(stop_event=None):
         try:
             await client.start(token)
         except asyncio.CancelledError:
-            # Expected on shutdown
             pass
         except Exception as e:
             print(f"❌ Discord bot crashed: {e}")
 
     def monitor_stop():
-        # Only start monitor if a stop_event was provided
         if not stop_event:
             return
         while not stop_event.is_set():
@@ -545,7 +618,6 @@ def run(stop_event=None):
         async def shutdown():
             try:
                 await client.close()
-                # discord.py keeps an aiohttp.ClientSession at client.http.session
                 if hasattr(client, "http") and getattr(client.http, "session", None):
                     await client.http.session.close()
                 await asyncio.sleep(0.1)
@@ -554,16 +626,12 @@ def run(stop_event=None):
             finally:
                 shutdown_complete.set()
 
-        # Schedule shutdown coroutine on the bot’s loop
         loop.call_soon_threadsafe(lambda: asyncio.ensure_future(shutdown()))
-        # Wait up to 15s for it to finish
         shutdown_complete.wait(timeout=15)
 
-    # Start the monitor thread if we have a stop_event
     if stop_event:
         threading.Thread(target=monitor_stop, daemon=True).start()
 
-    # Run the bot — ensures the loop is closed afterwards
     try:
         loop.run_until_complete(run_bot())
     finally:
