@@ -1412,7 +1412,11 @@ def render_plugin_store_page():
                         ok, msg = install_plugin_from_shop_item(item, url.strip())
                         if ok:
                             st.success(f"{msg} (updated {installed_ver} → {store_ver})")
-                            _refresh_plugins_after_fs_change()
+
+                            plugin_registry_mod.reload_plugins()
+                            st.session_state.pop("shop_platform_filter", None)
+                            st.session_state.pop("shop_search", None)
+
                             st.rerun()
                         else:
                             st.error(msg)
@@ -1444,7 +1448,11 @@ def render_plugin_store_page():
                     ok, msg = install_plugin_from_shop_item(item, url.strip())
                     if ok:
                         st.success(msg)
-                        _refresh_plugins_after_fs_change()
+
+                        plugin_registry_mod.reload_plugins()
+                        st.session_state.pop("shop_platform_filter", None)
+                        st.session_state.pop("shop_search", None)
+
                         st.rerun()
                     else:
                         st.error(msg)
