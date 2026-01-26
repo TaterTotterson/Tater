@@ -10,10 +10,10 @@ import threading
 from datetime import datetime
 from typing import Any, Dict, Optional, List
 import contextlib
-import base64
-from io import BytesIO
 import imghdr
 import hashlib
+import uuid
+from io import BytesIO
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -90,8 +90,6 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("nio").setLevel(logging.WARNING)
 logging.getLogger("nio.rooms").setLevel(logging.ERROR)
 logging.getLogger("nio.client.base_client").setLevel(logging.ERROR)
-
-# Most of the spam you pasted comes from these:
 logging.getLogger("nio.crypto").setLevel(logging.ERROR)
 logging.getLogger("nio.crypto.log").setLevel(logging.ERROR)
 
@@ -178,13 +176,39 @@ PLATFORM_SETTINGS = {
     },
 }
 
-# ---------------- Redis ----------------
+# ---------------- Redis (text/json history) ----------------
 redis_client = redis.Redis(
     host=os.getenv("REDIS_HOST", "127.0.0.1"),
     port=int(os.getenv("REDIS_PORT", 6379)),
     db=0,
     decode_responses=True,
 )
+
+# ---------------- Redis (binary blobs, NO base64) ----------------
+redis_host = os.getenv("REDIS_HOST", "127.0.0.1")
+redis_port = int(os.getenv("REDIS_PORT", 6379))
+blob_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=False)
+
+BLOB_PREFIX = "tater:blob:matrix"
+
+
+def _blob_key() -> str:
+    return f"{BLOB_PREFIX}:{uuid.uuid4().hex}"
+
+
+def store_blob(binary: bytes, ttl_seconds: int = 60 * 60 * 24 * 7) -> str:
+    key = _blob_key()
+    blob_client.set(key.encode("utf-8"), binary)
+    if ttl_seconds and ttl_seconds > 0:
+        blob_client.expire(key.encode("utf-8"), int(ttl_seconds))
+    return key
+
+
+def load_blob(key: str) -> Optional[bytes]:
+    if not key:
+        return None
+    return blob_client.get(key.encode("utf-8"))
+
 
 # ---------------- LLM ----------------
 llm_client = None
@@ -206,33 +230,42 @@ def _guess_mime(data: bytes) -> str:
 
 async def _apply_avatar_from_redis(client):
     """
-    Upload avatar from Redis key 'tater:avatar' and set as Matrix profile picture.
-    Only re-uploads if the content changed since the last successful set.
+    Avatar is now stored as raw bytes blob (no base64) at key 'tater:avatar_blob_key'
+    which points to a blob key in Redis binary store.
+    Back-compat: If 'tater:avatar' exists (base64), we still support it.
     Caches:
       - matrix:last_avatar_hash  (sha1 of bytes)
       - matrix:last_avatar_mxc   (mxc://… from homeserver)
     """
-    b64 = redis_client.get("tater:avatar")
-    if not b64:
-        return
+    data = None
 
-    # Decode and hash
-    try:
-        data = base64.b64decode(b64)
-    except Exception:
-        logger.warning("[Matrix] Avatar in Redis is not valid base64; skipping.")
+    # Preferred: blob ref
+    blob_ref = redis_client.get("tater:avatar_blob_key")
+    if blob_ref:
+        data = load_blob(blob_ref)
+
+    # Back-compat: old base64 key
+    if data is None:
+        b64 = redis_client.get("tater:avatar")
+        if b64:
+            try:
+                import base64
+                data = base64.b64decode(b64)
+            except Exception:
+                logger.warning("[Matrix] Avatar in Redis is not valid base64; skipping.")
+                return
+
+    if not data:
         return
 
     data_hash = hashlib.sha1(data).hexdigest()
     last_hash = redis_client.get("matrix:last_avatar_hash")
     last_mxc  = redis_client.get("matrix:last_avatar_mxc")
 
-    # Skip upload if unchanged
     if last_hash and data_hash == last_hash and last_mxc:
         logger.info("[Matrix] Avatar unchanged; skipping upload.")
         return
 
-    # Guess MIME + extension
     mime = _guess_mime(data)
     ext = {
         "image/jpeg": "jpg",
@@ -244,7 +277,6 @@ async def _apply_avatar_from_redis(client):
     }.get(mime, "bin")
     filename = f"avatar.{ext}"
 
-    # Upload & set
     try:
         bio = BytesIO(data)
         bio.seek(0)
@@ -255,7 +287,6 @@ async def _apply_avatar_from_redis(client):
             filename=filename,
             filesize=len(data),
         )
-        # Some nio versions return (UploadResponse, None)
         if isinstance(up, tuple):
             up = up[0]
 
@@ -265,9 +296,8 @@ async def _apply_avatar_from_redis(client):
             return
 
         await client.set_avatar(mxc)
-        logger.info("[Matrix] Avatar updated from WebUI Redis.")
+        logger.info("[Matrix] Avatar updated from Redis.")
 
-        # Cache after success
         redis_client.set("matrix:last_avatar_hash", data_hash)
         redis_client.set("matrix:last_avatar_mxc", mxc)
 
@@ -308,31 +338,6 @@ def save_matrix_message(room_id: str, role: str, username: str, content: Any):
     redis_client.rpush(key, json.dumps({"role": role, "username": username, "content": content}))
     if max_store > 0:
         redis_client.ltrim(key, -max_store, -1)
-
-def load_matrix_history(room_id: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
-    if limit is None:
-        limit = int(redis_client.get("tater:max_llm") or 8)
-    key = _room_history_key(room_id)
-    raw = redis_client.lrange(key, -limit, -1)
-    loop_messages: List[Dict[str, Any]] = []
-    for entry in raw:
-        data = json.loads(entry)
-        role = data.get("role", "user")
-        sender = data.get("username", role)
-        content = data.get("content")
-
-        # Represent non-text payloads as placeholders if present
-        if isinstance(content, dict) and content.get("type") in ["image", "audio", "video", "file"]:
-            name = content.get("name", "file")
-            content = f"[{content['type'].capitalize()}: {name}]"
-
-        if role not in ("user", "assistant"):
-            role = "assistant"
-
-        templ = _to_template_msg(role, content, sender=sender if role == "user" else None)
-        if templ is not None:
-            loop_messages.append(templ)
-    return _enforce_user_assistant_alternation(loop_messages)
 
 def _to_template_msg(role: str, content: Any, sender: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
@@ -381,14 +386,6 @@ def _to_template_msg(role: str, content: Any, sender: Optional[str] = None) -> O
     return {"role": role, "content": str(content)}
 
 def _enforce_user_assistant_alternation(loop_messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Merge consecutive messages with the same role to keep history compact.
-
-    IMPORTANT:
-    Do NOT insert a blank user message at the beginning.
-    Some LLM backends/models can return empty completions when an empty
-    user turn (content="") appears in the prompt.
-    """
     merged: List[Dict[str, Any]] = []
     for m in loop_messages:
         if not m:
@@ -399,6 +396,31 @@ def _enforce_user_assistant_alternation(loop_messages: List[Dict[str, Any]]) -> 
         else:
             merged.append(m)
     return merged
+
+def load_matrix_history(room_id: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    if limit is None:
+        limit = int(redis_client.get("tater:max_llm") or 8)
+    key = _room_history_key(room_id)
+    raw = redis_client.lrange(key, -limit, -1)
+    loop_messages: List[Dict[str, Any]] = []
+    for entry in raw:
+        data = json.loads(entry)
+        role = data.get("role", "user")
+        sender = data.get("username", role)
+        content = data.get("content")
+
+        # Show placeholders for media dicts in the LLM prompt (no blobs injected)
+        if isinstance(content, dict) and content.get("type") in ["image", "audio", "video", "file"]:
+            name = content.get("name", "file")
+            content = f"[{content['type'].capitalize()}: {name}]"
+
+        if role not in ("user", "assistant"):
+            role = "assistant"
+
+        templ = _to_template_msg(role, content, sender=sender if role == "user" else None)
+        if templ is not None:
+            loop_messages.append(templ)
+    return _enforce_user_assistant_alternation(loop_messages)
 
 # ---------------- System prompt (Matrix-scoped) ----------------
 def build_system_prompt() -> str:
@@ -457,26 +479,17 @@ def _keywords() -> List[str]:
     return [s.strip().lower() for s in raw.split(",") if s.strip()]
 
 def _should_respond(policy: str, body: str, my_user_id: str, my_display: Optional[str]) -> bool:
-    """
-    Return True if the bot should respond to this message under the current policy.
-    'mention_only' -> respond only when mentioned or keyword matched.
-    'all_messages' -> respond to every message.
-    """
     if policy == "all_messages":
         return True
 
-    # mention_only
     body_l = (body or "").lower()
 
-    # explicit MXID
     if my_user_id and my_user_id.lower() in body_l:
         return True
 
-    # display name
     if my_display and my_display.lower() in body_l:
         return True
 
-    # localpart of MXID (@local:server)
     try:
         if my_user_id.startswith("@"):
             localpart = my_user_id[1:].split(":", 1)[0].lower()
@@ -485,7 +498,6 @@ def _should_respond(policy: str, body: str, my_user_id: str, my_display: Optiona
     except Exception:
         pass
 
-    # custom keywords
     for kw in _keywords():
         if kw and kw in body_l:
             return True
@@ -500,7 +512,6 @@ class MatrixPlatform:
         self.access_token = _get_setting("matrix_access_token")
         self.password = _get_setting("matrix_password")
         self.device_name = _get_setting("matrix_device_name", "TaterBot")
-        # strict new default, no back-compat
         self.response_policy = _get_setting("response_policy", "mention_only")
         self.max_chunk = _get_int_setting("max_response_length", 4000)
         self.store_path = _get_setting("matrix_store_path", "/app/matrix-store")
@@ -509,7 +520,6 @@ class MatrixPlatform:
         self.trust_unverified_devices = _get_bool_setting("trust_unverified_devices", True)
         self.ready_ts_ms: Optional[int] = None
 
-        # Ensure store dir exists and is writable
         try:
             os.makedirs(self.store_path, exist_ok=True)
             os.chmod(self.store_path, 0o700)
@@ -522,7 +532,7 @@ class MatrixPlatform:
 
         cfg = AsyncClientConfig(
             store_sync_tokens=True,
-            encryption_enabled=True,          # E2EE-ready
+            encryption_enabled=True,
             pickle_key=self.pickle_key or None,
         )
         self.client = AsyncClient(
@@ -548,21 +558,14 @@ class MatrixPlatform:
             logger.debug(f"[Matrix] keys_query failed: {e}")
 
     async def _persist_device_if_possible(self, user_id: str, dev):
-        """
-        Try to persist trust flag updates in the store (works on SqliteStore).
-        We don't assume any specific nio version—best-effort only.
-        """
         try:
             store = getattr(self.client, "store", None)
             if not store:
                 return
-            # Common variants across nio versions:
             if hasattr(store, "save_device"):
                 try:
-                    # some versions want (user_id, device)
                     store.save_device(user_id, dev)
                 except TypeError:
-                    # some versions want (device) only
                     store.save_device(dev)
             elif hasattr(store, "save_device_keys"):
                 try:
@@ -573,10 +576,6 @@ class MatrixPlatform:
             pass
 
     async def _auto_trust_room_devices(self, room) -> None:
-        """
-        If enabled, mark UNVERIFIED/blacklisted devices for all room members as
-        trusted so we can encrypt to them. Also clears 'blacklisted' flags.
-        """
         if not self.trust_unverified_devices:
             return
 
@@ -594,12 +593,11 @@ class MatrixPlatform:
 
         for uid in member_ids:
             try:
-                devices = store_map[uid]  # mapping device_id -> Device
+                devices = store_map[uid]
             except Exception:
                 devices = {}
             for dev_id, dev in (devices or {}).items():
                 try:
-                    # Clear blacklist if set
                     if hasattr(dev, "blacklisted") and getattr(dev, "blacklisted"):
                         try:
                             dev.blacklisted = False
@@ -608,7 +606,6 @@ class MatrixPlatform:
                         except Exception:
                             logger.debug(f"[Matrix] Could not clear blacklist for {uid} {dev_id}")
 
-                    # Preferred: official verify if available
                     if crypto and hasattr(crypto, "verify_device"):
                         try:
                             crypto.verify_device(uid, dev_id)
@@ -618,7 +615,6 @@ class MatrixPlatform:
                         except Exception:
                             pass
 
-                    # Older nio: boolean flag
                     if hasattr(dev, "verified"):
                         try:
                             dev.verified = True
@@ -628,7 +624,6 @@ class MatrixPlatform:
                         except Exception:
                             pass
 
-                    # Newer nio: enum
                     if TrustState and hasattr(dev, "trust_state"):
                         try:
                             if dev.trust_state != TrustState.VERIFIED:
@@ -641,145 +636,21 @@ class MatrixPlatform:
                 except Exception as e:
                     logger.debug(f"[Matrix] Trust update failed for {uid} {dev_id}: {e}")
 
-    async def _send_media_item(self, room_id: str, item: Dict[str, Any]):
-        """
-        Accepts a dict like:
-          {"type":"image"|"audio"|"video"|"file",
-           "name":"foo.png",
-           "data":"<base64>",
-           "mimetype":"image/png"}
-        Uploads to Matrix and sends the correct m.room.message event.
-        If the room is encrypted and attachments helpers are available,
-        uses the encrypted 'file' payload per the Matrix spec.
-        """
-        from io import BytesIO
-        try:
-            try:
-                from nio.crypto import attachments  # optional, for encrypted media
-            except Exception:
-                attachments = None
-
-            kind = (item.get("type") or "file").lower()
-            name = item.get("name") or "output.bin"
-            mimetype = item.get("mimetype") or "application/octet-stream"
-            b64 = item.get("data")
-            if not b64:
-                await self._send_with_trust(room_id, f"[{kind.capitalize()}: {name}]")
-                return
-
-            try:
-                raw = base64.b64decode(b64)
-            except Exception:
-                await self._send_with_trust(room_id, f"[{kind.capitalize()}: {name}]")
-                return
-
-            # is the room encrypted?
-            room = self.client.rooms.get(room_id)
-            is_encrypted = bool(getattr(room, "encrypted", False))
-            if is_encrypted and attachments is None:
-                logger.warning("[Matrix] Encrypted room but nio.crypto.attachments unavailable; "
-                               "sending unencrypted media (install matrix-nio[crypto] to fix).")
-
-            # choose bytes to upload (ciphertext if encrypted+helpers)
-            upload_bytes = raw
-            file_obj = None
-            if is_encrypted and attachments is not None:
-                # returns (ciphertext_bytes, file_info_dict{iv,key,hashes})
-                upload_bytes, file_obj = attachments.encrypt_attachment(raw)
-
-            # upload to homeserver
-            bio = BytesIO(upload_bytes)
-            bio.seek(0)
-            try:
-                up = await self.client.upload(
-                    bio,
-                    content_type=mimetype,
-                    filename=name,
-                    filesize=len(upload_bytes),
-                )
-                if isinstance(up, tuple):  # older nio may return (resp, None)
-                    up = up[0]
-                mxc = getattr(up, "content_uri", None)
-                if not mxc:
-                    await self._send_with_trust(room_id, f"[{kind.capitalize()}: {name}]")
-                    return
-            except Exception as e:
-                logger.warning(f"[Matrix] media upload failed: {e}")
-                await self._send_with_trust(room_id, f"[{kind.capitalize()}: {name}]")
-                return
-
-            # build the event content
-            msgtype = {
-                "image": "m.image",
-                "audio": "m.audio",
-                "video": "m.video",
-            }.get(kind, "m.file")
-
-            content = {
-                "msgtype": msgtype,
-                "body": name,
-                "info": {
-                    "mimetype": mimetype,
-                    "size": len(raw),  # original size
-                },
-            }
-
-            if is_encrypted and file_obj is not None:
-                # encrypted media: include 'file' (with url) and NO top-level 'url'
-                file_payload = dict(file_obj)
-                file_payload["url"] = mxc
-                content["file"] = file_payload
-            else:
-                # unencrypted media: plain 'url'
-                content["url"] = mxc
-
-            # send
-            kwargs = {}
-            if self.trust_unverified_devices:
-                kwargs["ignore_unverified_devices"] = True
-
-            try:
-                await self.client.room_send(
-                    room_id=room_id,
-                    message_type="m.room.message",
-                    content=content,
-                    **kwargs,
-                )
-            except TypeError:
-                # older nio without ignore_unverified_devices
-                await self.client.room_send(
-                    room_id=room_id,
-                    message_type="m.room.message",
-                    content=content,
-                )
-            except Exception as e:
-                logger.warning(f"[Matrix] sending media event failed: {e}")
-                await self._send_with_trust(room_id, f"[{kind.capitalize()}: {name}]")
-
-        except Exception as e:
-            logger.warning(f"[Matrix] _send_media_item unexpected error: {e}")
-            await self._send_with_trust(room_id, f"[{(item.get('type') or 'file').capitalize()}: {item.get('name') or 'output'}]")
-
+    # ---------- Sending helpers ----------
     class _TypingScope:
-        """
-        Async context manager to show 'typing…' in a Matrix room.
-        Periodically refreshes the typing notice until exited.
-        """
         def __init__(self, client, room_id: str, refresh_ms: int = 20000):
             self.client = client
             self.room_id = room_id
-            self.refresh_ms = max(5000, int(refresh_ms))  # safety floor
+            self.refresh_ms = max(5000, int(refresh_ms))
             self._task = None
             self._alive = False
 
         async def _pinger(self):
-            # Keep the typing notice alive; servers typically expire it ~30s.
             try:
                 while self._alive:
                     try:
                         await self.client.room_typing(self.room_id, True, timeout=self.refresh_ms)
                     except Exception:
-                        # Non-fatal; try again next cycle
                         pass
                     await asyncio.sleep(self.refresh_ms / 1000 * 0.8)
             except asyncio.CancelledError:
@@ -800,14 +671,12 @@ class MatrixPlatform:
                 self._task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await self._task
-            # Best-effort send 'stopped typing'
             try:
                 await self.client.room_typing(self.room_id, False)
             except Exception:
                 pass
 
     def typing(self, room_id: str) -> "_TypingScope":
-        """Convenience factory to use: `async with self.typing(room.room_id): ...`"""
         return MatrixPlatform._TypingScope(self.client, room_id)
 
     async def _send_chunks(self, room_id: str, content: str):
@@ -828,7 +697,7 @@ class MatrixPlatform:
             i = k
 
             if not part:
-                continue  # avoid empty message events
+                continue
 
             payload = {"msgtype": "m.text", "body": part}
             html_part = _md_to_html(part)
@@ -852,13 +721,8 @@ class MatrixPlatform:
             await asyncio.sleep(0.02)
 
     async def _send_with_trust(self, room_id: str, content: str):
-        """
-        Send text to a room; if encryption errors complain about unverified/blacklisted
-        devices, auto-trust (if enabled) and retry once.
-        """
         room = self.client.rooms.get(room_id)
         if room and self.trust_unverified_devices:
-            # Proactively trust before sending to avoid first-failure loop
             await self._auto_trust_room_devices(room)
 
         try:
@@ -879,18 +743,139 @@ class MatrixPlatform:
             else:
                 logger.error(f"[Matrix] Send failed: {e}")
 
+    async def _send_media_item(self, room_id: str, item: Dict[str, Any]):
+        """
+        New format (NO base64):
+          {
+            "type": "image"|"audio"|"video"|"file",
+            "name": "foo.png",
+            "mimetype": "image/png",
+            "bytes": b"..."
+          }
+        Also supported:
+          { ... "blob_key": "tater:blob:..." }   # bytes stored in Redis binary store
+        Back-compat:
+          { ... "data": "<base64>" }             # will still work if any old plugin returns it
+        """
+        try:
+            try:
+                from nio.crypto import attachments  # optional, for encrypted media
+            except Exception:
+                attachments = None
+
+            kind = (item.get("type") or "file").lower()
+            name = item.get("name") or "output.bin"
+            mimetype = item.get("mimetype") or "application/octet-stream"
+
+            raw: Optional[bytes] = None
+
+            if "bytes" in item and isinstance(item["bytes"], (bytes, bytearray)):
+                raw = bytes(item["bytes"])
+            elif "blob_key" in item and isinstance(item["blob_key"], str):
+                raw = load_blob(item["blob_key"])
+            elif "data" in item and isinstance(item["data"], str):
+                # back-compat only
+                try:
+                    import base64
+                    raw = base64.b64decode(item["data"])
+                except Exception:
+                    raw = None
+
+            if not raw:
+                await self._send_with_trust(room_id, f"[{kind.capitalize()}: {name}]")
+                return
+
+            room = self.client.rooms.get(room_id)
+            is_encrypted = bool(getattr(room, "encrypted", False))
+            if is_encrypted and attachments is None:
+                logger.warning(
+                    "[Matrix] Encrypted room but nio.crypto.attachments unavailable; "
+                    "sending unencrypted media (install matrix-nio[crypto] to fix)."
+                )
+
+            upload_bytes = raw
+            file_obj = None
+            if is_encrypted and attachments is not None:
+                upload_bytes, file_obj = attachments.encrypt_attachment(raw)
+
+            bio = BytesIO(upload_bytes)
+            bio.seek(0)
+
+            try:
+                up = await self.client.upload(
+                    bio,
+                    content_type=mimetype,
+                    filename=name,
+                    filesize=len(upload_bytes),
+                )
+                if isinstance(up, tuple):
+                    up = up[0]
+                mxc = getattr(up, "content_uri", None)
+                if not mxc:
+                    await self._send_with_trust(room_id, f"[{kind.capitalize()}: {name}]")
+                    return
+            except Exception as e:
+                logger.warning(f"[Matrix] media upload failed: {e}")
+                await self._send_with_trust(room_id, f"[{kind.capitalize()}: {name}]")
+                return
+
+            msgtype = {
+                "image": "m.image",
+                "audio": "m.audio",
+                "video": "m.video",
+            }.get(kind, "m.file")
+
+            content = {
+                "msgtype": msgtype,
+                "body": name,
+                "info": {
+                    "mimetype": mimetype,
+                    "size": len(raw),
+                },
+            }
+
+            if is_encrypted and file_obj is not None:
+                file_payload = dict(file_obj)
+                file_payload["url"] = mxc
+                content["file"] = file_payload
+            else:
+                content["url"] = mxc
+
+            kwargs = {}
+            if self.trust_unverified_devices:
+                kwargs["ignore_unverified_devices"] = True
+
+            try:
+                await self.client.room_send(
+                    room_id=room_id,
+                    message_type="m.room.message",
+                    content=content,
+                    **kwargs,
+                )
+            except TypeError:
+                await self.client.room_send(
+                    room_id=room_id,
+                    message_type="m.room.message",
+                    content=content,
+                )
+            except Exception as e:
+                logger.warning(f"[Matrix] sending media event failed: {e}")
+                await self._send_with_trust(room_id, f"[{kind.capitalize()}: {name}]")
+
+        except Exception as e:
+            logger.warning(f"[Matrix] _send_media_item unexpected error: {e}")
+            await self._send_with_trust(room_id, f"[{(item.get('type') or 'file').capitalize()}: {item.get('name') or 'output'}]")
+
     # ---------- Login / lifecycle ----------
     async def login(self):
-        # Try access token first
         if self.client.access_token:
             try:
                 await self.client.whoami()
                 logger.info("[Matrix] Using provided access token.")
             except Exception:
                 logger.warning("[Matrix] Access token invalid; falling back to password.")
-                self.client.access_token = None  # force password path
+                self.client.access_token = None
 
-        # Password login if needed
         if not self.client.access_token:
             if not self.password:
                 raise RuntimeError("Matrix: no valid access token or password.")
@@ -900,19 +885,16 @@ class MatrixPlatform:
             else:
                 raise RuntimeError(f"[Matrix] Login error: {resp}")
 
-        # Upload our device keys (safe to call repeatedly)
         try:
             await self.client.keys_upload()
         except Exception as e:
             logger.debug(f"[Matrix] keys_upload skipped/failed: {e}")
 
-        # Populate the local device store with latest keys
         try:
             await self.client.keys_query()
         except Exception as e:
             logger.debug(f"[Matrix] keys_query failed: {e}")
 
-        # Mark our own device as verified (helps other clients trust us)
         try:
             if self.client.device_id:
                 await self.client.verify_device(self.user_id, self.client.device_id)
@@ -920,25 +902,6 @@ class MatrixPlatform:
         except Exception as e:
             logger.debug(f"[Matrix] Self-verify failed (non-fatal): {e}")
 
-        # Auto-verify every known, non-blacklisted device in our device store
-        try:
-            store = getattr(self.client, "device_store", None)
-            devices_by_user = getattr(store, "devices", {}) if store else {}
-            for user_id, devs in devices_by_user.items():
-                for dev_id, dev in devs.items():
-                    if getattr(dev, "blacklisted", False):
-                        continue
-                    if getattr(dev, "verified", False):
-                        continue
-                    try:
-                        await self.client.verify_device(user_id, dev_id)
-                        logger.info(f"[Matrix] Auto-verified device {dev_id} for {user_id}")
-                    except Exception as ve:
-                        logger.debug(f"[Matrix] Could not verify {user_id} {dev_id}: {ve}")
-        except Exception as e:
-            logger.debug(f"[Matrix] Auto-trust pass failed (non-fatal): {e}")
-
-        # Apply avatar from WebUI (Redis key 'tater:avatar')
         try:
             await _apply_avatar_from_redis(self.client)
         except Exception as e:
@@ -995,10 +958,6 @@ class MatrixPlatform:
             return
 
         if not _should_respond(self.response_policy, body, self.user_id, self.display_name_cache):
-            logger.debug(
-                "[Matrix] Ignoring due to policy. policy=%s display=%s user_id=%s body=%r",
-                self.response_policy, self.display_name_cache, self.user_id, body
-            )
             return
 
         save_matrix_message(room.room_id, "user", sender, body)
@@ -1007,11 +966,11 @@ class MatrixPlatform:
         history = load_matrix_history(room.room_id)
         messages = [{"role": "system", "content": system_prompt}] + history
 
-        # ← NEW: show typing while thinking / running plugins
         async with self.typing(room.room_id):
             try:
                 resp = await llm_client.chat(messages)
-                text = resp["message"].get("content", "").strip()
+                text = (resp.get("message", {}) or {}).get("content", "").strip()
+
                 if not text:
                     await self._send_with_trust(room.room_id, "I'm not sure how to respond.")
                     return
@@ -1029,20 +988,27 @@ class MatrixPlatform:
                     if func in plugin_registry and get_plugin_enabled(func):
                         plugin = plugin_registry[func]
 
+                        # Optional: waiting status line
                         if hasattr(plugin, "waiting_prompt_template"):
-                            wait_prompt = plugin.waiting_prompt_template.format(mention=self.display_name_cache or "there")
-                            wait_resp = await llm_client.chat(
-                                messages=[
-                                    {"role": "system", "content": "Write one short, friendly status line."},
-                                    {"role": "user", "content": wait_prompt}
-                                ]
-                            )
-                            wait_text = wait_resp["message"].get("content", "").strip()
-                            await self._send_with_trust(room.room_id, wait_text)
-                            save_matrix_message(
-                                room.room_id, "assistant", "assistant",
-                                {"marker": "plugin_wait", "content": wait_text}
-                            )
+                            try:
+                                wait_prompt = plugin.waiting_prompt_template.format(
+                                    mention=self.display_name_cache or "there"
+                                )
+                                wait_resp = await llm_client.chat(
+                                    messages=[
+                                        {"role": "system", "content": "Write one short, friendly status line."},
+                                        {"role": "user", "content": wait_prompt},
+                                    ]
+                                )
+                                wait_text = (wait_resp.get("message", {}) or {}).get("content", "").strip()
+                                if wait_text:
+                                    await self._send_with_trust(room.room_id, wait_text)
+                                    save_matrix_message(
+                                        room.room_id, "assistant", "assistant",
+                                        {"marker": "plugin_wait", "content": wait_text}
+                                    )
+                            except Exception as e:
+                                logger.debug(f"[Matrix] waiting line failed (non-fatal): {e}")
 
                         handler = getattr(plugin, "handle_matrix", None)
                         if not callable(handler):
@@ -1060,63 +1026,85 @@ class MatrixPlatform:
                                 args=args,
                                 llm_client=llm_client
                             )
-
-                            # --- Handle plugin returns like Discord/WebUI ---
-                            if isinstance(result, list):
-                                for item in result:
-                                    if isinstance(item, str):
-                                        await self._send_with_trust(room.room_id, item)
-                                        save_matrix_message(
-                                            room.room_id, "assistant", "assistant",
-                                            {"marker": "plugin_response", "phase": "final", "content": item}
-                                        )
-                                    elif isinstance(item, dict):
-                                        if item.get("type") in ("image", "audio", "video", "file"):
-                                            await self._send_media_item(room.room_id, item)
-                                        else:
-                                            kind = item.get("type", "file").capitalize()
-                                            name = item.get("name", "output")
-                                            await self._send_with_trust(room.room_id, f"[{kind}: {name}]")
-                                        save_matrix_message(
-                                            room.room_id, "assistant", "assistant",
-                                            {"marker": "plugin_response", "phase": "final", "content": item}
-                                        )
-
-                            elif isinstance(result, dict):
-                                if result.get("type") in ("image", "audio", "video", "file"):
-                                    await self._send_media_item(room.room_id, result)
-                                else:
-                                    kind = result.get("type", "file").capitalize()
-                                    name = result.get("name", "output")
-                                    await self._send_with_trust(room.room_id, f"[{kind}: {name}]")
-                                save_matrix_message(
-                                    room.room_id, "assistant", "assistant",
-                                    {"marker": "plugin_response", "phase": "final", "content": result}
-                                )
-
-                            elif isinstance(result, str):
-                                await self._send_with_trust(room.room_id, result)
-                                save_matrix_message(
-                                    room.room_id, "assistant", "assistant",
-                                    {"marker": "plugin_response", "phase": "final", "content": result}
-                                )
-                            else:
-                                logger.debug(f"[{func}] Plugin returned unrecognized type: {type(result)}")
-                            # -----------------------
-
-                        except Exception:
-                            logger.exception(f"[Matrix] Plugin '{func}' error")
-                            msg = f"I tried to run {func} but hit an error."
+                        except Exception as e:
+                            logger.error(f"[Matrix] Plugin '{func}' crashed: {e}", exc_info=True)
+                            msg = "❌ That tool ran into an error."
                             await self._send_with_trust(room.room_id, msg)
-                            save_matrix_message(room.room_id, "assistant", "assistant", msg)
+                            save_matrix_message(
+                                room.room_id, "assistant", "assistant",
+                                {"marker": "plugin_response", "phase": "final", "content": msg}
+                            )
+                            return
+
+                        def _save_plugin_response(payload):
+                            save_matrix_message(
+                                room.room_id, "assistant", "assistant",
+                                {"marker": "plugin_response", "phase": "final", "content": payload}
+                            )
+
+                        if isinstance(result, list):
+                            for item in result:
+                                if isinstance(item, str):
+                                    await self._send_with_trust(room.room_id, item)
+                                    _save_plugin_response(item)
+
+                                elif isinstance(item, dict):
+                                    # Send media if applicable
+                                    if item.get("type") in ("image", "audio", "video", "file"):
+                                        await self._send_media_item(room.room_id, item)
+                                    else:
+                                        kind = item.get("type", "file").capitalize()
+                                        name = item.get("name", "output")
+                                        await self._send_with_trust(room.room_id, f"[{kind}: {name}]")
+
+                                    # Store only refs / metadata (no base64)
+                                    if item.get("type") in ("image", "audio", "video", "file") and "bytes" in item and isinstance(item["bytes"], (bytes, bytearray)):
+                                        blob_key = store_blob(bytes(item["bytes"]))
+                                        safe_item = dict(item)
+                                        safe_item.pop("bytes", None)
+                                        safe_item["blob_key"] = blob_key
+                                        safe_item["size"] = len(load_blob(blob_key) or b"")
+                                        _save_plugin_response(safe_item)
+                                    else:
+                                        _save_plugin_response(item)
+
+                                else:
+                                    logger.debug(f"[{func}] Plugin returned unrecognized list item type: {type(item)}")
+
+                        elif isinstance(result, dict):
+                            if result.get("type") in ("image", "audio", "video", "file"):
+                                await self._send_media_item(room.room_id, result)
+
+                                if "bytes" in result and isinstance(result["bytes"], (bytes, bytearray)):
+                                    blob_key = store_blob(bytes(result["bytes"]))
+                                    safe_item = dict(result)
+                                    safe_item.pop("bytes", None)
+                                    safe_item["blob_key"] = blob_key
+                                    safe_item["size"] = len(load_blob(blob_key) or b"")
+                                    _save_plugin_response(safe_item)
+                                else:
+                                    _save_plugin_response(result)
+                            else:
+                                kind = result.get("type", "file").capitalize()
+                                name = result.get("name", "output")
+                                await self._send_with_trust(room.room_id, f"[{kind}: {name}]")
+                                _save_plugin_response(result)
+
+                        elif isinstance(result, str):
+                            await self._send_with_trust(room.room_id, result)
+                            _save_plugin_response(result)
+
+                        else:
+                            logger.debug(f"[{func}] Plugin returned unrecognized type: {type(result)}")
+
                         return
 
-                # No function call; plain assistant text
+                # Normal (non-tool) reply
                 await self._send_with_trust(room.room_id, text)
                 save_matrix_message(room.room_id, "assistant", "assistant", text)
 
             except Exception as e:
-                logger.error(f"[Matrix] Exception handling message: {e}")
+                logger.error(f"[Matrix] Exception handling message: {e}", exc_info=True)
                 await self._send_with_trust(room.room_id, "Sorry, I ran into an error while thinking.")
 
     async def on_text(self, room, event: RoomMessageText):
@@ -1156,10 +1144,8 @@ class MatrixPlatform:
         except Exception:
             pass
 
-        # Mark "now" as the line after which we will process events (from_now mode)
         self.ready_ts_ms = int(time.time() * 1000)
 
-        # Proactively prime trust for all currently joined rooms
         if self.trust_unverified_devices:
             try:
                 for room in list(self.client.rooms.values()):
@@ -1184,6 +1170,7 @@ class MatrixPlatform:
 def run(stop_event: Optional[threading.Event] = None):
     global llm_client
     llm_client = get_llm_client_from_env()
+    logger.info(f"[Matrix] LLM client → {build_llm_host_from_env()}")
 
     bot = MatrixPlatform()
     loop = asyncio.new_event_loop()
