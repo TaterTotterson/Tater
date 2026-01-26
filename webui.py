@@ -29,6 +29,12 @@ from helpers import (
     get_llm_client_from_env,
     build_llm_host_from_env
 )
+from plugin_settings import (
+    get_plugin_enabled,
+    set_plugin_enabled,
+    get_plugin_settings,
+    save_plugin_settings,
+)
 
 # Remove any prior handlers
 for handler in logging.root.handlers[:]:
@@ -297,16 +303,6 @@ def load_avatar_image(avatar_b64):
         redis_client.hdel("chat_settings", "avatar")
         return None
 
-def get_plugin_enabled(plugin_name):
-    # Try to get the state from Redis; default to False (disabled) if not set.
-    enabled = redis_client.hget("plugin_enabled", plugin_name)
-    if enabled is None:
-        return False
-    return enabled.lower() == "true"
-
-def set_plugin_enabled(plugin_name, enabled):
-    redis_client.hset("plugin_enabled", plugin_name, "true" if enabled else "false")
-
 def get_rss_enabled():
     enabled = redis_client.get("rss:enabled")
     if enabled is None:
@@ -488,15 +484,6 @@ def render_platform_controls(platform, redis_client):
         st.rerun()
 
 # ----------------- PLUGIN SETTINGS -----------------
-def get_plugin_settings(category):
-    key = f"plugin_settings:{category}"
-    return redis_client.hgetall(key)
-
-def save_plugin_settings(category, settings_dict):
-    key = f"plugin_settings:{category}"
-    # Ensure all values are converted to strings before saving to Redis
-    str_settings = {k: str(v) for k, v in settings_dict.items()}
-    redis_client.hset(key, mapping=str_settings)
 
 def get_plugin_description(plugin):
     return getattr(plugin, "plugin_dec", None) or getattr(plugin, "description", "")
