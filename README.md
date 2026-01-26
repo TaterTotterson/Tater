@@ -26,15 +26,6 @@
 Tater now uses a **remote plugin store**.  
 Plugins are no longer bundled with Tater — they are installed, updated, and restored automatically from the Tater Shop.
 
-This means:
-
-- New plugins appear instantly
-- Plugin updates do **not** require a Tater update
-- Your enabled plugins auto-restore after rebuilds
-- No Docker data directory is required
-
----
-
 ### 🛒 Tater Plugin Store
 
 All plugins, versions, descriptions, and update history now live here:
