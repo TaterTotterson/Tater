@@ -31,17 +31,6 @@ All plugins, versions, descriptions, and update history now live here:
 
 👉 **https://github.com/TaterTotterson/Tater_Shop**
 
-This repository is the single source of truth for:
-
-- Interactive plugins  
-- Automation plugins  
-- RSS notifier plugins  
-- Platform compatibility  
-- Minimum Tater versions  
-- Checksums & secure updates  
-
-The WebUI reads directly from this manifest.
-
 ---
 
 ### 🔍 Browsing Plugins
