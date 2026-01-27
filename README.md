@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://raw.githubusercontent.com/TaterTotterson/Tater/refs/heads/main/images/tater-animated.webp" alt="Tater Discord Bot" width="200"/>
+  <img src="https://github.com/user-attachments/assets/47c60b47-e10c-44d6-bdc5-1f9da2479980" alt="Tater AI Assistant" width="300"/>
   <h1>Tater</h1>
 </div>
 
