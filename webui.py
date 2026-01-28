@@ -223,55 +223,81 @@ def clear_plugin_redis_data(plugin_id: str, category_hint: str | None = None) ->
 def _refresh_plugins_after_fs_change():
     plugin_registry_mod.reload_plugins()
 
-def auto_restore_missing_plugins(manifest_url: str):
+def auto_restore_missing_plugins(manifest_url: str) -> tuple[bool, list[str], list[str]]:
     """
     Restore any plugins that are ENABLED in Redis but missing on disk.
     Uses the shop manifest as the source of install URLs.
     """
+    enabled_missing = []
+    restored = []
+    changed = False
+
+    try:
+        enabled_states = redis_client.hgetall("plugin_enabled")
+    except Exception as e:
+        logging.error(f"[restore] Failed to read plugin_enabled: {e}")
+        return changed, restored, enabled_missing
+
+    for plugin_id, raw in enabled_states.items():
+        enabled = str(raw).lower() == "true"
+        if enabled and not is_plugin_installed(plugin_id):
+            enabled_missing.append(plugin_id)
+
+    if not enabled_missing:
+        return changed, restored, enabled_missing
+
     try:
         manifest = fetch_shop_manifest(manifest_url)
     except Exception as e:
-        logging.error(f"Failed to load manifest for restore: {e}")
-        return
+        logging.error(f"[restore] Failed to load manifest: {e}")
+        return changed, restored, enabled_missing
 
     items = manifest.get("plugins") or manifest.get("items") or manifest.get("data") or []
     if not isinstance(items, list):
-        logging.error("Manifest format unexpected during restore.")
-        return
+        logging.error("[restore] Manifest format unexpected.")
+        return changed, restored, enabled_missing
 
-    restored = []
-
-    # If a plugin was enabled, it should be restorable. We can only restore things
-    # that exist in the manifest, so we iterate manifest ids and check Redis enabled.
+    by_id = {}
     for item in items:
         pid = (item.get("id") or "").strip()
-        if not pid:
+        if pid:
+            by_id[pid] = item
+
+    for pid in enabled_missing:
+        item = by_id.get(pid)
+        if not item:
+            logging.error(f"[restore] {pid} enabled but not found in manifest")
             continue
+        ok, msg = install_plugin_from_shop_item(item, manifest_url)
+        if ok:
+            restored.append(pid)
+            changed = True
+        else:
+            logging.error(f"[restore] {pid}: {msg}")
 
-        # IMPORTANT: avoid bool("false") == True
-        try:
-            raw = get_plugin_enabled(pid)
-            enabled = raw if isinstance(raw, bool) else str(raw).lower() == "true"
-        except Exception:
-            enabled = False
+    return changed, restored, enabled_missing
 
-        if enabled and not is_plugin_installed(pid):
-            ok, msg = install_plugin_from_shop_item(item, manifest_url)
-            if ok:
-                restored.append(pid)
-            else:
-                logging.error(f"[restore] {pid}: {msg}")
+def ensure_plugins_ready():
+    if st.session_state.get("plugins_ready"):
+        return
+
+    os.makedirs(PLUGIN_DIR, exist_ok=True)
+    shop_url = (redis_client.get("tater:shop_manifest_url") or SHOP_MANIFEST_URL_DEFAULT).strip()
+
+    changed, restored, enabled_missing = auto_restore_missing_plugins(shop_url)
+    if changed:
+        _refresh_plugins_after_fs_change()
 
     if restored:
-        logging.info(f"Restored missing enabled plugins: {', '.join(restored)}")
-    else:
-        logging.info("No enabled plugins needed restoring (or none were enabled).")
+        st.session_state["plugins_ready_notice"] = (
+            "Restored missing enabled plugins: " + ", ".join(restored)
+        )
+    elif enabled_missing:
+        st.session_state["plugins_ready_notice"] = (
+            "Some enabled plugins were missing and could not be restored."
+        )
 
-if not st.session_state.get("did_auto_restore_plugins"):
-    shop_url = (redis_client.get("tater:shop_manifest_url") or SHOP_MANIFEST_URL_DEFAULT).strip()
-    auto_restore_missing_plugins(shop_url)
-    _refresh_plugins_after_fs_change()
-    st.session_state["did_auto_restore_plugins"] = True
+    st.session_state["plugins_ready"] = True
 
 
 # ------------------ FILE BLOB HELPERS ------------------
@@ -459,6 +485,8 @@ if redis_client.get("webui:needs_rerun") == "true":
     redis_client.delete("webui:needs_rerun")
     st.rerun()
 
+ensure_plugins_ready()
+
 llm_client = get_llm_client_from_env()
 logging.getLogger("webui").debug(f"LLM client → {build_llm_host_from_env()}")
 
@@ -476,6 +504,11 @@ st.set_page_config(
     page_title=f"{first_name} Chat",
     page_icon=":material/tooltip_2:"
 )
+
+# Optional one-time notice after startup gate.
+if st.session_state.get("plugins_ready_notice") and not st.session_state.get("plugins_ready_notice_shown"):
+    st.info(st.session_state["plugins_ready_notice"])
+    st.session_state["plugins_ready_notice_shown"] = True
 
 # ---- session_state containers (must exist before platform start/stop) ----
 st.session_state.setdefault("platform_threads", {})
@@ -1676,6 +1709,7 @@ def _enforce_user_assistant_alternation(loop_messages):
 
 # ----------------- PROCESSING FUNCTIONS -----------------
 async def process_message(user_name, message_content):
+    ensure_plugins_ready()
     final_system_prompt = build_system_prompt()
     max_llm = int(redis_client.get("tater:max_llm") or 8)
     history = load_chat_history_tail(max_llm)
