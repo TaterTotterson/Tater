@@ -54,8 +54,6 @@ When Tater starts:
 
 No config loss. No manual installs. No volume mapping required.
 
----
-
 **Note**:
 - Do not use a thinking model with tater
 - Tater currently recommends using qwen3-next-80b, qwen3-coder-30b or Gemma3-27b
