@@ -973,7 +973,7 @@ def render_plugin_card(plugin):
 
                 if st.button("Remove", key=f"uninstall_{plugin_id}"):
                     # Grab category before uninstall (plugin may disappear from registry after file removal)
-                    loaded = plugin_registry.get(registry_id)
+                    loaded = plugin_registry.get(plugin_id)
                     category_hint = getattr(loaded, "settings_category", None) if loaded else None
 
                     ok, msg = uninstall_plugin_file(plugin_id)
@@ -2368,6 +2368,9 @@ elif active_view == "RSS Feed":
 
 elif active_view == "Plugin Store":
     render_plugin_store_page()
+
+elif active_view == "Settings":
+    render_settings_page()
 
 elif active_view == "Settings":
     render_settings_page()
