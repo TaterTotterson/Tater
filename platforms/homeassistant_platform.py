@@ -68,20 +68,6 @@ PLATFORM_SETTINGS = {
             "description": "TCP port for the Tater ↔ HA bridge",
         },
 
-        # --- Home Assistant connection (platform-owned) ---
-        "HA_BASE_URL": {
-            "label": "Home Assistant Base URL",
-            "type": "string",
-            "default": "http://homeassistant.local:8123",
-            "description": "Example: http://homeassistant.local:8123 or http://192.168.1.50:8123",
-        },
-        "HA_TOKEN": {
-            "label": "Home Assistant Long-Lived Access Token",
-            "type": "string",
-            "default": "",
-            "description": "Create in Home Assistant Profile → Long-Lived Access Tokens.",
-        },
-
         # --- History and TTL controls ---
         "SESSION_HISTORY_MAX": {
             "label": "Session History (turns)",
@@ -501,10 +487,10 @@ def _flatten_to_text(res: Any) -> str:
 # -------------------- Minimal HA client (platform local) --------------------
 class _HA:
     def __init__(self):
-        # Prefer platform settings first
-        ps = _platform_settings() or {}
-        base = (ps.get("HA_BASE_URL") or "").strip()
-        token = (ps.get("HA_TOKEN") or "").strip()
+        # Prefer shared Home Assistant settings first
+        shared = redis_client.hgetall("homeassistant_settings") or {}
+        base = (shared.get("HA_BASE_URL") or "").strip()
+        token = (shared.get("HA_TOKEN") or "").strip()
 
         # Backward-compatible fallback (legacy storage)
         if not base or not token:
@@ -518,7 +504,7 @@ class _HA:
 
         self.base = (base or "http://homeassistant.local:8123").rstrip("/")
         if not token:
-            raise ValueError("HA_TOKEN missing in Home Assistant platform settings.")
+            raise ValueError("HA_TOKEN missing in Home Assistant settings.")
         self.token = token
         self.headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
