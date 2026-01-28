@@ -117,8 +117,6 @@ Key benefits:
 
 This integration is required if you want Tater to participate directly in Home Assistant conversations or voice control.
 
----
-
 ### ⚙️ tater_automations
 https://github.com/TaterTotterson/tater_automations
 
@@ -134,7 +132,7 @@ This component is required if you want to trigger Tater tools directly from Home
 
 ---
 
-### Local Installation (Advanced)
+## Local Installation (Advanced)
 
 ### Prerequisites
 - Python 3.11
