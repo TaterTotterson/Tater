@@ -137,6 +137,7 @@ def install_plugin_from_shop_item(item: dict, manifest_url: str) -> tuple[bool, 
             return False, f"{plugin_id}: manifest item missing 'entry'."
 
         # Resolve relative paths against the manifest URL
+        entry = entry.lstrip("/")  # IMPORTANT: urljoin breaks raw GitHub paths if entry starts with /
         full_url = urljoin(manifest_url, entry)
 
         path = _safe_plugin_file_path(plugin_id)
@@ -278,9 +279,6 @@ def auto_restore_missing_plugins(manifest_url: str) -> tuple[bool, list[str], li
     return changed, restored, enabled_missing
 
 def ensure_plugins_ready():
-    if st.session_state.get("plugins_ready"):
-        return
-
     os.makedirs(PLUGIN_DIR, exist_ok=True)
     shop_url = (redis_client.get("tater:shop_manifest_url") or SHOP_MANIFEST_URL_DEFAULT).strip()
 
@@ -296,8 +294,6 @@ def ensure_plugins_ready():
         st.session_state["plugins_ready_notice"] = (
             "Some enabled plugins were missing and could not be restored."
         )
-
-    st.session_state["plugins_ready"] = True
 
 
 # ------------------ FILE BLOB HELPERS ------------------
@@ -977,7 +973,7 @@ def render_plugin_card(plugin):
 
                 if st.button("Remove", key=f"uninstall_{plugin_id}"):
                     # Grab category before uninstall (plugin may disappear from registry after file removal)
-                    loaded = plugin_registry.get(plugin_id)
+                    loaded = plugin_registry.get(registry_id)
                     category_hint = getattr(loaded, "settings_category", None) if loaded else None
 
                     ok, msg = uninstall_plugin_file(plugin_id)
