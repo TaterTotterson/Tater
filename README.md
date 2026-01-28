@@ -72,8 +72,6 @@ You can install both:
 
 directly from the Unraid App Store with a one-click template.
 
----
-
 ## 🏠 Home Assistant
 
 A dedicated Home Assistant add-on repository is available here:
