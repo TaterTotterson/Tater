@@ -801,6 +801,7 @@ def render_plugin_settings_form(plugin):
                     type="password",
                     key=f"{plugin.name}_{category}_{key}"
                 )
+
             elif input_type == "file":
                 uploaded_file = st.file_uploader(
                     label,
@@ -817,6 +818,7 @@ def render_plugin_settings_form(plugin):
                         new_value = default_value
                 else:
                     new_value = default_value
+
             elif input_type == "select":
                 options = info.get("options", []) or ["Option 1", "Option 2"]
                 current_index = options.index(default_value) if default_value in options else 0
@@ -827,6 +829,7 @@ def render_plugin_settings_form(plugin):
                     help=desc,
                     key=f"{plugin.name}_{category}_{key}"
                 )
+
             elif input_type == "checkbox":
                 is_checked = (
                     default_value if isinstance(default_value, bool)
@@ -838,9 +841,11 @@ def render_plugin_settings_form(plugin):
                     help=desc,
                     key=f"{plugin.name}_{category}_{key}"
                 )
+
             elif input_type == "number":
                 raw_value = str(default_value).strip()
                 is_int_like = bool(re.fullmatch(r"-?\d+", raw_value))
+
                 if is_int_like:
                     try:
                         current_num = int(raw_value)
@@ -866,6 +871,21 @@ def render_plugin_settings_form(plugin):
                         help=desc,
                         key=f"{plugin.name}_{category}_{key}"
                     )
+
+            elif input_type in ("textarea", "multiline") or info.get("multiline") is True:
+                rows = int(info.get("rows") or 8)
+                height = int(info.get("height") or (rows * 24 + 40))
+                placeholder = info.get("placeholder", None)
+
+                new_value = st.text_area(
+                    label,
+                    value=str(default_value),
+                    help=desc,
+                    height=height,
+                    placeholder=placeholder,
+                    key=f"{plugin.name}_{category}_{key}"
+                )
+
             else:
                 new_value = st.text_input(
                     label,
