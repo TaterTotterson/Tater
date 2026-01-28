@@ -560,6 +560,22 @@ def load_avatar_image(avatar_b64):
         redis_client.hdel("chat_settings", "avatar")
         return None
 
+def get_homeassistant_settings():
+    settings = redis_client.hgetall("homeassistant_settings")
+    return {
+        "HA_BASE_URL": settings.get("HA_BASE_URL", "http://homeassistant.local:8123"),
+        "HA_TOKEN": settings.get("HA_TOKEN", ""),
+    }
+
+def save_homeassistant_settings(base_url: str, token: str) -> None:
+    redis_client.hset(
+        "homeassistant_settings",
+        mapping={
+            "HA_BASE_URL": base_url,
+            "HA_TOKEN": token,
+        },
+    )
+
 def get_rss_enabled():
     enabled = redis_client.get("rss:enabled")
     if enabled is None:
@@ -1031,6 +1047,28 @@ def render_webui_settings():
         st.success("Attachment blobs cleared (chat history entries remain).")
         st.rerun()
 
+def render_homeassistant_settings():
+    st.subheader("Home Assistant Settings")
+    current_settings = get_homeassistant_settings()
+
+    base_url = st.text_input(
+        "Home Assistant Base URL",
+        value=current_settings["HA_BASE_URL"],
+        help="Example: http://homeassistant.local:8123 or http://192.168.1.50:8123",
+        key="homeassistant_base_url",
+    )
+    token = st.text_input(
+        "Home Assistant Long-Lived Access Token",
+        value=current_settings["HA_TOKEN"],
+        help="Create in Home Assistant Profile → Long-Lived Access Tokens.",
+        type="password",
+        key="homeassistant_token",
+    )
+
+    if st.button("Save Home Assistant Settings", key="save_homeassistant_settings"):
+        save_homeassistant_settings(base_url.strip(), token.strip())
+        st.success("Home Assistant settings updated.")
+
 def render_tater_settings():
     st.subheader(f"{first_name} Settings")
     stored_count = int(redis_client.get("tater:max_store") or 20)
@@ -1083,6 +1121,8 @@ def render_tater_settings():
 def render_settings_page():
     st.title("Settings")
     render_webui_settings()
+    st.markdown("---")
+    render_homeassistant_settings()
     st.markdown("---")
     render_tater_settings()
 
