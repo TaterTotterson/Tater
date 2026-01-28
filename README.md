@@ -60,7 +60,7 @@ No config loss. No manual installs. No volume mapping required.
 
 ---
 
-## Installation
+# Installation
 
 <img width="100" height="44" alt="unraid_logo_black-339076895" src="https://github.com/user-attachments/assets/87351bed-3321-4a43-924f-fecf2e4e700f" />
 
@@ -74,13 +74,13 @@ directly from the Unraid App Store with a one-click template.
 
 ---
 
-### 🏠 Home Assistant
+## 🏠 Home Assistant
 
 A dedicated Home Assistant add-on repository is available here:
 
 https://github.com/TaterTotterson/hassio-addons-tater
 
-#### Add the Tater add-on repository
+### Add the Tater add-on repository
 
 Click the button below to add the repository to Home Assistant:
 
