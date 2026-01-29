@@ -11,7 +11,7 @@ import redis
 import uvicorn
 from fastapi import FastAPI, HTTPException, Header
 from dotenv import load_dotenv
-import plugin_registry
+import plugin_registry as pr
 from helpers import (
     parse_function_json,
     get_tater_name,
@@ -229,8 +229,9 @@ def build_system_prompt() -> str:
     )
 
     # HomeKit tool list (Discord-style filtering)
+    plugins = pr.get_registry_snapshot()
     available_plugins = [
-        plugin for plugin in plugin_registry.plugin_registry.values()
+        plugin for plugin in plugins.values()
         if (
             ("homekit" in getattr(plugin, "platforms", []))
             or ("both" in getattr(plugin, "platforms", []))
@@ -238,7 +239,7 @@ def build_system_prompt() -> str:
     ]
     logger.debug(
         "[HomeKit] Number of plugins visible: %s | Number of enabled tools: %s",
-        len(plugin_registry.plugin_registry),
+        len(plugins),
         len(available_plugins),
     )
     tool_instructions = "\n\n".join(
@@ -327,7 +328,8 @@ async def handle_message(payload: Dict[str, Any], x_tater_token: Optional[str] =
                             {"marker": "plugin_call", "plugin": func, "arguments": args},
                             history_max, session_ttl)
 
-        plugin = plugin_registry.plugin_registry.get(func)
+        plugins = pr.get_registry_snapshot()
+        plugin = plugins.get(func)
 
         # Plugin must exist AND be enabled
         if not plugin or not _get_plugin_enabled(func):
