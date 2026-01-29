@@ -18,7 +18,7 @@ from io import BytesIO
 from dotenv import load_dotenv
 load_dotenv()
 
-from plugin_registry import plugin_registry
+import plugin_registry
 
 from helpers import (
     parse_function_json,
@@ -445,8 +445,9 @@ def build_system_prompt() -> str:
         "formats (and nothing else):\n\n"
     )
 
+    visible_plugins = list(plugin_registry.plugin_registry.values())
     tool_blocks = []
-    for plugin in plugin_registry.values():
+    for plugin in visible_plugins:
         platforms = getattr(plugin, "platforms", [])
         if ("matrix" in platforms) and get_plugin_enabled(plugin.name):
             desc = getattr(plugin, "description", "No description provided.")
@@ -456,6 +457,11 @@ def build_system_prompt() -> str:
                 f"Description: {desc}\n"
                 f"{usage}"
             )
+    logger.debug(
+        "[Matrix] Number of plugins visible: %s | Number of enabled tools: %s",
+        len(plugin_registry.plugin_registry),
+        len(tool_blocks),
+    )
 
     tools = "\n\n".join(tool_blocks) if tool_blocks else "No tools are currently available."
 
@@ -985,8 +991,8 @@ class MatrixPlatform:
                         {"marker": "plugin_call", "plugin": func, "arguments": args}
                     )
 
-                    if func in plugin_registry and get_plugin_enabled(func):
-                        plugin = plugin_registry[func]
+                    if func in plugin_registry.plugin_registry and get_plugin_enabled(func):
+                        plugin = plugin_registry.plugin_registry[func]
 
                         # Optional: waiting status line
                         if hasattr(plugin, "waiting_prompt_template"):
