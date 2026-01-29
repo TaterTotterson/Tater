@@ -23,7 +23,7 @@ from helpers import (
     get_llm_client_from_env,
     build_llm_host_from_env,
 )
-from plugin_registry import plugin_registry
+import plugin_registry
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("xbmc")
@@ -152,13 +152,21 @@ def build_system_prompt() -> str:
         )
 
     # Tool instructions (always included, no fake 'no tools' branch)
+    available_plugins = [
+        plugin for plugin in plugin_registry.plugin_registry.values()
+        if (("xbmc" in getattr(plugin, "platforms", [])) or ("both" in getattr(plugin, "platforms", [])))
+        and hasattr(plugin, "handle_xbmc")
+    ]
+    logger.debug(
+        "[XBMC] Number of plugins visible: %s | Number of enabled tools: %s",
+        len(plugin_registry.plugin_registry),
+        len(available_plugins),
+    )
     tool_instructions = "\n\n".join(
         f"Tool: {plugin.name}\n"
         f"Description: {getattr(plugin, 'description', 'No description provided.')}\n"
         f"{plugin.usage}"
-        for plugin in plugin_registry.values()
-        if (("xbmc" in getattr(plugin, "platforms", [])) or ("both" in getattr(plugin, "platforms", [])))
-        and hasattr(plugin, "handle_xbmc")
+        for plugin in available_plugins
     )
 
     behavior_guard = (
@@ -365,7 +373,7 @@ async def handle_message(payload: XBMCRequest):
                 history_max
             )
 
-            plugin = plugin_registry.get(func)
+            plugin = plugin_registry.plugin_registry.get(func)
             is_xbmc_plugin = plugin and (
                 ("xbmc" in getattr(plugin, "platforms", [])) or ("both" in getattr(plugin, "platforms", []))
             )

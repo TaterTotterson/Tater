@@ -8,7 +8,7 @@ import redis
 import requests
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
-from plugin_registry import plugin_registry
+import plugin_registry
 from plugin_settings import get_plugin_enabled
 
 logger = logging.getLogger("rss")
@@ -200,7 +200,7 @@ class RSSManager:
             f"{summary_text}"
         )
 
-        for name, plugin in plugin_registry.items():
+        for name, plugin in plugin_registry.plugin_registry.items():
             if getattr(plugin, "notifier", False) and get_plugin_enabled(name):
                 try:
                     await plugin.notify(title=entry_title, content=announcement)
@@ -208,10 +208,17 @@ class RSSManager:
                     logger.warning(f"{name} plugin failed: {e}")
 
     def any_notifier_enabled(self) -> bool:
-        for plugin in plugin_registry.values():
-            if getattr(plugin, "notifier", False) and get_plugin_enabled(plugin.name):
-                return True
-        return False
+        visible_plugins = list(plugin_registry.plugin_registry.values())
+        enabled_notifiers = [
+            plugin for plugin in visible_plugins
+            if getattr(plugin, "notifier", False) and get_plugin_enabled(plugin.name)
+        ]
+        logger.debug(
+            "[RSS] Number of plugins visible: %s | Number of enabled notifier tools: %s",
+            len(plugin_registry.plugin_registry),
+            len(enabled_notifiers),
+        )
+        return bool(enabled_notifiers)
 
     async def poll_feeds(self, stop_event=None):
         logger.info("Starting RSS feed polling...")
