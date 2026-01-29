@@ -16,7 +16,6 @@ import sys
 import uuid
 import hashlib
 import plugin_registry as plugin_registry_mod
-from plugin_registry import plugin_registry
 from urllib.parse import urljoin
 from datetime import datetime
 from PIL import Image
@@ -55,6 +54,10 @@ logging.getLogger("discord.http").setLevel(logging.WARNING)
 logging.getLogger("irc3.TaterBot").setLevel(logging.WARNING)  # Optional: suppress join/config spam
 
 dotenv.load_dotenv()
+
+# ------------------ Plugin Registry Access ------------------
+def get_registry():
+    return plugin_registry_mod.plugin_registry
 
 # ------------------ Upload / Attachment Limits ------------------
 # Per-file max upload size (MB) for st.chat_input + our Redis storage
@@ -199,7 +202,7 @@ def clear_plugin_redis_data(plugin_id: str, category_hint: str | None = None) ->
         # 1) Delete settings hash (plugin_settings:<category>)
         category = (category_hint or "").strip() or None
         if not category:
-            loaded = plugin_registry.get(plugin_id)
+            loaded = get_registry().get(plugin_id)
             category = getattr(loaded, "settings_category", None) if loaded else None
 
         if category:
@@ -973,7 +976,7 @@ def render_plugin_card(plugin):
 
                 if st.button("Remove", key=f"uninstall_{plugin_id}"):
                     # Grab category before uninstall (plugin may disappear from registry after file removal)
-                    loaded = plugin_registry.get(plugin_id)
+                    loaded = get_registry().get(registry_id)
                     category_hint = getattr(loaded, "settings_category", None) if loaded else None
 
                     ok, msg = uninstall_plugin_file(plugin_id)
@@ -1274,7 +1277,7 @@ def render_plugin_store_page():
         """
         if not plugin_id:
             return "0.0.0"
-        loaded = plugin_registry.get(plugin_id)
+        loaded = get_registry().get(plugin_id)
         if not loaded:
             return "0.0.0"
 
@@ -1314,7 +1317,7 @@ def render_plugin_store_page():
         """
         pid = (item.get("id") or "").strip()
         if pid and is_plugin_installed(pid):
-            loaded = plugin_registry.get(pid)
+            loaded = get_registry().get(pid)
             if loaded:
                 lp = getattr(loaded, "platforms", []) or []
                 norm = _normalize_plats(lp)
@@ -1571,7 +1574,7 @@ def build_system_prompt():
         f"Tool: {plugin.name}\n"
         f"Description: {getattr(plugin, 'description', 'No description provided.')}\n"
         f"{plugin.usage}"
-        for plugin in plugin_registry.values()
+        for plugin in get_registry().values()
         if ("webui" in plugin.platforms or "both" in plugin.platforms) and get_plugin_enabled(plugin.name)
     )
 
@@ -1814,7 +1817,7 @@ def start_plugin_job(plugin_name, args, llm_client):
 
     def job_runner():
         try:
-            plugin = plugin_registry.get(plugin_name)
+            plugin = get_registry().get(plugin_name)
             if not plugin:
                 raise RuntimeError(f"Plugin '{plugin_name}' is no longer installed.")
 
@@ -1858,7 +1861,7 @@ async def process_function_call(response_json, user_question=""):
     func = response_json.get("function")
     args = response_json.get("arguments", {})
 
-    plugin = plugin_registry.get(func)
+    plugin = get_registry().get(func)
     if not plugin:
         return "Received an unknown or uninstalled function call."
 
@@ -1949,15 +1952,15 @@ for platform in platform_registry:
 
 # Prepare plugin groupings
 rss_plugins = _sort_plugins_for_display([
-    p for p in plugin_registry.values()
+    p for p in get_registry().values()
     if getattr(p, "notifier", False)
 ])
 automation_plugins = _sort_plugins_for_display([
-    p for p in plugin_registry.values()
+    p for p in get_registry().values()
     if set(getattr(p, "platforms", []) or []) == {"automation"} and not getattr(p, "notifier", False)
 ])
 regular_plugins = _sort_plugins_for_display([
-    p for p in plugin_registry.values()
+    p for p in get_registry().values()
     if set(getattr(p, "platforms", []) or []) != {"automation"} and not getattr(p, "notifier", False)
 ])
 
@@ -2217,7 +2220,7 @@ if active_view == "Chat":
             if status == "pending":
                 pending_keys.append(key)
 
-                plugin = plugin_registry.get(plugin_name) if plugin_name else None
+                plugin = get_registry().get(plugin_name) if plugin_name else None
                 if plugin:
                     display_name = (
                         getattr(plugin, "plugin_name", None)
@@ -2263,7 +2266,7 @@ if active_view == "Chat":
                 plg = vals[idx * 2 + 1]
                 if stt == "pending":
                     cur_keys.append(k)
-                    p = plugin_registry.get(plg) if plg else None
+                    p = get_registry().get(plg) if plg else None
                     if p:
                         cur_names.append(
                             getattr(p, "plugin_name", None)
