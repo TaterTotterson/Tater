@@ -12,7 +12,7 @@ import plugin_registry as pr
 from plugin_settings import get_plugin_enabled
 
 logger = logging.getLogger("rss")
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 
 # Load settings from environment variables
 load_dotenv()
