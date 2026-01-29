@@ -9,7 +9,7 @@ from discord.ext import commands
 from discord import app_commands
 from dotenv import load_dotenv
 from datetime import datetime
-from plugin_registry import plugin_registry
+import plugin_registry
 import threading
 import time
 from io import BytesIO
@@ -264,13 +264,21 @@ class discord_platform(commands.Bot):
             "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
         )
 
+        available_plugins = [
+            plugin for plugin in plugin_registry.plugin_registry.values()
+            if ("discord" in plugin.platforms or "both" in plugin.platforms)
+            and get_plugin_enabled(plugin.name)
+        ]
+        logger.debug(
+            "[Discord] Number of plugins visible: %s | Number of enabled tools: %s",
+            len(plugin_registry.plugin_registry),
+            len(available_plugins),
+        )
         tool_instructions = "\n\n".join(
             f"Tool: {plugin.name}\n"
             f"Description: {getattr(plugin, 'description', 'No description provided.')}\n"
             f"{plugin.usage}"
-            for plugin in plugin_registry.values()
-            if ("discord" in plugin.platforms or "both" in plugin.platforms)
-            and get_plugin_enabled(plugin.name)
+            for plugin in available_plugins
         )
 
         behavior_guard = (
@@ -426,8 +434,8 @@ class discord_platform(commands.Bot):
                         {"marker": "plugin_call", "plugin": func, "arguments": args},
                     )
 
-                    if func in plugin_registry and get_plugin_enabled(func):
-                        plugin = plugin_registry[func]
+                    if func in plugin_registry.plugin_registry and get_plugin_enabled(func):
+                        plugin = plugin_registry.plugin_registry[func]
 
                         # Show waiting message if defined
                         if hasattr(plugin, "waiting_prompt_template"):
@@ -545,7 +553,7 @@ class discord_platform(commands.Bot):
         if user.bot:
             return
 
-        for plugin in plugin_registry.values():
+        for plugin in plugin_registry.plugin_registry.values():
             if not hasattr(plugin, "on_reaction_add"):
                 continue
             if not get_plugin_enabled(plugin.name):

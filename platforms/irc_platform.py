@@ -8,7 +8,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 import re
 import threading
-from plugin_registry import plugin_registry
+import plugin_registry
 import time
 import sys
 import irc3
@@ -336,12 +336,20 @@ def build_system_prompt():
         "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
     )
 
+    available_plugins = [
+        plugin for plugin in plugin_registry.plugin_registry.values()
+        if ("irc" in plugin.platforms or "both" in plugin.platforms) and get_plugin_enabled(plugin.name)
+    ]
+    logger.debug(
+        "[IRC] Number of plugins visible: %s | Number of enabled tools: %s",
+        len(plugin_registry.plugin_registry),
+        len(available_plugins),
+    )
     tool_instructions = "\n\n".join(
         f"Tool: {plugin.name}\n"
         f"Description: {getattr(plugin, 'description', 'No description provided.')}\n"
         f"{plugin.usage}"
-        for plugin in plugin_registry.values()
-        if ("irc" in plugin.platforms or "both" in plugin.platforms) and get_plugin_enabled(plugin.name)
+        for plugin in available_plugins
     )
 
     behavior_guard = (
@@ -379,8 +387,8 @@ async def on_message(self, mask, event, target, data):
             func = parsed["function"]
             args = parsed.get("arguments", {})
 
-            if func in plugin_registry and get_plugin_enabled(func):
-                plugin = plugin_registry[func]
+            if func in plugin_registry.plugin_registry and get_plugin_enabled(func):
+                plugin = plugin_registry.plugin_registry[func]
 
                 # Save structured plugin_call marker (corrected)
                 save_irc_message(

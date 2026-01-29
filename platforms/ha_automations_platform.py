@@ -14,7 +14,7 @@ from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
-from plugin_registry import plugin_registry
+import plugin_registry
 from helpers import get_llm_client_from_env, build_llm_host_from_env
 
 load_dotenv()
@@ -257,7 +257,7 @@ async def call_tool(tool_name: str, payload: ToolCallRequest):
     if not func_name:
         raise HTTPException(status_code=400, detail="Missing tool_name")
 
-    plugin = plugin_registry.get(func_name)
+    plugin = plugin_registry.plugin_registry.get(func_name)
     if not plugin:
         raise HTTPException(status_code=404, detail=f"Tool '{func_name}' not found")
 
