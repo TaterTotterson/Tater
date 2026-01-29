@@ -23,7 +23,7 @@ from helpers import (
     get_tater_name,
     get_tater_personality,
 )
-from plugin_registry import plugin_registry
+import plugin_registry
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -301,14 +301,22 @@ def build_system_prompt(ctx: Optional[Dict[str, Any]] = None) -> str:
         "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
     )
 
+    available_plugins = [
+        plugin for plugin in plugin_registry.plugin_registry.values()
+        if (("homeassistant" in getattr(plugin, "platforms", [])) or ("both" in getattr(plugin, "platforms", [])))
+        and get_plugin_enabled(plugin.name)
+        and hasattr(plugin, "handle_homeassistant")
+    ]
+    logger.debug(
+        "[Home Assistant] Number of plugins visible: %s | Number of enabled tools: %s",
+        len(plugin_registry.plugin_registry),
+        len(available_plugins),
+    )
     tool_instructions = "\n\n".join(
         f"Tool: {plugin.name}\n"
         f"Description: {getattr(plugin, 'description', 'No description provided.')}\n"
         f"{plugin.usage}"
-        for plugin in plugin_registry.values()
-        if (("homeassistant" in getattr(plugin, "platforms", [])) or ("both" in getattr(plugin, "platforms", [])))
-        and get_plugin_enabled(plugin.name)
-        and hasattr(plugin, "handle_homeassistant")
+        for plugin in available_plugins
     )
 
     behavior_guard = (
@@ -1054,7 +1062,7 @@ async def handle_message(payload: HARequest):
                 history_max,
             )
 
-            plugin = plugin_registry.get(func)
+            plugin = plugin_registry.plugin_registry.get(func)
             is_ha_plugin = plugin and (
                 ("homeassistant" in getattr(plugin, "platforms", [])) or ("both" in getattr(plugin, "platforms", []))
             )
