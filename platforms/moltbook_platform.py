@@ -91,10 +91,8 @@ PLATFORM_SETTINGS = {
             "default": "",
             "description": "Your Moltbook agent API key (auto-filled on first run if empty).",
         },
-    },
-    "optional": {
         "agent_name_override": {
-            "label": "Agent Name Override (optional)",
+            "label": "Agent Name Override",
             "type": "string",
             "default": "",
             "description": "If set, registration will use this name instead of Tater's first+last.",
