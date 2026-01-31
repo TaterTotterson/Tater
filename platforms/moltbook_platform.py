@@ -87,100 +87,119 @@ PLATFORM_SETTINGS = {
     "required": {
         "api_key": {
             "label": "Moltbook API Key",
-            "type": "string",
+            "type": "password",
             "default": "",
             "description": "Your Moltbook agent API key (auto-filled on first run if empty).",
         },
+
         "agent_name_override": {
             "label": "Agent Name Override",
-            "type": "string",
+            "type": "text",
             "default": "",
-            "description": "If set, registration will use this name instead of Tater's first+last.",
+            "description": "Optional. If set, registration uses this name instead of your default name.",
         },
+
         "description": {
             "label": "Agent Description",
-            "type": "string",
-            "default": "Tater AI assistant (tool-aware; posts and replies on Moltbook).",
+            "type": "text",
+            "default": "AI assistant (tool-aware; posts and replies on Moltbook).",
             "description": "Shown on your Moltbook profile.",
         },
+
         "mode": {
             "label": "Mode",
-            "type": "string",
+            "type": "select",
             "default": "read_only",
-            "description": "read_only | engage | autopost",
+            "options": ["read_only", "engage", "autopost"],
+            "description": "read_only = observe only • engage = reply/comment/vote • autopost = can post from queue",
         },
+
         "feed_source": {
             "label": "Feed Source",
-            "type": "string",
+            "type": "select",
             "default": "personal",
-            "description": "personal | global",
+            "options": ["personal", "global"],
+            "description": "Which feed to read.",
         },
+
         "feed_sort": {
             "label": "Feed Sort",
-            "type": "string",
+            "type": "select",
             "default": "new",
-            "description": "new | hot | top",
+            "options": ["new", "hot", "top"],
+            "description": "Sort order for the feed.",
         },
+
         "feed_limit": {
             "label": "Feed Limit",
             "type": "number",
             "default": DEFAULT_FEED_LIMIT,
             "description": "How many items to fetch per cycle (max 50).",
         },
+
         "check_interval_seconds": {
             "label": "Feed Check Interval (sec)",
             "type": "number",
             "default": DEFAULT_CHECK_INTERVAL_SECONDS,
-            "description": "How often to poll Moltbook feed.",
+            "description": "How often to poll the feed.",
         },
+
         "dm_check_interval_seconds": {
             "label": "DM Check Interval (sec)",
             "type": "number",
             "default": DEFAULT_DM_CHECK_INTERVAL_SECONDS,
-            "description": "How often to poll DM heartbeat.",
+            "description": "How often to poll DMs.",
         },
+
         "max_actions_per_cycle": {
             "label": "Max Actions Per Cycle",
             "type": "number",
             "default": DEFAULT_MAX_ACTIONS_PER_CYCLE,
-            "description": "Hard cap for comments/votes per cycle (prevents spam).",
+            "description": "Hard cap for comments/votes per cycle.",
         },
+
         "allow_comments": {
             "label": "Allow Comments",
-            "type": "bool",
+            "type": "checkbox",
             "default": True,
-            "description": "If false, never comment.",
+            "description": "If off, never comment.",
         },
+
         "allow_votes": {
             "label": "Allow Votes",
-            "type": "bool",
+            "type": "checkbox",
             "default": True,
-            "description": "If false, never vote.",
+            "description": "If off, never vote.",
         },
+
         "allow_autopost": {
             "label": "Allow Autopost",
-            "type": "bool",
+            "type": "checkbox",
             "default": False,
-            "description": "If true (and mode=autopost), can create posts from the Redis post queue.",
+            "description": "If on (and mode=autopost), can create posts from the Redis post queue.",
         },
+
         "dry_run": {
             "label": "Dry Run",
-            "type": "bool",
+            "type": "checkbox",
             "default": True,
-            "description": "If true, no writes: log intended actions only.",
+            "description": "If on, no writes (logs intended actions only).",
         },
+
         "reply_max_chars": {
             "label": "Reply Max Characters",
             "type": "number",
             "default": DEFAULT_REPLY_MAX_CHARS,
-            "description": "Soft cap for comments/DM replies.",
+            "description": "Soft cap for replies.",
         },
+
         "events_max": {
             "label": "Max Events Stored (0 = unlimited)",
             "type": "number",
             "default": DEFAULT_EVENTS_MAX,
-            "description": "Cap the event ledger list length. Set 0 to keep everything forever.",
+            "description": "Cap the event ledger list length.",
         },
+
         "dm_messages_max_per_conv": {
             "label": "Max DM Messages Stored Per Conversation (0 = unlimited)",
             "type": "number",
