@@ -244,19 +244,12 @@ def _get_str(name: str, default: str = "") -> str:
 DEFAULT_REQUIRED_SUBMOLT = "general"
 
 def _default_submolt_fallback() -> str:
-    # user setting
+    # user setting (must exist on Moltbook)
     s = (_get_str("default_submolt", "") or "").strip().lower()
     if s:
         return s
 
-    # tater name
-    first, last = get_tater_name()
-    name = f"{first}{last}".lower()
-    name = re.sub(r"[^a-z0-9_]", "", name)
-    if name:
-        return name
-
-    # hard fallback
+    # hard fallback (guaranteed to exist)
     return DEFAULT_REQUIRED_SUBMOLT
 
 def _get_int(name: str, default: int) -> int:
