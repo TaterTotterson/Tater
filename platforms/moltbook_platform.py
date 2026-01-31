@@ -232,6 +232,24 @@ PLATFORM_SETTINGS = {
 
 
 # -------------------- Settings helpers --------------------
+DEFAULT_REQUIRED_SUBMOLT = "general"
+
+def _default_submolt_fallback() -> str:
+    # 1. user setting
+    s = (_get_str("default_submolt", "") or "").strip().lower()
+    if s:
+        return s
+
+    # 2. tater name
+    first, last = get_tater_name()
+    name = f"{first}{last}".lower()
+    name = re.sub(r"[^a-z0-9_]", "", name)
+    if name:
+        return name
+
+    # 3. hard fallback
+    return DEFAULT_REQUIRED_SUBMOLT
+
 def _platform_settings() -> Dict[str, Any]:
     return redis_client.hgetall(MOLT_SETTINGS_KEY) or {}
 
@@ -885,14 +903,15 @@ async def _maybe_intro_post(llm, client: MoltbookClient, dry_run: bool):
 
     # AI-generated intro content (chatty, first-post framing)
     content = await _draft_intro_post(llm)
+    content = (content or "").strip()
     if not content:
         return
 
-    # Safety: if the model ever outputs tool JSON, bail (or you could rewrite)
+    # Safety: if the model ever outputs tool JSON, bail
     if _looks_like_tool_json(content):
         return
 
-    submolt = _get_str("default_submolt", DEFAULT_DEFAULT_SUBMOLT) or None
+    submolt = _default_submolt_fallback()
 
     if dry_run:
         logger.info(f"[Moltbook] DRY RUN intro post: {title}")
@@ -952,10 +971,16 @@ async def _maybe_self_post(llm, client: MoltbookClient, dry_run: bool):
         return
 
     title, content = await _draft_self_post(llm)
+    title = (title or "").strip()
+    content = (content or "").strip()
     if not title or not content:
         return
 
-    submolt = _get_str("default_submolt", DEFAULT_DEFAULT_SUBMOLT) or None
+    # Moltbook appears to require BOTH title and submolt (API returns 400 otherwise)
+    # Always provide a non-empty submolt fallback.
+    submolt = (_get_str("default_submolt", DEFAULT_DEFAULT_SUBMOLT) or "").strip()
+    if not submolt:
+        submolt = "general"  # fallback required by API (change to whatever you want)
 
     if dry_run:
         logger.info(f"[Moltbook] DRY RUN self-post: {title}")
