@@ -101,6 +101,39 @@ redis_blob_client = redis.Redis(
 
 # ------------------ RESTORE ENABLED PLUGINS IF MISSING ------------------
 
+def _enabled_missing_plugin_ids() -> list[str]:
+    """
+    Returns a list of plugin ids that are ENABLED in Redis but missing on disk.
+    This is fast and lets us avoid showing UI unless we truly need to download.
+    """
+    def _to_bool(v) -> bool:
+        if isinstance(v, bool):
+            return v
+        return str(v).strip().lower() in ("true", "1", "yes", "on")
+
+    missing: list[str] = []
+    seen = set()
+
+    try:
+        enabled_states = redis_client.hgetall("plugin_enabled") or {}
+    except Exception:
+        return missing
+
+    for pid, raw in enabled_states.items():
+        # normalize redis bytes -> str (just in case)
+        if isinstance(pid, (bytes, bytearray)):
+            pid = pid.decode("utf-8", "ignore")
+        pid = str(pid).strip()
+        if not pid:
+            continue
+
+        if _to_bool(raw) and not is_plugin_installed(pid):
+            if pid not in seen:
+                seen.add(pid)
+                missing.append(pid)
+
+    return missing
+
 def _safe_plugin_file_path(plugin_id: str) -> str:
     # plugins are single .py files; enforce simple ids
     if not re.fullmatch(r"[a-zA-Z0-9_\-]+", plugin_id or ""):
@@ -227,17 +260,20 @@ def clear_plugin_redis_data(plugin_id: str, category_hint: str | None = None) ->
 def _refresh_plugins_after_fs_change():
     plugin_registry_mod.reload_plugins()
 
-def auto_restore_missing_plugins(manifest_url: str) -> tuple[bool, list[str], list[str]]:
+def auto_restore_missing_plugins(manifest_url: str, progress_cb=None) -> tuple[bool, list[str], list[str]]:
     """
     Restore any plugins that are ENABLED in Redis but missing on disk.
     Uses the shop manifest as the source of install URLs.
+
+    progress_cb (optional): callable(progress_float_0_to_1, status_text)
     """
-    enabled_missing = []
-    restored = []
+    enabled_missing: list[str] = []
+    restored: list[str] = []
     changed = False
 
+    # Find enabled plugins that are missing on disk
     try:
-        enabled_states = redis_client.hgetall("plugin_enabled")
+        enabled_states = redis_client.hgetall("plugin_enabled") or {}
     except Exception as e:
         logging.error(f"[restore] Failed to read plugin_enabled: {e}")
         return changed, restored, enabled_missing
@@ -250,54 +286,133 @@ def auto_restore_missing_plugins(manifest_url: str) -> tuple[bool, list[str], li
     if not enabled_missing:
         return changed, restored, enabled_missing
 
+    total = len(enabled_missing)
+    if progress_cb:
+        try:
+            progress_cb(0.0, f"Found {total} enabled plugin(s) missing — preparing downloads…")
+        except Exception:
+            pass
+
+    # Load shop manifest
     try:
         manifest = fetch_shop_manifest(manifest_url)
     except Exception as e:
         logging.error(f"[restore] Failed to load manifest: {e}")
+        if progress_cb:
+            try:
+                progress_cb(0.0, f"Failed to load manifest: {e}")
+            except Exception:
+                pass
         return changed, restored, enabled_missing
 
     items = manifest.get("plugins") or manifest.get("items") or manifest.get("data") or []
     if not isinstance(items, list):
         logging.error("[restore] Manifest format unexpected.")
+        if progress_cb:
+            try:
+                progress_cb(0.0, "Manifest format unexpected (expected list under plugins/items/data).")
+            except Exception:
+                pass
         return changed, restored, enabled_missing
 
-    by_id = {}
+    # Index manifest by id
+    by_id: dict[str, dict] = {}
     for item in items:
         pid = (item.get("id") or "").strip()
         if pid:
             by_id[pid] = item
 
-    for pid in enabled_missing:
+    # Download/install missing enabled plugins with progress updates
+    for idx, pid in enumerate(enabled_missing, start=1):
         item = by_id.get(pid)
         if not item:
             logging.error(f"[restore] {pid} enabled but not found in manifest")
+            if progress_cb:
+                try:
+                    progress_cb((idx - 1) / max(1, total), f"{pid} enabled but not found in manifest ({idx}/{total})")
+                except Exception:
+                    pass
             continue
+
+        if progress_cb:
+            try:
+                progress_cb((idx - 1) / max(1, total), f"Downloading {pid}… ({idx}/{total})")
+            except Exception:
+                pass
+
         ok, msg = install_plugin_from_shop_item(item, manifest_url)
         if ok:
             restored.append(pid)
             changed = True
+            logging.info(f"[restore] {pid}: {msg}")
         else:
             logging.error(f"[restore] {pid}: {msg}")
 
+        if progress_cb:
+            try:
+                progress_cb(idx / max(1, total), f"Finished {pid} ({idx}/{total})")
+            except Exception:
+                pass
+
     return changed, restored, enabled_missing
 
-def ensure_plugins_ready():
-    os.makedirs(PLUGIN_DIR, exist_ok=True)
-    shop_url = (redis_client.get("tater:shop_manifest_url") or SHOP_MANIFEST_URL_DEFAULT).strip()
+def ensure_plugins_ready(progress_cb=None):
+    """
+    Ensure any ENABLED plugins that are missing on disk are restored from the shop.
 
-    changed, restored, enabled_missing = auto_restore_missing_plugins(shop_url)
+    progress_cb (optional): callable(progress_float_0_to_1, status_text)
+    """
+    os.makedirs(PLUGIN_DIR, exist_ok=True)
+
+    shop_url = (redis_client.get("tater:shop_manifest_url") or SHOP_MANIFEST_URL_DEFAULT)
+    shop_url = (shop_url or "").strip()
+
+    if not shop_url:
+        # No manifest URL configured; nothing we can do.
+        if progress_cb:
+            try:
+                progress_cb(1.0, "Plugin shop manifest URL is not configured.")
+            except Exception:
+                pass
+        return
+
+    # Fast pre-check so the UI can decide whether to show popup/progress
+    missing = _enabled_missing_plugin_ids()
+    if not missing:
+        if progress_cb:
+            try:
+                progress_cb(1.0, "All enabled plugins are present.")
+            except Exception:
+                pass
+        return
+
+    if progress_cb:
+        try:
+            progress_cb(0.0, f"Restoring {len(missing)} missing plugin(s)…")
+        except Exception:
+            pass
+
+    changed, restored, enabled_missing = auto_restore_missing_plugins(
+        shop_url,
+        progress_cb=progress_cb
+    )
+
     if changed:
+        if progress_cb:
+            try:
+                progress_cb(0.98, "Reloading plugins…")
+            except Exception:
+                pass
         _refresh_plugins_after_fs_change()
 
-    if restored:
-        st.session_state["plugins_ready_notice"] = (
-            "Restored missing enabled plugins: " + ", ".join(restored)
-        )
-    elif enabled_missing:
-        st.session_state["plugins_ready_notice"] = (
-            "Some enabled plugins were missing and could not be restored."
-        )
-
+    # Don’t spam “Restored: …” or “Failed: …” here.
+    # If you want *any* final message, keep it short/blank.
+    if progress_cb:
+        try:
+            # Empty text so your popup can close cleanly without showing a giant list.
+            progress_cb(1.0, "")
+        except Exception:
+            pass
 
 # ------------------ FILE BLOB HELPERS ------------------
 
@@ -484,7 +599,47 @@ if redis_client.get("webui:needs_rerun") == "true":
     redis_client.delete("webui:needs_rerun")
     st.rerun()
 
-ensure_plugins_ready()
+missing = _enabled_missing_plugin_ids()
+
+if missing:
+    # Only show UI when we truly need downloads
+    title = f"Restoring {len(missing)} missing plugin(s)…"
+
+    # If your Streamlit supports st.modal, this feels like a real popup
+    if hasattr(st, "modal"):
+        with st.modal(title):
+            status = st.empty()
+            bar = st.progress(0.0)
+
+            def progress_cb(p, txt):
+                try:
+                    bar.progress(max(0.0, min(1.0, float(p))))
+                except Exception:
+                    pass
+                try:
+                    status.write(txt)
+                except Exception:
+                    pass
+
+            ensure_plugins_ready(progress_cb=progress_cb)
+    else:
+        # Fallback: inline status (still only shows when downloading)
+        status = st.empty()
+        bar = st.progress(0.0)
+
+        def progress_cb(p, txt):
+            try:
+                bar.progress(max(0.0, min(1.0, float(p))))
+            except Exception:
+                pass
+            try:
+                status.write(txt)
+            except Exception:
+                pass
+
+        ensure_plugins_ready(progress_cb=progress_cb)
+else:
+    ensure_plugins_ready()
 
 llm_client = get_llm_client_from_env()
 logging.getLogger("webui").debug(f"LLM client → {build_llm_host_from_env()}")
@@ -503,11 +658,6 @@ st.set_page_config(
     page_title=f"{first_name} Chat",
     page_icon=":material/tooltip_2:"
 )
-
-# Optional one-time notice after startup gate.
-if st.session_state.get("plugins_ready_notice") and not st.session_state.get("plugins_ready_notice_shown"):
-    st.info(st.session_state["plugins_ready_notice"])
-    st.session_state["plugins_ready_notice_shown"] = True
 
 # ---- session_state containers (must exist before platform start/stop) ----
 st.session_state.setdefault("platform_threads", {})
@@ -1708,7 +1858,6 @@ def _enforce_user_assistant_alternation(loop_messages):
 
 # ----------------- PROCESSING FUNCTIONS -----------------
 async def process_message(user_name, message_content):
-    ensure_plugins_ready()
     final_system_prompt = build_system_prompt()
     max_llm = int(redis_client.get("tater:max_llm") or 8)
     history = load_chat_history_tail(max_llm)
@@ -2371,9 +2520,6 @@ elif active_view == "RSS Feed":
 
 elif active_view == "Plugin Store":
     render_plugin_store_page()
-
-elif active_view == "Settings":
-    render_settings_page()
 
 elif active_view == "Settings":
     render_settings_page()
