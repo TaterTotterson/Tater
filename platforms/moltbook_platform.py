@@ -232,27 +232,8 @@ PLATFORM_SETTINGS = {
 
 
 # -------------------- Settings helpers --------------------
-DEFAULT_REQUIRED_SUBMOLT = "general"
-
-def _default_submolt_fallback() -> str:
-    # 1. user setting
-    s = (_get_str("default_submolt", "") or "").strip().lower()
-    if s:
-        return s
-
-    # 2. tater name
-    first, last = get_tater_name()
-    name = f"{first}{last}".lower()
-    name = re.sub(r"[^a-z0-9_]", "", name)
-    if name:
-        return name
-
-    # 3. hard fallback
-    return DEFAULT_REQUIRED_SUBMOLT
-
 def _platform_settings() -> Dict[str, Any]:
     return redis_client.hgetall(MOLT_SETTINGS_KEY) or {}
-
 
 def _get_str(name: str, default: str = "") -> str:
     s = _platform_settings().get(name)
@@ -260,6 +241,23 @@ def _get_str(name: str, default: str = "") -> str:
         return (default or "").strip()
     return str(s).strip()
 
+DEFAULT_REQUIRED_SUBMOLT = "general"
+
+def _default_submolt_fallback() -> str:
+    # user setting
+    s = (_get_str("default_submolt", "") or "").strip().lower()
+    if s:
+        return s
+
+    # tater name
+    first, last = get_tater_name()
+    name = f"{first}{last}".lower()
+    name = re.sub(r"[^a-z0-9_]", "", name)
+    if name:
+        return name
+
+    # hard fallback
+    return DEFAULT_REQUIRED_SUBMOLT
 
 def _get_int(name: str, default: int) -> int:
     s = _platform_settings().get(name)
@@ -978,9 +976,7 @@ async def _maybe_self_post(llm, client: MoltbookClient, dry_run: bool):
 
     # Moltbook appears to require BOTH title and submolt (API returns 400 otherwise)
     # Always provide a non-empty submolt fallback.
-    submolt = (_get_str("default_submolt", DEFAULT_DEFAULT_SUBMOLT) or "").strip()
-    if not submolt:
-        submolt = "general"  # fallback required by API (change to whatever you want)
+    submolt = _default_submolt_fallback()
 
     if dry_run:
         logger.info(f"[Moltbook] DRY RUN self-post: {title}")
