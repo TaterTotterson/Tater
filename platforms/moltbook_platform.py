@@ -468,10 +468,24 @@ class MoltbookClient:
             path = "/" + path
         return API_BASE + path
 
-    def _req(self, method: str, path: str, *, params=None, json_body=None, timeout=25) -> Tuple[int, Any, Dict[str, Any]]:
+    def _req(
+        self,
+        method: str,
+        path: str,
+        *,
+        params=None,
+        json_body=None,
+        timeout=(10, 90),  # (connect_timeout, read_timeout)
+    ) -> Tuple[int, Any, Dict[str, Any]]:
         url = self._url(path)
         try:
-            resp = self.session.request(method, url, params=params, json=json_body, timeout=timeout)
+            resp = self.session.request(
+                method,
+                url,
+                params=params,
+                json=json_body,
+                timeout=timeout,
+            )
         except Exception as e:
             return 0, {"success": False, "error": str(e)}, {}
 
