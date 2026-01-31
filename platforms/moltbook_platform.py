@@ -1,22 +1,19 @@
 # platforms/moltbook_platform.py
 """
-Moltbook platform for Tater
+Moltbook platform for Tater (NO QUEUE VERSION)
 
 What this platform does:
 - Auto-registers a Moltbook agent on first run (if no api_key is stored).
-  - Uses Tater's first+last name (sanitized) OR an override.
-  - If name is taken, retries with suffixes: -1, -2, -3, ...
-  - Stores api_key + claim_url + verification_code + profile_url + tweet_template + created_at + status in Redis.
 - Polls Moltbook feed + DMs on intervals.
-- (Optional) Engage mode to comment/vote, and autopost mode to post from a Redis queue.
-- Stores EVERYTHING in Redis:
-  - Stats counters
-  - Event ledger (posts/comments/votes/dms with URLs)
-  - DM conversations + messages (all messages forever by default)
+- read_only: observe only
+- engage: can comment/vote
+- autopost: can create posts (self-generated) + optionally comment/vote
+- Stores stats + event ledger + DM history in Redis.
 
-IMPORTANT LLM BEHAVIOR:
-- Tater is tool-aware here (knows which tools exist), but MUST NOT call tools on Moltbook.
-- We never execute plugins/tools from this platform.
+Important API fields (per docs):
+- Create post: {"title": "...", "content": "...", "submolt": "optional"}
+- Comment: {"content": "..."}
+- DM request / send: {"message": "..."}
 """
 
 import os
@@ -26,6 +23,7 @@ import time
 import logging
 import threading
 import asyncio
+import random
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -38,7 +36,6 @@ from helpers import (
     get_tater_name,
     get_tater_personality,
     get_llm_client_from_env,
-    build_llm_host_from_env,
 )
 
 load_dotenv()
@@ -47,7 +44,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("moltbook")
 
 # -------------------- Moltbook API --------------------
-API_BASE = "https://www.moltbook.com/api/v1"  # NOTE: include www
+API_BASE = "https://www.moltbook.com/api/v1"  # include www
 
 # -------------------- Redis --------------------
 redis_host = os.getenv("REDIS_HOST", "127.0.0.1")
@@ -59,10 +56,15 @@ DEFAULT_FEED_LIMIT = 25
 DEFAULT_CHECK_INTERVAL_SECONDS = 60 * 15
 DEFAULT_DM_CHECK_INTERVAL_SECONDS = 60 * 5
 DEFAULT_MAX_ACTIONS_PER_CYCLE = 2
-DEFAULT_POST_COOLDOWN_SECONDS = 60 * 30  # Moltbook guide: 1 post / 30 min
+DEFAULT_POST_COOLDOWN_SECONDS = 60 * 30  # 1 post / 30 min (docs)
 DEFAULT_REPLY_MAX_CHARS = 600
+DEFAULT_EVENTS_MAX = 2000  # 0 = unlimited
 
-DEFAULT_EVENTS_MAX = 2000  # Set 0 to keep everything forever (unbounded list)
+# Self-post defaults
+DEFAULT_ALLOW_SELF_POSTS = True
+DEFAULT_SELF_POST_CHANCE_PCT = 25  # per feed cycle
+DEFAULT_DEFAULT_SUBMOLT = ""       # optional
+DEFAULT_INTRO_POST_ON_CLAIM = True
 
 # -------------------- Redis keys --------------------
 MOLT_SETTINGS_KEY = "moltbook_platform_settings"
@@ -77,9 +79,6 @@ DM_CONV_INDEX_KEY = "tater:moltbook:dm:conversations"
 DM_META_KEY_FMT = "tater:moltbook:dm:{cid}:meta"
 DM_MSGS_KEY_FMT = "tater:moltbook:dm:{cid}:messages"
 
-# Optional outbound post queue:
-# RPUSH with json: {"title": "...", "text": "...", "submolt": "optional"}
-MOLT_POST_QUEUE_KEY = "tater:moltbook:post_queue"
 
 # -------------------- Platform settings --------------------
 PLATFORM_SETTINGS = {
@@ -102,7 +101,7 @@ PLATFORM_SETTINGS = {
         "description": {
             "label": "Agent Description",
             "type": "text",
-            "default": "AI assistant (tool-aware; posts and replies on Moltbook).",
+            "default": "AI assistant (posts and replies on Moltbook).",
             "description": "Shown on your Moltbook profile.",
         },
 
@@ -111,7 +110,7 @@ PLATFORM_SETTINGS = {
             "type": "select",
             "default": "read_only",
             "options": ["read_only", "engage", "autopost"],
-            "description": "read_only = observe only • engage = reply/comment/vote • autopost = can post from queue",
+            "description": "read_only = observe only • engage = reply/comment/vote • autopost = can create posts too",
         },
 
         "feed_source": {
@@ -172,11 +171,33 @@ PLATFORM_SETTINGS = {
             "description": "If off, never vote.",
         },
 
-        "allow_autopost": {
-            "label": "Allow Autopost",
+        # Self-posting (no queue)
+        "allow_self_posts": {
+            "label": "Allow Self Posts",
             "type": "checkbox",
-            "default": False,
-            "description": "If on (and mode=autopost), can create posts from the Redis post queue.",
+            "default": DEFAULT_ALLOW_SELF_POSTS,
+            "description": "If on (and mode=autopost), can create its own posts (still respects cooldown).",
+        },
+
+        "self_post_chance_pct": {
+            "label": "Self Post Chance (%)",
+            "type": "number",
+            "default": DEFAULT_SELF_POST_CHANCE_PCT,
+            "description": "Percent chance per feed cycle it will generate + post something.",
+        },
+
+        "default_submolt": {
+            "label": "Default Submolt (optional)",
+            "type": "text",
+            "default": DEFAULT_DEFAULT_SUBMOLT,
+            "description": "If set, posts default here (ex: 'general'). Leave blank to post without submolt.",
+        },
+
+        "intro_post_on_claim": {
+            "label": "Post Intro Once After Claim",
+            "type": "checkbox",
+            "default": DEFAULT_INTRO_POST_ON_CLAIM,
+            "description": "If on, one-time intro post after the account becomes claimed (autopost mode only).",
         },
 
         "dry_run": {
@@ -208,6 +229,7 @@ PLATFORM_SETTINGS = {
         },
     },
 }
+
 
 # -------------------- Settings helpers --------------------
 def _platform_settings() -> Dict[str, Any]:
@@ -243,7 +265,7 @@ def _get_plugin_enabled(plugin_name: str) -> bool:
     return bool(enabled and enabled.lower() == "true")
 
 
-# -------------------- Small utilities --------------------
+# -------------------- Utilities --------------------
 def _now_ts() -> int:
     return int(time.time())
 
@@ -256,7 +278,6 @@ def _looks_like_tool_json(text: str) -> bool:
     t = (text or "").strip()
     if not (t.startswith("{") and t.endswith("}")):
         return False
-    # common tool-call fields
     return '"function"' in t or '"arguments"' in t
 
 
@@ -267,17 +288,18 @@ def _compact(s: str, n: int) -> str:
     return s[: max(0, n - 1)].rstrip() + "…"
 
 
-# -------------------- Redis: stats & event ledger --------------------
+def _sanitize_agent_name(name: str) -> str:
+    # Moltbook names tend to be simple; keep it safe
+    name = (name or "").strip()
+    name = re.sub(r"\s+", "", name)
+    name = re.sub(r"[^a-zA-Z0-9_\-]", "", name)
+    return name[:32] if name else "TaterBot"
+
+
+# -------------------- Redis: stats & events --------------------
 def _bump_stat(field: str, inc: int = 1):
     pipe = redis_client.pipeline()
     pipe.hincrby(MOLT_STATS_KEY, field, int(inc))
-    pipe.hset(MOLT_STATS_KEY, "last_activity_ts", str(_now_ts()))
-    pipe.execute()
-
-
-def _set_stat(field: str, value: str):
-    pipe = redis_client.pipeline()
-    pipe.hset(MOLT_STATS_KEY, field, value)
     pipe.hset(MOLT_STATS_KEY, "last_activity_ts", str(_now_ts()))
     pipe.execute()
 
@@ -298,6 +320,11 @@ def _state_get_int(field: str, default: int = 0) -> int:
         return int(v) if v is not None else default
     except Exception:
         return default
+
+
+def _state_get_str(field: str, default: str = "") -> str:
+    v = redis_client.hget(MOLT_STATE_KEY, field)
+    return str(v).strip() if v is not None else default
 
 
 def _state_set(field: str, value: Any):
@@ -323,18 +350,16 @@ def _dm_msgs_key(cid: str) -> str:
 
 def _dm_store_thread(cid: str, thread: Dict[str, Any]):
     """
-    Store thread and append any new messages.
+    Store thread meta and append any new messages.
     Keeps ALL messages forever by default (dm_messages_max_per_conv=0).
     """
     redis_client.sadd(DM_CONV_INDEX_KEY, cid)
 
-    # meta updates
     meta_updates: Dict[str, str] = {
         "conversation_id": cid,
         "updated_ts": str(_now_ts()),
     }
-    # include participants if present (store as json string)
-    for k in ("participants", "users", "members"):
+    for k in ("participants", "users", "members", "with_agent"):
         if k in thread:
             try:
                 meta_updates[k] = json.dumps(thread.get(k), ensure_ascii=False)
@@ -349,7 +374,6 @@ def _dm_store_thread(cid: str, thread: Dict[str, Any]):
 
     msgs_key = _dm_msgs_key(cid)
 
-    # Use last_seen_ts to avoid re-appending the same messages every poll
     last_seen_ts = 0
     try:
         last_seen_ts = int(redis_client.hget(_dm_meta_key(cid), "last_seen_ts") or "0")
@@ -381,13 +405,12 @@ def _dm_store_thread(cid: str, thread: Dict[str, Any]):
         payload = {
             "ts": m_ts or _now_ts(),
             "from": (m.get("from") or m.get("sender") or m.get("author") or "unknown"),
-            "text": (m.get("text") or m.get("content") or ""),
-            "raw": m,  # store full dict
+            "text": (m.get("text") or m.get("content") or m.get("message") or ""),
+            "raw": m,
         }
         redis_client.rpush(msgs_key, json.dumps(payload, ensure_ascii=False))
         new_count += 1
 
-    # Cap per-conversation if configured
     max_per = _get_int("dm_messages_max_per_conv", 0)
     if max_per and max_per > 0:
         redis_client.ltrim(msgs_key, -max_per, -1)
@@ -434,12 +457,12 @@ class MoltbookClient:
         try:
             resp = self.session.request(method, url, params=params, json=json_body, timeout=timeout)
         except Exception as e:
-            return 0, {"error": str(e)}, {}
+            return 0, {"success": False, "error": str(e)}, {}
 
         try:
             data: Any = resp.json()
         except Exception:
-            data = {"raw": resp.text}
+            data = {"success": False, "raw": resp.text}
 
         headers = dict(resp.headers or {})
         return resp.status_code, data, headers
@@ -447,6 +470,10 @@ class MoltbookClient:
     # --- Agent lifecycle ---
     def status(self) -> Tuple[int, Any, Dict[str, Any]]:
         return self._req("GET", "/agents/status")
+
+    def register(self, name: str, description: str) -> Tuple[int, Any, Dict[str, Any]]:
+        # Not in your provided docs, but matches earlier version usage
+        return self._req("POST", "/agents/register", json_body={"name": name, "description": description})
 
     # --- DMs ---
     def dm_check(self) -> Tuple[int, Any, Dict[str, Any]]:
@@ -458,14 +485,15 @@ class MoltbookClient:
     def dm_conversation(self, conv_id: str) -> Tuple[int, Any, Dict[str, Any]]:
         return self._req("GET", f"/agents/dm/conversations/{conv_id}")
 
-    def dm_send(self, conv_id: str, text: str) -> Tuple[int, Any, Dict[str, Any]]:
-        return self._req("POST", f"/agents/dm/conversations/{conv_id}/send", json_body={"text": text})
+    def dm_send(self, conv_id: str, message: str) -> Tuple[int, Any, Dict[str, Any]]:
+        # docs: {"message": "..."}
+        return self._req("POST", f"/agents/dm/conversations/{conv_id}/send", json_body={"message": message})
 
     # --- Feed ---
     def feed(self, source: str, sort: str, limit: int) -> Tuple[int, Any, Dict[str, Any]]:
         limit = max(1, min(int(limit or 25), 50))
         sort = (sort or "new").strip().lower()
-        if sort not in ("new", "hot", "top"):
+        if sort not in ("new", "hot", "top", "rising"):
             sort = "new"
 
         if (source or "personal").strip().lower() == "global":
@@ -473,8 +501,8 @@ class MoltbookClient:
         return self._req("GET", "/feed", params={"sort": sort, "limit": limit})
 
     # --- Writes ---
-    def comment(self, post_id: str, text: str) -> Tuple[int, Any, Dict[str, Any]]:
-        return self._req("POST", f"/posts/{post_id}/comments", json_body={"text": text})
+    def comment(self, post_id: str, content: str) -> Tuple[int, Any, Dict[str, Any]]:
+        return self._req("POST", f"/posts/{post_id}/comments", json_body={"content": content})
 
     def upvote(self, post_id: str) -> Tuple[int, Any, Dict[str, Any]]:
         return self._req("POST", f"/posts/{post_id}/upvote")
@@ -482,8 +510,8 @@ class MoltbookClient:
     def downvote(self, post_id: str) -> Tuple[int, Any, Dict[str, Any]]:
         return self._req("POST", f"/posts/{post_id}/downvote")
 
-    def create_post(self, title: str, text: str, submolt: Optional[str] = None) -> Tuple[int, Any, Dict[str, Any]]:
-        body = {"title": title, "text": text}
+    def create_post(self, title: str, content: str, submolt: Optional[str] = None) -> Tuple[int, Any, Dict[str, Any]]:
+        body = {"title": title, "content": content}
         if submolt:
             body["submolt"] = submolt
         return self._req("POST", "/posts", json_body=body)
@@ -528,13 +556,11 @@ def _tool_catalog_text() -> str:
         usage = getattr(plugin, "usage", "").strip()
         desc = getattr(plugin, "description", "No description provided.").strip()
         enabled = "enabled" if _get_plugin_enabled(plugin.name) else "disabled"
-
         lines.append(
             f"Tool: {plugin.name} ({enabled})\n"
             f"Description: {desc}\n"
             f"{usage}".strip()
         )
-
     return "\n\n".join(lines)
 
 
@@ -545,35 +571,28 @@ def build_system_prompt() -> str:
 
     persona_clause = ""
     if personality:
-        persona_clause = (
-            f"You should speak and behave like {personality} "
-            "while still being helpful, concise, and easy to understand. "
-            "Keep the style subtle rather than over-the-top.\n\n"
-        )
+        persona_clause = f"Vibe: {personality}. Keep it natural.\n\n"
 
-    moltbook_rules = (
-        "You are interacting on Moltbook (a public social feed and DM system).\n\n"
-        "CRITICAL TOOL RULES:\n"
-        "- You MAY talk about tools and reference them conceptually.\n"
-        "- You MUST NOT call, invoke, or request tool execution here.\n"
-        "- You MUST NOT output JSON tool calls.\n"
-        "- If a user asks you to do something that would require a tool, explain you can't run tools on Moltbook "
-        "and suggest asking you on Discord/WebUI/HomeKit instead.\n\n"
-        "STYLE:\n"
-        "- Write like a friendly human.\n"
-        "- Keep replies short and specific.\n"
-        "- Avoid spam.\n"
+    rules = (
+        "You are posting and replying on Moltbook (a public feed and DM system).\n\n"
+        "Hard rules:\n"
+        "- Do NOT output JSON tool calls.\n"
+        "- Do NOT ask to run tools here.\n"
+        "- If you accidentally generate tool JSON, rewrite it as normal text.\n\n"
+        "Style:\n"
+        "- Sound like a friendly human.\n"
+        "- You can start conversations and share thoughts.\n"
+        "- Don’t be spammy; one good post beats five mediocre ones.\n"
+        "- Keep posts readable. Avoid walls of text.\n"
     )
-
-    tool_catalog = _tool_catalog_text()
 
     return (
         f"Current Date and Time is: {now}\n\n"
-        f"You are {first} {last}, an AI assistant posting and replying on Moltbook.\n\n"
+        f"You are {first} {last}, an AI assistant on Moltbook.\n\n"
         f"{persona_clause}"
-        f"{moltbook_rules}\n"
-        "Enabled tool catalog (AWARENESS ONLY; DO NOT INVOKE):\n\n"
-        f"{tool_catalog}\n"
+        f"{rules}\n"
+        "Tool catalog (awareness only; never invoke):\n\n"
+        f"{_tool_catalog_text()}\n"
     )
 
 
@@ -584,32 +603,34 @@ async def _llm_chat(llm, messages: List[Dict[str, str]], timeout: int = 60) -> s
     return out.strip()
 
 
-async def _draft_reply_for_post(llm, post: Dict[str, Any], reply_max_chars: int) -> str:
+async def _draft_comment(llm, post: Dict[str, Any], reply_max_chars: int) -> str:
     title = (post.get("title") or "").strip()
-    text = (post.get("text") or "").strip()
-    author = (post.get("author") or post.get("user") or post.get("username") or "").strip()
-    pid = str(post.get("id") or post.get("_id") or "").strip()
+    content = (post.get("content") or "").strip()
+    author = (post.get("author") or {}).get("name") if isinstance(post.get("author"), dict) else post.get("author")
 
     prompt = (
-        "Write a concise, helpful comment reply for Moltbook.\n"
-        "- Do not output JSON.\n"
-        f"- Keep under {reply_max_chars} characters.\n"
-        "- If asked to run a tool, explain you can't run tools on Moltbook and suggest asking on Discord/WebUI/HomeKit.\n\n"
-        f"Post ID: {pid}\n"
+        "Write a friendly Moltbook comment.\n"
+        "- Be helpful or curious.\n"
+        "- Avoid repeating the post verbatim.\n"
+        "- 1-3 short paragraphs.\n"
+        "- No tool JSON.\n\n"
+        f"Post title: {title}\n"
         f"Author: {author}\n"
-        f"Title: {title}\n"
-        f"Post Text:\n{text}\n"
+        f"Post content:\n{content}\n"
     )
 
-    out = await _llm_chat(llm, [{"role": "system", "content": build_system_prompt()}, {"role": "user", "content": prompt}])
+    messages = [
+        {"role": "system", "content": build_system_prompt()},
+        {"role": "user", "content": prompt},
+    ]
+    txt = await _llm_chat(llm, messages, timeout=60)
+    txt = re.sub(r"\s+$", "", txt)
 
-    if _looks_like_tool_json(out):
-        out = (
-            "I can’t run tools directly from Moltbook, but I can explain what I’d do and help you do it "
-            "if you ask me on Discord/WebUI/HomeKit. What outcome are you aiming for?"
-        )
-    return _compact(out, reply_max_chars)
+    if _looks_like_tool_json(txt):
+        return ""
 
+    # hard-ish cap
+    return _compact(txt, max(50, int(reply_max_chars or DEFAULT_REPLY_MAX_CHARS)))
 
 async def _draft_dm_reply(llm, conv_id: str, thread: Dict[str, Any], reply_max_chars: int) -> str:
     msgs = thread.get("messages") or []
@@ -620,497 +641,601 @@ async def _draft_dm_reply(llm, conv_id: str, thread: Dict[str, Any], reply_max_c
         if not isinstance(m, dict):
             continue
         frm = (m.get("from") or m.get("sender") or m.get("author") or "user").strip()
-        txt = (m.get("text") or m.get("content") or "").strip()
-        formatted.append(f"{frm}: {txt}")
+        txt = (m.get("text") or m.get("content") or m.get("message") or "").strip()
+        if txt:
+            formatted.append(f"{frm}: {txt}")
 
     prompt = (
         "Write a short, friendly DM reply.\n"
-        "- Do not output JSON.\n"
-        f"- Keep under {reply_max_chars} characters.\n"
-        "- If asked to run a tool, explain you can't run tools on Moltbook and suggest asking on Discord/WebUI/HomeKit.\n\n"
+        "- Be chatty but not long.\n"
+        "- Ask 1 follow-up question if it helps.\n"
+        "- Do NOT output JSON.\n"
+        f"- Keep under {reply_max_chars} characters.\n\n"
         f"Conversation ID: {conv_id}\n"
         "Recent messages:\n"
         + "\n".join(formatted)
     )
 
-    out = await _llm_chat(llm, [{"role": "system", "content": build_system_prompt()}, {"role": "user", "content": prompt}])
+    out = await _llm_chat(
+        llm,
+        [
+            {"role": "system", "content": build_system_prompt()},
+            {"role": "user", "content": prompt},
+        ],
+        timeout=60,
+    )
 
     if _looks_like_tool_json(out):
-        out = (
-            "I can’t run tools from Moltbook DMs, but I can walk you through it or do it on Discord/WebUI/HomeKit. "
-            "What do you want me to accomplish?"
-        )
-    return _compact(out, reply_max_chars)
+        return ""
+
+    return _compact(out, max(80, int(reply_max_chars or DEFAULT_REPLY_MAX_CHARS)))
 
 
-# -------------------- Feed normalization + selection --------------------
-def _normalize_posts(feed_data: Any) -> List[Dict[str, Any]]:
-    if isinstance(feed_data, dict):
-        for k in ("items", "posts", "data", "results"):
-            v = feed_data.get(k)
-            if isinstance(v, list):
-                return [p for p in v if isinstance(p, dict)]
-        if "id" in feed_data and ("title" in feed_data or "text" in feed_data):
-            return [feed_data]
-        return []
-    if isinstance(feed_data, list):
-        return [p for p in feed_data if isinstance(p, dict)]
-    return []
+async def _maybe_reply_to_dms(llm, client: MoltbookClient, dry_run: bool, claimed: bool):
+    # only reply when the account is claimed AND mode allows interaction
+    mode = _get_str("mode", "read_only").lower()
+    if not claimed:
+        return
+    if mode not in ("engage", "autopost"):
+        return
 
+    reply_max_chars = _get_int("reply_max_chars", DEFAULT_REPLY_MAX_CHARS)
 
-def _post_text(p: Dict[str, Any]) -> str:
-    return ((p.get("title") or "") + " " + (p.get("text") or "")).strip()
+    # Try to learn our agent name/id from settings so we can avoid replying to ourselves
+    agent_name = _get_str("agent_name", "").strip().lower()
+    agent_id = _get_str("agent_id", "").strip()
 
-
-def _pick_posts_to_reply(posts: List[Dict[str, Any]], max_actions: int) -> List[Dict[str, Any]]:
-    candidates: List[Dict[str, Any]] = []
-    for p in posts:
-        pid = str(p.get("id") or p.get("_id") or "").strip()
-        if not pid or _seen_has(pid):
-            continue
-        txt = _post_text(p).lower()
-        if "?" in txt or "help" in txt or "how do" in txt or "anyone know" in txt:
-            candidates.append(p)
-
-    if not candidates:
-        for p in posts:
-            pid = str(p.get("id") or p.get("_id") or "").strip()
-            if pid and not _seen_has(pid):
-                candidates.append(p)
-
-    return candidates[: max(0, int(max_actions))]
-
-
-# -------------------- Auto-register on first run --------------------
-def _sanitize_agent_name(name: str) -> str:
-    name = (name or "").strip().replace(" ", "-")
-    name = re.sub(r"[^A-Za-z0-9\-_]", "", name)
-    name = name.strip("-_")
-    return (name[:32] if name else "Tater")
-
-
-def _save_registration_to_redis(reg: Dict[str, Any]):
-    agent = (reg or {}).get("agent") or {}
-    setup = (reg or {}).get("setup") or {}
-
-    pipe = redis_client.pipeline()
-
-    # ALWAYS store api_key explicitly (critical; cannot be retrieved later)
-    api_key = agent.get("api_key")
-    if api_key:
-        pipe.hset(MOLT_SETTINGS_KEY, "api_key", str(api_key))
-
-    # Store the rest of the critical agent fields so other platforms/plugins can answer
-    for k in ("id", "name", "claim_url", "verification_code", "profile_url", "created_at"):
-        v = agent.get(k)
-        if v is None:
-            continue
-        if k == "id":
-            pipe.hset(MOLT_SETTINGS_KEY, "agent_id", str(v))
-        elif k == "name":
-            pipe.hset(MOLT_SETTINGS_KEY, "agent_name", str(v))
-        else:
-            pipe.hset(MOLT_SETTINGS_KEY, k, str(v))
-
-    # store status + tweet_template + skill files (nice-to-have)
-    if reg.get("status") is not None:
-        pipe.hset(MOLT_SETTINGS_KEY, "status", str(reg.get("status")))
-    if reg.get("tweet_template") is not None:
-        pipe.hset(MOLT_SETTINGS_KEY, "tweet_template", str(reg.get("tweet_template")))
-
-    skill_files = reg.get("skill_files")
-    if isinstance(skill_files, dict):
+    conv_ids = list(redis_client.smembers(DM_CONV_INDEX_KEY) or [])
+    for cid in conv_ids:
         try:
-            pipe.hset(MOLT_SETTINGS_KEY, "skill_files_json", json.dumps(skill_files, ensure_ascii=False))
+            new_count = int(redis_client.hget(_dm_meta_key(cid), "new_messages_last_poll") or "0")
         except Exception:
-            pipe.hset(MOLT_SETTINGS_KEY, "skill_files_json", str(skill_files))
+            new_count = 0
 
-    # store claim message template
-    msg_tmpl = None
-    if isinstance(setup, dict) and isinstance(setup.get("step_3"), dict):
-        msg_tmpl = (setup.get("step_3") or {}).get("message_template")
-    if msg_tmpl:
-        pipe.hset(MOLT_SETTINGS_KEY, "claim_message_template", str(msg_tmpl))
+        if new_count <= 0:
+            continue
 
-    pipe.execute()
-
-    _log_event({
-        "ts": _now_ts(),
-        "type": "registered",
-        "agent_id": agent.get("id"),
-        "agent_name": agent.get("name"),
-        "claim_url": agent.get("claim_url"),
-        "verification_code": agent.get("verification_code"),
-        "profile_url": agent.get("profile_url"),
-        "created_at": agent.get("created_at"),
-        "status": reg.get("status"),
-    })
-
-
-def _register_agent_if_missing() -> bool:
-    """
-    If no api_key is stored in Redis, register a new Moltbook agent and persist all important fields.
-    If the name is taken, retry with suffixes: base-1, base-2, ...
-    Returns True if we registered (and should stop so next run uses saved api_key cleanly).
-    """
-    api_key = _get_str("api_key", "")
-    if api_key:
-        return False
-
-    override = _get_str("agent_name_override", "")
-    if override:
-        base = _sanitize_agent_name(override)
-    else:
-        first, last = get_tater_name()
-        base = _sanitize_agent_name(f"{first}-{last}")
-
-    desc = _get_str("description", "").strip() or "Tater AI assistant (tool-aware; posts and replies on Moltbook)"
-
-    max_tries = 50
-    for i in range(0, max_tries):
-        agent_name = base if i == 0 else _sanitize_agent_name(f"{base}-{i}")
-
-        logger.info(f"[Moltbook] No API key found. Auto-registering agent name='{agent_name}' (try {i+1}/{max_tries})...")
-
+        # Optional: skip if we already replied very recently to this convo
         try:
-            resp = requests.post(
-                f"{API_BASE}/agents/register",
-                headers={"Content-Type": "application/json", "Accept": "application/json"},
-                json={"name": agent_name, "description": desc},
-                timeout=25,
-            )
-            data = resp.json() if resp.content else {}
-        except Exception as e:
-            logger.error(f"[Moltbook] Registration failed: {e}")
+            last_replied_ts = int(redis_client.hget(_dm_meta_key(cid), "last_replied_ts") or "0")
+        except Exception:
+            last_replied_ts = 0
+
+        # Pull recent stored messages
+        raw_msgs = redis_client.lrange(_dm_msgs_key(cid), -12, -1) or []
+        msgs = []
+        for r in raw_msgs:
+            try:
+                msgs.append(json.loads(r))
+            except Exception:
+                pass
+
+        if not msgs:
+            # nothing to respond to
+            redis_client.hset(_dm_meta_key(cid), "new_messages_last_poll", "0")
+            continue
+
+        # Determine if the last message is from the agent (avoid replying to self)
+        last_msg = msgs[-1] if msgs else {}
+        last_from = str(last_msg.get("from") or "").strip().lower()
+        last_ts = int(last_msg.get("ts") or 0)
+
+        def _is_agent_sender(sender: str) -> bool:
+            if not sender:
+                return False
+            if agent_name and sender == agent_name:
+                return True
+            if agent_id and sender == agent_id:
+                return True
+            # fallback heuristics
+            if sender in ("agent", "tater", "taterbot", "assistant"):
+                return True
             return False
 
-        # success
-        if isinstance(data, dict) and data.get("success") is True:
-            _save_registration_to_redis(data)
-
-            agent = data.get("agent") or {}
-            claim_url = agent.get("claim_url") or "(missing claim_url)"
-            vcode = agent.get("verification_code") or "(missing verification_code)"
-
-            logger.warning("🦞 [Moltbook] Agent registered successfully, but is NOT claimed yet!")
-            logger.warning(f"🦞 Claim URL: {claim_url}")
-            logger.warning(f"🦞 Verification code: {vcode}")
-            logger.warning("🦞 IMPORTANT: API key cannot be retrieved later — it has been saved to Redis.")
-
-            return True
-
-        # name taken? retry
-        err = ""
-        hint = ""
-        if isinstance(data, dict):
-            err = str(data.get("error") or "")
-            hint = str(data.get("hint") or "")
-        combined = (err + " " + hint).lower()
-
-        name_taken = ("already taken" in combined) or ("name" in combined and "taken" in combined)
-        if name_taken or resp.status_code in (409, 422):
-            # keep trying suffixes
+        # If last message is from us, do not respond
+        if _is_agent_sender(last_from):
+            redis_client.hset(_dm_meta_key(cid), "new_messages_last_poll", "0")
             continue
 
-        logger.error(f"[Moltbook] Registration error {resp.status_code}: {data}")
+        # If we already replied after the last incoming msg timestamp, skip
+        if last_ts and last_replied_ts and last_replied_ts >= last_ts:
+            redis_client.hset(_dm_meta_key(cid), "new_messages_last_poll", "0")
+            continue
+
+        # Ensure there is at least one non-agent message in the window
+        has_user_msg = any(not _is_agent_sender(str(m.get("from") or "").strip().lower()) for m in msgs)
+        if not has_user_msg:
+            redis_client.hset(_dm_meta_key(cid), "new_messages_last_poll", "0")
+            continue
+
+        thread = {"messages": msgs}
+
+        reply = await _draft_dm_reply(llm, cid, thread, reply_max_chars)
+        if not reply:
+            # still clear so we don't loop forever
+            redis_client.hset(_dm_meta_key(cid), "new_messages_last_poll", "0")
+            continue
+
+        now_ts = _now_ts()
+
+        if dry_run:
+            logger.info(f"[Moltbook] DRY RUN DM reply to {cid}: {reply}")
+            _log_event({"ts": now_ts, "type": "dry_run_dm_send", "conversation_id": cid, "message": reply})
+            redis_client.hset(_dm_meta_key(cid), mapping={
+                "new_messages_last_poll": "0",
+                "last_replied_ts": str(now_ts),
+            })
+            continue
+
+        st, bd, hd = client.dm_send(str(cid), reply)
+        if st == 429:
+            _handle_rate_limit(st, hd, bd)
+            return
+
+        if st and isinstance(bd, dict) and bd.get("success") is True:
+            _bump_stat("dms_sent", 1)
+            _log_event({"ts": now_ts, "type": "dm_send", "conversation_id": cid, "message": reply})
+            redis_client.hset(_dm_meta_key(cid), mapping={
+                "new_messages_last_poll": "0",
+                "last_replied_ts": str(now_ts),
+            })
+        else:
+            _log_event({"ts": now_ts, "type": "dm_send_failed", "conversation_id": cid, "status": st, "body": bd})
+            # don't clear new_messages_last_poll here if you want retries; if you *do* want retries, keep as-is
+
+async def _draft_self_post(llm) -> Tuple[str, str]:
+    prompt = (
+        "Write a Moltbook post.\n"
+        "Make it something worth reading.\n"
+        "- It can be a thought, a question, a discovery, or a mini-story.\n"
+        "- Avoid being generic. Be specific.\n"
+        "- Do not mention tool calls or output JSON.\n\n"
+        "Return as:\n"
+        "TITLE: <short title>\n"
+        "CONTENT:\n"
+        "<post body>\n"
+    )
+
+    messages = [
+        {"role": "system", "content": build_system_prompt()},
+        {"role": "user", "content": prompt},
+    ]
+    txt = await _llm_chat(llm, messages, timeout=75)
+    if _looks_like_tool_json(txt):
+        return "", ""
+
+    title = ""
+    content = ""
+    m = re.search(r"^TITLE:\s*(.+?)\s*$", txt, re.MULTILINE)
+    if m:
+        title = m.group(1).strip()
+
+    m2 = re.search(r"^CONTENT:\s*(.*)$", txt, re.MULTILINE | re.DOTALL)
+    if m2:
+        content = m2.group(1).strip()
+    else:
+        # fallback: try splitting first line as title
+        lines = [l.strip() for l in (txt or "").splitlines() if l.strip()]
+        if lines:
+            title = lines[0][:120]
+            content = "\n".join(lines[1:]).strip()
+
+    title = _compact(title, 120).strip()
+    content = content.strip()
+
+    # sanity
+    if len(title) < 3 or len(content) < 20:
+        return "", ""
+    return title, content
+
+
+# -------------------- Main loop logic --------------------
+# -------------------- Intro post helpers --------------------
+async def _draft_intro_post(llm) -> str:
+    prompt = (
+        "This is your first post on Moltbook.\n"
+        "Introduce yourself in a friendly, natural way.\n"
+        "- Say who you are.\n"
+        "- Say what kinds of things you like to talk about.\n"
+        "- Keep it short and casual.\n"
+        "- Do NOT mention tools, plugins, or being a bot framework.\n"
+        "- Do NOT use hashtags.\n"
+        "- Do NOT output JSON.\n"
+    )
+
+    out = await _llm_chat(
+        llm,
+        [
+            {"role": "system", "content": build_system_prompt()},
+            {"role": "user", "content": prompt},
+        ],
+    )
+
+    return _compact(out, 600)
+
+
+def _should_intro_post(client_status: Dict[str, Any]) -> bool:
+    """
+    Do intro post once after claimed.
+    """
+    if not _get_bool("intro_post_on_claim", DEFAULT_INTRO_POST_ON_CLAIM):
+        return False
+    if _state_get_str("intro_post_done", "false").lower() == "true":
         return False
 
-    logger.error(f"[Moltbook] Could not find an available agent name after {max_tries} tries (base='{base}').")
-    return False
+    is_claimed = False
+    try:
+        if isinstance(client_status, dict):
+            data = client_status.get("data") or client_status
+            if isinstance(data, dict):
+                agent = data.get("agent") or data
+                if isinstance(agent, dict):
+                    is_claimed = bool(agent.get("is_claimed"))
+    except Exception:
+        is_claimed = False
+
+    return bool(is_claimed)
 
 
-# -------------------- Claim gating --------------------
-def _is_claimed_status(payload: Any) -> Tuple[bool, str]:
-    """
-    Returns (claimed_bool, status_str)
-    """
-    if isinstance(payload, dict):
-        status = str(payload.get("status") or payload.get("agent_status") or "").strip()
-        if not status and isinstance(payload.get("agent"), dict):
-            status = str(payload["agent"].get("status") or "").strip()
-        if not status:
-            status = "unknown"
-        claimed = status.lower() in ("claimed", "active", "verified")
-        return claimed, status
-    return False, "unknown"
-
-
-# -------------------- Main runner --------------------
-def run(stop_event: Optional[threading.Event] = None):
-    """
-    Starts Moltbook polling in a daemon thread.
-    """
-    # Auto-register if missing key
-    if _register_agent_if_missing():
+async def _maybe_intro_post(llm, client: MoltbookClient, dry_run: bool):
+    if _in_cooldown() or not _post_cooldown_ok():
         return
 
-    api_key = _get_str("api_key", "")
-    if not api_key:
-        logger.warning("⚠️ Missing Moltbook API key in Redis (moltbook_platform_settings.api_key). Not starting.")
+    title = "Hello Moltbook 👋"
+
+    # AI-generated intro content (chatty, first-post framing)
+    content = await _draft_intro_post(llm)
+    if not content:
         return
 
-    llm = get_llm_client_from_env()
-    logger.info(f"[Moltbook] LLM client → {build_llm_host_from_env()}")
+    # Safety: if the model ever outputs tool JSON, bail (or you could rewrite)
+    if _looks_like_tool_json(content):
+        return
 
-    client = MoltbookClient(api_key=api_key)
+    submolt = _get_str("default_submolt", DEFAULT_DEFAULT_SUBMOLT) or None
 
-    def _thread_main():
-        logger.info("[Moltbook] Platform started.")
+    if dry_run:
+        logger.info(f"[Moltbook] DRY RUN intro post: {title}")
+        _log_event({
+            "ts": _now_ts(),
+            "type": "dry_run_intro_post",
+            "title": title,
+            "submolt": submolt,
+            "summary": _compact(content, 300),
+        })
+        _state_set("intro_post_done", "true")
+        _state_set("last_post_ts", _now_ts())
+        return
 
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+    status, body, headers = client.create_post(title=title, content=content, submolt=submolt)
+    if status == 429:
+        _handle_rate_limit(status, headers, body)
+        return
 
-        last_feed_check = 0
-        last_dm_check = 0
-        last_status_check = 0
+    if status and isinstance(body, dict) and body.get("success") is True:
+        post_id = None
+        try:
+            data = body.get("data") or {}
+            if isinstance(data, dict):
+                post_id = data.get("id") or data.get("post_id")
+        except Exception:
+            post_id = None
 
-        claimed = False
-        status_str = "unknown"
+        _state_set("last_post_ts", _now_ts())
+        _state_set("intro_post_done", "true")
+        _bump_stat("posts_created", 1)
+        _log_event({
+            "ts": _now_ts(),
+            "type": "post_created",
+            "post_id": post_id,
+            "url": _post_url(post_id) if post_id else None,
+            "title": title,
+            "submolt": submolt,
+            "summary": _compact(content, 300),
+        })
+        return
 
-        while True:
-            if stop_event and stop_event.is_set():
-                logger.info("[Moltbook] Stop signal received. Exiting loop.")
-                break
+    logger.warning(f"[Moltbook] Intro post failed: status={status} body={body}")
+    _log_event({"ts": _now_ts(), "type": "post_failed", "status": status, "body": body})
 
-            # live settings
-            mode = _get_str("mode", "read_only").lower()
-            feed_source = _get_str("feed_source", "personal").lower()
-            feed_sort = _get_str("feed_sort", "new").lower()
-            feed_limit = _get_int("feed_limit", DEFAULT_FEED_LIMIT)
-            check_interval = _get_int("check_interval_seconds", DEFAULT_CHECK_INTERVAL_SECONDS)
-            dm_interval = _get_int("dm_check_interval_seconds", DEFAULT_DM_CHECK_INTERVAL_SECONDS)
-            max_actions = _get_int("max_actions_per_cycle", DEFAULT_MAX_ACTIONS_PER_CYCLE)
-            allow_comments = _get_bool("allow_comments", True)
-            allow_votes = _get_bool("allow_votes", True)
-            allow_autopost = _get_bool("allow_autopost", False)
-            dry_run = _get_bool("dry_run", True)
-            reply_max_chars = _get_int("reply_max_chars", DEFAULT_REPLY_MAX_CHARS)
+async def _maybe_self_post(llm, client: MoltbookClient, dry_run: bool):
+    mode = _get_str("mode", "read_only").lower()
+    if mode != "autopost":
+        return
+    if not _get_bool("allow_self_posts", DEFAULT_ALLOW_SELF_POSTS):
+        return
+    if _in_cooldown() or not _post_cooldown_ok():
+        return
 
-            if _in_cooldown():
-                time.sleep(5)
+    chance = max(0, min(100, _get_int("self_post_chance_pct", DEFAULT_SELF_POST_CHANCE_PCT)))
+    if random.randint(1, 100) > chance:
+        return
+
+    title, content = await _draft_self_post(llm)
+    if not title or not content:
+        return
+
+    submolt = _get_str("default_submolt", DEFAULT_DEFAULT_SUBMOLT) or None
+
+    if dry_run:
+        logger.info(f"[Moltbook] DRY RUN self-post: {title}")
+        _log_event({"ts": _now_ts(), "type": "dry_run_post", "title": title, "submolt": submolt})
+        _state_set("last_post_ts", _now_ts())
+        return
+
+    status, body, headers = client.create_post(title=title, content=content, submolt=submolt)
+    if status == 429:
+        _handle_rate_limit(status, headers, body)
+        return
+
+    if status and isinstance(body, dict) and body.get("success") is True:
+        post_id = None
+        try:
+            data = body.get("data") or {}
+            if isinstance(data, dict):
+                post_id = data.get("id") or data.get("post_id")
+        except Exception:
+            post_id = None
+
+        _state_set("last_post_ts", _now_ts())
+        _bump_stat("posts_created", 1)
+        _log_event({
+            "ts": _now_ts(),
+            "type": "post_created",
+            "post_id": post_id,
+            "url": _post_url(post_id) if post_id else None,
+            "title": title,
+            "submolt": submolt,
+        })
+        return
+
+    logger.warning(f"[Moltbook] Self post failed: status={status} body={body}")
+    _log_event({"ts": _now_ts(), "type": "post_failed", "status": status, "body": body})
+
+
+async def _engage_with_feed(llm, client: MoltbookClient):
+    mode = _get_str("mode", "read_only").lower()
+    if mode not in ("engage", "autopost"):
+        return
+
+    allow_comments = _get_bool("allow_comments", True)
+    allow_votes = _get_bool("allow_votes", True)
+    if not allow_comments and not allow_votes:
+        return
+
+    feed_source = _get_str("feed_source", "personal")
+    feed_sort = _get_str("feed_sort", "new")
+    feed_limit = _get_int("feed_limit", DEFAULT_FEED_LIMIT)
+    reply_max_chars = _get_int("reply_max_chars", DEFAULT_REPLY_MAX_CHARS)
+    dry_run = _get_bool("dry_run", True)
+
+    status, body, headers = client.feed(feed_source, feed_sort, feed_limit)
+    if status == 429:
+        _handle_rate_limit(status, headers, body)
+        return
+    if not status or not isinstance(body, dict) or body.get("success") is not True:
+        _log_event({"ts": _now_ts(), "type": "feed_failed", "status": status, "body": body})
+        return
+
+    data = body.get("data") or {}
+    items = data.get("items") or data.get("posts") or data.get("feed") or []
+    if not isinstance(items, list):
+        items = []
+
+    actions_left = max(0, _get_int("max_actions_per_cycle", DEFAULT_MAX_ACTIONS_PER_CYCLE))
+
+    for post in items:
+        if actions_left <= 0:
+            break
+        if not isinstance(post, dict):
+            continue
+
+        post_id = post.get("id") or post.get("post_id")
+        if not post_id:
+            continue
+        if _seen_has(str(post_id)):
+            continue
+
+        _seen_add(str(post_id))
+
+        # vote sometimes
+        did_action = False
+        if allow_votes and actions_left > 0 and random.random() < 0.25:
+            if dry_run:
+                _log_event({"ts": _now_ts(), "type": "dry_run_vote", "post_id": post_id, "vote": "upvote"})
+                actions_left -= 1
                 continue
 
-            now = _now_ts()
+            st, bd, hd = client.upvote(str(post_id))
+            if st == 429:
+                _handle_rate_limit(st, hd, bd)
+                return
+            if st and isinstance(bd, dict) and bd.get("success") is True:
+                _bump_stat("votes_cast", 1)
+                _log_event({"ts": _now_ts(), "type": "vote", "post_id": post_id, "vote": "upvote", "url": _post_url(str(post_id))})
+                actions_left -= 1
+                did_action = True
 
-            # -------------------
-            # Agent status check (gate writes until claimed)
-            # -------------------
-            if now - last_status_check >= 60:
-                last_status_check = now
-                s, data, headers = client.status()
-                if s == 429:
-                    _handle_rate_limit(s, headers, data)
-                elif s and s >= 400:
-                    logger.warning(f"[Moltbook] status error {s}: {data}")
-                else:
-                    claimed, status_str = _is_claimed_status(data)
-                    redis_client.hset(MOLT_SETTINGS_KEY, "status", status_str)
-                    redis_client.hset(MOLT_STATS_KEY, "agent_status", status_str)
-                    redis_client.hset(MOLT_STATS_KEY, "claimed", "true" if claimed else "false")
+        if did_action or not allow_comments or actions_left <= 0:
+            continue
 
-            # -------------------
-            # DM heartbeat / handling
-            # -------------------
-            if now - last_dm_check >= max(30, dm_interval):
-                last_dm_check = now
-                s, data, headers = client.dm_check()
-                if s == 429:
-                    _handle_rate_limit(s, headers, data)
-                elif s and s >= 400:
-                    logger.warning(f"[Moltbook] DM check error {s}: {data}")
-                else:
-                    s2, convs, h2 = client.dm_conversations()
-                    if s2 == 429:
-                        _handle_rate_limit(s2, h2, convs)
-                    elif s2 and s2 >= 400:
-                        logger.warning(f"[Moltbook] DM conversations error {s2}: {convs}")
-                    else:
-                        if isinstance(convs, list):
-                            conv_list = convs
-                        elif isinstance(convs, dict) and isinstance(convs.get("conversations"), list):
-                            conv_list = convs["conversations"]
-                        else:
-                            conv_list = []
+        # comment sometimes
+        if random.random() < 0.35:
+            comment = await _draft_comment(llm, post, reply_max_chars)
+            if not comment:
+                continue
 
-                        for conv in conv_list:
-                            if not isinstance(conv, dict):
-                                continue
-                            cid = str(conv.get("id") or "").strip()
-                            if not cid:
-                                continue
+            if dry_run:
+                _log_event({"ts": _now_ts(), "type": "dry_run_comment", "post_id": post_id, "content": comment})
+                actions_left -= 1
+                continue
 
-                            s3, thread, h3 = client.dm_conversation(cid)
-                            if s3 == 429:
-                                _handle_rate_limit(s3, h3, thread)
-                                break
-                            if s3 and s3 >= 400:
-                                continue
+            st, bd, hd = client.comment(str(post_id), comment)
+            if st == 429:
+                _handle_rate_limit(st, hd, bd)
+                return
 
-                            if isinstance(thread, dict):
-                                _dm_store_thread(cid, thread)
+            if st and isinstance(bd, dict) and bd.get("success") is True:
+                _bump_stat("comments_created", 1)
+                _log_event({"ts": _now_ts(), "type": "comment", "post_id": post_id, "content": comment, "url": _post_url(str(post_id))})
+                actions_left -= 1
 
-                            # Reply rules: only if claimed + mode allows
-                            if claimed and mode in ("engage", "autopost"):
-                                try:
-                                    new_messages = int(redis_client.hget(_dm_meta_key(cid), "new_messages_last_poll") or "0")
-                                except Exception:
-                                    new_messages = 0
 
-                                if new_messages > 0:
-                                    reply = loop.run_until_complete(_draft_dm_reply(llm, cid, thread, reply_max_chars))
-                                    if reply:
-                                        if dry_run:
-                                            logger.info(f"[Moltbook][DryRun] Would DM reply to {cid}: {reply}")
-                                        else:
-                                            s4, out, h4 = client.dm_send(cid, reply)
-                                            if s4 == 429:
-                                                _handle_rate_limit(s4, h4, out)
-                                                break
-                                            if s4 and s4 >= 400:
-                                                logger.warning(f"[Moltbook] DM send error {s4}: {out}")
-                                            else:
-                                                _bump_stat("dms_sent", 1)
-                                                _log_event({"ts": _now_ts(), "type": "dm_send", "conversation_id": cid, "text": reply})
+async def _poll_dms(client: MoltbookClient):
+    """
+    Poll DM check + optionally fetch conversations and store full threads.
+    """
+    status, body, headers = client.dm_check()
+    if status == 429:
+        _handle_rate_limit(status, headers, body)
+        return
+    if not status or not isinstance(body, dict) or body.get("success") is not True:
+        _log_event({"ts": _now_ts(), "type": "dm_check_failed", "status": status, "body": body})
+        return
 
-            # -------------------
-            # Feed check / engage
-            # -------------------
-            if now - last_feed_check >= max(60, check_interval):
-                last_feed_check = now
+    has_activity = bool(body.get("has_activity"))
+    _log_event({"ts": _now_ts(), "type": "dm_check", "has_activity": has_activity, "summary": body.get("summary")})
 
-                s, feed_data, headers = client.feed(feed_source, feed_sort, feed_limit)
-                if s == 429:
-                    _handle_rate_limit(s, headers, feed_data)
-                    time.sleep(5)
-                    continue
-                if s and s >= 400:
-                    logger.warning(f"[Moltbook] Feed error {s}: {feed_data}")
-                    time.sleep(10)
-                    continue
+    if not has_activity:
+        return
 
-                posts = _normalize_posts(feed_data)
-                if posts:
-                    _set_stat("last_feed_check_ts", str(_now_ts()))
-                    _set_stat("last_feed_count", str(len(posts)))
+    st2, bd2, hd2 = client.dm_conversations()
+    if st2 == 429:
+        _handle_rate_limit(st2, hd2, bd2)
+        return
+    if not st2 or not isinstance(bd2, dict) or bd2.get("success") is not True:
+        _log_event({"ts": _now_ts(), "type": "dm_conversations_failed", "status": st2, "body": bd2})
+        return
 
-                actions_taken = 0
+    data = bd2.get("conversations") or bd2.get("data") or {}
+    items = data.get("items") if isinstance(data, dict) else None
+    if items is None:
+        items = bd2.get("items")
+    if not isinstance(items, list):
+        items = []
 
-                # Engage only if claimed + mode allows
-                if claimed and mode in ("engage", "autopost"):
-                    targets = _pick_posts_to_reply(posts, max_actions=max_actions)
+    for conv in items:
+        if not isinstance(conv, dict):
+            continue
+        cid = conv.get("conversation_id") or conv.get("id")
+        if not cid:
+            continue
 
-                    for post in targets:
-                        if actions_taken >= max_actions:
-                            break
+        st3, bd3, hd3 = client.dm_conversation(str(cid))
+        if st3 == 429:
+            _handle_rate_limit(st3, hd3, bd3)
+            return
+        if not st3 or not isinstance(bd3, dict) or bd3.get("success") is not True:
+            _log_event({"ts": _now_ts(), "type": "dm_thread_failed", "conversation_id": cid, "status": st3, "body": bd3})
+            continue
 
-                        pid = str(post.get("id") or post.get("_id") or "").strip()
-                        if not pid or _seen_has(pid):
-                            continue
+        thread = bd3.get("conversation") or bd3.get("data") or bd3
+        if isinstance(thread, dict):
+            _dm_store_thread(str(cid), thread)
 
-                        _seen_add(pid)
 
-                        reply = loop.run_until_complete(_draft_reply_for_post(llm, post, reply_max_chars))
-                        if not reply:
-                            continue
+# -------------------- Runner --------------------
+_stop_event = threading.Event()
+_thread: Optional[threading.Thread] = None
 
-                        if allow_comments:
-                            if dry_run:
-                                logger.info(f"[Moltbook][DryRun] Would comment on {pid}: {reply}")
-                            else:
-                                s2, out2, h2 = client.comment(pid, reply)
-                                if s2 == 429:
-                                    _handle_rate_limit(s2, h2, out2)
-                                    break
-                                if s2 and s2 >= 400:
-                                    logger.warning(f"[Moltbook] Comment error {s2}: {out2}")
-                                else:
-                                    _bump_stat("comments_created", 1)
-                                    _log_event({
-                                        "ts": _now_ts(),
-                                        "type": "comment",
-                                        "post_id": pid,
-                                        "post_url": _post_url(pid),
-                                        "text": reply,
-                                        "post_title": _compact(post.get("title") or "", 200),
-                                    })
-                            actions_taken += 1
+async def _run_loop():
+    while not _stop_event.is_set():
+        api_key = _get_str("api_key", "")
+        if not api_key:
+            logger.warning("[Moltbook] No api_key configured yet.")
+            await asyncio.sleep(10)
+            continue
 
-                        if allow_votes and actions_taken < max_actions:
-                            if dry_run:
-                                logger.info(f"[Moltbook][DryRun] Would upvote {pid}")
-                            else:
-                                s3, out3, h3 = client.upvote(pid)
-                                if s3 == 429:
-                                    _handle_rate_limit(s3, h3, out3)
-                                    break
-                                if s3 and s3 >= 400:
-                                    logger.warning(f"[Moltbook] Upvote error {s3}: {out3}")
-                                else:
-                                    _bump_stat("votes_cast", 1)
-                                    _log_event({"ts": _now_ts(), "type": "vote", "vote": "upvote", "post_id": pid, "post_url": _post_url(pid)})
-                            actions_taken += 1
+        client = MoltbookClient(api_key)
+        dry_run = _get_bool("dry_run", True)
 
-                # -------------------
-                # Autopost from queue (claimed only)
-                # -------------------
-                if claimed and mode == "autopost" and allow_autopost and _post_cooldown_ok():
-                    raw = redis_client.lindex(MOLT_POST_QUEUE_KEY, 0)
-                    if raw:
-                        try:
-                            job = json.loads(raw)
-                        except Exception:
-                            job = None
+        llm = None  # lazy init
 
-                        if isinstance(job, dict):
-                            title = str(job.get("title") or "").strip()
-                            text = str(job.get("text") or "").strip()
-                            submolt = str(job.get("submolt") or "").strip() or None
+        # -------------------
+        # status (claim/intro logic)
+        # -------------------
+        claimed = False
 
-                            if title and text:
-                                if dry_run:
-                                    logger.info(f"[Moltbook][DryRun] Would create post: {title}")
-                                else:
-                                    s4, out4, h4 = client.create_post(title, text, submolt=submolt)
-                                    if s4 == 429:
-                                        _handle_rate_limit(s4, h4, out4)
-                                    elif s4 and s4 >= 400:
-                                        logger.warning(f"[Moltbook] Create post error {s4}: {out4}")
-                                    else:
-                                        post_id = ""
-                                        if isinstance(out4, dict):
-                                            maybe = out4.get("post") if isinstance(out4.get("post"), dict) else out4
-                                            post_id = str(maybe.get("id") or maybe.get("_id") or "").strip()
+        st, bd, hd = client.status()
+        if st == 429:
+            _handle_rate_limit(st, hd, bd)
+        else:
+            if isinstance(bd, dict) and bd.get("success") is True:
+                _bump_stat("status_ok", 1)
 
-                                        url = _post_url(post_id) if post_id else ""
-                                        _state_set("last_post_ts", _now_ts())
-                                        _bump_stat("posts_created", 1)
-                                        if url:
-                                            _set_stat("last_post_url", url)
+                # claimed detection (same logic used by _should_intro_post)
+                try:
+                    data = bd.get("data") or bd
+                    agent = data.get("agent") or data
+                    if isinstance(agent, dict):
+                        claimed = bool(agent.get("is_claimed"))
+                except Exception:
+                    claimed = False
 
-                                        _log_event({
-                                            "ts": _now_ts(),
-                                            "type": "post",
-                                            "id": post_id,
-                                            "url": url,
-                                            "title": _compact(title, 200),
-                                            "summary": _compact(text, 600),
-                                            "meta": {"submolt": submolt or ""},
-                                        })
+                # intro post (your existing gating in _should_intro_post)
+                if _should_intro_post(bd):
+                    llm = llm or get_llm_client_from_env()
+                    await _maybe_intro_post(llm, client, dry_run)
 
-                                        redis_client.lpop(MOLT_POST_QUEUE_KEY)
+        # -------------------
+        # DM polling (store)
+        # -------------------
+        try:
+            await _poll_dms(client)
+        except Exception as e:
+            logger.exception(f"[Moltbook] DM poll error: {e}")
 
-            # stop-aware sleep
-            for _ in range(10):
-                if stop_event and stop_event.is_set():
-                    break
-                time.sleep(0.5)
+        # -------------------
+        # DM replies (new)
+        # -------------------
+        try:
+            llm = llm or get_llm_client_from_env()
+            await _maybe_reply_to_dms(llm, client, dry_run, claimed)
+        except Exception as e:
+            logger.exception(f"[Moltbook] DM reply error: {e}")
+
+        # -------------------
+        # Feed + engage/self-post
+        # -------------------
+        try:
+            llm = llm or get_llm_client_from_env()
+            await _engage_with_feed(llm, client)
+        except Exception as e:
+            logger.exception(f"[Moltbook] Engage error: {e}")
 
         try:
-            loop.stop()
-            loop.close()
-        except Exception:
-            pass
+            llm = llm or get_llm_client_from_env()
+            await _maybe_self_post(llm, client, dry_run)
+        except Exception as e:
+            logger.exception(f"[Moltbook] Self-post error: {e}")
 
-        logger.info("[Moltbook] Platform stopped.")
+        # sleep
+        feed_sleep = max(15, _get_int("check_interval_seconds", DEFAULT_CHECK_INTERVAL_SECONDS))
+        dm_sleep = max(15, _get_int("dm_check_interval_seconds", DEFAULT_DM_CHECK_INTERVAL_SECONDS))
+        await asyncio.sleep(min(feed_sleep, dm_sleep))
 
-    threading.Thread(target=_thread_main, daemon=True).start()
+def run(stop_event: Optional[threading.Event] = None):
+    """
+    Platform entrypoint (matches your other platforms pattern).
+    """
+    global _thread, _stop_event
+    if stop_event is not None:
+        _stop_event = stop_event
+    else:
+        _stop_event = threading.Event()
+
+    def _runner():
+        asyncio.run(_run_loop())
+
+    _thread = threading.Thread(target=_runner, daemon=True)
+    _thread.start()
+    logger.info("[Moltbook] Platform started (no-queue).")
+
+
+def stop():
+    global _stop_event, _thread
+    if _stop_event:
+        _stop_event.set()
+    if _thread and _thread.is_alive():
+        _thread.join(timeout=5)
+    logger.info("[Moltbook] Platform stopped.")
