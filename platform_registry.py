@@ -5,7 +5,6 @@ from platforms.homeassistant_platform import PLATFORM_SETTINGS as ha_settings
 from platforms.homekit_platform import PLATFORM_SETTINGS as homekit_settings
 from platforms.irc_platform import PLATFORM_SETTINGS as irc_settings
 from platforms.matrix_platform import PLATFORM_SETTINGS as matrix_settings
-from platforms.moltbook_platform import PLATFORM_SETTINGS as moltbook_settings
 from platforms.xbmc_platform import PLATFORM_SETTINGS as xbmc_settings
 
 platform_registry = [
@@ -38,11 +37,6 @@ platform_registry = [
         **matrix_settings,
         "key": "matrix_platform",
         "label": "Matrix Settings",
-    },
-    {
-        **moltbook_settings,
-        "key": "moltbook_platform",
-        "label": "Moltbook Settings",
     },
     {
         **xbmc_settings,
