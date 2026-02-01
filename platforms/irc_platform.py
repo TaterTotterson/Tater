@@ -315,6 +315,17 @@ def load_irc_history(channel, limit=None):
 
     return _enforce_user_assistant_alternation(loop_messages)
 
+
+def _llm_meta(channel, user=None, request_kind="chat"):
+    meta = {
+        "platform": "irc",
+        "convo_id": f"irc:{channel}",
+        "request_kind": request_kind,
+    }
+    if user:
+        meta["user_id"] = str(user)
+    return meta
+
 def build_system_prompt():
     now = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
 
@@ -379,7 +390,10 @@ async def on_message(self, mask, event, target, data):
     messages = [{"role": "system", "content": build_system_prompt()}] + history
 
     try:
-        response = await llm_client.chat(messages)
+        response = await llm_client.chat(
+            messages,
+            meta=_llm_meta(target, mask.nick, "chat"),
+        )
         response_text = response["message"].get("content", "").strip()
         logger.info(f"{first}: {response_text}")
 
@@ -406,8 +420,9 @@ async def on_message(self, mask, event, target, data):
                     wait_response = await llm_client.chat(
                         messages=[
                             {"role": "system", "content": "Write one short, friendly status line."},
-                            {"role": "user", "content": wait_prompt}
-                        ]
+                            {"role": "user", "content": wait_prompt},
+                        ],
+                        meta=_llm_meta(target, mask.nick, "tool_reflection"),
                     )
                     wait_text = wait_response["message"]["content"].strip()
                     send_formatted(self, target, wait_text)
@@ -473,7 +488,7 @@ async def on_message(self, mask, event, target, data):
 def run(stop_event=None):
 
     global llm_client
-    llm_client = get_llm_client_from_env()
+    llm_client = get_llm_client_from_env(default_meta={"platform": "irc"})
 
     # Load fresh settings each time the platform starts
     cfg = _load_irc_settings()

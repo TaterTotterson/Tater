@@ -620,8 +620,22 @@ def build_system_prompt() -> str:
 
 
 # -------------------- LLM helpers --------------------
-async def _llm_chat(llm, messages: List[Dict[str, str]], timeout: int = 60) -> str:
-    resp = await llm.chat(messages, timeout=timeout)
+async def _llm_chat(
+    llm,
+    messages: List[Dict[str, str]],
+    timeout: int = 60,
+    convo_id: str = "moltbook:main",
+    request_kind: str = "chat",
+) -> str:
+    resp = await llm.chat(
+        messages,
+        timeout=timeout,
+        meta={
+            "platform": "moltbook",
+            "convo_id": convo_id,
+            "request_kind": request_kind,
+        },
+    )
     out = (resp.get("message", {}) or {}).get("content", "") or ""
     return out.strip()
 
@@ -1202,7 +1216,7 @@ async def _run_loop():
 
                 # intro post (your existing gating in _should_intro_post)
                 if _should_intro_post(bd):
-                    llm = llm or get_llm_client_from_env()
+                    llm = llm or get_llm_client_from_env(default_meta={"platform": "moltbook"})
                     await _maybe_intro_post(llm, client, dry_run)
 
         # -------------------
@@ -1217,7 +1231,7 @@ async def _run_loop():
         # DM replies (new)
         # -------------------
         try:
-            llm = llm or get_llm_client_from_env()
+            llm = llm or get_llm_client_from_env(default_meta={"platform": "moltbook"})
             await _maybe_reply_to_dms(llm, client, dry_run, claimed)
         except Exception as e:
             logger.exception(f"[Moltbook] DM reply error: {e}")
@@ -1226,13 +1240,13 @@ async def _run_loop():
         # Feed + engage/self-post
         # -------------------
         try:
-            llm = llm or get_llm_client_from_env()
+            llm = llm or get_llm_client_from_env(default_meta={"platform": "moltbook"})
             await _engage_with_feed(llm, client)
         except Exception as e:
             logger.exception(f"[Moltbook] Engage error: {e}")
 
         try:
-            llm = llm or get_llm_client_from_env()
+            llm = llm or get_llm_client_from_env(default_meta={"platform": "moltbook"})
             await _maybe_self_post(llm, client, dry_run)
         except Exception as e:
             logger.exception(f"[Moltbook] Self-post error: {e}")

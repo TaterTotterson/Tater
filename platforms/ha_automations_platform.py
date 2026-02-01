@@ -180,7 +180,7 @@ _llm = None
 @app.on_event("startup")
 async def _on_startup():
     global _llm
-    _llm = get_llm_client_from_env()
+    _llm = get_llm_client_from_env(default_meta={"platform": "ha_automations"})
     logger.info(f"[Automations] LLM client → {build_llm_host_from_env()}")
 
 @app.get("/tater-ha/v1/health")

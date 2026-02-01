@@ -185,6 +185,11 @@ class RSSManager:
                     summarization_response = await self.llm_client.chat(
                         messages=messages,
                         stream=False,
+                        meta={
+                            "platform": "rss",
+                            "convo_id": "rss:summary",
+                            "request_kind": "summarize",
+                        },
                         # optional: timeout=30, max_tokens=400  # keep it tidy
                     )
                     summary_text = summarization_response['message'].get('content', '').strip() or \

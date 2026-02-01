@@ -274,6 +274,14 @@ async def _load_history(session_id: Optional[str], limit: int) -> List[Dict[str,
             continue
     return _enforce_user_assistant_alternation(loop_messages)
 
+
+def _llm_meta(session_id: Optional[str], request_kind: str = "chat") -> Dict[str, Any]:
+    return {
+        "platform": "xbmc",
+        "convo_id": f"xbmc:{session_id or 'default'}",
+        "request_kind": request_kind,
+    }
+
 async def _save_message(session_id: Optional[str], role: str, content: Any, max_store: int):
     key = _sess_key(session_id)
     pipe = redis_client.pipeline()
@@ -318,7 +326,7 @@ _llm = None
 @app.on_event("startup")
 async def _on_startup():
     global _llm
-    _llm = get_llm_client_from_env()
+    _llm = get_llm_client_from_env(default_meta={"platform": "xbmc"})
     logger.info(f"[XBMC Bridge] LLM client → {build_llm_host_from_env()}")
 
 @app.get("/tater-xbmc/v1/health")
@@ -354,7 +362,11 @@ async def handle_message(payload: XBMCRequest):
     messages_list = [{"role": "system", "content": system_prompt}] + loop_messages
 
     try:
-        response = await _llm.chat(messages_list, timeout=TIMEOUT_SECONDS)
+        response = await _llm.chat(
+            messages_list,
+            timeout=TIMEOUT_SECONDS,
+            meta=_llm_meta(payload.session_id, "chat"),
+        )
         text = (response.get("message", {}) or {}).get("content", "") if isinstance(response, dict) else ""
 
         if not text:

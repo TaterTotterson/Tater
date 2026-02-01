@@ -27,6 +27,65 @@ redis_client = redis.Redis(
     decode_responses=True
 )
 
+
+def _johnny5_enabled() -> bool:
+    return redis_client.get("tater:johnny5:enabled") == "1"
+
+
+def _emit_johnny5_event(event_type: str, payload: Dict[str, Any]) -> None:
+    data = {"type": event_type, "ts": time.time(), **payload}
+    try:
+        redis_client.rpush("tater:johnny5:events", json.dumps(data))
+        redis_client.ltrim("tater:johnny5:events", -2000, -1)
+    except Exception:
+        pass
+
+
+def johnny5_chat(messages: List[Dict[str, Any]], meta: Dict[str, Any], timeout: Optional[float]) -> Optional[Dict[str, Any]]:
+    job_id = str(uuid.uuid4())
+    req = {
+        "job_id": job_id,
+        "messages": messages,
+        "meta": meta or {},
+        "timeout": timeout or 60,
+    }
+    for k in ("model", "max_tokens", "temperature", "request_kind"):
+        if k in meta:
+            req[k] = meta[k]
+
+    resp_key = f"tater:johnny5:llm:resp:{job_id}"
+    _emit_johnny5_event("llm_request", {"job_id": job_id, "platform": meta.get("platform")})
+    try:
+        redis_client.rpush("tater:johnny5:llm:req", json.dumps(req))
+    except Exception:
+        return None
+
+    deadline = time.time() + float(timeout or 60)
+    while time.time() < deadline:
+        raw = redis_client.get(resp_key)
+        if raw:
+            try:
+                redis_client.delete(resp_key)
+            except Exception:
+                pass
+            try:
+                data = json.loads(raw)
+            except Exception:
+                _emit_johnny5_event("llm_response_error", {"job_id": job_id})
+                return None
+            if not data.get("ok"):
+                _emit_johnny5_event(
+                    "llm_response_error",
+                    {"job_id": job_id, "error": data.get("error", "unknown")},
+                )
+                return None
+            _emit_johnny5_event("llm_response", {"job_id": job_id, "platform": meta.get("platform")})
+            return data.get("response")
+        time.sleep(0.2)
+
+    _emit_johnny5_event("llm_timeout", {"job_id": job_id, "platform": meta.get("platform")})
+    return None
+
 def get_tater_name():
     """Return the assistant's first and last name from Redis."""
     first = redis_client.get("tater:first_name")
@@ -197,7 +256,7 @@ def get_llm_client_from_env(**kwargs) -> "LLMClientWrapper":
     return LLMClientWrapper(host=host, **kwargs)
 
 class LLMClientWrapper:
-    def __init__(self, host, model=None, **kwargs):
+    def __init__(self, host, model=None, use_johnny5: bool = True, default_meta: Optional[Dict[str, Any]] = None, **kwargs):
         model = model or os.getenv("LLM_MODEL", "gemma-3-27b-it-abliterated")
         base_url = _normalize_base_url(host)
 
@@ -209,6 +268,8 @@ class LLMClientWrapper:
 
         self.host = base_url.rstrip("/")
         self.model = model
+        self.use_johnny5 = use_johnny5
+        self.default_meta = default_meta or {}
 
         # Common generation defaults (caller can override per-call)
         self.max_tokens = int(os.getenv("LLM_MAX_TOKENS", "1024"))
@@ -231,6 +292,8 @@ class LLMClientWrapper:
 
         stream = kwargs.pop("stream", False)
         model = kwargs.pop("model", self.model)
+        meta = kwargs.pop("meta", None) or {}
+        request_kind = kwargs.pop("request_kind", None)
 
         # Provide sensible defaults if not supplied
         if "max_tokens" not in kwargs:
@@ -238,12 +301,24 @@ class LLMClientWrapper:
         if "temperature" not in kwargs:
             kwargs["temperature"] = self.temperature
 
+        merged_meta = {**self.default_meta, **meta}
+        if request_kind:
+            merged_meta["request_kind"] = request_kind
+        merged_meta.setdefault("model", model)
+        merged_meta.setdefault("max_tokens", kwargs.get("max_tokens"))
+        merged_meta.setdefault("temperature", kwargs.get("temperature"))
+
         # sanitize messages (prevents empty-user poison + normalizes non-string content)
         try:
             messages = _sanitize_chat_messages(messages if isinstance(messages, list) else [])
         except Exception:
             # fail open: at least avoid crashing
             messages = messages if isinstance(messages, list) else []
+
+        if self.use_johnny5 and _johnny5_enabled() and not stream:
+            gateway_response = johnny5_chat(messages, merged_meta, timeout)
+            if gateway_response:
+                return gateway_response
 
         response = await self.client.chat.completions.create(
             model=model,

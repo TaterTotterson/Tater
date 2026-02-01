@@ -457,6 +457,14 @@ async def _load_history(conv_key: str, limit: int) -> List[Dict[str, Any]]:
             continue
     return _enforce_user_assistant_alternation(loop_messages)
 
+
+def _llm_meta(conv_key: str, request_kind: str = "chat") -> Dict[str, Any]:
+    return {
+        "platform": "homeassistant",
+        "convo_id": f"homeassistant:{conv_key}",
+        "request_kind": request_kind,
+    }
+
 async def _save_message(conv_key: str, role: str, content: Any, max_store: int):
     key = _sess_key(conv_key)
     pipe = redis_client.pipeline()
@@ -820,6 +828,11 @@ async def _generate_followup_question(assistant_text: str) -> str:
                 {"role": "user", "content": prompt},
             ],
             timeout=6,
+            meta={
+                "platform": "homeassistant",
+                "convo_id": "homeassistant:followup",
+                "request_kind": "summarize",
+            },
         )
         text = (r.get("message", {}) or {}).get("content", "") if isinstance(r, dict) else ""
         text = (text or "").strip()
@@ -919,7 +932,7 @@ _llm = None
 @app.on_event("startup")
 async def _on_startup():
     global _llm
-    _llm = get_llm_client_from_env()
+    _llm = get_llm_client_from_env(default_meta={"platform": "homeassistant"})
 
 @app.get("/tater-ha/v1/health")
 async def health():
@@ -1043,7 +1056,11 @@ async def handle_message(payload: HARequest):
     logger.debug(f"[HA Bridge] LLM last role = {messages_list[-1]['role']} (conv_key={conv_key})")
 
     try:
-        response = await _llm.chat(messages_list, timeout=TIMEOUT_SECONDS)
+        response = await _llm.chat(
+            messages_list,
+            timeout=TIMEOUT_SECONDS,
+            meta=_llm_meta(conv_key, "chat"),
+        )
         text = (response.get("message", {}) or {}).get("content", "") if isinstance(response, dict) else ""
         text = (text or "").strip()
 

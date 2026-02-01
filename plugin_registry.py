@@ -4,10 +4,10 @@ import threading
 import os
 from typing import Dict
 
-from plugin_loader import load_plugins_from_directory
+from plugin_loader import load_plugins_with_overrides
 
 # Build initial registry
-plugin_registry: Dict[str, object] = load_plugins_from_directory(
+plugin_registry: Dict[str, object] = load_plugins_with_overrides(
     os.getenv("TATER_PLUGIN_DIR", "plugins")
 )
 
@@ -29,7 +29,7 @@ def reload_plugins() -> Dict[str, object]:
         importlib.invalidate_caches()
 
         try:
-            new_registry = load_plugins_from_directory(
+            new_registry = load_plugins_with_overrides(
                 os.getenv("TATER_PLUGIN_DIR", "plugins")
             )
         except Exception as e:

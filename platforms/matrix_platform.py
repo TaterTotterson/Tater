@@ -422,6 +422,17 @@ def load_matrix_history(room_id: str, limit: Optional[int] = None) -> List[Dict[
             loop_messages.append(templ)
     return _enforce_user_assistant_alternation(loop_messages)
 
+
+def _llm_meta(room_id: str, user_id: Optional[str] = None, request_kind: str = "chat") -> Dict[str, Any]:
+    meta = {
+        "platform": "matrix",
+        "convo_id": f"matrix:{room_id}",
+        "request_kind": request_kind,
+    }
+    if user_id:
+        meta["user_id"] = str(user_id)
+    return meta
+
 # ---------------- System prompt (Matrix-scoped) ----------------
 def build_system_prompt() -> str:
     now = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
@@ -975,7 +986,10 @@ class MatrixPlatform:
 
         async with self.typing(room.room_id):
             try:
-                resp = await llm_client.chat(messages)
+                resp = await llm_client.chat(
+                    messages,
+                    meta=_llm_meta(room.room_id, sender, "chat"),
+                )
                 text = (resp.get("message", {}) or {}).get("content", "").strip()
 
                 if not text:
@@ -1006,7 +1020,8 @@ class MatrixPlatform:
                                     messages=[
                                         {"role": "system", "content": "Write one short, friendly status line."},
                                         {"role": "user", "content": wait_prompt},
-                                    ]
+                                    ],
+                                    meta=_llm_meta(room.room_id, sender, "tool_reflection"),
                                 )
                                 wait_text = (wait_resp.get("message", {}) or {}).get("content", "").strip()
                                 if wait_text:
@@ -1177,7 +1192,7 @@ class MatrixPlatform:
 # ---------------- Runner ----------------
 def run(stop_event: Optional[threading.Event] = None):
     global llm_client
-    llm_client = get_llm_client_from_env()
+    llm_client = get_llm_client_from_env(default_meta={"platform": "matrix"})
     logger.info(f"[Matrix] LLM client → {build_llm_host_from_env()}")
 
     bot = MatrixPlatform()

@@ -243,6 +243,16 @@ class discord_platform(commands.Bot):
         self.response_channel_id = response_channel_id
         self.max_response_length = max_response_length
 
+    def _llm_meta(self, channel_id, user_id=None, request_kind="chat"):
+        meta = {
+            "platform": "discord",
+            "convo_id": f"discord:{channel_id}",
+            "request_kind": request_kind,
+        }
+        if user_id is not None:
+            meta["user_id"] = str(user_id)
+        return meta
+
     def build_system_prompt(self):
         now = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
 
@@ -319,7 +329,8 @@ class discord_platform(commands.Bot):
                 messages=[
                     {"role": "system", "content": "Write a short, friendly, plain-English error note."},
                     {"role": "user", "content": prompt},
-                ]
+                ],
+                meta=self._llm_meta(message.channel.id, message.author.id, "tool_reflection"),
             )
             return error_response["message"].get("content", "").strip() or fallback
         except Exception as e:
@@ -415,7 +426,10 @@ class discord_platform(commands.Bot):
 
         async with message.channel.typing():
             try:
-                response = await self.llm.chat(messages_list)
+                response = await self.llm.chat(
+                    messages_list,
+                    meta=self._llm_meta(message.channel.id, message.author.id, "chat"),
+                )
                 response_text = response["message"].get("content", "").strip()
                 if not response_text:
                     await message.channel.send("I'm not sure how to respond to that.")
@@ -449,7 +463,8 @@ class discord_platform(commands.Bot):
                                 messages=[
                                     {"role": "system", "content": "Write one short, friendly status line."},
                                     {"role": "user", "content": wait_msg},
-                                ]
+                                ],
+                                meta=self._llm_meta(message.channel.id, message.author.id, "tool_reflection"),
                             )
                             wait_text = wait_response["message"]["content"].strip()
 
@@ -591,7 +606,7 @@ def run(stop_event=None):
     admin_id = redis_client.hget("discord_platform_settings", "admin_user_id")
     channel_id = redis_client.hget("discord_platform_settings", "response_channel_id")
 
-    llm_client = get_llm_client_from_env()
+    llm_client = get_llm_client_from_env(default_meta={"platform": "discord"})
     logger.info(f"[Discord] LLM client → {build_llm_host_from_env()}")
 
     if not (token and admin_id and channel_id):

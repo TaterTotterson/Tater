@@ -11,6 +11,7 @@ import logging
 import base64
 import requests
 import importlib
+import importlib.util
 import threading
 import sys
 import uuid
@@ -22,6 +23,8 @@ from PIL import Image
 from io import BytesIO
 from rss import RSSManager
 from platform_registry import platform_registry
+from johnny5 import state as johnny5_state
+from johnny5 import smoke_test as johnny5_smoke_test
 from helpers import (
     run_async,
     set_main_loop,
@@ -562,11 +565,11 @@ def _start_platform(key: str):
 
     def runner():
         try:
-            module = importlib.import_module(f"platforms.{key}")
+            module = _load_platform_module(key)
             if hasattr(module, "run"):
                 module.run(stop_event=stop_flag)
             else:
-                logging.getLogger("webui").warning(f"⚠️ No run(stop_event) in platforms.{key}")
+                logging.getLogger("webui").warning(f"⚠️ No run(stop_event) in {module.__name__}")
         except Exception as e:
             logging.getLogger("webui").error(f"❌ Error in platform {key}: {e}", exc_info=True)
 
@@ -576,6 +579,20 @@ def _start_platform(key: str):
     st.session_state["platform_threads"][key] = thread
     st.session_state["platform_stop_flags"][key] = stop_flag
     return thread, stop_flag
+
+
+def _load_platform_module(key: str):
+    if johnny5_state.is_override_enabled("platform", key):
+        candidate_path = johnny5_state.candidate_path("platform", key)
+        if candidate_path.exists():
+            module_name = f"tater_platform_{key}_{int(candidate_path.stat().st_mtime_ns)}"
+            spec = importlib.util.spec_from_file_location(module_name, str(candidate_path))
+            if spec and spec.loader:
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)  # type: ignore[attr-defined]
+                return module
+            logging.getLogger("webui").warning(f"⚠️ Failed to load candidate platform: {candidate_path}")
+    return importlib.import_module(f"platforms.{key}")
 
 def _stop_platform(key: str):
     threads = st.session_state.get("platform_threads", {})
@@ -593,6 +610,43 @@ def _stop_platform(key: str):
     # keep entries (or optionally clear them)
     # threads[key] = None
     # flags[key] = None
+
+
+def _start_johnny5():
+    thread = st.session_state.get("johnny5_thread")
+    stop_event = st.session_state.get("johnny5_stop_event")
+
+    if thread and thread.is_alive():
+        return thread, stop_event
+
+    stop_event = threading.Event()
+
+    def runner():
+        try:
+            from johnny5 import johnny5_gateway
+            johnny5_gateway.run(stop_event)
+        except Exception as e:
+            logging.getLogger("webui").error(f"❌ Error in Johnny5 gateway: {e}", exc_info=True)
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+
+    st.session_state["johnny5_thread"] = thread
+    st.session_state["johnny5_stop_event"] = stop_event
+    return thread, stop_event
+
+
+def _stop_johnny5():
+    stop_event = st.session_state.get("johnny5_stop_event")
+    thread = st.session_state.get("johnny5_thread")
+
+    if stop_event:
+        stop_event.set()
+
+    if thread and thread.is_alive():
+        thread.join(timeout=0.5)
+
+    st.session_state["johnny5_thread"] = None
 
 # ---- background job refresh hook ----
 if redis_client.get("webui:needs_rerun") == "true":
@@ -641,7 +695,9 @@ if missing:
 else:
     ensure_plugins_ready()
 
-llm_client = get_llm_client_from_env()
+llm_client = get_llm_client_from_env(
+    default_meta={"platform": "webui", "convo_id": "webui:chat"}
+)
 logging.getLogger("webui").debug(f"LLM client → {build_llm_host_from_env()}")
 
 # Set the main event loop used for run_async.
@@ -662,6 +718,8 @@ st.set_page_config(
 # ---- session_state containers (must exist before platform start/stop) ----
 st.session_state.setdefault("platform_threads", {})
 st.session_state.setdefault("platform_stop_flags", {})
+st.session_state.setdefault("johnny5_thread", None)
+st.session_state.setdefault("johnny5_stop_event", None)
 
 def save_message(role, username, content):
     message_data = {
@@ -1177,6 +1235,130 @@ def render_platforms_panel(auto_connected=None):
         label = platform.get("label") or platform.get("category") or platform.get("key")
         with st.expander(label, expanded=False):
             render_platform_controls(platform, redis_client)
+
+
+def _render_candidate_list(kind: str):
+    candidates = johnny5_state.list_candidates(kind)
+    if not candidates:
+        st.info(f"No candidate {kind}s yet.")
+        return
+
+    for cid, meta in sorted(candidates.items(), key=lambda item: item[0]):
+        status = meta.get("status", "unknown")
+        last_test = meta.get("last_test") or {}
+        override_enabled = johnny5_state.is_override_enabled(kind, cid)
+        label = f"{cid} ({status})"
+        with st.expander(label, expanded=False):
+            st.write(meta.get("path", ""))
+            if last_test:
+                st.caption(f"Last test: ok={last_test.get('ok')} • {last_test.get('ts', '')}")
+                details = last_test.get("details")
+                if details:
+                    st.code(details)
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                new_override = st.toggle(
+                    "Override enabled",
+                    value=override_enabled,
+                    key=f"override_{kind}_{cid}",
+                )
+                if new_override != override_enabled:
+                    johnny5_state.set_override(kind, cid, new_override)
+                    st.success("Override updated.")
+            with col2:
+                if st.button("Run smoke test", key=f"smoke_{kind}_{cid}"):
+                    result = johnny5_smoke_test.run_smoke_test(kind, cid)
+                    st.success(f"Smoke test ok={result.get('ok')}")
+            with col3:
+                if st.button("Promote", key=f"promote_{kind}_{cid}"):
+                    result = johnny5_state.promote_candidate(kind, cid)
+                    if result.get("ok"):
+                        st.success("Candidate promoted to stable.")
+                    else:
+                        st.error(result.get("error", "Promotion failed."))
+
+
+def render_johnny5_panel():
+    st.title("Johnny 5 Is Alive")
+
+    enabled = johnny5_state.is_enabled()
+    toggle = st.toggle("Enable Johnny5 gateway", value=enabled, key="johnny5_enabled")
+    if toggle != enabled:
+        johnny5_state.set_enabled(toggle)
+        if toggle:
+            _start_johnny5()
+        else:
+            _stop_johnny5()
+        st.rerun()
+
+    thread = st.session_state.get("johnny5_thread")
+    heartbeat = redis_client.get(johnny5_state.HEARTBEAT_KEY) or "unknown"
+    queue_depth = redis_client.llen(johnny5_state.LLM_REQ_KEY)
+    st.caption(f"Status: {'running' if thread and thread.is_alive() else 'stopped'}")
+    st.caption(f"Last heartbeat: {heartbeat}")
+    st.caption(f"Queue depth: {queue_depth}")
+
+    st.markdown("---")
+    st.subheader("Global Awareness")
+    st.caption(johnny5_state.get_global_focus() or "No focus set.")
+    errors = redis_client.lrange(johnny5_state.GLOBAL_ERRORS_KEY, 0, 4)
+    changes = redis_client.lrange(johnny5_state.GLOBAL_CHANGES_KEY, 0, 4)
+    if changes:
+        st.markdown("**Recent changes**")
+        for item in changes:
+            st.write(f"- {item}")
+    if errors:
+        st.markdown("**Recent errors**")
+        for item in errors:
+            st.write(f"- {item}")
+
+    st.markdown("---")
+    st.subheader("Create Candidate Plugin")
+    plugin_spec = st.text_area("Describe the plugin you want", key="johnny5_plugin_spec")
+    if st.button("Generate Plugin Candidate", key="johnny5_plugin_create"):
+        if not plugin_spec.strip():
+            st.warning("Please enter a plugin description.")
+        else:
+            resp = run_async(
+                llm_client.chat(
+                    messages=[{"role": "user", "content": plugin_spec}],
+                    meta={
+                        "platform": "webui_admin",
+                        "convo_id": "webui:johnny5:plugin_factory",
+                        "request_kind": "plugin_factory",
+                        "spec_text": plugin_spec,
+                    },
+                )
+            )
+            st.success(resp["message"].get("content", "Candidate created."))
+            st.rerun()
+
+    st.subheader("Create Candidate Platform")
+    platform_spec = st.text_area("Describe the platform you want", key="johnny5_platform_spec")
+    if st.button("Generate Platform Candidate", key="johnny5_platform_create"):
+        if not platform_spec.strip():
+            st.warning("Please enter a platform description.")
+        else:
+            resp = run_async(
+                llm_client.chat(
+                    messages=[{"role": "user", "content": platform_spec}],
+                    meta={
+                        "platform": "webui_admin",
+                        "convo_id": "webui:johnny5:platform_factory",
+                        "request_kind": "platform_factory",
+                        "spec_text": platform_spec,
+                    },
+                )
+            )
+            st.success(resp["message"].get("content", "Candidate created."))
+            st.rerun()
+
+    st.markdown("---")
+    st.subheader("Candidate Plugins")
+    _render_candidate_list("plugin")
+
+    st.subheader("Candidate Platforms")
+    _render_candidate_list("platform")
 
 def render_webui_settings():
     st.subheader("WebUI Settings")
@@ -1884,7 +2066,14 @@ async def process_message(user_name, message_content):
 
     # --- timing + usage capture ---
     start_ts = time.time()
-    response = await llm_client.chat(messages_list)
+    response = await llm_client.chat(
+        messages_list,
+        meta={
+            "platform": "webui",
+            "convo_id": "webui:chat",
+            "request_kind": "chat",
+        },
+    )
     elapsed = max(1e-6, time.time() - start_ts)
 
     # Try to use real usage; fall back to rough estimate if missing
@@ -2028,8 +2217,13 @@ async def process_function_call(response_json, user_question=""):
         wait_response = await llm_client.chat(
             messages=[
                 {"role": "system", "content": "Write one short, friendly status line for the user."},
-                {"role": "user", "content": wait_msg}
-            ]
+                {"role": "user", "content": wait_msg},
+            ],
+            meta={
+                "platform": "webui",
+                "convo_id": "webui:chat",
+                "request_kind": "tool_reflection",
+            },
         )
         wait_text = wait_response["message"]["content"].strip()
 
@@ -2059,7 +2253,16 @@ async def process_function_call(response_json, user_question=""):
     return []
 
 # ------------------ NAVIGATION ------------------
-nav_options = ["Chat", "Plugins", "Auto Plugins", "Platforms", "RSS Feed", "Plugin Store", "Settings"]
+nav_options = [
+    "Chat",
+    "Plugins",
+    "Auto Plugins",
+    "Platforms",
+    "RSS Feed",
+    "Plugin Store",
+    "Johnny 5 Is Alive",
+    "Settings",
+]
 if "active_view" not in st.session_state:
     st.session_state.active_view = nav_options[0]
 
@@ -2087,6 +2290,11 @@ else:
     _stop_rss()
 
 # ------------------ PLATFORM MANAGEMENT ------------------
+if johnny5_state.is_enabled():
+    _start_johnny5()
+else:
+    _stop_johnny5()
+
 auto_connected = []
 for platform in platform_registry:
     key = platform["key"]  # e.g. irc_platform
@@ -2520,6 +2728,9 @@ elif active_view == "RSS Feed":
 
 elif active_view == "Plugin Store":
     render_plugin_store_page()
+
+elif active_view == "Johnny 5 Is Alive":
+    render_johnny5_panel()
 
 elif active_view == "Settings":
     render_settings_page()
