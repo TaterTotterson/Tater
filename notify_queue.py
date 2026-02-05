@@ -2,7 +2,7 @@ import time
 import uuid
 from typing import Any, Dict, Optional, Tuple
 
-ALLOWED_PLATFORMS = ("discord", "irc", "matrix", "homeassistant", "ntfy")
+ALLOWED_PLATFORMS = ("discord", "irc", "matrix", "homeassistant", "ntfy", "telegram")
 
 QUEUE_KEYS = {
     "discord": "notifyq:discord",
@@ -10,6 +10,7 @@ QUEUE_KEYS = {
     "matrix": "notifyq:matrix",
     "homeassistant": "notifyq:homeassistant",
     "ntfy": "notifyq:ntfy",
+    "telegram": "notifyq:telegram",
 }
 
 _DEFAULT_SETTINGS = {
@@ -29,6 +30,12 @@ _DEFAULT_SETTINGS = {
         "category": "Matrix Notifier",
         "fields": {
             "room_id": "DEFAULT_ROOM_ID",
+        },
+    },
+    "telegram": {
+        "category": "Telegram Notifier",
+        "fields": {
+            "chat_id": "DEFAULT_CHAT_ID",
         },
     },
 }
@@ -156,6 +163,16 @@ def resolve_targets(
                 resolved["room_id"] = origin.get("room_id")
 
         if not resolved.get("room_id"):
+            return None, "Cannot queue: missing target channel/room"
+
+    elif platform == "telegram":
+        if not resolved.get("chat_id"):
+            if defaults.get("chat_id"):
+                resolved["chat_id"] = defaults["chat_id"]
+            elif origin.get("platform") == "telegram" and origin.get("chat_id"):
+                resolved["chat_id"] = origin.get("chat_id")
+
+        if not resolved.get("chat_id"):
             return None, "Cannot queue: missing target channel/room"
 
     elif platform == "homeassistant":

@@ -83,7 +83,7 @@ class VisionDescriberPlugin(ToolPlugin):
         "to inspect their image now! Only output that message."
     )
 
-    platforms = ["discord", "webui", "matrix", "irc"]
+    platforms = ["discord", "webui", "matrix", "irc", "telegram"]
 
     # ---------------- Settings ----------------
     def get_vision_settings(self):

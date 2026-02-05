@@ -123,7 +123,7 @@ class WeatherForecastPlugin(ToolPlugin):
         "Only output that message."
     )
 
-    platforms = ["discord", "webui", "irc", "homeassistant", "matrix", "homekit", "xbmc"]
+    platforms = ["discord", "webui", "irc", "homeassistant", "matrix", "homekit", "xbmc", "telegram"]
 
     # -------------------- Settings helpers --------------------
 

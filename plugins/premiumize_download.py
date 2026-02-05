@@ -39,7 +39,7 @@ class PremiumizeDownloadPlugin(ToolPlugin):
         "Write a friendly message telling {mention} you’re checking Premiumize and retrieving download links now! "
         "Only output that message."
     )
-    platforms = ["discord", "webui", "irc", "matrix"]
+    platforms = ["discord", "webui", "irc", "matrix", "telegram"]
 
     # ------------------- API -------------------
     @staticmethod

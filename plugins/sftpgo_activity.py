@@ -22,7 +22,7 @@ class SFTPGoActivityPlugin(ToolPlugin):
     pretty_name = "Checking FTP Activity"
     settings_category = "SFTPGo"
     waiting_prompt_template = "Write a friendly message telling {mention} you’re accessing the server to see who’s using it now! Only output that message."
-    platforms = ["discord", "webui", "irc", "matrix"]
+    platforms = ["discord", "webui", "irc", "matrix", "telegram"]
     required_settings = {
         "SFTPGO_API_URL": {
             "label": "SFTPGo API URL",

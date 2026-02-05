@@ -44,7 +44,7 @@ class WebSearchPlugin(ToolPlugin):
         "Write a friendly message telling {mention} you’re searching the web for more information now! "
         "Only output that message."
     )
-    platforms = ["discord", "webui", "irc", "homeassistant", "matrix", "homekit", "xbmc"]
+    platforms = ["discord", "webui", "irc", "homeassistant", "matrix", "homekit", "xbmc", "telegram"]
 
     def search_web(self, query, num_results=10):
         settings = redis_client.hgetall("plugin_settings:Web Search")

@@ -33,7 +33,7 @@ class ListFeedsPlugin(ToolPlugin):
     waiting_prompt_template = (
         "Write a friendly, casual message telling {mention} you’re grabbing the current watched feeds now! Only output that message."
     )
-    platforms = ["discord", "webui", "irc", "matrix"]
+    platforms = ["discord", "webui", "irc", "matrix", "telegram"]
 
     async def _list_feeds(self, username: str | None = None) -> str:
         feeds = get_all_feeds(redis_client) or {}
