@@ -482,17 +482,26 @@ def _get_media_blob_from_content(content: dict):
 
     return None
 
+@st.cache_resource
+def _platform_runtime():
+    # Shared across reruns/sessions within this Streamlit process.
+    return {
+        "lock": threading.RLock(),
+        "threads": {},
+        "stop_flags": {},
+    }
+
+
 def _start_platform(key: str):
-    st.session_state.setdefault("platform_threads", {})
-    st.session_state.setdefault("platform_stop_flags", {})
+    runtime = _platform_runtime()
+    with runtime["lock"]:
+        thread = runtime["threads"].get(key)
+        stop_flag = runtime["stop_flags"].get(key)
 
-    thread = st.session_state["platform_threads"].get(key)
-    stop_flag = st.session_state["platform_stop_flags"].get(key)
+        if thread and thread.is_alive():
+            return thread, stop_flag
 
-    if thread and thread.is_alive():
-        return thread, stop_flag
-
-    stop_flag = threading.Event()
+        stop_flag = threading.Event()
 
     def runner():
         try:
@@ -503,20 +512,27 @@ def _start_platform(key: str):
                 logging.getLogger("webui").warning(f"⚠️ No run(stop_event) in platforms.{key}")
         except Exception as e:
             logging.getLogger("webui").error(f"❌ Error in platform {key}: {e}", exc_info=True)
+        finally:
+            # Clean stale references when a platform exits/crashes.
+            with runtime["lock"]:
+                current = runtime["threads"].get(key)
+                if current is threading.current_thread():
+                    runtime["threads"].pop(key, None)
+                    runtime["stop_flags"].pop(key, None)
 
     thread = threading.Thread(target=runner, daemon=True)
+    with runtime["lock"]:
+        runtime["threads"][key] = thread
+        runtime["stop_flags"][key] = stop_flag
     thread.start()
 
-    st.session_state["platform_threads"][key] = thread
-    st.session_state["platform_stop_flags"][key] = stop_flag
     return thread, stop_flag
 
 def _stop_platform(key: str):
-    threads = st.session_state.get("platform_threads", {})
-    flags = st.session_state.get("platform_stop_flags", {})
-
-    thread = threads.get(key)
-    stop_flag = flags.get(key)
+    runtime = _platform_runtime()
+    with runtime["lock"]:
+        thread = runtime["threads"].get(key)
+        stop_flag = runtime["stop_flags"].get(key)
 
     if stop_flag:
         stop_flag.set()
@@ -524,9 +540,10 @@ def _stop_platform(key: str):
     if thread and thread.is_alive():
         thread.join(timeout=0.5)
 
-    # keep entries (or optionally clear them)
-    # threads[key] = None
-    # flags[key] = None
+    with runtime["lock"]:
+        if not thread or not thread.is_alive():
+            runtime["threads"].pop(key, None)
+            runtime["stop_flags"].pop(key, None)
 
 # ---- background job refresh hook ----
 if redis_client.get("webui:needs_rerun") == "true":
@@ -592,10 +609,6 @@ st.set_page_config(
     page_title=f"{first_name} Chat",
     page_icon=":material/tooltip_2:"
 )
-
-# ---- session_state containers (must exist before platform start/stop) ----
-st.session_state.setdefault("platform_threads", {})
-st.session_state.setdefault("platform_stop_flags", {})
 
 def save_message(role, username, content):
     message_data = {
