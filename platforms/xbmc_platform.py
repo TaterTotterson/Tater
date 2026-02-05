@@ -19,7 +19,6 @@ load_dotenv()
 from helpers import (
     parse_function_json,
     get_tater_name,
-    get_tater_personality,
     get_llm_client_from_env,
     build_llm_host_from_env,
 )

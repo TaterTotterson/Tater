@@ -1,6 +1,5 @@
 # platforms/matrix_platform.py
 import os
-import re
 import json
 import time
 import redis
@@ -19,6 +18,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import plugin_registry as pr
+from notify_queue import is_expired
+from notify_media import load_queue_attachments
 
 from helpers import (
     parse_function_json,
@@ -183,6 +184,8 @@ redis_client = redis.Redis(
     db=0,
     decode_responses=True,
 )
+NOTIFY_QUEUE_KEY = "notifyq:matrix"
+NOTIFY_POLL_INTERVAL = 0.5
 
 # ---------------- Redis (binary blobs, NO base64) ----------------
 redis_host = os.getenv("REDIS_HOST", "127.0.0.1")
@@ -750,6 +753,41 @@ class MatrixPlatform:
             else:
                 logger.error(f"[Matrix] Send failed: {e}")
 
+    async def _resolve_room_ref(self, room_ref: str) -> Optional[str]:
+        ref = (room_ref or "").strip()
+        if not ref:
+            return None
+
+        if ref.startswith("#"):
+            room_id = None
+            try:
+                resp = await self.client.room_resolve_alias(ref)
+                room_id = getattr(resp, "room_id", None)
+                if not room_id and isinstance(resp, dict):
+                    room_id = resp.get("room_id")
+            except Exception as e:
+                logger.warning(f"[notifyq] Matrix failed to resolve alias {ref}: {e}")
+
+            if not room_id:
+                try:
+                    join_resp = await self.client.join(ref)
+                    room_id = getattr(join_resp, "room_id", None)
+                    if not room_id and isinstance(join_resp, dict):
+                        room_id = join_resp.get("room_id")
+                except Exception as e:
+                    logger.warning(f"[notifyq] Matrix join via alias failed for {ref}: {e}")
+                    return None
+
+            if room_id and room_id not in self.client.rooms:
+                try:
+                    await self.client.join(room_id)
+                except Exception as e:
+                    logger.warning(f"[notifyq] Matrix join failed for {room_id}: {e}")
+
+            return room_id
+
+        return ref
+
     async def _send_media_item(self, room_id: str, item: Dict[str, Any]):
         """
         New format (NO base64):
@@ -959,6 +997,57 @@ class MatrixPlatform:
         if self.trust_unverified_devices:
             await self._auto_trust_room_devices(room)
 
+    async def _notify_queue_worker(self):
+        while True:
+            if self.stop_event and self.stop_event.is_set():
+                break
+
+            try:
+                item_json = await asyncio.to_thread(redis_client.lpop, NOTIFY_QUEUE_KEY)
+            except Exception:
+                item_json = None
+
+            if not item_json:
+                await asyncio.sleep(NOTIFY_POLL_INTERVAL)
+                continue
+
+            try:
+                item = json.loads(item_json)
+            except Exception:
+                logger.warning("[notifyq] invalid JSON item; skipping.")
+                continue
+
+            if is_expired(item):
+                continue
+
+            attachments = load_queue_attachments(redis_client, item.get("id"))
+            targets = item.get("targets") or {}
+            room_ref = targets.get("room_id")
+            room_id = await self._resolve_room_ref(room_ref)
+            if not room_id:
+                logger.warning("[notifyq] Matrix missing or invalid room_id; dropping item.")
+                continue
+
+            message = (item.get("message") or "").strip()
+            title = item.get("title")
+            if not message and not attachments:
+                continue
+
+            if message:
+                payload = f"{title}\n{message}" if title else message
+            elif title:
+                payload = title
+            else:
+                payload = ""
+
+            try:
+                if payload:
+                    await self._send_with_trust(room_id, payload)
+                for media in attachments:
+                    await self._send_media_item(room_id, media)
+            except Exception as e:
+                logger.warning(f"[notifyq] Matrix send failed: {e}")
+
     # ---------- Message handling ----------
     async def _handle_textlike(self, room, sender, body):
         if sender == self.user_id:
@@ -985,7 +1074,18 @@ class MatrixPlatform:
                 call = parse_function_json(text)
                 if call and isinstance(call, dict) and "function" in call:
                     func = call["function"]
-                    args = call.get("arguments", {})
+                    args = call.get("arguments", {}) or {}
+
+                    # Attach origin context for auto-targeting
+                    origin = {
+                        "platform": "matrix",
+                        "room_id": room.room_id,
+                        "user": sender,
+                        "request_id": f"{room.room_id}:{int(time.time() * 1000)}",
+                    }
+                    origin = {k: v for k, v in origin.items() if v not in (None, "")}
+                    args = dict(args)
+                    args["origin"] = origin
 
                     save_matrix_message(
                         room.room_id, "assistant", "assistant",
@@ -1154,6 +1254,9 @@ class MatrixPlatform:
 
         self.ready_ts_ms = int(time.time() * 1000)
 
+        loop = asyncio.get_running_loop()
+        self._notify_task = loop.create_task(self._notify_queue_worker())
+
         if self.trust_unverified_devices:
             try:
                 for room in list(self.client.rooms.values()):
@@ -1161,7 +1264,6 @@ class MatrixPlatform:
             except Exception as e:
                 logger.debug(f"[Matrix] Priming trust failed: {e}")
 
-        loop = asyncio.get_running_loop()
         self._sync_task = loop.create_task(self.sync_forever())
         if stop_event:
             while not stop_event.is_set():
@@ -1170,6 +1272,10 @@ class MatrixPlatform:
                 self._sync_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await self._sync_task
+            if getattr(self, "_notify_task", None) and not self._notify_task.done():
+                self._notify_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._notify_task
             await self.client.close()
         else:
             await asyncio.Event().wait()

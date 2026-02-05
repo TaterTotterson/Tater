@@ -15,12 +15,12 @@ import threading
 import sys
 import uuid
 import hashlib
+import feedparser
 import plugin_registry as plugin_registry_mod
 from urllib.parse import urljoin
 from datetime import datetime
 from PIL import Image
 from io import BytesIO
-from rss import RSSManager
 from platform_registry import platform_registry
 from helpers import (
     run_async,
@@ -37,6 +37,7 @@ from plugin_settings import (
     get_plugin_settings,
     save_plugin_settings,
 )
+from rss_store import get_all_feeds, set_feed, update_feed, delete_feed
 
 # Remove any prior handlers
 for handler in logging.root.handlers[:]:
@@ -327,9 +328,19 @@ def auto_restore_missing_plugins(manifest_url: str, progress_cb=None) -> tuple[b
         item = by_id.get(pid)
         if not item:
             logging.error(f"[restore] {pid} enabled but not found in manifest")
+            # Plugin is enabled, missing on disk, and cannot be restored from the shop.
+            # Remove stale enabled flag so it no longer blocks startup with restore prompts.
+            try:
+                redis_client.hdel("plugin_enabled", pid)
+                logging.info(f"[restore] Removed stale plugin_enabled key for {pid}")
+            except Exception as e:
+                logging.error(f"[restore] Failed to remove stale plugin_enabled key for {pid}: {e}")
             if progress_cb:
                 try:
-                    progress_cb((idx - 1) / max(1, total), f"{pid} enabled but not found in manifest ({idx}/{total})")
+                    progress_cb(
+                        (idx - 1) / max(1, total),
+                        f"{pid} missing and not in manifest; removed stale enable key ({idx}/{total})",
+                    )
                 except Exception:
                     pass
             continue
@@ -471,83 +482,6 @@ def _get_media_blob_from_content(content: dict):
 
     return None
 
-# ------------------ RSS (PLATFORM-STYLE SINGLETON) ------------------
-
-@st.cache_resource(show_spinner=False)
-def _start_rss(_llm_client):
-    """
-    Platform-style singleton:
-    - cache_resource prevents re-starting on Streamlit reruns
-    - returns (thread, stop_event)
-    - resilient restart loop inside thread
-    """
-    stop_event = st.session_state.setdefault("rss_stop_event", threading.Event())
-    thread = st.session_state.get("rss_thread")
-
-    # Don't start again if already running
-    if thread and thread.is_alive():
-        return thread, stop_event
-
-    stop_event.clear()
-
-    def _run():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-        backoff = 1.0  # seconds (will grow up to 10s)
-        max_backoff = 10.0
-
-        while not stop_event.is_set():
-            try:
-                rss_manager = RSSManager(llm_client=_llm_client)
-                loop.run_until_complete(rss_manager.poll_feeds(stop_event=stop_event))
-
-                if stop_event.is_set():
-                    break
-
-                logging.getLogger("RSS").warning("poll_feeds() returned; restarting shortly…")
-                time.sleep(1.0)
-                backoff = 1.0
-
-            except asyncio.CancelledError:
-                logging.getLogger("RSS").info("RSS poller cancelled; exiting thread.")
-                break
-            except KeyboardInterrupt:
-                logging.getLogger("RSS").info("RSS poller interrupted; exiting thread.")
-                break
-            except Exception as e:
-                logging.getLogger("RSS").error(f"RSS crashed: {e}", exc_info=True)
-                time.sleep(backoff)
-                backoff = min(max_backoff, backoff * 2)
-
-    t = threading.Thread(target=_run, daemon=True)
-    t.start()
-
-    st.session_state["rss_thread"] = t
-    st.session_state["rss_stop_event"] = stop_event
-    return t, stop_event
-
-
-def _stop_rss():
-    stop_event = st.session_state.get("rss_stop_event")
-    thread = st.session_state.get("rss_thread")
-
-    if stop_event:
-        stop_event.set()
-
-    if thread and thread.is_alive():
-        thread.join(timeout=0.25)
-
-    # IMPORTANT: allow restarting later
-    try:
-        _start_rss.clear()
-    except Exception:
-        pass
-
-    st.session_state["rss_thread"] = None
-    return thread, stop_event
-
-@st.cache_resource(show_spinner=False)
 def _start_platform(key: str):
     st.session_state.setdefault("platform_threads", {})
     st.session_state.setdefault("platform_stop_flags", {})
@@ -758,21 +692,6 @@ def save_homeassistant_settings(base_url: str, token: str) -> None:
         },
     )
 
-def get_rss_enabled():
-    enabled = redis_client.get("rss:enabled")
-    if enabled is None:
-        return True
-    return enabled.lower() == "true"
-
-def set_rss_enabled(enabled):
-    redis_client.set("rss:enabled", "true" if enabled else "false")
-
-def get_rss_running():
-    return (redis_client.get("rss_running") or "false").lower() == "true"
-
-def set_rss_running(enabled: bool):
-    redis_client.set("rss_running", "true" if enabled else "false")
-
 def render_plugin_controls(plugin_name, label=None):
     current_state = get_plugin_enabled(plugin_name)
     toggle_state = st.toggle(label or plugin_name, value=current_state, key=f"plugin_toggle_{plugin_name}")
@@ -789,22 +708,31 @@ def render_platform_controls(platform, redis_client):
     state_key    = f"{key}_running"
     cooldown_key = f"tater:cooldown:{key}"
     cooldown_secs = 10
+    toggle_key = f"{category}_toggle"
+    cooldown_notice_key = f"{category}_cooldown_notice"
+    toggle_reset_key = f"{category}_toggle_reset_to"
 
     # read current on/off from Redis
     is_running = (redis_client.get(state_key) == "true")
     emoji      = "🟢" if is_running else "🔴"
 
-    # force‐off gadget for cooldown toggle feedback
-    force_off_key = f"{category}_toggle_force_off"
-    if st.session_state.get(force_off_key):
-        del st.session_state[force_off_key]
-        is_enabled = False
-        new_toggle = False
-    else:
-        new_toggle = st.toggle(f"{emoji} Enable {short_name}",
-                               value=is_running,
-                               key=f"{category}_toggle")
-        is_enabled = new_toggle
+    # show one-time cooldown notice if we blocked restart on previous click
+    cooldown_notice = st.session_state.pop(cooldown_notice_key, None)
+    if cooldown_notice:
+        st.warning(cooldown_notice)
+
+    # If we asked for a reset on the previous run, apply it before rendering widget.
+    if toggle_reset_key in st.session_state:
+        st.session_state[toggle_key] = bool(st.session_state.pop(toggle_reset_key))
+    elif toggle_key not in st.session_state:
+        st.session_state[toggle_key] = is_running
+
+    new_toggle = st.toggle(
+        f"{emoji} Enable {short_name}",
+        value=is_running,
+        key=toggle_key,
+    )
+    is_enabled = new_toggle
 
     # --- TURNING ON ---
     if is_enabled and not is_running:
@@ -813,14 +741,15 @@ def render_platform_controls(platform, redis_client):
         now  = time.time()
         if last and now - float(last) < cooldown_secs:
             remaining = int(cooldown_secs - (now - float(last)))
-            st.warning(f"⏳ Wait {remaining}s before restarting {short_name}.")
-            st.session_state[force_off_key] = True
+            st.session_state[cooldown_notice_key] = f"⏳ Wait {remaining}s before restarting {short_name}."
+            st.session_state[toggle_reset_key] = False
             st.rerun()
 
         # actually start it
         _start_platform(key)
         redis_client.set(state_key, "true")
         st.success(f"{short_name} started.")
+        st.rerun()
 
     # --- TURNING OFF ---
     elif not is_enabled and is_running:
@@ -828,6 +757,7 @@ def render_platform_controls(platform, redis_client):
         redis_client.set(state_key, "false")
         redis_client.set(cooldown_key, str(time.time()))
         st.success(f"{short_name} stopped.")
+        st.rerun()
 
     # --- SETTINGS FORM ---
     redis_key = f"{key}_settings"
@@ -923,18 +853,191 @@ def render_platform_controls(platform, redis_client):
             )
             new_settings[setting_key] = new_val
 
-    if st.button(f"Save {short_name} Settings", key=f"save_{category}_unique"):
-        # coerce all values to strings for Redis HSET
-        save_map = {
-            k: (json.dumps(v) if isinstance(v, (dict, list, bool)) else str(v))
-            for k, v in new_settings.items()
-        }
-        redis_client.hset(redis_key, mapping=save_map)
-        st.success(f"{short_name} settings saved.")
+    if new_settings:
+        if st.button(f"Save {short_name} Settings", key=f"save_{category}_unique"):
+            # coerce all values to strings for Redis HSET
+            save_map = {
+                k: (json.dumps(v) if isinstance(v, (dict, list, bool)) else str(v))
+                for k, v in new_settings.items()
+            }
+            redis_client.hset(redis_key, mapping=save_map)
+            st.success(f"{short_name} settings saved.")
+    else:
+        st.caption("No platform settings to configure.")
 
-    # Trigger refresh if toggle changed
-    if new_toggle != is_running:
+    if key == "rss_platform":
+        st.markdown("---")
+        render_rss_feed_manager()
+
+def render_rss_feed_manager():
+    st.subheader("Feeds")
+    st.caption("Add feeds and customize delivery per feed. Leave targets blank to use notifier defaults.")
+
+    add_url = st.text_input("RSS Feed URL", key="rss_add_url")
+    cols = st.columns([1, 1, 2])
+    if cols[0].button("Add Feed", key="rss_add_btn"):
+        feed_url = (add_url or "").strip()
+        if not feed_url:
+            st.warning("Please enter a feed URL.")
+            st.stop()
+        existing = get_all_feeds(redis_client) or {}
+        if feed_url in existing:
+            st.warning("That feed is already configured.")
+            st.stop()
+        try:
+            parsed = feedparser.parse(feed_url)
+        except Exception:
+            parsed = None
+        if not parsed or (getattr(parsed, "bozo", 0) and not getattr(parsed, "entries", None)):
+            st.error("Failed to parse that feed URL.")
+            st.stop()
+        # Set last_ts=0 so the poller posts only the newest item once.
+        set_feed(redis_client, feed_url, {"last_ts": 0.0, "enabled": True, "platforms": {}})
+        st.success("Feed added.")
         st.rerun()
+
+    feeds = get_all_feeds(redis_client) or {}
+    if not feeds:
+        st.info("No feeds configured yet.")
+        return
+
+    default_cfg = {
+        "send_discord": True,
+        "discord_channel_id": "",
+        "send_irc": True,
+        "irc_channel": "",
+        "send_matrix": True,
+        "matrix_room_id": "",
+        "send_homeassistant": True,
+        "ha_device_service": "",
+        "send_ntfy": True,
+        "send_telegram": True,
+        "send_wordpress": True,
+    }
+
+    for idx, (feed_url, cfg) in enumerate(sorted(feeds.items(), key=lambda kv: kv[0].lower())):
+        exp_key = f"rss_feed_{idx}"
+        with st.expander(feed_url, expanded=False):
+            enabled_key = f"{exp_key}_enabled"
+            enabled_val = st.checkbox("Enabled", value=cfg.get("enabled", True), key=enabled_key)
+
+            platforms = cfg.get("platforms") or {}
+
+            # Discord
+            discord_override = platforms.get("discord") or {}
+            discord_enabled = st.checkbox(
+                "Send to Discord",
+                value=discord_override.get("enabled", default_cfg["send_discord"]),
+                key=f"{exp_key}_discord_enabled",
+            )
+            discord_channel_id = st.text_input(
+                "Discord Channel ID (override)",
+                value=(discord_override.get("targets") or {}).get("channel_id", ""),
+                placeholder=default_cfg["discord_channel_id"],
+                key=f"{exp_key}_discord_channel_id",
+            )
+
+            # IRC
+            irc_override = platforms.get("irc") or {}
+            irc_enabled = st.checkbox(
+                "Send to IRC",
+                value=irc_override.get("enabled", default_cfg["send_irc"]),
+                key=f"{exp_key}_irc_enabled",
+            )
+            irc_channel = st.text_input(
+                "IRC Channel (override)",
+                value=(irc_override.get("targets") or {}).get("channel", ""),
+                placeholder=default_cfg["irc_channel"],
+                key=f"{exp_key}_irc_channel",
+            )
+
+            # Matrix
+            matrix_override = platforms.get("matrix") or {}
+            matrix_enabled = st.checkbox(
+                "Send to Matrix",
+                value=matrix_override.get("enabled", default_cfg["send_matrix"]),
+                key=f"{exp_key}_matrix_enabled",
+            )
+            matrix_room_id = st.text_input(
+                "Matrix Room ID or Alias (override)",
+                value=(matrix_override.get("targets") or {}).get("room_id", ""),
+                placeholder=default_cfg["matrix_room_id"],
+                key=f"{exp_key}_matrix_room_id",
+            )
+
+            # Home Assistant
+            ha_override = platforms.get("homeassistant") or {}
+            ha_enabled = st.checkbox(
+                "Send to Home Assistant Notifications",
+                value=ha_override.get("enabled", default_cfg["send_homeassistant"]),
+                key=f"{exp_key}_ha_enabled",
+            )
+            ha_device = st.text_input(
+                "HA Mobile Notify Service (optional override)",
+                value=(ha_override.get("targets") or {}).get("device_service", ""),
+                placeholder=default_cfg["ha_device_service"],
+                key=f"{exp_key}_ha_device_service",
+            )
+
+            # Other notifiers
+            ntfy_override = platforms.get("ntfy") or {}
+            ntfy_enabled = st.checkbox(
+                "Send to Ntfy",
+                value=ntfy_override.get("enabled", default_cfg["send_ntfy"]),
+                key=f"{exp_key}_ntfy_enabled",
+            )
+            telegram_override = platforms.get("telegram") or {}
+            telegram_enabled = st.checkbox(
+                "Send to Telegram",
+                value=telegram_override.get("enabled", default_cfg["send_telegram"]),
+                key=f"{exp_key}_telegram_enabled",
+            )
+            wp_override = platforms.get("wordpress") or {}
+            wp_enabled = st.checkbox(
+                "Send to WordPress",
+                value=wp_override.get("enabled", default_cfg["send_wordpress"]),
+                key=f"{exp_key}_wp_enabled",
+            )
+
+            save_cols = st.columns([1, 1, 2])
+            if save_cols[0].button("Save Feed Settings", key=f"{exp_key}_save"):
+                new_platforms = {}
+
+                if discord_enabled != default_cfg["send_discord"] or discord_channel_id:
+                    new_platforms["discord"] = {
+                        "enabled": discord_enabled,
+                        "targets": {"channel_id": discord_channel_id} if discord_channel_id else {},
+                    }
+                if irc_enabled != default_cfg["send_irc"] or irc_channel:
+                    new_platforms["irc"] = {
+                        "enabled": irc_enabled,
+                        "targets": {"channel": irc_channel} if irc_channel else {},
+                    }
+                if matrix_enabled != default_cfg["send_matrix"] or matrix_room_id:
+                    new_platforms["matrix"] = {
+                        "enabled": matrix_enabled,
+                        "targets": {"room_id": matrix_room_id} if matrix_room_id else {},
+                    }
+                if ha_enabled != default_cfg["send_homeassistant"] or ha_device:
+                    new_platforms["homeassistant"] = {
+                        "enabled": ha_enabled,
+                        "targets": {"device_service": ha_device} if ha_device else {},
+                    }
+                if ntfy_enabled != default_cfg["send_ntfy"]:
+                    new_platforms["ntfy"] = {"enabled": ntfy_enabled, "targets": {}}
+                if telegram_enabled != default_cfg["send_telegram"]:
+                    new_platforms["telegram"] = {"enabled": telegram_enabled, "targets": {}}
+                if wp_enabled != default_cfg["send_wordpress"]:
+                    new_platforms["wordpress"] = {"enabled": wp_enabled, "targets": {}}
+
+                update_feed(redis_client, feed_url, {"enabled": enabled_val, "platforms": new_platforms})
+                st.success("Feed settings saved.")
+                st.rerun()
+
+            if save_cols[1].button("Remove Feed", key=f"{exp_key}_remove"):
+                delete_feed(redis_client, feed_url)
+                st.success("Feed removed.")
+                st.rerun()
 
 # ----------------- PLUGIN SETTINGS -----------------
 
@@ -1171,8 +1274,6 @@ def _platform_sort_name(p):
 
 def render_platforms_panel(auto_connected=None):
     st.subheader("Platforms")
-    if auto_connected:
-        st.success(f"{', '.join(auto_connected)} auto-connected.")
     for platform in sorted(platform_registry, key=_platform_sort_name):
         label = platform.get("label") or platform.get("category") or platform.get("key")
         with st.expander(label, expanded=False):
@@ -1328,32 +1429,116 @@ def render_settings_page():
     st.markdown("---")
     render_tater_settings()
 
-def render_rss_settings_page(rss_plugins, rss_enabled):
-    st.title("RSS Feed")
-    st.write("Control RSS feed monitoring and manage notification plugins.")
+def render_notifiers_page(notifier_plugins):
+    st.title("Notifiers")
+    st.write("Manage notifier plugins used by RSS and other systems.")
+    st.subheader("Notifier Plugins")
+    st.caption("Enable at least one notifier to receive notifications.")
+    render_plugin_list(notifier_plugins, "No notifier plugins available.")
 
-    toggle_state = st.toggle(
-        "Enable RSS feed watcher",
-        value=rss_enabled,
-        help="When enabled, RSS feeds will be polled and new items will be sent to the selected notifier plugins.",
-        key="rss_enabled_toggle"
-    )
 
-    if toggle_state != rss_enabled:
-        set_rss_enabled(toggle_state)
-        set_rss_running(toggle_state)
+def _load_schedules():
+    items_by_id = {}
+    due_by_id = {}
 
-        if toggle_state:
-            _start_rss(llm_client)
-        else:
-            _stop_rss()
+    # Primary source for next run timing.
+    due_rows = redis_client.zrange("reminders:due", 0, -1, withscores=True) or []
+    for reminder_id, due_ts in due_rows:
+        rid = str(reminder_id)
+        try:
+            due_by_id[rid] = float(due_ts)
+        except Exception:
+            pass
 
-        st.rerun()
+    # Source of truth for task objects (also catches tasks currently in-flight).
+    for key in redis_client.scan_iter(match="reminders:*", count=500):
+        key_s = str(key)
+        if key_s == "reminders:due":
+            continue
+        if not key_s.startswith("reminders:"):
+            continue
+        rid = key_s.split("reminders:", 1)[1].strip()
+        if not rid:
+            continue
 
-    st.markdown("---")
-    st.subheader("RSS Notifier Plugins")
-    st.caption("These plugins deliver RSS updates. Enable at least one to receive notifications.")
-    render_plugin_list(rss_plugins, "No RSS notifier plugins available.")
+        raw = redis_client.get(key_s)
+        if not raw:
+            continue
+        try:
+            obj = json.loads(raw)
+        except Exception:
+            continue
+        if not isinstance(obj, dict):
+            continue
+
+        due_ts = due_by_id.get(rid)
+        if due_ts is None:
+            try:
+                due_ts = float((obj.get("schedule") or {}).get("next_run_ts") or 0.0)
+            except Exception:
+                due_ts = 0.0
+
+        obj["_id"] = rid
+        obj["_due_ts"] = float(due_ts or 0.0)
+        items_by_id[rid] = obj
+
+    return list(items_by_id.values())
+
+
+def _delete_schedule(reminder_id: str):
+    rid = str(reminder_id or "").strip()
+    if not rid:
+        return
+    redis_client.zrem("reminders:due", rid)
+    redis_client.delete(f"reminders:{rid}")
+
+
+def render_ai_tasks_page():
+    st.title("AI Tasks")
+    st.caption("Manage AI tasks and reminders.")
+
+    schedules = _load_schedules()
+    if not schedules:
+        st.info("No schedules yet.")
+        return
+
+    def _sort_key(item):
+        return float(item.get("_due_ts") or 0.0)
+
+    for row in sorted(schedules, key=_sort_key):
+        rid = row.get("_id", "")
+        due_ts = float(row.get("_due_ts") or 0.0)
+        schedule = row.get("schedule") or {}
+        interval = 0.0
+        try:
+            interval = float(schedule.get("interval_sec") or 0.0)
+        except Exception:
+            interval = 0.0
+
+        platform = str(row.get("platform") or "").strip() or "unknown"
+        title = str(row.get("title") or "").strip()
+        task_prompt = str(row.get("task_prompt") or "").strip()
+        message = str(row.get("message") or "").strip()
+        preview = task_prompt or message or "(empty)"
+        preview = preview[:140] + ("..." if len(preview) > 140 else "")
+
+        due_local = datetime.fromtimestamp(due_ts).strftime("%Y-%m-%d %H:%M:%S")
+        mode_label = "AI Task"
+        recur_label = f"Every {int(interval)}s" if interval > 0 else "One-shot"
+        summary = f"{mode_label} -> {platform} -> {recur_label} -> next {due_local}"
+
+        with st.container():
+            cols = st.columns([10, 2])
+            with cols[0]:
+                st.markdown(f"**{title or 'Untitled schedule'}**")
+                st.caption(summary)
+                st.write(preview)
+            with cols[1]:
+                if st.button("🗑️", key=f"del_sched_{rid}", help="Delete schedule"):
+                    _delete_schedule(rid)
+                    st.success("Schedule removed.")
+                    st.rerun()
+        st.markdown("---")
 
 def _sort_plugins_for_display(plugins):
     return sorted(
@@ -2008,7 +2193,16 @@ def start_plugin_job(plugin_name, args, llm_client):
 
 async def process_function_call(response_json, user_question=""):
     func = response_json.get("function")
-    args = response_json.get("arguments", {})
+    args = response_json.get("arguments", {}) or {}
+
+    # Attach origin context for auto-targeting / auditing
+    origin = {
+        "platform": "webui",
+        "user": "webui",
+        "request_id": str(uuid.uuid4()),
+    }
+    args = dict(args)
+    args["origin"] = origin
 
     plugin = get_registry().get(func)
     if not plugin:
@@ -2059,7 +2253,7 @@ async def process_function_call(response_json, user_question=""):
     return []
 
 # ------------------ NAVIGATION ------------------
-nav_options = ["Chat", "Plugins", "Auto Plugins", "Platforms", "RSS Feed", "Plugin Store", "Settings"]
+nav_options = ["Chat", "Plugins", "Auto Plugins", "Notifiers", "Platforms", "AI Tasks", "Plugin Store", "Settings"]
 if "active_view" not in st.session_state:
     st.session_state.active_view = nav_options[0]
 
@@ -2071,20 +2265,6 @@ for opt in nav_options:
 
 active_view = st.session_state.active_view
 st.sidebar.markdown("---")
-
-# ------------------ RSS ------------------
-rss_enabled = get_rss_enabled()
-
-# If you've never set rss_running before, initialize it from rss:enabled once.
-if redis_client.get("rss_running") is None:
-    set_rss_running(rss_enabled)
-
-rss_should_run = get_rss_running()
-
-if rss_should_run:
-    _start_rss(llm_client)
-else:
-    _stop_rss()
 
 # ------------------ PLATFORM MANAGEMENT ------------------
 auto_connected = []
@@ -2100,7 +2280,7 @@ for platform in platform_registry:
         auto_connected.append(platform.get("label") or platform.get("category") or platform.get("key"))
 
 # Prepare plugin groupings
-rss_plugins = _sort_plugins_for_display([
+notifier_plugins = _sort_plugins_for_display([
     p for p in get_registry().values()
     if getattr(p, "notifier", False)
 ])
@@ -2262,11 +2442,17 @@ if active_view == "Chat":
                 st.write(content)
 
     # ------------------ Chat Input (NOW SUPPORTS FILES) ------------------
-    prompt = st.chat_input(
-        f"Chat with {first_name}…",
-        accept_file="multiple",              # change to "directory" if you want folder uploads
-        max_upload_size=WEBUI_ATTACH_MAX_MB_EACH
-    )
+    # Streamlit versions differ on chat_input kwargs (e.g., max_upload_size)
+    _chat_kwargs = {
+        "accept_file": "multiple",  # change to "directory" if you want folder uploads
+        "max_upload_size": WEBUI_ATTACH_MAX_MB_EACH,
+    }
+    try:
+        prompt = st.chat_input(f"Chat with {first_name}…", **_chat_kwargs)
+    except TypeError:
+        # Fallback for older Streamlit versions without max_upload_size
+        _chat_kwargs.pop("max_upload_size", None)
+        prompt = st.chat_input(f"Chat with {first_name}…", **_chat_kwargs)
 
     user_text = (getattr(prompt, "text", None) or "").strip() if prompt else ""
     files = list(getattr(prompt, "files", None) or []) if prompt else []
@@ -2515,8 +2701,11 @@ elif active_view == "Platforms":
     st.title("Platforms")
     render_platforms_panel(auto_connected)
 
-elif active_view == "RSS Feed":
-    render_rss_settings_page(rss_plugins, rss_enabled)
+elif active_view == "Notifiers":
+    render_notifiers_page(notifier_plugins)
+
+elif active_view == "AI Tasks":
+    render_ai_tasks_page()
 
 elif active_view == "Plugin Store":
     render_plugin_store_page()
