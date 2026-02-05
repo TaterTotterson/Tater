@@ -1056,6 +1056,16 @@ async def handle_message(payload: HARequest):
             func = fn.get("function")
             args = fn.get("arguments", {}) or {}
 
+            # Attach origin context for auto-targeting
+            origin = {
+                "platform": "homeassistant",
+                "user": payload.user_id,
+                "request_id": payload.session_id or conv_key,
+            }
+            origin = {k: v for k, v in origin.items() if v not in (None, "")}
+            args = dict(args)
+            args["origin"] = origin
+
             await _save_message(
                 conv_key,
                 "assistant",

@@ -1,12 +1,10 @@
 # plugins/example_plugin.py
-import os
-import json
 import asyncio
 import logging
 from dotenv import load_dotenv
 
 from plugin_base import ToolPlugin
-from helpers import extract_json, redis_client, get_tater_name
+from helpers import redis_client, get_tater_name
 
 load_dotenv()
 logger = logging.getLogger("example_plugin")

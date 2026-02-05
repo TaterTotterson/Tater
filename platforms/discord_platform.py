@@ -14,6 +14,8 @@ import threading
 import time
 from io import BytesIO
 import uuid
+from notify_queue import is_expired
+from notify_media import load_queue_attachments
 
 from helpers import (
     parse_function_json,
@@ -33,6 +35,8 @@ logger = logging.getLogger("discord")
 
 # NOTE: decode_responses=True means redis-py returns strings, not bytes.
 redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
+NOTIFY_QUEUE_KEY = "notifyq:discord"
+NOTIFY_POLL_INTERVAL = 0.5
 
 PLATFORM_SETTINGS = {
     "category": "Discord Settings",
@@ -243,6 +247,109 @@ class discord_platform(commands.Bot):
         self.response_channel_id = response_channel_id
         self.max_response_length = max_response_length
 
+    async def _send_notify_attachment(self, channel, attachment: dict):
+        kind = str((attachment or {}).get("type") or "file").strip().lower() or "file"
+        filename = str((attachment or {}).get("name") or f"{kind}.bin").strip()
+        binary = None
+
+        blob_key = (attachment or {}).get("blob_key")
+        if isinstance(blob_key, str) and blob_key.strip():
+            binary = load_blob(blob_key.strip())
+        elif isinstance((attachment or {}).get("bytes"), (bytes, bytearray)):
+            binary = bytes((attachment or {}).get("bytes"))
+
+        if not binary:
+            await safe_send(channel, f"[{kind.capitalize()}: {filename}]", self.max_response_length)
+            return
+
+        try:
+            file_obj = discord.File(BytesIO(binary), filename=filename)
+            await channel.send(file=file_obj)
+        except Exception:
+            await safe_send(channel, f"[{kind.capitalize()}: {filename}]", self.max_response_length)
+
+    async def _notify_queue_worker(self):
+        await self.wait_until_ready()
+        while not self.is_closed():
+            try:
+                item_json = await asyncio.to_thread(redis_client.lpop, NOTIFY_QUEUE_KEY)
+                if not item_json:
+                    await asyncio.sleep(NOTIFY_POLL_INTERVAL)
+                    continue
+
+                try:
+                    item = json.loads(item_json)
+                except Exception:
+                    logger.warning("[notifyq] invalid JSON item; skipping.")
+                    continue
+
+                if is_expired(item):
+                    continue
+
+                attachments = load_queue_attachments(redis_client, item.get("id"))
+                targets = item.get("targets") or {}
+                channel_id = targets.get("channel_id")
+                channel_name = targets.get("channel")
+                guild_id = targets.get("guild_id")
+
+                channel = None
+                if channel_id:
+                    try:
+                        cid = int(channel_id)
+                    except Exception:
+                        cid = None
+                    if cid:
+                        channel = self.get_channel(cid)
+                        if channel is None:
+                            try:
+                                channel = await self.fetch_channel(cid)
+                            except Exception:
+                                channel = None
+
+                if channel is None and channel_name:
+                    name = str(channel_name).lstrip("#")
+                    guild = None
+                    if guild_id:
+                        try:
+                            gid = int(guild_id)
+                            guild = self.get_guild(gid)
+                        except Exception:
+                            guild = None
+
+                    if guild:
+                        channel = discord.utils.get(guild.text_channels, name=name)
+                    else:
+                        for g in self.guilds:
+                            channel = discord.utils.get(g.text_channels, name=name)
+                            if channel:
+                                break
+
+                if channel is None:
+                    logger.warning("[notifyq] Discord channel not found; dropping item.")
+                    continue
+
+                message = (item.get("message") or "").strip()
+                title = item.get("title")
+                if not message and not attachments:
+                    continue
+
+                if message:
+                    payload = f"**{title}**\n{message}" if title else message
+                elif title:
+                    payload = f"**{title}**"
+                else:
+                    payload = ""
+
+                if payload:
+                    await safe_send(channel, payload, self.max_response_length)
+
+                for media in attachments:
+                    await self._send_notify_attachment(channel, media)
+
+            except Exception as e:
+                logger.warning(f"[notifyq] Discord worker error: {e}")
+                await asyncio.sleep(1)
+
     def build_system_prompt(self):
         now = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
 
@@ -302,6 +409,11 @@ class discord_platform(commands.Bot):
             logger.info(f"Synced {len(synced)} app commands.")
         except Exception as e:
             logger.error(f"Failed to sync app commands: {e}")
+        # Start notifier queue worker
+        try:
+            self.loop.create_task(self._notify_queue_worker())
+        except Exception as e:
+            logger.warning(f"[notifyq] Failed to start Discord worker: {e}")
 
     async def on_ready(self):
         first, last = get_tater_name()
@@ -425,7 +537,21 @@ class discord_platform(commands.Bot):
 
                 if response_json:
                     func = response_json.get("function")
-                    args = response_json.get("arguments", {})
+                    args = response_json.get("arguments", {}) or {}
+
+                    # Attach origin context for auto-targeting
+                    origin = {
+                        "platform": "discord",
+                        "channel_id": str(message.channel.id),
+                        "guild_id": str(message.guild.id) if message.guild else None,
+                        "channel": f"#{message.channel.name}" if getattr(message.channel, "name", None) else None,
+                        "user": message.author.display_name or message.author.name,
+                        "request_id": str(message.id),
+                    }
+                    # Remove empty keys
+                    origin = {k: v for k, v in origin.items() if v not in (None, "")}
+                    args = dict(args)
+                    args["origin"] = origin
 
                     # Save structured plugin_call marker
                     await self.save_message(

@@ -7,19 +7,15 @@ import asyncio
 from datetime import datetime
 from dotenv import load_dotenv
 import re
-import threading
 import plugin_registry as pr
 import time
-import sys
 import irc3
-from irc3.plugins.command import command
-import textwrap
+from notify_queue import is_expired
 from helpers import (
     parse_function_json,
     get_tater_name,
     get_tater_personality,
     get_llm_client_from_env,
-    build_llm_host_from_env,
 )
 
 load_dotenv()
@@ -73,6 +69,8 @@ redis_client = redis.Redis(
     db=0,
     decode_responses=True
 )
+NOTIFY_QUEUE_KEY = "notifyq:irc"
+NOTIFY_POLL_INTERVAL = 0.5
 
 MAX_RESPONSE_LENGTH = int(os.getenv("MAX_RESPONSE_LENGTH", 1500))
 llm_client = None
@@ -196,6 +194,43 @@ def send_formatted(self, target, text):
 
         if idx < len(paragraphs) - 1:
             self.privmsg(target, " ")
+
+async def _notify_queue_worker(bot, stop_event=None):
+    while True:
+        if stop_event and stop_event.is_set():
+            break
+
+        try:
+            item_json = await asyncio.to_thread(redis_client.lpop, NOTIFY_QUEUE_KEY)
+        except Exception:
+            item_json = None
+
+        if not item_json:
+            await asyncio.sleep(NOTIFY_POLL_INTERVAL)
+            continue
+
+        try:
+            item = json.loads(item_json)
+        except Exception:
+            logger.warning("[notifyq] invalid JSON item; skipping.")
+            continue
+
+        if is_expired(item):
+            continue
+
+        targets = item.get("targets") or {}
+        channel = targets.get("channel")
+        if not channel:
+            logger.warning("[notifyq] IRC missing channel; dropping item.")
+            continue
+
+        message = (item.get("message") or "").strip()
+        if not message:
+            continue
+
+        title = item.get("title")
+        payload = f"{title}\n{message}" if title else message
+        send_formatted(bot, channel, payload)
 
 # ---- LM template helpers ----
 def _to_template_msg(role, content, sender=None):
@@ -386,7 +421,18 @@ async def on_message(self, mask, event, target, data):
         parsed = parse_function_json(response_text)
         if parsed and isinstance(parsed, dict) and "function" in parsed:
             func = parsed["function"]
-            args = parsed.get("arguments", {})
+            args = parsed.get("arguments", {}) or {}
+
+            # Attach origin context for auto-targeting
+            origin = {
+                "platform": "irc",
+                "channel": target,
+                "user": mask.nick,
+                "request_id": f"{target}:{time.time():.3f}",
+            }
+            origin = {k: v for k, v in origin.items() if v not in (None, "")}
+            args = dict(args)
+            args["origin"] = origin
 
             plugins = pr.get_registry_snapshot()
             if func in plugins and get_plugin_enabled(func):
@@ -508,6 +554,8 @@ def run(stop_event=None):
             bot.create_connection()
             logger.info("✅ IRC bot connected.")
 
+            worker_task = asyncio.create_task(_notify_queue_worker(bot, stop_event))
+
             # If no stop_event was passed, run forever
             if not stop_event:
                 await asyncio.Event().wait()
@@ -517,6 +565,8 @@ def run(stop_event=None):
                 await asyncio.sleep(1)
 
             logger.info("🛑 stop_event triggered, shutting down IRC bot...")
+            if worker_task and not worker_task.done():
+                worker_task.cancel()
             bot.quit("Shutting down.")
             await asyncio.sleep(0.5)
 

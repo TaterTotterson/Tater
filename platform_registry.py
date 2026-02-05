@@ -2,9 +2,11 @@
 from platforms.discord_platform import PLATFORM_SETTINGS as discord_settings
 from platforms.ha_automations_platform import PLATFORM_SETTINGS as automations_settings
 from platforms.homeassistant_platform import PLATFORM_SETTINGS as ha_settings
+from platforms.ai_task_platform import PLATFORM_SETTINGS as ai_task_settings
 from platforms.homekit_platform import PLATFORM_SETTINGS as homekit_settings
 from platforms.irc_platform import PLATFORM_SETTINGS as irc_settings
 from platforms.matrix_platform import PLATFORM_SETTINGS as matrix_settings
+from platforms.rss_platform import PLATFORM_SETTINGS as rss_settings
 from platforms.xbmc_platform import PLATFORM_SETTINGS as xbmc_settings
 
 platform_registry = [
@@ -17,6 +19,11 @@ platform_registry = [
         **ha_settings,
         "key": "homeassistant_platform",
         "label": "Home Assistant Settings",
+    },
+    {
+        **ai_task_settings,
+        "key": "ai_task_platform",
+        "label": "AI Task Settings",
     },
     {
         **automations_settings,
@@ -37,6 +44,11 @@ platform_registry = [
         **matrix_settings,
         "key": "matrix_platform",
         "label": "Matrix Settings",
+    },
+    {
+        **rss_settings,
+        "key": "rss_platform",
+        "label": "RSS Settings",
     },
     {
         **xbmc_settings,

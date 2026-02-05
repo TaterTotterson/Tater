@@ -2,8 +2,6 @@ import os
 import asyncio
 from openai import AsyncOpenAI
 import requests
-from PIL import Image
-from io import BytesIO
 import nest_asyncio
 import redis
 from dotenv import load_dotenv
@@ -11,9 +9,8 @@ import re
 import json
 import base64
 import uuid
-import time
 import websocket
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from urllib.parse import urlparse, urlunparse
 
 load_dotenv()
