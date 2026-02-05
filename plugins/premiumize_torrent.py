@@ -44,7 +44,7 @@ class PremiumizeTorrentPlugin(ToolPlugin):
         "Write a friendly message telling {mention} you’re checking Premiumize for that torrent and retrieving download links now! "
         "Only output that message."
     )
-    platforms = ["discord", "matrix"]
+    platforms = ["discord", "matrix", "telegram"]
 
     # ------------------- API helpers -------------------
     @staticmethod

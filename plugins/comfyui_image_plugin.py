@@ -68,7 +68,7 @@ class ComfyUIImagePlugin(ToolPlugin):
     waiting_prompt_template = (
         "Write a fun, casual message saying you’re creating their masterpiece now! Only output that message."
     )
-    platforms = ["discord", "webui", "matrix"]  # matrix supported
+    platforms = ["discord", "webui", "matrix", "telegram"]  # matrix supported
 
     # ---------------------------
     # Server URL helpers

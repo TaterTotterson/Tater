@@ -41,7 +41,7 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
     plugin_dec = "Compose a music track from a prompt with ComfyUI Audio Ace."
     pretty_name = "Your Song"
     settings_category = "ComfyUI Audio Ace"
-    platforms = ["discord", "webui", "homeassistant", "matrix"]
+    platforms = ["discord", "webui", "homeassistant", "matrix", "telegram"]
 
     required_settings = {
         "COMFYUI_AUDIO_ACE_URL": {

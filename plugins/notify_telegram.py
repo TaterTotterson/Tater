@@ -1,117 +1,183 @@
-# plugins/notify_telegram.py
-import html
-import re
-import requests
+import json
 import logging
-import asyncio
-from urllib.parse import urlparse, parse_qs, urlunparse
+from typing import Any, Dict
+
 from plugin_base import ToolPlugin
-from plugin_settings import get_plugin_settings
+from helpers import redis_client
+from notify_queue import (
+    build_queue_item,
+    load_default_targets,
+    queue_key,
+    resolve_targets,
+)
+from notify_media import store_queue_attachments
 
 logger = logging.getLogger("notify_telegram")
+logger.setLevel(logging.INFO)
+
 
 class TelegramNotifierPlugin(ToolPlugin):
     name = "notify_telegram"
     plugin_name = "Telegram Notifier"
     pretty_name = "Telegram Notifier"
-    version = "1.0.0"
+    version = "1.1.0"
     min_tater_version = "50"
-    description = "Provides Telegram bot token and chat ID settings for RSS announcements."
-    plugin_dec = "Send RSS summaries to a Telegram chat via bot token and chat ID."
+    description = "Queue notifications for Telegram delivery."
+    plugin_dec = "Send messages to Telegram via the Telegram platform queue."
     usage = ""
-    platforms = []
+    platforms = []  # internal; not exposed as a direct tool
     settings_category = "Telegram Notifier"
     notifier = True  # Used by RSS manager to detect notifiers
 
     required_settings = {
-        "telegram_bot_token": {
-            "label": "Telegram Bot Token",
+        "DEFAULT_CHAT_ID": {
+            "label": "Default Chat ID",
             "type": "string",
             "default": "",
-            "description": "Bot token from @BotFather"
-        },
-        "telegram_chat_id": {
-            "label": "Telegram Channel ID",
-            "type": "string",
-            "default": "",
-            "description": "Channel or group ID (usually starts with -100...)"
+            "description": "Fallback Telegram chat ID when no target is provided.",
         }
     }
 
-    def strip_utm(self, url: str) -> str:
-        try:
-            parsed = urlparse(url)
-            query = parse_qs(parsed.query)
-            clean_query = {k: v for k, v in query.items() if not k.lower().startswith("utm_")}
-            parsed = parsed._replace(query="&".join(f"{k}={v[0]}" for k, v in clean_query.items()))
-            return urlunparse(parsed)
-        except Exception:
-            return url
+    def _extract_args(self, args: Dict[str, Any]):
+        args = args or {}
+        title = args.get("title")
+        message = args.get("message") or args.get("content")
+        targets = dict(args.get("targets") or {})
+        attachments = args.get("attachments") if isinstance(args.get("attachments"), list) else []
 
-    def post_to_telegram(self, message: str) -> bool:
-        settings = get_plugin_settings(self.settings_category)
-        bot_token = settings.get("telegram_bot_token")
-        chat_id = settings.get("telegram_chat_id")
+        for key in ("chat_id", "channel_id", "channel"):
+            if args.get(key) and key not in targets:
+                targets[key] = args.get(key)
 
-        if not bot_token or not chat_id:
-            logger.debug("Telegram bot token or chat ID not set.")
-            return False
+        if not targets.get("chat_id"):
+            if targets.get("channel_id"):
+                targets["chat_id"] = targets.get("channel_id")
+            elif targets.get("channel"):
+                targets["chat_id"] = targets.get("channel")
 
-        try:
-            lines = message.strip().splitlines()
-            cleaned_lines = []
+        meta = {
+            "priority": args.get("priority"),
+            "tags": args.get("tags"),
+            "ttl_sec": args.get("ttl_sec"),
+        }
+        origin = args.get("origin")
+        return title, message, targets, origin, meta, attachments
 
-            for line in lines:
-                line = line.strip()
+    def _legacy_defaults(self) -> Dict[str, str]:
+        settings = redis_client.hgetall("plugin_settings:Telegram Notifier") or {}
+        chat_id = str(settings.get("telegram_chat_id") or "").strip()
+        if chat_id:
+            return {"chat_id": chat_id}
+        return {}
 
-                # Convert Discord-style **bold**
-                line = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", line)
+    async def notify(
+        self,
+        title: str,
+        content: str,
+        targets: Dict[str, Any] | None = None,
+        origin: Dict[str, Any] | None = None,
+        meta: Dict[str, Any] | None = None,
+        attachments: list[Dict[str, Any]] | None = None,
+    ) -> str:
+        return self._enqueue(
+            title=title,
+            message=content,
+            targets=targets,
+            origin=origin,
+            meta=meta,
+            attachments=attachments,
+        )
 
-                # Convert ## Header to bold
-                if line.startswith("##"):
-                    line = f"<b>{html.escape(line.lstrip('#').strip())}</b>"
-                    cleaned_lines.append(line)
-                    continue
+    async def handle_webui(self, args, llm_client):
+        title, message, targets, origin, meta, attachments = self._extract_args(args)
+        return self._enqueue(
+            title=title,
+            message=message,
+            targets=targets,
+            origin=origin,
+            meta=meta,
+            attachments=attachments,
+        )
 
-                # Handle bullets: *, -, • → •
-                if line.startswith(("* ", "- ", "• ")):
-                    line = f"• {line[2:].strip()}"
+    async def handle_discord(self, message, args, llm_client):
+        title, message_text, targets, origin, meta, attachments = self._extract_args(args)
+        return self._enqueue(
+            title=title,
+            message=message_text,
+            targets=targets,
+            origin=origin,
+            meta=meta,
+            attachments=attachments,
+        )
 
-                # Convert bare URLs to links with stripped UTM
-                if re.fullmatch(r"https?://\S+", line):
-                    url = self.strip_utm(line)
-                    escaped_url = html.escape(url)
-                    line = f'<a href="{escaped_url}">{escaped_url}</a>'
-                else:
-                    line = html.escape(line, quote=False)
-                    line = line.replace("&lt;b&gt;", "<b>").replace("&lt;/b&gt;", "</b>")
+    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
+        title, message_text, targets, origin, meta, attachments = self._extract_args(args)
+        return self._enqueue(
+            title=title,
+            message=message_text,
+            targets=targets,
+            origin=origin,
+            meta=meta,
+            attachments=attachments,
+        )
 
-                cleaned_lines.append(line)
+    async def handle_matrix(self, client, room, sender, body, args, llm_client):
+        title, message_text, targets, origin, meta, attachments = self._extract_args(args)
+        return self._enqueue(
+            title=title,
+            message=message_text,
+            targets=targets,
+            origin=origin,
+            meta=meta,
+            attachments=attachments,
+        )
 
-            formatted_message = "\n".join(cleaned_lines)
+    async def handle_homeassistant(self, args, llm_client):
+        title, message_text, targets, origin, meta, attachments = self._extract_args(args)
+        return self._enqueue(
+            title=title,
+            message=message_text,
+            targets=targets,
+            origin=origin,
+            meta=meta,
+            attachments=attachments,
+        )
 
-            payload = {
-                "chat_id": chat_id,
-                "text": formatted_message,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": False
-            }
+    async def handle_telegram(self, update, args, llm_client):
+        title, message_text, targets, origin, meta, attachments = self._extract_args(args)
+        return self._enqueue(
+            title=title,
+            message=message_text,
+            targets=targets,
+            origin=origin,
+            meta=meta,
+            attachments=attachments,
+        )
 
-            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-            resp = requests.post(url, json=payload, timeout=10)
-            if resp.status_code >= 300:
-                logger.warning(f"Telegram publish failed ({resp.status_code}): {resp.text[:300]}")
-                return False
-            return True
+    def _enqueue(self, title, message, targets, origin, meta, attachments=None):
+        attachments = attachments if isinstance(attachments, list) else []
+        message = (message or "").strip()
+        if not message and not attachments:
+            return "Cannot queue: missing message"
+        if not message and attachments:
+            message = "Attachment"
 
-        except Exception as e:
-            logger.warning(f"Failed to send Telegram message: {e}")
-            return False
+        defaults = load_default_targets("telegram", redis_client)
+        if not defaults.get("chat_id"):
+            defaults = {**defaults, **self._legacy_defaults()}
+        resolved, err = resolve_targets("telegram", targets, origin, defaults)
+        if err:
+            return err
 
-    async def notify(self, title: str, content: str, targets=None, origin=None, meta=None):
-        ok = await asyncio.to_thread(self.post_to_telegram, content)
-        if ok:
-            return "Queued notification for telegram"
-        return "Cannot queue: missing telegram settings or send failed"
+        item = build_queue_item("telegram", title, message, resolved, origin, meta)
+        if attachments:
+            store_queue_attachments(redis_client, item.get("id"), attachments)
+        key = queue_key("telegram")
+        if not key:
+            return "Cannot queue: missing destination queue"
+
+        redis_client.rpush(key, json.dumps(item))
+        return "Queued notification for telegram"
+
 
 plugin = TelegramNotifierPlugin()

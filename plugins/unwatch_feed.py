@@ -33,7 +33,7 @@ class UnwatchFeedPlugin(ToolPlugin):
         "Write a friendly message telling {mention} you’re removing the feed from the watch list now! "
         "Only output that message."
     )
-    platforms = ["discord", "webui", "irc", "matrix"]
+    platforms = ["discord", "webui", "irc", "matrix", "telegram"]
 
     async def _unwatch_feed(self, feed_url: str, username: str | None = None) -> str:
         prefix = f"{username}: " if username else ""

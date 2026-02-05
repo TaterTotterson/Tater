@@ -49,7 +49,7 @@ class MisterRemotePlugin(ToolPlugin):
     )
     plugin_dec = "Control your MiSTer FPGA setup\u2014launch games, check status, or take screenshots."
 
-    platforms = ["discord", "webui", "irc", "homeassistant", "matrix", "homekit"]
+    platforms = ["discord", "webui", "irc", "homeassistant", "matrix", "homekit", "telegram"]
 
     usage = (
         "{\n"

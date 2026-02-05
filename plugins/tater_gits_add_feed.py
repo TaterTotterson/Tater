@@ -28,7 +28,7 @@ class TaterGitsAddFeedPlugin(ToolPlugin):
     plugin_dec = "Add a GitHub releases feed to the tater-gits watcher with smart naming."
     pretty_name = "Add Git Feed"
     waiting_prompt_template = "Tell {mention} I’m analyzing that repo and adding the feed now. Output only that friendly message."
-    platforms = ["webui", "discord", "irc", "matrix"]
+    platforms = ["webui", "discord", "irc", "matrix", "telegram"]
     settings_category = "Tater Gits"
 
     required_settings = {

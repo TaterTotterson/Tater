@@ -2,7 +2,7 @@
   <img src="https://github.com/user-attachments/assets/47c60b47-e10c-44d6-bdc5-1f9da2479980" alt="Tater AI Assistant" width="300"/>
 </div>
 
-**Tater** is an AI assistant that connects to any OpenAI-compatible LLM, giving you a powerful set of AI-driven tools. It includes a WebUI for setup and private chats, and works across **Discord**, **IRC**, **Matrix**, **Home Assistant**, **HomeKit**, and even the **OG Xbox via XBMC4Xbox**
+**Tater** is an AI assistant that connects to any OpenAI-compatible LLM, giving you a powerful set of AI-driven tools. It includes a WebUI for setup and private chats, and works across **Discord**, **Telegram**, **IRC**, **Matrix**, **Home Assistant**, **HomeKit**, and even the **OG Xbox via XBMC4Xbox**
 
 ---
 
@@ -13,9 +13,11 @@
 | `discord`         | Full-featured Discord bot that runs compatible plugins and supports rich interactions, media output, and background jobs. |
 | `homeassistant`   | Native integration for [Home Assistant](https://github.com/TaterTotterson/Tater-HomeAssistant), allowing Tater to act as a voice-enabled AI assistant through the Assist pipeline and control smart devices directly. |
 | `ha_automations`  | Lightweight Home Assistant automation-only endpoint for direct tool execution. Designed for fast, reliable automations like camera events, doorbell alerts, weather summaries, and dashboard sensors. Intended to be used with the [Tater Automations](https://github.com/TaterTotterson/tater_automations) custom component, which provides a native “Call Tater automation tool” action in Home Assistant. |
+| `ai_task`         | Built-in scheduled task runner for timed and recurring AI jobs, with delivery routed through notifier platforms (Discord, Telegram, Matrix, IRC, Home Assistant, and more). |
 | `homekit`         | Siri / Apple Shortcuts integration for [HomeKit](https://github.com/TaterTotterson/Tater/wiki/How-to-Build-the-%E2%80%9CTater%E2%80%9D-Shortcut), enabling “Hey Siri, ask Tater…” voice commands, per-device conversation sessions, and plugin-backed actions. |
 | `irc`             | Lightweight IRC bot that responds to mentions and runs compatible plugins. |
 | `matrix`          | Modern Matrix client with end-to-end encryption support, Markdown rendering, and full plugin compatibility — bringing Tater to federated chat networks like Element and Cinny. |
+| `telegram`        | Telegram bot integration with chat allowlists, DM user restrictions, queued notifications, media delivery, and plugin-backed tool execution. |
 | `xbmc`            | OG Xbox integration for **XBMC4Xbox**, provided by the custom Cortana-powered skin and script at [skin.cortana.tater-xbmc](https://github.com/TaterTotterson/skin.cortana.tater-xbmc), enabling an on-console AI assistant with chat history, quick asks, and plugin-powered actions. |
 | `webui`           | Streamlit-based WebUI for chatting, configuring plugins, and managing settings. |
 

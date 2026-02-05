@@ -43,7 +43,7 @@ class DeviceComparePlugin(ToolPlugin):
     pretty_name = "Comparing Devices"
     settings_category = "Device Compare"
     # Matrix supported (images only). IRC still not supported (images).
-    platforms = ["discord", "webui", "matrix"]
+    platforms = ["discord", "webui", "matrix", "telegram"]
 
     required_settings = {
         "GOOGLE_API_KEY": {"label": "Google API Key", "type": "string", "default": ""},

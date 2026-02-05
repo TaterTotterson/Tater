@@ -66,7 +66,7 @@ class SFTPGoAccountPlugin(ToolPlugin):
         }
     }
     waiting_prompt_template = "Write a friendly message telling {mention} you’re creating their account now! Only output that message."
-    platforms = ["discord", "webui", "irc", "matrix"]
+    platforms = ["discord", "webui", "irc", "matrix", "telegram"]
 
     @staticmethod
     async def safe_send(channel, content: str, **kwargs):

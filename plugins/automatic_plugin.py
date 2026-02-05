@@ -80,7 +80,7 @@ class AutomaticPlugin(ToolPlugin):
         }
     }
     waiting_prompt_template = "Write a fun, casual message telling {mention} you’re drawing their masterpiece now! Only output that message."
-    platforms = ["discord", "webui"]
+    platforms = ["discord", "webui", "telegram"]
 
     @staticmethod
     def _generate_image(prompt: str) -> bytes:

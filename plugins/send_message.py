@@ -18,14 +18,15 @@ class SendMessagePlugin(ToolPlugin):
         "  \"arguments\": {\n"
         "    \"message\": \"Optional body text when sending attachments\",\n"
         "    \"title\": \"Optional short title\",\n"
-        "    \"platform\": \"discord|irc|matrix|homeassistant|ntfy (optional; defaults to origin)\",\n"
+        "    \"platform\": \"discord|irc|matrix|homeassistant|ntfy|telegram (optional; defaults to origin)\",\n"
         "    \"targets\": {\n"
         "      \"channel_id\": \"discord only, optional\",\n"
         "      \"channel\": \"discord/irc, optional (#tater)\",\n"
         "      \"guild_id\": \"discord only, optional\",\n"
         "      \"room_id\": \"matrix room id or alias, optional (!id:server or #alias:server)\",\n"
         "      \"room_alias\": \"matrix alias, optional (#alias:server)\",\n"
-        "      \"device_service\": \"homeassistant only, optional\"\n"
+        "      \"device_service\": \"homeassistant only, optional\",\n"
+        "      \"chat_id\": \"telegram chat id, optional\"\n"
         "    },\n"
         "    \"attachments\": [{\"type\":\"image|audio|video|file\",\"name\":\"optional\",\"mimetype\":\"optional\",\"bytes\":\"optional-bytes\",\"blob_key\":\"optional\"}],\n"
         "    \"priority\": \"normal|high\",\n"
@@ -36,12 +37,12 @@ class SendMessagePlugin(ToolPlugin):
     )
     description = (
         "Queue a message via the notifier system. If no destination is provided, "
-        "it defaults to the origin platform (Discord/IRC/Matrix/Home Assistant). "
+        "it defaults to the origin platform (Discord/IRC/Matrix/Home Assistant/Telegram). "
         "When used from Discord, attached files are forwarded automatically."
     )
     pretty_name = "Send Message"
 
-    platforms = ["discord", "irc", "matrix", "homeassistant", "webui"]
+    platforms = ["discord", "irc", "matrix", "homeassistant", "telegram", "webui"]
 
     @staticmethod
     def _normalize_matrix_room_ref(room_ref: Any) -> str:
@@ -113,7 +114,7 @@ class SendMessagePlugin(ToolPlugin):
         attachments = self._clean_attachment_payload(args.get("attachments"))
 
         targets = dict(args.get("targets") or {})
-        for key in ("channel_id", "channel", "guild_id", "room_id", "room_alias", "device_service"):
+        for key in ("channel_id", "channel", "guild_id", "room_id", "room_alias", "device_service", "chat_id"):
             if args.get(key) and key not in targets:
                 targets[key] = args.get(key)
 
@@ -203,6 +204,9 @@ class SendMessagePlugin(ToolPlugin):
         return await self._dispatch(args)
 
     async def handle_matrix(self, client, room, sender, body, args, llm_client):
+        return await self._dispatch(args)
+
+    async def handle_telegram(self, update, args, llm_client):
         return await self._dispatch(args)
 
 

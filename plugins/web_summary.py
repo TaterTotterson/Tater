@@ -25,7 +25,7 @@ class WebSummaryPlugin(ToolPlugin):
     plugin_dec = "Summarize the main points of a webpage from its URL."
     pretty_name = "Summarizing Your Article"
     waiting_prompt_template = "Write a casual, friendly message telling {mention} you’re reading the article and preparing a summary now! Only output that message."
-    platforms = ["discord", "webui", "irc", "matrix"]
+    platforms = ["discord", "webui", "irc", "matrix", "telegram"]
 
     @staticmethod
     def fetch_web_summary(webpage_url, model=None):

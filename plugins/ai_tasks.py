@@ -31,9 +31,10 @@ class AITasksPlugin(ToolPlugin):
         "    \"message\": \"Required task prompt\",\n"
         "    \"task_prompt\": \"Optional explicit scheduled task prompt\",\n"
         "    \"title\": \"Optional short title\",\n"
-        "    \"platform\": \"discord|irc|matrix|homeassistant|ntfy (optional; defaults to origin)\",\n"
+        "    \"platform\": \"discord|irc|matrix|homeassistant|ntfy|telegram (optional; defaults to origin)\",\n"
         "    \"targets\": {\n"
-        "      \"channel\": \"optional destination (discord/irc channel, matrix room/alias, or HA notify service)\"\n"
+        "      \"channel\": \"optional destination (discord/irc channel, matrix room/alias, or HA notify service)\",\n"
+        "      \"chat_id\": \"optional telegram destination chat id\"\n"
         "    },\n"
         "    \"when_ts\": 1730000000.0,\n"
         "    \"when\": \"2026-02-03 15:04:05\",\n"
@@ -51,7 +52,7 @@ class AITasksPlugin(ToolPlugin):
     )
     pretty_name = "AI Tasks"
 
-    platforms = ["discord", "irc", "matrix", "homeassistant", "webui"]
+    platforms = ["discord", "irc", "matrix", "homeassistant", "telegram", "webui"]
 
     @staticmethod
     def _normalize_channel_targets(dest: str, targets: Dict[str, Any]) -> Dict[str, Any]:
@@ -65,6 +66,8 @@ class AITasksPlugin(ToolPlugin):
                 channel_ref = t.get("room_id")
             elif dest == "homeassistant":
                 channel_ref = t.get("device_service")
+            elif dest == "telegram":
+                channel_ref = t.get("chat_id")
 
         if not channel_ref:
             return t
@@ -86,6 +89,9 @@ class AITasksPlugin(ToolPlugin):
         if dest == "homeassistant":
             return {"device_service": ref}
 
+        if dest == "telegram":
+            return {"chat_id": ref}
+
         return {"channel": ref}
 
     def _extract_args(self, args: Dict[str, Any]):
@@ -99,7 +105,7 @@ class AITasksPlugin(ToolPlugin):
         platform = args.get("platform")
 
         targets = dict(args.get("targets") or {})
-        for key in ("channel", "channel_id", "room_id", "device_service"):
+        for key in ("channel", "channel_id", "room_id", "device_service", "chat_id"):
             if args.get(key) and key not in targets:
                 targets[key] = args.get(key)
 
@@ -284,6 +290,9 @@ class AITasksPlugin(ToolPlugin):
         return await self._schedule(args)
 
     async def handle_matrix(self, client, room, sender, body, args, llm_client):
+        return await self._schedule(args)
+
+    async def handle_telegram(self, update, args, llm_client):
         return await self._schedule(args)
 
 
