@@ -235,4 +235,7 @@ class YouTubeSummaryPlugin(ToolPlugin):
         # Matrix platform will handle chunking; return one string.
         return self.format_article(summary)
 
+    async def handle_telegram(self, update, args, llm_client):
+        return await self.handle_webui(args, llm_client)
+
 plugin = YouTubeSummaryPlugin()

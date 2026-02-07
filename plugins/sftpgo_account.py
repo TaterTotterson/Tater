@@ -328,5 +328,8 @@ class SFTPGoAccountPlugin(ToolPlugin):
             return "❌ Could not authenticate with SFTPGo. Please check the SFTPGo plugin settings."
         return "❌ Failed to create the SFTP account. Please try again later."
 
+    async def handle_telegram(self, update, args, llm_client):
+        return await self.handle_webui(args, llm_client)
+
 
 plugin = SFTPGoAccountPlugin()

@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 
 from plugin_base import ToolPlugin
 from helpers import redis_client, get_tater_name
+from plugin_diagnostics import diagnose_hash_fields, needs_from_diagnosis
+from plugin_result import action_failure, action_success
 
 load_dotenv()
 logger = logging.getLogger("weather_forecast")
@@ -20,9 +22,9 @@ class WeatherForecastPlugin(ToolPlugin):
     """
     Weather Forecast (WeatherAPI.com)
 
-    Tool-call schema (simple):
-      - LLM passes ONLY args["request"] (the exact user request text).
-      - Plugin parses it + calls WeatherAPI.
+    Tool-call schema (explicit):
+      - LLM passes structured arguments (location/days/date/hours/units).
+      - Plugin calls WeatherAPI directly with those explicit args.
       - Then it calls the LLM again to answer ONLY what the user asked,
         using a compact facts block (prevents data dumps).
 
@@ -34,19 +36,25 @@ class WeatherForecastPlugin(ToolPlugin):
 
     name = "weather_forecast"
     plugin_name = "Weather Forecast"
-    version = "1.0.0"
+    version = "1.0.9"
     min_tater_version = "50"
-    description = "Get current weather + forecast (and optional AQI/pollen/alerts) from WeatherAPI.com."
+    description = "Get current weather + forecast (and optional AQI/pollen/alerts) from WeatherAPI.com; always uses the default location if none is specified."
     plugin_dec = "Fetch WeatherAPI.com weather and answer only what the user asked (LLM-guided)."
+    when_to_use = "Use for current conditions or forecasts based on the user's natural-language weather request."
+    common_needs = ["weather request (e.g., current, tonight, tomorrow, multi-day)"]
+    required_args = ["request"]
+    optional_args = []
+    missing_info_prompts = [
+        "What weather do you want (current conditions, tonight, tomorrow, or multi-day forecast)?",
+    ]
     pretty_name = "Checking the Weather"
     settings_category = "Weather Forecast"
 
-    # IMPORTANT: keep the tool call simple for the LLM
     usage = (
         "{\n"
         '  "function": "weather_forecast",\n'
         '  "arguments": {\n'
-        '    "request": "<exact user request text>"\n'
+        '    "request": "User’s weather request in natural language (e.g., \\"forecast for tomorrow in 76114\\", \\"what’s the weather tonight\\"). If the user asked multiple things, include only the weather part."\n'
         "  }\n"
         "}\n"
     )
@@ -124,6 +132,119 @@ class WeatherForecastPlugin(ToolPlugin):
     )
 
     platforms = ["discord", "webui", "irc", "homeassistant", "matrix", "homekit", "xbmc", "telegram"]
+
+    def _normalize_request_text(self, text: str) -> str:
+        if not text:
+            return ""
+        cleaned = str(text).strip()
+        # strip common mention tokens (Discord/Mentions)
+        cleaned = re.sub(r"<@!?\\d+>", "", cleaned)
+        first, _ = get_tater_name()
+        if first:
+            cleaned = re.sub(rf"\\b{re.escape(first)}\\b", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"[@,:;.!]+", " ", cleaned)
+        cleaned = re.sub(r"\\s+", " ", cleaned).strip()
+        return cleaned
+
+    def _with_request_from_fallback(self, args: Dict[str, Any], fallback_text: str) -> Tuple[Dict[str, Any], str]:
+        args2 = dict(args or {})
+        req = (args2.get("request") or "").strip()
+        if not req and fallback_text:
+            req = str(fallback_text).strip()
+        req = self._normalize_request_text(req)
+        if req:
+            args2["request"] = req
+        return args2, req
+
+    def _diagnosis(self) -> dict:
+        return diagnose_hash_fields(
+            "plugin_settings:Weather Forecast",
+            fields={"weatherapi_key": "WEATHERAPI_KEY", "default_location": "DEFAULT_LOCATION"},
+            validators={
+                "weatherapi_key": lambda v: len(v.strip()) >= 10,
+                "default_location": lambda v: len(v.strip()) >= 3,
+            },
+        )
+
+    def _to_contract(self, message: str, request_text: str) -> dict:
+        msg = (message or "").strip()
+        low = msg.lower()
+        if not msg:
+            return action_failure(
+                code="empty_result",
+                message="Weather tool returned no output.",
+                diagnosis=self._diagnosis(),
+                needs=["What forecast do you want (current, tonight, tomorrow, multi-day)?"],
+                say_hint="Explain no output was returned and ask which forecast details the user wants; use the default location if configured.",
+            )
+
+        if "not configured" in low:
+            diagnosis = self._diagnosis()
+            needs = needs_from_diagnosis(
+                diagnosis,
+                {
+                    "weatherapi_key": "Please set your WeatherAPI.com API key in settings.",
+                    "default_location": "Please set a default location (city or ZIP) in settings.",
+                },
+            )
+            return action_failure(
+                code="weather_config_missing",
+                message="WeatherAPI configuration is incomplete.",
+                diagnosis=diagnosis,
+                needs=needs,
+                say_hint="Explain that weather settings are missing and ask for the API key and default location.",
+            )
+
+        if "no weather request provided" in low:
+            return action_failure(
+                code="missing_request",
+                message="No weather request was provided.",
+                diagnosis=self._diagnosis(),
+                needs=["What forecast do you want (current, tonight, tomorrow, multi-day)?"],
+                say_hint="Ask which forecast details the user wants; default location will be used if set.",
+            )
+
+        if "no location provided" in low:
+            return action_failure(
+                code="missing_location",
+                message=msg,
+                diagnosis=self._diagnosis(),
+                needs=["Which city or ZIP should I use?"],
+                say_hint="Explain no location is configured and ask for a city or ZIP.",
+            )
+
+        if "requested date is in the past" in low or "too far out" in low:
+            return action_failure(
+                code="invalid_date",
+                message=msg,
+                diagnosis=self._diagnosis(),
+                needs=["Please provide a date within the next 14 days."],
+                say_hint="Explain the requested date is out of range and ask for a valid date.",
+            )
+
+        if "no weather data returned" in low or "weather failed" in low:
+            return action_failure(
+                code="weather_failed",
+                message=msg,
+                diagnosis=self._diagnosis(),
+                needs=["Try again or specify a different location."],
+                say_hint="Explain the weather lookup failed and ask whether to retry.",
+            )
+
+        if "weatherapi error" in low:
+            return action_failure(
+                code="weatherapi_error",
+                message=msg,
+                diagnosis=self._diagnosis(),
+                needs=["Try a different location (city or ZIP)."],
+                say_hint="Explain the weather provider returned an error and ask for a different location.",
+            )
+
+        return action_success(
+            facts={"request": request_text, "result": msg},
+            say_hint="Provide the weather answer exactly as returned.",
+            suggested_followups=["Want the forecast for another day or location?"],
+        )
 
     # -------------------- Settings helpers --------------------
 
@@ -477,24 +598,68 @@ class WeatherForecastPlugin(ToolPlugin):
             return "Weather failed: LLM client not provided."
 
         args = args or {}
-        request_text = (args.get("request") or "").strip()
-        if not request_text:
-            return "No weather request provided."
 
-        location_override = self._extract_location_override(request_text)
-        used_default_location = location_override is None
-        location = location_override or settings["DEFAULT_LOCATION"]
+        # Explicit structured arguments (preferred)
+        location = (args.get("location") or "").strip()
+        days = args.get("days")
+        date_str = (args.get("date") or "").strip() or None
+        hours = args.get("hours")
+        units = (args.get("units") or "").strip().lower()
 
-        parsed = self._interpret_request(
-            request_text,
-            default_days=settings["DEFAULT_DAYS"],
-            default_hours=settings["SHOW_HOURLY_PEEK"],
+        explicit_args = any(
+            k in args
+            for k in ("location", "days", "date", "hours", "units")
         )
 
-        days = max(1, min(int(parsed.get("days") or settings["DEFAULT_DAYS"]), 14))
-        wanted_date = self._parse_date(parsed.get("date"))
-        hours = max(0, min(int(parsed.get("hours") or settings["SHOW_HOURLY_PEEK"]), 48))
-        units = settings["DEFAULT_UNITS"]
+        request_text = (args.get("request") or "").strip()
+
+        # Back-compat: if no explicit args provided, parse the raw request text
+        if not explicit_args and request_text:
+            location_override = self._extract_location_override(request_text)
+            if location_override:
+                location = location_override
+            parsed = self._interpret_request(
+                request_text,
+                default_days=settings["DEFAULT_DAYS"],
+                default_hours=settings["SHOW_HOURLY_PEEK"],
+            )
+            days = parsed.get("days")
+            date_str = parsed.get("date")
+            hours = parsed.get("hours")
+
+        used_default_location = False
+        if not location:
+            location = settings["DEFAULT_LOCATION"]
+            used_default_location = True
+
+        if not location:
+            return "No location provided and no default location is configured."
+
+        # Normalize days/hours/units
+        try:
+            days = int(days) if days is not None else int(settings["DEFAULT_DAYS"])
+        except Exception:
+            days = int(settings["DEFAULT_DAYS"])
+        days = max(1, min(days, 14))
+
+        try:
+            hours = int(hours) if hours is not None else int(settings["SHOW_HOURLY_PEEK"])
+        except Exception:
+            hours = int(settings["SHOW_HOURLY_PEEK"])
+        hours = max(0, min(hours, 48))
+
+        if units not in ("us", "metric"):
+            units = settings["DEFAULT_UNITS"]
+
+        wanted_date = self._parse_date(date_str) if date_str else None
+        if wanted_date:
+            today = date.today()
+            diff = (wanted_date - today).days
+            if diff < 0:
+                return "Requested date is in the past. Please provide a future date."
+            if diff > 13:
+                return "Requested date is too far out. WeatherAPI supports up to 14 days."
+            days = max(days, min(14, diff + 1))
         max_chars = settings["MAX_RESPONSE_CHARS"]
 
         params = {
@@ -522,6 +687,19 @@ class WeatherForecastPlugin(ToolPlugin):
             used_default_location=used_default_location,
         )
 
+        if not request_text:
+            req_bits = []
+            if wanted_date:
+                req_bits.append(f"forecast for {wanted_date.isoformat()}")
+            elif days:
+                req_bits.append(f"{days}-day forecast")
+            else:
+                req_bits.append("weather forecast")
+            if hours:
+                req_bits.append(f"next {hours} hours")
+            loc_label = location if location else "default location"
+            request_text = f"{' and '.join(req_bits)} in {loc_label}"
+
         # Always summarize via LLM (no fallback)
         try:
             answered = await self._answer_with_llm(llm_client, request_text, facts, max_chars=max_chars)
@@ -535,11 +713,20 @@ class WeatherForecastPlugin(ToolPlugin):
     # -------------------- Platform handlers --------------------
 
     async def handle_discord(self, message, args, llm_client):
-        return await self._get_weather_text(args or {}, llm_client=llm_client)
+        fallback = ""
+        try:
+            fallback = (getattr(message, "content", None) or "").strip()
+        except Exception:
+            fallback = ""
+        args2, request_text = self._with_request_from_fallback(args, fallback)
+        text = await self._get_weather_text(args2, llm_client=llm_client)
+        return self._to_contract(text, request_text)
 
     async def handle_webui(self, args, llm_client):
         async def inner():
-            return await self._get_weather_text(args or {}, llm_client=llm_client)
+            args2, request_text = self._with_request_from_fallback(args or {}, "")
+            text = await self._get_weather_text(args2, llm_client=llm_client)
+            return self._to_contract(text, request_text)
 
         try:
             asyncio.get_running_loop()
@@ -548,21 +735,41 @@ class WeatherForecastPlugin(ToolPlugin):
             return asyncio.run(inner())
 
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
-        text = await self._get_weather_text(args or {}, llm_client=llm_client)
-        one_line = re.sub(r"\s+", " ", text).strip()
-        return f"{user}: {one_line[:430]}"
+        args2, request_text = self._with_request_from_fallback(args or {}, raw_message)
+        text = await self._get_weather_text(args2, llm_client=llm_client)
+        return self._to_contract(text, request_text)
 
     async def handle_homeassistant(self, args, llm_client):
-        return (await self._get_weather_text(args or {}, llm_client=llm_client)).strip()
+        args2, request_text = self._with_request_from_fallback(args or {}, "")
+        text = await self._get_weather_text(args2, llm_client=llm_client)
+        return self._to_contract(text, request_text)
 
     async def handle_matrix(self, client, room, sender, body, args, llm_client):
-        return await self._get_weather_text(args or {}, llm_client=llm_client)
+        args2, request_text = self._with_request_from_fallback(args or {}, body)
+        text = await self._get_weather_text(args2, llm_client=llm_client)
+        return self._to_contract(text, request_text)
+
+    async def handle_telegram(self, update, args, llm_client):
+        fallback = ""
+        try:
+            if isinstance(update, dict):
+                msg = update.get("message") or {}
+                fallback = (msg.get("text") or msg.get("caption") or "").strip()
+        except Exception:
+            fallback = ""
+        args2, request_text = self._with_request_from_fallback(args or {}, fallback)
+        text = await self._get_weather_text(args2, llm_client=llm_client)
+        return self._to_contract(text, request_text)
 
     async def handle_homekit(self, args, llm_client):
-        return self._siri_flatten(await self._get_weather_text(args or {}, llm_client=llm_client))
+        args2, request_text = self._with_request_from_fallback(args or {}, "")
+        text = await self._get_weather_text(args2, llm_client=llm_client)
+        return self._to_contract(text, request_text)
 
     async def handle_xbmc(self, args, llm_client):
-        return (await self._get_weather_text(args or {}, llm_client=llm_client)).strip()
+        args2, request_text = self._with_request_from_fallback(args or {}, "")
+        text = await self._get_weather_text(args2, llm_client=llm_client)
+        return self._to_contract(text, request_text)
 
 
 plugin = WeatherForecastPlugin()

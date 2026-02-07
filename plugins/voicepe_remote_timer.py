@@ -29,7 +29,7 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
 
     name = "voicepe_remote_timer"
     plugin_name = "Voice PE Remote Timer"
-    version = "1.0.1"
+    version = "1.0.2"
     min_tater_version = "50"
     pretty_name = "Voice PE Remote Timer"
     settings_category = "Voice PE Remote Timer"
@@ -77,7 +77,7 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
         "Only output that message."
     )
 
-    platforms = ["homeassistant", "homekit", "xbmc", "webui"]
+    platforms = ["homeassistant", "homekit", "xbmc", "webui", "discord", "telegram", "matrix", "irc"]
 
     # ─────────────────────────────────────────────────────────────
     # Settings / HA helpers
@@ -662,6 +662,18 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
             return await inner()
         except RuntimeError:
             return asyncio.run(inner())
+
+    async def handle_discord(self, message, args, llm_client):
+        return await self.handle_webui(args, llm_client, context=None)
+
+    async def handle_telegram(self, update, args, llm_client):
+        return await self.handle_webui(args, llm_client, context=None)
+
+    async def handle_matrix(self, client, room, sender, body, args, llm_client):
+        return await self.handle_webui(args, llm_client, context=None)
+
+    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
+        return await self.handle_webui(args, llm_client, context=None)
 
 
 plugin = VoicePERemoteTimerPlugin()

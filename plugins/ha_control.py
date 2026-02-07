@@ -4,10 +4,13 @@ import re
 import json as _json
 import time
 import requests
+import difflib
 from typing import Any, List, Optional, Set, Tuple
 
 from plugin_base import ToolPlugin
 from helpers import redis_client
+from plugin_diagnostics import combine_diagnosis, diagnose_hash_fields, diagnose_redis_keys, needs_from_diagnosis
+from plugin_result import action_failure, action_success
 
 logger = logging.getLogger("ha_control")
 logger.setLevel(logging.INFO)
@@ -58,20 +61,18 @@ class HAClient:
 class HAControlPlugin(ToolPlugin):
     name = "ha_control"
     plugin_name = "Home Assistant Control"
-    version = "1.0.1"
+    version = "1.1.4"
     min_tater_version = "50"
     pretty_name = "Home Assistant Control"
 
     settings_category = "Home Assistant Control"
-    platforms = ["homeassistant", "webui", "xbmc", "homekit"]
+    platforms = ["homeassistant", "webui", "xbmc", "homekit", "discord", "telegram", "matrix", "irc"]
 
-    # ONLY pass the user's exact request. Plugin infers everything else.
     usage = (
         "{\n"
         '  "function": "ha_control",\n'
         '  "arguments": {\n'
-        '    "query": "The user’s request in natural language. If the user uses pronouns (it/them/those/that), '
-        'restate the request with the previously mentioned device or group."\n'
+        '    "query": "Single Home Assistant command in natural language (e.g., \\"turn off the office lights\\", \\"set the thermostat to 72\\", \\"what is the kitchen temperature\\"). If the user asked multiple things, include ONLY the Home Assistant part. If the user uses pronouns (it/them/those/that), restate the request with the actual device or area."\n'
         "  }\n"
         "}\n"
     )
@@ -80,7 +81,14 @@ class HAControlPlugin(ToolPlugin):
         "Control or check Home Assistant devices like lights, switches, thermostats, locks, covers, "
         "remotes for TVs/streaming devices, temperatures, and sensors."
     )
-    plugin_dec = "Control Home Assistant devices, including TV remotes, and read sensors."
+    plugin_dec = "Control Home Assistant devices."
+    when_to_use = "Use to control or query Home Assistant devices based on a single natural-language command."
+    common_needs = ["device/area and action (e.g., \"office lights\" + \"turn off\")"]
+    required_args = ["query"]
+    optional_args = []
+    missing_info_prompts = [
+        "Which Home Assistant device or area should I control, and what action should I take (e.g., \"turn off the office lights\")?",
+    ]
 
     waiting_prompt_template = (
         "Write a friendly message telling {mention} you’re accessing Home Assistant devices now! "
@@ -146,6 +154,45 @@ class HAControlPlugin(ToolPlugin):
         if raw in ("0", "false", "no", "off"):
             return False
         return default
+
+    def _extract_desired_from_args(self, args: dict) -> dict:
+        desired: dict = {}
+        raw = args.get("desired")
+        if isinstance(raw, dict):
+            desired.update(raw)
+        elif isinstance(raw, str) and raw.strip():
+            try:
+                parsed = _json.loads(raw)
+                if isinstance(parsed, dict):
+                    desired.update(parsed)
+            except Exception:
+                pass
+
+        for key in ("temperature", "brightness_pct", "color_name", "command", "activity"):
+            if key not in desired and args.get(key) is not None:
+                desired[key] = args.get(key)
+        return desired
+
+    def _synthetic_query_from_args(self, args: dict) -> str:
+        raw = (args.get("query") or "").strip()
+        if raw:
+            return raw
+        action = (args.get("action") or args.get("intent") or "").strip()
+        entity_id = (args.get("entity_id") or "").strip()
+        scope = (args.get("scope") or "").strip()
+        domain_hint = (args.get("domain_hint") or "").strip()
+        parts = [action, entity_id or scope or domain_hint]
+        joined = " ".join([p for p in parts if p]).strip()
+        return joined or "Home Assistant request"
+
+    def _validated_entity_id(self, entity_id: str, query: str) -> str:
+        eid = (entity_id or "").strip()
+        if not eid:
+            return ""
+        q = (query or "").lower()
+        if eid.lower() in q:
+            return eid
+        return ""
 
     # ----------------------------
     # Internal helpers
@@ -525,6 +572,61 @@ class HAControlPlugin(ToolPlugin):
         return None
 
     # ----------------------------
+    # Candidate filtering helpers
+    # ----------------------------
+    @staticmethod
+    def _normalize_for_match(text: str) -> str:
+        t = (text or "").lower()
+        t = re.sub(r"[^a-z0-9]+", " ", t)
+        return re.sub(r"\s+", " ", t).strip()
+
+    def _extract_keywords(self, text: str) -> List[str]:
+        t = self._normalize_for_match(text)
+        if not t:
+            return []
+        tokens = [tok for tok in t.split(" ") if tok]
+        stop = {
+            "turn", "on", "off", "the", "a", "an", "please", "to", "in", "of", "for",
+            "set", "make", "switch", "device", "devices", "area", "room",
+            "light", "lights", "lamp", "lamps", "bulb", "bulbs", "led", "hue", "sconce",
+        }
+        out = [tok for tok in tokens if tok not in stop and len(tok) > 1]
+        return out
+
+    def _tokens_from_scope(self, scope: str) -> List[str]:
+        s = (scope or "").strip().lower()
+        if not s or s in {"inside", "outside", "unknown"}:
+            return []
+        if ":" in s:
+            s = s.split(":", 1)[1]
+        return self._extract_keywords(s)
+
+    def _filter_candidates_by_tokens(self, candidates: List[dict], tokens: List[str]) -> Tuple[List[dict], bool]:
+        if not candidates or not tokens:
+            return candidates, False
+        scores = []
+        for c in candidates:
+            name = (c.get("name") or "").lower()
+            eid = (c.get("entity_id") or "").lower()
+            blob = f"{name} {eid}"
+            score = 0.0
+            for t in tokens:
+                if not t:
+                    continue
+                if t in blob:
+                    score += 1.0
+                    continue
+                for word in blob.split():
+                    if difflib.SequenceMatcher(None, t, word).ratio() >= 0.86:
+                        score += 0.6
+                        break
+            scores.append(score)
+        max_score = max(scores) if scores else 0
+        if max_score <= 0:
+            return candidates, False
+        return [c for c, sc in zip(candidates, scores) if sc == max_score], True
+
+    # ----------------------------
     # Catalog (grounding)
     # ----------------------------
     def _catalog_cache_key(self) -> str:
@@ -739,7 +841,30 @@ class HAControlPlugin(ToolPlugin):
         if dh:
             return {dh}
 
+        # Avoid scenes/scripts for turn_off unless explicitly requested
+        if (action or "").lower().strip() in {"turn_off"}:
+            return {"light", "switch", "fan", "media_player", "cover", "lock", "remote"}
+
         return {"light", "switch", "fan", "media_player", "scene", "script", "cover", "lock", "remote"}
+
+    def _infer_domain_hint_from_query(self, query: str) -> str:
+        t = (query or "").lower()
+        if not t:
+            return ""
+
+        if any(w in t for w in ["light", "lights", "lamp", "lamps", "bulb", "bulbs", "led", "hue", "sconce"]):
+            return "light"
+        if any(w in t for w in ["fan", "fans"]):
+            return "fan"
+        if any(w in t for w in ["switch", "plug", "outlet"]):
+            return "switch"
+        if any(w in t for w in ["garage", "cover", "blinds", "shade", "door"]):
+            return "cover"
+        if any(w in t for w in ["lock", "locked", "unlock"]):
+            return "lock"
+        if any(w in t for w in ["scene", "mode"]):
+            return "scene"
+        return ""
 
     # ----------------------------
     # Step 3: LLM chooser (grounded) + tournament chunking + cache + single-candidate shortcut
@@ -770,7 +895,7 @@ class HAControlPlugin(ToolPlugin):
         cat_ts = self._catalog_ts()
         cache_key = None
         if cache_ttl > 0:
-            cache_key = f"ha_control:choose:v2:{(query or '').strip().lower()}:{str(cat_ts or 'none')}:{_json.dumps(intent, sort_keys=True, ensure_ascii=False)}"
+            cache_key = f"ha_control:choose:v3:{(query or '').strip().lower()}:{str(cat_ts or 'none')}:{_json.dumps(intent, sort_keys=True, ensure_ascii=False)}"
             try:
                 cached = self._cache_get_json(cache_key)
                 if cached and isinstance(cached, dict):
@@ -886,6 +1011,34 @@ class HAControlPlugin(ToolPlugin):
 
         return None
 
+    def _expected_states_for_action(self, service: str, entity_domain: str) -> Optional[set[str]]:
+        """
+        Best-effort expected state mapping for verification.
+        Returns None when we cannot reliably verify.
+        """
+        svc = (service or "").lower().strip()
+        dom = (entity_domain or "").lower().strip()
+
+        if dom in ("light", "switch", "fan"):
+            if svc == "turn_on":
+                return {"on"}
+            if svc == "turn_off":
+                return {"off"}
+
+        if dom == "cover":
+            if svc in ("open_cover", "open"):
+                return {"open"}
+            if svc in ("close_cover", "close"):
+                return {"closed"}
+
+        if dom == "lock":
+            if svc == "lock":
+                return {"locked"}
+            if svc == "unlock":
+                return {"unlocked"}
+
+        return None
+
     async def _speak_response_state(self, user_query: str, friendly: str, value: str, unit: str, llm_client) -> str:
         system = (
             "You are a smart home voice assistant.\n"
@@ -930,20 +1083,143 @@ class HAControlPlugin(ToolPlugin):
         except Exception:
             return f"Okay, {action_spoken} {friendly}."
 
+    def _ha_diagnosis(self) -> dict:
+        hash_diag = diagnose_hash_fields(
+            "homeassistant_settings",
+            fields={"ha_base_url": "HA_BASE_URL", "ha_token": "HA_TOKEN"},
+            validators={
+                "ha_base_url": lambda v: v.startswith("http://") or v.startswith("https://"),
+                "ha_token": lambda v: len(v.strip()) >= 10,
+            },
+        )
+        key_diag = diagnose_redis_keys(
+            keys={
+                "ha_base_url": "tater:homeassistant:base_url",
+                "ha_token": "tater:homeassistant:token",
+            },
+            validators={
+                "ha_base_url": lambda v: v.startswith("http://") or v.startswith("https://"),
+                "ha_token": lambda v: len(v.strip()) >= 10,
+            },
+        )
+        # Prefer explicit WebUI settings; only fall back to legacy keys when missing.
+        merged = dict(hash_diag)
+        for k, v in (key_diag or {}).items():
+            if merged.get(k) == "missing":
+                merged[k] = v
+        return merged
+
+    def _structured_from_text(self, text: str, query: str, args: Optional[dict] = None) -> dict:
+        msg = (text or "").strip()
+        lower = msg.lower()
+        args = args or {}
+        action = (args.get("action") or "").strip().lower()
+        entity_id = (args.get("entity_id") or "").strip()
+        scope = (args.get("scope") or "").strip()
+
+        if not msg:
+            return action_failure(
+                code="empty_result",
+                message="No response from Home Assistant control.",
+                diagnosis=self._ha_diagnosis(),
+                needs=["What should I control?"],
+                say_hint="Explain that no result was returned and ask for the exact device/action.",
+            )
+
+        if "token is not set" in lower:
+            diagnosis = self._ha_diagnosis()
+            needs = needs_from_diagnosis(
+                diagnosis,
+                {
+                    "ha_base_url": "Please set your Home Assistant base URL in settings.",
+                    "ha_token": "Please set your Home Assistant long-lived access token in settings.",
+                },
+            )
+            return action_failure(
+                code="ha_auth_missing",
+                message="Home Assistant authentication is not configured.",
+                diagnosis=diagnosis,
+                needs=needs,
+                say_hint="Explain setup is incomplete and ask for missing Home Assistant settings.",
+            )
+
+        is_failure = (
+            lower.startswith("error ")
+            or lower.startswith("i couldn't")
+            or lower.startswith("i couldn’t")
+            or lower.startswith("please provide")
+            or lower.startswith("tell me what")
+            or "is not supported" in lower
+            or "couldn’t find" in lower
+            or "couldn't find" in lower
+        )
+
+        if is_failure:
+            needs = []
+            if "query" in lower or "action" in lower or "missing action" in lower:
+                needs.append("What exact Home Assistant action should I run?")
+            if "couldn" in lower and "find" in lower:
+                needs.append("Which device or room should I target?")
+            if "entity_id" in lower or "entity id" in lower:
+                needs.append("Which device or room should I target? (Exact entity_id optional if you know it.)")
+            return action_failure(
+                code="ha_request_failed",
+                message=msg,
+                diagnosis=self._ha_diagnosis(),
+                needs=needs,
+                say_hint="Explain what failed and ask only the missing details needed to continue.",
+            )
+
+        return action_success(
+            facts={
+                "query": query,
+                "action": action or "auto",
+                "entity_id": entity_id,
+                "scope": scope,
+                "result": msg,
+            },
+            say_hint="Confirm the completed Home Assistant action using these facts only.",
+            suggested_followups=[
+                "Want me to adjust anything else in Home Assistant?",
+            ],
+        )
+
+    async def _handle_structured(self, args, llm_client):
+        args = args or {}
+        query = (args.get("query") or "").strip()
+        if not query:
+            query = self._synthetic_query_from_args(args)
+        out = await self._handle(args, llm_client)
+        if isinstance(out, dict) and "ok" in out:
+            return out
+        return self._structured_from_text(str(out), query, args)
+
     # ----------------------------
     # Handlers
     # ----------------------------
     async def handle_homeassistant(self, args, llm_client):
-        return await self._handle(args, llm_client)
+        return await self._handle_structured(args, llm_client)
 
     async def handle_webui(self, args, llm_client):
-        return await self._handle(args, llm_client)
+        return await self._handle_structured(args, llm_client)
 
     async def handle_xbmc(self, args, llm_client):
-        return await self._handle(args, llm_client)
+        return await self._handle_structured(args, llm_client)
 
     async def handle_homekit(self, args, llm_client):
-        return await self._handle(args, llm_client)
+        return await self._handle_structured(args, llm_client)
+
+    async def handle_discord(self, message, args, llm_client):
+        return await self._handle_structured(args, llm_client)
+
+    async def handle_telegram(self, update, args, llm_client):
+        return await self._handle_structured(args, llm_client)
+
+    async def handle_matrix(self, client, room, sender, body, args, llm_client):
+        return await self._handle_structured(args, llm_client)
+
+    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
+        return await self._handle_structured(args, llm_client)
 
     # ----------------------------
     # Core logic
@@ -956,9 +1232,58 @@ class HAControlPlugin(ToolPlugin):
                 "and add a Long-Lived Access Token."
             )
 
+        args = args or {}
         query = (args.get("query") or "").strip()
-        if not query:
-            return "Please provide 'query' with the user's exact request."
+        action_arg = (args.get("action") or "").strip().lower()
+        intent_arg = (args.get("intent") or "").strip().lower()
+        scope_arg = (args.get("scope") or "").strip()
+        domain_hint_arg = (args.get("domain_hint") or "").strip()
+        explicit_entity = (args.get("entity_id") or "").strip()
+        desired_arg = self._extract_desired_from_args(args)
+
+        explicit_args = any(
+            k in args
+            for k in (
+                "action",
+                "intent",
+                "entity_id",
+                "scope",
+                "domain_hint",
+                "temperature",
+                "brightness_pct",
+                "color_name",
+                "command",
+                "activity",
+                "desired",
+            )
+        )
+        if not explicit_args:
+            if not query:
+                return "Please provide 'query' with the user's exact request."
+        else:
+            if not intent_arg:
+                if action_arg == "set_temperature":
+                    intent_arg = "set_temperature"
+                elif action_arg == "get_state":
+                    intent_arg = "get_state"
+                elif action_arg:
+                    intent_arg = "control"
+
+            if intent_arg in ("get_state", "get_temp") and not action_arg:
+                action_arg = "get_state"
+            if intent_arg == "set_temperature" and not action_arg:
+                action_arg = "set_temperature"
+
+            if not action_arg:
+                return "Missing action. Please specify what Home Assistant should do."
+
+            if not query:
+                query = self._synthetic_query_from_args(args)
+
+        explicit_entity = self._validated_entity_id(explicit_entity, query)
+
+        if explicit_entity and "." not in explicit_entity:
+            return "Please provide the full entity_id (for example: light.kitchen)."
 
         excluded = self._excluded_entities_set()
 
@@ -970,18 +1295,28 @@ class HAControlPlugin(ToolPlugin):
 
         # ✅ Fast-path: try deterministic intent parsing first (skips interpret LLM for common commands)
         intent: Optional[dict] = None
-        if self._get_bool_setting("HA_FASTPATH_ENABLED", True):
-            try:
-                intent = self._fast_intent_from_text(query)
-            except Exception:
-                intent = None
+        if explicit_args:
+            inferred_hint = domain_hint_arg or self._infer_domain_hint_from_query(query)
+            intent = {
+                "intent": intent_arg or "control",
+                "action": action_arg,
+                "scope": scope_arg or "unknown",
+                "domain_hint": inferred_hint or "",
+                "desired": desired_arg,
+            }
+        else:
+            if self._get_bool_setting("HA_FASTPATH_ENABLED", True):
+                try:
+                    intent = self._fast_intent_from_text(query)
+                except Exception:
+                    intent = None
 
-        if not intent:
-            try:
-                intent = await self._interpret_query(query, llm_client)
-            except Exception as e:
-                logger.error(f"[ha_control] interpret_query failed: {e}")
-                return "I couldn't understand that request."
+            if not intent:
+                try:
+                    intent = await self._interpret_query(query, llm_client)
+                except Exception as e:
+                    logger.error(f"[ha_control] interpret_query failed: {e}")
+                    return "I couldn't understand that request."
 
         intent_type = (intent.get("intent") or "").strip()
         action = (intent.get("action") or "").strip()
@@ -992,41 +1327,46 @@ class HAControlPlugin(ToolPlugin):
         if not isinstance(desired, dict):
             desired = {}
 
-        # Fill missing "desired" fields from the raw query
-        if desired.get("color_name") in (None, "", "null"):
-            cn = self._parse_color_name_from_text(query)
-            if cn:
-                desired["color_name"] = cn
-        if desired.get("brightness_pct") in (None, "", "null"):
-            bp = self._parse_brightness_pct_from_text(query)
-            if bp is not None:
-                desired["brightness_pct"] = bp
-        if desired.get("temperature") in (None, "", "null"):
-            tp = self._parse_temperature_from_text(query)
-            if tp is not None:
-                desired["temperature"] = tp
+        if not explicit_args:
+            # Fill missing "desired" fields from the raw query
+            if desired.get("color_name") in (None, "", "null"):
+                cn = self._parse_color_name_from_text(query)
+                if cn:
+                    desired["color_name"] = cn
+            if desired.get("brightness_pct") in (None, "", "null"):
+                bp = self._parse_brightness_pct_from_text(query)
+                if bp is not None:
+                    desired["brightness_pct"] = bp
+            if desired.get("temperature") in (None, "", "null"):
+                tp = self._parse_temperature_from_text(query)
+                if tp is not None:
+                    desired["temperature"] = tp
 
-        # Remote fallbacks
-        if desired.get("command") in (None, "", "null"):
-            cmd = self._normalize_remote_command(query)
-            if cmd:
-                desired["command"] = cmd
-        if desired.get("activity") in (None, "", "null"):
-            act = self._guess_activity_from_text(query)
-            if act:
-                desired["activity"] = act
+            # Remote fallbacks
+            if desired.get("command") in (None, "", "null"):
+                cmd = self._normalize_remote_command(query)
+                if cmd:
+                    desired["command"] = cmd
+            if desired.get("activity") in (None, "", "null"):
+                act = self._guess_activity_from_text(query)
+                if act:
+                    desired["activity"] = act
 
-        # Light color hard-guard (extra safety)
-        if self._is_light_color_command(query):
-            intent_type = "control"
-            action = "turn_on"
-            domain_hint = "light"
-            if not scope:
-                scope = "unknown"
-            if not desired.get("color_name"):
-                desired["color_name"] = self._parse_color_name_from_text(query) or "white"
+            # Light color hard-guard (extra safety)
+            if self._is_light_color_command(query):
+                intent_type = "control"
+                action = "turn_on"
+                domain_hint = "light"
+                if not scope:
+                    scope = "unknown"
+                if not desired.get("color_name"):
+                    desired["color_name"] = self._parse_color_name_from_text(query) or "white"
 
-        is_temp_question = self._contains_any(query, ["temp", "temperature", "degrees"])
+        is_temp_question = False
+        if intent_type == "get_temp":
+            is_temp_question = True
+        elif not explicit_args:
+            is_temp_question = self._contains_any(query, ["temp", "temperature", "degrees"])
         if intent_type == "get_temp" or (is_temp_question and intent_type in ("get_state", "control", "set_temperature")):
             scope_l = (scope or "").lower()
             if not scope_l or scope_l == "unknown":
@@ -1039,7 +1379,9 @@ class HAControlPlugin(ToolPlugin):
             if excluded:
                 candidates = [c for c in candidates if (c.get("entity_id") or "").lower() not in excluded]
 
-            entity_id = await self._choose_entity_llm(query, {"intent": "get_temp", "scope": scope}, candidates, llm_client)
+            entity_id = explicit_entity or await self._choose_entity_llm(
+                query, {"intent": "get_temp", "scope": scope}, candidates, llm_client
+            )
             if not entity_id:
                 return "I couldn’t find a temperature sensor for that."
 
@@ -1054,13 +1396,23 @@ class HAControlPlugin(ToolPlugin):
                 logger.error(f"[ha_control] temp get_state error: {e}")
                 return f"Error reading {entity_id}: {e}"
 
-        wants_thermostat = self._contains_any(query, ["thermostat", "hvac"])
+        wants_thermostat = False
+        if not explicit_args:
+            wants_thermostat = self._contains_any(query, ["thermostat", "hvac"])
+        elif (domain_hint or "").lower() == "climate":
+            wants_thermostat = True
         if wants_thermostat and intent_type in ("get_state", "control") and action == "get_state":
             climate_candidates = self._candidates_for_domains(catalog, {"climate"})
             if excluded:
                 climate_candidates = [c for c in climate_candidates if (c.get("entity_id") or "").lower() not in excluded]
 
-            entity_id = await self._choose_entity_llm(query, {"intent": "get_state", "domain_hint": "climate"}, climate_candidates, llm_client)
+            entity_id = explicit_entity
+            if entity_id and not entity_id.startswith("climate."):
+                return "That entity_id is not a climate device. Please provide a climate entity."
+            if not entity_id:
+                entity_id = await self._choose_entity_llm(
+                    query, {"intent": "get_state", "domain_hint": "climate"}, climate_candidates, llm_client
+                )
             if not entity_id:
                 return "I couldn’t find a thermostat."
 
@@ -1086,7 +1438,11 @@ class HAControlPlugin(ToolPlugin):
             if excluded:
                 candidates = [c for c in candidates if (c.get("entity_id") or "").lower() not in excluded]
 
-            entity_id = await self._choose_entity_llm(query, intent, candidates, llm_client)
+            entity_id = explicit_entity
+            if entity_id and not entity_id.startswith("climate."):
+                return "That entity_id is not a climate device. Please provide a thermostat entity."
+            if not entity_id:
+                entity_id = await self._choose_entity_llm(query, intent, candidates, llm_client)
             if not entity_id:
                 return "I couldn’t find a thermostat to set."
 
@@ -1119,7 +1475,13 @@ class HAControlPlugin(ToolPlugin):
                     if not ((c.get("domain") or "").lower() == "light" and (c.get("entity_id") or "").lower() in excluded)
                 ]
 
-            entity_id = await self._choose_entity_llm(query, intent, candidates, llm_client)
+            tokens = self._tokens_from_scope(scope) or self._extract_keywords(query)
+            if not explicit_entity:
+                candidates, matched = self._filter_candidates_by_tokens(candidates, tokens)
+                if tokens and not matched:
+                    return f"I couldn't find a device matching '{' '.join(tokens)}'."
+
+            entity_id = explicit_entity or await self._choose_entity_llm(query, intent, candidates, llm_client)
             if not entity_id:
                 return "I couldn’t find a device matching that."
 
@@ -1313,10 +1675,49 @@ class HAControlPlugin(ToolPlugin):
 
             # Generic non-remote control path
             try:
+                st_before = None
+                try:
+                    st_before = client.get_state(entity_id)
+                except Exception:
+                    st_before = None
+
                 client.call_service(entity_domain, service, payload)
-                st = client.get_state(entity_id)
+
+                # Give HA a moment to update state; poll a few times before failing.
+                expected = self._expected_states_for_action(service, entity_domain)
+                st = None
+                state_after = ""
+                for delay in (0.4, 0.7, 1.0):
+                    time.sleep(delay)
+                    st = client.get_state(entity_id)
+                    state_after = (st.get("state") if isinstance(st, dict) else str(st or "")).lower().strip()
+                    if expected and state_after in expected:
+                        break
+
                 attrs = (st.get("attributes") or {}) if isinstance(st, dict) else {}
                 friendly = (attrs.get("friendly_name") or entity_id)
+                state_before = (
+                    (st_before.get("state") if isinstance(st_before, dict) else str(st_before or "")).lower().strip()
+                )
+
+                if expected:
+                    if state_after in {"unknown", "unavailable", ""}:
+                        # proceed but mark as unverified
+                        verified = False
+                    elif state_after not in expected:
+                        return action_failure(
+                            code="ha_state_not_changed",
+                            message=f"{friendly} did not change to the expected state.",
+                            diagnosis=self._ha_diagnosis(),
+                            needs=[
+                                "Should I retry, or is there a different device/room I should target?",
+                            ],
+                            say_hint="Explain the device did not change state and ask whether to retry or target a different device.",
+                        )
+                    else:
+                        verified = True
+                else:
+                    verified = False
 
                 spoken_action = service.replace("_", " ")
                 if spoken_action == "turn on":
@@ -1325,11 +1726,38 @@ class HAControlPlugin(ToolPlugin):
                     spoken_action = "turned off"
 
                 extras_txt = ", ".join(extras_txt_parts) if extras_txt_parts else ""
-                return await self._speak_response_confirm(query, friendly, spoken_action, extras_txt, llm_client)
+                already = bool(expected and state_before in expected and state_after in expected)
+
+                return action_success(
+                    facts={
+                        "query": query,
+                        "action": action or "auto",
+                        "entity_id": entity_id,
+                        "friendly_name": friendly,
+                        "result": spoken_action,
+                        "state_before": state_before,
+                        "state_after": state_after,
+                        "verified": verified,
+                        "already": already,
+                        "extras": extras_txt,
+                    },
+                    say_hint=(
+                        "Confirm the Home Assistant action. Mention the device name. "
+                        "If already is true, say it was already in the desired state. "
+                        "If verified is false, mention you couldn't confirm the state."
+                    ),
+                    suggested_followups=["Want me to adjust anything else in Home Assistant?"],
+                )
 
             except Exception as e:
                 logger.error(f"[ha_control] control error: {e}")
-                return f"Error performing {service} on {entity_id}: {e}"
+                return action_failure(
+                    code="ha_control_failed",
+                    message=f"Error performing {service} on {entity_id}: {e}",
+                    diagnosis=self._ha_diagnosis(),
+                    needs=["Should I retry or target a different device?"],
+                    say_hint="Explain the Home Assistant action failed and ask whether to retry.",
+                )
 
         if intent_type == "get_state" or action == "get_state":
             allowed = {"sensor", "binary_sensor", "lock", "cover", "light", "switch", "fan", "media_player", "climate", "remote", "select"}
@@ -1337,7 +1765,13 @@ class HAControlPlugin(ToolPlugin):
             if excluded:
                 candidates = [c for c in candidates if (c.get("entity_id") or "").lower() not in excluded]
 
-            entity_id = await self._choose_entity_llm(query, intent, candidates, llm_client)
+            tokens = self._tokens_from_scope(scope) or self._extract_keywords(query)
+            if not explicit_entity:
+                candidates, matched = self._filter_candidates_by_tokens(candidates, tokens)
+                if tokens and not matched:
+                    return f"I couldn't find a device matching '{' '.join(tokens)}'."
+
+            entity_id = explicit_entity or await self._choose_entity_llm(query, intent, candidates, llm_client)
             if not entity_id:
                 return "I couldn’t find a device or sensor matching that."
 

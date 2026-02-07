@@ -27,13 +27,13 @@ def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype
 class ComfyUIImagePlugin(ToolPlugin):
     name = "comfyui_image_plugin"
     plugin_name = "ComfyUI Image"
-    version = "1.0.1"
+    version = "1.0.2"
     min_tater_version = "50"
     usage = (
         "{\n"
         '  "function": "comfyui_image_plugin",\n'
         '  "arguments": {\n'
-        '    "prompt": "<Text prompt for the image>",\n'
+        '    "prompt": "<Text prompt for the image. If omitted, generate a creative prompt based on the user request>",\n'
         '    "negative_prompt": "<Optional negative prompt>",\n'
         '    "width": 1024,\n'
         '    "height": 1024\n'
@@ -92,6 +92,29 @@ class ComfyUIImagePlugin(ToolPlugin):
     # ---------------------------
     # Template / settings helpers
     # ---------------------------
+    @staticmethod
+    def _resolve_prompt(args: Optional[dict]) -> str:
+        args = args or {}
+        raw = None
+        for key in ("prompt", "request", "message", "query", "text"):
+            val = args.get(key)
+            if isinstance(val, str) and val.strip():
+                raw = val.strip()
+                break
+
+        if not raw:
+            return "a serene sky with dramatic clouds at golden hour, wide cinematic view, rich color, high detail"
+
+        cleaned = " ".join(raw.split())
+        lower = cleaned.lower()
+        short_prompt = len(cleaned.split()) < 5 or len(cleaned) < 24
+        has_style = any(tag in lower for tag in ("cinematic", "photoreal", "high detail", "ultra", "4k"))
+        if short_prompt and not has_style:
+            if "sky" in lower:
+                return f"{cleaned}, expansive sky, dramatic clouds, warm light, cinematic, high detail"
+            return f"{cleaned}, cinematic wide shot, soft lighting, atmospheric, high detail"
+        return cleaned
+
     @staticmethod
     def get_workflow_template():
         settings = redis_client.hgetall(f"plugin_settings:{ComfyUIImagePlugin.settings_category}") or {}
@@ -440,9 +463,7 @@ class ComfyUIImagePlugin(ToolPlugin):
     # Discord
     # ---------------------------------------
     async def handle_discord(self, message, args, llm_client):
-        user_prompt = (args or {}).get("prompt")
-        if not user_prompt:
-            return "No prompt provided for ComfyUI."
+        user_prompt = ComfyUIImagePlugin._resolve_prompt(args)
         try:
             neg = (args or {}).get("negative_prompt", "") or ""
 
@@ -473,9 +494,7 @@ class ComfyUIImagePlugin(ToolPlugin):
     # WebUI
     # ---------------------------------------
     async def handle_webui(self, args, llm_client):
-        user_prompt = (args or {}).get("prompt")
-        if not user_prompt:
-            return "No prompt provided for ComfyUI."
+        user_prompt = ComfyUIImagePlugin._resolve_prompt(args)
         try:
             neg = (args or {}).get("negative_prompt", "") or ""
 
@@ -501,13 +520,14 @@ class ComfyUIImagePlugin(ToolPlugin):
         except Exception as e:
             return f"Failed to queue prompt: {type(e).__name__}: {e}"
 
+    async def handle_telegram(self, update, args, llm_client):
+        return await self.handle_webui(args, llm_client)
+
     # ---------------------------------------
     # Matrix
     # ---------------------------------------
     async def handle_matrix(self, client, room, sender, body, args, llm_client):
-        user_prompt = (args or {}).get("prompt")
-        if not user_prompt:
-            return "No prompt provided for ComfyUI."
+        user_prompt = ComfyUIImagePlugin._resolve_prompt(args)
 
         try:
             neg = (args or {}).get("negative_prompt", "") or ""

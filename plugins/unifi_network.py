@@ -32,19 +32,24 @@ class UnifiNetworkPlugin(ToolPlugin):
 
     name = "unifi_network"
     plugin_name = "UniFi Network"
-    version = "1.0.0"
+    version = "1.0.2"
     min_tater_version = "50"
     pretty_name = "UniFi Network"
     description = "Answer questions about your UniFi Network (clients, devices, site status) using the official UniFi Integration API."
     plugin_dec = "Fetch UniFi Network sites/clients/devices via the official API and let the LLM answer questions from computed facts + compact lists."
+    when_to_use = "Use for UniFi Network status, client/device counts, listings, or simple lookups."
+    common_needs = ["action", "name (for find_client/find_device)"]
+    required_args = ["action"]
+    optional_args = ["name"]
     settings_category = "UniFi Network"
-    platforms = ["webui", "homeassistant", "homekit", "xbmc"]
+    platforms = ["webui", "homeassistant", "homekit", "xbmc", "discord", "telegram", "matrix", "irc"]
 
     usage = (
         "{\n"
         '  "function": "unifi_network",\n'
         '  "arguments": {\n'
-        '    "query": "User request in natural language (e.g., \\"how\\\'s the network?\\", \\"who is online\\", \\"find john\\", \\"list devices\\")"\n'
+        '    "action": "summary|clients_online|clients_wired|clients_wireless|devices_offline|list_clients|list_devices|find_client|find_device",\n'
+        '    "name": "Optional client/device name for find_* actions."\n'
         "  }\n"
         "}\n"
     )
@@ -532,10 +537,55 @@ class UnifiNetworkPlugin(ToolPlugin):
     async def handle_xbmc(self, args: Dict[str, Any], llm_client):
         return await self._handle(args, llm_client)
 
+    async def handle_discord(self, message, args, llm_client):
+        return await self._handle(args, llm_client)
+
+    async def handle_telegram(self, update, args, llm_client):
+        return await self._handle(args, llm_client)
+
+    async def handle_matrix(self, client, room, sender, body, args, llm_client):
+        return await self._handle(args, llm_client)
+
+    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
+        return await self._handle(args, llm_client)
+
+    def _query_from_action(self, action: str, name: str) -> Optional[str]:
+        act = (action or "").strip().lower()
+        if not act:
+            return None
+        if act in ("summary", "status", "site_status"):
+            return "how's the network"
+        if act in ("clients_online", "clients"):
+            return "who is online"
+        if act == "clients_wired":
+            return "how many wired clients"
+        if act == "clients_wireless":
+            return "how many wireless clients"
+        if act == "devices_offline":
+            return "which devices are offline"
+        if act == "list_clients":
+            return "list clients"
+        if act == "list_devices":
+            return "list devices"
+        if act in ("find_client", "find_device"):
+            if name:
+                return f"find {name}"
+            return None
+        return None
+
     async def _handle(self, args: Dict[str, Any], llm_client):
+        args = args or {}
+        action = (args.get("action") or "").strip().lower()
+        name = (args.get("name") or "").strip()
         query = (args.get("query") or "").strip()
+
+        if action:
+            query = self._query_from_action(action, name) or query
+
         if not query:
-            return "Please provide a 'query' like: “how’s the network?” or “who is online?”"
+            if action in ("find_client", "find_device"):
+                return "Please provide the client or device name to find."
+            return "Please provide an action (and name if needed), or a query like: “how’s the network?”"
 
         s = self._get_settings()
         try:

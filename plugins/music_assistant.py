@@ -11,6 +11,8 @@ from dotenv import load_dotenv
 
 from plugin_base import ToolPlugin
 from helpers import redis_client, get_tater_name
+from plugin_diagnostics import combine_diagnosis, diagnose_hash_fields, diagnose_redis_keys, needs_from_diagnosis
+from plugin_result import action_failure, action_success
 
 load_dotenv()
 logger = logging.getLogger("music_assistant")
@@ -43,15 +45,19 @@ class RoomPlayerNotFound(RuntimeError):
 class MusicAssistantPlugin(ToolPlugin):
     name = "music_assistant"
     plugin_name = "Music Assistant"
-    version = "1.0.5"
+    version = "1.0.8"
     min_tater_version = "50"
 
     usage = (
         "{\n"
         '  "function": "music_assistant",\n'
         '  "arguments": {\n'
-        '    "request": "<what the user wants to do, e.g. play reggae, play stick figure, stop, next, volume 40>",\n'
-        '    "room": "<room name like Kitchen>"\n'
+        '    "action": "play|queue|pause|resume|stop|next|previous|volume",\n'
+        '    "query": "What to play or queue (artist/album/track/playlist). Required for play/queue.",\n'
+        '    "room": "Optional room name like Kitchen.",\n'
+        '    "volume": "0-100 (only for action=volume).",\n'
+        '    "prefer": "Optional hint like artist|album|track|playlist|radio.",\n'
+        '    "random": false\n'
         "  }\n"
         "}\n"
     )
@@ -62,6 +68,14 @@ class MusicAssistantPlugin(ToolPlugin):
         "Some devices provide room context in the system prompt, use it for room unless the user has specified a room"
         "If room is truly unknown, ask the user where to play."
     )
+
+    when_to_use = "Use to control music playback with explicit action/query/room/volume inputs."
+    common_needs = ["action", "query (for play/queue)", "room (optional)"]
+    required_args = ["action"]
+    optional_args = ["query", "room", "volume", "prefer", "random"]
+    missing_info_prompts = [
+        "What should I play or control, and which room should I use?",
+    ]
 
     plugin_dec = "Play music and control playback via Music Assistant in Home Assistant."
     pretty_name = "Controlling Music"
@@ -96,7 +110,7 @@ class MusicAssistantPlugin(ToolPlugin):
         "Only output that message."
     )
 
-    platforms = ["webui", "homeassistant", "homekit", "xbmc"]
+    platforms = ["webui", "homeassistant", "homekit", "xbmc", "discord", "telegram", "matrix", "irc"]
 
     # -------------------- HA helpers --------------------
     def _ha_settings(self) -> Dict[str, str]:
@@ -741,18 +755,61 @@ class MusicAssistantPlugin(ToolPlugin):
     async def _run(self, args: Dict[str, Any], llm_client) -> str:
         args = args or {}
         request_text = (args.get("request") or "").strip()
+        action = (args.get("action") or "").strip().lower()
+        query = (args.get("query") or "").strip()
         room = (args.get("room") or "").strip() or None
+        prefer = args.get("prefer")
+        vol = args.get("volume")
+        want_random = args.get("random")
 
-        if not request_text:
+        if isinstance(want_random, str):
+            want_random = want_random.strip().lower() in ("1", "true", "yes", "on")
+        elif want_random is None:
+            want_random = False
+
+        explicit_args = any(k in args for k in ("action", "query", "room", "volume", "prefer", "random"))
+
+        plan = None
+        need_plan = (
+            (not action)
+            or (action in {"play", "queue"} and not query)
+            or (action == "volume" and vol is None)
+        )
+        if need_plan and request_text:
+            plan = await self._llm_plan(request_text, room, llm_client)
+
+        if plan:
+            if not action:
+                action = (plan.get("action") or "").strip().lower()
+            if not query:
+                query = (plan.get("query") or "").strip()
+            if prefer is None and plan.get("prefer") is not None:
+                prefer = plan.get("prefer")
+            if vol is None and plan.get("volume") is not None:
+                vol = plan.get("volume")
+            if args.get("random") is None and plan.get("random") is not None:
+                want_random = bool(plan.get("random"))
+            if not room:
+                room = (plan.get("room") or room)
+
+        if not action and query:
+            action = "play"
+
+        if not action:
+            if explicit_args:
+                return "Missing action. Specify play, queue, pause, resume, stop, next, previous, or volume."
             return "No request provided."
 
-        plan = await self._llm_plan(request_text, room, llm_client)
-        action = (plan.get("action") or "play").strip().lower()
-        query = (plan.get("query") or "").strip() or request_text
-        prefer = (plan.get("prefer") or None)
-        vol = plan.get("volume")
-        want_random = bool(plan.get("random")) if plan.get("random") is not None else False
-        plan_room = (plan.get("room") or room)
+        if action in {"play", "queue"} and not query:
+            if request_text:
+                query = request_text
+            else:
+                return "What should I play or queue?"
+
+        if action == "volume" and vol is None:
+            return "What volume should I set (0-100)?"
+
+        plan_room = room
 
         try:
             media_player = await self._resolve_media_player(plan_room, args, llm_client)
@@ -768,6 +825,9 @@ class MusicAssistantPlugin(ToolPlugin):
 
         if action not in {"play", "queue"}:
             return "Sorry — I’m not sure what to do with that request."
+
+        if not request_text:
+            request_text = query or action
 
         # Clean the query so we don't search for "play stick figure"
         cleaned = self._normalize_query(query) or self._normalize_query(request_text) or query
@@ -839,14 +899,121 @@ class MusicAssistantPlugin(ToolPlugin):
         except Exception:
             return f"I searched Music Assistant for '{cleaned}' but didn’t find anything. Want to try a different search?"
 
+    def _diagnosis(self) -> Dict[str, str]:
+        music_diag = diagnose_hash_fields(
+            "plugin_settings:Music Assistant",
+            fields={"ma_config_entry_id": "MA_CONFIG_ENTRY_ID"},
+            validators={"ma_config_entry_id": lambda v: len(v.strip()) >= 3},
+        )
+        ha_diag = diagnose_hash_fields(
+            "homeassistant_settings",
+            fields={"ha_base_url": "HA_BASE_URL", "ha_token": "HA_TOKEN"},
+            validators={
+                "ha_base_url": lambda v: v.startswith("http://") or v.startswith("https://"),
+                "ha_token": lambda v: len(v.strip()) >= 10,
+            },
+        )
+        ha_key_diag = diagnose_redis_keys(
+            keys={"ha_base_url": "tater:homeassistant:base_url", "ha_token": "tater:homeassistant:token"},
+            validators={
+                "ha_base_url": lambda v: v.startswith("http://") or v.startswith("https://"),
+                "ha_token": lambda v: len(v.strip()) >= 10,
+            },
+        )
+        return combine_diagnosis(music_diag, ha_diag, ha_key_diag)
+
+    def _to_contract(self, raw: str, args: Dict[str, Any]) -> Dict[str, Any]:
+        msg = (raw or "").strip()
+        low = msg.lower()
+        request = (args.get("request") or "").strip()
+        action = (args.get("action") or "").strip().lower()
+        query = (args.get("query") or "").strip()
+        room = (args.get("room") or "").strip()
+
+        if not msg:
+            return action_failure(
+                code="empty_result",
+                message="Music Assistant did not return a response.",
+                diagnosis=self._diagnosis(),
+                needs=["What should I play or control?"],
+                say_hint="Explain that no result was returned and ask for the intended playback action.",
+            )
+
+        if "token is not set" in low or "service call failed" in low or "websocket auth failed" in low:
+            diagnosis = self._diagnosis()
+            needs = needs_from_diagnosis(
+                diagnosis,
+                {
+                    "ha_base_url": "Please set your Home Assistant base URL in settings.",
+                    "ha_token": "Please set your Home Assistant long-lived access token in settings.",
+                    "ma_config_entry_id": "Please set your Music Assistant config_entry_id in settings.",
+                },
+            )
+            return action_failure(
+                code="music_assistant_config_missing",
+                message="Music Assistant configuration is incomplete.",
+                diagnosis=diagnosis,
+                needs=needs,
+                say_hint="Explain setup is incomplete and ask for the missing configuration values.",
+            )
+
+        is_failure = (
+            low.startswith("no request provided")
+            or "missing action" in low
+            or "what should i play" in low
+            or "which room should i play it in" in low
+            or "couldn’t find a player" in low
+            or "couldn't find a player" in low
+            or "i searched music assistant" in low
+            or "not sure what to do" in low
+            or low.startswith("error")
+        )
+        if is_failure:
+            needs = []
+            if "room" in low:
+                needs.append("Which room should I use? (for example: Kitchen)")
+            if "request" in low or "missing action" in low or "what should i play" in low:
+                needs.append("What should I play or control?")
+            if "didn’t find" in low or "didn't find" in low:
+                needs.append("Try a different artist, song, album, or playlist name.")
+            return action_failure(
+                code="music_assistant_request_failed",
+                message=msg,
+                diagnosis=self._diagnosis(),
+                needs=needs,
+                say_hint="Explain why the request failed and ask only for missing playback details.",
+            )
+
+        return action_success(
+            facts={
+                "action": action or "auto",
+                "query": query or request,
+                "room": room or "auto",
+                "result": msg,
+            },
+            say_hint="Confirm what happened in Music Assistant using only these facts.",
+            suggested_followups=["Want me to queue something else?"],
+        )
+
+    async def _run_structured(self, args: Dict[str, Any], llm_client):
+        out = await self._run(args or {}, llm_client)
+        if isinstance(out, dict) and "ok" in out:
+            return out
+        return self._to_contract(str(out), args or {})
+
     # -------------------- Platform handlers --------------------
     async def handle_webui(self, args, llm_client):
         async def inner():
             try:
-                return await self._run(args or {}, llm_client)
+                return await self._run_structured(args or {}, llm_client)
             except Exception as e:
                 logger.error(f"[music_assistant:webui] {e}")
-                return str(e)
+                return action_failure(
+                    code="music_assistant_exception",
+                    message=str(e),
+                    diagnosis=self._diagnosis(),
+                    say_hint="Explain that the request failed and suggest retrying.",
+                )
 
         try:
             asyncio.get_running_loop()
@@ -856,25 +1023,51 @@ class MusicAssistantPlugin(ToolPlugin):
 
     async def handle_homeassistant(self, args, llm_client):
         try:
-            return await self._run(args or {}, llm_client)
+            return await self._run_structured(args or {}, llm_client)
         except Exception as e:
             logger.error(f"[music_assistant:ha] {e}")
-            return str(e)
+            return action_failure(
+                code="music_assistant_exception",
+                message=str(e),
+                diagnosis=self._diagnosis(),
+                say_hint="Explain that playback control failed and ask if the user wants to retry.",
+            )
 
     async def handle_homekit(self, args, llm_client):
         try:
-            out = await self._run(args or {}, llm_client)
-            return self._siri_flatten(out)
+            return await self._run_structured(args or {}, llm_client)
         except Exception as e:
             logger.error(f"[music_assistant:homekit] {e}")
-            return self._siri_flatten(str(e))
+            return action_failure(
+                code="music_assistant_exception",
+                message=str(e),
+                diagnosis=self._diagnosis(),
+                say_hint="Explain the failure briefly and ask for a retry if needed.",
+            )
 
     async def handle_xbmc(self, args, llm_client):
         try:
-            return await self._run(args or {}, llm_client)
+            return await self._run_structured(args or {}, llm_client)
         except Exception as e:
             logger.error(f"[music_assistant:xbmc] {e}")
-            return str(e)
+            return action_failure(
+                code="music_assistant_exception",
+                message=str(e),
+                diagnosis=self._diagnosis(),
+                say_hint="Explain that playback control failed and suggest retrying.",
+            )
+
+    async def handle_discord(self, message, args, llm_client):
+        return await self.handle_webui(args, llm_client)
+
+    async def handle_telegram(self, update, args, llm_client):
+        return await self.handle_webui(args, llm_client)
+
+    async def handle_matrix(self, client, room, sender, body, args, llm_client):
+        return await self.handle_webui(args, llm_client)
+
+    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
+        return await self.handle_webui(args, llm_client)
 
 
 plugin = MusicAssistantPlugin()

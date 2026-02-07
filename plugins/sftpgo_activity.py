@@ -140,6 +140,10 @@ class SFTPGoActivityPlugin(ToolPlugin):
         except RuntimeError:
             return [asyncio.run(self._get_activity_summary(llm_client))]
 
+    # Telegram
+    async def handle_telegram(self, update, args, llm_client):
+        return await self.handle_webui(args, llm_client)
+
     # Matrix
     async def handle_matrix(self, client, room, sender, body, args, llm_client):
         """

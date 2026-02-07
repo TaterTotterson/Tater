@@ -14,16 +14,16 @@ from pydantic import BaseModel, Field
 import uvicorn
 import requests
 import re
-import inspect
 import aiohttp
 
 from helpers import (
     get_llm_client_from_env,
-    parse_function_json,
     get_tater_name,
     get_tater_personality,
 )
 import plugin_registry as pr
+from agent_lab_registry import build_agent_registry
+from planner_loop import should_use_agent_mode, run_planner_loop
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -288,57 +288,35 @@ def build_system_prompt(ctx: Optional[Dict[str, Any]] = None) -> str:
     persona_clause = ""
     if personality:
         persona_clause = (
-            f"You should speak and behave like {personality} "
-            "while still being helpful, concise, and easy to understand. "
-            "Keep the style subtle rather than over-the-top. "
-            "Even while staying in character, you must strictly follow the tool-calling rules below.\n\n"
+            f"Voice style: {personality}. "
+            "This affects tone only and never overrides tool/safety rules.\n\n"
         )
 
-    base_prompt = (
-        f"You are {first} {last}, a Home Assistant–savvy AI assistant with access to various tools and plugins.\n\n"
+    return (
+        f"Current Date and Time is: {now}\n\n"
+        f"You are {first} {last}, a Home Assistant–savvy AI assistant.\n\n"
         f"{persona_clause}"
         f"{room_clause}"
-        "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
-    )
-
-    plugins = pr.get_registry_snapshot()
-    available_plugins = [
-        plugin for plugin in plugins.values()
-        if (("homeassistant" in getattr(plugin, "platforms", [])) or ("both" in getattr(plugin, "platforms", [])))
-        and get_plugin_enabled(plugin.name)
-        and hasattr(plugin, "handle_homeassistant")
-    ]
-    logger.debug(
-        "[Home Assistant] Number of plugins visible: %s | Number of enabled tools: %s",
-        len(plugins),
-        len(available_plugins),
-    )
-    tool_instructions = "\n\n".join(
-        f"Tool: {plugin.name}\n"
-        f"Description: {getattr(plugin, 'description', 'No description provided.')}\n"
-        f"{plugin.usage}"
-        for plugin in available_plugins
-    )
-
-    behavior_guard = (
-        "Only call a tool if the user's latest message clearly requests an action — such as 'generate', 'summarize', or 'download'.\n"
-        "Never call a tool in response to casual or friendly messages like 'thanks', 'lol', or 'cool' — reply normally instead.\n"
-    )
-
-    no_emoji_guard = (
+        "Current platform: homeassistant.\n"
+        "Tool strategy:\n"
+        "- Answer directly when no external action/live data is required.\n"
+        "- Tools are discovered on-demand; not all tools are described here. If unsure, call list_plugins.\n"
+        "- If a tool may be needed, call list_plugins first.\n- If the user asks to control devices or services or interact with external systems, call list_plugins first.\n"
+        "- If the user asks about a specific tool/plugin by name or asks what a tool can do, call list_plugins or get_plugin_help instead of guessing.\n"
+        "- If you might need a tool or are unsure a capability exists, call list_plugins before saying it is unavailable.\n"
+        "- If the user asks for multiple independent actions, you may call tools one at a time until all actions are complete, then respond.\n"
+        "- Optionally call get_plugin_help before calling a plugin.\n"
+        "- Ask concise follow-up questions for missing required inputs.\n"
+        "- Only ask for inputs a tool explicitly requires (from list_plugins needs or get_plugin_help required_args). If defaults exist, proceed without asking.\n"
+        "- Call only plugins compatible with homeassistant.\n"
+        "- If unsupported here, explain and list supported platforms.\n"
+        "- Tool calls must be JSON only: {\"function\":\"name\",\"arguments\":{...}}\n"
+        "- Meta-tools: list_plugins, get_plugin_help, list_platforms_for_plugin.\n"
+        "- Never claim success unless tool output confirms success.\n"
         "IMPORTANT:\n"
         "- Do not use emojis.\n"
         "- Do not include markdown formatting.\n"
         "- Keep replies concise and easy to understand.\n"
-    )
-
-    return (
-        f"Current Date and Time is: {now}\n\n"
-        f"{base_prompt}\n\n"
-        f"{tool_instructions}\n\n"
-        f"{behavior_guard}\n"
-        f"{no_emoji_guard}"
-        "If no function is needed, reply normally."
     )
 
 # -------------------- History shaping (Discord-style alternation) --------------------
@@ -1042,96 +1020,48 @@ async def handle_message(payload: HARequest):
 
     logger.debug(f"[HA Bridge] LLM last role = {messages_list[-1]['role']} (conv_key={conv_key})")
 
+    merged_registry, merged_enabled, _collisions = build_agent_registry(
+        pr.get_registry_snapshot(),
+        get_plugin_enabled,
+    )
+
     try:
-        response = await _llm.chat(messages_list, timeout=TIMEOUT_SECONDS)
-        text = (response.get("message", {}) or {}).get("content", "") if isinstance(response, dict) else ""
-        text = (text or "").strip()
-
-        if not text:
-            await _save_message(conv_key, "assistant", "", history_max)
-            return HAResponse(response="Sorry, I didn't catch that.")
-
-        fn = parse_function_json(text)
-        if fn:
-            func = fn.get("function")
-            args = fn.get("arguments", {}) or {}
-
-            # Attach origin context for auto-targeting
-            origin = {
-                "platform": "homeassistant",
-                "user": payload.user_id,
-                "request_id": payload.session_id or conv_key,
-            }
-            origin = {k: v for k, v in origin.items() if v not in (None, "")}
-            args = dict(args)
-            args["origin"] = origin
-
-            await _save_message(
-                conv_key,
-                "assistant",
-                {"marker": "plugin_call", "plugin": func, "arguments": args},
-                history_max,
-            )
-
-            plugins = pr.get_registry_snapshot()
-            plugin = plugins.get(func)
-            is_ha_plugin = plugin and (
-                ("homeassistant" in getattr(plugin, "platforms", [])) or ("both" in getattr(plugin, "platforms", []))
-            )
-            if not plugin or not get_plugin_enabled(func) or not is_ha_plugin:
-                msg = f"Function `{func}` is not available for Home Assistant."
-                await _save_message(conv_key, "assistant", msg, history_max)
-                return HAResponse(response=msg)
-
-            if not hasattr(plugin, "handle_homeassistant"):
-                msg = f"Function `{func}` is not supported in this platform."
-                await _save_message(conv_key, "assistant", msg, history_max)
-                return HAResponse(response=msg)
-
-            try:
-                handle = plugin.handle_homeassistant
-                try:
-                    sig = inspect.signature(handle)
-                except Exception:
-                    sig = None
-
-                if sig and "context" in sig.parameters:
-                    result = await handle(args, _llm, context=ctx)
-                else:
-                    result = await handle(args, _llm)
-
-                final_text = _flatten_to_text(result).strip() or f"Done with {func}."
-                if len(final_text) > 4000:
-                    final_text = final_text[:4000] + "…"
-
-                await _save_message(
-                    conv_key,
-                    "assistant",
-                    {"marker": "plugin_response", "phase": "final", "content": final_text},
-                    history_max,
-                )
-
-                if _get_bool_platform_setting("CONTINUED_CHAT_ENABLED", DEFAULT_CONTINUED_CHAT_ENABLED):
-                    asyncio.create_task(_maybe_reopen_listening(conv_key, ctx, final_text))
-
-                return HAResponse(response=final_text)
-
-            except Exception:
-                logger.exception(f"[HA Bridge] Plugin '{func}' error")
-                msg = f"I tried to run {func} but hit an error."
-                await _save_message(conv_key, "assistant", msg, history_max)
-                return HAResponse(response=msg)
-
-        # Plain text answer
-        final_text = text
+        _use_agent, active_task_id, _reason = should_use_agent_mode(
+            user_text=text_in,
+            platform="homeassistant",
+            scope=conv_key,
+            r=redis_client,
+        )
+        origin = {
+            "platform": "homeassistant",
+            "user": payload.user_id,
+            "request_id": payload.session_id or conv_key,
+        }
+        origin = {k: v for k, v in origin.items() if v not in (None, "")}
+        result = await run_planner_loop(
+            llm_client=_llm,
+            platform="homeassistant",
+            history_messages=messages_list,
+            registry=merged_registry,
+            enabled_predicate=merged_enabled,
+            context={"context": ctx},
+            user_text=text_in,
+            scope=conv_key,
+            task_id=active_task_id,
+            origin=origin,
+            redis_client=redis_client,
+        )
+        final_text = (result.get("text") or "").strip()
         if len(final_text) > 4000:
             final_text = final_text[:4000] + "…"
-
-        await _save_message(conv_key, "assistant", final_text, history_max)
-
+        await _save_message(
+            conv_key,
+            "assistant",
+            {"marker": "plugin_response", "phase": "final", "content": final_text},
+            history_max,
+        )
         if _get_bool_platform_setting("CONTINUED_CHAT_ENABLED", DEFAULT_CONTINUED_CHAT_ENABLED):
             asyncio.create_task(_maybe_reopen_listening(conv_key, ctx, final_text))
-
         return HAResponse(response=final_text)
 
     except Exception:

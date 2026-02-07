@@ -292,6 +292,13 @@ class OverseerrTrendingPlugin(ToolPlugin):
             logger.exception("[OverseerrTrending handle_matrix] %s", e)
             return f"Error: {e}"
 
+    async def handle_telegram(self, update, args, llm_client):
+        try:
+            return await self._answer(args or {}, llm_client, platform="telegram")
+        except Exception as e:
+            logger.exception("[OverseerrTrending handle_telegram] %s", e)
+            return f"Error: {e}"
+
     async def handle_homekit(self, args, llm_client):
         try:
             return await self._answer(args or {}, llm_client, platform="homekit")

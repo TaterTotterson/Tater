@@ -6,6 +6,7 @@ import redis
 import asyncio
 import logging
 import threading
+import re
 from datetime import datetime
 from typing import Any, Dict, Optional, List
 import contextlib
@@ -22,12 +23,16 @@ from notify_queue import is_expired
 from notify_media import load_queue_attachments
 
 from helpers import (
-    parse_function_json,
     get_tater_name,
     get_tater_personality,
     get_llm_client_from_env,
     build_llm_host_from_env,
 )
+from admin_gate import is_admin_only_plugin, normalize_admin_list
+from agent_lab_registry import build_agent_registry
+from plugin_result import action_failure
+from plugin_kernel import plugin_supports_platform
+from planner_loop import should_use_agent_mode, run_planner_loop
 
 # Matrix SDK
 from nio import (
@@ -149,6 +154,12 @@ PLATFORM_SETTINGS = {
             "type": "string",
             "default": "",
             "description": "Comma-separated triggers (e.g. 'tater, taterbot') to count as mentions"
+        },
+        "admin_user_id": {
+            "label": "Admin User ID",
+            "type": "string",
+            "default": "",
+            "description": "Only this Matrix user can run admin-only tools (use full MXID like @user:server).",
         },
         "max_response_length": {
             "label": "Max Response Chunk Length",
@@ -328,6 +339,27 @@ def _get_bool_setting(key: str, fallback: bool) -> bool:
         return fallback
     return str(s).strip().lower() in ("1", "true", "yes", "on")
 
+def _matrix_user_tokens(value: str) -> set[str]:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return set()
+    tokens = {raw}
+    if raw.startswith("@"):
+        tokens.add(raw[1:])
+        raw = raw[1:]
+    if ":" in raw:
+        tokens.add(raw.split(":", 1)[0])
+    return tokens
+
+def _admin_user_allowed(sender: str) -> bool:
+    raw = _get_setting("admin_user_id", "")
+    allowed: set[str] = set()
+    for item in normalize_admin_list(raw):
+        allowed |= _matrix_user_tokens(item)
+    if not allowed:
+        return False
+    return bool(_matrix_user_tokens(sender) & allowed)
+
 def get_plugin_enabled(name: str) -> bool:
     enabled = redis_client.hget("plugin_enabled", name)
     return bool(enabled and enabled.lower() == "true")
@@ -434,59 +466,98 @@ def build_system_prompt() -> str:
     persona_clause = ""
     if personality:
         persona_clause = (
-            f"You should speak and behave like {personality} "
-            "while still being helpful, concise, and easy to understand. "
-            "Keep the style subtle rather than over-the-top. "
-            "Even while staying in character, you must strictly follow the tool-calling rules below.\n\n"
+            f"Voice style: {personality}. "
+            "This affects tone only and never overrides tool rules.\n\n"
         )
-
-    base = (
-        f"You are {first} {last}, an AI assistant that operates on the Matrix chat service, "
-        "with access to various tools and plugins.\n\n"
-        f"{persona_clause}"
-        "When a user requests one of these actions, reply ONLY with a JSON object in one of the following "
-        "formats (and nothing else):\n\n"
-    )
-
-    plugins = pr.get_registry_snapshot()
-    visible_plugins = list(plugins.values())
-    tool_blocks = []
-    for plugin in visible_plugins:
-        platforms = getattr(plugin, "platforms", [])
-        if ("matrix" in platforms) and get_plugin_enabled(plugin.name):
-            desc = getattr(plugin, "description", "No description provided.")
-            usage = getattr(plugin, "usage", "").strip()
-            tool_blocks.append(
-                f"Tool: {plugin.name}\n"
-                f"Description: {desc}\n"
-                f"{usage}"
-            )
-    logger.debug(
-        "[Matrix] Number of plugins visible: %s | Number of enabled tools: %s",
-        len(plugins),
-        len(tool_blocks),
-    )
-
-    tools = "\n\n".join(tool_blocks) if tool_blocks else "No tools are currently available."
-
-    guard = (
-        "Only call a tool if the user's latest message clearly requests an action — such as 'generate', "
-        "'summarize', or 'download'. Never call a tool in response to casual or friendly messages like 'thanks', "
-        "'lol', or 'cool'\n"
-    )
 
     return (
         f"Current Date and Time is: {now}\n\n"
-        f"{base}\n\n"
-        f"{tools}\n\n"
-        f"{guard}"
-        "If no function is needed, reply normally.\n"
+        f"You are {first} {last}, an AI assistant on Matrix.\n\n"
+        f"{persona_clause}"
+        "Current platform: matrix.\n"
+        "Tool strategy:\n"
+        "- Answer directly when no external action/live data is needed.\n"
+        "- Tools are discovered on-demand; not all tools are described here. If unsure, call list_plugins.\n"
+        "- If a tool may be needed, call list_plugins first.\n- If the user asks to control devices or services or interact with external systems, call list_plugins first.\n"
+        "- If the user asks about a specific tool/plugin by name or asks what a tool can do, call list_plugins or get_plugin_help instead of guessing.\n"
+        "- If you might need a tool or are unsure a capability exists, call list_plugins before saying it is unavailable.\n"
+        "- If the user asks for multiple independent actions, you may call tools one at a time until all actions are complete, then respond.\n"
+        "- Optionally call get_plugin_help before calling a plugin.\n"
+        "- Ask concise follow-up questions for missing required inputs.\n"
+        "- Only ask for inputs a tool explicitly requires (from list_plugins needs or get_plugin_help required_args). If defaults exist, proceed without asking.\n"
+        "- Call only plugins compatible with matrix.\n"
+        "- If unsupported here, explain and list supported platforms.\n"
+        "- Tool calls must be JSON only: {\"function\":\"name\",\"arguments\":{...}}\n"
+        "- Meta-tools: list_plugins, get_plugin_help, list_platforms_for_plugin.\n"
+        "- Never claim success unless tool output confirms success.\n"
     )
 
 # ---------------- Mention helpers & trigger policy ----------------
 def _keywords() -> List[str]:
     raw = _get_setting("mention_keywords", "")
     return [s.strip().lower() for s in raw.split(",") if s.strip()]
+
+
+def _matrix_bot_aliases(my_user_id: str, my_display: Optional[str]) -> List[str]:
+    aliases: List[str] = []
+    if my_display:
+        aliases.append(my_display.strip())
+    if my_user_id:
+        aliases.append(my_user_id.strip())
+        if my_user_id.startswith("@"):
+            localpart = my_user_id[1:].split(":", 1)[0]
+            if localpart:
+                aliases.append(localpart)
+    # de-dupe preserving order
+    seen = set()
+    out: List[str] = []
+    for a in aliases:
+        if a and a.lower() not in seen:
+            out.append(a)
+            seen.add(a.lower())
+    return out
+
+
+def _strip_matrix_mentions(text: str, my_user_id: str, my_display: Optional[str]) -> str:
+    if not text:
+        return ""
+    cleaned = str(text).strip()
+    for alias in _matrix_bot_aliases(my_user_id, my_display):
+        pattern = re.compile(rf"\\b{re.escape(alias)}\\b", flags=re.IGNORECASE)
+        cleaned = pattern.sub("", cleaned)
+    cleaned = re.sub(r"[@,:;.!]+", " ", cleaned)
+    cleaned = re.sub(r"\\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def _is_mention_only(text: str, my_user_id: str, my_display: Optional[str]) -> bool:
+    return _strip_matrix_mentions(text, my_user_id, my_display) == ""
+
+
+def _find_prev_user_message(room_id: str, sender: str, my_user_id: str, my_display: Optional[str], exclude_text: str = "") -> str:
+    key = _room_history_key(room_id)
+    try:
+        raw_history = redis_client.lrange(key, 0, -1)
+    except Exception:
+        return ""
+    for entry in reversed(raw_history):
+        try:
+            data = json.loads(entry)
+        except Exception:
+            continue
+        if data.get("role") != "user":
+            continue
+        if sender and data.get("username") != sender:
+            continue
+        content = data.get("content")
+        if not isinstance(content, str):
+            continue
+        if exclude_text and content == exclude_text:
+            continue
+        if _is_mention_only(content, my_user_id, my_display):
+            continue
+        return content.strip()
+    return ""
 
 def _should_respond(policy: str, body: str, my_user_id: str, my_display: Optional[str]) -> bool:
     if policy == "all_messages":
@@ -1058,158 +1129,107 @@ class MatrixPlatform:
 
         save_matrix_message(room.room_id, "user", sender, body)
 
+        effective_body = body
+        stripped = _strip_matrix_mentions(body, self.user_id, self.display_name_cache)
+        if stripped:
+            effective_body = stripped
+        elif _is_mention_only(body, self.user_id, self.display_name_cache):
+            prev = _find_prev_user_message(
+                room.room_id, sender, self.user_id, self.display_name_cache, exclude_text=body
+            )
+            if prev:
+                effective_body = prev
+
         system_prompt = build_system_prompt()
         history = load_matrix_history(room.room_id)
         messages = [{"role": "system", "content": system_prompt}] + history
+        merged_registry, merged_enabled, _collisions = build_agent_registry(
+            pr.get_registry_snapshot(),
+            get_plugin_enabled,
+        )
 
         async with self.typing(room.room_id):
             try:
-                resp = await llm_client.chat(messages)
-                text = (resp.get("message", {}) or {}).get("content", "").strip()
+                _use_agent, active_task_id, _reason = should_use_agent_mode(
+                    user_text=effective_body,
+                    platform="matrix",
+                    scope=room.room_id,
+                    r=redis_client,
+                )
+                origin = {
+                    "platform": "matrix",
+                    "room_id": room.room_id,
+                    "user": sender,
+                    "request_id": str(time.time()),
+                }
+                origin = {k: v for k, v in origin.items() if v not in (None, "")}
 
-                if not text:
-                    await self._send_with_trust(room.room_id, "I'm not sure how to respond.")
-                    return
+                async def _wait_callback(func_name, plugin_obj):
+                    if not plugin_obj:
+                        return
+                    if not plugin_supports_platform(plugin_obj, "matrix"):
+                        return
+                    if not hasattr(plugin_obj, "waiting_prompt_template"):
+                        return
+                    wait_msg = plugin_obj.waiting_prompt_template.format(mention=sender)
+                    wait_response = await llm_client.chat(
+                        messages=[
+                            {"role": "system", "content": "Write one short, friendly status line."},
+                            {"role": "user", "content": wait_msg},
+                        ]
+                    )
+                    wait_text = (wait_response.get("message", {}) or {}).get("content", "").strip()
+                    if wait_text:
+                        await self._send_with_trust(room.room_id, wait_text)
+                        save_matrix_message(
+                            room.room_id, "assistant", "assistant",
+                            {"marker": "plugin_wait", "content": wait_text}
+                        )
 
-                call = parse_function_json(text)
-                if call and isinstance(call, dict) and "function" in call:
-                    func = call["function"]
-                    args = call.get("arguments", {}) or {}
+                def _admin_guard(func_name):
+                    if is_admin_only_plugin(func_name) and not _admin_user_allowed(sender):
+                        msg = (
+                            "This tool is restricted to the configured admin user on Matrix."
+                            if _get_setting("admin_user_id", "")
+                            else "This tool is disabled because no Matrix admin user is configured."
+                        )
+                        return action_failure(
+                            code="admin_only",
+                            message=msg,
+                            needs=[],
+                            say_hint="Explain that this tool is restricted to the admin user on this platform.",
+                        )
+                    return None
 
-                    # Attach origin context for auto-targeting
-                    origin = {
-                        "platform": "matrix",
-                        "room_id": room.room_id,
-                        "user": sender,
-                        "request_id": f"{room.room_id}:{int(time.time() * 1000)}",
-                    }
-                    origin = {k: v for k, v in origin.items() if v not in (None, "")}
-                    args = dict(args)
-                    args["origin"] = origin
+                result = await run_planner_loop(
+                    llm_client=llm_client,
+                    platform="matrix",
+                    history_messages=messages,
+                    registry=merged_registry,
+                    enabled_predicate=merged_enabled,
+                    context={"client": self.client, "room": room, "sender": sender, "body": effective_body},
+                    user_text=effective_body,
+                    scope=room.room_id,
+                    task_id=active_task_id,
+                    origin=origin,
+                    wait_callback=_wait_callback,
+                    admin_guard=_admin_guard,
+                    redis_client=redis_client,
+                )
 
+                final_text = (result.get("text") or "").strip()
+                if final_text:
+                    await self._send_with_trust(room.room_id, final_text)
                     save_matrix_message(
                         room.room_id, "assistant", "assistant",
-                        {"marker": "plugin_call", "plugin": func, "arguments": args}
+                        {"marker": "plugin_response", "phase": "final", "content": final_text}
                     )
 
-                    plugins = pr.get_registry_snapshot()
-                    if func in plugins and get_plugin_enabled(func):
-                        plugin = plugins[func]
-
-                        # Optional: waiting status line
-                        if hasattr(plugin, "waiting_prompt_template"):
-                            try:
-                                wait_prompt = plugin.waiting_prompt_template.format(
-                                    mention=self.display_name_cache or "there"
-                                )
-                                wait_resp = await llm_client.chat(
-                                    messages=[
-                                        {"role": "system", "content": "Write one short, friendly status line."},
-                                        {"role": "user", "content": wait_prompt},
-                                    ]
-                                )
-                                wait_text = (wait_resp.get("message", {}) or {}).get("content", "").strip()
-                                if wait_text:
-                                    await self._send_with_trust(room.room_id, wait_text)
-                                    save_matrix_message(
-                                        room.room_id, "assistant", "assistant",
-                                        {"marker": "plugin_wait", "content": wait_text}
-                                    )
-                            except Exception as e:
-                                logger.debug(f"[Matrix] waiting line failed (non-fatal): {e}")
-
-                        handler = getattr(plugin, "handle_matrix", None)
-                        if not callable(handler):
-                            msg = f"Function `{func}` is not available on Matrix."
-                            await self._send_with_trust(room.room_id, msg)
-                            save_matrix_message(room.room_id, "assistant", "assistant", msg)
-                            return
-
-                        try:
-                            result = await handler(
-                                client=self.client,
-                                room=room,
-                                sender=sender,
-                                body=body,
-                                args=args,
-                                llm_client=llm_client
-                            )
-                        except Exception as e:
-                            logger.error(f"[Matrix] Plugin '{func}' crashed: {e}", exc_info=True)
-                            msg = "❌ That tool ran into an error."
-                            await self._send_with_trust(room.room_id, msg)
-                            save_matrix_message(
-                                room.room_id, "assistant", "assistant",
-                                {"marker": "plugin_response", "phase": "final", "content": msg}
-                            )
-                            return
-
-                        def _save_plugin_response(payload):
-                            save_matrix_message(
-                                room.room_id, "assistant", "assistant",
-                                {"marker": "plugin_response", "phase": "final", "content": payload}
-                            )
-
-                        if isinstance(result, list):
-                            for item in result:
-                                if isinstance(item, str):
-                                    await self._send_with_trust(room.room_id, item)
-                                    _save_plugin_response(item)
-
-                                elif isinstance(item, dict):
-                                    # Send media if applicable
-                                    if item.get("type") in ("image", "audio", "video", "file"):
-                                        await self._send_media_item(room.room_id, item)
-                                    else:
-                                        kind = item.get("type", "file").capitalize()
-                                        name = item.get("name", "output")
-                                        await self._send_with_trust(room.room_id, f"[{kind}: {name}]")
-
-                                    # Store only refs / metadata (no base64)
-                                    if item.get("type") in ("image", "audio", "video", "file") and "bytes" in item and isinstance(item["bytes"], (bytes, bytearray)):
-                                        blob_key = store_blob(bytes(item["bytes"]))
-                                        safe_item = dict(item)
-                                        safe_item.pop("bytes", None)
-                                        safe_item["blob_key"] = blob_key
-                                        safe_item["size"] = len(load_blob(blob_key) or b"")
-                                        _save_plugin_response(safe_item)
-                                    else:
-                                        _save_plugin_response(item)
-
-                                else:
-                                    logger.debug(f"[{func}] Plugin returned unrecognized list item type: {type(item)}")
-
-                        elif isinstance(result, dict):
-                            if result.get("type") in ("image", "audio", "video", "file"):
-                                await self._send_media_item(room.room_id, result)
-
-                                if "bytes" in result and isinstance(result["bytes"], (bytes, bytearray)):
-                                    blob_key = store_blob(bytes(result["bytes"]))
-                                    safe_item = dict(result)
-                                    safe_item.pop("bytes", None)
-                                    safe_item["blob_key"] = blob_key
-                                    safe_item["size"] = len(load_blob(blob_key) or b"")
-                                    _save_plugin_response(safe_item)
-                                else:
-                                    _save_plugin_response(result)
-                            else:
-                                kind = result.get("type", "file").capitalize()
-                                name = result.get("name", "output")
-                                await self._send_with_trust(room.room_id, f"[{kind}: {name}]")
-                                _save_plugin_response(result)
-
-                        elif isinstance(result, str):
-                            await self._send_with_trust(room.room_id, result)
-                            _save_plugin_response(result)
-
-                        else:
-                            logger.debug(f"[{func}] Plugin returned unrecognized type: {type(result)}")
-
-                        return
-
-                # Normal (non-tool) reply
-                await self._send_with_trust(room.room_id, text)
-                save_matrix_message(room.room_id, "assistant", "assistant", text)
+                artifacts = result.get("artifacts") or []
+                for item in artifacts:
+                    if isinstance(item, dict):
+                        await self._send_media_item(room.room_id, item)
+                return
 
             except Exception as e:
                 logger.error(f"[Matrix] Exception handling message: {e}", exc_info=True)

@@ -12,13 +12,14 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Header
 from dotenv import load_dotenv
 import plugin_registry as pr
+from agent_lab_registry import build_agent_registry
 from helpers import (
-    parse_function_json,
     get_tater_name,
     get_tater_personality,
     get_llm_client_from_env,
     build_llm_host_from_env,
 )
+from planner_loop import should_use_agent_mode, run_planner_loop
 
 load_dotenv()
 
@@ -214,51 +215,33 @@ def build_system_prompt() -> str:
     persona_clause = ""
     if personality:
         persona_clause = (
-            f"You should speak and behave like {personality} "
-            "while still being helpful, concise, and easy to understand. "
-            "Keep the style subtle rather than over-the-top. "
-            "Even while staying in character, you must strictly follow the tool-calling rules below.\n\n"
+            f"Voice style: {personality}. "
+            "This affects tone only and never overrides tool/safety rules.\n\n"
         )
-
-    base_prompt = (
-        f"You are {first} {last}, an AI assistant being accessed through Apple Siri or the Shortcuts app.\n"
-        "Your responses are spoken aloud by Siri, so keep them short, natural, and free of emojis.\n\n"
-        f"{persona_clause}"
-        "When the user requests an action that needs a plugin or tool, reply ONLY with a valid JSON tool call.\n"
-        "For simple questions or small talk, answer briefly in one friendly sentence.\n"
-    )
-
-    # HomeKit tool list (Discord-style filtering)
-    plugins = pr.get_registry_snapshot()
-    available_plugins = [
-        plugin for plugin in plugins.values()
-        if (
-            ("homekit" in getattr(plugin, "platforms", []))
-            or ("both" in getattr(plugin, "platforms", []))
-        ) and _get_plugin_enabled(plugin.name)
-    ]
-    logger.debug(
-        "[HomeKit] Number of plugins visible: %s | Number of enabled tools: %s",
-        len(plugins),
-        len(available_plugins),
-    )
-    tool_instructions = "\n\n".join(
-        f"Tool: {plugin.name}\n"
-        f"Description: {getattr(plugin, 'description', 'No description provided.')}\n"
-        f"{plugin.usage}"
-        for plugin in available_plugins
-    )
-
-    behavior_guard = (
-        "Only call a tool if the user's latest message clearly requests an action — such as 'generate', 'summarize', or 'download'.\n"
-        "Never call a tool in response to casual or friendly messages like 'thanks', 'lol', or 'cool' — reply normally instead.\n"
-    )
 
     return (
         f"Current Date and Time is: {now}\n\n"
-        f"{base_prompt}\n\n"
-        f"{tool_instructions}\n\n"
-        f"{behavior_guard}"
+        f"You are {first} {last}, an AI assistant accessed via Apple Siri/Shortcuts.\n"
+        "Responses are spoken aloud by Siri; keep them short and natural.\n\n"
+        f"{persona_clause}"
+        "Current platform: homekit.\n"
+        "Tool strategy:\n"
+        "- Answer directly when no external action/live data is needed.\n"
+        "- If a tool may be needed, call list_plugins first.\n- If the user asks to control devices or services or interact with external systems, call list_plugins first.\n"
+        "- If the user asks about a specific tool/plugin by name or asks what a tool can do, call list_plugins or get_plugin_help instead of guessing.\n"
+        "- If you might need a tool or are unsure a capability exists, call list_plugins before saying it is unavailable.\n"
+        "- If the user asks for multiple independent actions, you may call tools one at a time until all actions are complete, then respond.\n"
+        "- Optionally call get_plugin_help before calling a plugin.\n"
+        "- Ask concise follow-up questions for missing required inputs.\n"
+        "- Only ask for inputs a tool explicitly requires (from list_plugins needs or get_plugin_help required_args). If defaults exist, proceed without asking.\n"
+        "- Call only plugins compatible with homekit.\n"
+        "- If unsupported here, explain and list supported platforms.\n"
+        "- Tool calls must be JSON only: {\"function\":\"name\",\"arguments\":{...}}\n"
+        "- Meta-tools: list_plugins, get_plugin_help, list_platforms_for_plugin.\n"
+        "- Never claim success unless tool output confirms success.\n"
+        "IMPORTANT:\n"
+        "- Do not use emojis.\n"
+        "- Do not include markdown formatting.\n"
     )
 
 # -------------------- FastAPI app --------------------
@@ -305,68 +288,36 @@ async def handle_message(payload: Dict[str, Any], x_tater_token: Optional[str] =
 
     await _save_message(session_id, "user", text_in, history_max, session_ttl)
 
+    merged_registry, merged_enabled, _collisions = build_agent_registry(
+        pr.get_registry_snapshot(),
+        _get_plugin_enabled,
+    )
+
     try:
-        resp = await _llm.chat(messages_list, timeout=TIMEOUT_SECONDS)
-    except Exception as e:
-        logger.exception("[HomeKit] LLM error")
-        await _save_message(session_id, "assistant", f"LLM error: {e}", history_max, session_ttl)
-        return {"reply": "Sorry, I had a problem talking to Tater."}
-
-    text = (resp.get("message", {}) or {}).get("content", "") or ""
-    text = text.strip()
-
-    if not text:
-        await _save_message(session_id, "assistant", "", history_max, session_ttl)
-        return {"reply": "Sorry, I didn't catch that."}
-
-    fn = parse_function_json(text)
-    if fn:
-        func = fn.get("function")
-        args = fn.get("arguments", {}) or {}
-
-        await _save_message(session_id, "assistant",
-                            {"marker": "plugin_call", "plugin": func, "arguments": args},
-                            history_max, session_ttl)
-
-        plugins = pr.get_registry_snapshot()
-        plugin = plugins.get(func)
-
-        # Plugin must exist AND be enabled
-        if not plugin or not _get_plugin_enabled(func):
-            msg = f"Function `{func}` is not available for HomeKit/Siri."
-            await _save_message(session_id, "assistant", msg, history_max, session_ttl)
-            return {"reply": msg}
-
-        # Plugin must explicitly support HomeKit
-        platforms = getattr(plugin, "platforms", []) or []
-        if "homekit" not in platforms and "both" not in platforms:
-            msg = f"Function `{func}` does not support HomeKit/Siri."
-            await _save_message(session_id, "assistant", msg, history_max, session_ttl)
-            return {"reply": msg}
-
-        # Plugin must implement handle_homekit
-        if not hasattr(plugin, "handle_homekit"):
-            msg = f"Function `{func}` is not implemented for HomeKit/Siri."
-            await _save_message(session_id, "assistant", msg, history_max, session_ttl)
-            return {"reply": msg}
-
-        # Execute HomeKit handler ONLY
-        try:
-            result = await plugin.handle_homekit(args, _llm)
-        except Exception as e:
-            logger.exception(f"[HomeKit] plugin {func} error")
-            msg = f"I tried to run {func} but hit an error."
-            await _save_message(session_id, "assistant", msg, history_max, session_ttl)
-            return {"reply": msg}
-
-        # Normalize result to spoken text
-        if isinstance(result, str):
-            final_text = result
-        elif isinstance(result, dict) and isinstance(result.get("message"), str):
-            final_text = result["message"]
-        else:
-            final_text = json.dumps(result, ensure_ascii=False)[:2000]
-
+        _use_agent, active_task_id, _reason = should_use_agent_mode(
+            user_text=text_in,
+            platform="homekit",
+            scope=str(session_id),
+            r=redis_client,
+        )
+        origin = {"platform": "homekit", "request_id": session_id}
+        origin = {k: v for k, v in origin.items() if v not in (None, "")}
+        result = await run_planner_loop(
+            llm_client=_llm,
+            platform="homekit",
+            history_messages=messages_list,
+            registry=merged_registry,
+            enabled_predicate=merged_enabled,
+            context={},
+            user_text=text_in,
+            scope=str(session_id),
+            task_id=active_task_id,
+            origin=origin,
+            redis_client=redis_client,
+        )
+        final_text = (result.get("text") or "").strip()
+        if len(final_text) > 2000:
+            final_text = final_text[:2000] + "…"
         await _save_message(
             session_id,
             "assistant",
@@ -374,15 +325,12 @@ async def handle_message(payload: Dict[str, Any], x_tater_token: Optional[str] =
             history_max,
             session_ttl,
         )
-
         return {"reply": final_text}
 
-    final_text = text.strip()
-    if len(final_text) > 2000:
-        final_text = final_text[:2000] + "…"
-
-    await _save_message(session_id, "assistant", final_text, history_max, session_ttl)
-    return {"reply": final_text}
+    except Exception as e:
+        logger.exception("[HomeKit] LLM error")
+        await _save_message(session_id, "assistant", f"LLM error: {e}", history_max, session_ttl)
+        return {"reply": "Sorry, I had a problem talking to Tater."}
 
 def run(stop_event: Optional[threading.Event] = None):
     raw_port = redis_client.hget("homekit_platform_settings", "bind_port")

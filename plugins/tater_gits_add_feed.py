@@ -216,5 +216,8 @@ class TaterGitsAddFeedPlugin(ToolPlugin):
             return "❌ Please provide a GitHub releases feed URL."
         return await self._run(url, llm_client)
 
+    async def handle_telegram(self, update, args, llm_client):
+        return await self.handle_webui(args, llm_client)
+
 
 plugin = TaterGitsAddFeedPlugin()

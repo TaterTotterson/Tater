@@ -156,6 +156,14 @@ git clone https://github.com/TaterTotterson/Tater.git
 cd Tater
 ```
 
+Note for Agent Lab:
+- If you plan to use Agent Lab, run Tater inside a Python virtual environment so Agent Lab dependencies stay isolated and easy to manage (recommended).
+  Quickstart:
+  ```bash
+  python -m venv .venv
+  source .venv/bin/activate
+  ```
+
 3. **Install Dependencies**
 
 Using pip, run:
@@ -230,6 +238,7 @@ docker run -d --name tater_webui \
   -e LLM_MODEL=gemma3-27b-abliterated \
   -e REDIS_HOST=127.0.0.1 \
   -e REDIS_PORT=6379 \
+  -v /path/to/agent_lab:/app/agent_lab \
   ghcr.io/tatertotterson/tater:latest
 ```
 ---
@@ -248,10 +257,14 @@ docker run -d --name tater_webui \
   -e LLM_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxx \
   -e REDIS_HOST=127.0.0.1 \
   -e REDIS_PORT=6379 \
+  -v /path/to/agent_lab:/app/agent_lab \
   ghcr.io/tatertotterson/tater:latest
 ```
 Note: When using ChatGPT, leave LLM_PORT blank.  
 Tater will automatically connect using HTTPS without appending a port number.
+
+Tip: The Agent Lab data lives in `/app/agent_lab` inside the container.  
+If you don’t mount it to the host, Agent Lab plugins/platforms/artifacts will be lost when the container is rebuilt or updated.
 
 ### 3. Access the Web UI
 

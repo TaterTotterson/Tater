@@ -312,6 +312,23 @@ def extract_json(text: str):
                         continue
     return None
 
+TOOL_MARKUP_REPAIR_PROMPT = (
+    "Formatting error: do not emit tool channel markup like <|channel|> or to=... . "
+    "If you need to call a tool, respond only with JSON: "
+    "{\"function\":\"name\",\"arguments\":{...}}. Otherwise respond normally."
+)
+TOOL_MARKUP_FAILURE_TEXT = "Sorry, I had trouble formatting a tool call. Please try again."
+
+def looks_like_tool_markup(text: str) -> bool:
+    if not text:
+        return False
+    s = str(text)
+    if "<|" in s and "|>" in s:
+        return True
+    if re.search(r"\bto=[A-Za-z0-9_.-]+\b", s) and ("commentary" in s or "message" in s):
+        return True
+    return False
+
 def parse_function_json(response_text: str):
     def _pick(obj):
         if isinstance(obj, dict):
@@ -326,6 +343,32 @@ def parse_function_json(response_text: str):
 
     s = str(response_text).strip()
 
+    # Remove code fence markers anywhere to avoid treating ```json as a tool name.
+    if "```" in s:
+        s = re.sub(r"```(?:json)?", "", s, flags=re.IGNORECASE).strip()
+
+    # ---------------------------------------------------------
+    # Tool-call markup (Codex/OpenAI style) support:
+    #   <|channel|>commentary to=repo_browser.list_plugins <|message|>{"type":"list"}
+    # ---------------------------------------------------------
+    m_tool = re.search(r"to=([a-zA-Z0-9_.-]+).*?<\|message\|>(\{.*\})", s, re.DOTALL)
+    if m_tool:
+        tool_name = m_tool.group(1).strip()
+        tool_name = tool_name.split(".")[-1] if tool_name else tool_name
+        blob = m_tool.group(2).strip()
+        try:
+            args = json.loads(blob)
+            if isinstance(args, dict):
+                # normalize odd list payloads from other tool schemas
+                if tool_name == "list_plugins" and args.get("type") == "list":
+                    args = {}
+                if tool_name in {"get_plugin_help", "list_platforms_for_plugin"}:
+                    if "plugin_id" not in args and "name" in args:
+                        args["plugin_id"] = args.get("name")
+                return {"function": tool_name, "arguments": args}
+        except Exception:
+            return {"function": tool_name, "arguments": {}}
+
     # strip code fences early so shorthand/prefix parsing still works
     if s.startswith("```"):
         s = re.sub(r"^```(?:json)?\s*", "", s, flags=re.MULTILINE).strip()
@@ -335,6 +378,7 @@ def parse_function_json(response_text: str):
     # ---------------------------------------------------------
     # NEW: Embedded shorthand support:
     #   "Sure, here you go ha_control{...}"
+    # If the embedded JSON already contains a tool call, prefer that.
     # ---------------------------------------------------------
     m_anywhere = re.search(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\s*(\{[^{}]*\})', s)
     if m_anywhere:
@@ -343,6 +387,8 @@ def parse_function_json(response_text: str):
         try:
             args = json.loads(blob)
             if isinstance(args, dict):
+                if "function" in args and isinstance(args.get("function"), str):
+                    return {"function": args["function"], "arguments": args.get("arguments", {}) or {}}
                 return {"function": func, "arguments": args}
         except Exception:
             pass
@@ -364,13 +410,16 @@ def parse_function_json(response_text: str):
     except json.JSONDecodeError:
         json_str = extract_json(s)
         if not json_str:
-            return None
+            json_str = None
 
-        prefix = s.split(json_str, 1)[0].strip()
+        if json_str:
+            prefix = s.split(json_str, 1)[0].strip()
+        else:
+            prefix = ""
 
         # Slightly stricter "possible func" match
         m2 = re.search(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\s*[:(]*\s*$', prefix)
-        if m2:
+        if m2 and json_str:
             possible_func = m2.group(1)
             try:
                 args = json.loads(json_str)
@@ -379,10 +428,13 @@ def parse_function_json(response_text: str):
             except Exception:
                 pass
 
-        try:
-            response_json = json.loads(json_str)
-        except Exception:
-            return None
+        if json_str:
+            try:
+                response_json = json.loads(json_str)
+            except Exception:
+                response_json = None
+        else:
+            response_json = None
 
     picked = _pick(response_json)
     if picked:
@@ -393,6 +445,57 @@ def parse_function_json(response_text: str):
             picked = _pick(item)
             if picked:
                 return picked
+
+    # ---------------------------------------------------------
+    # Relaxed fallback: tolerate invalid JSON for file/code tools
+    # ---------------------------------------------------------
+    def _extract_relaxed_string(text: str, key: str) -> str | None:
+        pat = rf'"{re.escape(key)}"\s*:\s*"(.*)"\s*\}}\s*\}}\s*$'
+        m = re.search(pat, text, flags=re.DOTALL)
+        if m:
+            return m.group(1)
+        pat = rf"'{re.escape(key)}'\s*:\s*'(.*)'\s*\}}\s*\}}\s*$"
+        m = re.search(pat, text, flags=re.DOTALL)
+        if m:
+            return m.group(1)
+        return None
+
+    def _extract_relaxed_scalar(text: str, key: str) -> str | None:
+        pat = rf'"{re.escape(key)}"\s*:\s*"([^"]+)"'
+        m = re.search(pat, text)
+        if m:
+            return m.group(1)
+        pat = rf"'{re.escape(key)}'\s*:\s*'([^']+)'"
+        m = re.search(pat, text)
+        if m:
+            return m.group(1)
+        return None
+
+    def _relaxed_tool_call(text: str) -> dict | None:
+        fm = re.search(r'"function"\s*:\s*"([^"]+)"', text)
+        if not fm:
+            fm = re.search(r"'function'\s*:\s*'([^']+)'", text)
+        if not fm:
+            return None
+        func = fm.group(1).strip()
+        if not func:
+            return None
+
+        if func in {"write_file"}:
+            path = _extract_relaxed_scalar(text, "path")
+            content = _extract_relaxed_string(text, "content")
+            if path and content is not None:
+                return {"function": func, "arguments": {"path": path, "content": content}}
+        if func in {"create_plugin", "create_platform"}:
+            name = _extract_relaxed_scalar(text, "name")
+            code = _extract_relaxed_string(text, "code")
+            if name and code is not None:
+                return {"function": func, "arguments": {"name": name, "code": code}}
+        return None
+
+    relaxed = _relaxed_tool_call(s)
+    if relaxed:
+        return relaxed
 
     return None
 
