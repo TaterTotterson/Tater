@@ -18,6 +18,36 @@ Agent Lab plugins live in `agent_lab/plugins/` and must not write outside `agent
 - Avoid triple-quoted strings inside `code_lines` (they break JSON). Prefer single quotes or comments.
 - Each `code_lines` entry must be a single line. Do not include embedded `\n`.
 
+**Golden Template (code_lines-friendly)**
+Use this shape first, then fill in plugin-specific details:
+```json
+{
+  "function": "create_plugin",
+  "arguments": {
+    "name": "my_plugin",
+    "code_lines": [
+      "from plugin_base import ToolPlugin",
+      "from plugin_result import action_success",
+      "",
+      "class MyPlugin(ToolPlugin):",
+      "    name = \"my_plugin\"",
+      "    plugin_name = \"My Plugin\"",
+      "    version = \"1.0.0\"",
+      "    description = \"What this does.\"",
+      "    platforms = [\"webui\"]",
+      "    usage = '{\"function\":\"my_plugin\",\"arguments\":{\"foo\":\"bar\"}}'",
+      "    when_to_use = \"Use when the user asks to do X.\"",
+      "    waiting_prompt_template = \"Write a friendly message telling {mention} you're starting now. Only output that message.\"",
+      "",
+      "    async def handle_webui(self, args, llm_client, context=None):",
+      "        return action_success(facts={\"foo\": args.get(\"foo\")}, say_hint=\"Report the foo value only.\")",
+      "",
+      "plugin = MyPlugin()"
+    ]
+  }
+}
+```
+
 **Minimal Example**
 ```python
 from plugin_base import ToolPlugin
@@ -74,13 +104,22 @@ Notes:
 - When using `code_lines`, keep `usage` as a single-line JSON string to avoid quoting/escape issues.
   Example: `usage = '{"function":"my_plugin","arguments":{}}'`
 
+**Do / Don't (Specific)**
+- Do keep `usage` and `name` aligned exactly (same function id string).
+- Do keep list/dict literals complete on one `code_lines` line when possible.
+- Do implement `handle_<platform>` for every platform listed in `platforms`.
+- Do return `action_success(...)` / `action_failure(...)`, not ad-hoc dicts.
+- Don't define `run()`; it is ignored by the runtime.
+- Don't include `origin` in `usage`; it is injected automatically.
+- Don't split one Python statement across many `code_lines` entries.
+
 Optional but recommended fields used by discovery and help:
-- `when_to_use`, `common_needs`, `required_args`, `optional_args`, `example_calls`, `missing_info_prompts`
+- `common_needs`, `required_args`, `optional_args`, `example_calls`, `missing_info_prompts`
 - `argument_schema` (JSON schema-like dict) for richer `get_plugin_help` output
 
 **Waiting Prompt (required)**
 Always include `waiting_prompt_template` as an **instruction** that tells the LLM what to say.
-It must include wording like “Write …” and “Only output that message.”
+It should include wording like “Write …” and “Only output that message.”
 Example:
 ```python
 waiting_prompt_template = (
@@ -159,6 +198,14 @@ Rules:
 - If the user explicitly requests **AI‑generated** content, you must call `llm_client` at runtime.
 - Do not hardcode a static list of jokes/lines when AI‑generated output is required.
 
+**Common Plugin Patterns (Pick One)**
+1. API Fetch + Summarize
+   Use settings for auth, call external API, normalize data, return concise `facts` and `say_hint`.
+2. AI Generator
+   Validate inputs, call `llm_client.chat(...)`, sanitize fallback text, return generated content in `facts`.
+3. Action + Confirmation
+   Trigger one deterministic action (queue/send/schedule/control), return clear confirmation with key args echoed.
+
 **Artifacts**
 Include `artifacts` for images/audio/files. Each artifact dict can contain:
 - `type`: `image|audio|video|file`
@@ -222,19 +269,21 @@ They are unioned into `agent_lab/requirements.txt` and installed on validation.
 - Loader scans `agent_lab/plugins/*.py`.
 - A module-global `plugin` instance is required.
 - Validation checks syntax, required metadata, and dependencies.
+- `waiting_prompt_template` must be explicitly defined on the plugin.
+- Waiting prompt phrasing quality may be reported as a warning during validation.
 
 **Authoring Rule**
 - Use `create_plugin` for Agent Lab plugins (do not use `write_file` for plugins).
 - Prefer a stable plugin example as a template when possible.
 
-**Working Checklist**
-1. Plugin file uses `agent_lab/plugins/<id>.py` and exposes `plugin = <ToolPlugin instance>`.
-2. Metadata fields are set: `name`, `plugin_name`, `version`, `description`, `platforms`, `usage`.
-3. Handler signature uses `llm_client` (or `llm`), not `llp_client`.
-4. `usage` includes full arguments the plugin needs (no raw user prompt pass-through).
-5. If settings/secrets are needed, `settings_category` + `required_settings` are defined and read from `exp:plugin_settings:<Category>`.
-   `required_settings` is a dict of dicts (no lists).
-6. Validation passes in the Agent Lab tab before enabling.
+**Validation Checklist (Mental)**
+1. Did I set required metadata: `name`, `plugin_name`, `version`, `description`, `platforms`, `usage`, `when_to_use`, `waiting_prompt_template`?
+2. Does `usage` function id exactly match `name`?
+3. Did I implement `handle_<platform>` for each listed platform?
+4. Does handler signature use `llm_client` (or `llm`), not `llp_client`?
+5. If settings are needed, are `settings_category` and dict-shaped `required_settings` defined and read from `exp:plugin_settings:<Category>`?
+6. Are returns using `action_success` / `action_failure` with concise `say_hint`?
+7. Does validation pass in Agent Lab before enabling?
 
 **Safety**
 - Do not write outside `agent_lab/`.
