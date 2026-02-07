@@ -7,7 +7,6 @@ from urllib.parse import urlencode
 import re
 
 import httpx
-import requests
 from dotenv import load_dotenv
 
 from plugin_base import ToolPlugin
@@ -32,7 +31,7 @@ class EventsQueryPlugin(ToolPlugin):
     """
     name = "events_query"
     plugin_name = "Events Query"
-    version = "1.0.3"
+    version = "1.0.4"
     min_tater_version = "50"
     pretty_name = "Events Query"
     description = (
@@ -58,15 +57,7 @@ class EventsQueryPlugin(ToolPlugin):
     platforms = ["webui", "homeassistant", "homekit", "discord", "telegram", "matrix", "irc"]
     settings_category = "Events Query"
 
-    required_settings = {
-        # ---- Home Assistant time sync ----
-        "TIME_SENSOR_ENTITY": {
-            "label": "Time Sensor (ISO)",
-            "type": "string",
-            "default": "sensor.date_time_iso",
-            "description": "Sensor with local-naive ISO time (e.g., 2025-10-19T20:07:00)."
-        },
-    }
+    required_settings = {}
 
     waiting_prompt_template = (
         "Let {mention} know you’re checking recent home events now. "
@@ -87,8 +78,7 @@ class EventsQueryPlugin(ToolPlugin):
                 "Home Assistant token is not set. Open WebUI → Settings → Home Assistant Settings "
                 "and add a Long-Lived Access Token."
             )
-        time_sensor = (s.get("TIME_SENSOR_ENTITY") or "sensor.date_time_iso").strip()
-        return {"base": base, "token": token, "time_sensor": time_sensor}
+        return {"base": base, "token": token}
 
     def _automation_base(self) -> str:
         try:
@@ -130,21 +120,7 @@ class EventsQueryPlugin(ToolPlugin):
     def _ha_headers(self, token: str) -> Dict[str, str]:
         return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
-    def _ha_now(self, ha_base: str, token: str, sensor_entity: str) -> datetime:
-        """
-        Use HA's reported time exactly as local-naive. Strip tz if present.
-        Fallback to local system time (also naive).
-        """
-        try:
-            url = f"{ha_base}/api/states/{sensor_entity}"
-            r = requests.get(url, headers=self._ha_headers(token), timeout=5)
-            if r.status_code < 400:
-                state = (r.json() or {}).get("state", "")
-                if state:
-                    dt = datetime.fromisoformat(state)
-                    return dt.replace(tzinfo=None) if dt.tzinfo else dt
-        except Exception:
-            logger.info("[events_query] HA time sensor fetch failed; using local system time")
+    def _ha_now(self) -> datetime:
         return datetime.now()
 
     @staticmethod
@@ -570,7 +546,7 @@ class EventsQueryPlugin(ToolPlugin):
         ha = self._ha(s)
 
         # Align with HA local time (naive)
-        now = self._ha_now(ha["base"], ha["token"], ha["time_sensor"])
+        now = self._ha_now()
 
         # Timeframe: today|yesterday|last_24h|<date>
         tf_raw = (args.get("timeframe") or "today").strip()

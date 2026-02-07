@@ -1516,6 +1516,21 @@ def render_rss_feed_manager():
                 placeholder=default_cfg["ha_device_service"],
                 key=f"{exp_key}_ha_device_service",
             )
+            ha_persistent = (ha_override.get("targets") or {}).get("persistent")
+            if isinstance(ha_persistent, str):
+                ha_persistent = ha_persistent.strip().lower() in ("1", "true", "yes", "on")
+            if ha_persistent is True:
+                ha_persist_choice = "Force on"
+            elif ha_persistent is False:
+                ha_persist_choice = "Force off"
+            else:
+                ha_persist_choice = "Use default"
+            ha_persist_choice = st.selectbox(
+                "HA Persistent Notification",
+                options=["Use default", "Force on", "Force off"],
+                index=["Use default", "Force on", "Force off"].index(ha_persist_choice),
+                key=f"{exp_key}_ha_persist_choice",
+            )
 
             # Other notifiers
             ntfy_override = platforms.get("ntfy") or {}
@@ -1556,10 +1571,17 @@ def render_rss_feed_manager():
                         "enabled": matrix_enabled,
                         "targets": {"room_id": matrix_room_id} if matrix_room_id else {},
                     }
-                if ha_enabled != default_cfg["send_homeassistant"] or ha_device:
+                if ha_enabled != default_cfg["send_homeassistant"] or ha_device or ha_persist_choice != "Use default":
+                    targets = {}
+                    if ha_device:
+                        targets["device_service"] = ha_device
+                    if ha_persist_choice == "Force on":
+                        targets["persistent"] = True
+                    elif ha_persist_choice == "Force off":
+                        targets["persistent"] = False
                     new_platforms["homeassistant"] = {
                         "enabled": ha_enabled,
-                        "targets": {"device_service": ha_device} if ha_device else {},
+                        "targets": targets,
                     }
                 if ntfy_enabled != default_cfg["send_ntfy"]:
                     new_platforms["ntfy"] = {"enabled": ntfy_enabled, "targets": {}}

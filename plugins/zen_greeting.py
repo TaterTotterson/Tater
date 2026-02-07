@@ -23,11 +23,11 @@ class ZenGreetingPlugin(ToolPlugin):
     Notes:
     - Designed for Home Assistant dashboards (very short output).
     - Optionally writes directly into an input_text helper in Home Assistant.
-    - Uses HA time sensor so the greeting matches HA's local time.
+    - Uses local system time for greeting.
     """
     name = "zen_greeting"
     plugin_name = "Zen Greeting"
-    version = "1.0.1"
+    version = "1.0.2"
     min_tater_version = "50"
     pretty_name = "Zen Greeting"
 
@@ -54,12 +54,6 @@ class ZenGreetingPlugin(ToolPlugin):
     settings_category = "Zen Greeting"
 
     required_settings = {
-        "TIME_SENSOR_ENTITY": {
-            "label": "Time Sensor (ISO)",
-            "type": "string",
-            "default": "sensor.date_time_iso",
-            "description": "Sensor with local-naive ISO time (e.g., 2025-10-19T20:07:00)."
-        },
         "INPUT_TEXT_ENTITY": {
             "label": "Input Text Entity to Update (optional)",
             "type": "string",
@@ -93,24 +87,10 @@ class ZenGreetingPlugin(ToolPlugin):
                 "Home Assistant token is not set. Open WebUI → Settings → Home Assistant Settings "
                 "and add a Long-Lived Access Token."
             )
-        time_sensor = (s.get("TIME_SENSOR_ENTITY") or "sensor.date_time_iso").strip()
-        return {"base": base, "token": token, "time_sensor": time_sensor}
+        return {"base": base, "token": token}
 
     def _ha_headers(self, token: str) -> Dict[str, str]:
         return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-
-    def _get_ha_time(self, ha_base: str, token: str, time_entity: str) -> datetime:
-        try:
-            url = f"{ha_base}/api/states/{time_entity}"
-            r = requests.get(url, headers=self._ha_headers(token), timeout=5)
-            if r.status_code < 400:
-                state = (r.json() or {}).get("state", "")
-                if isinstance(state, str) and state.strip() and state not in ("unknown", "unavailable"):
-                    dt = datetime.fromisoformat(state.strip())
-                    return dt.replace(tzinfo=None) if dt.tzinfo else dt
-        except Exception:
-            logger.info("[zen_greeting] HA time fetch failed; using local system time")
-        return datetime.now()
 
     def _set_input_text(self, ha_base: str, token: str, entity_id: str, value: str) -> None:
         entity_id = (entity_id or "").strip()
@@ -242,7 +222,7 @@ class ZenGreetingPlugin(ToolPlugin):
         max_chars = int(s.get("MAX_CHARS") or 100)
         max_chars = max(40, min(max_chars, 100))
 
-        now = self._get_ha_time(ha["base"], ha["token"], ha["time_sensor"])
+        now = datetime.now()
         greeting = self._time_greeting(now)
 
         include_date = bool(args.get("include_date", False))

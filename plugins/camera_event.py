@@ -26,11 +26,11 @@ class CameraEventPlugin(ToolPlugin):
     durable event via the Automations /events/add endpoint for later retrieval.
     Includes a per-camera cooldown (configured in settings).
 
-    Stores events per-area (e.g., 'front_yard', 'back_yard') and stamps with HA local-naive ISO time.
+    Stores events per-area (e.g., 'front_yard', 'back_yard') and stamps with local system time.
     """
     name = "camera_event"
     plugin_name = "Camera Event"
-    version = "1.0.1"
+    version = "1.0.2"
     min_tater_version = "50"
     description = "Camera event tool for when the user requests or says to run camera event."
     plugin_dec = "Capture a Home Assistant camera snapshot, describe it with vision AI, and log the event."
@@ -48,13 +48,6 @@ class CameraEventPlugin(ToolPlugin):
 
     settings_category = "Camera Event"
     required_settings = {
-        "TIME_SENSOR_ENTITY": {
-            "label": "Time Sensor (ISO)",
-            "type": "string",
-            "default": "sensor.date_time_iso",
-            "description": "Sensor with local-naive ISO time (e.g., 2025-10-19T20:07:00)."
-        },
-
         # ---- Vision LLM ----
         "VISION_API_BASE": {
             "label": "Vision API Base URL",
@@ -99,8 +92,7 @@ class CameraEventPlugin(ToolPlugin):
                 "Home Assistant token is not set. Open WebUI → Settings → Home Assistant Settings "
                 "and add a Long-Lived Access Token."
             )
-        time_sensor = (s.get("TIME_SENSOR_ENTITY") or "sensor.date_time_iso").strip()
-        return {"base": base, "token": token, "time_sensor": time_sensor}
+        return {"base": base, "token": token}
 
     def _vision(self, s: Dict[str, str]) -> Dict[str, Optional[str]]:
         api_base = (s.get("VISION_API_BASE") or "http://127.0.0.1:1234").rstrip("/")
@@ -135,21 +127,7 @@ class CameraEventPlugin(ToolPlugin):
         """Ensure strict ISO without timezone or microseconds: YYYY-MM-DDTHH:MM:SS"""
         return dt.strftime("%Y-%m-%dT%H:%M:%S")
 
-    def _ha_now(self, ha_base: str, token: str, sensor_entity: str) -> datetime:
-        """
-        Use HA's reported time exactly as local-naive time.
-        If HA includes a timezone offset, strip it. Fallback to local system time.
-        """
-        try:
-            url = f"{ha_base}/api/states/{sensor_entity}"
-            r = requests.get(url, headers=self._ha_headers(token), timeout=5)
-            if r.status_code < 400:
-                state = (r.json() or {}).get("state", "")
-                if state and state not in ("unknown", "unavailable"):
-                    dt = datetime.fromisoformat(state)
-                    return dt.replace(tzinfo=None) if dt.tzinfo else dt
-        except Exception:
-            logger.info("[camera_event] HA time sensor fetch failed; using local system time")
+    def _ha_now(self) -> datetime:
         return datetime.now()
 
     def _get_camera_jpeg(self, ha_base: str, token: str, camera_entity: str) -> bytes:
@@ -284,7 +262,7 @@ class CameraEventPlugin(ToolPlugin):
             }
 
         # Current HA local time (naive) for event stamping
-        now_local = self._ha_now(ha["base"], ha["token"], ha["time_sensor"])
+        now_local = self._ha_now()
         now_iso = self._format_iso_naive(now_local)
 
         # Fetch snapshot

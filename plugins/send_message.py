@@ -26,6 +26,7 @@ class SendMessagePlugin(ToolPlugin):
         "      \"room_id\": \"matrix room id or alias, optional (!id:server or #alias:server)\",\n"
         "      \"room_alias\": \"matrix alias, optional (#alias:server)\",\n"
         "      \"device_service\": \"homeassistant only, optional\",\n"
+        "      \"persistent\": \"homeassistant only, optional (true/false)\",\n"
         "      \"chat_id\": \"telegram chat id, optional\"\n"
         "    },\n"
         "    \"attachments\": [{\"type\":\"image|audio|video|file\",\"name\":\"optional\",\"mimetype\":\"optional\",\"bytes\":\"optional-bytes\",\"blob_key\":\"optional\"}],\n"
@@ -114,7 +115,7 @@ class SendMessagePlugin(ToolPlugin):
         attachments = self._clean_attachment_payload(args.get("attachments"))
 
         targets = dict(args.get("targets") or {})
-        for key in ("channel_id", "channel", "guild_id", "room_id", "room_alias", "device_service", "chat_id"):
+        for key in ("channel_id", "channel", "guild_id", "room_id", "room_alias", "device_service", "persistent", "chat_id"):
             if args.get(key) and key not in targets:
                 targets[key] = args.get(key)
 

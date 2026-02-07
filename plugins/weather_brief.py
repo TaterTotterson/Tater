@@ -26,7 +26,7 @@ class WeatherBriefPlugin(ToolPlugin):
     """
     name = "weather_brief"
     plugin_name = "Weather Brief"
-    version = "1.0.1"
+    version = "1.0.2"
     min_tater_version = "50"
     pretty_name = "Weather Brief"
 
@@ -50,13 +50,6 @@ class WeatherBriefPlugin(ToolPlugin):
     settings_category = "Weather Brief"
 
     required_settings = {
-        "TIME_SENSOR_ENTITY": {
-            "label": "Time Sensor (ISO)",
-            "type": "string",
-            "default": "sensor.date_time_iso",
-            "description": "Sensor with local-naive ISO time (e.g., 2025-10-19T20:07:00)."
-        },
-
         # Weather sensors
         "TEMP_ENTITY": {
             "label": "Temperature Entity",
@@ -106,8 +99,7 @@ class WeatherBriefPlugin(ToolPlugin):
                 "Home Assistant token is not set. Open WebUI → Settings → Home Assistant Settings "
                 "and add a Long-Lived Access Token."
             )
-        time_sensor = (s.get("TIME_SENSOR_ENTITY") or "sensor.date_time_iso").strip()
-        return {"base": base, "token": token, "time_sensor": time_sensor}
+        return {"base": base, "token": token}
 
     def _ha_headers(self, token: str) -> Dict[str, str]:
         return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
@@ -134,36 +126,8 @@ class WeatherBriefPlugin(ToolPlugin):
 
     # ---------- Time helpers ----------
     @staticmethod
-    def _parse_iso_naive(s: Optional[str]) -> Optional[datetime]:
-        if not s:
-            return None
-        s = s.strip()
-        try:
-            return datetime.strptime(s, "%Y-%m-%dT%H:%M:%S")
-        except Exception:
-            try:
-                dt = datetime.fromisoformat(s)
-                return dt.replace(tzinfo=None) if dt.tzinfo else dt
-            except Exception:
-                return None
-
-    @staticmethod
     def _format_iso_naive(dt: datetime) -> str:
         return dt.strftime("%Y-%m-%dT%H:%M:%S")
-
-    def _ha_now(self, ha_base: str, token: str, sensor_entity: str) -> datetime:
-        try:
-            url = f"{ha_base}/api/states/{sensor_entity}"
-            r = requests.get(url, headers=self._ha_headers(token), timeout=5)
-            if r.status_code < 400:
-                state = (r.json() or {}).get("state", "")
-                if state and state not in ("unknown", "unavailable"):
-                    dt = self._parse_iso_naive(state)
-                    if dt:
-                        return dt
-        except Exception:
-            logger.info("[weather_brief] HA time sensor fetch failed; using local system time")
-        return datetime.now()
 
     # ---------- HA history ----------
     def _fetch_history(
@@ -309,7 +273,7 @@ class WeatherBriefPlugin(ToolPlugin):
             hours = 12
         hours = max(1, min(hours, 72))
 
-        now = self._ha_now(ha["base"], ha["token"], ha["time_sensor"])
+        now = datetime.now()
         start = now - timedelta(hours=hours)
 
         temp_entity = (s.get("TEMP_ENTITY") or "").strip()
