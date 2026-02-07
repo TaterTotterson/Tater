@@ -81,7 +81,8 @@ AGENT_CREATION_REPAIR_PROMPT = (
     "For Agent Lab plugins, set `platforms` to include the current platform, and implement the matching handler "
     "(e.g., handle_webui for webui, handle_discord for discord). "
     "Always include `when_to_use` and a waiting_prompt_template for Agent Lab plugins. "
-    "waiting_prompt_template must be an instruction to the LLM (e.g., 'Write a short, friendly status line...')."
+    "waiting_prompt_template must be an instruction to the LLM and include wording like "
+    "'Write ...' and 'Only output that message.'"
 )
 AGENT_CREATION_FAILURE_TEXT = "Sorry, I couldn't generate the required tool calls. Please try again."
 AGENT_UNKNOWN_TOOL_REPAIR_PROMPT = (
@@ -306,6 +307,7 @@ def _agent_system_instructions(max_rounds: int, max_tool_calls: int) -> str:
         "- Decide the next step each round: tool call, question, or finish.\n"
         "- Use list_plugins to discover tools; use get_plugin_help if arguments are unclear.\n"
         "- If the user asks to schedule or run a recurring task (daily/weekly/every), use the `ai_tasks` plugin; do not create a platform or tool.\n"
+        "- For scheduled tasks, assume local timezone if none is provided. If no destination is given, use the current channel/room from origin (do not ask for channel IDs).\n"
         "- If the user asks to run a plugin by name (even approximate), call list_plugins and pick the closest match (ignore minor typos/plurals). If a close match exists, use it and do not claim it’s unavailable; optionally confirm.\n"
         "- When calling a plugin, use its id from list_plugins (not the display name).\n"
         "- Examples that require list_plugins: weather/forecast, news, stocks, sports scores, downloads, music/song generation, image/video generation, camera feeds/snapshots (front/back yard, porch, driveway, garage), camera/sensor status, smart-home actions.\n"
