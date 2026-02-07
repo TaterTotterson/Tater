@@ -33,7 +33,7 @@ class EventsQueryBriefPlugin(ToolPlugin):
 
     name = "events_query_brief"
     plugin_name = "Events Query Brief"
-    version = "1.0.1"
+    version = "1.0.2"
     min_tater_version = "50"
     pretty_name = "Events Query (Brief)"
 
@@ -62,13 +62,6 @@ class EventsQueryBriefPlugin(ToolPlugin):
     settings_category = "Events Query"
 
     required_settings = {
-        "TIME_SENSOR_ENTITY": {
-            "label": "Time Sensor (ISO)",
-            "type": "string",
-            "default": "sensor.date_time_iso",
-            "description": "Entity that provides local-naive ISO time like 2025-10-19T20:07:00.",
-        },
-
         # where to write the brief (optional)
         "INPUT_TEXT_ENTITY": {
             "label": "Input Text Entity to Update (optional)",
@@ -100,8 +93,7 @@ class EventsQueryBriefPlugin(ToolPlugin):
                 "Home Assistant token is not set. Open WebUI → Settings → Home Assistant Settings "
                 "and add a Long-Lived Access Token."
             )
-        sensor = (s.get("TIME_SENSOR_ENTITY") or "sensor.date_time_iso").strip()
-        return {"base": base, "token": token, "time_sensor": sensor}
+        return {"base": base, "token": token}
 
     def _automation_base(self) -> str:
         try:
@@ -114,15 +106,6 @@ class EventsQueryBriefPlugin(ToolPlugin):
         return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
     def _ha_now(self, ha: Dict[str, str]) -> datetime:
-        try:
-            url = f"{ha['base']}/api/states/{ha['time_sensor']}"
-            r = requests.get(url, headers=self._ha_headers(ha["token"]), timeout=5)
-            if r.status_code < 400:
-                state = (r.json() or {}).get("state", "")
-                dt = datetime.fromisoformat(state)
-                return dt.replace(tzinfo=None) if dt.tzinfo else dt
-        except Exception:
-            pass
         return datetime.now()
 
     @staticmethod

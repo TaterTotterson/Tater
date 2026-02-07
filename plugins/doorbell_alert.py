@@ -31,7 +31,7 @@ class DoorbellAlertPlugin(ToolPlugin):
     """
     name = "doorbell_alert"
     plugin_name = "Doorbell Alert"
-    version = "1.0.1"
+    version = "1.0.3"
     min_tater_version = "50"
     description = "Doorbell alert tool for when the user requests or says to run a doorbell alert."
     plugin_dec = "Handle doorbell events: snapshot, describe with vision, announce, and log notifications."
@@ -60,14 +60,6 @@ class DoorbellAlertPlugin(ToolPlugin):
             "description": "TTS entity to use (e.g., tts.piper)."
         },
 
-        # Prefer TIME_SENSOR_ENTITY; legacy HA_TIME_ENTITY still accepted.
-        "TIME_SENSOR_ENTITY": {
-            "label": "Time Sensor (ISO)",
-            "type": "string",
-            "default": "sensor.date_time_iso",
-            "description": "Entity that provides a local-naive ISO string like 2025-10-19T20:07:00."
-        },
-
         # ---- Defaults ----
         "CAMERA_ENTITY": {
             "label": "Camera Entity",
@@ -86,6 +78,12 @@ class DoorbellAlertPlugin(ToolPlugin):
             "type": "boolean",
             "default": False,
             "description": "If true, also post alerts to the HA notification queue and events."
+        },
+        "PERSISTENT_NOTIFICATIONS_ENABLED": {
+            "label": "Enable HA Persistent Notifications",
+            "type": "boolean",
+            "default": True,
+            "description": "If true, also create Home Assistant persistent notifications when notifications are enabled.",
         },
         "AREA_LABEL": {
             "label": "Area Label",
@@ -133,6 +131,19 @@ class DoorbellAlertPlugin(ToolPlugin):
             redis_client.hgetall(f"plugin_settings: {self.settings_category}")
         return s or {}
 
+    @staticmethod
+    def _boolish(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        val = str(value).strip().lower()
+        if val in ("1", "true", "yes", "y", "on", "enabled"):
+            return True
+        if val in ("0", "false", "no", "n", "off", "disabled"):
+            return False
+        return default
+
     def _ha(self, s: Dict[str, str]) -> Dict[str, str]:
         ha_settings = redis_client.hgetall("homeassistant_settings") or {}
         base = (ha_settings.get("HA_BASE_URL") or "http://homeassistant.local:8123").strip().rstrip("/")
@@ -143,8 +154,7 @@ class DoorbellAlertPlugin(ToolPlugin):
                 "and add a Long-Lived Access Token."
             )
         tts_entity = (s.get("TTS_ENTITY") or "tts.piper").strip() or "tts.piper"
-        time_entity = (s.get("TIME_SENSOR_ENTITY") or s.get("HA_TIME_ENTITY") or "sensor.date_time_iso").strip()
-        return {"base": base, "token": token, "tts_entity": tts_entity, "time_entity": time_entity}
+        return {"base": base, "token": token, "tts_entity": tts_entity}
 
     def _vision(self, s: Dict[str, str]) -> Dict[str, Optional[str]]:
         api_base = (s.get("VISION_API_BASE") or "http://127.0.0.1:1234").rstrip("/")
@@ -167,38 +177,6 @@ class DoorbellAlertPlugin(ToolPlugin):
         if r.status_code >= 400:
             raise RuntimeError(f"camera_proxy HTTP {r.status_code}: {r.text[:200]}")
         return r.content
-
-    def _get_ha_time(self, ha_base: str, token: str, time_entity: str) -> str:
-        """
-        Fetch a local-naive ISO time string (YYYY-MM-DDTHH:MM:SS) from HA.
-        If HA provides a value with tz/offset, strip it to naive. If fetch fails,
-        fallback to local system time in the same naive format.
-        """
-        try:
-            if time_entity:
-                url = f"{ha_base}/api/states/{quote(time_entity, safe='')}"
-                r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=5)
-                if r.status_code < 400:
-                    state = (r.json() or {}).get("state", "")
-                    if isinstance(state, str) and state.strip():
-                        try:
-                            dt = datetime.fromisoformat(state.strip())
-                            if dt.tzinfo:
-                                dt = dt.replace(tzinfo=None)
-                            return dt.strftime("%Y-%m-%dT%H:%M:%S")
-                        except Exception:
-                            # If it already looks like naive ISO, accept as-is after validating shape
-                            s = state.strip()
-                            try:
-                                datetime.strptime(s, "%Y-%m-%dT%H:%M:%S")
-                                return s
-                            except Exception:
-                                pass
-        except Exception:
-            logger.debug("[doorbell_alert] HA time entity fetch failed", exc_info=True)
-
-        # Local fallback (naive)
-        return self._iso_naive_now()
 
     # ---------- Bridges ----------
     def _notify_ha_bridge(
@@ -278,6 +256,14 @@ class DoorbellAlertPlugin(ToolPlugin):
                 logger.warning("[doorbell_alert] events post failed %s: %s", r.status_code, r.text[:200])
         except Exception as e:
             logger.warning("[doorbell_alert] events post error: %s", e)
+
+    def _send_persistent_notification(self, ha_base: str, token: str, title: str, message: str) -> None:
+        url = f"{ha_base}/api/services/persistent_notification/create"
+        headers = self._ha_headers(token)
+        payload = {"title": title, "message": message}
+        r = requests.post(url, headers=headers, json=payload, timeout=10)
+        if r.status_code >= 400:
+            raise RuntimeError(f"persistent_notification HTTP {r.status_code}: {r.text[:200]}")
 
     # ---------- Vision / TTS ----------
     def _vision_describe(self, image_bytes: bytes, api_base: str, model: str, api_key: Optional[str]) -> str:
@@ -360,6 +346,7 @@ class DoorbellAlertPlugin(ToolPlugin):
         camera_default = (s.get("CAMERA_ENTITY") or "").strip()
         players_default = self._parse_players_setting(s.get("MEDIA_PLAYERS", ""))
         notif_default = str(s.get("NOTIFICATIONS_ENABLED", "false")).strip().lower() in ("1", "true", "yes", "on")
+        persistent_default = self._boolish(s.get("PERSISTENT_NOTIFICATIONS_ENABLED"), True)
         tts_default = ha["tts_entity"]
         area_default = (s.get("AREA_LABEL") or "front door").strip()
 
@@ -374,6 +361,7 @@ class DoorbellAlertPlugin(ToolPlugin):
             players = players_default
 
         notifications = bool(args.get("notifications")) if "notifications" in args else notif_default
+        persistent_notifications = persistent_default
 
         # Validate requireds
         if not camera:
@@ -382,7 +370,7 @@ class DoorbellAlertPlugin(ToolPlugin):
             raise ValueError("No media players configured — set MEDIA_PLAYERS in settings or pass 'players' in args.")
 
         # HA local-naive ISO time
-        ha_time = self._get_ha_time(ha["base"], ha["token"], ha["time_entity"])
+        ha_time = self._iso_naive_now()
 
         # Area slug for storage (per-area bucket)
         area_slug = self._slug(area)
@@ -419,6 +407,11 @@ class DoorbellAlertPlugin(ToolPlugin):
                     level="info",
                     data={"area": area, **extra},
                 )
+                if persistent_notifications:
+                    try:
+                        self._send_persistent_notification(ha["base"], ha["token"], "Doorbell", generic)
+                    except Exception as e:
+                        logger.warning("[doorbell_alert] persistent notification failed: %s", e)
             return {"ok": True, "note": "snapshot_failed_generic_alert_spoken", "players": players, "area": area}
 
         # 2) Vision brief
@@ -456,6 +449,11 @@ class DoorbellAlertPlugin(ToolPlugin):
                 level="info",
                 data={"area": area, **extra},
             )
+            if persistent_notifications:
+                try:
+                    self._send_persistent_notification(ha["base"], ha["token"], "Doorbell", desc)
+                except Exception as e:
+                    logger.warning("[doorbell_alert] persistent notification failed: %s", e)
 
         # Platform ignores the return; for logs/tracing only
         return {"ok": True, "spoken": True, "players": players, "area": area}

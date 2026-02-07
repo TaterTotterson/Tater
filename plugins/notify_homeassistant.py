@@ -79,19 +79,34 @@ def _post_ha_notification(
         raise RuntimeError(f"HTTP {resp.status_code}: {resp.text}")
 
 
+def _send_persistent_notification(title: str | None, message: str) -> None:
+    data = {
+        "message": (message or "").strip(),
+        "title": (title or "Notification").strip(),
+    }
+    _ha_call_service("persistent_notification", "create", data)
+
+
 class HomeAssistantNotifier(ToolPlugin):
     name = "notify_homeassistant"
     pretty_name = "Home Assistant Notifier"
+    version = "1.0.1"
     description = "Queue notifications for Home Assistant delivery."
     notifier = True
     platforms = []  # internal; not exposed as a direct tool
     settings_category = "Home Assistant Notifier"
     required_settings = {
         "ENABLE_PERSISTENT": {
-            "label": "Enable Persistent Notifications",
+            "label": "Enable Home Assistant Notifications",
             "type": "checkbox",
             "default": True,
-            "description": "If disabled, Home Assistant notifications are skipped.",
+            "description": "If disabled, all Home Assistant notifications are skipped.",
+        },
+        "ENABLE_PERSISTENT_NOTIFICATION": {
+            "label": "Enable HA Persistent Notifications",
+            "type": "checkbox",
+            "default": True,
+            "description": "If enabled, also create Home Assistant persistent notifications.",
         },
         "DEFAULT_DEVICE_SERVICE": {
             "label": "Default Mobile Notify Service",
@@ -113,6 +128,25 @@ class HomeAssistantNotifier(ToolPlugin):
             return False
         return True
 
+    def _boolish(self, value, default: bool) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        val = str(value).strip().lower()
+        if val in ("1", "true", "yes", "y", "on", "enabled"):
+            return True
+        if val in ("0", "false", "no", "n", "off", "disabled"):
+            return False
+        return default
+
+    def _persistent_notification_enabled(self, targets: Dict[str, Any]) -> bool:
+        if isinstance(targets, dict) and "persistent" in targets:
+            return self._boolish(targets.get("persistent"), True)
+        settings = redis_client.hgetall("plugin_settings:Home Assistant Notifier") or {}
+        raw = settings.get("ENABLE_PERSISTENT_NOTIFICATION")
+        return self._boolish(raw, True)
+
     def _extract_args(self, args: Dict[str, Any]):
         args = args or {}
         title = args.get("title")
@@ -121,6 +155,8 @@ class HomeAssistantNotifier(ToolPlugin):
 
         if args.get("device_service") and "device_service" not in targets:
             targets["device_service"] = args.get("device_service")
+        if "persistent" in args and "persistent" not in targets:
+            targets["persistent"] = args.get("persistent")
 
         meta = {
             "priority": args.get("priority"),
@@ -184,6 +220,12 @@ class HomeAssistantNotifier(ToolPlugin):
             )
         except Exception as e:
             logger.warning(f"[notify] HA notifications add failed: {e}")
+
+        if self._persistent_notification_enabled(resolved):
+            try:
+                _send_persistent_notification(title, message)
+            except Exception as e:
+                logger.warning(f"[notify] HA persistent notification failed: {e}")
 
         device_service = (resolved.get("device_service") or _get_default_device_service()).strip()
         if device_service:

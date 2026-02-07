@@ -233,6 +233,9 @@ docker run -d --name tater_webui \
   -p 8788:8788 \
   -p 8789:8789 \
   -p 8790:8790 \
+  -e TZ=America/Chicago \
+  -v /etc/localtime:/etc/localtime:ro \
+  -v /etc/timezone:/etc/timezone:ro \
   -e LLM_HOST=127.0.0.1 \
   -e LLM_PORT=11434 \
   -e LLM_MODEL=gemma3-27b-abliterated \
@@ -251,6 +254,9 @@ docker run -d --name tater_webui \
   -p 8788:8788 \
   -p 8789:8789 \
   -p 8790:8790 \
+  -e TZ=America/Chicago \
+  -v /etc/localtime:/etc/localtime:ro \
+  -v /etc/timezone:/etc/timezone:ro \
   -e LLM_HOST=https://api.openai.com \
   -e LLM_PORT= \
   -e LLM_MODEL=gpt-4o \
@@ -267,6 +273,7 @@ Tip: The Agent Lab data lives in `/app/agent_lab` inside the container.
 If you don’t mount it to the host, Agent Lab plugins/platforms/artifacts will be lost when the container is rebuilt or updated.
 
 Unraid note: add a container path mapping for `/app/agent_lab` to a persistent share (e.g., `/mnt/user/appdata/tater/agent_lab`) so you don’t lose Agent Lab data during container updates.
+Unraid note: also set `TZ` and map `/etc/localtime` + `/etc/timezone` if you want local time inside the container.
 
 ### 3. Access the Web UI
 
