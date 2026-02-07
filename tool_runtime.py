@@ -127,6 +127,35 @@ def run_meta_tool(
         return inspect_plugin(str(args.get("plugin_id") or ""))
 
     if func == "create_plugin":
+        if not args.get("code") and not args.get("code_b64") and not args.get("code_lines"):
+            manifest = args.get("manifest")
+            code_files = args.get("code_files")
+            if isinstance(manifest, dict) and not args.get("name"):
+                args = dict(args)
+                args["name"] = (
+                    manifest.get("id")
+                    or manifest.get("name")
+                    or manifest.get("plugin_id")
+                    or manifest.get("plugin_name")
+                    or ""
+                )
+            if isinstance(code_files, list) and code_files:
+                selected = None
+                for entry in code_files:
+                    if isinstance(entry, dict):
+                        path = str(entry.get("path") or "").lower()
+                        if path.endswith("main.py") or path.endswith(".py"):
+                            selected = entry
+                            break
+                if selected is None:
+                    selected = code_files[0] if isinstance(code_files[0], dict) else None
+                if isinstance(selected, dict):
+                    if isinstance(selected.get("content_lines"), list):
+                        args = dict(args)
+                        args["code_lines"] = selected.get("content_lines")
+                    elif isinstance(selected.get("content"), str):
+                        args = dict(args)
+                        args["code"] = selected.get("content")
         if args.get("plugin_id"):
             args = dict(args)
             args["name"] = args.get("plugin_id")
@@ -149,6 +178,35 @@ def run_meta_tool(
             bool(args.get("auto_install", True)),
         )
     if func == "create_platform":
+        if not args.get("code") and not args.get("code_b64") and not args.get("code_lines"):
+            manifest = args.get("manifest")
+            code_files = args.get("code_files")
+            if isinstance(manifest, dict) and not args.get("name"):
+                args = dict(args)
+                args["name"] = (
+                    manifest.get("id")
+                    or manifest.get("name")
+                    or manifest.get("platform_key")
+                    or manifest.get("platform_name")
+                    or ""
+                )
+            if isinstance(code_files, list) and code_files:
+                selected = None
+                for entry in code_files:
+                    if isinstance(entry, dict):
+                        path = str(entry.get("path") or "").lower()
+                        if path.endswith("main.py") or path.endswith(".py"):
+                            selected = entry
+                            break
+                if selected is None:
+                    selected = code_files[0] if isinstance(code_files[0], dict) else None
+                if isinstance(selected, dict):
+                    if isinstance(selected.get("content_lines"), list):
+                        args = dict(args)
+                        args["code_lines"] = selected.get("content_lines")
+                    elif isinstance(selected.get("content"), str):
+                        args = dict(args)
+                        args["code"] = selected.get("content")
         if not args.get("name") and args.get("platform_name"):
             args = dict(args)
             args["name"] = args.get("platform_name")

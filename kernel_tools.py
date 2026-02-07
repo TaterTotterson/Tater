@@ -805,6 +805,13 @@ def create_plugin(
             except Exception as e:
                 return {"tool": "create_plugin", "ok": False, "error": f"Invalid code_b64: {e}"}
         elif isinstance(code_lines, list):
+            for idx, line in enumerate(code_lines):
+                if isinstance(line, str) and ("\n" in line or "\r" in line):
+                    return {
+                        "tool": "create_plugin",
+                        "ok": False,
+                        "error": "code_lines entries must be single-line strings (no embedded newlines).",
+                    }
             payload = "\n".join(str(x) for x in code_lines)
         else:
             payload = code or ""
@@ -941,6 +948,13 @@ def create_platform(
             except Exception as e:
                 return {"tool": "create_platform", "ok": False, "error": f"Invalid code_b64: {e}"}
         elif isinstance(code_lines, list):
+            for idx, line in enumerate(code_lines):
+                if isinstance(line, str) and ("\n" in line or "\r" in line):
+                    return {
+                        "tool": "create_platform",
+                        "ok": False,
+                        "error": "code_lines entries must be single-line strings (no embedded newlines).",
+                    }
             payload = "\n".join(str(x) for x in code_lines)
         else:
             payload = code or ""

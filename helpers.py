@@ -375,24 +375,6 @@ def parse_function_json(response_text: str):
     if s.endswith("```"):
         s = re.sub(r"\s*```$", "", s, flags=re.MULTILINE).strip()
 
-    # ---------------------------------------------------------
-    # NEW: Embedded shorthand support:
-    #   "Sure, here you go ha_control{...}"
-    # If the embedded JSON already contains a tool call, prefer that.
-    # ---------------------------------------------------------
-    m_anywhere = re.search(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\s*(\{[^{}]*\})', s)
-    if m_anywhere:
-        func = m_anywhere.group(1)
-        blob = m_anywhere.group(2)
-        try:
-            args = json.loads(blob)
-            if isinstance(args, dict):
-                if "function" in args and isinstance(args.get("function"), str):
-                    return {"function": args["function"], "arguments": args.get("arguments", {}) or {}}
-                return {"function": func, "arguments": args}
-        except Exception:
-            pass
-
     # Accept shorthand ONLY when it's the whole message: ha_control{"query":"..."}
     m = re.match(r'^([a-zA-Z0-9_]+)\s*(\{.*\})\s*$', s, re.DOTALL)
     if m:
