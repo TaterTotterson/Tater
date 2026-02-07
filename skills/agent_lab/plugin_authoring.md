@@ -80,7 +80,7 @@ Optional but recommended fields used by discovery and help:
 
 **Waiting Prompt (required)**
 Always include `waiting_prompt_template` as an **instruction** that tells the LLM what to say.
-It should be phrased like: “Write a short, friendly message… Only output that message.”
+It must include wording like “Write …” and “Only output that message.”
 Example:
 ```python
 waiting_prompt_template = (

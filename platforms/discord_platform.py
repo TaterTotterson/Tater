@@ -391,6 +391,7 @@ class discord_platform(commands.Bot):
             "- If the user asks to run a plugin by name (even approximate), call list_plugins and pick the closest match (ignore minor typos/plurals). If a close match exists, use it and do not claim it’s unavailable; optionally confirm.\n"
             "- When calling a plugin, use its id from list_plugins (not the display name).\n"
             "- If the user asks to schedule or run a recurring task (daily/weekly/every), use the `ai_tasks` plugin; do not create a platform or tool.\n"
+            "- For scheduled tasks, assume local timezone if none is provided. If no destination is given, use the current channel/room from origin (do not ask for channel IDs).\n"
             "- If you might need a tool or are unsure a capability exists, call list_plugins before saying it is unavailable.\n"
             "- If the user asks for multiple independent actions, you may call tools one at a time until all actions are complete, then respond.\n"
             "- Optionally call get_plugin_help before executing a plugin.\n"

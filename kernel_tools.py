@@ -751,6 +751,13 @@ def validate_plugin(name: str, auto_install: bool = True) -> Dict[str, Any]:
         usage_val = getattr(plugin, "usage", None)
         if not isinstance(usage_val, str) or not usage_val.strip():
             missing.append("usage")
+        wait_prompt = getattr(plugin, "waiting_prompt_template", None)
+        if not isinstance(wait_prompt, str) or not wait_prompt.strip():
+            missing.append("waiting_prompt_template")
+        else:
+            lowered = wait_prompt.lower()
+            if "write" not in lowered or "only output" not in lowered:
+                missing.append("waiting_prompt_template")
         # Validate platform ids
         try:
             from plugin_kernel import KNOWN_PLATFORMS, expand_plugin_platforms

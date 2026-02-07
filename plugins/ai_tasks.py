@@ -50,11 +50,11 @@ class AITasksPlugin(ToolPlugin):
         "    \"title\": \"Optional short title\",\n"
         "    \"platform\": \"discord|irc|matrix|homeassistant|ntfy|telegram (optional; defaults to origin)\",\n"
         "    \"targets\": {\n"
-        "      \"channel\": \"optional destination (discord/irc channel, matrix room/alias, or HA notify service)\",\n"
+        "      \"channel\": \"optional destination (discord/irc channel, matrix room/alias, or HA notify service). If omitted, uses the current channel/room from origin\",\n"
         "      \"chat_id\": \"optional telegram destination chat id\"\n"
         "    },\n"
         "    \"when_ts\": 1730000000.0,\n"
-        "    \"when\": \"2026-02-03 15:04:05 or 10am\",\n"
+        "    \"when\": \"2026-02-03 15:04:05 or 10am (local time)\",\n"
         "    \"in_seconds\": 3600,\n"
         "    \"every_seconds\": 0,\n"
         "    \"priority\": \"normal|high\",\n"
@@ -68,6 +68,12 @@ class AITasksPlugin(ToolPlugin):
         "At run time, AI can answer directly or call one tool before sending the final response."
     )
     pretty_name = "AI Tasks"
+    when_to_use = "Schedule one-off or recurring tasks (daily/weekly/every N seconds) that run later."
+    common_needs = [
+        "task to run",
+        "when to run (time or interval)",
+        "destination (optional; defaults to current channel/room)",
+    ]
 
     platforms = ["discord", "irc", "matrix", "homeassistant", "telegram", "webui"]
     waiting_prompt_template = (
