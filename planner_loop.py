@@ -2,6 +2,7 @@ import json
 import time
 import uuid
 import os
+import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from helpers import (
@@ -298,7 +299,7 @@ def _agent_system_instructions(max_rounds: int, max_tool_calls: int) -> str:
         "- Do not provide a creative or alternative response until you have verified no compatible tool exists.\n"
         "- Before saying you cannot do something in this environment, call list_plugins to verify tool availability.\n"
         "- Before creating Agent Lab plugins/platforms, read the authoring skills via read_file:\n"
-        "  agent_lab/skills/plugin_authoring.md and agent_lab/skills/platform_authoring.md.\n"
+        "  skills/agent_lab/plugin_authoring.md and skills/agent_lab/platform_authoring.md.\n"
         "- When creating new Agent Lab plugins/platforms, read 1–2 similar stable examples using list_directory/read_file.\n"
         "- If a tool returns needs[], stop and ask exactly those questions.\n"
         "- If an action is destructive/high-impact, ask for explicit confirmation first.\n"
@@ -403,6 +404,71 @@ def _has_valid_created(items: List[str]) -> bool:
             return True
     return False
 
+
+def _extract_example_keywords(text: str) -> List[str]:
+    s = (text or "").lower()
+    if not s:
+        return []
+    tokens = re.split(r"[^a-z0-9]+", s)
+    out = []
+    for t in tokens:
+        if len(t) >= 3:
+            out.append(t)
+    # Normalize common synonyms
+    if "song" in out:
+        out.append("music")
+        out.append("audio")
+    if "music" in out:
+        out.append("audio")
+    if "image" in out or "picture" in out or "photo" in out:
+        out.append("image")
+    if "video" in out or "animation" in out or "movie" in out:
+        out.append("video")
+    if "camera" in out or "snapshot" in out:
+        out.append("camera")
+    return list(dict.fromkeys(out))
+
+
+def _select_example_paths(text: str, kind: str, max_examples: int = 2) -> List[str]:
+    keywords = _extract_example_keywords(text)
+    if kind == "plugin":
+        candidates = [
+            (["image", "picture", "photo"], "plugins/comfyui_image_plugin.py"),
+            (["video", "animation", "movie"], "plugins/comfyui_video_plugin.py"),
+            (["audio", "music", "song"], "plugins/comfyui_audio_ace.py"),
+            (["weather", "forecast"], "plugins/weather_forecast.py"),
+            (["homeassistant", "home", "lights", "switch", "device"], "plugins/ha_control.py"),
+            (["notify", "message", "alert"], "plugins/send_message.py"),
+            (["rss", "feed"], "plugins/watch_feed.py"),
+        ]
+        fallback = ["plugins/send_message.py"]
+    else:
+        candidates = [
+            (["rss", "feed"], "platforms/rss_platform.py"),
+            (["discord"], "platforms/discord_platform.py"),
+            (["irc"], "platforms/irc_platform.py"),
+            (["matrix"], "platforms/matrix_platform.py"),
+            (["telegram"], "platforms/telegram_platform.py"),
+            (["homeassistant", "home", "ha"], "platforms/homeassistant_platform.py"),
+            (["homekit"], "platforms/homekit_platform.py"),
+            (["xbmc"], "platforms/xbmc_platform.py"),
+        ]
+        fallback = ["platforms/rss_platform.py"]
+
+    scored = []
+    for keys, path in candidates:
+        score = 0
+        for k in keys:
+            if k in keywords:
+                score += 1
+        if score > 0:
+            scored.append((score, path))
+
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    picks = [p for _, p in scored][:max_examples]
+    if not picks:
+        picks = fallback[:max_examples]
+    return picks
 
 def _missing_creation_parts(state: Dict[str, Any], intent: Dict[str, bool]) -> List[str]:
     created = _creation_state(state)
@@ -552,13 +618,14 @@ async def run_planner_loop(
     unknown_tool_fix_used = False
     created_snapshot = _creation_state(state)
     creation_followup_issued = bool(state.get("creation_followup_issued"))
+    example_loaded = state.get("examples_loaded") or {}
 
     if needs_creation and not state.get("skills_loaded"):
         skill_paths = []
         if creation_intent.get("need_plugin"):
-            skill_paths.append("agent_lab/skills/plugin_authoring.md")
+            skill_paths.append("skills/agent_lab/plugin_authoring.md")
         if creation_intent.get("need_platform"):
-            skill_paths.append("agent_lab/skills/platform_authoring.md")
+            skill_paths.append("skills/agent_lab/platform_authoring.md")
         for spath in skill_paths:
             meta_payload = run_meta_tool(
                 func="read_file",
@@ -580,6 +647,54 @@ async def run_planner_loop(
                 }
             )
         state["skills_loaded"] = True
+        save_task_state(state, r=r)
+
+    if needs_creation:
+        if creation_intent.get("need_plugin") and not example_loaded.get("plugin"):
+            for path in _select_example_paths(user_text or "", "plugin"):
+                meta_payload = run_meta_tool(
+                    func="read_file",
+                    args={"path": path},
+                    platform=platform,
+                    registry=registry,
+                    enabled_predicate=enabled_predicate,
+                )
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": json.dumps({"function": "read_file", "arguments": {"path": path}}, ensure_ascii=False),
+                    }
+                )
+                messages.append(
+                    {
+                        "role": "tool",
+                        "content": json.dumps({"tool": "read_file", "result": meta_payload}, ensure_ascii=False),
+                    }
+                )
+            example_loaded["plugin"] = True
+        if creation_intent.get("need_platform") and not example_loaded.get("platform"):
+            for path in _select_example_paths(user_text or "", "platform"):
+                meta_payload = run_meta_tool(
+                    func="read_file",
+                    args={"path": path},
+                    platform=platform,
+                    registry=registry,
+                    enabled_predicate=enabled_predicate,
+                )
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": json.dumps({"function": "read_file", "arguments": {"path": path}}, ensure_ascii=False),
+                    }
+                )
+                messages.append(
+                    {
+                        "role": "tool",
+                        "content": json.dumps({"tool": "read_file", "result": meta_payload}, ensure_ascii=False),
+                    }
+                )
+            example_loaded["platform"] = True
+        state["examples_loaded"] = example_loaded
         save_task_state(state, r=r)
 
     while rounds_used < max_rounds:

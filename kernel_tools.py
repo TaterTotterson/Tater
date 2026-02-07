@@ -31,7 +31,8 @@ AGENT_DOCUMENTS_DIR = AGENT_LAB_DIR / "documents"
 AGENT_DOWNLOADS_DIR = AGENT_LAB_DIR / "downloads"
 AGENT_WORKSPACE_DIR = AGENT_LAB_DIR / "workspace"
 AGENT_LOGS_DIR = AGENT_LAB_DIR / "logs"
-AGENT_SKILLS_DIR = AGENT_LAB_DIR / "skills"
+SKILLS_DIR = BASE_DIR / "skills"
+AGENT_SKILLS_DIR = SKILLS_DIR / "agent_lab"
 AGENT_REQUIREMENTS = AGENT_LAB_DIR / "requirements.txt"
 
 STABLE_PLUGINS_DIR = BASE_DIR / os.getenv("TATER_PLUGIN_DIR", "plugins")
@@ -52,6 +53,7 @@ def _ensure_dirs() -> None:
         AGENT_WORKSPACE_DIR,
         AGENT_LOGS_DIR,
         AGENT_SKILLS_DIR,
+        SKILLS_DIR,
     ):
         path.mkdir(parents=True, exist_ok=True)
     if not AGENT_REQUIREMENTS.exists():
@@ -292,7 +294,7 @@ def download_file(
 
 def read_file(path: str) -> Dict[str, Any]:
     _ensure_dirs()
-    allowed = [AGENT_LAB_DIR, STABLE_PLUGINS_DIR, STABLE_PLATFORMS_DIR]
+    allowed = [AGENT_LAB_DIR, STABLE_PLUGINS_DIR, STABLE_PLATFORMS_DIR, SKILLS_DIR]
     resolved = _resolve_safe_path(path, allowed)
     if not resolved:
         return {"tool": "read_file", "ok": False, "error": "Path not allowed."}
