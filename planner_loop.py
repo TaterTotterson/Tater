@@ -71,7 +71,17 @@ AGENT_CREATION_REPAIR_PROMPT = (
     "Use create_plugin/create_platform (not write_file for plugins/platforms). "
     "Agent Lab platforms require a PLATFORM dict and a run(stop_event) function. "
     "Agent Lab plugins must subclass ToolPlugin and expose a module-level `plugin` instance (not a dict). "
-    "Always include full file content via code_lines (preferred) or code/code_b64."
+    "Always include full file content via code_lines (preferred) or code/code_b64. "
+    "When using code_lines, keep `usage` as a single-line JSON string to avoid quoting errors "
+    "(example: usage = '{\"function\":\"my_plugin\",\"arguments\":{}}'). "
+    "Each code_lines entry must be a single line (no embedded \\n). Use single-quoted strings to avoid escaping. "
+    "Do NOT split list/dict literals across multiple code_lines entries. "
+    "If you call llm_client.chat, keep the messages list on ONE line: "
+    "messages=[{\"role\":\"system\",\"content\":\"...\"},{\"role\":\"user\",\"content\":\"...\"}]. "
+    "For Agent Lab plugins, set `platforms` to include the current platform, and implement the matching handler "
+    "(e.g., handle_webui for webui, handle_discord for discord). "
+    "Always include `when_to_use` and a waiting_prompt_template for Agent Lab plugins. "
+    "waiting_prompt_template must be an instruction to the LLM (e.g., 'Write a short, friendly status line...')."
 )
 AGENT_CREATION_FAILURE_TEXT = "Sorry, I couldn't generate the required tool calls. Please try again."
 AGENT_UNKNOWN_TOOL_REPAIR_PROMPT = (
@@ -85,7 +95,11 @@ PLUGIN_REQUIREMENTS_HINT = (
     "Plugin must subclass ToolPlugin imported from plugin_base and assign an instance to module-level `plugin` (not a dict). "
     "Required attributes: name, plugin_name, version, description, platforms, usage (string). "
     "platforms must be a list of supported platform ids: webui, discord, irc, homeassistant, "
-    "homekit, matrix, telegram, xbmc, automation, rss (or 'both')."
+    "homekit, matrix, telegram, xbmc, automation, rss (or 'both'). "
+    "Include when_to_use and waiting_prompt_template (required for Agent Lab plugins). "
+    "Keep usage as a single-line JSON string, e.g., usage = '{\"function\":\"my_plugin\",\"arguments\":{}}'. "
+    "Each code_lines entry must be a single line (no embedded \\n). "
+    "If you call llm_client.chat, put the messages list on ONE line with a comma between dicts."
 )
 
 
@@ -291,6 +305,9 @@ def _agent_system_instructions(max_rounds: int, max_tool_calls: int) -> str:
         "Rules:\n"
         "- Decide the next step each round: tool call, question, or finish.\n"
         "- Use list_plugins to discover tools; use get_plugin_help if arguments are unclear.\n"
+        "- If the user asks to schedule or run a recurring task (daily/weekly/every), use the `ai_tasks` plugin; do not create a platform or tool.\n"
+        "- If the user asks to run a plugin by name (even approximate), call list_plugins and pick the closest match (ignore minor typos/plurals). If a close match exists, use it and do not claim it’s unavailable; optionally confirm.\n"
+        "- When calling a plugin, use its id from list_plugins (not the display name).\n"
         "- Examples that require list_plugins: weather/forecast, news, stocks, sports scores, downloads, music/song generation, image/video generation, camera feeds/snapshots (front/back yard, porch, driveway, garage), camera/sensor status, smart-home actions.\n"
         "- The user does not need to explicitly request tool use; if a tool is appropriate, use it.\n"
         "- Prefer using a tool over attempting to answer from scratch when a tool could fulfill the request.\n"
@@ -300,7 +317,6 @@ def _agent_system_instructions(max_rounds: int, max_tool_calls: int) -> str:
         "- Before saying you cannot do something in this environment, call list_plugins to verify tool availability.\n"
         "- Before creating Agent Lab plugins/platforms, read the authoring skills via read_file:\n"
         "  skills/agent_lab/plugin_authoring.md and skills/agent_lab/platform_authoring.md.\n"
-        "- When creating new Agent Lab plugins/platforms, read 1–2 similar stable examples using list_directory/read_file.\n"
         "- If a tool returns needs[], stop and ask exactly those questions.\n"
         "- If an action is destructive/high-impact, ask for explicit confirmation first.\n"
         f"- Budget: max rounds={max_rounds}, max tool calls={max_tool_calls}.\n"
@@ -311,6 +327,11 @@ def _agent_system_instructions(max_rounds: int, max_tool_calls: int) -> str:
         "create_platform, validate_platform, write_workspace_note, list_workspace.\n"
         "When writing files or code, prefer `content_lines`/`code_lines` arrays (one string per line) to avoid JSON escaping issues; "
         "base64 fields (`content_b64`/`code_b64`) are also supported.\n"
+        "For create_plugin/create_platform, do NOT use manifest/code_files. Provide `name` plus `code_lines` (preferred) "
+        "or `code`/`code_b64`. Avoid triple-quoted docstrings or unescaped double quotes inside code_lines; "
+        "use single quotes or comments instead.\n"
+        "If the user explicitly asks for AI-generated content (e.g., AI-generated jokes, stories, summaries), "
+        "the plugin must call llm_client at runtime to generate output. Do NOT hardcode a static list.\n"
         "File writes are restricted to agent_lab/; stable code is read-only.\n"
         "Use read_url for small text downloads. Use download_file to save files under agent_lab/downloads.\n"
         "You cannot start/stop platforms yourself; after creating one, instruct the user to enable/start it from the Agent Lab tab.\n"
@@ -405,70 +426,77 @@ def _has_valid_created(items: List[str]) -> bool:
     return False
 
 
-def _extract_example_keywords(text: str) -> List[str]:
-    s = (text or "").lower()
-    if not s:
-        return []
-    tokens = re.split(r"[^a-z0-9]+", s)
-    out = []
-    for t in tokens:
-        if len(t) >= 3:
-            out.append(t)
-    # Normalize common synonyms
-    if "song" in out:
-        out.append("music")
-        out.append("audio")
-    if "music" in out:
-        out.append("audio")
-    if "image" in out or "picture" in out or "photo" in out:
-        out.append("image")
-    if "video" in out or "animation" in out or "movie" in out:
-        out.append("video")
-    if "camera" in out or "snapshot" in out:
-        out.append("camera")
-    return list(dict.fromkeys(out))
+def _log_creation_response(task_id: str, user_text: str, response_text: str) -> None:
+    if not response_text:
+        return
+    try:
+        base_dir = os.path.join(os.getcwd(), "agent_lab", "logs")
+        os.makedirs(base_dir, exist_ok=True)
+        path = os.path.join(base_dir, "agent_creation.log")
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{ts} | task={task_id}\n")
+            f.write(f"USER: {user_text}\n")
+            f.write("MODEL:\n")
+            f.write(response_text.rstrip() + "\n")
+            f.write("-" * 60 + "\n")
+    except Exception:
+        return
 
 
-def _select_example_paths(text: str, kind: str, max_examples: int = 2) -> List[str]:
-    keywords = _extract_example_keywords(text)
-    if kind == "plugin":
-        candidates = [
-            (["image", "picture", "photo"], "plugins/comfyui_image_plugin.py"),
-            (["video", "animation", "movie"], "plugins/comfyui_video_plugin.py"),
-            (["audio", "music", "song"], "plugins/comfyui_audio_ace.py"),
-            (["weather", "forecast"], "plugins/weather_forecast.py"),
-            (["homeassistant", "home", "lights", "switch", "device"], "plugins/ha_control.py"),
-            (["notify", "message", "alert"], "plugins/send_message.py"),
-            (["rss", "feed"], "plugins/watch_feed.py"),
-        ]
-        fallback = ["plugins/send_message.py"]
-    else:
-        candidates = [
-            (["rss", "feed"], "platforms/rss_platform.py"),
-            (["discord"], "platforms/discord_platform.py"),
-            (["irc"], "platforms/irc_platform.py"),
-            (["matrix"], "platforms/matrix_platform.py"),
-            (["telegram"], "platforms/telegram_platform.py"),
-            (["homeassistant", "home", "ha"], "platforms/homeassistant_platform.py"),
-            (["homekit"], "platforms/homekit_platform.py"),
-            (["xbmc"], "platforms/xbmc_platform.py"),
-        ]
-        fallback = ["platforms/rss_platform.py"]
+async def _force_creation_tool_call(
+    *,
+    llm_client: Any,
+    user_text: str,
+    missing_parts: List[str],
+) -> Optional[Dict[str, Any]]:
+    """
+    Last-resort attempt to coerce a valid create_plugin/create_platform tool call.
+    Returns parsed tool call dict or None.
+    """
+    if not llm_client or not user_text:
+        return None
 
-    scored = []
-    for keys, path in candidates:
-        score = 0
-        for k in keys:
-            if k in keywords:
-                score += 1
-        if score > 0:
-            scored.append((score, path))
+    wants_plugin = "plugin" in (missing_parts or [])
+    wants_platform = "platform" in (missing_parts or [])
+    if not (wants_plugin or wants_platform):
+        return None
 
-    scored.sort(key=lambda x: (-x[0], x[1]))
-    picks = [p for _, p in scored][:max_examples]
-    if not picks:
-        picks = fallback[:max_examples]
-    return picks
+    tool_name = "create_plugin" if wants_plugin else "create_platform"
+    system = (
+        "You MUST return ONLY valid JSON with a single tool call.\n"
+        f"Tool to call: {tool_name}.\n"
+        "Use fields: name, code_lines (preferred) or code/code_b64.\n"
+        "Do NOT use manifest/code_files.\n"
+        "Avoid triple-quoted docstrings and unescaped double quotes in code_lines.\n"
+        "If the user asked for AI-generated content, the plugin must call llm_client at runtime (no static lists).\n"
+        "Return ONLY JSON. No extra text."
+    )
+    user = (
+        "User request:\n"
+        f"{user_text}\n\n"
+        "Pick a short, safe id for name (snake_case)."
+    )
+    try:
+        resp = await llm_client.chat(
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ]
+        )
+    except Exception:
+        return None
+
+    content = (resp.get("message", {}) or {}).get("content", "").strip()
+    if not content:
+        return None
+    parsed = parse_function_json(content)
+    if not parsed:
+        return None
+    func = str(parsed.get("function") or "").strip()
+    if func not in {"create_plugin", "create_platform"}:
+        return None
+    return parsed
 
 def _missing_creation_parts(state: Dict[str, Any], intent: Dict[str, bool]) -> List[str]:
     created = _creation_state(state)
@@ -618,7 +646,6 @@ async def run_planner_loop(
     unknown_tool_fix_used = False
     created_snapshot = _creation_state(state)
     creation_followup_issued = bool(state.get("creation_followup_issued"))
-    example_loaded = state.get("examples_loaded") or {}
 
     if needs_creation and not state.get("skills_loaded"):
         skill_paths = []
@@ -649,53 +676,12 @@ async def run_planner_loop(
         state["skills_loaded"] = True
         save_task_state(state, r=r)
 
-    if needs_creation:
-        if creation_intent.get("need_plugin") and not example_loaded.get("plugin"):
-            for path in _select_example_paths(user_text or "", "plugin"):
-                meta_payload = run_meta_tool(
-                    func="read_file",
-                    args={"path": path},
-                    platform=platform,
-                    registry=registry,
-                    enabled_predicate=enabled_predicate,
-                )
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": json.dumps({"function": "read_file", "arguments": {"path": path}}, ensure_ascii=False),
-                    }
-                )
-                messages.append(
-                    {
-                        "role": "tool",
-                        "content": json.dumps({"tool": "read_file", "result": meta_payload}, ensure_ascii=False),
-                    }
-                )
-            example_loaded["plugin"] = True
-        if creation_intent.get("need_platform") and not example_loaded.get("platform"):
-            for path in _select_example_paths(user_text or "", "platform"):
-                meta_payload = run_meta_tool(
-                    func="read_file",
-                    args={"path": path},
-                    platform=platform,
-                    registry=registry,
-                    enabled_predicate=enabled_predicate,
-                )
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": json.dumps({"function": "read_file", "arguments": {"path": path}}, ensure_ascii=False),
-                    }
-                )
-                messages.append(
-                    {
-                        "role": "tool",
-                        "content": json.dumps({"tool": "read_file", "result": meta_payload}, ensure_ascii=False),
-                    }
-                )
-            example_loaded["platform"] = True
-        state["examples_loaded"] = example_loaded
+    if needs_creation and not state.get("creation_guidance_loaded"):
+        messages.append({"role": "system", "content": AGENT_CREATION_REPAIR_PROMPT})
+        state["creation_guidance_loaded"] = True
         save_task_state(state, r=r)
+
+    # No automatic stable-example reads for creation requests.
 
     while rounds_used < max_rounds:
         rounds_used += 1
@@ -712,6 +698,10 @@ async def run_planner_loop(
                 break
 
             parsed = parse_function_json(text)
+            if needs_creation:
+                parsed_func = str(parsed.get("function") or "").strip() if parsed else ""
+                if parsed_func not in {"create_plugin", "create_platform"}:
+                    _log_creation_response(task_id or "unknown", user_text or "", text)
             if not parsed:
                 created_snapshot = _creation_state(state)
                 already_created = bool(
@@ -720,6 +710,17 @@ async def run_planner_loop(
                     or created_snapshot.get("files")
                 )
                 missing_parts = _missing_creation_parts(state, creation_intent) if needs_creation else []
+                if ("create_plugin" in text or "create_platform" in text) and not format_fix_used:
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            "Your tool-call JSON was invalid. Return ONLY valid JSON.\n"
+                            "For create_plugin/create_platform, do NOT use manifest/code_files. "
+                            "Use name plus code_lines (preferred) or code/code_b64."
+                        ),
+                    })
+                    format_fix_used = True
+                    continue
                 if looks_like_tool_markup(text):
                     if not format_fix_used:
                         messages.append({"role": "system", "content": TOOL_MARKUP_REPAIR_PROMPT})
@@ -729,6 +730,7 @@ async def run_planner_loop(
                 elif needs_creation and missing_parts:
                     if creation_fix_used < CREATION_MAX_REPROMPTS:
                         need_line = " and ".join(missing_parts)
+                        messages.append({"role": "system", "content": AGENT_CREATION_REPAIR_PROMPT})
                         messages.append(
                             {
                                 "role": "system",
@@ -740,6 +742,14 @@ async def run_planner_loop(
                             }
                         )
                         creation_fix_used += 1
+                        continue
+                    forced = await _force_creation_tool_call(
+                        llm_client=llm_client,
+                        user_text=user_text or "",
+                        missing_parts=missing_parts,
+                    )
+                    if forced:
+                        forced_call = forced
                         continue
                     text = _creation_summary(state) or AGENT_CREATION_FAILURE_TEXT
                 elif needs_creation and already_created:
@@ -975,10 +985,18 @@ async def run_planner_loop(
             save_task_state(state, r=r)
             continue
 
-        # Attach origin if provided
+        # Attach origin if provided (merge to preserve channel/room context)
         if origin:
             args = dict(args or {})
-            args.setdefault("origin", origin)
+            existing = args.get("origin")
+            if not isinstance(existing, dict) or not existing:
+                args["origin"] = origin
+            else:
+                merged = dict(origin)
+                for k, v in existing.items():
+                    if v not in (None, ""):
+                        merged[k] = v
+                args["origin"] = merged
 
         # Loop detection
         signature = _signature_for_attempt(func, args)

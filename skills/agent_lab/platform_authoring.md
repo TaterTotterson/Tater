@@ -7,11 +7,15 @@ Agent Lab platforms live in `agent_lab/platforms/` and must not write outside `a
 **Overview**
 - Platforms are long-running services started and stopped from the Agent Lab tab.
 - They run in a background thread and must support cooperative shutdown.
-- Before authoring, scan 1–2 similar stable platforms in `platforms/` with `list_directory` + `read_file` to match patterns.
 
 **File Layout**
 - Create: `agent_lab/platforms/<platform_key>.py`
 - Must expose a module-level `PLATFORM` dict and `run(stop_event=None)` function.
+
+**Tool Call Format**
+- Use `create_platform` with `name` plus `code_lines` (preferred) or `code`/`code_b64`.
+- Do NOT use `manifest` / `code_files` schemas; they are not accepted by the runtime.
+- Avoid triple-quoted strings inside `code_lines` (they break JSON). Prefer single quotes or comments.
 
 **Required Exports (Agent Lab)**
 ```python

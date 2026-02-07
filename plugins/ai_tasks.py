@@ -2,7 +2,8 @@ import json
 import logging
 import time
 import uuid
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
 from typing import Any, Dict
 
 from plugin_base import ToolPlugin
@@ -24,6 +25,22 @@ REMINDER_DUE_ZSET = "reminders:due"
 
 class AITasksPlugin(ToolPlugin):
     name = "ai_tasks"
+    required_args = ["message"]
+    optional_args = [
+        "task_prompt",
+        "title",
+        "platform",
+        "targets",
+        "when_ts",
+        "when",
+        "in_seconds",
+        "every_seconds",
+        "priority",
+        "tags",
+        "ttl_sec",
+        "origin",
+    ]
+    version = "1.0.1"
     usage = (
         "{\n"
         "  \"function\": \"ai_tasks\",\n"
@@ -37,7 +54,7 @@ class AITasksPlugin(ToolPlugin):
         "      \"chat_id\": \"optional telegram destination chat id\"\n"
         "    },\n"
         "    \"when_ts\": 1730000000.0,\n"
-        "    \"when\": \"2026-02-03 15:04:05\",\n"
+        "    \"when\": \"2026-02-03 15:04:05 or 10am\",\n"
         "    \"in_seconds\": 3600,\n"
         "    \"every_seconds\": 0,\n"
         "    \"priority\": \"normal|high\",\n"
@@ -53,6 +70,10 @@ class AITasksPlugin(ToolPlugin):
     pretty_name = "AI Tasks"
 
     platforms = ["discord", "irc", "matrix", "homeassistant", "telegram", "webui"]
+    waiting_prompt_template = (
+        "Write a short, friendly message telling {mention} you’re scheduling the task now. "
+        "Only output that message."
+    )
 
     @staticmethod
     def _normalize_channel_targets(dest: str, targets: Dict[str, Any]) -> Dict[str, Any]:
@@ -162,6 +183,7 @@ class AITasksPlugin(ToolPlugin):
 
         if isinstance(when_txt, str) and when_txt.strip():
             text = when_txt.strip()
+            text_lower = text.lower()
             # numeric string -> epoch
             if text.isdigit():
                 try:
@@ -185,6 +207,35 @@ class AITasksPlugin(ToolPlugin):
                         break
                     except Exception:
                         dt = None
+
+            if dt is None:
+                # time-only formats like "10am", "10:30 pm", "at 22:15"
+                m = re.match(r"^(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*$", text_lower)
+                if m:
+                    hour = int(m.group(1))
+                    minute = int(m.group(2) or 0)
+                    mer = m.group(3)
+                    if hour < 1 or hour > 12 or minute > 59:
+                        return None
+                    if mer == "am":
+                        hour = 0 if hour == 12 else hour
+                    else:
+                        hour = 12 if hour == 12 else hour + 12
+                    now_dt = datetime.now().astimezone()
+                    dt = now_dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                    if dt.timestamp() <= now_dt.timestamp():
+                        dt = dt + timedelta(days=1)
+                else:
+                    m24 = re.match(r"^(?:at\s+)?(\d{1,2})(?::(\d{2}))\s*$", text_lower)
+                    if m24:
+                        hour = int(m24.group(1))
+                        minute = int(m24.group(2))
+                        if hour < 0 or hour > 23 or minute > 59:
+                            return None
+                        now_dt = datetime.now().astimezone()
+                        dt = now_dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                        if dt.timestamp() <= now_dt.timestamp():
+                            dt = dt + timedelta(days=1)
 
             if dt is None:
                 return None
@@ -231,13 +282,7 @@ class AITasksPlugin(ToolPlugin):
         if dest not in ALLOWED_PLATFORMS:
             return "Cannot queue: missing destination platform"
 
-        next_run = self._parse_when(when_ts, when_txt, in_seconds)
-        if next_run is None:
-            return "Cannot schedule: missing or invalid time"
-
         now = time.time()
-        if next_run < now:
-            next_run = now
 
         try:
             interval = float(every_seconds) if every_seconds is not None else 0.0
@@ -245,6 +290,15 @@ class AITasksPlugin(ToolPlugin):
             interval = 0.0
         if interval < 0:
             interval = 0.0
+
+        next_run = self._parse_when(when_ts, when_txt, in_seconds)
+        if next_run is None and interval > 0:
+            next_run = now + max(1.0, interval)
+        if next_run is None:
+            return "Cannot schedule: missing or invalid time"
+
+        if next_run < now:
+            next_run = now
 
         normalized_targets = self._normalize_channel_targets(dest, targets)
         defaults = load_default_targets(dest, redis_client)
