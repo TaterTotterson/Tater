@@ -290,6 +290,8 @@ def _agent_system_instructions(max_rounds: int, max_tool_calls: int) -> str:
         "Rules:\n"
         "- Decide the next step each round: tool call, question, or finish.\n"
         "- Use list_plugins to discover tools; use get_plugin_help if arguments are unclear.\n"
+        "- The user does not need to explicitly request tool use; if a tool is appropriate, use it.\n"
+        "- Prefer using a tool over attempting to answer from scratch when a tool could fulfill the request.\n"
         "- Only call tools compatible with this platform.\n"
         "- For any create/generate request (content, media, files, or other artifacts), always call list_plugins before responding.\n"
         "- Do not provide a creative or alternative response until you have verified no compatible tool exists.\n"
@@ -309,8 +311,6 @@ def _agent_system_instructions(max_rounds: int, max_tool_calls: int) -> str:
         "base64 fields (`content_b64`/`code_b64`) are also supported.\n"
         "File writes are restricted to agent_lab/; stable code is read-only.\n"
         "Use read_url for small text downloads. Use download_file to save files under agent_lab/downloads.\n"
-        "If the user asks to create a new tool, plugin, or server, use Agent Lab tools to create it under agent_lab/.\n"
-        "For local HTTP APIs, create an Agent Lab platform with run(stop_event) that serves the endpoint and exits cleanly on stop.\n"
         "You cannot start/stop platforms yourself; after creating one, instruct the user to enable/start it from the Agent Lab tab.\n"
         "Do not refuse by claiming you can't create plugins or servers here; create the Agent Lab code and explain how to activate it.\n"
     )

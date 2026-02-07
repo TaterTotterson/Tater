@@ -266,6 +266,8 @@ Tater will automatically connect using HTTPS without appending a port number.
 Tip: The Agent Lab data lives in `/app/agent_lab` inside the container.  
 If you don’t mount it to the host, Agent Lab plugins/platforms/artifacts will be lost when the container is rebuilt or updated.
 
+Unraid note: add a container path mapping for `/app/agent_lab` to a persistent share (e.g., `/mnt/user/appdata/tater/agent_lab`) so you don’t lose Agent Lab data during container updates.
+
 ### 3. Access the Web UI
 
 Once the container is running, open your browser and navigate to:
