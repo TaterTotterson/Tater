@@ -12,11 +12,15 @@ import time
 import irc3
 from notify_queue import is_expired
 from helpers import (
-    parse_function_json,
     get_tater_name,
     get_tater_personality,
     get_llm_client_from_env,
 )
+from admin_gate import is_admin_only_plugin, normalize_admin_list
+from agent_lab_registry import build_agent_registry
+from plugin_result import action_failure
+from plugin_kernel import plugin_supports_platform
+from planner_loop import should_use_agent_mode, run_planner_loop
 
 load_dotenv()
 logger = logging.getLogger("irc.tater")
@@ -59,6 +63,12 @@ PLATFORM_SETTINGS = {
             "type": "string",
             "default": "",
             "description": "Login password (ZNC password)"
+        },
+        "admin_nick": {
+            "label": "Admin Nick",
+            "type": "string",
+            "default": "",
+            "description": "Only this nick can run admin-only tools (comma-separated supported)."
         }
     }
 }
@@ -96,6 +106,7 @@ def _load_irc_settings():
     username = settings.get("irc_username", "")
     password = settings.get("irc_password", "")
     ssl_flag = str(settings.get("irc_ssl", "false")).lower() in ("1", "true", "yes", "on")
+    admin_nick = settings.get("admin_nick", "")
 
     return {
         "server": server,
@@ -105,7 +116,15 @@ def _load_irc_settings():
         "username": username,
         "password": password,
         "ssl": ssl_flag,
+        "admin_nick": admin_nick,
     }
+
+def _irc_admin_allowed(nick: str) -> bool:
+    raw = (_load_irc_settings().get("admin_nick") or "").strip()
+    allowed = normalize_admin_list(raw)
+    if not allowed:
+        return False
+    return str(nick or "").strip().lower() in allowed
 
 def format_irc_text(raw: str, width: int = 80) -> str:
     if not isinstance(raw, str):
@@ -312,6 +331,62 @@ def _enforce_user_assistant_alternation(loop_messages):
 
     return merged
 
+
+def _strip_bot_mention(text: str, bot_name: str) -> str:
+    if not text:
+        return ""
+    if not bot_name:
+        return text.strip()
+    pattern = re.compile(rf"\\b{re.escape(bot_name)}\\b", flags=re.IGNORECASE)
+    cleaned = pattern.sub("", text)
+    cleaned = re.sub(r"[@,:;.!]+", " ", cleaned)
+    cleaned = re.sub(r"\\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def _is_mention_only(text: str, bot_name: str) -> bool:
+    return _strip_bot_mention(text, bot_name) == ""
+
+
+def _sanitize_request_text(text: str, bot_name: str = "", sender_name: str = "") -> str:
+    if not text:
+        return ""
+    cleaned = str(text).strip()
+    if sender_name:
+        prefix = re.compile(rf"^@?{re.escape(sender_name)}\\b\\s*[:,-]\\s*", flags=re.IGNORECASE)
+        cleaned = prefix.sub("", cleaned).strip()
+    if bot_name:
+        cleaned = _strip_bot_mention(cleaned, bot_name)
+    return cleaned
+
+
+def _find_prev_user_message(channel: str, sender: str, bot_name: str, exclude_text=None) -> str:
+    key = f"tater:irc:{channel}:history"
+    try:
+        raw_history = redis_client.lrange(key, 0, -1)
+    except Exception:
+        return ""
+
+    for entry in reversed(raw_history):
+        try:
+            data = json.loads(entry)
+        except Exception:
+            continue
+        if data.get("role") != "user":
+            continue
+        if sender and data.get("username") != sender:
+            continue
+        content = data.get("content")
+        if not isinstance(content, str):
+            continue
+        if exclude_text and content == exclude_text:
+            continue
+        if _is_mention_only(content, bot_name):
+            continue
+        return content.strip()
+
+    return ""
+
 def get_plugin_enabled(name):
     enabled = redis_client.hget("plugin_enabled", name)
     return enabled and enabled.lower() == "true"
@@ -359,46 +434,31 @@ def build_system_prompt():
     persona_clause = ""
     if personality:
         persona_clause = (
-            f"You should speak and behave like {personality} "
-            "while still being helpful, concise, and easy to understand. "
-            "Keep the style subtle rather than over-the-top. "
-            "Even while staying in character, you must strictly follow the tool-calling rules below.\n\n"
+            f"Voice style: {personality}. "
+            "This changes tone only and never overrides tool rules.\n\n"
         )
-
-    base_prompt = (
-        f"You are {first} {last}, an IRC-savvy AI assistant with access to various tools and plugins.\n\n"
-        f"{persona_clause}"
-        "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
-    )
-
-    plugins = pr.get_registry_snapshot()
-    available_plugins = [
-        plugin for plugin in plugins.values()
-        if ("irc" in plugin.platforms or "both" in plugin.platforms) and get_plugin_enabled(plugin.name)
-    ]
-    logger.debug(
-        "[IRC] Number of plugins visible: %s | Number of enabled tools: %s",
-        len(plugins),
-        len(available_plugins),
-    )
-    tool_instructions = "\n\n".join(
-        f"Tool: {plugin.name}\n"
-        f"Description: {getattr(plugin, 'description', 'No description provided.')}\n"
-        f"{plugin.usage}"
-        for plugin in available_plugins
-    )
-
-    behavior_guard = (
-        "Only call a tool if the user's latest message clearly requests an action — such as 'generate', 'summarize', or 'download'.\n"
-        "Never call a tool in response to casual or friendly messages like 'thanks', 'lol', or 'cool' — reply normally instead.\n"
-    )
 
     return (
         f"Current Date and Time is: {now}\n\n"
-        f"{base_prompt}\n\n"
-        f"{tool_instructions}\n\n"
-        f"{behavior_guard}"
-        "If no function is needed, reply normally.\n"
+        f"You are {first} {last}, an IRC-savvy AI assistant.\n\n"
+        f"{persona_clause}"
+        "Current platform: irc.\n"
+        "Tool strategy:\n"
+        "- Answer directly when no external action/live data is needed.\n"
+        "- Tools are discovered on-demand; not all tools are described here. If unsure, call list_plugins.\n"
+        "- If tool use might be needed, call list_plugins first.\n- If the user asks to control devices or services or interact with external systems, call list_plugins first.\n"
+        "- If the user asks about a specific tool/plugin by name or asks what a tool can do, call list_plugins or get_plugin_help instead of guessing.\n"
+        "- If you might need a tool or are unsure a capability exists, call list_plugins before saying it is unavailable.\n"
+        "- If the user asks for multiple independent actions, you may call tools one at a time until all actions are complete, then respond.\n"
+        "- Optionally call get_plugin_help before plugin execution.\n"
+        "- Ask concise follow-up questions for missing required inputs.\n"
+        "- Only ask for inputs a tool explicitly requires (from list_plugins needs or get_plugin_help required_args). If defaults exist, proceed without asking.\n"
+        "- Call only plugins compatible with irc.\n"
+        "- If unsupported on irc, explain and list supported platforms.\n"
+        "- Tool calls must be JSON only: {\"function\":\"name\",\"arguments\":{...}}\n"
+        "- Meta-tools: list_plugins, get_plugin_help, list_platforms_for_plugin.\n"
+        "- Never claim success unless tool output confirms success.\n"
+        "Use plain ASCII text; no markdown and no emoji.\n"
     )
 
 @irc3.event(irc3.rfc.PRIVMSG)
@@ -409,108 +469,123 @@ async def on_message(self, mask, event, target, data):
     if first.lower() not in data.lower():
         return
 
+    effective_request = data
+    stripped = _strip_bot_mention(data, first)
+    if stripped:
+        effective_request = stripped
+    elif _is_mention_only(data, first):
+        prev = _find_prev_user_message(target, mask.nick, first, exclude_text=data)
+        if prev:
+            effective_request = prev
+    effective_request = _sanitize_request_text(effective_request, bot_name=first, sender_name=mask.nick)
+
     logger.info(f"<{mask.nick}> {data}")
     history = load_irc_history(channel=target)
     messages = [{"role": "system", "content": build_system_prompt()}] + history
+    merged_registry, merged_enabled, _collisions = build_agent_registry(
+        pr.get_registry_snapshot(),
+        get_plugin_enabled,
+    )
 
     try:
-        response = await llm_client.chat(messages)
-        response_text = response["message"].get("content", "").strip()
-        logger.info(f"{first}: {response_text}")
+        _use_agent, active_task_id, _reason = should_use_agent_mode(
+            user_text=effective_request,
+            platform="irc",
+            scope=target,
+            r=redis_client,
+        )
+        origin = {
+            "platform": "irc",
+            "channel": target,
+            "user": mask.nick,
+            "request_id": f"{target}:{time.time():.3f}",
+        }
+        origin = {k: v for k, v in origin.items() if v not in (None, "")}
 
-        parsed = parse_function_json(response_text)
-        if parsed and isinstance(parsed, dict) and "function" in parsed:
-            func = parsed["function"]
-            args = parsed.get("arguments", {}) or {}
-
-            # Attach origin context for auto-targeting
-            origin = {
-                "platform": "irc",
-                "channel": target,
-                "user": mask.nick,
-                "request_id": f"{target}:{time.time():.3f}",
-            }
-            origin = {k: v for k, v in origin.items() if v not in (None, "")}
-            args = dict(args)
-            args["origin"] = origin
-
-            plugins = pr.get_registry_snapshot()
-            if func in plugins and get_plugin_enabled(func):
-                plugin = plugins[func]
-
-                # Save structured plugin_call marker (corrected)
+        async def _wait_callback(func_name, plugin_obj):
+            if not plugin_obj:
+                return
+            if not plugin_supports_platform(plugin_obj, "irc"):
+                return
+            if not hasattr(plugin_obj, "waiting_prompt_template"):
+                return
+            wait_msg = plugin_obj.waiting_prompt_template.format(mention=mask.nick)
+            wait_response = await llm_client.chat(
+                messages=[
+                    {"role": "system", "content": "Write one short, plain ASCII status line."},
+                    {"role": "user", "content": wait_msg},
+                ]
+            )
+            wait_text = (wait_response.get("message", {}) or {}).get("content", "").strip()
+            if wait_text:
+                self.privmsg(target, f"{mask.nick}: {wait_text}")
                 save_irc_message(
                     channel=target,
                     role="assistant",
                     username="assistant",
-                    content={"marker": "plugin_call", "plugin": func, "arguments": args}
+                    content={"marker": "plugin_wait", "content": wait_text},
                 )
 
-                # Optional waiting message (save as plugin_wait AFTER generated)
-                if hasattr(plugin, "waiting_prompt_template"):
-                    wait_prompt = plugin.waiting_prompt_template.format(mention=mask.nick)
-                    wait_response = await llm_client.chat(
-                        messages=[
-                            {"role": "system", "content": "Write one short, friendly status line."},
-                            {"role": "user", "content": wait_prompt}
-                        ]
-                    )
-                    wait_text = wait_response["message"]["content"].strip()
-                    send_formatted(self, target, wait_text)
-                    save_irc_message(
-                        channel=target,
-                        role="assistant",
-                        username="assistant",
-                        content={"marker": "plugin_wait", "content": wait_text}
-                    )
+        def _admin_guard(func_name):
+            if is_admin_only_plugin(func_name) and not _irc_admin_allowed(mask.nick):
+                msg = (
+                    "This tool is restricted to the configured admin user on IRC."
+                    if (_load_irc_settings().get("admin_nick") or "").strip()
+                    else "This tool is disabled because no IRC admin user is configured."
+                )
+                return action_failure(
+                    code="admin_only",
+                    message=msg,
+                    needs=[],
+                    say_hint="Explain that this tool is restricted to the admin user on this platform.",
+                )
+            return None
 
-                result = await plugin.handle_irc(self, target, mask.nick, data, args, llm_client)
+        result = await run_planner_loop(
+            llm_client=llm_client,
+            platform="irc",
+            history_messages=messages,
+            registry=merged_registry,
+            enabled_predicate=merged_enabled,
+            context={"raw_message": data},
+            user_text=effective_request,
+            scope=target,
+            task_id=active_task_id,
+            origin=origin,
+            wait_callback=_wait_callback,
+            admin_guard=_admin_guard,
+            redis_client=redis_client,
+        )
 
-                if isinstance(result, list):
-                    for item in result:
-                        if isinstance(item, str):
-                            send_formatted(self, target, item)
-                            save_irc_message(
-                                channel=target,
-                                role="assistant",
-                                username="assistant",
-                                content={"marker": "plugin_response", "phase": "final", "content": item}
-                            )
+        final_text = (result.get("text") or "").strip()
+        if final_text:
+            send_formatted(self, target, final_text)
+            save_irc_message(
+                channel=target,
+                role="assistant",
+                username="assistant",
+                content={"marker": "plugin_response", "phase": "final", "content": final_text},
+            )
 
-                        elif isinstance(item, dict):
-                            # Save a light placeholder to history
-                            kind = (item.get("type") or "file").lower()
-                            name = item.get("name", "output")
-                            placeholder = f"[{kind.capitalize()}: {name}]"
-                            self.privmsg(target, f"{mask.nick}: {placeholder}")
-                            save_irc_message(
-                                channel=target,
-                                role="assistant",
-                                username="assistant",
-                                content={
-                                    "marker": "plugin_response",
-                                    "phase": "final",
-                                    "content": {"type": kind, "name": name}
-                                }
-                            )
-
-                elif isinstance(result, str) and result.strip():
-                    send_formatted(self, target, result)
-                    save_irc_message(
-                        channel=target,
-                        role="assistant",
-                        username="assistant",
-                        content={"marker": "plugin_response", "phase": "final", "content": result}
-                    )
-
-                else:
-                    logger.debug(f"[{func}] Plugin returned nothing or unrecognized result type: {type(result)}")
-
-                return
-
-        # Default fallback reply
-        send_formatted(self, target, response_text)
-        save_irc_message(channel=target, role="assistant", username="assistant", content=response_text)
+        artifacts = result.get("artifacts") or []
+        for item in artifacts:
+            if not isinstance(item, dict):
+                continue
+            kind = (item.get("type") or "file").lower()
+            name = item.get("name", "output")
+            placeholder = f"[{kind.capitalize()}: {name}]"
+            self.privmsg(target, f"{mask.nick}: {placeholder}")
+            save_irc_message(
+                channel=target,
+                role="assistant",
+                username="assistant",
+                content={
+                    "marker": "plugin_response",
+                    "phase": "final",
+                    "content": {"type": kind, "name": name},
+                },
+            )
+        return
 
     except Exception as e:
         logger.error(f"Error processing IRC message: {e}")

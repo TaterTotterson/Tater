@@ -5,6 +5,8 @@ import asyncio
 from urllib.parse import quote
 from plugin_base import ToolPlugin
 from helpers import redis_client
+from plugin_diagnostics import combine_diagnosis, diagnose_hash_fields, diagnose_redis_keys, needs_from_diagnosis
+from plugin_result import action_failure, action_success
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -13,7 +15,7 @@ logger.setLevel(logging.DEBUG)
 class PremiumizeDownloadPlugin(ToolPlugin):
     name = "premiumize_download"
     plugin_name = "Premiumize Download"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "50"
     usage = (
         "{\n"
@@ -40,6 +42,18 @@ class PremiumizeDownloadPlugin(ToolPlugin):
         "Only output that message."
     )
     platforms = ["discord", "webui", "irc", "matrix", "telegram"]
+
+    def _diagnosis(self) -> dict:
+        hash_diag = diagnose_hash_fields(
+            "plugin_settings:Premiumize",
+            fields={"premiumize_api_key": "PREMIUMIZE_API_KEY"},
+            validators={"premiumize_api_key": lambda v: len(v.strip()) >= 10},
+        )
+        key_diag = diagnose_redis_keys(
+            keys={"premiumize_api_key": "tater:premiumize:api_key"},
+            validators={"premiumize_api_key": lambda v: len(v.strip()) >= 10},
+        )
+        return combine_diagnosis(hash_diag, key_diag)
 
     # ------------------- API -------------------
     @staticmethod
@@ -110,22 +124,87 @@ class PremiumizeDownloadPlugin(ToolPlugin):
             return cls._links_to_message(url, links, max_len=max_response_length)
         return f"The URL `{url}` is not cached on Premiumize.me."
 
+    def _to_contract(self, result_text: str, url: str) -> dict:
+        msg = (result_text or "").strip()
+        low = msg.lower()
+        if not msg:
+            return action_failure(
+                code="empty_result",
+                message="Premiumize did not return a response.",
+                diagnosis=self._diagnosis(),
+                needs=["Which URL should I check in Premiumize?"],
+                say_hint="Explain that no output was returned and ask for the URL.",
+            )
+
+        if "api key not configured" in low:
+            diagnosis = self._diagnosis()
+            needs = needs_from_diagnosis(
+                diagnosis,
+                {"premiumize_api_key": "Please set your Premiumize API key in plugin settings."},
+            )
+            return action_failure(
+                code="premiumize_config_missing",
+                message="Premiumize API key is not configured.",
+                diagnosis=diagnosis,
+                needs=needs,
+                say_hint="Explain that Premiumize API settings are missing and ask for the API key.",
+            )
+
+        if "not cached" in low:
+            return action_failure(
+                code="not_cached",
+                message=msg,
+                diagnosis=self._diagnosis(),
+                needs=[],
+                say_hint="Explain the URL is not currently cached on Premiumize.",
+            )
+
+        if low.startswith("failed") or "error" in low:
+            return action_failure(
+                code="premiumize_request_failed",
+                message=msg,
+                diagnosis=self._diagnosis(),
+                needs=["Please verify the URL and try again."],
+                say_hint="Explain that Premiumize lookup failed and ask whether to retry.",
+            )
+
+        return action_success(
+            facts={"url": url, "result": msg},
+            say_hint="Return the download result message exactly as provided without inventing details.",
+            suggested_followups=["Want me to check another URL?"],
+        )
+
     # ------------------- Platform handlers -------------------
     async def handle_discord(self, message, args, llm_client):
         url = (args or {}).get("url")
         if not url:
-            return f"{getattr(message.author, 'mention', '')}: No URL provided for Premiumize download check."
+            return action_failure(
+                code="missing_url",
+                message="No URL provided for Premiumize download check.",
+                needs=["What URL should I check in Premiumize?"],
+                say_hint="Ask the user for the URL to check.",
+            )
         try:
             result = await self._process_download_web(url)
-            return result
+            return self._to_contract(result, url)
         except Exception as e:
             logger.exception("[Premiumize handle_discord] %s", e)
-            return f"{getattr(message.author, 'mention', '')}: Failed to retrieve Premiumize download links: {e}"
+            return action_failure(
+                code="premiumize_exception",
+                message=f"Failed to retrieve Premiumize download links: {e}",
+                diagnosis=self._diagnosis(),
+                say_hint="Explain that Premiumize lookup failed and ask whether to retry.",
+            )
 
     async def handle_webui(self, args, llm_client):
         url = (args or {}).get("url")
         if not url:
-            return ["No URL provided for Premiumize download check."]
+            return action_failure(
+                code="missing_url",
+                message="No URL provided for Premiumize download check.",
+                needs=["What URL should I check in Premiumize?"],
+                say_hint="Ask for the URL.",
+            )
         try:
             asyncio.get_running_loop()
             result = await self._process_download_web(url)
@@ -133,14 +212,23 @@ class PremiumizeDownloadPlugin(ToolPlugin):
             result = asyncio.run(self._process_download_web(url))
         except Exception as e:
             logger.exception("[Premiumize handle_webui] %s", e)
-            return [f"❌ Failed to check download: {e}"]
-        # WebUI expects a list of strings to render
-        return [result]
+            return action_failure(
+                code="premiumize_exception",
+                message=f"Failed to check download: {e}",
+                diagnosis=self._diagnosis(),
+                say_hint="Explain that the Premiumize check failed and ask if the user wants to retry.",
+            )
+        return self._to_contract(result, url)
 
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         url = (args or {}).get("url")
         if not url:
-            return f"{user}: No URL provided for Premiumize download check."
+            return action_failure(
+                code="missing_url",
+                message="No URL provided for Premiumize download check.",
+                needs=["What URL should I check in Premiumize?"],
+                say_hint="Ask for the URL to check.",
+            )
         try:
             asyncio.get_running_loop()
             result = await self._process_download_web(url)
@@ -148,23 +236,40 @@ class PremiumizeDownloadPlugin(ToolPlugin):
             result = asyncio.run(self._process_download_web(url))
         except Exception as e:
             logger.exception("[Premiumize handle_irc] %s", e)
-            return f"{user}: Error checking download: {e}"
-        return f"{user}: {result}"
+            return action_failure(
+                code="premiumize_exception",
+                message=f"Error checking download: {e}",
+                diagnosis=self._diagnosis(),
+                say_hint="Explain that Premiumize lookup failed and ask whether to retry.",
+            )
+        return self._to_contract(result, url)
 
     async def handle_matrix(self, client, room, sender, body, args, ll_client=None, **kwargs):
         """
         Matrix returns a plain string; the platform will handle chunking and sending.
         """
         url = (args or {}).get("url")
-        prefix = f"{sender}: " if sender else ""
         if not url:
-            return f"{prefix}No URL provided for Premiumize download check."
+            return action_failure(
+                code="missing_url",
+                message="No URL provided for Premiumize download check.",
+                needs=["What URL should I check in Premiumize?"],
+                say_hint="Ask for the URL.",
+            )
         try:
             result = await self._process_download_web(url)
-            return f"{prefix}{result}"
+            return self._to_contract(result, url)
         except Exception as e:
             logger.exception("[Premiumize handle_matrix] %s", e)
-            return f"{prefix}Failed to retrieve Premiumize download links: {e}"
+            return action_failure(
+                code="premiumize_exception",
+                message=f"Failed to retrieve Premiumize download links: {e}",
+                diagnosis=self._diagnosis(),
+                say_hint="Explain that Premiumize lookup failed and ask whether to retry.",
+            )
+
+    async def handle_telegram(self, update, args, llm_client):
+        return await self.handle_webui(args, llm_client)
 
 
 plugin = PremiumizeDownloadPlugin()

@@ -212,6 +212,9 @@ class OverseerrDetailsPlugin(ToolPlugin):
         answer = await self._answer(args or {}, llm_client)
         return answer
 
+    async def handle_telegram(self, update, args, llm_client):
+        return await self._answer(args or {}, llm_client)
+
     async def handle_homekit(self, args, llm_client):
         answer = await self._answer(args or {}, llm_client)
         return self._tame_text(answer, 500)

@@ -18,12 +18,16 @@ from notify_queue import is_expired
 from notify_media import load_queue_attachments
 
 from helpers import (
-    parse_function_json,
     get_tater_name,
     get_tater_personality,
     get_llm_client_from_env,
-    build_llm_host_from_env
+    build_llm_host_from_env,
 )
+from admin_gate import is_admin_only_plugin
+from agent_lab_registry import build_agent_registry
+from plugin_result import action_failure
+from plugin_kernel import plugin_supports_platform, plugin_display_name
+from planner_loop import should_use_agent_mode, run_planner_loop
 
 load_dotenv()
 redis_host = os.getenv("REDIS_HOST", "127.0.0.1")
@@ -247,6 +251,14 @@ class discord_platform(commands.Bot):
         self.response_channel_id = response_channel_id
         self.max_response_length = max_response_length
 
+    def _admin_allowed(self, user_id: int | None) -> bool:
+        if not self.admin_user_id:
+            return False
+        try:
+            return int(user_id or 0) == int(self.admin_user_id)
+        except Exception:
+            return False
+
     async def _send_notify_attachment(self, channel, attachment: dict):
         kind = str((attachment or {}).get("type") or "file").strip().lower() or "file"
         filename = str((attachment or {}).get("name") or f"{kind}.bin").strip()
@@ -359,47 +371,30 @@ class discord_platform(commands.Bot):
         persona_clause = ""
         if personality:
             persona_clause = (
-                f"You should speak and behave like {personality} "
-                "while still being helpful, concise, and easy to understand. "
-                "Keep the style subtle rather than over-the-top. "
-                "Even while staying in character, you must strictly follow the tool-calling rules below.\n\n"
+                f"Voice style: {personality}. "
+                "This affects tone only and must never override tool/safety rules.\n\n"
             )
-
-        base_prompt = (
-            f"You are {first} {last}, a Discord-savvy AI assistant with access to various tools and plugins.\n\n"
-            f"{persona_clause}"
-            "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
-        )
-
-        plugins = pr.get_registry_snapshot()
-        available_plugins = [
-            plugin for plugin in plugins.values()
-            if ("discord" in plugin.platforms or "both" in plugin.platforms)
-            and get_plugin_enabled(plugin.name)
-        ]
-        logger.debug(
-            "[Discord] Number of plugins visible: %s | Number of enabled tools: %s",
-            len(plugins),
-            len(available_plugins),
-        )
-        tool_instructions = "\n\n".join(
-            f"Tool: {plugin.name}\n"
-            f"Description: {getattr(plugin, 'description', 'No description provided.')}\n"
-            f"{plugin.usage}"
-            for plugin in available_plugins
-        )
-
-        behavior_guard = (
-            "Only call a tool if the user's latest message clearly requests an action — such as 'generate', 'summarize', or 'download'.\n"
-            "Never call a tool in response to casual or friendly messages like 'thanks', 'lol', or 'cool' — reply normally instead.\n"
-        )
 
         return (
             f"Current Date and Time is: {now}\n\n"
-            f"{base_prompt}\n\n"
-            f"{tool_instructions}\n\n"
-            f"{behavior_guard}"
-            "If no function is needed, reply normally."
+            f"You are {first} {last}, a Discord-savvy AI assistant.\n\n"
+            f"{persona_clause}"
+            "Current platform: discord.\n"
+            "Tool strategy:\n"
+            "- Answer directly when no external action/live data is needed.\n"
+            "- Tools are discovered on-demand; not all tools are described here. If unsure, call list_plugins.\n"
+            "- If a tool may be needed, call list_plugins first.\n- If the user asks to control devices or services or interact with external systems, call list_plugins first.\n"
+            "- If the user asks about a specific tool/plugin by name or asks what a tool can do, call list_plugins or get_plugin_help instead of guessing.\n"
+            "- If you might need a tool or are unsure a capability exists, call list_plugins before saying it is unavailable.\n"
+            "- If the user asks for multiple independent actions, you may call tools one at a time until all actions are complete, then respond.\n"
+            "- Optionally call get_plugin_help before executing a plugin.\n"
+            "- Ask concise follow-up questions if required arguments are missing.\n"
+            "- Only ask for inputs a tool explicitly requires (from list_plugins needs or get_plugin_help required_args). If defaults exist, proceed without asking.\n"
+            "- Call only plugins compatible with discord.\n"
+            "- If unsupported on discord, explain and list supported platforms.\n"
+            "- Tool calls must be JSON only: {\"function\":\"name\",\"arguments\":{...}}\n"
+            "- Meta-tools available: list_plugins, get_plugin_help, list_platforms_for_plugin.\n"
+            "- Never narrate success unless tool output confirms ok=true.\n"
         )
 
     async def setup_hook(self):
@@ -524,148 +519,135 @@ class discord_platform(commands.Bot):
         system_prompt = self.build_system_prompt()
         history = await self.load_history(message.channel.id)
         messages_list = [{"role": "system", "content": system_prompt}] + history
+        merged_registry, merged_enabled, _collisions = build_agent_registry(
+            pr.get_registry_snapshot(),
+            get_plugin_enabled,
+        )
 
         async with message.channel.typing():
             try:
-                response = await self.llm.chat(messages_list)
-                response_text = response["message"].get("content", "").strip()
-                if not response_text:
-                    await message.channel.send("I'm not sure how to respond to that.")
-                    return
+                _use_agent, active_task_id, _reason = should_use_agent_mode(
+                    user_text=message.content or "",
+                    platform="discord",
+                    scope=str(message.channel.id),
+                    r=redis_client,
+                )
+                origin = {
+                    "platform": "discord",
+                    "channel_id": str(message.channel.id),
+                    "guild_id": str(message.guild.id) if message.guild else None,
+                    "channel": f"#{message.channel.name}" if getattr(message.channel, "name", None) else None,
+                    "user": message.author.display_name or message.author.name,
+                    "request_id": str(message.id),
+                }
+                origin = {k: v for k, v in origin.items() if v not in (None, "")}
 
-                response_json = parse_function_json(response_text)
+                async def _wait_callback(func_name, plugin_obj):
+                    if not plugin_obj:
+                        return
+                    if not plugin_supports_platform(plugin_obj, "discord"):
+                        return
+                    if not hasattr(plugin_obj, "waiting_prompt_template"):
+                        return
+                    wait_msg = plugin_obj.waiting_prompt_template.format(mention=message.author.mention)
+                    wait_response = await self.llm.chat(
+                        messages=[
+                            {"role": "system", "content": "Write one short, friendly status line."},
+                            {"role": "user", "content": wait_msg},
+                        ]
+                    )
+                    wait_text = (wait_response.get("message", {}) or {}).get("content", "").strip()
+                    if wait_text:
+                        await self.save_message(
+                            message.channel.id,
+                            "assistant",
+                            "assistant",
+                            {"marker": "plugin_wait", "content": wait_text},
+                        )
+                        await safe_send(message.channel, wait_text, self.max_response_length)
 
-                if response_json:
-                    func = response_json.get("function")
-                    args = response_json.get("arguments", {}) or {}
+                def _admin_guard(func_name):
+                    if is_admin_only_plugin(func_name) and not self._admin_allowed(getattr(message.author, "id", None)):
+                        plugin_obj = merged_registry.get(func_name)
+                        pretty = plugin_display_name(plugin_obj) if plugin_obj else func_name
+                        msg = (
+                            "This tool is restricted to the configured admin user on Discord."
+                            if self.admin_user_id
+                            else "This tool is disabled because no Discord admin user is configured."
+                        )
+                        return action_failure(
+                            code="admin_only",
+                            message=f"{pretty}: {msg}",
+                            needs=[],
+                            say_hint="Explain that this tool is restricted to the admin user on this platform.",
+                        )
+                    return None
 
-                    # Attach origin context for auto-targeting
-                    origin = {
-                        "platform": "discord",
-                        "channel_id": str(message.channel.id),
-                        "guild_id": str(message.guild.id) if message.guild else None,
-                        "channel": f"#{message.channel.name}" if getattr(message.channel, "name", None) else None,
-                        "user": message.author.display_name or message.author.name,
-                        "request_id": str(message.id),
-                    }
-                    # Remove empty keys
-                    origin = {k: v for k, v in origin.items() if v not in (None, "")}
-                    args = dict(args)
-                    args["origin"] = origin
-
-                    # Save structured plugin_call marker
+                result = await run_planner_loop(
+                    llm_client=self.llm,
+                    platform="discord",
+                    history_messages=messages_list,
+                    registry=merged_registry,
+                    enabled_predicate=merged_enabled,
+                    context={"message": message},
+                    user_text=message.content or "",
+                    scope=str(message.channel.id),
+                    task_id=active_task_id,
+                    origin=origin,
+                    wait_callback=_wait_callback,
+                    admin_guard=_admin_guard,
+                    redis_client=redis_client,
+                )
+                final_text = (result.get("text") or "").strip()
+                if final_text:
+                    await safe_send(message.channel, final_text, self.max_response_length)
                     await self.save_message(
                         message.channel.id,
                         "assistant",
                         "assistant",
-                        {"marker": "plugin_call", "plugin": func, "arguments": args},
+                        {"marker": "plugin_response", "phase": "final", "content": final_text},
                     )
-
-                    plugins = pr.get_registry_snapshot()
-                    if func in plugins and get_plugin_enabled(func):
-                        plugin = plugins[func]
-
-                        # Show waiting message if defined
-                        if hasattr(plugin, "waiting_prompt_template"):
-                            wait_msg = plugin.waiting_prompt_template.format(
-                                mention=message.author.mention
+                artifacts = result.get("artifacts") or []
+                for item in artifacts:
+                    if not isinstance(item, dict):
+                        continue
+                    content_type = item.get("type", "file")
+                    filename = item.get("name", "output.bin")
+                    mimetype = item.get("mimetype", "")
+                    try:
+                        binary = None
+                        if "bytes" in item and isinstance(item["bytes"], (bytes, bytearray)):
+                            binary = bytes(item["bytes"])
+                        elif "blob_key" in item and isinstance(item["blob_key"], str):
+                            binary = load_blob(item["blob_key"])
+                        if binary is None:
+                            await safe_send(
+                                message.channel,
+                                f"[{content_type.capitalize()}: {filename}]",
+                                self.max_response_length,
                             )
+                            continue
 
-                            wait_response = await self.llm.chat(
-                                messages=[
-                                    {"role": "system", "content": "Write one short, friendly status line."},
-                                    {"role": "user", "content": wait_msg},
-                                ]
-                            )
-                            wait_text = wait_response["message"]["content"].strip()
+                        file = discord.File(BytesIO(binary), filename=filename)
+                        await message.channel.send(file=file)
 
-                            await self.save_message(
-                                message.channel.id,
-                                "assistant",
-                                "assistant",
-                                {"marker": "plugin_wait", "content": wait_text},
-                            )
-                            await safe_send(message.channel, wait_text, self.max_response_length)
-
-                        result = await plugin.handle_discord(message, args, self.llm)
-
-                        if isinstance(result, list):
-                            for item in result:
-                                if isinstance(item, str):
-                                    await safe_send(message.channel, item, self.max_response_length)
-                                    await self.save_message(
-                                        message.channel.id,
-                                        "assistant",
-                                        "assistant",
-                                        {"marker": "plugin_response", "phase": "final", "content": item},
-                                    )
-
-                                elif isinstance(item, dict):
-                                    content_type = item.get("type", "file")
-                                    filename = item.get("name", "output.bin")
-                                    mimetype = item.get("mimetype", "")
-
-                                    try:
-                                        # Prefer bytes; support legacy blob_key; (no base64)
-                                        binary = None
-                                        if "bytes" in item and isinstance(item["bytes"], (bytes, bytearray)):
-                                            binary = bytes(item["bytes"])
-                                        elif "blob_key" in item and isinstance(item["blob_key"], str):
-                                            binary = load_blob(item["blob_key"])
-                                        else:
-                                            logger.warning(
-                                                f"Missing 'bytes' or 'blob_key' for {content_type} content."
-                                            )
-                                            continue
-
-                                        if binary is None:
-                                            logger.warning(f"Blob load failed for {filename}")
-                                            continue
-
-                                        file = discord.File(BytesIO(binary), filename=filename)
-                                        await message.channel.send(file=file)
-
-                                        # Store only a lightweight ref in history
-                                        blob_key = store_blob(binary)
-                                        content_obj = {
-                                            "type": content_type,
-                                            "name": filename,
-                                            "mimetype": mimetype,
-                                            "blob_key": blob_key,
-                                            "size": len(binary),
-                                        }
-
-                                        await self.save_message(
-                                            message.channel.id,
-                                            "assistant",
-                                            "assistant",
-                                            {"marker": "plugin_response", "phase": "final", "content": content_obj},
-                                        )
-
-                                    except Exception as e:
-                                        logger.warning(f"Failed to handle {content_type} return: {e}")
-
-                        elif isinstance(result, str):
-                            await safe_send(message.channel, result, self.max_response_length)
-                            await self.save_message(
-                                message.channel.id,
-                                "assistant",
-                                "assistant",
-                                {"marker": "plugin_response", "phase": "final", "content": result},
-                            )
-
-                    else:
-                        error = await self.generate_error_message(
-                            f"Unknown or disabled function call: {func}.",
-                            f"Function `{func}` is not available or disabled.",
-                            message,
+                        blob_key = store_blob(binary)
+                        content_obj = {
+                            "type": content_type,
+                            "name": filename,
+                            "mimetype": mimetype,
+                            "blob_key": blob_key,
+                            "size": len(binary),
+                        }
+                        await self.save_message(
+                            message.channel.id,
+                            "assistant",
+                            "assistant",
+                            {"marker": "plugin_response", "phase": "final", "content": content_obj},
                         )
-                        await message.channel.send(error)
-                        return
-
-                else:
-                    await safe_send(message.channel, response_text, self.max_response_length)
-                    await self.save_message(message.channel.id, "assistant", "assistant", response_text)
+                    except Exception as e:
+                        logger.warning(f"Failed to send artifact {content_type}: {e}")
+                return
 
             except Exception as e:
                 logger.error(f"Exception in message handler: {e}")
@@ -681,11 +663,14 @@ class discord_platform(commands.Bot):
         if user.bot:
             return
 
-        plugins = pr.get_registry_snapshot()
-        for plugin in plugins.values():
+        merged_registry, merged_enabled, _collisions = build_agent_registry(
+            pr.get_registry_snapshot(),
+            get_plugin_enabled,
+        )
+        for name, plugin in merged_registry.items():
             if not hasattr(plugin, "on_reaction_add"):
                 continue
-            if not get_plugin_enabled(plugin.name):
+            if not merged_enabled(name):
                 continue
 
             try:

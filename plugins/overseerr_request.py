@@ -27,7 +27,7 @@ class OverseerrRequestPlugin(ToolPlugin):
     """
     name = "overseerr_request"
     plugin_name = "Overseerr Request"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "50"
     usage = (
         "{\n"
@@ -61,7 +61,7 @@ class OverseerrRequestPlugin(ToolPlugin):
         "Tell {mention} you’re adding their title to Overseerr now. "
         "Keep it short and friendly. Only output that message."
     )
-    platforms = ["webui", "homeassistant", "homekit"]  # simplified: no Discord/IRC
+    platforms = ["webui", "homeassistant", "homekit", "discord", "telegram", "matrix", "irc"]
 
     # ---------- Settings ----------
     @staticmethod
@@ -363,6 +363,18 @@ class OverseerrRequestPlugin(ToolPlugin):
         clean = re.sub(r"[()]", "", clean)  # remove parentheses
         clean = clean.strip(" .")
         return f"{clean} has been added to your requests."
+
+    async def handle_discord(self, message, args, llm_client):
+        return await self.handle_webui(args, llm_client)
+
+    async def handle_telegram(self, update, args, llm_client):
+        return await self.handle_webui(args, llm_client)
+
+    async def handle_matrix(self, client, room, sender, body, args, llm_client):
+        return await self.handle_webui(args, llm_client)
+
+    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
+        return await self.handle_webui(args, llm_client)
 
 
 plugin = OverseerrRequestPlugin()

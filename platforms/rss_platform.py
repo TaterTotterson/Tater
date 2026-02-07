@@ -9,6 +9,7 @@ import requests
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 import plugin_registry as pr
+from agent_lab_registry import build_agent_registry
 from plugin_settings import get_plugin_enabled
 from helpers import get_llm_client_from_env
 from rss_store import get_all_feeds, update_feed, ensure_feed, delete_feed
@@ -259,9 +260,12 @@ class RSSManager:
             "request_id": f"rss:{feed_title}",
         }
 
-        plugins = pr.get_registry_snapshot()
-        for name, plugin in plugins.items():
-            if getattr(plugin, "notifier", False) and get_plugin_enabled(name):
+        merged_registry, merged_enabled, _collisions = build_agent_registry(
+            pr.get_registry_snapshot(),
+            get_plugin_enabled,
+        )
+        for name, plugin in merged_registry.items():
+            if getattr(plugin, "notifier", False) and merged_enabled(name):
                 platform_key = NOTIFIER_PLATFORM_MAP.get(name)
                 rule = merged_rules.get(platform_key) if platform_key else None
                 if rule and not rule.get("enabled", True):
@@ -296,17 +300,19 @@ class RSSManager:
         rules = _rss_notifier_rules({})
         feeds = self.get_feeds()
 
-        plugins = pr.get_registry_snapshot()
-        visible_plugins = list(plugins.values())
+        merged_registry, merged_enabled, _collisions = build_agent_registry(
+            pr.get_registry_snapshot(),
+            get_plugin_enabled,
+        )
         enabled_notifiers = []
 
-        for plugin in visible_plugins:
+        for name, plugin in merged_registry.items():
             if not getattr(plugin, "notifier", False):
                 continue
-            if not get_plugin_enabled(plugin.name):
+            if not merged_enabled(name):
                 continue
 
-            platform_key = NOTIFIER_PLATFORM_MAP.get(plugin.name, "")
+            platform_key = NOTIFIER_PLATFORM_MAP.get(name, "")
             global_enabled = rules.get(platform_key, {}).get("enabled", True)
             if global_enabled:
                 enabled_notifiers.append(plugin)
@@ -325,7 +331,7 @@ class RSSManager:
 
         logger.debug(
             "[RSS] Number of plugins visible: %s | Number of enabled notifier tools: %s",
-            len(plugins),
+            len(merged_registry),
             len(enabled_notifiers),
         )
         return bool(enabled_notifiers)

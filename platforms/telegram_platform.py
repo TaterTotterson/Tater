@@ -17,12 +17,16 @@ from plugin_base import ToolPlugin
 from notify_media import load_queue_attachments
 from notify_queue import is_expired
 from helpers import (
-    parse_function_json,
     get_tater_name,
     get_tater_personality,
     get_llm_client_from_env,
     build_llm_host_from_env,
 )
+from admin_gate import is_admin_only_plugin
+from agent_lab_registry import build_agent_registry
+from plugin_result import action_failure
+from plugin_kernel import plugin_supports_platform
+from planner_loop import should_use_agent_mode, run_planner_loop
 
 load_dotenv()
 
@@ -455,12 +459,7 @@ class TelegramPlatform:
 
     def _tool_visible_on_telegram(self, plugin: Any) -> bool:
         platforms = set(getattr(plugin, "platforms", []) or [])
-        if "telegram" in platforms or "both" in platforms:
-            return True
-        # Compatibility path: reuse Discord-capable tools on Telegram.
-        if "discord" in platforms:
-            return True
-        return False
+        return bool("telegram" in platforms or "both" in platforms)
 
     def build_system_prompt(self):
         now = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
@@ -470,47 +469,30 @@ class TelegramPlatform:
         persona_clause = ""
         if personality:
             persona_clause = (
-                f"You should speak and behave like {personality} "
-                "while still being helpful, concise, and easy to understand. "
-                "Keep the style subtle rather than over-the-top. "
-                "Even while staying in character, you must strictly follow the tool-calling rules below.\n\n"
+                f"Voice style: {personality}. "
+                "This affects tone only and never overrides tool rules.\n\n"
             )
-
-        base_prompt = (
-            f"You are {first} {last}, a Telegram-savvy AI assistant with access to various tools and plugins.\n\n"
-            f"{persona_clause}"
-            "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
-        )
-
-        plugins = pr.get_registry_snapshot()
-        available_plugins = [
-            plugin
-            for plugin in plugins.values()
-            if self._tool_visible_on_telegram(plugin) and _get_plugin_enabled(plugin.name)
-        ]
-        logger.debug(
-            "[Telegram] Number of plugins visible: %s | Number of enabled tools: %s",
-            len(plugins),
-            len(available_plugins),
-        )
-        tool_instructions = "\n\n".join(
-            f"Tool: {plugin.name}\n"
-            f"Description: {getattr(plugin, 'description', 'No description provided.')}\n"
-            f"{plugin.usage}"
-            for plugin in available_plugins
-        )
-
-        behavior_guard = (
-            "Only call a tool if the user's latest message clearly requests an action - such as 'generate', 'summarize', or 'download'.\n"
-            "Never call a tool in response to casual or friendly messages like 'thanks', 'lol', or 'cool' - reply normally instead.\n"
-        )
 
         return (
             f"Current Date and Time is: {now}\n\n"
-            f"{base_prompt}\n\n"
-            f"{tool_instructions}\n\n"
-            f"{behavior_guard}"
-            "If no function is needed, reply normally."
+            f"You are {first} {last}, a Telegram-savvy AI assistant.\n\n"
+            f"{persona_clause}"
+            "Current platform: telegram.\n"
+            "Tool strategy:\n"
+            "- Answer directly when no external action/live data is needed.\n"
+            "- Tools are discovered on-demand; not all tools are described here. If unsure, call list_plugins.\n"
+            "- If a tool may be needed, call list_plugins first.\n- If the user asks to control devices or services or interact with external systems, call list_plugins first.\n"
+            "- If the user asks about a specific tool/plugin by name or asks what a tool can do, call list_plugins or get_plugin_help instead of guessing.\n"
+            "- If you might need a tool or are unsure a capability exists, call list_plugins before saying it is unavailable.\n"
+            "- If the user asks for multiple independent actions, you may call tools one at a time until all actions are complete, then respond.\n"
+            "- Optionally call get_plugin_help before calling a plugin.\n"
+            "- Ask concise follow-up questions for missing required inputs.\n"
+            "- Only ask for inputs a tool explicitly requires (from list_plugins needs or get_plugin_help required_args). If defaults exist, proceed without asking.\n"
+            "- Call only plugins compatible with telegram.\n"
+            "- If unsupported here, explain and list supported platforms.\n"
+            "- Tool calls must be JSON only: {\"function\":\"name\",\"arguments\":{...}}\n"
+            "- Meta-tools: list_plugins, get_plugin_help, list_platforms_for_plugin.\n"
+            "- Never claim success unless tool output confirms success.\n"
         )
 
     def _chat_allowed(self, chat_id: str) -> bool:
@@ -531,6 +513,23 @@ class TelegramPlatform:
             candidates.add(sender_id)
         if sender_username:
             candidates.add(sender_username)
+        return bool(candidates & self.allowed_dm_users)
+
+    def _admin_user_allowed(self, sender: Dict[str, Any]) -> bool:
+        if not self.allowed_dm_users:
+            return False
+
+        sender_id = str((sender or {}).get("id") or "").strip()
+        sender_username = _normalize_user_ref((sender or {}).get("username"))
+        sender_first = _normalize_user_ref((sender or {}).get("first_name"))
+
+        candidates = set()
+        if sender_id:
+            candidates.add(sender_id)
+        if sender_username:
+            candidates.add(sender_username)
+        if sender_first:
+            candidates.add(sender_first)
         return bool(candidates & self.allowed_dm_users)
 
     async def _send_plugin_result(self, chat_id: str, result: Any):
@@ -644,22 +643,18 @@ class TelegramPlatform:
         system_prompt = self.build_system_prompt()
         history = self._load_history(chat_id)
         messages = [{"role": "system", "content": system_prompt}] + history
+        merged_registry, merged_enabled, _collisions = build_agent_registry(
+            pr.get_registry_snapshot(),
+            _get_plugin_enabled,
+        )
 
         try:
-            response = await self.llm.chat(messages)
-            response_text = response["message"].get("content", "").strip()
-            if not response_text:
-                await self._send_text(chat_id, "I'm not sure how to respond to that.")
-                return
-
-            response_json = parse_function_json(response_text)
-            if not response_json:
-                await self._send_text(chat_id, response_text)
-                self._save_message(chat_id, "assistant", "assistant", response_text)
-                return
-
-            func = response_json.get("function")
-            args = response_json.get("arguments", {}) or {}
+            _use_agent, active_task_id, _reason = should_use_agent_mode(
+                user_text=message_text,
+                platform="telegram",
+                scope=chat_id,
+                r=redis_client,
+            )
             origin = {
                 "platform": "telegram",
                 "chat_id": chat_id,
@@ -669,43 +664,76 @@ class TelegramPlatform:
                 "request_id": str(message.get("message_id") or f"{chat_id}:{time.time():.3f}"),
             }
             origin = {k: v for k, v in origin.items() if v not in (None, "")}
-            args = dict(args)
-            args["origin"] = origin
 
-            self._save_message(
-                chat_id,
-                "assistant",
-                "assistant",
-                {"marker": "plugin_call", "plugin": func, "arguments": args},
-            )
-
-            plugins = pr.get_registry_snapshot()
-            if func not in plugins or not _get_plugin_enabled(func):
-                await self._send_text(chat_id, f"Function `{func}` is not available or disabled.")
-                return
-
-            plugin = plugins[func]
-
-            if hasattr(plugin, "waiting_prompt_template"):
-                wait_msg = plugin.waiting_prompt_template.format(mention=f"@{username}")
+            async def _wait_callback(func_name, plugin_obj):
+                if not plugin_obj:
+                    return
+                if not plugin_supports_platform(plugin_obj, "telegram"):
+                    return
+                if not hasattr(plugin_obj, "waiting_prompt_template"):
+                    return
+                wait_msg = plugin_obj.waiting_prompt_template.format(mention=username)
                 wait_response = await self.llm.chat(
                     messages=[
                         {"role": "system", "content": "Write one short, friendly status line."},
                         {"role": "user", "content": wait_msg},
                     ]
                 )
-                wait_text = wait_response["message"]["content"].strip()
+                wait_text = (wait_response.get("message", {}) or {}).get("content", "").strip()
                 if wait_text:
+                    await self._send_text(chat_id, wait_text)
                     self._save_message(
                         chat_id,
                         "assistant",
                         "assistant",
                         {"marker": "plugin_wait", "content": wait_text},
                     )
-                    await self._send_text(chat_id, wait_text)
 
-            result = await self._run_plugin(plugin, message, chat_id, username, args)
-            await self._send_plugin_result(chat_id, result)
+            def _admin_guard(func_name):
+                if is_admin_only_plugin(func_name) and not self._admin_user_allowed(sender):
+                    msg = (
+                        "This tool is restricted to the configured admin user on Telegram."
+                        if self.allowed_dm_users
+                        else "This tool is disabled because no Telegram admin user is configured."
+                    )
+                    return action_failure(
+                        code="admin_only",
+                        message=msg,
+                        needs=[],
+                        say_hint="Explain that this tool is restricted to the admin user on this platform.",
+                    )
+                return None
+
+            result = await run_planner_loop(
+                llm_client=self.llm,
+                platform="telegram",
+                history_messages=messages,
+                registry=merged_registry,
+                enabled_predicate=merged_enabled,
+                context={"update": message},
+                user_text=message_text,
+                scope=chat_id,
+                task_id=active_task_id,
+                origin=origin,
+                wait_callback=_wait_callback,
+                admin_guard=_admin_guard,
+                redis_client=redis_client,
+            )
+
+            final_text = (result.get("text") or "").strip()
+            if final_text:
+                await self._send_text(chat_id, final_text)
+                self._save_message(
+                    chat_id,
+                    "assistant",
+                    "assistant",
+                    {"marker": "plugin_response", "phase": "final", "content": final_text},
+                )
+
+            artifacts = result.get("artifacts") or []
+            for item in artifacts:
+                await self._send_plugin_result(chat_id, item)
+            return
 
         except Exception as e:
             logger.error(f"[Telegram] Error processing message: {e}")

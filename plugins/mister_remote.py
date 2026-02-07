@@ -2,6 +2,8 @@ import json, logging, re, time, difflib, requests, mimetypes
 from dotenv import load_dotenv
 from plugin_base import ToolPlugin
 from helpers import redis_client, extract_json  # <-- we use your extractor
+from plugin_diagnostics import combine_diagnosis, diagnose_hash_fields, diagnose_redis_keys, needs_from_diagnosis
+from plugin_result import action_failure, action_success
 
 def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str) -> dict:
     if not isinstance(binary, (bytes, bytearray)):
@@ -39,7 +41,7 @@ SYN = {
 class MisterRemotePlugin(ToolPlugin):
     name = "mister_remote"
     plugin_name = "MiSTer Remote"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "50"
     pretty_name = "MiSTer Remote"
     description = (
@@ -438,6 +440,104 @@ class MisterRemotePlugin(ToolPlugin):
         # Keep it short-ish for TTS; tweak if you like.
         return out[:350]
 
+    def _diagnosis(self) -> dict:
+        hash_diag = diagnose_hash_fields(
+            "plugin_settings:MiSTer Remote",
+            fields={"mister_host": "MISTER_HOST", "mister_port": "MISTER_PORT"},
+            validators={
+                "mister_host": lambda v: v.startswith("http://") or v.startswith("https://"),
+                "mister_port": lambda v: v.isdigit(),
+            },
+        )
+        key_diag = diagnose_redis_keys(
+            keys={"mister_host": "tater:mister:host", "mister_port": "tater:mister:port"},
+            validators={
+                "mister_host": lambda v: v.startswith("http://") or v.startswith("https://"),
+                "mister_port": lambda v: v.isdigit(),
+            },
+        )
+        return combine_diagnosis(hash_diag, key_diag)
+
+    def _to_contract(self, raw, args: dict) -> dict:
+        cmd = _strip((args or {}).get("command", ""))
+        utterance = _strip((args or {}).get("utterance", ""))
+
+        if isinstance(raw, dict) and "ok" in raw:
+            return raw
+
+        if isinstance(raw, list):
+            artifacts = [x for x in raw if isinstance(x, dict) and x.get("type") in ("image", "audio", "video", "file")]
+            texts = [x for x in raw if isinstance(x, str)]
+            facts = {
+                "command": cmd,
+                "utterance": utterance,
+                "artifact_count": len(artifacts),
+            }
+            if texts:
+                facts["messages"] = texts[:3]
+            return action_success(
+                facts=facts,
+                say_hint="Confirm what MiSTer did using these facts only.",
+                suggested_followups=["Want another game or command?"],
+                artifacts=artifacts,
+            )
+
+        msg = str(raw or "").strip()
+        low = msg.lower()
+        if not msg:
+            return action_failure(
+                code="empty_result",
+                message="MiSTer remote did not return a response.",
+                diagnosis=self._diagnosis(),
+                needs=["What game or command should I run on MiSTer?"],
+                say_hint="Explain that no output was returned and ask for the specific MiSTer action.",
+            )
+
+        if low.startswith("unknown command"):
+            return action_failure(
+                code="unknown_command",
+                message=msg,
+                diagnosis=self._diagnosis(),
+                needs=["Use one of: play, now_playing, go_to_menu, screenshot_take."],
+                say_hint="Explain valid command choices and ask which one the user wants.",
+            )
+
+        if low.startswith("mister http error") or low.startswith("failed:"):
+            diagnosis = self._diagnosis()
+            needs = needs_from_diagnosis(
+                diagnosis,
+                {
+                    "mister_host": "Please confirm the MiSTer host URL in plugin settings.",
+                    "mister_port": "Please confirm the MiSTer API port in plugin settings.",
+                },
+            )
+            return action_failure(
+                code="mister_request_failed",
+                message=msg,
+                diagnosis=diagnosis,
+                needs=needs,
+                say_hint="Explain that MiSTer communication failed and ask for the missing/invalid settings.",
+            )
+
+        if "i couldn" in low or "no matches" in low:
+            return action_failure(
+                code="not_found",
+                message=msg,
+                diagnosis=self._diagnosis(),
+                needs=["What exact game title or system should I use?"],
+                say_hint="Explain what couldn't be matched and ask for a clearer game/system request.",
+            )
+
+        return action_success(
+            facts={"command": cmd, "utterance": utterance, "result": msg},
+            say_hint="Confirm the MiSTer result in a short factual sentence.",
+            suggested_followups=["Want me to launch another title?"],
+        )
+
+    async def _handle_structured(self, args: dict, llm_client):
+        out = await self._handle_async(args, llm_client)
+        return self._to_contract(out, args or {})
+
     # ---------------- Dispatcher -----------------
     async def _handle_async(self, args: dict, llm_client):
         cmd = _strip((args or {}).get("command", ""))
@@ -487,48 +587,46 @@ class MisterRemotePlugin(ToolPlugin):
         args = args or {}
         if not _strip(args.get("utterance","")):
             args["utterance"] = (getattr(message, "content", "") or "").strip()
-        if _strip(args.get("command", "")) == "screenshot_take":
-            content, filename, core = self._capture_screenshot()
-            if content and filename:
-                return self._build_screenshot_payload(content, filename)
-            if filename and core is not None:
-                url = self._screenshot_url(core, filename)
-                return [f"Screenshot captured: `{filename}` — {url}"]
-            return ["Screenshot requested, but I couldn’t find the new file yet."]
-        return await self._handle_async(args, llm_client)
+        return await self._handle_structured(args, llm_client)
 
     async def handle_webui(self, args, llm_client):
         args = args or {}
         if not _strip(args.get("utterance","")):
             args["utterance"] = _strip(args.get("user_text",""))
-        return await self._handle_async(args, llm_client)
+        return await self._handle_structured(args, llm_client)
 
     async def handle_irc(self, bot, channel, user, raw, args, llm_client):
         args = args or {}
         if not _strip(args.get("utterance","")):
             args["utterance"] = (raw or "").strip()
-        out = await self._handle_async(args, llm_client)
-        if isinstance(out, list):
-            # IRC can't upload; show text only
-            for item in out:
-                if isinstance(item, str):
-                    return f"{user}: {item}"
-            return f"{user}: Screenshot captured."
-        return f"{user}: {out}"
+        return await self._handle_structured(args, llm_client)
 
     async def handle_homeassistant(self, args, llm_client):
         args = args or {}
-        return await self._handle_async(args, llm_client)
+        return await self._handle_structured(args, llm_client)
 
     async def handle_matrix(self, client, room, sender, body, args, llm_client):
         args = args or {}
         if not _strip(args.get("utterance","")):
             args["utterance"] = (body or "").strip()
-        return await self._handle_async(args, llm_client)
+        return await self._handle_structured(args, llm_client)
+
+    async def handle_telegram(self, update, args, llm_client):
+        args = args or {}
+        if not _strip(args.get("utterance", "")):
+            text = ""
+            try:
+                if isinstance(update, dict):
+                    msg = update.get("message") or {}
+                    text = msg.get("text") or msg.get("caption") or ""
+            except Exception:
+                text = ""
+            args["utterance"] = (text or "").strip()
+        return await self._handle_structured(args, llm_client)
 
     async def handle_homekit(self, args, llm_client):
         args = args or {}
-        out = await self._handle_async(args, llm_client)
-        return self._siri_flatten(out)
+        out = await self._handle_structured(args, llm_client)
+        return out
 
 plugin = MisterRemotePlugin()

@@ -5,6 +5,7 @@ import logging
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from plugin_base import ToolPlugin
+from plugin_result import action_failure, research_success
 
 load_dotenv()
 logger = logging.getLogger("web_summary")
@@ -13,7 +14,7 @@ logger.setLevel(logging.INFO)
 class WebSummaryPlugin(ToolPlugin):
     name = "web_summary"
     plugin_name = "Web Summary"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "50"
     usage = (
         "{\n"
@@ -107,54 +108,103 @@ class WebSummaryPlugin(ToolPlugin):
         )
         return response["message"].get("content", "")
 
+    def _to_contract(self, url: str, summary: str | None):
+        if not summary:
+            return action_failure(
+                code="summary_failed",
+                message="Failed to summarize the article.",
+                needs=["Please provide a reachable webpage URL to summarize."],
+                say_hint="Explain that summarization failed and ask for a valid URL.",
+            )
+        return research_success(
+            answer=summary.strip(),
+            highlights=[],
+            sources=[{"title": "", "url": url, "publisher": "", "date": ""}],
+            say_hint="Provide the summary first and cite the source URL.",
+        )
+
     # --- Discord ---
     async def handle_discord(self, message, args, llm_client):
         url = args.get("url")
         if not url:
-            return "No webpage URL provided."
+            return action_failure(
+                code="missing_url",
+                message="No webpage URL provided.",
+                needs=["Which webpage URL should I summarize?"],
+                say_hint="Ask for the article URL.",
+            )
 
         try:
-            return await self._web_summary(url, llm_client)
+            summary = await self._web_summary(url, llm_client)
+            return self._to_contract(url, summary)
         except Exception as e:
-            return f"Failed to summarize the article: {e}"
+            return action_failure(
+                code="summary_exception",
+                message=f"Failed to summarize the article: {e}",
+                say_hint="Explain that summarization failed and ask whether to retry.",
+            )
 
     # --- WebUI ---
     async def handle_webui(self, args, llm_client):
         url = args.get("url")
         if not url:
-            return ["No webpage URL provided."]
+            return action_failure(
+                code="missing_url",
+                message="No webpage URL provided.",
+                needs=["Which webpage URL should I summarize?"],
+                say_hint="Ask for the article URL.",
+            )
 
         try:
             loop = asyncio.get_running_loop()
-            return await self._web_summary(url, llm_client)
+            summary = await self._web_summary(url, llm_client)
         except RuntimeError:
-            return asyncio.run(self._web_summary(url, llm_client))
+            summary = asyncio.run(self._web_summary(url, llm_client))
         except Exception as e:
-            return [f"Failed to summarize the article: {e}"]
+            return action_failure(
+                code="summary_exception",
+                message=f"Failed to summarize the article: {e}",
+                say_hint="Explain that summarization failed and ask whether to retry.",
+            )
+        return self._to_contract(url, summary)
 
     # --- IRC ---
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         url = args.get("url")
         if not url:
-            return f"{user}: No URL provided."
+            return action_failure(
+                code="missing_url",
+                message="No URL provided.",
+                needs=["Which webpage URL should I summarize?"],
+                say_hint="Ask for the URL.",
+            )
 
         summary = await self._web_summary(url, llm_client)
-        if not summary:
-            return f"{user}: Failed to summarize article."
-
-        return f"{user}: {summary}"
+        return self._to_contract(url, summary)
 
     # --- Matrix ---
     async def handle_matrix(self, client, room, sender, body, args, llm_client=None, **kwargs):
         llm = llm_client or kwargs.get("llm")
         url = (args or {}).get("url")
         if not url:
-            return "No webpage URL provided."
+            return action_failure(
+                code="missing_url",
+                message="No webpage URL provided.",
+                needs=["Which webpage URL should I summarize?"],
+                say_hint="Ask for the URL.",
+            )
 
         try:
             result = await self._web_summary(url, llm)
-            return result or "Failed to summarize the article."
+            return self._to_contract(url, result)
         except Exception as e:
-            return f"Failed to summarize the article: {e}"
+            return action_failure(
+                code="summary_exception",
+                message=f"Failed to summarize the article: {e}",
+                say_hint="Explain that summarization failed and ask whether to retry.",
+            )
+
+    async def handle_telegram(self, update, args, llm_client):
+        return await self.handle_webui(args, llm_client)
 
 plugin = WebSummaryPlugin()

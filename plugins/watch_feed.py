@@ -67,6 +67,10 @@ class WatchFeedPlugin(ToolPlugin):
         feed_url = args.get("feed_url")
         return await self._watch_feed(feed_url)
 
+    async def handle_telegram(self, update, args, llm_client):
+        feed_url = args.get("feed_url")
+        return await self._watch_feed(feed_url)
+
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         feed_url = args.get("feed_url")
         return await self._watch_feed(feed_url, username=user)

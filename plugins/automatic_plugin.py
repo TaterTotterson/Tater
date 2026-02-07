@@ -178,6 +178,9 @@ class AutomaticPlugin(ToolPlugin):
         except RuntimeError:
             return asyncio.run(inner())
 
+    async def handle_telegram(self, update, args, llm_client):
+        return await self.handle_webui(args, llm_client)
+
     # --- IRC Handler ---
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         await bot.privmsg(channel, f"{user}: ❌ This plugin only works in Discord or the WebUI.")

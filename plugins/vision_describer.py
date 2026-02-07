@@ -435,6 +435,22 @@ class VisionDescriberPlugin(ToolPlugin):
         except RuntimeError:
             return asyncio.run(self._describe_latest_image("webui:chat_history"))
 
+    async def handle_telegram(self, update, args, llm_client):
+        chat_id = None
+        try:
+            if isinstance(update, dict):
+                msg = update.get("message") or {}
+                chat = msg.get("chat") or {}
+                chat_id = chat.get("id")
+        except Exception:
+            chat_id = None
+        redis_key = f"tater:telegram:{chat_id}:history" if chat_id else "tater:telegram:unknown:history"
+        try:
+            asyncio.get_running_loop()
+            return await self._describe_latest_image(redis_key)
+        except RuntimeError:
+            return asyncio.run(self._describe_latest_image(redis_key))
+
     async def handle_matrix(self, client, room, sender, body, args, llm_client):
         # Redis-backed room history key (what your platform already uses)
         room_id = getattr(room, "room_id", None) or (room.get("room_id") if isinstance(room, dict) else None)

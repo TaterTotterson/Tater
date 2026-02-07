@@ -13,6 +13,7 @@ import requests
 import urllib3
 
 from plugin_base import ToolPlugin
+from plugin_result import action_failure
 from helpers import redis_client, get_tater_name, get_tater_personality
 
 def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str) -> dict:
@@ -69,6 +70,98 @@ def _to_data_url(image_bytes: bytes, filename: str = "image.jpg") -> str:
     mime = mimetypes.guess_type(filename)[0] or "image/jpeg"
     b64 = base64.b64encode(image_bytes).decode("utf-8")
     return f"data:{mime};base64,{b64}"
+
+
+def _extract_context_text(context: Optional[dict]) -> str:
+    if not isinstance(context, dict):
+        return ""
+    for key in ("raw_message", "request_text", "user_text", "task_prompt", "body"):
+        val = context.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+
+    msg = context.get("message")
+    if msg is not None:
+        for attr in ("content", "text", "message"):
+            val = getattr(msg, attr, None)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+
+    update = context.get("update")
+    if isinstance(update, dict):
+        text = ((update.get("message") or {}).get("text") or "")
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+
+    ctx = context.get("context")
+    if isinstance(ctx, dict):
+        for key in ("raw_message", "text", "message"):
+            val = ctx.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+
+    return ""
+
+
+def _split_action_and_target(raw_action: str) -> Tuple[str, str]:
+    raw = (raw_action or "").strip().lower()
+    if not raw:
+        return "", ""
+    raw = raw.replace("-", "_")
+    if raw in {"describe area", "describe camera", "list cameras", "sensor detail", "sensors status"}:
+        raw = raw.replace(" ", "_")
+        return raw, ""
+
+    tokens = raw.split()
+    if len(tokens) >= 2:
+        candidate = f"{tokens[0]}_{tokens[1]}"
+        if candidate in {"sensors_status", "sensor_detail", "list_cameras", "describe_camera", "describe_area"}:
+            return candidate, " ".join(tokens[2:]).strip()
+        return tokens[0], " ".join(tokens[1:]).strip()
+    return raw, ""
+
+
+def _looks_like_area(text: str) -> bool:
+    t = (text or "").lower()
+    return any(k in t for k in [
+        "front yard", "back yard", "yard", "porch", "driveway", "patio", "garage", "front porch", "back porch",
+    ])
+
+
+def _guess_action_from_text(text: str, target: str = "") -> str:
+    t = f"{text} {target}".lower().strip()
+    if not t:
+        return ""
+
+    if "list" in t and "camera" in t:
+        return "list_cameras"
+
+    if any(k in t for k in ["sensor", "sensors", "battery", "humidity", "temperature", "temp"]):
+        if any(k in t for k in ["front door", "back door", "garage door", "doorbell"]):
+            return "sensor_detail"
+        return "sensors_status"
+
+    if any(k in t for k in ["snapshot", "photo", "picture", "image"]):
+        return "describe_camera" if target or "camera" in t or "doorbell" in t else "describe_area"
+
+    if any(k in t for k in ["what's happening", "whats happening", "what is happening", "show me", "look", "see", "view", "describe"]):
+        if _looks_like_area(t):
+            return "describe_area"
+        if any(k in t for k in ["camera", "cam", "doorbell", "front door", "back door"]):
+            return "describe_camera"
+        return "describe_area"
+
+    if _looks_like_area(t):
+        return "describe_area"
+
+    if any(k in t for k in ["door", "window"]):
+        return "sensor_detail" if target else "sensors_status"
+
+    return ""
+
+
+def _platform_supports_media(platform: str) -> bool:
+    return (platform or "").strip().lower() in {"webui", "discord", "telegram", "matrix"}
 
 
 # ----------------------------
@@ -257,18 +350,22 @@ class UniFiProtectPlugin(ToolPlugin):
 
     name = "unifi_protect"
     plugin_name = "UniFi Protect"
-    version = "1.0.0"
+    version = "1.0.5"
     min_tater_version = "50"
     pretty_name = "UniFi Protect"
     settings_category = "UniFi Protect"
 
-    platforms = ["webui", "homeassistant", "homekit", "xbmc"]
+    platforms = ["webui", "homeassistant", "homekit", "xbmc", "discord", "telegram", "matrix", "irc"]
 
     usage = (
         "{\n"
         '  "function": "unifi_protect",\n'
         '  "arguments": {\n'
-        '    "query": "User request in natural language (e.g., \\"how are the sensors?\\", \\"are any doors open\\", \\"when was the garage door opened\\", \\"list cameras\\", \\"whats going on in the front yard\\")"\n'
+        '    "action": "Optional: sensors_status|sensor_detail|list_cameras|describe_camera|describe_area.",\n'
+        '    "target": "Optional name hint (front door, garage, doorbell, front yard).",\n'
+        '    "camera": "Optional camera name (alias of target for describe_camera).",\n'
+        '    "area": "Optional area name (alias of target for describe_area).",\n'
+        '    "query": "Optional: user request text; plugin will infer action/target if omitted."\n'
         "  }\n"
         "}\n"
     )
@@ -278,6 +375,44 @@ class UniFiProtectPlugin(ToolPlugin):
         "(list + snapshot vision summaries). Uses the UniFi Protect Integration API via your console proxy."
     )
     plugin_dec = "Get UniFi Protect sensor status and camera snapshot vision summaries."
+    when_to_use = (
+        "Use for UniFi Protect camera snapshots or descriptions (e.g., 'what does the front yard look like', "
+        "'what's happening in the back yard', 'describe the porch/driveway/garage'), plus sensor status or camera lists."
+    )
+    common_needs = ["camera or area name (optional if already in the request)"]
+    required_args = []
+    optional_args = ["action", "target", "camera", "area", "query"]
+    missing_info_prompts = [
+        "Which camera or area should I describe (for example: back yard, front door, garage)?",
+    ]
+
+    argument_schema = {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["sensors_status", "sensor_detail", "list_cameras", "describe_camera", "describe_area"],
+                "description": "Optional action (plugin can infer from query).",
+            },
+            "target": {
+                "type": "string",
+                "description": "Name hint for sensor/camera/area (front door, garage, back yard).",
+            },
+            "camera": {
+                "type": "string",
+                "description": "Camera name (alias of target for describe_camera).",
+            },
+            "area": {
+                "type": "string",
+                "description": "Area name (alias of target for describe_area).",
+            },
+            "query": {
+                "type": "string",
+                "description": "Optional: user request text to infer action/target.",
+            },
+        },
+        "required": [],
+    }
 
     waiting_prompt_template = (
         "Write a friendly message telling {mention} you’re checking UniFi Protect now. "
@@ -615,22 +750,46 @@ class UniFiProtectPlugin(ToolPlugin):
     # ----------------------------
     # Platform handlers
     # ----------------------------
-    async def handle_webui(self, args, llm_client):
-        return await self._handle(args, llm_client, platform="webui")
+    async def handle_webui(self, args, llm_client, context=None):
+        return await self._handle(args, llm_client, platform="webui", context=context)
 
-    async def handle_homeassistant(self, args, llm_client):
-        return await self._handle(args, llm_client, platform="homeassistant")
+    async def handle_homeassistant(self, args, llm_client, context=None):
+        return await self._handle(args, llm_client, platform="homeassistant", context=context)
 
-    async def handle_homekit(self, args, llm_client):
-        return await self._handle(args, llm_client, platform="homekit")
+    async def handle_homekit(self, args, llm_client, context=None):
+        return await self._handle(args, llm_client, platform="homekit", context=context)
 
-    async def handle_xbmc(self, args, llm_client):
-        return await self._handle(args, llm_client, platform="xbmc")
+    async def handle_xbmc(self, args, llm_client, context=None):
+        return await self._handle(args, llm_client, platform="xbmc", context=context)
+
+    async def handle_discord(self, message, args, llm_client, context=None):
+        ctx = context or {}
+        if "message" not in ctx:
+            ctx["message"] = message
+        return await self._handle(args, llm_client, platform="discord", context=ctx)
+
+    async def handle_telegram(self, update, args, llm_client, context=None):
+        ctx = context or {}
+        if "update" not in ctx:
+            ctx["update"] = update
+        return await self._handle(args, llm_client, platform="telegram", context=ctx)
+
+    async def handle_matrix(self, client, room, sender, body, args, llm_client, context=None):
+        ctx = context or {}
+        if "body" not in ctx:
+            ctx["body"] = body
+        return await self._handle(args, llm_client, platform="matrix", context=ctx)
+
+    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client, context=None):
+        ctx = context or {}
+        if "raw_message" not in ctx:
+            ctx["raw_message"] = raw_message
+        return await self._handle(args, llm_client, platform="irc", context=ctx)
 
     # ----------------------------
     # Core
     # ----------------------------
-    async def _handle(self, args, llm_client, platform: str = "webui"):
+    async def _handle(self, args, llm_client, platform: str = "webui", context: Optional[dict] = None):
         client = self._get_client()
         if not client:
             return (
@@ -638,14 +797,62 @@ class UniFiProtectPlugin(ToolPlugin):
                 "Please set UNIFI_PROTECT_BASE_URL and UNIFI_PROTECT_API_KEY in plugin settings."
             )
 
+        args = args or {}
+        context = context or {}
+        action_raw = (args.get("action") or "").strip()
+        target = (
+            args.get("target")
+            or args.get("camera")
+            or args.get("area")
+            or args.get("camera_name")
+            or args.get("area_name")
+            or ""
+        )
+        target = str(target).strip()
         query = (args.get("query") or "").strip()
         if not query:
-            return "Please provide 'query' with what you want to know."
+            query = _extract_context_text(context)
 
-        # Decide action with LLM
-        plan = await self._decide_action(query, llm_client)
-        action = (plan.get("action") or "").strip()
-        target = (plan.get("target") or "").strip()
+        action, action_target = _split_action_and_target(action_raw)
+        if action_target and not target:
+            target = action_target
+
+        allowed_actions = {"sensors_status", "sensor_detail", "list_cameras", "describe_camera", "describe_area"}
+
+        if action and action not in allowed_actions:
+            guessed = _guess_action_from_text(action, target)
+            if guessed:
+                action = guessed
+            else:
+                action = ""
+
+        if not action:
+            if query:
+                action = _guess_action_from_text(query, target)
+            if not action and query:
+                plan = await self._decide_action(query, llm_client)
+                action = (plan.get("action") or "").strip().lower()
+                target = target or (plan.get("target") or "").strip()
+
+        if not action:
+            return action_failure(
+                code="invalid_action",
+                message="I couldn't determine which UniFi Protect action to run.",
+                needs=[
+                    "Do you want sensors status, list cameras, or a camera/area description?",
+                    "Which camera or area should I describe (for example: back yard, front door, garage)?",
+                ],
+                say_hint="Explain that more detail is needed and ask the follow-up questions.",
+            )
+
+        if not query:
+            query = f"{action} {target}".strip()
+
+        if action == "sensors_status" and target:
+            action = "sensor_detail"
+
+        if action == "describe_camera" and not target and _looks_like_area(query):
+            action = "describe_area"
 
         # ---- Sensors status / detail
         if action in ("sensors_status", "sensor_detail"):
@@ -728,7 +935,7 @@ class UniFiProtectPlugin(ToolPlugin):
             text = await self._answer_with_facts(query, facts, llm_client)
 
             # WebUI can render image blobs. Others: return text only (spoken-friendly).
-            if platform == "webui":
+            if _platform_supports_media(platform):
                 return [
                     _build_media_metadata(
                         img_bytes,
@@ -790,7 +997,7 @@ class UniFiProtectPlugin(ToolPlugin):
                         "ok": True,
                     })
 
-                    if platform == "webui":
+                    if _platform_supports_media(platform):
                         images_out.append(
                             _build_media_metadata(
                                 img_bytes,
@@ -823,7 +1030,7 @@ class UniFiProtectPlugin(ToolPlugin):
 
             text = await self._answer_with_facts(query, facts, llm_client)
 
-            if platform == "webui":
+            if _platform_supports_media(platform):
                 return images_out + [text]
             return text
 

@@ -71,6 +71,16 @@ def load_plugins_from_directory(plugin_dir: Optional[str] = None) -> Dict[str, T
         # Normalize plugin.name to the registry id
         plugin.name = pid
 
+        # Ensure every plugin has example_calls populated for help UX.
+        try:
+            examples = getattr(plugin, "example_calls", None)
+            if not isinstance(examples, list) or not examples:
+                usage = getattr(plugin, "usage", "") or ""
+                if isinstance(usage, str) and usage.strip():
+                    plugin.example_calls = [usage.strip()]
+        except Exception:
+            pass
+
         if pid in registry:
             print(f"⚠️ Duplicate plugin id '{pid}' from file {path.name}; skipping.")
             continue

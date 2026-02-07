@@ -80,6 +80,10 @@ class ListFeedsPlugin(ToolPlugin):
     async def handle_webui(self, args, llm_client):
         return await self._list_feeds()
 
+    # ---------- Telegram ----------
+    async def handle_telegram(self, update, args, llm_client):
+        return await self._list_feeds()
+
     # ---------- IRC ----------
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         return await self._list_feeds(username=user)

@@ -32,7 +32,7 @@ class EventsQueryPlugin(ToolPlugin):
     """
     name = "events_query"
     plugin_name = "Events Query"
-    version = "1.0.1"
+    version = "1.0.3"
     min_tater_version = "50"
     pretty_name = "Events Query"
     description = (
@@ -42,6 +42,7 @@ class EventsQueryPlugin(ToolPlugin):
         "as the 'query' argument so context is preserved."
     )
     plugin_dec = "Answer questions about stored household events by area and timeframe."
+    when_to_use = "Use for historical event summaries from stored automations logs (not live camera snapshots)."
 
     usage = (
         "{\n"
@@ -54,7 +55,7 @@ class EventsQueryPlugin(ToolPlugin):
         "}\n"
     )
 
-    platforms = ["webui", "homeassistant", "homekit"]
+    platforms = ["webui", "homeassistant", "homekit", "discord", "telegram", "matrix", "irc"]
     settings_category = "Events Query"
 
     required_settings = {
@@ -668,6 +669,18 @@ class EventsQueryPlugin(ToolPlugin):
         return await self._handle(args, llm_client)
 
     async def handle_homekit(self, args: Dict[str, Any], llm_client):
+        return await self._handle(args, llm_client)
+
+    async def handle_discord(self, message, args, llm_client):
+        return await self._handle(args, llm_client)
+
+    async def handle_telegram(self, update, args, llm_client):
+        return await self._handle(args, llm_client)
+
+    async def handle_matrix(self, client, room, sender, body, args, llm_client):
+        return await self._handle(args, llm_client)
+
+    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         return await self._handle(args, llm_client)
 
 plugin = EventsQueryPlugin()

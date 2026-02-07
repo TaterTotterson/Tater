@@ -28,7 +28,7 @@ class FindMyPhonePlugin(ToolPlugin):
 
     name = "find_my_phone"
     plugin_name = "Find My Phone"
-    version = "1.0.1"
+    version = "1.0.2"
     min_tater_version = "50"
     usage = (
         "{\n"
@@ -74,7 +74,7 @@ class FindMyPhonePlugin(ToolPlugin):
         "Write a short, friendly message telling {mention} their phone should be making noise now "
         "and they should go find it. Only output that message."
     )
-    platforms = ["webui", "homeassistant", "homekit", "xbmc"]
+    platforms = ["webui", "homeassistant", "homekit", "xbmc", "discord", "telegram", "matrix", "irc"]
 
     def _load_settings(self) -> dict:
         return redis_client.hgetall(f"plugin_settings:{self.settings_category}")
@@ -245,6 +245,18 @@ class FindMyPhonePlugin(ToolPlugin):
         return self._siri_flatten(answer)
 
     async def handle_xbmc(self, args, llm_client):
+        return (await self._run(llm_client, mention="you")).strip()
+
+    async def handle_discord(self, message, args, llm_client):
+        return (await self._run(llm_client, mention="you")).strip()
+
+    async def handle_telegram(self, update, args, llm_client):
+        return (await self._run(llm_client, mention="you")).strip()
+
+    async def handle_matrix(self, client, room, sender, body, args, llm_client):
+        return (await self._run(llm_client, mention="you")).strip()
+
+    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         return (await self._run(llm_client, mention="you")).strip()
 
 

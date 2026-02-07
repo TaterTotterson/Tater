@@ -8,6 +8,8 @@ from dotenv import load_dotenv
 import requests
 from plugin_base import ToolPlugin
 from helpers import extract_json, redis_client, get_tater_name
+from plugin_diagnostics import diagnose_hash_fields, needs_from_diagnosis
+from plugin_result import action_failure, research_success
 
 load_dotenv()
 logger = logging.getLogger("web_search")
@@ -16,7 +18,7 @@ logger.setLevel(logging.INFO)
 class WebSearchPlugin(ToolPlugin):
     name = "web_search"
     plugin_name = "Web Search"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "50"
     usage = (
         "{\n"
@@ -46,6 +48,32 @@ class WebSearchPlugin(ToolPlugin):
     )
     platforms = ["discord", "webui", "irc", "homeassistant", "matrix", "homekit", "xbmc", "telegram"]
 
+    def _diagnosis(self) -> dict:
+        return diagnose_hash_fields(
+            "plugin_settings:Web Search",
+            fields={"google_api_key": "GOOGLE_API_KEY", "google_cx": "GOOGLE_CX"},
+            validators={
+                "google_api_key": lambda v: len(v.strip()) >= 10,
+                "google_cx": lambda v: len(v.strip()) >= 5,
+            },
+        )
+
+    def _failure(self, message: str) -> dict:
+        diagnosis = self._diagnosis()
+        return action_failure(
+            code="web_search_failed",
+            message=message,
+            diagnosis=diagnosis,
+            needs=needs_from_diagnosis(
+                diagnosis,
+                {
+                    "google_api_key": "Please set the Google API key for Web Search.",
+                    "google_cx": "Please set the Google Search Engine ID (CX).",
+                },
+            ),
+            say_hint="Explain the search failure and ask only for missing search configuration or query details.",
+        )
+
     def search_web(self, query, num_results=10):
         settings = redis_client.hgetall("plugin_settings:Web Search")
         api_key = settings.get("GOOGLE_API_KEY", "")
@@ -55,7 +83,7 @@ class WebSearchPlugin(ToolPlugin):
             warning = ("Search is not configured. Please set your Google API key and "
                        "Search Engine ID in the plugin settings.")
             logger.warning(f"[Google CSE] {warning}")
-            return [{"title": "Missing configuration", "href": "", "body": warning}]
+            return []
 
         try:
             response = requests.get(
@@ -175,11 +203,23 @@ class WebSearchPlugin(ToolPlugin):
                     "Do not introduce yourself. Only answer:"
                 )
                 final = await llm_client.chat(messages=[{"role": "system", "content": final_prompt}])
-                return final["message"].get("content", "").strip()
+                answer = final["message"].get("content", "").strip()
+                source_title = ""
+                for item in filtered:
+                    if item.get("href") == link:
+                        source_title = item.get("title") or ""
+                        break
+                return {
+                    "answer": answer,
+                    "source": {"title": source_title, "url": link, "publisher": "", "date": ""},
+                }
 
             attempted_links.add(link)
 
-        return "Sorry, I couldn't extract content from any of the top results."
+        return {
+            "answer": "Sorry, I couldn't extract content from any of the top results.",
+            "source": {},
+        }
 
 
     def _siri_flatten(self, text: str | None) -> str:
@@ -198,20 +238,26 @@ class WebSearchPlugin(ToolPlugin):
     async def handle_discord(self, message, args, llm_client):
         query = args.get("query")
         if not query:
-            return "No search query provided."
+            return self._failure("No search query provided.")
         results = self.search_web(query)
         if not results:
-            return "No results found."
-        return await self._pick_link_and_summarize(results, query, message.content, llm_client)
+            return self._failure("No results found.")
+        payload = await self._pick_link_and_summarize(results, query, message.content, llm_client)
+        return research_success(
+            answer=payload.get("answer") or "",
+            highlights=[],
+            sources=[payload.get("source")] if isinstance(payload.get("source"), dict) and payload.get("source") else [],
+            say_hint="Answer first, cite 1 source when available, and ask a brief follow-up if useful.",
+        )
 
     async def handle_webui(self, args, llm_client):
         query = args.get("query")
         if not query:
-            return ["No search query provided."]
+            return self._failure("No search query provided.")
 
         results = self.search_web(query)
         if not results:
-            return ["No results found."]
+            return self._failure("No results found.")
 
         async def inner():
             return await self._pick_link_and_summarize(
@@ -223,78 +269,113 @@ class WebSearchPlugin(ToolPlugin):
 
         try:
             asyncio.get_running_loop()
-            return await inner()
+            payload = await inner()
         except RuntimeError:
-            return asyncio.run(inner())
+            payload = asyncio.run(inner())
+
+        return research_success(
+            answer=payload.get("answer") or "",
+            highlights=[],
+            sources=[payload.get("source")] if isinstance(payload.get("source"), dict) and payload.get("source") else [],
+            say_hint="Answer first, cite 1 source when available, and ask a brief follow-up if useful.",
+        )
 
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         query = args.get("query")
         if not query:
-            return f"{user}: No search query provided."
+            return self._failure("No search query provided.")
 
         results = self.search_web(query)
         if not results:
-            return f"{user}: No results found."
+            return self._failure("No results found.")
 
-        answer = await self._pick_link_and_summarize(results, query, raw_message, llm_client)
-        return f"{user}: {answer}"
+        payload = await self._pick_link_and_summarize(results, query, raw_message, llm_client)
+        return research_success(
+            answer=payload.get("answer") or "",
+            highlights=[],
+            sources=[payload.get("source")] if isinstance(payload.get("source"), dict) and payload.get("source") else [],
+            say_hint="Answer first, cite 1 source when available, and ask a brief follow-up if useful.",
+        )
 
     async def handle_homeassistant(self, args, llm_client):
         query = args.get("query")
         if not query:
-            return "No search query provided."
+            return self._failure("No search query provided.")
 
         results = self.search_web(query)
         if not results:
-            return "No results found."
+            return self._failure("No results found.")
 
         user_q = args.get("user_question", "")
-        answer = await self._pick_link_and_summarize(results, query, user_q, llm_client)
-        return (answer or "No answer available.").strip()
+        payload = await self._pick_link_and_summarize(results, query, user_q, llm_client)
+        return research_success(
+            answer=(payload.get("answer") or "No answer available.").strip(),
+            highlights=[],
+            sources=[payload.get("source")] if isinstance(payload.get("source"), dict) and payload.get("source") else [],
+            say_hint="Answer first, cite 1 source when available, and ask a brief follow-up if useful.",
+        )
 
     async def handle_matrix(self, client, room, sender, body, args, llm_client):
         if not llm_client:
-            return "Search failed: LLM client not provided."
+            return self._failure("Search failed: LLM client not provided.")
 
         query = (args or {}).get("query")
         if not query:
-            return "No search query provided."
+            return self._failure("No search query provided.")
 
         results = self.search_web(query)
         if not results:
-            return "No results found."
+            return self._failure("No results found.")
 
         user_q = body or ""
-        answer = await self._pick_link_and_summarize(results, query, user_q, llm_client)
-        return answer
+        payload = await self._pick_link_and_summarize(results, query, user_q, llm_client)
+        return research_success(
+            answer=payload.get("answer") or "",
+            highlights=[],
+            sources=[payload.get("source")] if isinstance(payload.get("source"), dict) and payload.get("source") else [],
+            say_hint="Answer first, cite 1 source when available, and ask a brief follow-up if useful.",
+        )
+
+    async def handle_telegram(self, update, args, llm_client):
+        return await self.handle_webui(args, llm_client)
     
     async def handle_homekit(self, args, llm_client):
         args = args or {}
         query = args.get("query")
         if not query:
-            return "No search query provided."
+            return self._failure("No search query provided.")
 
         results = self.search_web(query)
         if not results:
-            return "No results found."
+            return self._failure("No results found.")
 
         user_q = args.get("user_question", "")
-        answer = await self._pick_link_and_summarize(results, query, user_q, llm_client)
-        return self._siri_flatten(answer)
+        payload = await self._pick_link_and_summarize(results, query, user_q, llm_client)
+        return research_success(
+            answer=self._siri_flatten(payload.get("answer") or ""),
+            highlights=[],
+            sources=[payload.get("source")] if isinstance(payload.get("source"), dict) and payload.get("source") else [],
+            say_hint="Answer first and include one source URL when available.",
+        )
 
     async def handle_xbmc(self, args, llm_client):
         args = args or {}
         query = args.get("query")
         if not query:
-            return "No search query provided."
+            return self._failure("No search query provided.")
 
         results = self.search_web(query)
         if not results:
-            return "No results found."
+            return self._failure("No results found.")
 
         user_q = args.get("user_question", "")
-        answer = await self._pick_link_and_summarize(results, query, user_q, llm_client)
-        return (answer or "No answer available.").strip()
+        payload = await self._pick_link_and_summarize(results, query, user_q, llm_client)
+        return research_success(
+            answer=(payload.get("answer") or "No answer available.").strip(),
+            highlights=[],
+            sources=[payload.get("source")] if isinstance(payload.get("source"), dict) and payload.get("source") else [],
+            say_hint="Answer first, cite 1 source when available, and ask a brief follow-up if useful.",
+        )
 
 
 plugin = WebSearchPlugin()

@@ -22,10 +22,10 @@ from datetime import datetime
 from PIL import Image
 from io import BytesIO
 from platform_registry import platform_registry
+from plugin_loader import load_plugins_from_directory
 from helpers import (
     run_async,
     set_main_loop,
-    parse_function_json,
     get_tater_name,
     get_tater_personality,
     get_llm_client_from_env,
@@ -37,7 +37,17 @@ from plugin_settings import (
     get_plugin_settings,
     save_plugin_settings,
 )
+from admin_gate import DEFAULT_ADMIN_ONLY_PLUGINS, REDIS_KEY as ADMIN_GATE_KEY, get_admin_only_plugins
+from agent_lab_registry import build_agent_registry
 from rss_store import get_all_feeds, set_feed, update_feed, delete_feed
+from kernel_tools import (
+    AGENT_PLUGINS_DIR,
+    AGENT_PLATFORMS_DIR,
+    validate_plugin,
+    validate_platform,
+    delete_file,
+)
+from planner_loop import should_use_agent_mode, run_planner_loop
 
 # Remove any prior handlers
 for handler in logging.root.handlers[:]:
@@ -444,6 +454,38 @@ def _load_file_blob_from_redis(file_id: str):
     data = redis_blob_client.get(f"{FILE_BLOB_KEY_PREFIX}{file_id}")
     return data if data else None
 
+def _normalize_plugin_response_item(item):
+    """
+    Convert plugin media payloads into redis blob references so JSON serialization works.
+    Supports both keys: data / bytes.
+    Produces: {type,name,mimetype,size,id}
+    """
+    if not isinstance(item, dict):
+        return item
+
+    t = item.get("type")
+    if t not in ("image", "audio", "video", "file"):
+        return item
+
+    raw = None
+    if isinstance(item.get("data"), (bytes, bytearray)):
+        raw = bytes(item["data"])
+    elif isinstance(item.get("bytes"), (bytes, bytearray)):
+        raw = bytes(item["bytes"])
+
+    if raw is None:
+        return item
+
+    file_id = str(uuid.uuid4())
+    _store_file_blob_in_redis(file_id, raw)
+
+    safe = dict(item)
+    safe.pop("data", None)
+    safe.pop("bytes", None)
+    safe["id"] = file_id
+    safe["size"] = len(raw)
+    return safe
+
 def _get_media_blob_from_content(content: dict):
     """
     Supports:
@@ -490,6 +532,52 @@ def _platform_runtime():
         "threads": {},
         "stop_flags": {},
     }
+
+
+@st.cache_resource
+def _exp_platform_runtime():
+    return {
+        "lock": threading.RLock(),
+        "threads": {},
+        "stop_flags": {},
+    }
+
+AUTO_START_COOLDOWN_SEC = 30
+
+
+def _platform_thread_alive(key: str) -> bool:
+    runtime = _platform_runtime()
+    with runtime["lock"]:
+        thread = runtime["threads"].get(key)
+        return bool(thread and thread.is_alive())
+
+
+def _exp_platform_thread_alive(key: str) -> bool:
+    runtime = _exp_platform_runtime()
+    with runtime["lock"]:
+        thread = runtime["threads"].get(key)
+        return bool(thread and thread.is_alive())
+
+
+def _should_autostart(key: str, exp: bool = False) -> bool:
+    bucket = "exp" if exp else "platform"
+    token = f"{bucket}:{key}"
+    attempts = st.session_state.setdefault("autostart_attempts", set())
+    if token in attempts:
+        return False
+
+    attempts.add(token)
+    redis_key = f"webui:autostart:{bucket}:{key}"
+    last = redis_client.get(redis_key)
+    if last:
+        try:
+            if time.time() - float(last) < AUTO_START_COOLDOWN_SEC:
+                return False
+        except Exception:
+            pass
+
+    redis_client.set(redis_key, str(time.time()))
+    return True
 
 
 def _start_platform(key: str):
@@ -544,6 +632,111 @@ def _stop_platform(key: str):
         if not thread or not thread.is_alive():
             runtime["threads"].pop(key, None)
             runtime["stop_flags"].pop(key, None)
+
+
+def _start_agent_lab_platform(key: str, path: str):
+    runtime = _exp_platform_runtime()
+    with runtime["lock"]:
+        thread = runtime["threads"].get(key)
+        stop_flag = runtime["stop_flags"].get(key)
+
+        if thread and thread.is_alive():
+            return thread, stop_flag
+
+        stop_flag = threading.Event()
+
+    def runner():
+        try:
+            spec = importlib.util.spec_from_file_location(f"agent_lab_platform_{key}_{int(time.time())}", path)
+            if spec is None or spec.loader is None:
+                logging.getLogger("webui").warning(f"⚠️ Agent Lab platform {key} has no loader.")
+                return
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)  # type: ignore[attr-defined]
+            run_fn = getattr(module, "run", None)
+            if callable(run_fn):
+                run_fn(stop_event=stop_flag)
+            else:
+                logging.getLogger("webui").warning(f"⚠️ Agent Lab platform {key} missing run().")
+        except Exception as e:
+            logging.getLogger("webui").error(f"❌ Error in Agent Lab platform {key}: {e}", exc_info=True)
+        finally:
+            with runtime["lock"]:
+                current = runtime["threads"].get(key)
+                if current is threading.current_thread():
+                    runtime["threads"].pop(key, None)
+                    runtime["stop_flags"].pop(key, None)
+
+    thread = threading.Thread(target=runner, daemon=True, name=f"agent-lab-platform-{key}")
+    with runtime["lock"]:
+        runtime["threads"][key] = thread
+        runtime["stop_flags"][key] = stop_flag
+    thread.start()
+
+    return thread, stop_flag
+
+
+def _stop_agent_lab_platform(key: str):
+    runtime = _exp_platform_runtime()
+    with runtime["lock"]:
+        thread = runtime["threads"].get(key)
+        stop_flag = runtime["stop_flags"].get(key)
+
+    if stop_flag:
+        stop_flag.set()
+
+    if thread and thread.is_alive():
+        thread.join(timeout=0.5)
+
+    with runtime["lock"]:
+        if not thread or not thread.is_alive():
+            runtime["threads"].pop(key, None)
+            runtime["stop_flags"].pop(key, None)
+
+
+def _discover_agent_lab_plugins():
+    AGENT_PLUGINS_DIR.mkdir(parents=True, exist_ok=True)
+    plugins = load_plugins_from_directory(str(AGENT_PLUGINS_DIR))
+    items = []
+    for path in sorted(AGENT_PLUGINS_DIR.glob("*.py")):
+        name = path.stem
+        plugin = plugins.get(name)
+        items.append({"name": name, "plugin": plugin, "path": path, "loaded": bool(plugin)})
+    return items
+
+
+def _discover_agent_lab_platforms():
+    AGENT_PLATFORMS_DIR.mkdir(parents=True, exist_ok=True)
+    items = []
+    for path in sorted(AGENT_PLATFORMS_DIR.glob("*.py")):
+        name = path.stem
+        label = name
+        ok = True
+        error = ""
+        required = {}
+        try:
+            spec = importlib.util.spec_from_file_location(f"exp_platform_meta_{name}_{int(time.time())}", str(path))
+            if spec is None or spec.loader is None:
+                ok = False
+                error = "Missing loader"
+            else:
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)  # type: ignore[attr-defined]
+                meta = getattr(module, "PLATFORM", None)
+                if isinstance(meta, dict):
+                    label = meta.get("label") or meta.get("category") or meta.get("key") or label
+                    required = meta.get("required") or {}
+                else:
+                    ok = False
+                    error = "Missing PLATFORM dict"
+                if not callable(getattr(module, "run", None)):
+                    ok = False
+                    error = "Missing run()"
+        except Exception as e:
+            ok = False
+            error = str(e)
+        items.append({"key": name, "label": label, "path": str(path), "ok": ok, "error": error, "required": required})
+    return items
 
 # ---- background job refresh hook ----
 if redis_client.get("webui:needs_rerun") == "true":
@@ -712,6 +905,338 @@ def render_plugin_controls(plugin_name, label=None):
     if toggle_state != current_state:
         set_plugin_enabled(plugin_name, toggle_state)
         st.rerun()
+
+
+# ----------------- EXPERIMENTAL PLUGIN HELPERS -----------------
+def exp_get_plugin_enabled(plugin_name: str) -> bool:
+    raw = redis_client.hget("exp:plugin_enabled", plugin_name)
+    return str(raw or "").strip().lower() == "true"
+
+
+def exp_set_plugin_enabled(plugin_name: str, enabled: bool) -> None:
+    redis_client.hset("exp:plugin_enabled", plugin_name, "true" if enabled else "false")
+
+
+def exp_get_plugin_settings(category: str) -> dict:
+    return redis_client.hgetall(f"exp:plugin_settings:{category}") or {}
+
+
+def exp_save_plugin_settings(category: str, settings: dict) -> None:
+    redis_client.hset(f"exp:plugin_settings:{category}", mapping={k: str(v) for k, v in settings.items()})
+
+
+def exp_get_platform_settings(platform_key: str) -> dict:
+    return redis_client.hgetall(f"exp:platform_settings:{platform_key}") or {}
+
+
+def exp_save_platform_settings(platform_key: str, settings: dict) -> None:
+    redis_client.hset(f"exp:platform_settings:{platform_key}", mapping={k: str(v) for k, v in settings.items()})
+
+
+def _load_exp_validation(kind: str, name: str) -> dict | None:
+    key = f"exp:validation:{kind}:{name}"
+    raw = redis_client.get(key)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _validation_status(report: dict | None, fallback_error: str | None = None) -> tuple[str, str]:
+    if report:
+        if report.get("ok"):
+            return ("Valid", "")
+        missing_deps = report.get("missing_dependencies") or []
+        if missing_deps:
+            return ("Missing dependencies", ", ".join(map(str, missing_deps)))
+        err = report.get("error") or report.get("missing_fields") or "Invalid"
+        if isinstance(err, list):
+            err = ", ".join(map(str, err))
+        return ("Invalid", str(err))
+    if fallback_error:
+        return ("Load error", fallback_error)
+    return ("Not validated", "")
+
+
+def _dependency_lines(report: dict | None) -> list[str]:
+    if not report:
+        return []
+    lines: list[str] = []
+    declared = report.get("declared_dependencies") or []
+    missing = report.get("missing_dependencies") or []
+    installed = report.get("installed_dependencies") or []
+    install_errors = report.get("install_errors") or []
+    if declared:
+        lines.append(f"Declared deps: {', '.join(map(str, declared))}")
+    if missing:
+        lines.append(f"Missing deps: {', '.join(map(str, missing))}")
+    if installed:
+        lines.append(f"Installed deps: {', '.join(map(str, installed))}")
+    if install_errors:
+        lines.append(f"Install errors: {', '.join(map(str, install_errors))}")
+    return lines
+
+
+def render_exp_plugin_settings_form(plugin):
+    category = getattr(plugin, "settings_category", None)
+    settings = getattr(plugin, "required_settings", None)
+    if not category or not settings:
+        return
+    if not isinstance(settings, dict):
+        with st.expander("Settings", expanded=False):
+            st.warning("Settings schema invalid (expected a dictionary).")
+        return
+
+    with st.expander("Settings", expanded=False):
+        current_settings = exp_get_plugin_settings(category)
+        new_settings = {}
+        has_fields = False
+
+        for key, info in settings.items():
+            input_type = info.get("type", "text")
+            label = info.get("label", key)
+            desc = info.get("description", "")
+            default_value = current_settings.get(key, info.get("default", ""))
+
+            if input_type == "button":
+                if st.button(label, key=f"exp_{plugin.name}_{category}_{key}_button"):
+                    if hasattr(plugin, "handle_setting_button"):
+                        try:
+                            result = plugin.handle_setting_button(key)
+                            if asyncio.iscoroutine(result):
+                                result = run_async(result)
+                            if result:
+                                st.success(result)
+                        except Exception as e:
+                            st.error(f"Error running {label}: {e}")
+                if desc:
+                    st.caption(desc)
+                continue
+
+            has_fields = True
+
+            if input_type == "password":
+                new_value = st.text_input(
+                    label,
+                    value=str(default_value),
+                    help=desc,
+                    type="password",
+                    key=f"exp_{plugin.name}_{category}_{key}"
+                )
+            elif input_type == "file":
+                uploaded_file = st.file_uploader(
+                    label,
+                    type=["json"],
+                    key=f"exp_{plugin.name}_{category}_{key}"
+                )
+                if uploaded_file is not None:
+                    try:
+                        file_content = uploaded_file.read().decode("utf-8")
+                        json.loads(file_content)
+                        new_value = file_content
+                    except Exception as e:
+                        st.error(f"Error in uploaded file for {key}: {e}")
+                        new_value = default_value
+                else:
+                    new_value = default_value
+            elif input_type == "select":
+                options = info.get("options", []) or ["Option 1", "Option 2"]
+                current_index = options.index(default_value) if default_value in options else 0
+                new_value = st.selectbox(
+                    label,
+                    options,
+                    index=current_index,
+                    help=desc,
+                    key=f"exp_{plugin.name}_{category}_{key}"
+                )
+            elif input_type == "checkbox":
+                is_checked = (
+                    default_value if isinstance(default_value, bool)
+                    else str(default_value).lower() in ("true", "1", "yes")
+                )
+                new_value = st.checkbox(
+                    label,
+                    value=is_checked,
+                    help=desc,
+                    key=f"exp_{plugin.name}_{category}_{key}"
+                )
+            elif input_type == "number":
+                raw_value = str(default_value).strip()
+                is_int_like = bool(re.fullmatch(r"-?\d+", raw_value))
+
+                if is_int_like:
+                    try:
+                        current_num = int(raw_value)
+                    except Exception:
+                        current_num = 0
+                    new_value = st.number_input(
+                        label,
+                        value=current_num,
+                        step=1,
+                        format="%d",
+                        help=desc,
+                        key=f"exp_{plugin.name}_{category}_{key}"
+                    )
+                else:
+                    try:
+                        current_num = float(raw_value) if raw_value else 0.0
+                    except Exception:
+                        current_num = 0.0
+                    new_value = st.number_input(
+                        label,
+                        value=current_num,
+                        step=1.0,
+                        help=desc,
+                        key=f"exp_{plugin.name}_{category}_{key}"
+                    )
+            elif input_type in ("textarea", "multiline") or info.get("multiline") is True:
+                rows = int(info.get("rows") or 8)
+                height = int(info.get("height") or (rows * 24 + 40))
+                placeholder = info.get("placeholder", None)
+                new_value = st.text_area(
+                    label,
+                    value=str(default_value),
+                    help=desc,
+                    height=height,
+                    placeholder=placeholder,
+                    key=f"exp_{plugin.name}_{category}_{key}"
+                )
+            else:
+                new_value = st.text_input(
+                    label,
+                    value=str(default_value),
+                    help=desc,
+                    key=f"exp_{plugin.name}_{category}_{key}"
+                )
+
+            new_settings[key] = new_value
+
+        if has_fields and st.button(f"Save {category} Settings", key=f"exp_save_{plugin.name}_{category}"):
+            exp_save_plugin_settings(category, new_settings)
+            st.success(f"{category} settings saved.")
+            st.rerun()
+
+
+def render_exp_platform_settings_form(platform_key: str, required: dict):
+    if not required:
+        return
+
+    with st.expander("Settings", expanded=False):
+        current_settings = exp_get_platform_settings(platform_key)
+        new_settings = {}
+        has_fields = False
+
+        for key, info in required.items():
+            input_type = info.get("type", "text")
+            label = info.get("label", key)
+            desc = info.get("description", "")
+            default_value = current_settings.get(key, info.get("default", ""))
+
+            has_fields = True
+
+            if input_type == "password":
+                new_value = st.text_input(
+                    label,
+                    value=str(default_value),
+                    help=desc,
+                    type="password",
+                    key=f"exp_platform_{platform_key}_{key}"
+                )
+            elif input_type == "file":
+                uploaded_file = st.file_uploader(
+                    label,
+                    type=["json"],
+                    key=f"exp_platform_{platform_key}_{key}"
+                )
+                if uploaded_file is not None:
+                    try:
+                        file_content = uploaded_file.read().decode("utf-8")
+                        json.loads(file_content)
+                        new_value = file_content
+                    except Exception as e:
+                        st.error(f"Error in uploaded file for {key}: {e}")
+                        new_value = default_value
+                else:
+                    new_value = default_value
+            elif input_type == "select":
+                options = info.get("options", []) or ["Option 1", "Option 2"]
+                current_index = options.index(default_value) if default_value in options else 0
+                new_value = st.selectbox(
+                    label,
+                    options,
+                    index=current_index,
+                    help=desc,
+                    key=f"exp_platform_{platform_key}_{key}"
+                )
+            elif input_type in ("checkbox", "boolean", "bool"):
+                is_checked = (
+                    default_value if isinstance(default_value, bool)
+                    else str(default_value).lower() in ("true", "1", "yes")
+                )
+                new_value = st.checkbox(
+                    label,
+                    value=is_checked,
+                    help=desc,
+                    key=f"exp_platform_{platform_key}_{key}"
+                )
+            elif input_type == "number":
+                raw_value = str(default_value).strip()
+                is_int_like = bool(re.fullmatch(r"-?\d+", raw_value))
+
+                if is_int_like:
+                    try:
+                        current_num = int(raw_value)
+                    except Exception:
+                        current_num = 0
+                    new_value = st.number_input(
+                        label,
+                        value=current_num,
+                        step=1,
+                        format="%d",
+                        help=desc,
+                        key=f"exp_platform_{platform_key}_{key}"
+                    )
+                else:
+                    try:
+                        current_num = float(raw_value) if raw_value else 0.0
+                    except Exception:
+                        current_num = 0.0
+                    new_value = st.number_input(
+                        label,
+                        value=current_num,
+                        step=1.0,
+                        help=desc,
+                        key=f"exp_platform_{platform_key}_{key}"
+                    )
+            elif input_type in ("textarea", "multiline") or info.get("multiline") is True:
+                rows = int(info.get("rows") or 8)
+                height = int(info.get("height") or (rows * 24 + 40))
+                placeholder = info.get("placeholder", None)
+                new_value = st.text_area(
+                    label,
+                    value=str(default_value),
+                    help=desc,
+                    height=height,
+                    placeholder=placeholder,
+                    key=f"exp_platform_{platform_key}_{key}"
+                )
+            else:
+                new_value = st.text_input(
+                    label,
+                    value=str(default_value),
+                    help=desc,
+                    key=f"exp_platform_{platform_key}_{key}"
+                )
+
+            new_settings[key] = new_value
+
+        if has_fields and st.button(f"Save {platform_key} Settings", key=f"exp_save_platform_{platform_key}"):
+            exp_save_platform_settings(platform_key, new_settings)
+            st.success("Platform settings saved.")
+            st.rerun()
 
 def render_platform_controls(platform, redis_client):
     category     = platform["label"]
@@ -1282,6 +1807,112 @@ def render_plugin_card(plugin):
 
         render_plugin_settings_form(plugin)
 
+
+def render_agent_lab_plugin_card(plugin):
+    display_name = (
+        getattr(plugin, "plugin_name", None)
+        or getattr(plugin, "pretty_name", None)
+        or plugin.name
+    )
+    description = get_plugin_description(plugin)
+    platforms = getattr(plugin, "platforms", []) or []
+    registry_id = plugin.name
+
+    enabled = exp_get_plugin_enabled(registry_id)
+    plugin_file = AGENT_PLUGINS_DIR / f"{registry_id}.py"
+    report = _load_exp_validation("plugin", registry_id)
+    status_label, status_detail = _validation_status(report)
+
+    with st.container(border=True):
+        header_cols = st.columns([4, 1.1, 1.1, 1.1])
+
+        with header_cols[0]:
+            st.subheader(display_name)
+            st.caption(f"ID: {registry_id}")
+            st.caption(f"Enabled: {'yes' if enabled else 'no'}")
+
+        with header_cols[1]:
+            if st.button("Validate", key=f"exp_validate_{registry_id}"):
+                report = validate_plugin(registry_id)
+                if report.get("ok"):
+                    st.success("Validation passed.")
+                else:
+                    st.error(f"Validation failed: {report.get('error') or report.get('missing_fields')}")
+
+        with header_cols[2]:
+            if st.button("Enable", key=f"exp_enable_{registry_id}"):
+                report = validate_plugin(registry_id)
+                if report.get("ok"):
+                    exp_set_plugin_enabled(registry_id, True)
+                    st.success("Enabled.")
+                    st.rerun()
+                else:
+                    st.error(f"Enable blocked: {report.get('error') or report.get('missing_fields')}")
+
+        with header_cols[3]:
+            if st.button("Disable", key=f"exp_disable_{registry_id}"):
+                exp_set_plugin_enabled(registry_id, False)
+                st.success("Disabled.")
+                st.rerun()
+
+        if description:
+            st.write(description)
+        if platforms:
+            st.caption(f"Platforms: {', '.join(platforms)}")
+        if status_label:
+            status_line = f"Validation: {status_label}"
+            if status_detail:
+                status_line = f"{status_line} ({status_detail})"
+            st.caption(status_line)
+        for line in _dependency_lines(report):
+            st.caption(line)
+
+        if plugin_file.exists():
+            if st.button("Delete", key=f"exp_delete_{registry_id}"):
+                result = delete_file(str(plugin_file))
+                if result.get("ok"):
+                    exp_set_plugin_enabled(registry_id, False)
+                    st.success("Deleted Agent Lab plugin file.")
+                    st.rerun()
+                else:
+                    st.error(result.get("error") or "Delete failed.")
+
+        render_exp_plugin_settings_form(plugin)
+
+
+def render_agent_lab_plugin_error_card(name: str, path: str):
+    report = _load_exp_validation("plugin", name)
+    status_label, status_detail = _validation_status(report, fallback_error="Failed to load")
+
+    with st.container(border=True):
+        header_cols = st.columns([4, 1, 1])
+        with header_cols[0]:
+            st.subheader(name)
+            st.caption(f"ID: {name}")
+            status_line = f"Validation: {status_label}"
+            if status_detail:
+                status_line = f"{status_line} ({status_detail})"
+            st.caption(status_line)
+        with header_cols[1]:
+            if st.button("Validate", key=f"exp_validate_error_{name}"):
+                report = validate_plugin(name)
+                if report.get("ok"):
+                    st.success("Validation passed.")
+                else:
+                    st.error(f"Validation failed: {report.get('error') or report.get('missing_fields')}")
+        with header_cols[2]:
+            if st.button("Delete", key=f"exp_delete_error_{name}"):
+                result = delete_file(str(path))
+                if result.get("ok"):
+                    exp_set_plugin_enabled(name, False)
+                    st.success("Deleted Agent Lab plugin file.")
+                    st.rerun()
+                else:
+                    st.error(result.get("error") or "Delete failed.")
+
+        for line in _dependency_lines(report):
+            st.caption(line)
+
 def _platform_sort_name(p):
     return (p.get("label") or p.get("category") or p.get("key") or "").lower()
 
@@ -1332,17 +1963,9 @@ def render_webui_settings():
         redis_client.set("tater:show_speed_stats", "true" if show_speed else "false")
         st.success("WebUI settings updated.")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Clear Chat History", key="clear_history"):
-            clear_chat_history()
-            st.success("Chat history cleared.")
-    with col2:
-        if st.button("Clear Active Plugin Jobs", key="clear_plugin_jobs"):
-            for key in redis_client.scan_iter("webui:plugin_jobs:*"):
-                redis_client.delete(key)
-            st.success("All active plugin jobs have been cleared.")
-            st.rerun()
+    if st.button("Clear Chat History", key="clear_history"):
+        clear_chat_history()
+        st.success("Chat history cleared.")
 
     st.markdown("---")
     st.subheader("Attachments")
@@ -1392,7 +2015,6 @@ def render_tater_settings():
     default_first = redis_client.get("tater:first_name") or first_name
     default_last = redis_client.get("tater:last_name") or last_name
     default_personality = redis_client.get("tater:personality") or ""
-
     first_input = st.text_input("First Name", value=default_first, key="tater_first_name")
     last_input = st.text_input("Last Name", value=default_last, key="tater_last_name")
 
@@ -1434,6 +2056,43 @@ def render_tater_settings():
         st.success("Tater settings updated.")
         st.rerun()
 
+def render_admin_gating_settings():
+    st.subheader("Admin Tool Gating")
+    st.caption(
+        "Only the configured admin user can run these plugins on Discord, Telegram, Matrix, and IRC. "
+        "If a platform’s admin user setting is blank, these tools are disabled for everyone on that platform."
+    )
+
+    registry = get_registry() or {}
+    plugin_ids = sorted(registry.keys())
+    current = sorted(get_admin_only_plugins(redis_client))
+    known_current = [p for p in current if p in plugin_ids]
+    unknown_current = [p for p in current if p not in plugin_ids]
+
+    if redis_client.get(ADMIN_GATE_KEY) is None:
+        st.info("Currently using the default admin-only list. Save to customize.")
+
+    if unknown_current:
+        st.warning(f"Unknown plugin IDs currently stored: {', '.join(unknown_current)}")
+
+    selected = st.multiselect(
+        "Admin-only plugins (by plugin id)",
+        options=plugin_ids,
+        default=known_current,
+        help="Selected plugins can only be run by the admin user on Discord/Telegram/Matrix/IRC.",
+        key="admin_gate_plugins",
+    )
+
+    col1, col2 = st.columns(2)
+    if col1.button("Save Admin Tool Gating", key="save_admin_gating"):
+        redis_client.set(ADMIN_GATE_KEY, json.dumps(selected))
+        st.success("Admin-only plugin list saved.")
+
+    if col2.button("Reset to Defaults", key="reset_admin_gating"):
+        redis_client.delete(ADMIN_GATE_KEY)
+        st.success("Admin-only plugin list reset to defaults.")
+        st.rerun()
+
 def render_settings_page():
     st.title("Settings")
     render_webui_settings()
@@ -1441,6 +2100,8 @@ def render_settings_page():
     render_homeassistant_settings()
     st.markdown("---")
     render_tater_settings()
+    st.markdown("---")
+    render_admin_gating_settings()
 
 def render_notifiers_page(notifier_plugins):
     st.title("Notifiers")
@@ -1570,6 +2231,96 @@ def render_plugin_list(plugins, empty_message):
         return
     for plugin in sorted_plugins:
         render_plugin_card(plugin)
+
+
+def render_agent_lab_page():
+    st.title("Agent Lab")
+    st.caption("Agent Lab tools are isolated under agent_lab/.")
+
+    st.subheader("Agent Plugins")
+    exp_items = _discover_agent_lab_plugins()
+    exp_errors = [f"{item['name']}.py (failed to load)" for item in exp_items if not item.get("loaded")]
+    if exp_errors:
+        st.warning("Some Agent Lab plugins failed to load: " + ", ".join(exp_errors))
+    if not exp_items:
+        st.info("No Agent Lab plugins found in agent_lab/plugins.")
+    else:
+        for item in exp_items:
+            plugin = item.get("plugin")
+            if plugin:
+                render_agent_lab_plugin_card(plugin)
+            else:
+                render_agent_lab_plugin_error_card(item.get("name", "unknown"), item.get("path", ""))
+
+    st.markdown("---")
+    st.subheader("Agent Platforms")
+    exp_platforms = _discover_agent_lab_platforms()
+    if not exp_platforms:
+        st.info("No Agent Lab platforms found in agent_lab/platforms.")
+        return
+
+    for platform in exp_platforms:
+        key = platform.get("key")
+        label = platform.get("label") or key
+        path = platform.get("path")
+        ok = platform.get("ok", True)
+        error = platform.get("error") or ""
+        required = platform.get("required") or {}
+
+        running_key = f"exp:{key}_running"
+        is_running = (redis_client.get(running_key) or "") == "true"
+        report = _load_exp_validation("platform", key)
+        status_label, status_detail = _validation_status(report, fallback_error=error if not ok else None)
+
+        with st.container(border=True):
+            cols = st.columns([4, 1, 1, 1])
+            with cols[0]:
+                st.subheader(label)
+                st.caption(f"Key: {key}")
+                st.caption(f"Running: {'yes' if is_running else 'no'}")
+                status_line = f"Validation: {status_label}"
+                if status_detail:
+                    status_line = f"{status_line} ({status_detail})"
+                st.caption(status_line)
+                for line in _dependency_lines(report):
+                    st.caption(line)
+            with cols[1]:
+                if st.button("Validate", key=f"exp_platform_validate_{key}"):
+                    report = validate_platform(key)
+                    if report.get("ok"):
+                        st.success("Validation passed.")
+                    else:
+                        st.error(f"Validation failed: {report.get('error') or report.get('missing_fields')}")
+            with cols[2]:
+                if st.button("Start", key=f"exp_platform_start_{key}"):
+                    report = validate_platform(key)
+                    if report.get("ok"):
+                        redis_client.set(running_key, "true")
+                        if path:
+                            _start_agent_lab_platform(key, path)
+                        st.success("Started.")
+                        st.rerun()
+                    else:
+                        st.error(f"Start blocked: {report.get('error') or report.get('missing_fields')}")
+            with cols[3]:
+                if st.button("Stop", key=f"exp_platform_stop_{key}"):
+                    redis_client.set(running_key, "false")
+                    _stop_agent_lab_platform(key)
+                    st.success("Stopped.")
+                    st.rerun()
+
+            if path and st.button("Delete", key=f"exp_platform_delete_{key}"):
+                result = delete_file(str(path))
+                if result.get("ok"):
+                    redis_client.set(running_key, "false")
+                    _stop_agent_lab_platform(key)
+                    st.success("Deleted Agent Lab platform file.")
+                    st.rerun()
+                else:
+                    st.error(result.get("error") or "Delete failed.")
+
+            if ok and required:
+                render_exp_platform_settings_form(key, required)
 
 def render_plugin_store_page():
     import re as _re
@@ -1907,36 +2658,30 @@ def build_system_prompt():
     persona_clause = ""
     if personality:
         persona_clause = (
-            f"You should speak and behave like {personality}. "
-            "This affects tone, voice, and phrasing only. "
-            "You must always follow system instructions, tool rules, and safety constraints exactly.\n\n"
+            f"Voice style: {personality}. "
+            "This affects tone only. "
+            "You must always follow tool and safety rules.\n\n"
         )
-
-    base_prompt = (
-        f"You are {first} {last}, an AI assistant with access to various tools and plugins.\n\n"
-        f"{persona_clause}"
-        "When a user requests one of these actions, reply ONLY with a JSON object in one of the following formats (and nothing else):\n\n"
-    )
-
-    tool_instructions = "\n\n".join(
-        f"Tool: {plugin.name}\n"
-        f"Description: {getattr(plugin, 'description', 'No description provided.')}\n"
-        f"{plugin.usage}"
-        for plugin in get_registry().values()
-        if ("webui" in plugin.platforms or "both" in plugin.platforms) and get_plugin_enabled(plugin.name)
-    )
-
-    behavior_guard = (
-        "Only call a tool if the user's latest message clearly requests an action — such as 'generate', 'summarize', or 'download'.\n"
-        "Never call a tool in response to casual or friendly messages like 'thanks', 'lol', or 'cool'.\n"
-    )
 
     return (
         f"Current Date and Time is: {now}\n\n"
-        f"{base_prompt}\n\n"
-        f"{tool_instructions}\n\n"
-        f"{behavior_guard}"
-        "If no function is needed, reply normally.\n"
+        f"You are {first} {last}, an AI assistant with tool access.\n\n"
+        f"{persona_clause}"
+        "Current platform: webui.\n"
+        "Tool strategy:\n"
+        "- Answer directly when no tool is required.\n"
+        "- Tools are discovered on-demand; not all tools are described here. If unsure, call list_plugins.\n"
+        "- If external actions/live data are needed, call list_plugins first.\n- If the user asks to control devices or services or interact with external systems, call list_plugins first.\n"
+        "- If the user asks about a specific tool/plugin by name or asks what a tool can do, call list_plugins or get_plugin_help instead of guessing.\n"
+        "- If you might need a tool or are unsure a capability exists, call list_plugins before saying it is unavailable.\n"
+        "- Optionally call get_plugin_help before calling a plugin.\n"
+        "- If missing required information, ask concise follow-up questions.\n"
+        "- Only ask for inputs a tool explicitly requires (from list_plugins needs or get_plugin_help required_args). If defaults exist, proceed without asking.\n"
+        "- Only call plugins compatible with webui.\n"
+        "- If a capability is unavailable here, explain and list where it is available.\n"
+        "- For tool calls, output only JSON: {\"function\":\"name\",\"arguments\":{...}}\n"
+        "- Meta-tools always available: list_plugins, get_plugin_help, list_platforms_for_plugin.\n"
+        "- Never claim tool success unless the tool result confirms success.\n"
     )
 
 # ----------------- UNIVERSAL MESSAGE NORMALIZATION ----------------------------
@@ -2055,7 +2800,7 @@ def _enforce_user_assistant_alternation(loop_messages):
     return merged
 
 # ----------------- PROCESSING FUNCTIONS -----------------
-async def process_message(user_name, message_content):
+async def process_message(user_name, message_content, wait_callback=None):
     final_system_prompt = build_system_prompt()
     max_llm = int(redis_client.get("tater:max_llm") or 8)
     history = load_chat_history_tail(max_llm)
@@ -2080,193 +2825,45 @@ async def process_message(user_name, message_content):
     loop_messages = _enforce_user_assistant_alternation(loop_messages)
     messages_list.extend(loop_messages)
 
-    # --- timing + usage capture ---
-    start_ts = time.time()
-    response = await llm_client.chat(messages_list)
-    elapsed = max(1e-6, time.time() - start_ts)
+    merged_registry, merged_enabled, _collisions = build_agent_registry(
+        get_registry(),
+        get_plugin_enabled,
+    )
 
-    # Try to use real usage; fall back to rough estimate if missing
-    usage = response.get("usage") or {}
-    prompt_tok = int(usage.get("prompt_tokens") or 0)
-    comp_tok   = int(usage.get("completion_tokens") or 0)
-    total_tok  = int(usage.get("total_tokens") or (prompt_tok + comp_tok))
-
-    if total_tok == 0:
-        # heuristic: ~4 chars/token on average
-        out_text = (response.get("message", {}) or {}).get("content", "") or ""
-        total_tok = max(1, int(len(out_text) / 4))
-        comp_tok = total_tok  # best-effort; no prompt/comp split
-
-    tps_total = total_tok / elapsed
-    tps_comp  = (comp_tok / elapsed) if comp_tok else None
-
-    # Store for UI
-    redis_client.hset("webui:last_llm_stats", mapping={
-        "model": str(response.get("model") or ""),
-        "elapsed": f"{elapsed:.6f}",
-        "prompt_tokens": str(prompt_tok),
-        "completion_tokens": str(comp_tok),
-        "total_tokens": str(total_tok),
-        "tps_total": f"{tps_total:.2f}",
-        "tps_comp": f"{tps_comp:.2f}" if tps_comp is not None else "",
-        "ts": str(time.time()),
-    })
-
-    return response["message"]["content"].strip()
-
-
-# ----------------- BACKGROUND PLUGIN JOBS -----------------
-def start_plugin_job(plugin_name, args, llm_client):
-    job_id = str(uuid.uuid4())
-    redis_key = f"webui:plugin_jobs:{job_id}"
-    redis_client.hset(redis_key, mapping={
-        "status": "pending",
-        "is_running": "1",
-        "is_done": "0",
-        "plugin": plugin_name,
-        "args": json.dumps(args),
-        "created_at": time.time()
-    })
-
-    def _normalize_plugin_response_item(item):
-        """
-        Convert plugin media payloads into redis blob references so JSON serialization works.
-        Supports both keys: data / bytes.
-        Produces: {type,name,mimetype,size,id}
-        """
-        if not isinstance(item, dict):
-            return item
-
-        t = item.get("type")
-        if t not in ("image", "audio", "video", "file"):
-            return item
-
-        # plugin media may come as bytes in `data` or `bytes`
-        raw = None
-        if isinstance(item.get("data"), (bytes, bytearray)):
-            raw = bytes(item["data"])
-        elif isinstance(item.get("bytes"), (bytes, bytearray)):
-            raw = bytes(item["bytes"])
-
-        # If it's already a reference (id present) or no raw bytes, leave it alone
-        if raw is None:
-            return item
-
-        file_id = str(uuid.uuid4())
-        _store_file_blob_in_redis(file_id, raw)
-
-        safe = dict(item)
-        safe.pop("data", None)
-        safe.pop("bytes", None)
-        safe["id"] = file_id
-        safe["size"] = len(raw)
-        return safe
-
-    def job_runner():
-        try:
-            plugin = get_registry().get(plugin_name)
-            if not plugin:
-                raise RuntimeError(f"Plugin '{plugin_name}' is no longer installed.")
-
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                result = loop.run_until_complete(plugin.handle_webui(args, llm_client))
-            finally:
-                loop.close()
-
-            responses = result if isinstance(result, list) else [result]
-
-            # normalize all responses so bytes never hit json.dumps
-            normalized = []
-            for r in responses:
-                if isinstance(r, list):
-                    normalized.append([_normalize_plugin_response_item(x) for x in r])
-                else:
-                    normalized.append(_normalize_plugin_response_item(r))
-
-            redis_client.hset(redis_key, mapping={
-                "status": "done",
-                "is_running": "0",
-                "is_done": "1",
-                "responses": json.dumps(normalized)
-            })
-        except Exception as e:
-            redis_client.hset(redis_key, mapping={
-                "status": "error",
-                "is_running": "0",
-                "is_done": "0",
-                "error": str(e)
-            })
-        finally:
-            redis_client.set("webui:needs_rerun", "true")
-
-    threading.Thread(target=job_runner, daemon=True).start()
-    return job_id
-
-async def process_function_call(response_json, user_question=""):
-    func = response_json.get("function")
-    args = response_json.get("arguments", {}) or {}
-
-    # Attach origin context for auto-targeting / auditing
+    _use_agent, active_task_id, _reason = should_use_agent_mode(
+        user_text=message_content or "",
+        platform="webui",
+        scope="chat",
+        r=redis_client,
+    )
     origin = {
         "platform": "webui",
-        "user": "webui",
-        "request_id": str(uuid.uuid4()),
+        "user": user_name,
     }
-    args = dict(args)
-    args["origin"] = origin
+    result = await run_planner_loop(
+        llm_client=llm_client,
+        platform="webui",
+        history_messages=messages_list,
+        registry=merged_registry,
+        enabled_predicate=merged_enabled,
+        context={"raw_message": message_content},
+        user_text=message_content or "",
+        scope="chat",
+        task_id=active_task_id,
+        origin=origin,
+        redis_client=redis_client,
+        wait_callback=wait_callback,
+    )
+    responses = []
+    if result.get("text"):
+        responses.append(result["text"])
+    for item in result.get("artifacts") or []:
+        responses.append(_normalize_plugin_response_item(item))
+    return {"responses": responses, "agent": True}
 
-    plugin = get_registry().get(func)
-    if not plugin:
-        return "Received an unknown or uninstalled function call."
-
-    # Save structured plugin_call marker
-    save_message("assistant", "assistant", {
-        "marker": "plugin_call",
-        "plugin": func,
-        "arguments": args
-    })
-
-    # Optional: waiting status line
-    if hasattr(plugin, "waiting_prompt_template"):
-        wait_msg = plugin.waiting_prompt_template.format(mention="User")
-
-        wait_response = await llm_client.chat(
-            messages=[
-                {"role": "system", "content": "Write one short, friendly status line for the user."},
-                {"role": "user", "content": wait_msg}
-            ]
-        )
-        wait_text = wait_response["message"]["content"].strip()
-
-        # Save waiting message to Redis
-        save_message("assistant", "assistant", {
-            "marker": "plugin_wait",
-            "content": wait_text
-        })
-
-        # Append waiting message to session state for persistence
-        st.session_state.chat_messages.append({
-            "role": "assistant",
-            "content": {
-                "marker": "plugin_wait",
-                "content": wait_text
-            }
-        })
-
-        # Immediate feedback: render waiting message now before rerun
-        with st.chat_message("assistant", avatar=assistant_avatar):
-            st.write(wait_text)
-
-    # Start background plugin job (new logic)
-    start_plugin_job(func, args, llm_client)
-
-    # Let the job return its response later
-    return []
 
 # ------------------ NAVIGATION ------------------
-nav_options = ["Chat", "Plugins", "Auto Plugins", "Notifiers", "Platforms", "AI Tasks", "Plugin Store", "Settings"]
+nav_options = ["Chat", "Plugins", "Auto Plugins", "Notifiers", "Platforms", "AI Tasks", "Agent Lab", "Plugin Store", "Settings"]
 if "active_view" not in st.session_state:
     st.session_state.active_view = nav_options[0]
 
@@ -2289,8 +2886,23 @@ for platform in platform_registry:
     platform_should_run = redis_client.get(state_key) == "true"
 
     if platform_should_run:
-        _start_platform(key)
-        auto_connected.append(platform.get("label") or platform.get("category") or platform.get("key"))
+        if _platform_thread_alive(key):
+            auto_connected.append(platform.get("label") or platform.get("category") or platform.get("key"))
+        elif _should_autostart(key, exp=False):
+            _start_platform(key)
+            auto_connected.append(platform.get("label") or platform.get("category") or platform.get("key"))
+
+# ------------------ EXPERIMENTAL PLATFORM MANAGEMENT ------------------
+exp_platforms = _discover_agent_lab_platforms()
+for exp in exp_platforms:
+    exp_key = exp.get("key")
+    exp_path = exp.get("path")
+    if not exp_key or not exp_path:
+        continue
+    state_key = f"exp:{exp_key}_running"
+    if (redis_client.get(state_key) or "") == "true":
+        if not _exp_platform_thread_alive(exp_key) and _should_autostart(exp_key, exp=True):
+            _start_experiment_platform(exp_key, exp_path)
 
 # Prepare plugin groupings
 notifier_plugins = _sort_plugins_for_display([
@@ -2311,47 +2923,6 @@ if "chat_messages" not in st.session_state:
     full_history = load_chat_history()
     max_display = int(redis_client.get("tater:max_display") or 8)
     st.session_state.chat_messages = full_history[-max_display:]
-
-# Check for completed plugin jobs (same behavior, fewer Redis round trips)
-job_keys = list(redis_client.scan_iter(match="webui:plugin_jobs:*", count=2000))
-if job_keys:
-    pipe = redis_client.pipeline()
-    for key in job_keys:
-        pipe.hgetall(key)
-    jobs = pipe.execute()
-
-    for key, job in zip(job_keys, jobs):
-        status = job.get("status")
-
-        if status == "done":
-            try:
-                responses = json.loads(job.get("responses", "[]"))
-            except Exception:
-                responses = []
-
-            for r in responses:
-                item = {
-                    "role": "assistant",
-                    "content": {
-                        "marker": "plugin_response",
-                        "phase": "final",
-                        "content": r
-                    }
-                }
-                st.session_state.chat_messages.append(item)
-                save_message("assistant", "assistant", item["content"])
-
-            redis_client.delete(key)
-
-        elif status == "error":
-            err = job.get("error") or "Unknown error"
-            item = {
-                "role": "assistant",
-                "content": f"❌ Plugin error: {err}"
-            }
-            st.session_state.chat_messages.append(item)
-            save_message("assistant", "assistant", item["content"])
-            redis_client.delete(key)
 
 if active_view == "Chat":
     st.title(f"{first_name} Chat Web UI")
@@ -2513,15 +3084,42 @@ if active_view == "Chat":
             st.session_state.chat_messages.append({"role": "user", "content": msg})
 
         # ---- Send to LLM (even if only files were uploaded) ----
-        with st.spinner(f"{first_name} is thinking..."):
-            response_text = run_async(process_message(uname, user_text))
+        status_box = None
+        if hasattr(st, "status"):
+            status_box = st.status(
+                f"{first_name} is thinking…",
+                state="running",
+                expanded=False,
+            )
 
-        func_call = parse_function_json(response_text)
-        if func_call:
-            func_result = run_async(process_function_call(func_call, user_text))
-            responses = func_result if isinstance(func_result, list) else [func_result]
+        async def _wait_callback(func_name, plugin_obj):
+            if not status_box:
+                return
+            display_name = (
+                getattr(plugin_obj, "plugin_name", None)
+                or getattr(plugin_obj, "pretty_name", None)
+                or getattr(plugin_obj, "name", None)
+                or func_name
+            )
+            status_box.update(
+                label=f"{first_name} is working on: {display_name}",
+                state="running",
+            )
+
+        if status_box is None:
+            spinner_label = f"{first_name} is thinking..."
+            with st.spinner(spinner_label):
+                response_payload = run_async(process_message(uname, user_text, wait_callback=_wait_callback))
         else:
-            responses = [response_text]
+            response_payload = run_async(process_message(uname, user_text, wait_callback=_wait_callback))
+
+        if status_box is not None:
+            status_box.update(label=f"{first_name} finished.", state="complete")
+
+        if isinstance(response_payload, dict) and isinstance(response_payload.get("responses"), list):
+            responses = response_payload.get("responses") or []
+        else:
+            responses = [response_payload]
 
         for item in responses:
             st.session_state.chat_messages.append({"role": "assistant", "content": item})
@@ -2549,157 +3147,6 @@ if active_view == "Chat":
             except Exception:
                 pass
 
-    # ------------------ pending plugin jobs indicator (BOTTOM, WAIT FOR TRANSITION) ------------------
-    pending_plugins = []
-    pending_keys = []
-
-    job_keys = list(redis_client.scan_iter(match="webui:plugin_jobs:*", count=2000))
-    if job_keys:
-        pipe = redis_client.pipeline()
-        for key in job_keys:
-            pipe.hget(key, "status")
-            pipe.hget(key, "plugin")
-        results = pipe.execute()
-
-        for i, key in enumerate(job_keys):
-            status = results[i * 2]
-            plugin_name = results[i * 2 + 1]
-
-            if status == "pending":
-                pending_keys.append(key)
-
-                plugin = get_registry().get(plugin_name) if plugin_name else None
-                if plugin:
-                    display_name = (
-                        getattr(plugin, "plugin_name", None)
-                        or getattr(plugin, "pretty_name", None)
-                        or plugin.name
-                    )
-                    pending_plugins.append(display_name)
-                elif plugin_name:
-                    pending_plugins.append(plugin_name)
-
-    if pending_plugins:
-        names_str = ", ".join(pending_plugins)
-
-        # Prefer newer Streamlit status UI when available; fall back to spinner.
-        use_status = hasattr(st, "status")
-
-        if use_status:
-            status_box = st.status(
-                f"{first_name} is working on: {names_str}",
-                state="running",
-                expanded=False
-            )
-        else:
-            status_box = None
-
-        def _update_label():
-            # Recompute names each tick so the list stays accurate as jobs finish/start
-            cur_names = []
-            cur_keys = []
-
-            keys = list(redis_client.scan_iter(match="webui:plugin_jobs:*", count=2000))
-            if not keys:
-                return "", []
-
-            pipe = redis_client.pipeline()
-            for k in keys:
-                pipe.hget(k, "status")
-                pipe.hget(k, "plugin")
-            vals = pipe.execute()
-
-            for idx, k in enumerate(keys):
-                stt = vals[idx * 2]
-                plg = vals[idx * 2 + 1]
-                if stt == "pending":
-                    cur_keys.append(k)
-                    p = get_registry().get(plg) if plg else None
-                    if p:
-                        cur_names.append(
-                            getattr(p, "plugin_name", None)
-                            or getattr(p, "pretty_name", None)
-                            or p.name
-                        )
-                    elif plg:
-                        cur_names.append(plg)
-
-            return ", ".join(cur_names), cur_keys
-
-        previous_pending = set(pending_keys)
-
-        while True:
-            transition_detected = False
-            current_pending = set()
-
-            job_keys_now = list(redis_client.scan_iter(match="webui:plugin_jobs:*", count=2000))
-            if job_keys_now:
-                pipe = redis_client.pipeline()
-                for key in job_keys_now:
-                    pipe.hget(key, "status")
-                statuses = pipe.execute()
-
-                for key, status in zip(job_keys_now, statuses):
-                    if status == "pending":
-                        current_pending.add(key)
-                    else:
-                        # pending -> done/error transition
-                        if key in previous_pending:
-                            transition_detected = True
-
-            # A key that used to exist vanished (deleted after processing) = transition
-            for key in list(previous_pending):
-                if not redis_client.exists(key):
-                    transition_detected = True
-
-            # Update the nicer UI label while we wait
-            if status_box is not None:
-                new_names, _ = _update_label()
-                if new_names:
-                    status_box.update(
-                        label=f"{first_name} is working on: {new_names}",
-                        state="running"
-                    )
-                else:
-                    # Don't mark complete here — a transition likely happened and we're about to rerun
-                    status_box.update(
-                        label=f"{first_name} is updating plugin results…",
-                        state="running"
-                    )
-
-            # Stop waiting if anything finished OR nothing is pending anymore
-            if transition_detected or not current_pending:
-                break
-
-            previous_pending = current_pending
-            time.sleep(1)
-
-        # Close out the status box nicely (only if truly finished)
-        if status_box is not None:
-            # Are there still pending jobs right now?
-            keys = list(redis_client.scan_iter(match="webui:plugin_jobs:*", count=2000))
-            still_pending = False
-            if keys:
-                pipe = redis_client.pipeline()
-                for k in keys:
-                    pipe.hget(k, "status")
-                stts = pipe.execute()
-                still_pending = any(s == "pending" for s in stts)
-
-            if still_pending:
-                # Keep it "running" — rerun will refresh the label anyway
-                status_box.update(
-                    label=f"{first_name} is still working on plugins…",
-                    state="running"
-                )
-            else:
-                status_box.update(
-                    label=f"{first_name} updated plugin results.",
-                    state="complete"
-                )
-
-        st.rerun()
-
 elif active_view == "Plugins":
     st.title("Plugins")
     st.write("Browse available plugins. Automation-only tools are listed separately.")
@@ -2719,6 +3166,9 @@ elif active_view == "Notifiers":
 
 elif active_view == "AI Tasks":
     render_ai_tasks_page()
+
+elif active_view == "Agent Lab":
+    render_agent_lab_page()
 
 elif active_view == "Plugin Store":
     render_plugin_store_page()

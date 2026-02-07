@@ -1,10 +1,19 @@
 class ToolPlugin:
     name = ""
     plugin_name = ""
+    pretty_name = ""
+    version = "1.0.0"
     usage = ""
     platforms = []
     notifier = False
     plugin_dec = ""
+    description = ""
+    when_to_use = ""
+    common_needs = []
+    required_args = []
+    optional_args = []
+    example_calls = []
+    missing_info_prompts = []
     settings_category = None
     required_settings = {}
 

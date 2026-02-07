@@ -20,7 +20,7 @@ class BroadcastPlugin(ToolPlugin):
     """
     name = "broadcast"
     plugin_name = "Broadcast"
-    version = "1.0.1"
+    version = "1.0.2"
     min_tater_version = "50"
     usage = (
         "{\n"
@@ -60,8 +60,7 @@ class BroadcastPlugin(ToolPlugin):
         "Only output that message."
     )
 
-    # Not available on Discord/IRC/Matrix
-    platforms = ["homeassistant", "homekit", "xbmc", "webui"]
+    platforms = ["homeassistant", "homekit", "xbmc", "webui", "discord", "telegram", "matrix", "irc"]
 
     # ──────────────────────────────────────────────────────────────────────────
     # Settings / HA
@@ -223,6 +222,18 @@ class BroadcastPlugin(ToolPlugin):
         args = args or {}
         final = await self._broadcast(args.get("text") or "", llm_client)
         return (final or "No announcement.").strip()
+
+    async def handle_discord(self, message, args, llm_client):
+        return await self.handle_webui(args, llm_client)
+
+    async def handle_telegram(self, update, args, llm_client):
+        return await self.handle_webui(args, llm_client)
+
+    async def handle_matrix(self, client, room, sender, body, args, llm_client):
+        return await self.handle_webui(args, llm_client)
+
+    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
+        return await self.handle_webui(args, llm_client)
 
 
 plugin = BroadcastPlugin()
