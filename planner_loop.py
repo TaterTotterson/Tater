@@ -290,6 +290,7 @@ def _agent_system_instructions(max_rounds: int, max_tool_calls: int) -> str:
         "Rules:\n"
         "- Decide the next step each round: tool call, question, or finish.\n"
         "- Use list_plugins to discover tools; use get_plugin_help if arguments are unclear.\n"
+        "- Examples that require list_plugins: weather/forecast, news, stocks, sports scores, downloads, music/song generation, image/video generation, camera feeds/snapshots (front/back yard, porch, driveway, garage), camera/sensor status, smart-home actions.\n"
         "- The user does not need to explicitly request tool use; if a tool is appropriate, use it.\n"
         "- Prefer using a tool over attempting to answer from scratch when a tool could fulfill the request.\n"
         "- Only call tools compatible with this platform.\n"
