@@ -36,6 +36,8 @@ def build_compact_system_prompt(platform: str, extra_instructions: str = "") -> 
         "Tool use policy:\n"
         "- Answer directly when no external action or live lookup is needed.\n"
         "- Tools are discovered on-demand; not all tools are described here. If unsure, call list_plugins.\n"
+        "- The user does not need to explicitly request tool use; if a tool is appropriate, use it.\n"
+        "- Prefer using a tool over attempting to answer from scratch when a tool could fulfill the request.\n"
         "- If a tool may be needed, call `list_plugins` first.\n"
         "- If the user asks to control devices or services or interact with external systems, call list_plugins first.\n"
         "- If the user asks about a specific tool/plugin by name or asks what a tool can do, call `list_plugins` or `get_plugin_help` instead of guessing.\n"

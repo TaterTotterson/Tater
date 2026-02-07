@@ -481,6 +481,8 @@ class TelegramPlatform:
             "Tool strategy:\n"
             "- Answer directly when no external action/live data is needed.\n"
             "- Tools are discovered on-demand; not all tools are described here. If unsure, call list_plugins.\n"
+            "- The user does not need to explicitly request tool use; if a tool is appropriate, use it.\n"
+            "- Prefer using a tool over attempting to answer from scratch when a tool could fulfill the request.\n"
             "- If a tool may be needed, call list_plugins first.\n- If the user asks to control devices or services or interact with external systems, call list_plugins first.\n"
             "- If the user asks about a specific tool/plugin by name or asks what a tool can do, call list_plugins or get_plugin_help instead of guessing.\n"
             "- If you might need a tool or are unsure a capability exists, call list_plugins before saying it is unavailable.\n"
