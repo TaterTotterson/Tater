@@ -39,6 +39,71 @@ AGENT_MODE_TRIGGERS = (
     "set this up fully",
 )
 
+CREATION_VERBS = (
+    "create",
+    "make",
+    "build",
+    "set up",
+    "setup",
+    "generate",
+    "write",
+    "scaffold",
+)
+
+CREATION_PLUGIN_KEYWORDS = (
+    "plugin",
+    "tool",
+)
+
+CREATION_PLATFORM_KEYWORDS = (
+    "platform",
+    "server",
+    "endpoint",
+    "api",
+    "service",
+    "website",
+)
+
+CREATION_PLUGIN_PHRASES = (
+    "create plugin",
+    "create a plugin",
+    "make plugin",
+    "build plugin",
+    "new plugin",
+    "create tool",
+    "build tool",
+    "create_plugin",
+)
+
+CREATION_PLATFORM_PHRASES = (
+    "create platform",
+    "create a platform",
+    "build platform",
+    "new platform",
+    "create server",
+    "build server",
+    "create endpoint",
+    "build endpoint",
+    "create api",
+    "build api",
+    "create service",
+    "build service",
+    "create website",
+    "build website",
+    "create_platform",
+)
+
+CREATION_NEGATIVE_GUARDS = (
+    "review",
+    "debug",
+    "fix",
+    "explain",
+    "use existing plugin",
+    "use existing tools",
+    "list plugins",
+    "run",
+)
+
 HIGH_IMPACT_KEYWORDS = (
     "delete",
     "remove",
@@ -355,26 +420,130 @@ def _looks_high_impact(plugin_id: str, args: Dict[str, Any]) -> bool:
     return any(k in blob for k in HIGH_IMPACT_KEYWORDS)
 
 
-def _needs_agent_lab_creation(text: str) -> bool:
+def _has_phrase(text: str, phrase: str) -> bool:
+    needle = str(phrase or "").strip().lower()
+    if not needle:
+        return False
+    if " " in needle or "_" in needle:
+        return needle in text
+    return re.search(rf"\b{re.escape(needle)}\b", text) is not None
+
+
+def _creation_request_analysis(text: str) -> Dict[str, Any]:
     s = (text or "").lower()
     if not s:
-        return False
+        return {
+            "mode": "none",
+            "confidence": 0.0,
+            "need_plugin": False,
+            "need_platform": False,
+            "scores": {"plugin": 0, "platform": 0},
+            "guards": [],
+        }
 
-    keywords = ("plugin", "platform", "server", "endpoint", "api", "website", "tool")
-    verbs = ("create", "make", "build", "set up", "setup", "generate", "write")
+    s = re.sub(r"\s+", " ", s).strip()
+    has_agent_lab_context = "agent lab" in s or "agent mode" in s
+    has_verbs = any(v in s for v in CREATION_VERBS)
+    plugin_keyword_hit = any(k in s for k in CREATION_PLUGIN_KEYWORDS)
+    platform_keyword_hit = any(k in s for k in CREATION_PLATFORM_KEYWORDS)
+    plugin_phrase_hit = any(p in s for p in CREATION_PLUGIN_PHRASES) or bool(
+        re.search(
+            r"\b(?:create|make|build|set\s+up|setup|generate|write|scaffold)\b(?:\W+\w+){0,3}\W+\b(?:plugin|tool)\b",
+            s,
+        )
+    )
+    platform_phrase_hit = any(p in s for p in CREATION_PLATFORM_PHRASES) or bool(
+        re.search(
+            r"\b(?:create|make|build|set\s+up|setup|generate|write|scaffold)\b(?:\W+\w+){0,3}\W+\b(?:platform|server|endpoint|api|service|website)\b",
+            s,
+        )
+    )
 
-    if "agent lab" in s or "agent mode" in s:
-        return any(k in s for k in keywords)
+    plugin_score = 0
+    platform_score = 0
 
-    return any(k in s for k in keywords) and any(v in s for v in verbs)
+    if plugin_keyword_hit:
+        plugin_score += 1
+    if platform_keyword_hit:
+        platform_score += 1
+    if has_verbs and plugin_keyword_hit:
+        plugin_score += 1
+    if has_verbs and platform_keyword_hit:
+        platform_score += 1
+    if plugin_phrase_hit:
+        plugin_score += 3
+    if platform_phrase_hit:
+        platform_score += 3
+    if has_agent_lab_context:
+        if plugin_keyword_hit or plugin_phrase_hit:
+            plugin_score += 2
+        if platform_keyword_hit or platform_phrase_hit:
+            platform_score += 2
+
+    guards = [g for g in CREATION_NEGATIVE_GUARDS if _has_phrase(s, g)]
+    if guards:
+        plugin_score = max(0, plugin_score - 2)
+        platform_score = max(0, platform_score - 2)
+
+    need_plugin = plugin_phrase_hit or (plugin_keyword_hit and has_verbs)
+    need_platform = platform_phrase_hit or (platform_keyword_hit and has_verbs)
+    if not need_plugin and plugin_score >= 4 and plugin_score > platform_score:
+        need_plugin = True
+    if not need_platform and platform_score >= 4 and platform_score > plugin_score:
+        need_platform = True
+
+    best_score = max(plugin_score, platform_score)
+    if best_score >= 5 and not guards and (need_plugin or need_platform):
+        mode = "create"
+        confidence = 0.85
+    elif best_score >= 3 and (plugin_keyword_hit or platform_keyword_hit or plugin_phrase_hit or platform_phrase_hit):
+        mode = "ask"
+        confidence = 0.60 if not guards else 0.45
+    else:
+        mode = "none"
+        confidence = 0.20
+
+    if mode in {"ask", "create"} and not (need_plugin or need_platform):
+        if plugin_score > platform_score:
+            need_plugin = True
+        elif platform_score > plugin_score:
+            need_platform = True
+
+    return {
+        "mode": mode,
+        "confidence": confidence,
+        "need_plugin": bool(need_plugin),
+        "need_platform": bool(need_platform),
+        "scores": {"plugin": int(plugin_score), "platform": int(platform_score)},
+        "guards": guards,
+    }
+
+
+def _needs_agent_lab_creation(text: str) -> bool:
+    return _creation_request_analysis(text).get("mode") == "create"
 
 
 def _creation_intent(text: str) -> Dict[str, bool]:
-    s = (text or "").lower()
+    analysis = _creation_request_analysis(text)
     return {
-        "need_platform": any(k in s for k in ("platform", "server", "endpoint", "api", "service")),
-        "need_plugin": any(k in s for k in ("plugin", "tool")),
+        "need_platform": bool(analysis.get("need_platform")),
+        "need_plugin": bool(analysis.get("need_plugin")),
     }
+
+
+def _creation_confirmation_prompt(intent: Dict[str, bool]) -> str:
+    targets: List[str] = []
+    if intent.get("need_plugin"):
+        targets.append("plugin")
+    if intent.get("need_platform"):
+        targets.append("platform")
+    if not targets:
+        targets = ["plugin or platform"]
+    target_text = " and ".join(targets)
+    return (
+        f"I can create a new Agent Lab {target_text}, but I want to confirm first. "
+        f"Do you want me to generate a new {target_text} now? (yes/no)"
+    )
 
 
 def _creation_state(state: Dict[str, Any]) -> Dict[str, List[str]]:
@@ -616,6 +785,66 @@ async def run_planner_loop(
     else:
         forced_call = None
 
+    creation_analysis = _creation_request_analysis(user_text or "")
+    creation_intent = {
+        "need_plugin": bool(creation_analysis.get("need_plugin")),
+        "need_platform": bool(creation_analysis.get("need_platform")),
+    }
+    needs_creation = creation_analysis.get("mode") == "create"
+    creation_user_confirmed = bool(state.get("creation_user_confirmed")) or needs_creation
+
+    if state.get("pending_creation_confirmation"):
+        decision = _confirm_from_text(user_text)
+        question = str(state.get("pending_creation_question") or "").strip()
+        if not question:
+            question = _creation_confirmation_prompt(state.get("pending_creation_intent") or creation_intent)
+        if decision is None:
+            save_task_state(state, r=r)
+            return {"text": question, "status": "blocked", "task_id": task_id, "artifacts": []}
+        if decision is False:
+            clear_active_task_id(platform, scope, r=r)
+            state["status"] = "stopped"
+            state["pending_creation_confirmation"] = False
+            state["pending_creation_intent"] = {}
+            state["pending_creation_source_text"] = ""
+            state["pending_creation_question"] = ""
+            state["creation_user_confirmed"] = False
+            _update_progress_summary(state, "User declined Agent Lab code generation.")
+            save_task_state(state, r=r)
+            return {
+                "text": "Okay, I won't generate a new Agent Lab plugin/platform. Tell me what to do with existing tools.",
+                "status": "stopped",
+                "task_id": task_id,
+                "artifacts": [],
+            }
+        source_text = str(state.get("pending_creation_source_text") or state.get("goal") or user_text or "")
+        pending_intent = state.get("pending_creation_intent")
+        if not isinstance(pending_intent, dict):
+            pending_intent = _creation_intent(source_text)
+        creation_analysis = _creation_request_analysis(source_text)
+        creation_intent = {
+            "need_plugin": bool(pending_intent.get("need_plugin")),
+            "need_platform": bool(pending_intent.get("need_platform")),
+        }
+        needs_creation = True
+        creation_user_confirmed = True
+        state["pending_creation_confirmation"] = False
+        state["pending_creation_intent"] = {}
+        state["pending_creation_source_text"] = ""
+        state["pending_creation_question"] = ""
+        state["creation_user_confirmed"] = True
+        state["status"] = "running"
+        save_task_state(state, r=r)
+        user_text = source_text
+    elif creation_analysis.get("mode") == "ask":
+        question = _creation_confirmation_prompt(creation_intent)
+        state["pending_creation_confirmation"] = True
+        state["pending_creation_intent"] = creation_intent
+        state["pending_creation_source_text"] = user_text or ""
+        state["pending_creation_question"] = question
+        save_task_state(state, r=r)
+        return {"text": question, "status": "blocked", "task_id": task_id, "artifacts": []}
+
     messages = list(history_messages or [])
     agent_msg = {"role": "system", "content": _agent_system_instructions(max_rounds, max_tool_calls)}
     if messages and messages[0].get("role") == "system":
@@ -643,11 +872,10 @@ async def run_planner_loop(
     format_fix_used = False
     missing_args_fix_used = 0
     creation_fix_used = 0
-    needs_creation = _needs_agent_lab_creation(user_text or "")
-    creation_intent = _creation_intent(user_text or "")
     unknown_tool_fix_used = False
     created_snapshot = _creation_state(state)
     creation_followup_issued = bool(state.get("creation_followup_issued"))
+    creation_precheck_done = bool(state.get("creation_precheck_done"))
 
     if needs_creation and not state.get("skills_loaded"):
         skill_paths = []
@@ -745,14 +973,15 @@ async def run_planner_loop(
                         )
                         creation_fix_used += 1
                         continue
-                    forced = await _force_creation_tool_call(
-                        llm_client=llm_client,
-                        user_text=user_text or "",
-                        missing_parts=missing_parts,
-                    )
-                    if forced:
-                        forced_call = forced
-                        continue
+                    if creation_user_confirmed:
+                        forced = await _force_creation_tool_call(
+                            llm_client=llm_client,
+                            user_text=user_text or "",
+                            missing_parts=missing_parts,
+                        )
+                        if forced:
+                            forced_call = forced
+                            continue
                     text = _creation_summary(state) or AGENT_CREATION_FAILURE_TEXT
                 elif needs_creation and already_created:
                     text = _creation_summary(state) or text
@@ -805,6 +1034,17 @@ async def run_planner_loop(
             }
 
         if needs_creation and func in {"create_platform", "create_plugin"}:
+            if not creation_precheck_done:
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "Before creating new Agent Lab code, call list_plugins first. "
+                        "If an existing tool can satisfy the request, use that tool instead of create_plugin/create_platform."
+                    ),
+                })
+                state["creation_precheck_prompted"] = True
+                save_task_state(state, r=r)
+                continue
             if func == "create_plugin":
                 name_hint = args.get("name") or args.get("plugin_id") or args.get("plugin_name")
             else:
@@ -875,6 +1115,9 @@ async def run_planner_loop(
             )
             if isinstance(meta_payload, dict):
                 ok = bool(meta_payload.get("ok"))
+                if func == "list_plugins":
+                    creation_precheck_done = True
+                    state["creation_precheck_done"] = True
                 if ok:
                     if func == "create_plugin":
                         name = meta_payload.get("name") or args.get("name")

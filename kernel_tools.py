@@ -737,6 +737,7 @@ def validate_plugin(name: str, auto_install: bool = True) -> Dict[str, Any]:
 
     plugin = getattr(module, "plugin", None)
     missing = []
+    warnings = []
     if not plugin:
         missing.append("plugin")
     else:
@@ -751,13 +752,28 @@ def validate_plugin(name: str, auto_install: bool = True) -> Dict[str, Any]:
         usage_val = getattr(plugin, "usage", None)
         if not isinstance(usage_val, str) or not usage_val.strip():
             missing.append("usage")
-        wait_prompt = getattr(plugin, "waiting_prompt_template", None)
-        if not isinstance(wait_prompt, str) or not wait_prompt.strip():
+        explicit_wait_prompt = None
+        try:
+            if "waiting_prompt_template" in getattr(plugin, "__dict__", {}):
+                explicit_wait_prompt = plugin.__dict__.get("waiting_prompt_template")
+            elif "waiting_prompt_template" in getattr(plugin.__class__, "__dict__", {}):
+                explicit_wait_prompt = plugin.__class__.__dict__.get("waiting_prompt_template")
+        except Exception:
+            explicit_wait_prompt = None
+
+        if not isinstance(explicit_wait_prompt, str) or not explicit_wait_prompt.strip():
             missing.append("waiting_prompt_template")
         else:
-            lowered = wait_prompt.lower()
-            if "write" not in lowered or "only output" not in lowered:
-                missing.append("waiting_prompt_template")
+            lowered = explicit_wait_prompt.lower()
+            has_instruction = any(word in lowered for word in ("write", "generate", "tell", "say", "respond"))
+            has_output_constraint = any(
+                phrase in lowered for phrase in ("only output", "output only", "only return", "return only")
+            )
+            if not (has_instruction and has_output_constraint):
+                warnings.append(
+                    "waiting_prompt_template should instruct the LLM (e.g., 'Write ...') "
+                    "and constrain output (e.g., 'Only output that message.')."
+                )
         # Validate platform ids
         try:
             from plugin_kernel import KNOWN_PLATFORMS, expand_plugin_platforms
@@ -784,6 +800,7 @@ def validate_plugin(name: str, auto_install: bool = True) -> Dict[str, Any]:
         "missing_dependencies": missing_deps,
         "installed_dependencies": installed_deps,
         "install_errors": install_errors,
+        "warnings": warnings,
     }
     if ok:
         report["plugin_name"] = getattr(plugin, "name", name)

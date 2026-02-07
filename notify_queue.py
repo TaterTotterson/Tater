@@ -117,15 +117,15 @@ def resolve_targets(
 
     if platform == "discord":
         if not resolved.get("channel_id") and not resolved.get("channel"):
-            if defaults.get("channel_id"):
-                resolved["channel_id"] = defaults["channel_id"]
-            elif defaults.get("channel"):
-                resolved["channel"] = defaults["channel"]
-            elif origin.get("platform") == "discord":
+            if origin.get("platform") == "discord":
                 if origin.get("channel_id"):
                     resolved["channel_id"] = origin.get("channel_id")
                 elif origin.get("channel"):
                     resolved["channel"] = origin.get("channel")
+            elif defaults.get("channel_id"):
+                resolved["channel_id"] = defaults["channel_id"]
+            elif defaults.get("channel"):
+                resolved["channel"] = defaults["channel"]
 
         if not (resolved.get("channel_id") or resolved.get("channel")):
             return None, "Cannot queue: missing target channel/room"
@@ -136,17 +136,17 @@ def resolve_targets(
                 resolved["channel"] = f"#{channel}"
 
         if not resolved.get("guild_id"):
-            if defaults.get("guild_id"):
-                resolved["guild_id"] = defaults["guild_id"]
-            elif origin.get("platform") == "discord" and origin.get("guild_id"):
+            if origin.get("platform") == "discord" and origin.get("guild_id"):
                 resolved["guild_id"] = origin.get("guild_id")
+            elif defaults.get("guild_id"):
+                resolved["guild_id"] = defaults["guild_id"]
 
     elif platform == "irc":
         if not resolved.get("channel"):
-            if defaults.get("channel"):
-                resolved["channel"] = defaults["channel"]
-            elif origin.get("platform") == "irc" and origin.get("channel"):
+            if origin.get("platform") == "irc" and origin.get("channel"):
                 resolved["channel"] = origin.get("channel")
+            elif defaults.get("channel"):
+                resolved["channel"] = defaults["channel"]
 
         if not resolved.get("channel"):
             return None, "Cannot queue: missing target channel/room"
@@ -157,20 +157,20 @@ def resolve_targets(
 
     elif platform == "matrix":
         if not resolved.get("room_id"):
-            if defaults.get("room_id"):
-                resolved["room_id"] = defaults["room_id"]
-            elif origin.get("platform") == "matrix" and origin.get("room_id"):
+            if origin.get("platform") == "matrix" and origin.get("room_id"):
                 resolved["room_id"] = origin.get("room_id")
+            elif defaults.get("room_id"):
+                resolved["room_id"] = defaults["room_id"]
 
         if not resolved.get("room_id"):
             return None, "Cannot queue: missing target channel/room"
 
     elif platform == "telegram":
         if not resolved.get("chat_id"):
-            if defaults.get("chat_id"):
-                resolved["chat_id"] = defaults["chat_id"]
-            elif origin.get("platform") == "telegram" and origin.get("chat_id"):
+            if origin.get("platform") == "telegram" and origin.get("chat_id"):
                 resolved["chat_id"] = origin.get("chat_id")
+            elif defaults.get("chat_id"):
+                resolved["chat_id"] = defaults["chat_id"]
 
         if not resolved.get("chat_id"):
             return None, "Cannot queue: missing target channel/room"
