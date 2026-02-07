@@ -481,6 +481,7 @@ class TelegramPlatform:
             "Tool strategy:\n"
             "- Answer directly when no external action/live data is needed.\n"
             "- Tools are discovered on-demand; not all tools are described here. If unsure, call list_plugins.\n"
+            "- Examples that require list_plugins: weather/forecast, news, stocks, sports scores, downloads, music/song generation, image/video generation, camera feeds/snapshots (front/back yard, porch, driveway, garage), camera/sensor status, smart-home actions.\n"
             "- The user does not need to explicitly request tool use; if a tool is appropriate, use it.\n"
             "- Prefer using a tool over attempting to answer from scratch when a tool could fulfill the request.\n"
             "- If a tool may be needed, call list_plugins first.\n- If the user asks to control devices or services or interact with external systems, call list_plugins first.\n"

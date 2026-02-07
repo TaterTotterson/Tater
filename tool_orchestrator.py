@@ -36,6 +36,7 @@ def build_compact_system_prompt(platform: str, extra_instructions: str = "") -> 
         "Tool use policy:\n"
         "- Answer directly when no external action or live lookup is needed.\n"
         "- Tools are discovered on-demand; not all tools are described here. If unsure, call list_plugins.\n"
+        "- Examples that require list_plugins: weather/forecast, news, stocks, sports scores, downloads, music/song generation, image/video generation, camera feeds/snapshots (front/back yard, porch, driveway, garage), camera/sensor status, smart-home actions.\n"
         "- The user does not need to explicitly request tool use; if a tool is appropriate, use it.\n"
         "- Prefer using a tool over attempting to answer from scratch when a tool could fulfill the request.\n"
         "- If a tool may be needed, call `list_plugins` first.\n"

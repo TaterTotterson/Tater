@@ -54,19 +54,31 @@ Notes:
 - `pretty_name` is not used; prefer `plugin_name`.
 - `plugin_dec` is legacy, `description` is preferred.
 - `plugin` must be a ToolPlugin instance, not a dict.
+- `name` must be a safe id (letters/numbers/underscore/hyphen). Lowercase recommended.
 - Import ToolPlugin from `plugin_base` (not `toolplugin`).
 - `platforms` must use supported ids: `webui`, `discord`, `irc`, `homeassistant`, `homekit`, `matrix`, `telegram`, `xbmc`, `automation`, `rss` (or `both`).
 
 **Usage Schema Rules**
 - `usage` must include every argument the plugin needs. Do not pass only a raw user prompt.
+- Do not use a plain-English sentence for `usage`; it must be JSON schema text.
 - Use the pattern:
   - `{"function": "<id>", "arguments": { ... }}`
 - Do not include `origin` in `usage`; it is injected automatically.
 - Keep argument defaults in the schema when possible (helps `get_plugin_help`).
 
 Optional but recommended fields used by discovery and help:
-- `when_to_use`, `common_needs`, `required_args`, `optional_args`, `example_calls`, `missing_info_prompts`
+- `when_to_use`, `common_needs`, `required_args`, `optional_args`, `example_calls`, `missing_info_prompts`, `waiting_prompt_template`
 - `argument_schema` (JSON schema-like dict) for richer `get_plugin_help` output
+
+**Waiting Prompt (optional)**
+If a plugin may take time to run, add `waiting_prompt_template` to emit a short “working…” message.
+Example:
+```python
+waiting_prompt_template = (
+    "Write a friendly message telling {mention} you’re starting the task now. "
+    "Only output that message."
+)
+```
 
 **Platform Gating**
 - `platforms` must list where the plugin is allowed to run.
@@ -86,6 +98,9 @@ Optional but recommended fields used by discovery and help:
 - `handle_automation(self, args, llm_client)`
 
 You can implement a shared internal method and call it from each handler.
+
+Important:
+- Do NOT define a `run()` method; it will not be called. Use `handle_<platform>` instead.
 
 **Result Contract**
 Return structured results using `plugin_result` helpers.
@@ -112,6 +127,18 @@ Failure:
 ```
 
 Research-style outputs can use `plugin_result.research_success`.
+
+**AI-Generated Text (optional)**
+If the plugin should generate text (e.g., jokes, summaries), use `llm_client` inside the handler:
+```python
+async def handle_discord(self, message, args, llm_client, context=None):
+    resp = await llm_client.chat(messages=[
+        {"role": "system", "content": "Write one short, clean joke about hukked."},
+        {"role": "user", "content": "Tell me a joke."},
+    ])
+    joke = (resp.get("message") or {}).get("content", "").strip() or "No joke generated."
+    return action_success(facts={"joke": joke}, say_hint=joke)
+```
 
 **Artifacts**
 Include `artifacts` for images/audio/files. Each artifact dict can contain:
