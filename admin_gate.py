@@ -6,11 +6,14 @@ from helpers import redis_client as _redis_client
 
 
 REDIS_KEY = "tater:admin_only_plugins"
+CREATION_GATE_KEY = "tater:admin_gate_agent_lab_creation"
+CREATION_GATED_FUNCTIONS = {"create_plugin", "create_platform"}
 
 DEFAULT_ADMIN_ONLY_PLUGINS = {
     "broadcast",
     "events_query",
     "find_my_phone",
+    "get_notifications",
     "ha_control",
     "music_assistant",
     "overseerr_request",
@@ -51,3 +54,26 @@ def get_admin_only_plugins(redis_client=None) -> set[str]:
 
 def is_admin_only_plugin(plugin_id: str) -> bool:
     return (plugin_id or "").strip().lower() in get_admin_only_plugins()
+
+
+def _as_bool(value, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
+
+
+def is_agent_lab_creation_tool(func_name: str) -> bool:
+    return (func_name or "").strip().lower() in CREATION_GATED_FUNCTIONS
+
+
+def is_agent_lab_creation_admin_gated(redis_client=None) -> bool:
+    rc = redis_client or _redis_client
+    raw = rc.get(CREATION_GATE_KEY) if rc else None
+    return _as_bool(raw, default=False)

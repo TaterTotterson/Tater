@@ -37,7 +37,12 @@ from plugin_settings import (
     get_plugin_settings,
     save_plugin_settings,
 )
-from admin_gate import DEFAULT_ADMIN_ONLY_PLUGINS, REDIS_KEY as ADMIN_GATE_KEY, get_admin_only_plugins
+from admin_gate import (
+    REDIS_KEY as ADMIN_GATE_KEY,
+    CREATION_GATE_KEY,
+    get_admin_only_plugins,
+    is_agent_lab_creation_admin_gated,
+)
 from agent_lab_registry import build_agent_registry
 from rss_store import get_all_feeds, set_feed, update_feed, delete_feed
 from kernel_tools import (
@@ -46,6 +51,7 @@ from kernel_tools import (
     validate_plugin,
     validate_platform,
     delete_file,
+    memory_list,
 )
 from planner_loop import should_use_agent_mode, run_planner_loop
 
@@ -703,7 +709,7 @@ def _stop_agent_lab_platform(key: str):
 
 def _discover_agent_lab_plugins():
     AGENT_PLUGINS_DIR.mkdir(parents=True, exist_ok=True)
-    plugins = load_plugins_from_directory(str(AGENT_PLUGINS_DIR))
+    plugins = load_plugins_from_directory(str(AGENT_PLUGINS_DIR), id_from_filename=True)
     items = []
     for path in sorted(AGENT_PLUGINS_DIR.glob("*.py")):
         name = path.stem
@@ -1912,6 +1918,7 @@ def render_agent_lab_plugin_card(plugin):
 def render_agent_lab_plugin_error_card(name: str, path: str):
     report = _load_exp_validation("plugin", name)
     status_label, status_detail = _validation_status(report, fallback_error="Failed to load")
+    missing_fields = report.get("missing_fields") if isinstance(report, dict) else []
 
     with st.container(border=True):
         header_cols = st.columns([4, 1, 1])
@@ -1938,6 +1945,9 @@ def render_agent_lab_plugin_error_card(name: str, path: str):
                     st.rerun()
                 else:
                     st.error(result.get("error") or "Delete failed.")
+
+        if isinstance(missing_fields, list) and "name" in missing_fields:
+            st.caption("Tip: set plugin class `name` to match this file id exactly.")
 
         for line in _dependency_lines(report):
             st.caption(line)
@@ -1976,32 +1986,6 @@ def render_webui_settings():
     show_speed_default = (redis_client.get("tater:show_speed_stats") or "true").lower() == "true"
     show_speed = st.checkbox("Show tokens/sec", value=show_speed_default, key="show_speed_stats")
 
-    legacy_web_search = redis_client.hgetall("plugin_settings:Web Search") or {}
-    web_search_api_default = (
-        redis_client.get("tater:web_search:google_api_key")
-        or legacy_web_search.get("GOOGLE_API_KEY")
-        or ""
-    )
-    web_search_cx_default = (
-        redis_client.get("tater:web_search:google_cx")
-        or legacy_web_search.get("GOOGLE_CX")
-        or ""
-    )
-    st.markdown("---")
-    st.subheader("Web Search")
-    st.caption("Used by kernel `search_web` for research and current information.")
-    web_search_api = st.text_input(
-        "Google API Key",
-        value=web_search_api_default,
-        type="password",
-        key="web_search_google_api_key",
-    )
-    web_search_cx = st.text_input(
-        "Google Search Engine ID (CX)",
-        value=web_search_cx_default,
-        key="web_search_google_cx",
-    )
-
     uploaded_avatar = st.file_uploader(
         "Upload your avatar", type=["png", "jpg", "jpeg"], key="avatar_uploader"
     )
@@ -2016,8 +2000,6 @@ def render_webui_settings():
 
         redis_client.set("tater:max_display", new_display)
         redis_client.set("tater:show_speed_stats", "true" if show_speed else "false")
-        redis_client.set("tater:web_search:google_api_key", web_search_api.strip())
-        redis_client.set("tater:web_search:google_cx", web_search_cx.strip())
         st.success("WebUI settings updated.")
 
     if st.button("Clear Chat History", key="clear_history"):
@@ -2042,6 +2024,134 @@ def render_webui_settings():
 
         st.success("Attachment blobs cleared (chat history entries remain).")
         st.rerun()
+
+
+def render_web_search_settings():
+    st.subheader("Web Search")
+    st.caption("Used by kernel `search_web` for research and current information.")
+
+    legacy_web_search = redis_client.hgetall("plugin_settings:Web Search") or {}
+    web_search_api_default = (
+        redis_client.get("tater:web_search:google_api_key")
+        or legacy_web_search.get("GOOGLE_API_KEY")
+        or ""
+    )
+    web_search_cx_default = (
+        redis_client.get("tater:web_search:google_cx")
+        or legacy_web_search.get("GOOGLE_CX")
+        or ""
+    )
+
+    web_search_api = st.text_input(
+        "Google API Key",
+        value=web_search_api_default,
+        type="password",
+        key="web_search_google_api_key",
+    )
+    web_search_cx = st.text_input(
+        "Google Search Engine ID (CX)",
+        value=web_search_cx_default,
+        key="web_search_google_cx",
+    )
+
+    if st.button("Save Web Search Settings", key="save_web_search_settings"):
+        redis_client.set("tater:web_search:google_api_key", web_search_api.strip())
+        redis_client.set("tater:web_search:google_cx", web_search_cx.strip())
+        st.success("Web Search settings updated.")
+
+
+def render_memory_settings():
+    st.subheader("Memory")
+    st.caption("Manage durable memory behavior and inspect stored memory entries.")
+
+    explicit_default = str(
+        redis_client.get("tater:memory:explicit_only") or "true"
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    raw_ttl = redis_client.get("tater:memory:default_ttl_sec") or 0
+    try:
+        ttl_default = int(float(raw_ttl))
+    except (TypeError, ValueError):
+        ttl_default = 0
+
+    explicit_only = st.checkbox(
+        "Require explicit user intent before memory writes",
+        value=explicit_default,
+        key="memory_explicit_only",
+        help="When enabled, memory_set writes are blocked unless the user clearly asks to remember/save defaults.",
+    )
+    default_ttl = st.number_input(
+        "Default TTL For Volatile Memory (seconds, 0 = no TTL)",
+        min_value=0,
+        max_value=31_536_000,
+        value=max(0, ttl_default),
+        step=60,
+        format="%d",
+        key="memory_default_ttl",
+    )
+    st.caption("TTL applies only to volatile keys (for example: last.*, temp.*, volatile.*, cache.*).")
+
+    if st.button("Save Memory Settings", key="save_memory_settings"):
+        redis_client.set("tater:memory:explicit_only", "true" if explicit_only else "false")
+        redis_client.set("tater:memory:default_ttl_sec", int(default_ttl))
+        st.success("Memory settings updated.")
+
+    st.markdown("---")
+    st.caption("Inspect stored memory entries.")
+    inspect_scope = st.selectbox(
+        "Inspect Scope",
+        options=["global", "user", "room"],
+        key="memory_inspect_scope",
+    )
+    inspect_prefix = st.text_input("Prefix Filter (optional)", value="", key="memory_inspect_prefix")
+    inspect_limit = st.number_input(
+        "Max Entries",
+        min_value=1,
+        max_value=200,
+        value=25,
+        step=1,
+        format="%d",
+        key="memory_inspect_limit",
+    )
+
+    inspect_user_id = None
+    inspect_room_id = None
+    inspect_platform = "webui"
+    if inspect_scope == "user":
+        inspect_user_id = st.text_input(
+            "User Id",
+            value=(get_chat_settings().get("username") or "User"),
+            key="memory_inspect_user_id",
+        ).strip()
+    elif inspect_scope == "room":
+        inspect_platform = st.text_input(
+            "Room Platform",
+            value="webui",
+            key="memory_inspect_platform",
+        ).strip() or "webui"
+        inspect_room_id = st.text_input(
+            "Room Id",
+            value="chat",
+            key="memory_inspect_room_id",
+        ).strip() or "chat"
+
+    snapshot = memory_list(
+        prefix=inspect_prefix or None,
+        scope=inspect_scope,
+        user_id=inspect_user_id,
+        room_id=inspect_room_id,
+        platform=inspect_platform,
+        limit=int(inspect_limit),
+    )
+
+    if snapshot.get("ok"):
+        st.caption(
+            f"Showing {snapshot.get('count', 0)} of {snapshot.get('total_count', 0)} entries "
+            f"for `{snapshot.get('scope', inspect_scope)}` scope."
+        )
+        st.json(snapshot.get("items", []))
+    else:
+        st.error(snapshot.get("error") or "Unable to load memory entries.")
+
 
 def render_homeassistant_settings():
     st.subheader("Home Assistant Settings")
@@ -2152,8 +2262,14 @@ def render_admin_gating_settings():
     known_current = [p for p in current if p in plugin_ids]
     unknown_current = [p for p in current if p not in plugin_ids]
 
-    if redis_client.get(ADMIN_GATE_KEY) is None:
-        st.info("Currently using the default admin-only list. Save to customize.")
+    using_default_plugin_list = redis_client.get(ADMIN_GATE_KEY) is None
+    using_default_creation_gate = redis_client.get(CREATION_GATE_KEY) is None
+    if using_default_plugin_list and using_default_creation_gate:
+        st.info("Currently using default admin-gating values. Save to customize.")
+    elif using_default_plugin_list:
+        st.info("Currently using the default admin-only plugin list. Save to customize.")
+    elif using_default_creation_gate:
+        st.info("Agent Lab creation admin-gating is at default (off). Save to customize.")
 
     if unknown_current:
         st.warning(f"Unknown plugin IDs currently stored: {', '.join(unknown_current)}")
@@ -2165,20 +2281,32 @@ def render_admin_gating_settings():
         help="Selected plugins can only be run by the admin user on Discord/Telegram/Matrix/IRC.",
         key="admin_gate_plugins",
     )
+    creation_gate_enabled = st.checkbox(
+        "Require admin user for Agent Lab plugin/platform creation",
+        value=is_agent_lab_creation_admin_gated(redis_client),
+        key="admin_gate_agent_lab_creation",
+        help="When enabled, `create_plugin` and `create_platform` can only be run by the configured admin user.",
+    )
 
     col1, col2 = st.columns(2)
     if col1.button("Save Admin Tool Gating", key="save_admin_gating"):
         redis_client.set(ADMIN_GATE_KEY, json.dumps(selected))
-        st.success("Admin-only plugin list saved.")
+        redis_client.set(CREATION_GATE_KEY, "true" if creation_gate_enabled else "false")
+        st.success("Admin tool gating saved.")
 
     if col2.button("Reset to Defaults", key="reset_admin_gating"):
         redis_client.delete(ADMIN_GATE_KEY)
-        st.success("Admin-only plugin list reset to defaults.")
+        redis_client.delete(CREATION_GATE_KEY)
+        st.success("Admin tool gating reset to defaults.")
         st.rerun()
 
 def render_settings_page():
     st.title("Settings")
     render_webui_settings()
+    st.markdown("---")
+    render_web_search_settings()
+    st.markdown("---")
+    render_memory_settings()
     st.markdown("---")
     render_homeassistant_settings()
     st.markdown("---")

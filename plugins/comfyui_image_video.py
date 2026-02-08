@@ -5,10 +5,17 @@ import requests
 import asyncio
 import secrets
 import copy
+import logging
+import time
+import uuid
 from PIL import Image
 from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 from plugin_base import ToolPlugin
 from helpers import redis_client, get_latest_image_from_history, run_comfy_prompt
+
+logger = logging.getLogger("comfyui_image_video")
+logger.setLevel(logging.INFO)
+
 
 def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str) -> dict:
     if not isinstance(binary, (bytes, bytearray)):
@@ -24,7 +31,7 @@ def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype
 class ComfyUIImageVideoPlugin(ToolPlugin):
     name = "comfyui_image_video"
     plugin_name = "ComfyUI Animate Image"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "50"
     usage = (
         '{\n'
@@ -208,7 +215,7 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
         wf = copy.deepcopy(ComfyUIImageVideoPlugin.get_workflow_template())
 
         # resolution defaults
-        settings = redis_client.hgetall(f"plugin_settings:{ComfyUIImageVideoPlugin.settings_category}")
+        settings = redis_client.hgetall(f"plugin_settings:{ComfyUIImageVideoPlugin.settings_category}") or {}
         res_map = {
             "144p": (256, 144), "240p": (426, 240), "360p": (480, 360),
             "480p": (640, 480), "720p": (1280, 720), "1080p": (1920, 1080)
@@ -224,13 +231,26 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
         raw_length = settings.get("LENGTH", b"1")
         try:
             default_seconds = int(raw_length.decode() if isinstance(raw_length, (bytes, bytearray)) else raw_length)
-        except ValueError:
+        except Exception:
             default_seconds = 1
         default_frames = max(1, default_seconds * fps)
 
-        w = width or default_w
-        h = height or default_h
-        frames = length or default_frames
+        try:
+            w = int(width) if width is not None else int(default_w)
+        except Exception:
+            w = int(default_w)
+        try:
+            h = int(height) if height is not None else int(default_h)
+        except Exception:
+            h = int(default_h)
+        try:
+            frames = int(length) if length is not None else int(default_frames)
+        except Exception:
+            frames = int(default_frames)
+
+        w = max(64, min(w, 4096))
+        h = max(64, min(h, 4096))
+        frames = max(1, min(frames, 6000))
 
         # randomize motion seeds
         random_seed = secrets.randbits(63)
@@ -250,25 +270,36 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
         # run Comfy with a per-job client_id + WS and wait by prompt_id
         prompt_id, _ = run_comfy_prompt(base_http, base_ws, wf)
 
-        # fetch outputs from history
-        hist = ComfyUIImageVideoPlugin.get_history(base_http, prompt_id).get(prompt_id, {})
-        outputs = hist.get("outputs", {}) if isinstance(hist, dict) else {}
+        # fetch outputs from history (poll because Comfy history can lag after prompt completion)
+        for _ in range(40):
+            hist = ComfyUIImageVideoPlugin.get_history(base_http, prompt_id).get(prompt_id, {})
+            outputs = hist.get("outputs", {}) if isinstance(hist, dict) else {}
 
-        # try image outputs
-        for node in outputs.values():
-            if "images" in node:
-                img = node["images"][0]
-                content = ComfyUIImageVideoPlugin.fetch_asset(base_http, img["filename"], img.get("subfolder",""), img.get("type","output"))
-                ext = os.path.splitext(img["filename"])[-1].lstrip(".") or "webp"
-                return content, ext
+            for node in outputs.values():
+                if "images" in node and node["images"]:
+                    img = node["images"][0]
+                    content = ComfyUIImageVideoPlugin.fetch_asset(
+                        base_http,
+                        img["filename"],
+                        img.get("subfolder", ""),
+                        img.get("type", "output"),
+                    )
+                    ext = os.path.splitext(img["filename"])[-1].lstrip(".") or "webp"
+                    return content, ext
 
-        # try video outputs
-        for node in outputs.values():
-            if "videos" in node:
-                vid = node["videos"][0]
-                content = ComfyUIImageVideoPlugin.fetch_asset(base_http, vid["filename"], vid.get("subfolder",""), vid.get("type","output"))
-                ext = os.path.splitext(vid["filename"])[-1].lstrip(".") or "mp4"
-                return content, ext
+            for node in outputs.values():
+                if "videos" in node and node["videos"]:
+                    vid = node["videos"][0]
+                    content = ComfyUIImageVideoPlugin.fetch_asset(
+                        base_http,
+                        vid["filename"],
+                        vid.get("subfolder", ""),
+                        vid.get("type", "output"),
+                    )
+                    ext = os.path.splitext(vid["filename"])[-1].lstrip(".") or "mp4"
+                    return content, ext
+
+            time.sleep(0.5)
 
         # fallback: guess SaveVideo prefix on disk
         for node in wf.values():
@@ -282,8 +313,8 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
                 try:
                     content = ComfyUIImageVideoPlugin.fetch_asset(base_http, guessed_filename, subfolder, "output")
                     return content, "mp4"
-                except Exception as e:
-                    raise RuntimeError(f"Could not fetch video file from disk: {e}")
+                except Exception:
+                    pass
 
         raise RuntimeError("No output found in ComfyUI history or disk.")
 
@@ -291,7 +322,10 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
     # Orchestration
     # ---------------------------
     async def _generate(self, args, llm_client):
-        prompt = args.get("prompt", "").strip()
+        args = args or {}
+        prompt = str(args.get("prompt") or "").strip()
+        if not prompt:
+            prompt = "subtle natural motion, smooth cinematic movement"
         image_bytes, filename = get_latest_image_from_history("webui:chat_history")
 
         if not image_bytes:
@@ -304,36 +338,47 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
 
             if ext == "webp":
                 tmp_webp = f"/tmp/{uuid.uuid4().hex}.webp"
-                tmp_mp4  = f"/tmp/{uuid.uuid4().hex}.mp4"
-                with open(tmp_webp, "wb") as f:
-                    f.write(animated_bytes)
-
-                settings = redis_client.hgetall(f"plugin_settings:{self.settings_category}")
-                raw_len = settings.get("LENGTH", b"10")
+                tmp_mp4 = f"/tmp/{uuid.uuid4().hex}.mp4"
                 try:
-                    duration = int(raw_len.decode() if isinstance(raw_len, (bytes, bytearray)) else raw_len)
-                except ValueError:
-                    duration = 10
+                    with open(tmp_webp, "wb") as f:
+                        f.write(animated_bytes)
 
-                wf = ComfyUIImageVideoPlugin.get_workflow_template()
-                fps = ComfyUIImageVideoPlugin.get_fps_from_workflow(wf, default=16)
+                    settings = redis_client.hgetall(f"plugin_settings:{self.settings_category}") or {}
+                    raw_len = settings.get("LENGTH", b"10")
+                    try:
+                        duration = int(raw_len.decode() if isinstance(raw_len, (bytes, bytearray)) else raw_len)
+                    except Exception:
+                        duration = 10
 
-                self.webp_to_mp4(tmp_webp, tmp_mp4, fps=fps, duration=duration)
+                    wf = ComfyUIImageVideoPlugin.get_workflow_template()
+                    fps = ComfyUIImageVideoPlugin.get_fps_from_workflow(wf, default=16)
 
-                with open(tmp_mp4, "rb") as f:
-                    animated_bytes = f.read()
-                ext = "mp4"
-                mime = "video/mp4"
-                file_name = "animated.mp4"
+                    self.webp_to_mp4(tmp_webp, tmp_mp4, fps=fps, duration=duration)
 
-                msg = await llm_client.chat([
-                    {"role": "system", "content": f'The user has just been shown an animated video based on the prompt: "{prompt}".'},
-                    {"role": "user", "content": "Reply with a short, fun message celebrating the animation. No lead-in phrases or instructions."}
-                ])
-                followup_text = msg["message"]["content"].strip() or "🎞️ Here's your animated video!"
+                    with open(tmp_mp4, "rb") as f:
+                        animated_bytes = f.read()
+                    ext = "mp4"
+                    mime = "video/mp4"
+                    file_name = "animated.mp4"
+                finally:
+                    for p in (tmp_webp, tmp_mp4):
+                        try:
+                            if os.path.exists(p):
+                                os.remove(p)
+                        except Exception:
+                            pass
 
-                os.remove(tmp_webp)
-                os.remove(tmp_mp4)
+                if llm_client is not None:
+                    try:
+                        msg = await llm_client.chat([
+                            {"role": "system", "content": f'The user has just been shown an animated video based on the prompt: "{prompt}".'},
+                            {"role": "user", "content": "Reply with a short, fun message celebrating the animation. No lead-in phrases or instructions."}
+                        ])
+                        followup_text = (msg.get("message", {}) or {}).get("content", "").strip() or "Here's your animated video!"
+                    except Exception:
+                        followup_text = "Here's your animated video!"
+                else:
+                    followup_text = "Here's your animated video!"
             else:
                 mime = "video/mp4" if ext == "mp4" else "image/webp"
                 file_name = f"animated.{ext}"
@@ -350,6 +395,7 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
                 followup_text
             ]
         except Exception as e:
+            logger.exception("ComfyUI image-video generation failed: %s", e)
             return [f"❌ Failed to generate animation: {e}"]
 
     # --- Discord Handler ---
@@ -358,13 +404,9 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
 
     # --- WebUI Handler ---
     async def handle_webui(self, args, llm_client):
-        try:
-            asyncio.get_running_loop()
-            return await self._generate(args, llm_client)
-        except RuntimeError:
-            return asyncio.run(self._generate(args, llm_client))
+        return await self._generate(args or {}, llm_client)
 
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
-        await bot.privmsg(channel, f"{user}: ❌ This plugin is only available in the WebUI.")
+        return f"{user}: This plugin is only available in the WebUI."
 
 plugin = ComfyUIImageVideoPlugin()

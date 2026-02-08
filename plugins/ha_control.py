@@ -1,4 +1,5 @@
 # plugins/ha_control_plugin.py
+import asyncio
 import logging
 import re
 import json as _json
@@ -98,38 +99,38 @@ class HAControlPlugin(ToolPlugin):
     required_settings = {
         "HA_CATALOG_CACHE_SECONDS": {
             "label": "Catalog Cache Seconds",
-            "type": "string",
-            "default": "60",
+            "type": "number",
+            "default": 60,
             "description": "How long to cache the compact entity catalog in Redis."
         },
         "HA_MAX_CANDIDATES": {
             "label": "Max Candidates Sent to LLM",
-            "type": "string",
-            "default": "400",
+            "type": "number",
+            "default": 400,
             "description": "Max candidates to send in a single LLM call (tournament chunking used above this)."
         },
         "HA_CHUNK_SIZE": {
             "label": "LLM Tournament Chunk Size",
-            "type": "string",
-            "default": "120",
+            "type": "number",
+            "default": 120,
             "description": "Chunk size for tournament selection when candidate list is very large."
         },
         "HA_INTERPRET_CACHE_SECONDS": {
             "label": "Interpret Cache Seconds",
-            "type": "string",
-            "default": "45",
+            "type": "number",
+            "default": 45,
             "description": "Cache LLM interpret results per-query (seconds). Fast-path rules still run first."
         },
         "HA_CHOOSE_CACHE_SECONDS": {
             "label": "Choose Cache Seconds",
-            "type": "string",
-            "default": "45",
+            "type": "number",
+            "default": 45,
             "description": "Cache LLM chosen entity per-query+catalog (seconds)."
         },
         "HA_FASTPATH_ENABLED": {
             "label": "Enable Fast-Path Parsing",
-            "type": "string",
-            "default": "true",
+            "type": "checkbox",
+            "default": True,
             "description": "If true, common commands (lights, brightness, color, thermostat set, remote buttons) skip the interpret LLM."
         },
     }
@@ -137,21 +138,51 @@ class HAControlPlugin(ToolPlugin):
     # ----------------------------
     # Settings helpers
     # ----------------------------
-    def _get_plugin_settings(self) -> dict:
-        return redis_client.hgetall("plugin_settings:Home Assistant Control") or {}
+    @staticmethod
+    def _decode_map(raw: dict | None) -> dict:
+        out: dict = {}
+        for key, value in (raw or {}).items():
+            k = key.decode("utf-8", "ignore") if isinstance(key, (bytes, bytearray)) else str(key)
+            if isinstance(value, (bytes, bytearray)):
+                out[k] = value.decode("utf-8", "ignore")
+            elif value is None:
+                out[k] = ""
+            else:
+                out[k] = str(value)
+        return out
 
-    def _get_int_setting(self, key: str, default: int) -> int:
-        raw = (self._get_plugin_settings().get(key) or "").strip()
+    def _get_plugin_settings(self) -> dict:
+        merged: dict = {}
+        for key in ("plugin_settings: Home Assistant Control", "plugin_settings:Home Assistant Control"):
+            merged.update(self._decode_map(redis_client.hgetall(key) or {}))
+        return merged
+
+    def _get_int_setting(
+        self,
+        key: str,
+        default: int,
+        minimum: Optional[int] = None,
+        maximum: Optional[int] = None,
+    ) -> int:
+        raw = self._get_plugin_settings().get(key)
         try:
-            return int(float(raw))
+            value = int(float(str(raw).strip()))
         except Exception:
-            return default
+            value = int(default)
+        if minimum is not None and value < minimum:
+            value = minimum
+        if maximum is not None and value > maximum:
+            value = maximum
+        return value
 
     def _get_bool_setting(self, key: str, default: bool) -> bool:
-        raw = (self._get_plugin_settings().get(key) or "").strip().lower()
-        if raw in ("1", "true", "yes", "on"):
+        raw = self._get_plugin_settings().get(key)
+        if isinstance(raw, bool):
+            return raw
+        text = str(raw or "").strip().lower()
+        if text in ("1", "true", "yes", "on"):
             return True
-        if raw in ("0", "false", "no", "off"):
+        if text in ("0", "false", "no", "off"):
             return False
         return default
 
@@ -186,13 +217,12 @@ class HAControlPlugin(ToolPlugin):
         return joined or "Home Assistant request"
 
     def _validated_entity_id(self, entity_id: str, query: str) -> str:
-        eid = (entity_id or "").strip()
+        eid = (entity_id or "").strip().lower()
         if not eid:
             return ""
-        q = (query or "").lower()
-        if eid.lower() in q:
-            return eid
-        return ""
+        if not re.fullmatch(r"[a-z0-9_]+\.[a-z0-9_]+", eid):
+            return ""
+        return eid
 
     # ----------------------------
     # Internal helpers
@@ -236,7 +266,9 @@ class HAControlPlugin(ToolPlugin):
             return False
 
         # must be about lights
-        is_lightish = any(w in t for w in [" light", " lights", "lamp", "bulb", "led", "hue", "sconce"])
+        is_lightish = bool(
+            re.search(r"\b(light|lights|lamp|lamps|bulb|bulbs|led|hue|sconce)\b", t)
+        )
         if not is_lightish:
             return False
 
@@ -244,7 +276,7 @@ class HAControlPlugin(ToolPlugin):
         has_color_word = bool(re.search(
             r"\b(red|orange|yellow|green|cyan|blue|purple|magenta|pink|white|warm white|cool white)\b",
             t
-        )) or (" color" in t)
+        )) or bool(re.search(r"\bcolor\b", t))
 
         if not has_color_word:
             return False
@@ -934,8 +966,8 @@ class HAControlPlugin(ToolPlugin):
                 return eid if eid in candidate_set else None
             return None
 
-        max_single = self._get_int_setting("HA_MAX_CANDIDATES", 400)
-        chunk_size = self._get_int_setting("HA_CHUNK_SIZE", 120)
+        max_single = self._get_int_setting("HA_MAX_CANDIDATES", 400, minimum=1, maximum=5000)
+        chunk_size = self._get_int_setting("HA_CHUNK_SIZE", 120, minimum=1, maximum=1000)
 
         # Prefer single-shot when reasonable
         picked: Optional[str] = None
@@ -959,10 +991,10 @@ class HAControlPlugin(ToolPlugin):
                     eid = await ask_pick(winners)
                     picked = eid or winners[0]["entity_id"]
                 else:
-                    picked = next(iter(candidate_set), None)
+                    picked = mini[0]["entity_id"] if mini else None
             except Exception as e:
                 logger.warning(f"[ha_control] LLM choose failed tournament: {e}")
-                picked = next(iter(candidate_set), None)
+                picked = mini[0]["entity_id"] if mini else None
 
         if picked and cache_key and cache_ttl > 0:
             self._cache_set_json(cache_key, {"entity_id": picked}, cache_ttl)
@@ -1241,12 +1273,11 @@ class HAControlPlugin(ToolPlugin):
         explicit_entity = (args.get("entity_id") or "").strip()
         desired_arg = self._extract_desired_from_args(args)
 
-        explicit_args = any(
+        structured_args = any(
             k in args
             for k in (
                 "action",
                 "intent",
-                "entity_id",
                 "scope",
                 "domain_hint",
                 "temperature",
@@ -1257,6 +1288,7 @@ class HAControlPlugin(ToolPlugin):
                 "desired",
             )
         )
+        explicit_args = bool(structured_args and (action_arg or intent_arg or not query))
         if not explicit_args:
             if not query:
                 return "Please provide 'query' with the user's exact request."
@@ -1326,6 +1358,16 @@ class HAControlPlugin(ToolPlugin):
         desired = intent.get("desired") or {}
         if not isinstance(desired, dict):
             desired = {}
+
+        # Apply explicit overrides even when parsing from natural-language query.
+        if scope_arg:
+            scope = scope_arg
+        if domain_hint_arg:
+            domain_hint = domain_hint_arg
+        if isinstance(desired_arg, dict):
+            for key, value in desired_arg.items():
+                if value not in (None, "", "null"):
+                    desired[key] = value
 
         if not explicit_args:
             # Fill missing "desired" fields from the raw query
@@ -1628,16 +1670,21 @@ class HAControlPlugin(ToolPlugin):
                         last_error: Optional[Exception] = None
                         for cmd in variants:
                             tried.append(cmd)
-                            payload_cmd = dict(payload)
-                            payload_cmd["command"] = [cmd]
-                            try:
-                                client.call_service("remote", "send_command", payload_cmd)
-                                extras_txt_parts.append(cmd)
-                                last_error = None
+                            sent = False
+                            for command_value in ([cmd], cmd):
+                                payload_cmd = dict(payload)
+                                payload_cmd["command"] = command_value
+                                try:
+                                    client.call_service("remote", "send_command", payload_cmd)
+                                    extras_txt_parts.append(cmd)
+                                    last_error = None
+                                    sent = True
+                                    break
+                                except Exception as e:
+                                    last_error = e
+                                    continue
+                            if sent:
                                 break
-                            except Exception as e:
-                                last_error = e
-                                continue
 
                         if last_error is not None:
                             logger.info(f"[ha_control] remote.send_command failed. Tried: {tried}. Last error: {last_error}")
@@ -1688,7 +1735,7 @@ class HAControlPlugin(ToolPlugin):
                 st = None
                 state_after = ""
                 for delay in (0.4, 0.7, 1.0):
-                    time.sleep(delay)
+                    await asyncio.sleep(delay)
                     st = client.get_state(entity_id)
                     state_after = (st.get("state") if isinstance(st, dict) else str(st or "")).lower().strip()
                     if expected and state_after in expected:

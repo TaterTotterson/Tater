@@ -18,7 +18,7 @@ _lock = threading.RLock()
 
 def _load_agent_plugins() -> Dict[str, Any]:
     AGENT_PLUGINS_DIR.mkdir(parents=True, exist_ok=True)
-    return load_plugins_from_directory(str(AGENT_PLUGINS_DIR))
+    return load_plugins_from_directory(str(AGENT_PLUGINS_DIR), id_from_filename=True)
 
 
 try:

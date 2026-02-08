@@ -1,6 +1,7 @@
 # plugins/events_query.py
 import logging
 import json
+import asyncio
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
@@ -31,7 +32,7 @@ class EventsQueryPlugin(ToolPlugin):
     """
     name = "events_query"
     plugin_name = "Events Query"
-    version = "1.0.4"
+    version = "1.0.5"
     min_tater_version = "50"
     pretty_name = "Events Query"
     description = (
@@ -140,6 +141,15 @@ class EventsQueryPlugin(ToolPlugin):
         return start, end
 
     @staticmethod
+    def _clamp_window_to_now(start: datetime, end: datetime, now: datetime) -> Tuple[datetime, datetime]:
+        # Prevent querying future slices for "this morning/afternoon/evening".
+        if now <= start:
+            return start, start
+        if now < end:
+            return start, now
+        return start, end
+
+    @staticmethod
     def _strip_ordinal(day_str: str) -> str:
         # "14th" -> "14"
         return re.sub(r"(?i)(\d+)(st|nd|rd|th)", r"\1", day_str.strip())
@@ -199,9 +209,15 @@ class EventsQueryPlugin(ToolPlugin):
         return sources
 
     # ---------- Fetch ----------
-    async def _fetch_one_source(self, base: str, source: str,
-                                since: Optional[datetime], until: Optional[datetime],
-                                limit: int = 1000) -> List[Dict[str, Any]]:
+    async def _fetch_one_source(
+        self,
+        client: httpx.AsyncClient,
+        base: str,
+        source: str,
+        since: Optional[datetime],
+        until: Optional[datetime],
+        limit: int = 1000,
+    ) -> List[Dict[str, Any]]:
         params = {"source": source, "limit": int(limit)}
         if since:
             params["since"] = self._iso(since)
@@ -210,25 +226,45 @@ class EventsQueryPlugin(ToolPlugin):
 
         url = f"{base}/tater-ha/v1/events/search?{urlencode(params)}"
         try:
-            async with httpx.AsyncClient(timeout=8.0) as client:
-                r = await client.get(url)
-                r.raise_for_status()
-                data = r.json() if r.headers.get("content-type", "").lower().startswith("application/json") else {}
-                items = (data or {}).get("items", [])
-                # Populate source in case server didn't echo it back
-                for it in items:
-                    it.setdefault("source", source)
-                return items if isinstance(items, list) else []
+            r = await client.get(url)
+            r.raise_for_status()
+            data = r.json() if r.headers.get("content-type", "").lower().startswith("application/json") else {}
+            items = (data or {}).get("items", [])
+            # Populate source in case server didn't echo it back
+            for it in items:
+                it.setdefault("source", source)
+            return items if isinstance(items, list) else []
         except Exception as e:
             logger.error(f"[events_query] fetch failed for source={source}: {e}")
             return []
 
     async def _fetch_sources_window(self, sources: List[str], start: datetime, end: datetime) -> List[Dict[str, Any]]:
+        if not sources:
+            return []
         base = self._automation_base()
         items: List[Dict[str, Any]] = []
-        # fetch per source with window to reduce payload
-        for src in sources:
-            items.extend(await self._fetch_one_source(base, src, start, end, limit=1000))
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                tasks = [
+                    self._fetch_one_source(
+                        client=client,
+                        base=base,
+                        source=src,
+                        since=start,
+                        until=end,
+                        limit=1000,
+                    )
+                    for src in sources
+                ]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for result in results:
+                    if isinstance(result, Exception):
+                        logger.warning("[events_query] source fetch task failed: %s", result)
+                        continue
+                    if isinstance(result, list):
+                        items.extend(result)
+        except Exception as e:
+            logger.error(f"[events_query] fetch window failed: {e}")
         return items
 
     # ---------- Time/Message helpers ----------
@@ -264,6 +300,17 @@ class EventsQueryPlugin(ToolPlugin):
     @staticmethod
     def _contains_person_text(s: str) -> bool:
         s = (s or "").lower()
+        negatives = [
+            "no person",
+            "no one",
+            "nobody",
+            "none detected",
+            "person not detected",
+            "no people",
+            "empty",
+        ]
+        if any(n in s for n in negatives):
+            return False
         keywords = [
             "person", "someone", "people", "man", "woman", "kid", "child",
             "visitor", "delivery", "driver", "courier", "walker", "intruder"
@@ -334,9 +381,17 @@ class EventsQueryPlugin(ToolPlugin):
         if mins is not None:
             if mins <= 2:
                 return f"Yes — someone was just seen in {friendly}."
-            if mins <= 59:
+            if mins <= 15:
                 return f"Yes — someone was seen in {friendly} about {mins} minutes ago."
-        return f"Yes — someone was seen in {friendly} at {self._human_time(last_dt)}."
+            if mins <= 59:
+                return (
+                    f"Someone was seen in {friendly} about {mins} minutes ago, "
+                    "but there is no very recent detection right now."
+                )
+        return f"No recent person detection in {friendly} right now. Last seen at {self._human_time(last_dt)}."
+
+    def _sort_events_by_time(self, events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return sorted(events, key=lambda e: self._parse_event_dt(e) or datetime.min)
 
     @staticmethod
     def _looks_like_whole_home(phrase: str) -> bool:
@@ -359,6 +414,27 @@ class EventsQueryPlugin(ToolPlugin):
                 outs.append(a)
         return outs or catalog
 
+    def _resolve_areas_heuristic(self, user_area: str, sources_catalog: List[str]) -> Optional[List[str]]:
+        phrase = (user_area or "").strip()
+        if not phrase or not sources_catalog:
+            return None
+        if self._looks_like_whole_home(phrase):
+            return sorted(set(sources_catalog))
+
+        friendly_by_src = {src: self._source_to_area(src) for src in sources_catalog}
+        direct = []
+        for src, friendly in friendly_by_src.items():
+            if self._areas_match(phrase, friendly) or self._areas_match(phrase, src.replace("_", " ")):
+                direct.append(src)
+        if direct:
+            return sorted(set(direct))
+
+        if self._looks_like_outside(phrase):
+            friendly = self._filter_outdoor_like(list(friendly_by_src.values()))
+            return sorted(set([src for src, area in friendly_by_src.items() if area in friendly]))
+
+        return None
+
     async def _resolve_areas_with_llm(self, user_area: str, sources_catalog: List[str], llm_client) -> Optional[List[str]]:
         """
         Map a user-provided area phrase to one or more actual event storages (sources).
@@ -366,6 +442,12 @@ class EventsQueryPlugin(ToolPlugin):
         We show the LLM their human-friendly forms and translate back to the slugs.
         """
         if not sources_catalog:
+            return None
+
+        heuristic = self._resolve_areas_heuristic(user_area, sources_catalog)
+        if heuristic:
+            return heuristic
+        if llm_client is None:
             return None
 
         # Build friendly ↔ slug maps
@@ -441,27 +523,21 @@ class EventsQueryPlugin(ToolPlugin):
 
             # Heuristic expansions if empty
             if not selected_slugs:
-                if self._looks_like_whole_home(user_area):
-                    selected_slugs = sorted(set(sources_catalog))
-                elif self._looks_like_outside(user_area):
-                    outs = self._filter_outdoor_like(friendly_catalog)
-                    selected_slugs = [friendly_to_slug[a] for a in outs if a in friendly_to_slug]
+                selected_slugs = self._resolve_areas_heuristic(user_area, sources_catalog) or []
 
             return selected_slugs
         except Exception:
             # Fallback heuristics
-            if self._looks_like_whole_home(user_area):
-                return sorted(set(sources_catalog))
-            if self._looks_like_outside(user_area):
-                outs = self._filter_outdoor_like(friendly_catalog)
-                return [friendly_to_slug[a] for a in outs if a in friendly_to_slug]
-            return None
+            return self._resolve_areas_heuristic(user_area, sources_catalog)
 
     # ---------- Summarization ----------
     async def _summarize(self, events: List[Dict[str, Any]], area_phrase: Optional[str],
                          label: str, llm_client, user_query: Optional[str] = None) -> str:
+        ordered_events = self._sort_events_by_time(events)
+        # Keep prompt sizes bounded while preserving recency.
+        prompt_events = ordered_events[-220:]
         simplified = []
-        for e in events:
+        for e in prompt_events:
             # prefer source-as-area; fallback to data.area if missing
             pretty_area = self._source_to_area(e.get("source", "")) or ((e.get("data") or {}).get("area") or "").strip()
             simplified.append({
@@ -494,31 +570,33 @@ class EventsQueryPlugin(ToolPlugin):
             "context": {
                 "area": area_phrase or "all areas",
                 "timeframe": label,
-                "events": simplified
+                "events": simplified,
+                "events_truncated": len(prompt_events) < len(ordered_events),
             }
         }
 
-        try:
-            resp = await llm_client.chat(
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
-                ],
-                temperature=0.2,
-                max_tokens=400,
-                timeout_ms=60_000,
-            )
-            text = (resp.get("message", {}) or {}).get("content", "").strip()
-            if text:
-                return text
-        except Exception as e:
-            logger.info(f"[events_query] LLM summary failed; using fallback: {e}")
+        if llm_client is not None:
+            try:
+                resp = await llm_client.chat(
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+                    ],
+                    temperature=0.2,
+                    max_tokens=400,
+                    timeout_ms=60_000,
+                )
+                text = (resp.get("message", {}) or {}).get("content", "").strip()
+                if text:
+                    return text
+            except Exception as e:
+                logger.info(f"[events_query] LLM summary failed; using fallback: {e}")
 
         # Fallback list
-        if not events:
+        if not ordered_events:
             return f"No events found for {area_phrase or 'all areas'} {label}."
         lines = [f"Here’s what I found for {area_phrase or 'all areas'} {label}:"]
-        for i, e in enumerate(events, 1):
+        for i, e in enumerate(ordered_events, 1):
             t = (e.get("title") or "").strip()
             m = (e.get("message") or "").strip()
             typ = (e.get("type") or "").strip()
@@ -542,10 +620,7 @@ class EventsQueryPlugin(ToolPlugin):
 
     # ---------- Core ----------
     async def _handle(self, args: Dict[str, Any], llm_client) -> str:
-        s = self._s()
-        ha = self._ha(s)
-
-        # Align with HA local time (naive)
+        # Local naive wall-clock used by automations event timestamps.
         now = self._ha_now()
 
         # Timeframe: today|yesterday|last_24h|<date>
@@ -553,19 +628,22 @@ class EventsQueryPlugin(ToolPlugin):
         tf = tf_raw.lower()
 
         if tf in ("evening", "tonight", "this evening"):
-            # 5:00 PM → 11:59:59 PM (or now→EOD if we're already past start)
+            # 5:00 PM → 11:59:59 PM, clamped to now.
             start = now.replace(hour=17, minute=0, second=0, microsecond=0)
-            end = max(now, start.replace(hour=23, minute=59, second=59, microsecond=0))
+            end = start.replace(hour=23, minute=59, second=59, microsecond=0)
+            start, end = self._clamp_window_to_now(start, end, now)
             label = "this evening"
         elif tf in ("afternoon", "this afternoon"):
-            # 12:00:00 PM → 4:59:59 PM
+            # 12:00:00 PM → 4:59:59 PM, clamped to now.
             start = now.replace(hour=12, minute=0, second=0, microsecond=0)
             end = now.replace(hour=17, minute=0, second=0, microsecond=0) - timedelta(seconds=1)
+            start, end = self._clamp_window_to_now(start, end, now)
             label = "this afternoon"
         elif tf in ("this morning", "morning"):
-            # 5:00:00 AM → 11:59:59 AM
+            # 5:00:00 AM → 11:59:59 AM, clamped to now.
             start = now.replace(hour=5, minute=0, second=0, microsecond=0)
             end = now.replace(hour=12, minute=0, second=0, microsecond=0) - timedelta(seconds=1)
+            start, end = self._clamp_window_to_now(start, end, now)
             label = "this morning"
         elif tf == "today":
             start, end = self._day_bounds(now)
@@ -589,10 +667,12 @@ class EventsQueryPlugin(ToolPlugin):
 
         # Discover area sources from Redis
         sources_catalog = self._discover_sources()
+        if not sources_catalog:
+            return "No event sources are configured yet."
 
         # If a specific area was given, try to map it to one or more sources
         area_raw = (args.get("area") or "").strip()
-        user_query = (args.get("query") or "").strip()
+        user_query = (args.get("query") or args.get("request") or "").strip()
         area_phrase = area_raw or user_query  # allow natural-language fallback
 
         resolved_sources: Optional[List[str]] = None
@@ -608,11 +688,17 @@ class EventsQueryPlugin(ToolPlugin):
 
         # Fetch only within window to limit payload
         items = await self._fetch_sources_window(chosen_sources, start, end)
+        items = self._sort_events_by_time(items)
 
         # Presence intent path (force "today")
         if self._is_presence_query(user_query) and area_phrase:
             p_start, p_end = self._day_bounds(now)
-            todays = [e for e in items if self._within_window(e, p_start, p_end)]
+            if start == p_start and end == p_end:
+                todays = items
+            else:
+                todays = self._sort_events_by_time(
+                    await self._fetch_sources_window(chosen_sources, p_start, p_end)
+                )
             # Present per resolved friendly area (mapped from chosen sources)
             friendly_targets: List[str] = []
             if resolved_sources:
@@ -653,7 +739,9 @@ class EventsQueryPlugin(ToolPlugin):
     async def handle_telegram(self, update, args, llm_client):
         return await self._handle(args, llm_client)
 
-    async def handle_matrix(self, client, room, sender, body, args, llm_client):
+    async def handle_matrix(self, client, room, sender, body, args, llm_client=None, **kwargs):
+        if llm_client is None:
+            llm_client = kwargs.get("llm") or kwargs.get("ll_client") or kwargs.get("llm_client")
         return await self._handle(args, llm_client)
 
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):

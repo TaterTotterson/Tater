@@ -1,4 +1,5 @@
 # plugins/doorbell_alert.py
+import asyncio
 import json
 import base64
 import logging
@@ -31,7 +32,7 @@ class DoorbellAlertPlugin(ToolPlugin):
     """
     name = "doorbell_alert"
     plugin_name = "Doorbell Alert"
-    version = "1.0.3"
+    version = "1.0.4"
     min_tater_version = "50"
     description = "Doorbell alert tool for when the user requests or says to run a doorbell alert."
     plugin_dec = "Handle doorbell events: snapshot, describe with vision, announce, and log notifications."
@@ -44,6 +45,8 @@ class DoorbellAlertPlugin(ToolPlugin):
         '    "players": ["media_player.kitchen"],\n'
         '    "tts_entity": "tts.piper",\n'
         '    "notifications": true,\n'
+        '    "persistent_notifications": true,\n'
+        '    "device_service": "notify.mobile_app_my_phone",\n'
         '    "area": "front door"\n'
         "  }\n"
         "}\n"
@@ -69,9 +72,19 @@ class DoorbellAlertPlugin(ToolPlugin):
         },
         "MEDIA_PLAYERS": {
             "label": "Media Players",
-            "type": "text",
+            "type": "textarea",
             "default": "media_player.living_room\nmedia_player.kitchen",
-            "description": "One media_player entity per line (newline or comma separated)."
+            "rows": 8,
+            "description": (
+                "One media_player entity per line (newline or comma separated).\n"
+                "Example:\n"
+                "media_player.living_room\n"
+                "media_player.kitchen"
+            ),
+            "placeholder": (
+                "media_player.living_room\n"
+                "media_player.kitchen"
+            ),
         },
         "NOTIFICATIONS_ENABLED": {
             "label": "Enable Notifications by Default",
@@ -83,7 +96,7 @@ class DoorbellAlertPlugin(ToolPlugin):
             "label": "Enable HA Persistent Notifications",
             "type": "boolean",
             "default": True,
-            "description": "If true, also create Home Assistant persistent notifications when notifications are enabled.",
+            "description": "If true, also create Home Assistant persistent notifications via Home Assistant Notifier.",
         },
         "AREA_LABEL": {
             "label": "Area Label",
@@ -179,45 +192,6 @@ class DoorbellAlertPlugin(ToolPlugin):
         return r.content
 
     # ---------- Bridges ----------
-    def _notify_ha_bridge(
-        self,
-        *,
-        source: str,
-        title: str,
-        message: str,
-        level: str = "info",
-        notif_type: str = "doorbell",
-        entity_id: Optional[str] = None,
-        ha_time: Optional[str] = None,
-        data: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        """
-        POST to HA notifications: /tater-ha/v1/notifications/add
-        """
-        try:
-            raw_port = redis_client.hget("homeassistant_platform_settings", "bind_port")
-            port = int(raw_port) if raw_port is not None else 8787
-        except Exception:
-            port = 8787
-
-        url = f"http://127.0.0.1:{port}/tater-ha/v1/notifications/add"
-        payload = {
-            "source": source,
-            "title": title,
-            "type": notif_type,
-            "message": message,
-            "entity_id": entity_id or "",
-            "ha_time": ha_time or "",
-            "level": level,
-            "data": data or {},
-        }
-        try:
-            r = requests.post(url, json=payload, timeout=5)
-            if r.status_code >= 400:
-                logger.warning("[doorbell_alert] notify post failed %s: %s", r.status_code, r.text[:200])
-        except Exception as e:
-            logger.warning("[doorbell_alert] notify post error: %s", e)
-
     def _post_automation_event(
         self,
         *,
@@ -257,13 +231,63 @@ class DoorbellAlertPlugin(ToolPlugin):
         except Exception as e:
             logger.warning("[doorbell_alert] events post error: %s", e)
 
-    def _send_persistent_notification(self, ha_base: str, token: str, title: str, message: str) -> None:
-        url = f"{ha_base}/api/services/persistent_notification/create"
-        headers = self._ha_headers(token)
-        payload = {"title": title, "message": message}
-        r = requests.post(url, headers=headers, json=payload, timeout=10)
-        if r.status_code >= 400:
-            raise RuntimeError(f"persistent_notification HTTP {r.status_code}: {r.text[:200]}")
+    async def _notify_via_homeassistant_notifier(
+        self,
+        *,
+        title: str,
+        message: str,
+        persistent_notifications: bool,
+        device_service: Optional[str],
+        area: str,
+        camera: str,
+        players: List[str],
+        tts_entity: str,
+    ) -> Dict[str, Any]:
+        try:
+            import plugin_registry as pr
+            from plugin_settings import get_plugin_enabled
+        except Exception as exc:
+            return {"ok": False, "error": f"Notifier registry unavailable: {exc}"}
+
+        plugins = pr.get_registry_snapshot() or {}
+        notifier = plugins.get("notify_homeassistant")
+        if not notifier or not getattr(notifier, "notifier", False):
+            return {"ok": False, "error": "notify_homeassistant plugin is not available."}
+
+        if not get_plugin_enabled("notify_homeassistant"):
+            return {"ok": False, "error": "notify_homeassistant plugin is disabled."}
+
+        targets: Dict[str, Any] = {"persistent": bool(persistent_notifications)}
+        service = (device_service or "").strip()
+        if service:
+            targets["device_service"] = service
+
+        origin = {
+            "platform": "doorbell_alert",
+            "scope": "doorbell_alert",
+            "area": area,
+            "camera": camera,
+            "players": players,
+            "tts_entity": tts_entity,
+        }
+        meta = {"priority": "normal"}
+        try:
+            result = notifier.notify(
+                title=title,
+                content=message,
+                targets=targets,
+                origin=origin,
+                meta=meta,
+            )
+            if asyncio.iscoroutine(result):
+                result = await result
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+        result_text = str(result or "").strip()
+        if result_text.lower().startswith("queued notification"):
+            return {"ok": True, "result": result_text}
+        return {"ok": False, "error": result_text or "notify_homeassistant returned an empty response."}
 
     # ---------- Vision / TTS ----------
     def _vision_describe(self, image_bytes: bytes, api_base: str, model: str, api_key: Optional[str]) -> str:
@@ -335,6 +359,8 @@ class DoorbellAlertPlugin(ToolPlugin):
             "players": ["media_player.one", "media_player.two"],
             "tts_entity": "tts.piper",
             "notifications": true,
+            "persistent_notifications": true,
+            "device_service": "notify.mobile_app_my_phone",
             "area": "front door"
           }
         """
@@ -360,8 +386,18 @@ class DoorbellAlertPlugin(ToolPlugin):
         else:
             players = players_default
 
-        notifications = bool(args.get("notifications")) if "notifications" in args else notif_default
-        persistent_notifications = persistent_default
+        notifications = (
+            self._boolish(args.get("notifications"), notif_default)
+            if "notifications" in args
+            else notif_default
+        )
+        if "persistent_notifications" in args:
+            persistent_notifications = self._boolish(args.get("persistent_notifications"), persistent_default)
+        elif "persistent" in args:
+            persistent_notifications = self._boolish(args.get("persistent"), persistent_default)
+        else:
+            persistent_notifications = persistent_default
+        device_service = (args.get("device_service") or "").strip() if "device_service" in args else ""
 
         # Validate requireds
         if not camera:
@@ -385,17 +421,18 @@ class DoorbellAlertPlugin(ToolPlugin):
 
             if notifications:
                 extra = {"players": players, "tts_entity": tts_entity, "area": area}
-                # notifications can keep a feature/source label
-                self._notify_ha_bridge(
-                    source="doorbell_alert",
+                notify_result = await self._notify_via_homeassistant_notifier(
                     title="Doorbell",
                     message=generic,
-                    notif_type="doorbell",
-                    entity_id=camera,
-                    ha_time=ha_time,
-                    level="info",
-                    data=extra,
+                    persistent_notifications=persistent_notifications,
+                    device_service=device_service,
+                    area=area,
+                    camera=camera,
+                    players=players,
+                    tts_entity=tts_entity,
                 )
+                if not notify_result.get("ok"):
+                    logger.warning("[doorbell_alert] notify_homeassistant failed: %s", notify_result.get("error"))
                 # events stored per-area
                 self._post_automation_event(
                     source=area_slug,  # <-- per-area storage
@@ -407,11 +444,6 @@ class DoorbellAlertPlugin(ToolPlugin):
                     level="info",
                     data={"area": area, **extra},
                 )
-                if persistent_notifications:
-                    try:
-                        self._send_persistent_notification(ha["base"], ha["token"], "Doorbell", generic)
-                    except Exception as e:
-                        logger.warning("[doorbell_alert] persistent notification failed: %s", e)
             return {"ok": True, "note": "snapshot_failed_generic_alert_spoken", "players": players, "area": area}
 
         # 2) Vision brief
@@ -427,17 +459,18 @@ class DoorbellAlertPlugin(ToolPlugin):
         # 4) Notifications + Events (optional)
         if notifications:
             extra = {"players": players, "tts_entity": tts_entity, "area": area}
-            # notifications: keep logical feature source
-            self._notify_ha_bridge(
-                source="doorbell_alert",
+            notify_result = await self._notify_via_homeassistant_notifier(
                 title="Doorbell",
                 message=desc,
-                notif_type="doorbell",
-                entity_id=camera,
-                ha_time=ha_time,
-                level="info",
-                data=extra,
+                persistent_notifications=persistent_notifications,
+                device_service=device_service,
+                area=area,
+                camera=camera,
+                players=players,
+                tts_entity=tts_entity,
             )
+            if not notify_result.get("ok"):
+                logger.warning("[doorbell_alert] notify_homeassistant failed: %s", notify_result.get("error"))
             # events: per-area source
             self._post_automation_event(
                 source=area_slug,  # <-- per-area storage
@@ -449,11 +482,6 @@ class DoorbellAlertPlugin(ToolPlugin):
                 level="info",
                 data={"area": area, **extra},
             )
-            if persistent_notifications:
-                try:
-                    self._send_persistent_notification(ha["base"], ha["token"], "Doorbell", desc)
-                except Exception as e:
-                    logger.warning("[doorbell_alert] persistent notification failed: %s", e)
 
         # Platform ignores the return; for logs/tracing only
         return {"ok": True, "spoken": True, "players": players, "area": area}

@@ -6,6 +6,8 @@ import json
 import time
 import copy
 import secrets
+import logging
+import uuid
 import requests
 from PIL import Image
 from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
@@ -13,6 +15,8 @@ from plugin_base import ToolPlugin
 from helpers import redis_client, run_comfy_prompt
 
 SETTINGS_CATEGORY = "ComfyUI Video"
+logger = logging.getLogger("comfyui_video_plugin")
+logger.setLevel(logging.INFO)
 
 def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str) -> dict:
     if not isinstance(binary, (bytes, bytearray)):
@@ -31,7 +35,7 @@ class _ComfyUIImageHelper:
 
     @staticmethod
     def get_base_http():
-        settings = redis_client.hgetall(f"plugin_settings:{_ComfyUIImageHelper.settings_category}")
+        settings = redis_client.hgetall(f"plugin_settings:{_ComfyUIImageHelper.settings_category}") or {}
         raw = settings.get("COMFYUI_URL", b"")
         url = raw.decode("utf-8").strip() if isinstance(raw, (bytes, bytearray)) else (raw or "").strip()
         if not url:
@@ -47,7 +51,7 @@ class _ComfyUIImageHelper:
 
     @staticmethod
     def get_workflow_template():
-        settings = redis_client.hgetall(f"plugin_settings:{_ComfyUIImageHelper.settings_category}")
+        settings = redis_client.hgetall(f"plugin_settings:{_ComfyUIImageHelper.settings_category}") or {}
         workflow_raw = settings.get("COMFYUI_WORKFLOW", b"")
         workflow_str = workflow_raw.decode("utf-8").strip() if isinstance(workflow_raw, (bytes, bytearray)) else (workflow_raw or "").strip()
         if not workflow_str:
@@ -147,7 +151,7 @@ class _ComfyUIImageHelper:
             "720p": (1280, 720),
             "1080p": (1920, 1080),
         }
-        settings = redis_client.hgetall(f"plugin_settings:{_ComfyUIImageHelper.settings_category}")
+        settings = redis_client.hgetall(f"plugin_settings:{_ComfyUIImageHelper.settings_category}") or {}
         raw_res = settings.get("IMAGE_RESOLUTION", b"720p")
         resolution = raw_res.decode("utf-8") if isinstance(raw_res, (bytes, bytearray)) else (raw_res or "720p")
         default_w, default_h = res_map.get(resolution, (1280, 720))
@@ -170,7 +174,7 @@ class _ComfyUIImageVideoHelper:
 
     @staticmethod
     def get_base_http() -> str:
-        settings = redis_client.hgetall(f"plugin_settings:{_ComfyUIImageVideoHelper.settings_category}")
+        settings = redis_client.hgetall(f"plugin_settings:{_ComfyUIImageVideoHelper.settings_category}") or {}
         url_raw = settings.get("COMFYUI_VIDEO_URL", b"")
         url = url_raw.decode("utf-8").strip() if isinstance(url_raw, (bytes, bytearray)) else (url_raw or "").strip()
         if not url:
@@ -186,7 +190,7 @@ class _ComfyUIImageVideoHelper:
 
     @staticmethod
     def get_workflow_template() -> dict:
-        settings = redis_client.hgetall(f"plugin_settings:{_ComfyUIImageVideoHelper.settings_category}")
+        settings = redis_client.hgetall(f"plugin_settings:{_ComfyUIImageVideoHelper.settings_category}") or {}
         raw = settings.get("COMFYUI_VIDEO_WORKFLOW", b"")
         workflow_str = raw.decode("utf-8").strip() if isinstance(raw, (bytes, bytearray)) else (raw or "").strip()
         if not workflow_str:
@@ -269,7 +273,7 @@ class _ComfyUIImageVideoHelper:
         uploaded = _ComfyUIImageVideoHelper.upload_image(base_http, image_bytes, filename)
         wf = copy.deepcopy(_ComfyUIImageVideoHelper.get_workflow_template())
 
-        settings = redis_client.hgetall(f"plugin_settings:{_ComfyUIImageVideoHelper.settings_category}")
+        settings = redis_client.hgetall(f"plugin_settings:{_ComfyUIImageVideoHelper.settings_category}") or {}
         res_map = {
             "144p": (256, 144), "240p": (426, 240), "360p": (480, 360),
             "480p": (640, 480), "720p": (1280, 720), "1080p": (1920, 1080)
@@ -305,22 +309,34 @@ class _ComfyUIImageVideoHelper:
         _ComfyUIImageVideoHelper._apply_overrides(wf, prompt, uploaded, w, h, frames)
 
         prompt_id, _ = run_comfy_prompt(base_http, base_ws, wf)
-        hist = _ComfyUIImageVideoHelper.get_history(base_http, prompt_id).get(prompt_id, {})
-        outputs = hist.get("outputs", {}) if isinstance(hist, dict) else {}
+        for _ in range(40):
+            hist = _ComfyUIImageVideoHelper.get_history(base_http, prompt_id).get(prompt_id, {})
+            outputs = hist.get("outputs", {}) if isinstance(hist, dict) else {}
 
-        for node in outputs.values():
-            if "images" in node:
-                img = node["images"][0]
-                content = _ComfyUIImageVideoHelper.fetch_asset(base_http, img["filename"], img.get("subfolder", ""), img.get("type", "output"))
-                ext = os.path.splitext(img["filename"])[-1].lstrip(".") or "webp"
-                return content, ext
+            for node in outputs.values():
+                if "images" in node and node["images"]:
+                    img = node["images"][0]
+                    content = _ComfyUIImageVideoHelper.fetch_asset(
+                        base_http,
+                        img["filename"],
+                        img.get("subfolder", ""),
+                        img.get("type", "output"),
+                    )
+                    ext = os.path.splitext(img["filename"])[-1].lstrip(".") or "webp"
+                    return content, ext
 
-        for node in outputs.values():
-            if "videos" in node:
-                vid = node["videos"][0]
-                content = _ComfyUIImageVideoHelper.fetch_asset(base_http, vid["filename"], vid.get("subfolder", ""), vid.get("type", "output"))
-                ext = os.path.splitext(vid["filename"])[-1].lstrip(".") or "mp4"
-                return content, ext
+            for node in outputs.values():
+                if "videos" in node and node["videos"]:
+                    vid = node["videos"][0]
+                    content = _ComfyUIImageVideoHelper.fetch_asset(
+                        base_http,
+                        vid["filename"],
+                        vid.get("subfolder", ""),
+                        vid.get("type", "output"),
+                    )
+                    ext = os.path.splitext(vid["filename"])[-1].lstrip(".") or "mp4"
+                    return content, ext
+            time.sleep(0.5)
 
         for node in wf.values():
             if node.get("class_type") == "SaveVideo":
@@ -338,7 +354,7 @@ class _ComfyUIImageVideoHelper:
 class ComfyUIVideoPlugin(ToolPlugin):
     name = "comfyui_video_plugin"
     plugin_name = "ComfyUI Video"
-    version = "1.0.1"
+    version = "1.0.2"
     min_tater_version = "50"
     usage = (
         '{\n'
@@ -398,14 +414,14 @@ class ComfyUIVideoPlugin(ToolPlugin):
         },
         "VIDEO_LENGTH": {
             "label": "Clip Length (seconds)",
-            "type": "string",
-            "default": "5",
+            "type": "number",
+            "default": 5,
             "description": "Length of each individual clip."
         },
         "VIDEO_CLIPS": {
             "label": "Number of Clips",
-            "type": "string",
-            "default": "1",
+            "type": "number",
+            "default": 1,
             "description": "How many clips to generate and merge into one video."
         }
     }
@@ -426,7 +442,7 @@ class ComfyUIVideoPlugin(ToolPlugin):
                 if os.path.exists(path):
                     os.remove(path)
             except Exception as e:
-                print(f"[Cleanup warning] {e}")
+                logger.warning("[Cleanup warning] %s", e)
 
     def webp_to_mp4(self, input_file, output_file, fps=16, duration=5):
         frames, tmp_dir, frame_files = [], f"{os.path.dirname(input_file)}/frames_{uuid.uuid4().hex[:6]}", []
@@ -460,6 +476,8 @@ class ComfyUIVideoPlugin(ToolPlugin):
         os.remove(listpath)
 
     async def _derive_motion_directive(self, raw: str, llm_client) -> str:
+        if llm_client is None:
+            return "hand to face; soft laugh; brush hair behind ear"
         sys = (
             "Extract the intended animation as ONE concise directive (<= 24 words). "
             "Prioritize clear SUBJECT ACTIONS over camera motion (e.g., hand to face, laugh, brush hair behind ear). "
@@ -482,6 +500,8 @@ class ComfyUIVideoPlugin(ToolPlugin):
             return []
         if not base_motion:
             base_motion = "hand to face; soft laugh; brush hair behind ear"
+        if llm_client is None:
+            return [base_motion] * len(scene_prompts)
 
         n = len(scene_prompts)
         scenes_block = "\n".join([f"{i+1}. {sp}" for i, sp in enumerate(scene_prompts)])
@@ -520,7 +540,7 @@ class ComfyUIVideoPlugin(ToolPlugin):
 
     async def _generate_video(self, prompt, llm_client):
         # --- read settings safely
-        settings = redis_client.hgetall(f"plugin_settings:{self.settings_category}")
+        settings = redis_client.hgetall(f"plugin_settings:{self.settings_category}") or {}
         raw_res = settings.get("VIDEO_RESOLUTION", b"720p")
         resolution = raw_res.decode() if isinstance(raw_res, bytes) else raw_res
         w, h = self.res_map.get(resolution, (1280, 720))
@@ -562,35 +582,38 @@ class ComfyUIVideoPlugin(ToolPlugin):
             "- Return ONLY the list.\n"
         )
 
-        try:
-            resp = await llm_client.chat([
-                {"role": "system", "content": "You write concise, varied scene prompts that keep subject & mood consistent."},
-                {"role": "user", "content": scene_list_prompt}
-            ])
-            raw_list = (resp.get("message", {}) or {}).get("content", "") or ""
-            image_prompts = []
-            for line in raw_list.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                if line[0].isdigit():
-                    parts = line.split(".", 1)
-                    if len(parts) == 1:
-                        parts = line.split(")", 1)
-                    if len(parts) == 1:
-                        parts = line.split("-", 1)
-                    if len(parts) == 2 and parts[1].strip():
-                        image_prompts.append(parts[1].strip())
-                        continue
-                image_prompts.append(line)
-            if not image_prompts:
-                image_prompts = [prompt] * num_clips
-            elif len(image_prompts) < num_clips:
-                image_prompts += [image_prompts[-1]] * (num_clips - len(image_prompts))
-            else:
-                image_prompts = image_prompts[:num_clips]
-        except Exception:
+        if llm_client is None:
             image_prompts = [prompt] * num_clips
+        else:
+            try:
+                resp = await llm_client.chat([
+                    {"role": "system", "content": "You write concise, varied scene prompts that keep subject & mood consistent."},
+                    {"role": "user", "content": scene_list_prompt}
+                ])
+                raw_list = (resp.get("message", {}) or {}).get("content", "") or ""
+                image_prompts = []
+                for line in raw_list.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if line[0].isdigit():
+                        parts = line.split(".", 1)
+                        if len(parts) == 1:
+                            parts = line.split(")", 1)
+                        if len(parts) == 1:
+                            parts = line.split("-", 1)
+                        if len(parts) == 2 and parts[1].strip():
+                            image_prompts.append(parts[1].strip())
+                            continue
+                    image_prompts.append(line)
+                if not image_prompts:
+                    image_prompts = [prompt] * num_clips
+                elif len(image_prompts) < num_clips:
+                    image_prompts += [image_prompts[-1]] * (num_clips - len(image_prompts))
+                else:
+                    image_prompts = image_prompts[:num_clips]
+            except Exception:
+                image_prompts = [prompt] * num_clips
 
         # NEW: derive motion + tailor per-clip motion prompts
         base_motion = await self._derive_motion_directive(prompt, llm_client)
@@ -648,10 +671,14 @@ class ComfyUIVideoPlugin(ToolPlugin):
                 final_bytes = f.read()
             temp_paths.append(out_path)
 
-            msg = await llm_client.chat([
-                {"role": "system", "content": f"The user has just been shown a video based on '{prompt}'."},
-                {"role": "user", "content": "Reply with a short, fun message celebrating the video. No lead-in phrases or instructions."}
-            ])
+            if llm_client is not None:
+                msg = await llm_client.chat([
+                    {"role": "system", "content": f"The user has just been shown a video based on '{prompt}'."},
+                    {"role": "user", "content": "Reply with a short, fun message celebrating the video. No lead-in phrases or instructions."}
+                ])
+                msg_text = (msg["message"]["content"].strip() if msg and msg.get("message") else "") or "Here's your video!"
+            else:
+                msg_text = "Here's your video!"
 
             return [
                 _build_media_metadata(
@@ -660,7 +687,7 @@ class ComfyUIVideoPlugin(ToolPlugin):
                     name="generated_video.mp4",
                     mimetype="video/mp4",
                 ),
-                (msg["message"]["content"].strip() if msg and msg.get("message") else "") or "🎬 Here’s your video!"
+                msg_text
             ]
         finally:
             self.cleanup_temp_files(temp_paths)
@@ -669,17 +696,16 @@ class ComfyUIVideoPlugin(ToolPlugin):
         return "❌ This plugin is only available in the WebUI due to file size limitations."
 
     async def handle_webui(self, args, llm_client):
+        args = args or {}
         if "prompt" not in args:
             return ["No prompt provided."]
         try:
-            asyncio.get_running_loop()
             return await self._generate_video(args["prompt"], llm_client)
-        except RuntimeError:
-            return asyncio.run(self._generate_video(args["prompt"], llm_client))
         except Exception as e:
+            logger.exception("ComfyUI video generation failed: %s", e)
             return [f"⚠️ Error generating video: {e}"]
 
     async def handle_irc(self, bot, channel, user, raw, args, llm_client):
-        await bot.privmsg(channel, f"{user}: This plugin is supported only on WebUI.")
+        return f"{user}: This plugin is supported only on WebUI."
 
 plugin = ComfyUIVideoPlugin()

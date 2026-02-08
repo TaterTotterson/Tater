@@ -17,11 +17,21 @@ def _plugin_dir() -> Path:
     return Path(plugin_dir)
 
 
-def load_plugins_from_directory(plugin_dir: Optional[str] = None) -> Dict[str, ToolPlugin]:
+def load_plugins_from_directory(
+    plugin_dir: Optional[str] = None,
+    *,
+    id_from_filename: bool = False,
+) -> Dict[str, ToolPlugin]:
     """
     Load plugins by scanning a directory for *.py files and importing them directly
     from file paths. Each plugin module must expose a global named `plugin` which
     is an instance of ToolPlugin.
+
+    Args:
+        plugin_dir: Directory to scan for plugin modules.
+        id_from_filename: When True, use the plugin filename stem as the registry
+            id and normalize plugin.name to that stem. When False, use the
+            declared plugin.name (fallback to filename).
 
     Returns:
         { plugin_id: plugin_instance }
@@ -65,7 +75,20 @@ def load_plugins_from_directory(plugin_dir: Optional[str] = None) -> Dict[str, T
             # Not a ToolPlugin plugin module; ignore
             continue
 
-        pid = getattr(plugin, "name", None) or name
+        declared_id = str(getattr(plugin, "name", "") or "").strip()
+        pid = declared_id or name
+        if id_from_filename:
+            # Agent Lab canonicalizes ids to filenames so edit/reload/validation
+            # operations consistently target <id>.py.
+            pid = name
+            if declared_id and declared_id != name:
+                current_label = str(getattr(plugin, "plugin_name", "") or "").strip()
+                if not current_label:
+                    plugin.plugin_name = declared_id
+                print(
+                    f"⚠️ Plugin '{path.name}' declares name '{declared_id}'; "
+                    f"using filename id '{name}'."
+                )
         pid = str(pid).strip() or name
 
         # Normalize plugin.name to the registry id

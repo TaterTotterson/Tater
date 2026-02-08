@@ -28,7 +28,12 @@ from helpers import (
     get_llm_client_from_env,
     build_llm_host_from_env,
 )
-from admin_gate import is_admin_only_plugin, normalize_admin_list
+from admin_gate import (
+    is_admin_only_plugin,
+    is_agent_lab_creation_tool,
+    is_agent_lab_creation_admin_gated,
+    normalize_admin_list,
+)
 from agent_lab_registry import build_agent_registry
 from plugin_result import action_failure
 from plugin_kernel import plugin_supports_platform
@@ -831,6 +836,93 @@ class MatrixPlatform:
             else:
                 logger.error(f"[Matrix] Send failed: {e}")
 
+    async def _send_reaction(self, room_id: str, event_id: str, emoji: str) -> bool:
+        clean_emoji = str(emoji or "").strip()
+        event_ref = str(event_id or "").strip()
+        if not clean_emoji or not event_ref:
+            return False
+
+        content = {
+            "m.relates_to": {
+                "rel_type": "m.annotation",
+                "event_id": event_ref,
+                "key": clean_emoji,
+            }
+        }
+
+        kwargs = {}
+        if self.trust_unverified_devices:
+            kwargs["ignore_unverified_devices"] = True
+
+        try:
+            await self.client.room_send(
+                room_id=room_id,
+                message_type="m.reaction",
+                content=content,
+                **kwargs,
+            )
+            return True
+        except TypeError:
+            try:
+                await self.client.room_send(
+                    room_id=room_id,
+                    message_type="m.reaction",
+                    content=content,
+                )
+                return True
+            except Exception:
+                return False
+        except Exception:
+            return False
+
+    @staticmethod
+    def _extract_hook_emoji(value: Any) -> str:
+        if isinstance(value, dict):
+            value = value.get("emoji")
+        if isinstance(value, str):
+            return value.strip()
+        return ""
+
+    async def _maybe_passive_reaction(
+        self,
+        *,
+        room_id: str,
+        event_id: str,
+        user_text: str,
+        assistant_text: str,
+        merged_registry: Dict[str, Any],
+        merged_enabled,
+    ) -> None:
+        if not event_id:
+            return
+
+        for name, plugin in merged_registry.items():
+            hook = getattr(plugin, "on_assistant_response", None)
+            if not callable(hook):
+                continue
+            if not merged_enabled(name):
+                continue
+
+            try:
+                suggested = await hook(
+                    platform="matrix",
+                    user_text=user_text or "",
+                    assistant_text=assistant_text or "",
+                    llm_client=llm_client,
+                    scope=room_id,
+                    room_id=room_id,
+                    event_id=event_id,
+                )
+                emoji = self._extract_hook_emoji(suggested)
+                if not emoji:
+                    continue
+
+                applied = await self._send_reaction(room_id=room_id, event_id=event_id, emoji=emoji)
+                if applied:
+                    return
+            except Exception as exc:
+                logger.debug(f"[{name}] passive reaction skipped: {exc}")
+
     async def _resolve_room_ref(self, room_ref: str) -> Optional[str]:
         ref = (room_ref or "").strip()
         if not ref:
@@ -1127,7 +1219,7 @@ class MatrixPlatform:
                 logger.warning(f"[notifyq] Matrix send failed: {e}")
 
     # ---------- Message handling ----------
-    async def _handle_textlike(self, room, sender, body):
+    async def _handle_textlike(self, room, sender, body, event_id: str = ""):
         if sender == self.user_id:
             return
 
@@ -1194,12 +1286,27 @@ class MatrixPlatform:
                         )
 
                 def _admin_guard(func_name):
-                    if is_admin_only_plugin(func_name) and not _admin_user_allowed(sender):
-                        msg = (
-                            "This tool is restricted to the configured admin user on Matrix."
-                            if _get_setting("admin_user_id", "")
-                            else "This tool is disabled because no Matrix admin user is configured."
-                        )
+                    needs_admin = False
+                    creation_guard = False
+                    if is_admin_only_plugin(func_name):
+                        needs_admin = True
+                    elif is_agent_lab_creation_tool(func_name) and is_agent_lab_creation_admin_gated(redis_client):
+                        needs_admin = True
+                        creation_guard = True
+
+                    if needs_admin and not _admin_user_allowed(sender):
+                        if creation_guard:
+                            msg = (
+                                "Agent Lab plugin/platform creation is restricted to the configured admin user on Matrix."
+                                if _get_setting("admin_user_id", "")
+                                else "Agent Lab creation is disabled because no Matrix admin user is configured."
+                            )
+                        else:
+                            msg = (
+                                "This tool is restricted to the configured admin user on Matrix."
+                                if _get_setting("admin_user_id", "")
+                                else "This tool is disabled because no Matrix admin user is configured."
+                            )
                         return action_failure(
                             code="admin_only",
                             message=msg,
@@ -1236,6 +1343,17 @@ class MatrixPlatform:
                 for item in artifacts:
                     if isinstance(item, dict):
                         await self._send_media_item(room.room_id, item)
+
+                if (final_text or artifacts) and event_id:
+                    assistant_summary = final_text or "[Sent attachments]"
+                    await self._maybe_passive_reaction(
+                        room_id=room.room_id,
+                        event_id=event_id,
+                        user_text=effective_body,
+                        assistant_text=assistant_summary,
+                        merged_registry=merged_registry,
+                        merged_enabled=merged_enabled,
+                    )
                 return
 
             except Exception as e:
@@ -1245,13 +1363,23 @@ class MatrixPlatform:
     async def on_text(self, room, event: RoomMessageText):
         if not self._should_process_event(event):
             return
-        await self._handle_textlike(room, event.sender, event.body or "")
+        await self._handle_textlike(
+            room,
+            event.sender,
+            event.body or "",
+            str(getattr(event, "event_id", "") or ""),
+        )
 
     async def on_megolm(self, room, event: MegolmEvent):
         if not self._should_process_event(event):
             return
         body = getattr(event, "body", None) or (getattr(event, "source", {}) or {}).get("content", {}).get("body", "")
-        await self._handle_textlike(room, event.sender, body or "")
+        await self._handle_textlike(
+            room,
+            event.sender,
+            body or "",
+            str(getattr(event, "event_id", "") or ""),
+        )
 
     async def sync_forever(self):
         self.client.add_event_callback(self.on_invite, InviteMemberEvent)

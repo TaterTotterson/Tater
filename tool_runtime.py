@@ -25,11 +25,20 @@ from kernel_tools import (
     list_stable_platforms,
     inspect_plugin,
     validate_plugin,
+    test_plugin,
     validate_platform,
     create_plugin,
     create_platform,
     write_workspace_note,
     list_workspace,
+    memory_get,
+    memory_set,
+    memory_list,
+    memory_delete,
+    memory_explain,
+    memory_search,
+    truth_get_last,
+    truth_list,
 )
 from plugin_result import action_failure, normalize_plugin_result
 
@@ -52,12 +61,28 @@ META_TOOLS = {
     "list_stable_platforms",
     "inspect_plugin",
     "validate_plugin",
+    "test_plugin",
     "validate_platform",
     "create_plugin",
     "create_platform",
     "write_workspace_note",
     "list_workspace",
+    "memory_get",
+    "memory_set",
+    "memory_list",
+    "memory_delete",
+    "memory_explain",
+    "memory_search",
+    "truth_get_last",
+    "truth_list",
 }
+
+
+def _to_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
 
 
 def is_meta_tool(name: Optional[str]) -> bool:
@@ -71,6 +96,7 @@ def run_meta_tool(
     platform: str,
     registry: Dict[str, Any],
     enabled_predicate: Optional[Callable[[str], bool]] = None,
+    origin: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     if func == "list_plugins":
         arg_platform = str(args.get("platform") or platform or "webui")
@@ -109,6 +135,7 @@ def run_meta_tool(
         return search_web(
             str(args.get("query") or ""),
             num_results=int(args.get("num_results") or args.get("max_results") or 5),
+            start=int(args.get("start") or 1),
             site=args.get("site") or args.get("domain"),
             safe=str(args.get("safe") or "active"),
             country=args.get("country"),
@@ -187,6 +214,12 @@ def run_meta_tool(
         return list_stable_platforms()
     if func == "inspect_plugin":
         return inspect_plugin(str(args.get("plugin_id") or ""))
+    if func == "test_plugin":
+        return test_plugin(
+            str(args.get("name") or args.get("plugin_id") or ""),
+            platform=args.get("platform"),
+            auto_install=bool(args.get("auto_install", False)),
+        )
 
     if func == "create_plugin":
         if not args.get("code") and not args.get("code_b64") and not args.get("code_lines"):
@@ -228,11 +261,18 @@ def run_meta_tool(
         if name and not re.match(r"^[A-Za-z0-9_-]+$", name) and args.get("plugin_id"):
             args = dict(args)
             args["name"] = str(args.get("plugin_id") or "").strip()
+        raw_overwrite = args.get("overwrite", False)
+        overwrite = (
+            raw_overwrite.strip().lower() in {"1", "true", "yes", "on"}
+            if isinstance(raw_overwrite, str)
+            else bool(raw_overwrite)
+        )
         return create_plugin(
             str(args.get("name") or ""),
             args.get("code"),
             code_b64=args.get("code_b64"),
             code_lines=args.get("code_lines"),
+            overwrite=overwrite,
         )
     if func == "validate_plugin":
         return validate_plugin(
@@ -275,11 +315,18 @@ def run_meta_tool(
         if not args.get("name") and args.get("platform_key"):
             args = dict(args)
             args["name"] = args.get("platform_key")
+        raw_overwrite = args.get("overwrite", False)
+        overwrite = (
+            raw_overwrite.strip().lower() in {"1", "true", "yes", "on"}
+            if isinstance(raw_overwrite, str)
+            else bool(raw_overwrite)
+        )
         return create_platform(
             str(args.get("name") or ""),
             args.get("code"),
             code_b64=args.get("code_b64"),
             code_lines=args.get("code_lines"),
+            overwrite=overwrite,
         )
     if func == "validate_platform":
         return validate_platform(
@@ -290,6 +337,114 @@ def run_meta_tool(
         return write_workspace_note(str(args.get("content") or ""))
     if func == "list_workspace":
         return list_workspace()
+    if func == "memory_get":
+        raw_include = args.get("include_meta", True)
+        include_meta = (
+            raw_include.strip().lower() in {"1", "true", "yes", "on"}
+            if isinstance(raw_include, str)
+            else bool(raw_include)
+        )
+        return memory_get(
+            keys=args.get("keys"),
+            prefix=args.get("prefix"),
+            scope=str(args.get("scope") or "global"),
+            user_id=args.get("user_id"),
+            room_id=args.get("room_id"),
+            platform=args.get("platform") or platform,
+            limit=_to_int(args.get("limit") or 50, 50),
+            include_meta=include_meta,
+            origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
+        )
+    if func == "memory_set":
+        entries = args.get("entries")
+        if not isinstance(entries, dict):
+            entries = args.get("values") if isinstance(args.get("values"), dict) else {}
+        raw_confirmed = args.get("confirmed", False)
+        confirmed = (
+            raw_confirmed.strip().lower() in {"1", "true", "yes", "on"}
+            if isinstance(raw_confirmed, str)
+            else bool(raw_confirmed)
+        )
+        return memory_set(
+            entries=entries,
+            scope=str(args.get("scope") or "global"),
+            user_id=args.get("user_id"),
+            room_id=args.get("room_id"),
+            platform=args.get("platform") or platform,
+            ttl_sec=args.get("ttl_sec"),
+            source=args.get("source"),
+            request_text=args.get("request_text"),
+            confirmed=confirmed,
+            origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
+        )
+    if func == "memory_list":
+        return memory_list(
+            prefix=args.get("prefix"),
+            scope=str(args.get("scope") or "global"),
+            user_id=args.get("user_id"),
+            room_id=args.get("room_id"),
+            platform=args.get("platform") or platform,
+            limit=_to_int(args.get("limit") or 50, 50),
+            origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
+        )
+    if func == "memory_delete":
+        return memory_delete(
+            keys=args.get("keys"),
+            scope=str(args.get("scope") or "global"),
+            user_id=args.get("user_id"),
+            room_id=args.get("room_id"),
+            platform=args.get("platform") or platform,
+            origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
+        )
+    if func == "memory_explain":
+        key = args.get("key")
+        if not key and args.get("keys"):
+            if isinstance(args.get("keys"), list) and args.get("keys"):
+                key = args.get("keys")[0]
+            elif isinstance(args.get("keys"), str):
+                key = args.get("keys").split(",", 1)[0]
+        return memory_explain(
+            str(key or ""),
+            scope=str(args.get("scope") or "auto"),
+            user_id=args.get("user_id"),
+            room_id=args.get("room_id"),
+            platform=args.get("platform") or platform,
+            origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
+        )
+    if func == "memory_search":
+        raw_include_truth = args.get("include_truth", True)
+        include_truth = (
+            raw_include_truth.strip().lower() in {"1", "true", "yes", "on"}
+            if isinstance(raw_include_truth, str)
+            else bool(raw_include_truth)
+        )
+        return memory_search(
+            str(args.get("query") or ""),
+            scope=str(args.get("scope") or "auto"),
+            user_id=args.get("user_id"),
+            room_id=args.get("room_id"),
+            platform=args.get("platform") or platform,
+            include_truth=include_truth,
+            limit=_to_int(args.get("limit") or 8, 8),
+            min_score=_to_int(args.get("min_score") or 1, 1),
+            origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
+        )
+    if func == "truth_get_last":
+        return truth_get_last(
+            platform=args.get("platform") or platform,
+            scope=args.get("scope"),
+            plugin_id=args.get("plugin_id"),
+            scan_limit=_to_int(args.get("scan_limit") or 200, 200),
+            origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
+        )
+    if func == "truth_list":
+        return truth_list(
+            platform=args.get("platform") or platform,
+            scope=args.get("scope"),
+            plugin_id=args.get("plugin_id"),
+            limit=_to_int(args.get("limit") or 10, 10),
+            origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
+        )
 
     return {"ok": False, "error": {"code": "unknown_meta_tool", "message": f"Unknown meta tool: {func}"}}
 

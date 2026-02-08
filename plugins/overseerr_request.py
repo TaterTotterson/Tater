@@ -1,8 +1,7 @@
 # plugins/overseerr_request.py
-import re
 import json
-import asyncio
 import logging
+import re
 from urllib.parse import quote
 from typing import Any, Dict, List, Optional
 
@@ -27,7 +26,7 @@ class OverseerrRequestPlugin(ToolPlugin):
     """
     name = "overseerr_request"
     plugin_name = "Overseerr Request"
-    version = "1.0.1"
+    version = "1.0.2"
     min_tater_version = "50"
     usage = (
         "{\n"
@@ -53,7 +52,7 @@ class OverseerrRequestPlugin(ToolPlugin):
         },
         "OVERSEERR_API_KEY": {
             "label": "Overseerr API Key",
-            "type": "string",
+            "type": "password",
             "default": "",
         },
     }
@@ -66,9 +65,14 @@ class OverseerrRequestPlugin(ToolPlugin):
     # ---------- Settings ----------
     @staticmethod
     def _get_settings():
-        s = redis_client.hgetall("plugin_settings:Overseerr")
-        base = s.get("OVERSEERR_BASE_URL", "http://localhost:5055").rstrip("/")
-        api = s.get("OVERSEERR_API_KEY", "")
+        s = redis_client.hgetall("plugin_settings:Overseerr") or {}
+
+        def _val(k, default=""):
+            v = s.get(k, default)
+            return v.decode("utf-8", "ignore") if isinstance(v, (bytes, bytearray)) else str(v or "")
+
+        base = _val("OVERSEERR_BASE_URL", "http://localhost:5055").rstrip("/")
+        api = _val("OVERSEERR_API_KEY", "")
         return base, api
 
     # ---------- HTTP helpers ----------
@@ -314,67 +318,50 @@ class OverseerrRequestPlugin(ToolPlugin):
 
         return f"Requested {disp_title}{ypart} ({media_type}){status_text}.{rid}"
 
+    @staticmethod
+    def _format_result_message(raw: str, *, tts: bool = False) -> str:
+        text = str(raw or "").strip()
+        if not text:
+            return "Overseerr request completed."
+
+        # Keep non-success responses unchanged (errors/no results/already requested).
+        if not text.startswith("Requested "):
+            return text
+
+        clean = re.sub(r"^Requested\s+", "", text)
+        clean = re.sub(r"\(status:.*?\)", "", clean, flags=re.IGNORECASE)
+        clean = re.sub(r"\[request #.*?\]", "", clean)
+        if tts:
+            clean = re.sub(r"[()]", "", clean)
+        clean = clean.strip(" .")
+        return f"{clean} has been added to your requests."
+
     # ---------- Platform handlers ----------
     async def handle_webui(self, args, llm_client):
-        """
-        WebUI output:
-          e.g. "One Battle After Another (2025) has been added to your requests"
-        """
-        async def inner():
-            raw = self._do_request_flow(args)
-            # Extract title portion
-            clean = re.sub(r"^Requested\s+", "", raw)
-            clean = re.sub(r"\(status:.*?\)", "", clean, flags=re.IGNORECASE)
-            clean = re.sub(r"\[request #.*?\]", "", clean)
-            clean = clean.strip(" .")
-
-            # Keep year parentheses in WebUI
-            return f"{clean} has been added to your requests."
-        try:
-            asyncio.get_running_loop()
-            return await inner()
-        except RuntimeError:
-            return asyncio.run(inner())
+        raw = self._do_request_flow(args or {})
+        return [self._format_result_message(raw, tts=False)]
 
     async def handle_homeassistant(self, args, llm_client):
-        """
-        Home Assistant TTS output:
-          e.g. "One Battle After Another 2025 has been added to your requests"
-        """
-        raw = self._do_request_flow(args)
-        clean = re.sub(r"^Requested\s+", "", raw)
-        clean = re.sub(r"\(status:.*?\)", "", clean, flags=re.IGNORECASE)
-        clean = re.sub(r"\[request #.*?\]", "", clean)
-        clean = re.sub(r"[()]", "", clean)  # remove parentheses
-        clean = clean.strip(" .")
-
-        return f"{clean} has been added to your requests."
+        raw = self._do_request_flow(args or {})
+        return [self._format_result_message(raw, tts=True)]
 
     async def handle_homekit(self, args, llm_client):
-        """
-        HomeKit/Siri TTS output:
-          e.g. "One Battle After Another 2025 has been added to your requests"
-        (Same style as Home Assistant, parentheses removed for cleaner speech.)
-        """
-        raw = self._do_request_flow(args)
-        clean = re.sub(r"^Requested\s+", "", raw)
-        clean = re.sub(r"\(status:.*?\)", "", clean, flags=re.IGNORECASE)
-        clean = re.sub(r"\[request #.*?\]", "", clean)
-        clean = re.sub(r"[()]", "", clean)  # remove parentheses
-        clean = clean.strip(" .")
-        return f"{clean} has been added to your requests."
+        raw = self._do_request_flow(args or {})
+        return [self._format_result_message(raw, tts=True)]
 
     async def handle_discord(self, message, args, llm_client):
-        return await self.handle_webui(args, llm_client)
+        return await self.handle_webui(args or {}, llm_client)
 
     async def handle_telegram(self, update, args, llm_client):
-        return await self.handle_webui(args, llm_client)
+        return await self.handle_webui(args or {}, llm_client)
 
     async def handle_matrix(self, client, room, sender, body, args, llm_client):
-        return await self.handle_webui(args, llm_client)
+        return await self.handle_webui(args or {}, llm_client)
 
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
-        return await self.handle_webui(args, llm_client)
+        out = await self.handle_webui(args or {}, llm_client)
+        text = str(out[0]) if isinstance(out, list) and out else str(out)
+        return [f"{user}: {text}"]
 
 
 plugin = OverseerrRequestPlugin()

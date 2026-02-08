@@ -23,7 +23,11 @@ from helpers import (
     get_llm_client_from_env,
     build_llm_host_from_env,
 )
-from admin_gate import is_admin_only_plugin
+from admin_gate import (
+    is_admin_only_plugin,
+    is_agent_lab_creation_tool,
+    is_agent_lab_creation_admin_gated,
+)
 from agent_lab_registry import build_agent_registry
 from plugin_result import action_failure
 from plugin_kernel import plugin_supports_platform, plugin_display_name
@@ -440,6 +444,47 @@ class discord_platform(commands.Bot):
             logger.error(f"Error generating error message: {e}")
             return fallback
 
+    @staticmethod
+    def _extract_hook_emoji(value) -> str:
+        if isinstance(value, dict):
+            value = value.get("emoji")
+        if isinstance(value, str):
+            return value.strip()
+        return ""
+
+    async def _maybe_passive_reaction(
+        self,
+        message: discord.Message,
+        user_text: str,
+        assistant_text: str,
+        merged_registry,
+        merged_enabled,
+    ):
+        for name, plugin in merged_registry.items():
+            hook = getattr(plugin, "on_assistant_response", None)
+            if not callable(hook):
+                continue
+            if not merged_enabled(name):
+                continue
+
+            try:
+                suggested = await hook(
+                    platform="discord",
+                    user_text=user_text or "",
+                    assistant_text=assistant_text or "",
+                    llm_client=self.llm,
+                    scope=str(getattr(message.channel, "id", "") or ""),
+                    message=message,
+                    user=message.author,
+                )
+                emoji = self._extract_hook_emoji(suggested)
+                if not emoji:
+                    continue
+                await message.add_reaction(emoji)
+                return
+            except Exception as exc:
+                logger.debug(f"[{name}] passive reaction skipped: {exc}")
+
     async def load_history(self, channel_id, limit=None):
         if limit is None:
             limit = int(redis_client.get("tater:max_llm") or 8)
@@ -574,14 +619,29 @@ class discord_platform(commands.Bot):
                         await safe_send(message.channel, wait_text, self.max_response_length)
 
                 def _admin_guard(func_name):
-                    if is_admin_only_plugin(func_name) and not self._admin_allowed(getattr(message.author, "id", None)):
+                    needs_admin = False
+                    creation_guard = False
+                    if is_admin_only_plugin(func_name):
+                        needs_admin = True
+                    elif is_agent_lab_creation_tool(func_name) and is_agent_lab_creation_admin_gated(redis_client):
+                        needs_admin = True
+                        creation_guard = True
+
+                    if needs_admin and not self._admin_allowed(getattr(message.author, "id", None)):
                         plugin_obj = merged_registry.get(func_name)
                         pretty = plugin_display_name(plugin_obj) if plugin_obj else func_name
-                        msg = (
-                            "This tool is restricted to the configured admin user on Discord."
-                            if self.admin_user_id
-                            else "This tool is disabled because no Discord admin user is configured."
-                        )
+                        if creation_guard:
+                            msg = (
+                                "Agent Lab plugin/platform creation is restricted to the configured admin user on Discord."
+                                if self.admin_user_id
+                                else "Agent Lab creation is disabled because no Discord admin user is configured."
+                            )
+                        else:
+                            msg = (
+                                "This tool is restricted to the configured admin user on Discord."
+                                if self.admin_user_id
+                                else "This tool is disabled because no Discord admin user is configured."
+                            )
                         return action_failure(
                             code="admin_only",
                             message=f"{pretty}: {msg}",
@@ -654,6 +714,16 @@ class discord_platform(commands.Bot):
                         )
                     except Exception as e:
                         logger.warning(f"Failed to send artifact {content_type}: {e}")
+
+                if final_text or artifacts:
+                    assistant_summary = final_text or "[Sent attachments]"
+                    await self._maybe_passive_reaction(
+                        message=message,
+                        user_text=message.content or "",
+                        assistant_text=assistant_summary,
+                        merged_registry=merged_registry,
+                        merged_enabled=merged_enabled,
+                    )
                 return
 
             except Exception as e:

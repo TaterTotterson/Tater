@@ -78,7 +78,7 @@ plugin = MyPlugin()
 ```
 
 **Required Metadata**
-- `name`: unique id (prefer matching filename)
+- `name`: unique id and must match the filename stem exactly (`agent_lab/plugins/<name>.py`)
 - `plugin_name`: human-friendly display name
 - `version`: semantic version string
 - `description`: short capability summary

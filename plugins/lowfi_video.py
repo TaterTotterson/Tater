@@ -10,11 +10,14 @@ import random
 import copy
 import secrets
 import time
+import logging
 from math import ceil
 from plugin_base import ToolPlugin
 from helpers import redis_client, run_comfy_prompt
 
 SETTINGS_CATEGORY = "Lofi Video"
+logger = logging.getLogger("lowfi_video")
+logger.setLevel(logging.INFO)
 
 def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str) -> dict:
     if not isinstance(binary, (bytes, bytearray)):
@@ -26,9 +29,6 @@ def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype
         "size": len(binary),
         "bytes": bytes(binary),
     }
-
-CLIENT_ID = str(uuid.uuid4())
-
 
 class _ComfyUIImageHelper:
     settings_category = SETTINGS_CATEGORY
@@ -343,16 +343,20 @@ class _ComfyUIImageVideoHelper:
 class LowfiVideoPlugin(ToolPlugin):
     name = "lowfi_video"
     plugin_name = "Lofi Video"
-    version = "1.0.1"
+    version = "1.1.0"
     min_tater_version = "50"
     usage = (
         "{\n"
         '  "function": "lowfi_video",\n'
         '  "arguments": {\n'
-        '    "prompt": "<scene prompt for the visual>"\n'
+        '    "prompt": "<scene prompt for the visual>",\n'
+        '    "audio_minutes": 2,\n'
+        '    "video_minutes": 20,\n'
+        '    "loop_seconds": 15\n'
         "  }\n"
         "}\n"
     )
+    optional_args = ["query", "request", "text", "audio_minutes", "video_minutes", "loop_seconds"]
     description = "Generates lofi audio via AceStep and loops a cozy animation to full length (MP4)."
     plugin_dec = "Create a cozy lofi video by generating music and looping a matching animation."
     pretty_name = "Your Lofi Video"
@@ -414,12 +418,69 @@ class LowfiVideoPlugin(ToolPlugin):
         "PINGPONG_LOOP": {
             "label": "Enable Ping-pong Loop",
             "type": "checkbox",
-            "default": "false",
+            "default": False,
             "description": "Play each loop forward then backward for a seamless boomerang effect."
         },
     }
 
     # ------------------------- Helpers -------------------------
+
+    @staticmethod
+    def _decode_map(raw: dict | None) -> dict:
+        out: dict = {}
+        for key, value in (raw or {}).items():
+            k = key.decode("utf-8", "ignore") if isinstance(key, (bytes, bytearray)) else str(key)
+            if isinstance(value, (bytes, bytearray)):
+                out[k] = value.decode("utf-8", "ignore")
+            elif value is None:
+                out[k] = ""
+            else:
+                out[k] = str(value)
+        return out
+
+    @staticmethod
+    def _coerce_int(value, default: int, minimum: int, maximum: int) -> int:
+        try:
+            parsed = int(float(str(value).strip()))
+        except Exception:
+            parsed = int(default)
+        if parsed < minimum:
+            return minimum
+        if parsed > maximum:
+            return maximum
+        return parsed
+
+    @staticmethod
+    def _as_bool(value, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "on", "enabled"}:
+            return True
+        if text in {"0", "false", "no", "off", "disabled"}:
+            return False
+        return default
+
+    @staticmethod
+    def _extract_prompt(args: dict | None) -> str:
+        data = args or {}
+        for key in ("prompt", "query", "request", "text"):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    @staticmethod
+    def _write_binary(path: str, payload: bytes) -> None:
+        with open(path, "wb") as handle:
+            handle.write(payload)
+
+    @staticmethod
+    def _read_binary(path: str) -> bytes:
+        with open(path, "rb") as handle:
+            return handle.read()
 
     def _to_ws_url(self, base_http: str) -> str:
         base_http = (base_http or "http://localhost:8188").rstrip("/")
@@ -430,7 +491,15 @@ class LowfiVideoPlugin(ToolPlugin):
         return "ws://" + base_http
 
     def _ffmpeg(self, args: list[str]):
-        subprocess.run(args, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            subprocess.run(args, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        except FileNotFoundError as exc:
+            raise RuntimeError("ffmpeg is not installed or not in PATH.") from exc
+        except subprocess.CalledProcessError as exc:
+            details = (exc.stderr or exc.stdout or "").strip()
+            if len(details) > 1200:
+                details = details[-1200:]
+            raise RuntimeError(f"ffmpeg failed: {details or str(exc)}") from exc
 
     def _safe_unlink(self, path: str):
         try:
@@ -444,7 +513,13 @@ class LowfiVideoPlugin(ToolPlugin):
             "ffprobe", "-v", "error", "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1", path
         ]
-        out = subprocess.run(args, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            out = subprocess.run(args, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        except FileNotFoundError:
+            logger.warning("[lowfi_video] ffprobe is not installed; treating duration as unknown.")
+            return 0.0
+        except subprocess.CalledProcessError:
+            return 0.0
         try:
             dur = float(out.stdout.strip())
             return max(0.0, dur)
@@ -528,6 +603,12 @@ class LowfiVideoPlugin(ToolPlugin):
         }
 
     async def _refine_prompt_for_lofi(self, raw: str, llm_client) -> str:
+        source = (raw or "").strip()
+        if not source:
+            return "cozy rainy-night lofi room with warm desk lamp glow, soft shadows, books and plants, calm atmosphere, cinematic composition"
+        if llm_client is None:
+            return source
+
         sys = (
             "Rewrite the user's request into a single vivid SCENE prompt for generating a still image for a lofi video loop. "
             "Constraints: <= 35 words, exactly one sentence, no text overlays or typography. "
@@ -537,15 +618,21 @@ class LowfiVideoPlugin(ToolPlugin):
             "Keep any named characters and specific setting details from the user. "
             "Avoid mentioning motion, camera moves, or transitions."
         )
-        usr = raw
-        resp = await llm_client.chat([
-            {"role": "system", "content": sys},
-            {"role": "user", "content": usr}
-        ])
-        scene = (resp.get("message", {}) or {}).get("content", "").strip()
-        return scene or raw
+        try:
+            resp = await llm_client.chat([
+                {"role": "system", "content": sys},
+                {"role": "user", "content": source}
+            ])
+            scene = (resp.get("message", {}) or {}).get("content", "").strip()
+            return scene or source
+        except Exception:
+            return source
 
     async def _refine_prompt_for_lofi_animation(self, scene_prompt: str, llm_client) -> str:
+        fallback = "gentle parallax, slow zoom and sway, no hand movement, cozy ambience, seamless loop"
+        if llm_client is None:
+            return fallback
+
         sys = (
             "Rewrite the scene into ONE sentence (<= 25 words) describing loopable lofi animation. "
             "Prefer environmental micro-motion over camera moves. "
@@ -564,9 +651,9 @@ class LowfiVideoPlugin(ToolPlugin):
                 {"role": "user", "content": usr}
             ])
             anim = (resp.get("message", {}) or {}).get("content", "").strip()
-            return anim or "gentle parallax, slow zoom and sway, no hand movement, cozy ambience, seamless loop"
+            return anim or fallback
         except Exception:
-            return "gentle parallax, slow zoom and sway, no hand movement, cozy ambience, seamless loop"
+            return fallback
 
     # -------------------- Audio via ComfyUI (async-safe) ---------------------
 
@@ -581,16 +668,19 @@ class LowfiVideoPlugin(ToolPlugin):
                 if isinstance(inputs, dict) and "seed" in inputs:
                     inputs["seed"] = random.randint(0, 2**63 - 1)
 
-        base = settings.get("COMFYUI_AUDIO_URL", b"http://localhost:8188")
+        base = settings.get("COMFYUI_AUDIO_URL", "http://localhost:8188")
         if isinstance(base, (bytes, bytearray)):
-            base = base.decode("utf-8")
-        base = base or "http://localhost:8188"
+            base = base.decode("utf-8", "ignore")
+        base = (base or "http://localhost:8188").strip()
+        if not base.startswith("http://") and not base.startswith("https://"):
+            base = f"http://{base}"
 
         server_http = base.rstrip("/")
-        ws_url = self._to_ws_url(server_http) + f"/ws?clientId={CLIENT_ID}"
+        client_id = str(uuid.uuid4())
+        ws_url = self._to_ws_url(server_http) + f"/ws?clientId={client_id}"
 
         def _post_prompt():
-            r = requests.post(f"{server_http}/prompt", json={"prompt": wf, "client_id": CLIENT_ID}, timeout=60)
+            r = requests.post(f"{server_http}/prompt", json={"prompt": wf, "client_id": client_id}, timeout=60)
             r.raise_for_status()
             return r.json()["prompt_id"]
 
@@ -598,32 +688,49 @@ class LowfiVideoPlugin(ToolPlugin):
 
         def _wait_ws_done():
             ws = websocket.WebSocket()
-            ws.connect(ws_url)
+            ws.connect(ws_url, timeout=20)
+            ws.settimeout(1.0)
+            deadline = time.time() + max(240, seconds * 2)
             try:
-                while True:
-                    msg = ws.recv()
+                while time.time() < deadline:
+                    try:
+                        msg = ws.recv()
+                    except websocket.WebSocketTimeoutException:
+                        continue
                     if isinstance(msg, str):
-                        data = json.loads(msg)
+                        try:
+                            data = json.loads(msg)
+                        except Exception:
+                            continue
                         if data.get("type") == "executing":
                             d = data.get("data", {})
                             if d.get("prompt_id") == prompt_id and d.get("node") is None:
                                 return
+                raise RuntimeError("Timed out waiting for ComfyUI audio workflow completion.")
             finally:
                 ws.close()
 
         await asyncio.to_thread(_wait_ws_done)
 
         def _fetch_mp3():
-            hist = requests.get(f"{server_http}/history/{prompt_id}", timeout=60).json()[prompt_id]
-            for node in hist.get("outputs", {}).values():
-                if "audio" in node:
-                    for a in node["audio"]:
-                        filename = a.get("filename")
-                        subfolder = a.get("subfolder", "")
-                        ftype = a.get("type", "output")
+            for _ in range(60):
+                hist_resp = requests.get(f"{server_http}/history/{prompt_id}", timeout=60)
+                hist_resp.raise_for_status()
+                payload = hist_resp.json()
+                hist = payload.get(prompt_id, {}) if isinstance(payload, dict) else {}
+                outputs = hist.get("outputs", {}) if isinstance(hist, dict) else {}
+                for node in outputs.values():
+                    audio_list = node.get("audio") or []
+                    for item in audio_list:
+                        filename = item.get("filename")
+                        subfolder = item.get("subfolder", "")
+                        ftype = item.get("type", "output")
                         if filename and filename.lower().endswith(".mp3"):
                             params = {"filename": filename, "subfolder": subfolder, "type": ftype}
-                            return requests.get(f"{server_http}/view", params=params, timeout=60).content
+                            view_resp = requests.get(f"{server_http}/view", params=params, timeout=60)
+                            view_resp.raise_for_status()
+                            return view_resp.content
+                time.sleep(0.5)
             return None
 
         audio_bytes = await asyncio.to_thread(_fetch_mp3)
@@ -631,7 +738,7 @@ class LowfiVideoPlugin(ToolPlugin):
             raise RuntimeError("No MP3 found in ComfyUI history for lofi audio.")
 
         audio_path = f"/tmp/{uuid.uuid4().hex[:8]}_lofi.mp3"
-        await asyncio.to_thread(lambda: open(audio_path, "wb").write(audio_bytes))
+        await asyncio.to_thread(self._write_binary, audio_path, audio_bytes)
         return audio_path
 
     # -------------------- Visual loop (still -> i2v) ------------------------
@@ -684,14 +791,10 @@ class LowfiVideoPlugin(ToolPlugin):
 
         ext = (ext or "webp").lower()
         tmp = f"/tmp/{uuid.uuid4().hex[:8]}_loop.{ext}"
-        await asyncio.to_thread(lambda: open(tmp, "wb").write(anim_bytes))
+        await asyncio.to_thread(self._write_binary, tmp, anim_bytes)
 
         # --- Optional ping-pong loop ---
-        raw_pp = settings.get("PINGPONG_LOOP", b"false")
-        pingpong_enabled = (
-            raw_pp.decode("utf-8", "ignore").lower() == "true"
-            if isinstance(raw_pp, (bytes, bytearray)) else str(raw_pp).lower() == "true"
-        )
+        pingpong_enabled = self._as_bool(settings.get("PINGPONG_LOOP"), default=False)
 
         if pingpong_enabled:
             # Ensure MP4 first
@@ -771,7 +874,7 @@ class LowfiVideoPlugin(ToolPlugin):
         final_path = f"{base}_lofi_final.mp4"
 
         loop_mp4 = await self._ensure_mp4_async(video_loop_path)
-        cross_audio = self._build_crossfaded_audio(audio_path, video_seconds, fade_seconds=2)
+        cross_audio = await asyncio.to_thread(self._build_crossfaded_audio, audio_path, video_seconds, 2)
 
         cmd = [
             "ffmpeg", "-y",
@@ -785,95 +888,77 @@ class LowfiVideoPlugin(ToolPlugin):
             final_path
         ]
         await asyncio.to_thread(self._ffmpeg, cmd)
-        self._safe_unlink(cross_audio)
+        if cross_audio and cross_audio != audio_path:
+            self._safe_unlink(cross_audio)
+        if loop_mp4 and loop_mp4 != video_loop_path:
+            self._safe_unlink(loop_mp4)
         return final_path
 
     # ----------------------- Platform handlers -----------------------
 
     async def handle_webui(self, args, llm_client):
-        if "prompt" not in args:
-            return ["No prompt given."]
+        arg_map = args if isinstance(args, dict) else {}
+        prompt_text = self._extract_prompt(arg_map)
+        if not prompt_text:
+            return ["No prompt given. Pass one of: prompt, query, request, or text."]
 
-        async def _generate():
-            # Load settings
-            settings = redis_client.hgetall(f"plugin_settings:{self.settings_category}")
-            prompt_text = args["prompt"]
+        settings = self._decode_map(redis_client.hgetall(f"plugin_settings:{self.settings_category}"))
 
-            # Defaults
-            audio_minutes = 2       # Always 2 minutes audio
-            video_minutes = 20      # Always 20 minutes total video
-            loop_seconds  = 15      # Always 15 second loop clip
+        audio_minutes = self._coerce_int(arg_map.get("audio_minutes", 2), default=2, minimum=1, maximum=3)
+        video_minutes = self._coerce_int(arg_map.get("video_minutes", 20), default=20, minimum=1, maximum=22)
+        loop_default = settings.get("LENGTH", "15")
+        loop_seconds = self._coerce_int(arg_map.get("loop_seconds", loop_default), default=15, minimum=1, maximum=60)
 
-            # Audio: cap at 3 min
-            audio_minutes = min(audio_minutes, 3)
+        # Keep total video >= audio and align to full audio loops where possible.
+        video_minutes = max(video_minutes, audio_minutes)
+        if audio_minutes > 0 and (video_minutes % audio_minutes) != 0:
+            aligned = ((video_minutes // audio_minutes) + 1) * audio_minutes
+            if aligned <= 22:
+                video_minutes = aligned
+            else:
+                fallback = max(audio_minutes, (22 // audio_minutes) * audio_minutes)
+                video_minutes = min(fallback, 22)
 
-            # Loop clip: 1–60 sec
-            loop_seconds = max(1, min(loop_seconds, 60))
+        prompt_text_refined = await self._refine_prompt_for_lofi(prompt_text, llm_client)
 
-            # Ensure video >= audio length
-            video_minutes = max(video_minutes, audio_minutes)
+        audio_path = None
+        loop_clip_path = None
+        final_path = None
 
-            # Round up so audio finishes cleanly
-            if audio_minutes > 0 and (video_minutes % audio_minutes) != 0:
-                video_minutes = ((video_minutes // audio_minutes) + 1) * audio_minutes
-
-            # Cap at 20 minutes, but allow +2 min overage
-            if video_minutes > 22:
-                video_minutes = 20
-
-            # Refine prompt
-            prompt_text_refined = await self._refine_prompt_for_lofi(prompt_text, llm_client)
-
-            audio_path = None
-            loop_clip_path = None
-            final_path = None  # track for cleanup
-
-            try:
-                # 1) Audio
-                audio_path = await self._generate_audio(settings, audio_minutes)
-
-                # 2) Visual loop
-                loop_clip_path = await self._generate_loop_clip(settings, prompt_text_refined, loop_seconds, llm_client)
-
-                # 3) Mux to final MP4 (with crossfaded audio)
-                final_path = await self._mux(loop_clip_path, audio_path, video_seconds=video_minutes * 60)
-
-                # 4) Read & return (raw bytes)
-                final_bytes = await asyncio.to_thread(lambda: open(final_path, "rb").read())
-
-                # 5) Follow-up message
-                msg = await llm_client.chat([
-                    {"role": "system", "content": f"User just got a lofi video for: '{prompt_text_refined}'"},
-                    {"role": "user", "content": "Respond with a short, chill message celebrating the lofi video. Do not include any lead-in phrases or instructions — just the message."}
-                ])
-                followup_text = (msg.get("message", {}).get("content") or "").strip() or "☕ Here’s your chill lofi video!"
-
-                return [
-                    _build_media_metadata(
-                        final_bytes,
-                        media_type="video",
-                        name="lofi_video.mp4",
-                        mimetype="video/mp4",
-                    ),
-                    followup_text
-                ]
-            except Exception as e:
-                return [f"❌ Lofi video failed: {type(e).__name__}: {e}"]
-            finally:
-                # Clean up temp files and the final MP4 (we already inlined it)
-                for p in (audio_path, loop_clip_path, final_path):
-                    if p:
-                        self._safe_unlink(p)
-
-        # Match your working plugin’s event loop handling
         try:
-            loop = asyncio.get_running_loop()
-            if loop.is_running():
-                return await _generate()
-        except RuntimeError:
-            pass
+            audio_path = await self._generate_audio(settings, audio_minutes)
+            loop_clip_path = await self._generate_loop_clip(settings, prompt_text_refined, loop_seconds, llm_client)
+            final_path = await self._mux(loop_clip_path, audio_path, video_seconds=video_minutes * 60)
+            final_bytes = await asyncio.to_thread(self._read_binary, final_path)
 
-        return asyncio.run(_generate())
+            followup_text = "Here is your chill lofi video."
+            if llm_client is not None:
+                try:
+                    msg = await llm_client.chat([
+                        {"role": "system", "content": f"User just got a lofi video for: '{prompt_text_refined}'"},
+                        {"role": "user", "content": "Respond with a short, chill message celebrating the lofi video. Do not include any lead-in phrases or instructions; output only the message."}
+                    ])
+                    generated = (msg.get("message", {}).get("content") or "").strip()
+                    if generated:
+                        followup_text = generated
+                except Exception:
+                    pass
+
+            return [
+                _build_media_metadata(
+                    final_bytes,
+                    media_type="video",
+                    name="lofi_video.mp4",
+                    mimetype="video/mp4",
+                ),
+                followup_text,
+            ]
+        except Exception as exc:
+            return [f"Lofi video failed: {type(exc).__name__}: {exc}"]
+        finally:
+            for path in (audio_path, loop_clip_path, final_path):
+                if path:
+                    self._safe_unlink(path)
 
     async def handle_discord(self, message, args, llm_client):
         return "❌ This plugin is only available in the WebUI due to file size limitations."

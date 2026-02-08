@@ -1,30 +1,58 @@
-# plugins/watch_feed.py
-import os
-import feedparser
 import logging
-from dotenv import load_dotenv
-from plugin_base import ToolPlugin
-import redis
 from typing import Optional
-from rss_store import ensure_feed
+from urllib.parse import urlsplit, urlunsplit
 
-load_dotenv()
+import feedparser
+
+from helpers import redis_client
+from plugin_base import ToolPlugin
+from rss_store import ensure_feed, get_feed
+
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 
-redis_host = os.getenv("REDIS_HOST", "127.0.0.1")
-redis_port = int(os.getenv("REDIS_PORT", 6379))
-redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
+
+def _extract_feed_url(args: dict) -> str:
+    if not isinstance(args, dict):
+        return ""
+    for key in ("feed_url", "url", "rss_url", "feed"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _normalize_feed_url(raw_url: str) -> str:
+    raw = (raw_url or "").strip().strip("<>").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urlsplit(raw)
+    except Exception:
+        return ""
+
+    scheme = (parsed.scheme or "").lower()
+    netloc = (parsed.netloc or "").lower().strip()
+    if scheme not in {"http", "https"} or not netloc:
+        return ""
+
+    path = parsed.path or "/"
+    if path != "/":
+        path = path.rstrip("/")
+
+    return urlunsplit((scheme, netloc, path, parsed.query or "", ""))
 
 
 class WatchFeedPlugin(ToolPlugin):
-    name = "watch_feed"
-    plugin_name = "Watch Feed"
-    version = "1.0.0"
+    name = "rss_watch"
+    plugin_name = "RSS Watch"
+    version = "1.1.0"
     min_tater_version = "50"
+    when_to_use = "Use when the user asks to subscribe to or watch an RSS/Atom feed URL."
+    optional_args = ["url", "rss_url", "feed"]
     usage = (
         "{\n"
-        '  "function": "watch_feed",\n'
+        '  "function": "rss_watch",\n'
         '  "arguments": {"feed_url": "<RSS feed URL>"}\n'
         "}\n"
     )
@@ -32,7 +60,7 @@ class WatchFeedPlugin(ToolPlugin):
     plugin_dec = "Add an RSS/Atom feed to the watch list and post only the newest item once."
     pretty_name = "Adding Your Feed"
     waiting_prompt_template = (
-        "Write a friendly message telling {mention} you’re adding the feed to the watch list now! "
+        "Write a friendly message telling {mention} you are adding the feed to the watch list now. "
         "Only output that message."
     )
     platforms = ["discord", "webui", "irc", "matrix", "telegram"]
@@ -43,41 +71,58 @@ class WatchFeedPlugin(ToolPlugin):
         if not feed_url:
             return f"{prefix}No feed URL provided for watching."
 
+        normalized_url = _normalize_feed_url(feed_url)
+        if not normalized_url:
+            return f"{prefix}Please provide a valid http/https RSS feed URL."
+
+        if get_feed(redis_client, normalized_url):
+            return f"{prefix}Already watching feed: {normalized_url}"
+
         try:
-            parsed = feedparser.parse(feed_url)
+            parsed = feedparser.parse(normalized_url)
         except Exception as e:
             logger.debug(f"[watch_feed] feedparser threw: {e}")
-            return f"{prefix}Failed to parse feed: {feed_url}"
+            return f"{prefix}Failed to parse feed: {normalized_url}"
 
-        # feedparser sets bozo on *any* parse issue, but the feed can still be usable.
-        # If it’s bozo *and* has no entries/title, treat as failed.
-        if getattr(parsed, "bozo", 0) and not getattr(parsed, "entries", None):
-            return f"{prefix}Failed to parse feed: {feed_url}"
+        entries = list(getattr(parsed, "entries", None) or [])
+        feed_meta = getattr(parsed, "feed", None) or {}
+        title = ""
+        if isinstance(feed_meta, dict):
+            title = str(feed_meta.get("title") or "").strip()
+        else:
+            title = str(getattr(feed_meta, "title", "") or "").strip()
+        bozo = bool(getattr(parsed, "bozo", 0))
+        if bozo and not entries and not title:
+            return f"{prefix}Failed to parse feed: {normalized_url}"
+        if not entries and not title:
+            return f"{prefix}That URL does not look like a valid RSS/Atom feed: {normalized_url}"
 
         # Set last_ts=0 so the poller posts only the newest item once.
-        ensure_feed(redis_client, feed_url, 0.0)
-        return f"{prefix}Now watching feed: {feed_url}"
+        ensure_feed(redis_client, normalized_url, 0.0)
+        if title:
+            return f"{prefix}Now watching feed: {normalized_url} ({title})"
+        return f"{prefix}Now watching feed: {normalized_url}"
 
     # -------- platform handlers --------
     async def handle_discord(self, message, args, llm_client):
-        feed_url = args.get("feed_url")
+        feed_url = _extract_feed_url(args or {})
         return await self._watch_feed(feed_url)
 
     async def handle_webui(self, args, llm_client):
-        feed_url = args.get("feed_url")
+        feed_url = _extract_feed_url(args or {})
         return await self._watch_feed(feed_url)
 
     async def handle_telegram(self, update, args, llm_client):
-        feed_url = args.get("feed_url")
+        feed_url = _extract_feed_url(args or {})
         return await self._watch_feed(feed_url)
 
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
-        feed_url = args.get("feed_url")
+        feed_url = _extract_feed_url(args or {})
         return await self._watch_feed(feed_url, username=user)
 
-    async def handle_matrix(self, client, room, sender, body, args, ll_client=None, **kwargs):
-        feed_url = args.get("feed_url")
-        return await self._watch_feed(feed_url, username=sender)
+    async def handle_matrix(self, client, room, sender, body, args, llm_client=None, **kwargs):
+        feed_url = _extract_feed_url(args or {})
+        return await self._watch_feed(feed_url)
 
 
 plugin = WatchFeedPlugin()

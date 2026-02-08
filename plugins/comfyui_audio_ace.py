@@ -6,6 +6,7 @@ import yaml
 import random
 import copy
 import logging
+import time
 import requests
 from urllib.parse import quote
 from plugin_base import ToolPlugin
@@ -29,7 +30,7 @@ logger.setLevel(logging.INFO)
 class ComfyUIAudioAcePlugin(ToolPlugin):
     name = "comfyui_audio_ace"
     plugin_name = "ComfyUI Audio Ace"
-    version = "1.0.1"
+    version = "1.0.2"
     min_tater_version = "50"
     usage = (
         '{\n'
@@ -74,9 +75,17 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         return redis_client.hgetall(f"plugin_settings:{ComfyUIAudioAcePlugin.settings_category}") or {}
 
     @staticmethod
+    def _as_text(value, default=""):
+        if value is None:
+            return str(default)
+        if isinstance(value, (bytes, bytearray)):
+            return value.decode("utf-8", "ignore")
+        return str(value)
+
+    @staticmethod
     def get_base_http():
         settings = ComfyUIAudioAcePlugin._settings()
-        url = (settings.get("COMFYUI_AUDIO_ACE_URL") or "").strip() or "http://localhost:8188"
+        url = ComfyUIAudioAcePlugin._as_text(settings.get("COMFYUI_AUDIO_ACE_URL"), "").strip() or "http://localhost:8188"
         if not url.startswith("http://") and not url.startswith("https://"):
             url = "http://" + url
         return url.rstrip("/")
@@ -173,6 +182,9 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
 
     @staticmethod
     async def generate_tags_and_lyrics(user_prompt, llm_client):
+        if llm_client is None:
+            safe = (user_prompt or "a warm uplifting song").strip()
+            return "pop, uplifting, melodic", f"[inst]\n\n[verse]\n{safe}\n\n[chorus]\n{safe}\n"
         system_prompt = (
             f'The user wants a song: "{user_prompt}".\n\n'
             "Write a JSON object with these two fields:\n"
@@ -275,24 +287,26 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
 
         prompt_id, _ = run_comfy_prompt(base_http, base_ws, workflow)
 
-        history = ComfyUIAudioAcePlugin.get_history(base_http, prompt_id).get(prompt_id, {})
-        outputs = history.get("outputs", {}) if isinstance(history, dict) else {}
+        for _ in range(50):
+            history = ComfyUIAudioAcePlugin.get_history(base_http, prompt_id).get(prompt_id, {})
+            outputs = history.get("outputs", {}) if isinstance(history, dict) else {}
 
-        for _, node_out in outputs.items():
-            if "audio" in node_out:
-                for audio_meta in node_out["audio"]:
-                    filename    = audio_meta.get("filename")
-                    subfolder   = audio_meta.get("subfolder", "")
-                    folder_type = audio_meta.get("type", "output")
-                    if filename:
-                        media_url = ComfyUIAudioAcePlugin.build_comfy_view_url(
-                            base_http, filename, subfolder, folder_type
-                        )
-                        try:
-                            audio_bytes = ComfyUIAudioAcePlugin.get_audio_bytes(base_http, filename, subfolder, folder_type)
-                        except Exception:
-                            audio_bytes = None
-                        return media_url, audio_bytes
+            for _, node_out in outputs.items():
+                if "audio" in node_out:
+                    for audio_meta in node_out["audio"]:
+                        filename = audio_meta.get("filename")
+                        subfolder = audio_meta.get("subfolder", "")
+                        folder_type = audio_meta.get("type", "output")
+                        if filename:
+                            media_url = ComfyUIAudioAcePlugin.build_comfy_view_url(
+                                base_http, filename, subfolder, folder_type
+                            )
+                            try:
+                                audio_bytes = ComfyUIAudioAcePlugin.get_audio_bytes(base_http, filename, subfolder, folder_type)
+                            except Exception:
+                                audio_bytes = None
+                            return media_url, audio_bytes
+            time.sleep(0.5)
 
         raise Exception("No audio returned.")
 
@@ -309,14 +323,20 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
                 mimetype="audio/mpeg",
             )
 
-        system_msg = f'The user received a ComfyUI-generated song based on: "{prompt}"'
-        response = await llm_client.chat(
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": "Send a short friendly comment about the new song. Only generate the message. Do not respond to this message."}
-            ]
-        )
-        message_text = response["message"].get("content", "").strip() or "Hope you enjoy the track!"
+        if llm_client is not None:
+            try:
+                system_msg = f'The user received a ComfyUI-generated song based on: "{prompt}"'
+                response = await llm_client.chat(
+                    messages=[
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": "Send a short friendly comment about the new song. Only generate the message. Do not respond to this message."}
+                    ]
+                )
+                message_text = response["message"].get("content", "").strip() or "Hope you enjoy the track!"
+            except Exception:
+                message_text = "Hope you enjoy the track!"
+        else:
+            message_text = "Hope you enjoy the track!"
 
         return audio_meta, message_text, media_url, audio_bytes
 
@@ -324,7 +344,8 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
     # Discord
     # ---------------------------------------
     async def handle_discord(self, message, args, llm_client):
-        user_prompt = args.get("prompt", "").strip()
+        args = args or {}
+        user_prompt = str(args.get("prompt") or "").strip()
         if not user_prompt:
             return "No prompt provided."
         try:
@@ -340,14 +361,12 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
     # WebUI
     # ---------------------------------------
     async def handle_webui(self, args, llm_client):
-        prompt = args.get("prompt", "").strip()
+        args = args or {}
+        prompt = str(args.get("prompt") or "").strip()
         if not prompt:
             return ["No prompt provided."]
         try:
-            asyncio.get_running_loop()
             audio_meta, message_text, media_url, _audio_bytes = await self._generate(prompt, llm_client)
-        except RuntimeError:
-            audio_meta, message_text, media_url, _audio_bytes = asyncio.run(self._generate(prompt, llm_client))
         except Exception as e:
             logger.exception("ComfyUIAudioAcePlugin WebUI error: %s", e)
             return [f"Failed to create song: {e}"]
@@ -356,12 +375,15 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         return [f"Your song is ready: {media_url}", message_text]
 
     async def handle_telegram(self, update, args, llm_client):
-        return await self.handle_webui(args, llm_client)
+        return await self.handle_webui(args or {}, llm_client)
 
     # ---------------------------------------
     # Matrix
     # ---------------------------------------
-    async def handle_matrix(self, client, room, sender, body, args, llm_client):
+    async def handle_matrix(self, client, room, sender, body, args, llm_client=None, **kwargs):
+        if llm_client is None:
+            llm_client = kwargs.get("llm") or kwargs.get("ll_client") or kwargs.get("llm_client")
+        args = args or {}
         prompt = (args.get("prompt") or "").strip()
         if not prompt:
             return "No prompt provided."
@@ -385,6 +407,7 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
           - play on configured media_player OR (if unset) try to play on the speaking Voice PE device
             using the HA room/device context passed from the conversation agent.
         """
+        args = args or {}
         prompt = (args.get("prompt") or "").strip()
         if not prompt:
             return "No prompt provided."
@@ -417,14 +440,16 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
             "will play soon. Include one friendly emoji, and output only the message."
         )
         try:
-            resp = await llm_client.chat(
-                messages=[
-                    {"role": "system", "content": system_msg},
-                    {"role": "user", "content": "Generate that short message now."}
-                ]
-            )
-            msg = resp["message"].get("content", "").strip() or f"Your song will play soon on {target_player}!"
-            return msg
+            if llm_client is not None:
+                resp = await llm_client.chat(
+                    messages=[
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": "Generate that short message now."}
+                    ]
+                )
+                msg = resp["message"].get("content", "").strip() or f"Your song will play soon on {target_player}!"
+                return msg
+            return f"Your song will play soon on {target_player}!"
         except Exception as e:
             logger.exception("LLM ack generation failed: %s", e)
             return f"Your song will play soon on {target_player}!"
