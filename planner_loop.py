@@ -104,6 +104,8 @@ CREATION_NEGATIVE_GUARDS = (
     "run",
 )
 
+CREATION_EXPLICIT_ONLY_KEY = "tater:agent_creation:explicit_only"
+
 HIGH_IMPACT_KEYWORDS = (
     "delete",
     "remove",
@@ -146,7 +148,7 @@ AGENT_CREATION_REPAIR_PROMPT = (
     "For Agent Lab plugins, set `platforms` to include the current platform, and implement the matching handler "
     "(e.g., handle_webui for webui, handle_discord for discord). "
     "Always include `when_to_use` and a waiting_prompt_template for Agent Lab plugins. "
-    "waiting_prompt_template must be an instruction to the LLM and include wording like "
+    "waiting_prompt_template must be an instruction to the LLM and should include wording like "
     "'Write ...' and 'Only output that message.'"
 )
 AGENT_CREATION_FAILURE_TEXT = "Sorry, I couldn't generate the required tool calls. Please try again."
@@ -388,10 +390,16 @@ def _agent_system_instructions(max_rounds: int, max_tool_calls: int) -> str:
         "- If an action is destructive/high-impact, ask for explicit confirmation first.\n"
         f"- Budget: max rounds={max_rounds}, max tool calls={max_tool_calls}.\n"
         "- Tool calls must be JSON only. Final replies should be plain text.\n"
-        "Kernel tools available: read_file, write_file, list_directory, delete_file, read_url, download_file, "
-        "list_stable_plugins, list_stable_platforms, inspect_plugin, "
+        "Kernel tools available: read_file, search_files, write_file, list_directory, delete_file, read_url, download_file, "
+        "list_archive, extract_archive, list_stable_plugins, list_stable_platforms, inspect_plugin, "
         "create_plugin, validate_plugin, "
         "create_platform, validate_platform, write_workspace_note, list_workspace.\n"
+        "read_file supports plain text and structured extraction for .pdf, .docx, .xlsx/.xlsm, .csv/.tsv, and .pptx files.\n"
+        "For large files, call read_file with `start` and `max_chars` to page through content.\n"
+        "Archive helpers support zip/tar plus 7z/rar when dependencies are installed.\n"
+        "For kernel file paths, `/agent_lab/...` maps to the Agent Lab root, and shortcuts like "
+        "`documents/...`, `downloads/...`, `workspace/...`, `artifacts/...`, and `logs/...` "
+        "resolve under `agent_lab/`.\n"
         "When writing files or code, prefer `content_lines`/`code_lines` arrays (one string per line) to avoid JSON escaping issues; "
         "base64 fields (`content_b64`/`code_b64`) are also supported.\n"
         "For create_plugin/create_platform, do NOT use manifest/code_files. Provide `name` plus `code_lines` (preferred) "
@@ -429,12 +437,41 @@ def _has_phrase(text: str, phrase: str) -> bool:
     return re.search(rf"\b{re.escape(needle)}\b", text) is not None
 
 
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    sval = str(value).strip().lower()
+    if not sval:
+        return default
+    if sval in {"1", "true", "yes", "on"}:
+        return True
+    if sval in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _creation_explicit_only(r=None) -> bool:
+    env = os.getenv("TATER_CREATION_EXPLICIT_ONLY")
+    if env is not None and str(env).strip() != "":
+        return _as_bool(env, default=True)
+    r = r or default_redis
+    raw = None
+    try:
+        raw = r.get(CREATION_EXPLICIT_ONLY_KEY)
+    except Exception:
+        raw = None
+    return _as_bool(raw, default=True)
+
+
 def _creation_request_analysis(text: str) -> Dict[str, Any]:
     s = (text or "").lower()
     if not s:
         return {
             "mode": "none",
             "confidence": 0.0,
+            "explicit": False,
             "need_plugin": False,
             "need_platform": False,
             "scores": {"plugin": 0, "platform": 0},
@@ -485,6 +522,8 @@ def _creation_request_analysis(text: str) -> Dict[str, Any]:
         plugin_score = max(0, plugin_score - 2)
         platform_score = max(0, platform_score - 2)
 
+    explicit_request = bool(plugin_phrase_hit or platform_phrase_hit)
+
     need_plugin = plugin_phrase_hit or (plugin_keyword_hit and has_verbs)
     need_platform = platform_phrase_hit or (platform_keyword_hit and has_verbs)
     if not need_plugin and plugin_score >= 4 and plugin_score > platform_score:
@@ -512,6 +551,7 @@ def _creation_request_analysis(text: str) -> Dict[str, Any]:
     return {
         "mode": mode,
         "confidence": confidence,
+        "explicit": explicit_request,
         "need_plugin": bool(need_plugin),
         "need_platform": bool(need_platform),
         "scores": {"plugin": int(plugin_score), "platform": int(platform_score)},
@@ -786,6 +826,12 @@ async def run_planner_loop(
         forced_call = None
 
     creation_analysis = _creation_request_analysis(user_text or "")
+    explicit_only = _creation_explicit_only(r=r)
+    if explicit_only and not state.get("creation_user_confirmed"):
+        if creation_analysis.get("mode") == "create" and not creation_analysis.get("explicit"):
+            creation_analysis = dict(creation_analysis)
+            creation_analysis["mode"] = "ask"
+            creation_analysis["confidence"] = 0.55
     creation_intent = {
         "need_plugin": bool(creation_analysis.get("need_plugin")),
         "need_platform": bool(creation_analysis.get("need_platform")),
