@@ -1,12 +1,18 @@
 import ast
+import codecs
+import csv
+import fnmatch
+import io
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import time
 import uuid
+import zipfile
 import importlib.util
 import ipaddress
 import socket
@@ -40,6 +46,27 @@ STABLE_PLATFORMS_DIR = BASE_DIR / "platforms"
 
 _SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
 _SAFE_DEP_RE = re.compile(r"^[A-Za-z0-9_.\\-\\[\\]==<>!~]+$")
+_AGENT_LAB_SHORTCUT_DIRS = {
+    "documents",
+    "downloads",
+    "workspace",
+    "artifacts",
+    "logs",
+}
+_READ_FILE_MAX_CHARS = int(os.getenv("TATER_READ_FILE_MAX_CHARS", "400000"))
+_READ_PDF_MAX_PAGES = int(os.getenv("TATER_READ_PDF_MAX_PAGES", "120"))
+_READ_DOCX_MAX_TABLE_ROWS = int(os.getenv("TATER_READ_DOCX_MAX_TABLE_ROWS", "300"))
+_READ_XLSX_MAX_SHEETS = int(os.getenv("TATER_READ_XLSX_MAX_SHEETS", "4"))
+_READ_XLSX_MAX_ROWS_PER_SHEET = int(os.getenv("TATER_READ_XLSX_MAX_ROWS_PER_SHEET", "120"))
+_READ_XLSX_MAX_COLS_PER_ROW = int(os.getenv("TATER_READ_XLSX_MAX_COLS_PER_ROW", "24"))
+_READ_CSV_MAX_ROWS = int(os.getenv("TATER_READ_CSV_MAX_ROWS", "500"))
+_READ_CSV_MAX_COLS = int(os.getenv("TATER_READ_CSV_MAX_COLS", "64"))
+_READ_PPTX_MAX_SLIDES = int(os.getenv("TATER_READ_PPTX_MAX_SLIDES", "120"))
+_SEARCH_DEFAULT_MAX_RESULTS = int(os.getenv("TATER_SEARCH_MAX_RESULTS", "100"))
+_SEARCH_MAX_FILE_CHARS = int(os.getenv("TATER_SEARCH_MAX_FILE_CHARS", "200000"))
+_ARCHIVE_LIST_MAX_ENTRIES = int(os.getenv("TATER_ARCHIVE_LIST_MAX_ENTRIES", "1000"))
+_ARCHIVE_EXTRACT_MAX_FILES = int(os.getenv("TATER_ARCHIVE_EXTRACT_MAX_FILES", "1000"))
+_ARCHIVE_EXTRACT_MAX_TOTAL_BYTES = int(os.getenv("TATER_ARCHIVE_EXTRACT_MAX_TOTAL_BYTES", "100000000"))
 
 
 def _ensure_dirs() -> None:
@@ -74,7 +101,24 @@ def _log_write(action: str, path: Path, size: int = 0) -> None:
 def _resolve_safe_path(path: str, allowed_roots: List[Path]) -> Optional[Path]:
     if not path:
         return None
-    p = Path(path)
+
+    raw = str(path).strip()
+    normalized = raw.replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+
+    if normalized == "/agent_lab":
+        raw = str(AGENT_LAB_DIR)
+    elif normalized.startswith("/agent_lab/"):
+        suffix = normalized[len("/agent_lab/") :]
+        raw = str(AGENT_LAB_DIR / suffix)
+    else:
+        parts = normalized.split("/", 1)
+        head = parts[0] if parts else ""
+        if head in _AGENT_LAB_SHORTCUT_DIRS:
+            raw = str(AGENT_LAB_DIR / normalized)
+
+    p = Path(raw)
     if not p.is_absolute():
         p = (BASE_DIR / p).resolve()
     else:
@@ -90,8 +134,307 @@ def _resolve_safe_path(path: str, allowed_roots: List[Path]) -> Optional[Path]:
     return None
 
 
+def _coerce_int(value: Any, default: int, min_value: int = 0, max_value: Optional[int] = None) -> int:
+    try:
+        out = int(float(value))
+    except Exception:
+        out = int(default)
+    if out < min_value:
+        out = min_value
+    if max_value is not None and out > max_value:
+        out = max_value
+    return out
+
+
+def _slice_content(text: str, start: Any = 0, max_chars: Any = None) -> Tuple[str, Dict[str, Any]]:
+    start_i = _coerce_int(start, default=0, min_value=0)
+    limit_default = _READ_FILE_MAX_CHARS
+    limit_i = _coerce_int(
+        max_chars if max_chars is not None else limit_default,
+        default=limit_default,
+        min_value=1,
+        max_value=2_000_000,
+    )
+    total = len(text)
+    if start_i > total:
+        start_i = total
+    end_i = min(total, start_i + limit_i)
+    chunk = text[start_i:end_i]
+    has_more = end_i < total
+    meta = {
+        "start": start_i,
+        "end": end_i,
+        "max_chars": limit_i,
+        "total_chars": total,
+        "returned_chars": len(chunk),
+        "has_more": has_more,
+        "next_start": end_i if has_more else None,
+    }
+    return chunk, meta
+
+
 def _read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8")
+    raw = path.read_bytes()
+    if not raw:
+        return ""
+
+    if raw.startswith(codecs.BOM_UTF8):
+        text = raw.decode("utf-8-sig", errors="replace")
+    elif raw.startswith(codecs.BOM_UTF16_LE) or raw.startswith(codecs.BOM_UTF16_BE):
+        text = raw.decode("utf-16", errors="replace")
+    elif raw.startswith(codecs.BOM_UTF32_LE) or raw.startswith(codecs.BOM_UTF32_BE):
+        text = raw.decode("utf-32", errors="replace")
+    else:
+        if b"\x00" in raw[:8192]:
+            raise ValueError(
+                "Binary file is not readable as plain text. Supported document formats: "
+                ".pdf, .docx, .xlsx, .xlsm, .csv, .tsv, .pptx."
+            )
+        text = raw.decode("utf-8", errors="replace")
+
+    return text
+
+
+def _read_pdf_text(path: Path) -> Tuple[str, Dict[str, Any]]:
+    try:
+        from pypdf import PdfReader
+    except Exception as e:
+        raise RuntimeError("PDF parsing requires the `pypdf` package.") from e
+
+    reader = PdfReader(str(path))
+    total_pages = len(reader.pages)
+    max_pages = max(1, _READ_PDF_MAX_PAGES)
+    pages_to_read = min(total_pages, max_pages)
+    chunks: List[str] = []
+
+    for idx in range(pages_to_read):
+        page_text = ""
+        try:
+            page_text = reader.pages[idx].extract_text() or ""
+        except Exception:
+            page_text = ""
+        page_text = page_text.strip()
+        if page_text:
+            chunks.append(f"[Page {idx + 1}]\n{page_text}")
+        else:
+            chunks.append(f"[Page {idx + 1}]\n")
+
+    if not chunks:
+        chunks = ["[No extractable text found in PDF.]"]
+
+    merged = "\n\n".join(chunks).strip()
+    if not merged:
+        merged = "[No extractable text found in PDF.]"
+    metadata = {
+        "format": "pdf",
+        "pages": total_pages,
+        "pages_read": pages_to_read,
+        "source_truncated": bool(total_pages > pages_to_read),
+    }
+    return merged, metadata
+
+
+def _read_docx_text(path: Path) -> Tuple[str, Dict[str, Any]]:
+    try:
+        import docx
+    except Exception as e:
+        raise RuntimeError("DOCX parsing requires the `python-docx` package.") from e
+
+    doc = docx.Document(str(path))
+    chunks: List[str] = []
+    for para in doc.paragraphs:
+        text = (para.text or "").strip()
+        if text:
+            chunks.append(text)
+
+    table_rows = 0
+    total_table_rows = 0
+    max_rows = max(1, _READ_DOCX_MAX_TABLE_ROWS)
+    for table in doc.tables:
+        for row in table.rows:
+            total_table_rows += 1
+            if table_rows >= max_rows:
+                break
+            cells = [str((cell.text or "")).strip() for cell in row.cells]
+            if any(cells):
+                chunks.append(" | ".join(cells))
+            table_rows += 1
+
+    merged = "\n".join(chunks).strip() or "[No extractable text found in DOCX.]"
+    metadata = {
+        "format": "docx",
+        "paragraphs": len(doc.paragraphs),
+        "table_rows": total_table_rows,
+        "table_rows_read": min(table_rows, max_rows),
+        "source_truncated": bool(total_table_rows > max_rows),
+    }
+    return merged, metadata
+
+
+def _read_xlsx_text(path: Path) -> Tuple[str, Dict[str, Any]]:
+    try:
+        from openpyxl import load_workbook
+    except Exception as e:
+        raise RuntimeError("XLSX parsing requires the `openpyxl` package.") from e
+
+    max_sheets = max(1, _READ_XLSX_MAX_SHEETS)
+    max_rows = max(1, _READ_XLSX_MAX_ROWS_PER_SHEET)
+    max_cols = max(1, _READ_XLSX_MAX_COLS_PER_ROW)
+    wb = load_workbook(filename=str(path), read_only=True, data_only=True)
+    chunks: List[str] = []
+    sheet_names = list(wb.sheetnames or [])
+    sheets_to_read = sheet_names[:max_sheets]
+    source_truncated = False
+
+    for sheet_name in sheets_to_read:
+        ws = wb[sheet_name]
+        chunks.append(f"[Sheet: {sheet_name}]")
+        row_index = 0
+        for row in ws.iter_rows(min_row=1, max_row=max_rows + 1, max_col=max_cols, values_only=True):
+            if row_index >= max_rows:
+                source_truncated = True
+                break
+            values = ["" if cell is None else str(cell) for cell in row]
+            if any(v.strip() for v in values):
+                chunks.append("\t".join(values).rstrip())
+            row_index += 1
+        if row_index == 0:
+            chunks.append("[Empty sheet]")
+        chunks.append("")
+
+    wb.close()
+    merged = "\n".join(chunks).strip() or "[No extractable content found in XLSX.]"
+    source_truncated = bool(source_truncated or len(sheet_names) > len(sheets_to_read))
+    metadata = {
+        "format": "xlsx",
+        "sheets": len(sheet_names),
+        "sheets_read": len(sheets_to_read),
+        "rows_per_sheet_limit": max_rows,
+        "source_truncated": source_truncated,
+    }
+    return merged, metadata
+
+
+def _sniff_csv_delimiter(sample: str, path: Path) -> str:
+    if path.suffix.lower() == ".tsv":
+        return "\t"
+    try:
+        dialect = csv.Sniffer().sniff(sample or "", delimiters=",;\t|")
+        delim = getattr(dialect, "delimiter", ",")
+        return delim if isinstance(delim, str) and delim else ","
+    except Exception:
+        return ","
+
+
+def _read_csv_text(path: Path) -> Tuple[str, Dict[str, Any]]:
+    try:
+        raw = path.read_bytes()
+    except Exception as e:
+        raise RuntimeError(f"Unable to read CSV file: {e}") from e
+    if not raw:
+        return "", {"format": "csv", "rows": 0, "rows_read": 0, "source_truncated": False}
+
+    try:
+        text = raw.decode("utf-8-sig")
+    except Exception:
+        text = raw.decode("utf-8", errors="replace")
+
+    delimiter = _sniff_csv_delimiter(text[:4096], path)
+    max_rows = max(1, _READ_CSV_MAX_ROWS)
+    max_cols = max(1, _READ_CSV_MAX_COLS)
+    reader = csv.reader(io.StringIO(text, newline=""), delimiter=delimiter)
+
+    out_lines: List[str] = []
+    total_rows = 0
+    rows_read = 0
+    max_seen_cols = 0
+    source_truncated = False
+
+    for row in reader:
+        total_rows += 1
+        max_seen_cols = max(max_seen_cols, len(row))
+        if rows_read >= max_rows:
+            source_truncated = True
+            continue
+        if len(row) > max_cols:
+            source_truncated = True
+        visible = row[:max_cols]
+        out_lines.append("\t".join(str(cell) for cell in visible))
+        rows_read += 1
+
+    merged = "\n".join(out_lines).strip()
+    if not merged and total_rows == 0:
+        merged = ""
+    elif not merged:
+        merged = "[No non-empty rows found in CSV/TSV.]"
+
+    metadata = {
+        "format": "csv",
+        "delimiter": delimiter,
+        "rows": total_rows,
+        "rows_read": rows_read,
+        "max_columns_seen": max_seen_cols,
+        "source_truncated": bool(source_truncated),
+    }
+    return merged, metadata
+
+
+def _read_pptx_text(path: Path) -> Tuple[str, Dict[str, Any]]:
+    try:
+        from pptx import Presentation
+    except Exception as e:
+        raise RuntimeError("PPTX parsing requires the `python-pptx` package.") from e
+
+    prs = Presentation(str(path))
+    total_slides = len(prs.slides)
+    max_slides = max(1, _READ_PPTX_MAX_SLIDES)
+    slides_to_read = min(total_slides, max_slides)
+    chunks: List[str] = []
+
+    for idx, slide in enumerate(prs.slides):
+        if idx >= slides_to_read:
+            break
+        slide_lines: List[str] = []
+        for shape in slide.shapes:
+            if hasattr(shape, "has_text_frame") and shape.has_text_frame:
+                raw = shape.text or ""
+                text = raw.strip()
+                if text:
+                    slide_lines.append(text)
+            elif hasattr(shape, "table") and shape.table is not None:
+                for row in shape.table.rows:
+                    cells = [str((cell.text or "")).strip() for cell in row.cells]
+                    if any(cells):
+                        slide_lines.append(" | ".join(cells))
+
+        if slide_lines:
+            chunks.append(f"[Slide {idx + 1}]\n" + "\n".join(slide_lines))
+        else:
+            chunks.append(f"[Slide {idx + 1}]\n")
+
+    merged = "\n\n".join(chunks).strip() or "[No extractable text found in PPTX.]"
+    metadata = {
+        "format": "pptx",
+        "slides": total_slides,
+        "slides_read": slides_to_read,
+        "source_truncated": bool(total_slides > slides_to_read),
+    }
+    return merged, metadata
+
+
+def _extract_file_content(path: Path) -> Tuple[str, Dict[str, Any]]:
+    ext = path.suffix.lower()
+    if ext == ".pdf":
+        return _read_pdf_text(path)
+    if ext == ".docx":
+        return _read_docx_text(path)
+    if ext in {".xlsx", ".xlsm"}:
+        return _read_xlsx_text(path)
+    if ext in {".csv", ".tsv"}:
+        return _read_csv_text(path)
+    if ext == ".pptx":
+        return _read_pptx_text(path)
+    return _read_text(path), {"format": "text", "source_truncated": False}
 
 
 def _sanitize_filename(name: str) -> str:
@@ -292,7 +635,7 @@ def download_file(
     }
 
 
-def read_file(path: str) -> Dict[str, Any]:
+def read_file(path: str, start: int = 0, max_chars: Optional[int] = None) -> Dict[str, Any]:
     _ensure_dirs()
     allowed = [AGENT_LAB_DIR, STABLE_PLUGINS_DIR, STABLE_PLATFORMS_DIR, SKILLS_DIR]
     resolved = _resolve_safe_path(path, allowed)
@@ -301,10 +644,158 @@ def read_file(path: str) -> Dict[str, Any]:
     if not resolved.exists() or not resolved.is_file():
         return {"tool": "read_file", "ok": False, "error": "File not found."}
     try:
-        content = _read_text(resolved)
-        return {"tool": "read_file", "ok": True, "path": str(resolved), "content": content}
+        full_content, metadata = _extract_file_content(resolved)
+        chunk, window = _slice_content(full_content, start=start, max_chars=max_chars)
+        source_truncated = bool(metadata.get("source_truncated"))
+        return {
+            "tool": "read_file",
+            "ok": True,
+            "path": str(resolved),
+            "content": chunk,
+            "source_truncated": source_truncated,
+            "truncated": bool(source_truncated or window.get("has_more")),
+            **window,
+            **metadata,
+        }
     except Exception as e:
         return {"tool": "read_file", "ok": False, "error": str(e)}
+
+
+def _is_hidden_path(path: Path) -> bool:
+    for part in path.parts:
+        if part.startswith(".") and part not in {".", ".."}:
+            return True
+    return False
+
+
+def _find_query_hits(
+    content: str,
+    query: str,
+    *,
+    case_sensitive: bool = False,
+    max_hits: int = 50,
+) -> List[Dict[str, Any]]:
+    if not query:
+        return []
+    needle = query if case_sensitive else query.lower()
+    hits: List[Dict[str, Any]] = []
+    for idx, line in enumerate(content.splitlines(), start=1):
+        hay = line if case_sensitive else line.lower()
+        if needle in hay:
+            snippet = line.strip()
+            if len(snippet) > 320:
+                snippet = snippet[:320].rstrip() + "..."
+            hits.append({"line": idx, "snippet": snippet})
+            if len(hits) >= max_hits:
+                break
+    return hits
+
+
+def search_files(
+    query: str,
+    *,
+    path: Optional[str] = None,
+    max_results: int = _SEARCH_DEFAULT_MAX_RESULTS,
+    case_sensitive: bool = False,
+    include_hidden: bool = False,
+    file_glob: Optional[str] = None,
+) -> Dict[str, Any]:
+    _ensure_dirs()
+    needle = str(query or "").strip()
+    if not needle:
+        return {"tool": "search_files", "ok": False, "error": "query is required."}
+
+    max_results_i = _coerce_int(max_results, default=_SEARCH_DEFAULT_MAX_RESULTS, min_value=1, max_value=2000)
+    allow_roots = [AGENT_LAB_DIR, STABLE_PLUGINS_DIR, STABLE_PLATFORMS_DIR, SKILLS_DIR]
+
+    try:
+        targets: List[Path] = []
+        if path and str(path).strip():
+            resolved = _resolve_safe_path(str(path), allow_roots)
+            if not resolved:
+                return {"tool": "search_files", "ok": False, "error": "Path not allowed."}
+            if not resolved.exists():
+                return {"tool": "search_files", "ok": False, "error": "Path not found."}
+            targets = [resolved]
+        else:
+            targets = [AGENT_DOCUMENTS_DIR, AGENT_WORKSPACE_DIR]
+
+        scanned_files = 0
+        skipped_files = 0
+        matched_files = 0
+        results: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        per_file_hit_limit = 5
+
+        def _iter_files(base: Path) -> List[Path]:
+            if base.is_file():
+                return [base]
+            out: List[Path] = []
+            for p in base.rglob("*"):
+                if p.is_file():
+                    out.append(p)
+            return out
+
+        for target in targets:
+            files = _iter_files(target)
+            for file_path in files:
+                file_key = str(file_path.resolve())
+                if file_key in seen:
+                    continue
+                seen.add(file_key)
+                if not include_hidden and _is_hidden_path(file_path):
+                    continue
+                if file_glob and not fnmatch.fnmatch(file_path.name, str(file_glob)):
+                    continue
+
+                scanned_files += 1
+                try:
+                    text, _meta = _extract_file_content(file_path)
+                except Exception:
+                    skipped_files += 1
+                    continue
+                if len(text) > _SEARCH_MAX_FILE_CHARS:
+                    text = text[:_SEARCH_MAX_FILE_CHARS]
+
+                hits = _find_query_hits(
+                    text,
+                    needle,
+                    case_sensitive=case_sensitive,
+                    max_hits=per_file_hit_limit,
+                )
+                if not hits:
+                    continue
+
+                matched_files += 1
+                for hit in hits:
+                    results.append(
+                        {
+                            "path": str(file_path),
+                            "line": hit["line"],
+                            "snippet": hit["snippet"],
+                        }
+                    )
+                    if len(results) >= max_results_i:
+                        break
+                if len(results) >= max_results_i:
+                    break
+            if len(results) >= max_results_i:
+                break
+
+        return {
+            "tool": "search_files",
+            "ok": True,
+            "query": needle,
+            "results": results,
+            "count": len(results),
+            "scanned_files": scanned_files,
+            "matched_files": matched_files,
+            "skipped_files": skipped_files,
+            "paths": [str(p) for p in targets],
+            "max_results": max_results_i,
+        }
+    except Exception as e:
+        return {"tool": "search_files", "ok": False, "error": str(e)}
 
 
 def write_file(
@@ -375,6 +866,432 @@ def list_directory(path: str) -> Dict[str, Any]:
         return {"tool": "list_directory", "ok": True, "path": str(resolved), "files": files, "directories": dirs}
     except Exception as e:
         return {"tool": "list_directory", "ok": False, "error": str(e)}
+
+
+def _safe_archive_target(base_dir: Path, member_name: str) -> Optional[Path]:
+    raw = str(member_name or "").strip().replace("\\", "/")
+    if not raw:
+        return None
+    while raw.startswith("/"):
+        raw = raw[1:]
+    normalized = os.path.normpath(raw).replace("\\", "/")
+    if normalized in {"", ".", ".."} or normalized.startswith("../"):
+        return None
+    first = normalized.split("/", 1)[0]
+    if ":" in first:
+        return None
+    try:
+        target = (base_dir / normalized).resolve()
+        base = base_dir.resolve()
+    except Exception:
+        return None
+    if target == base or base in target.parents:
+        return target
+    return None
+
+
+def list_archive(path: str, max_entries: int = _ARCHIVE_LIST_MAX_ENTRIES) -> Dict[str, Any]:
+    _ensure_dirs()
+    allowed = [AGENT_LAB_DIR]
+    archive_path = _resolve_safe_path(path, allowed)
+    if not archive_path:
+        return {"tool": "list_archive", "ok": False, "error": "Path not allowed."}
+    if not archive_path.exists() or not archive_path.is_file():
+        return {"tool": "list_archive", "ok": False, "error": "Archive not found."}
+
+    max_entries_i = _coerce_int(max_entries, default=_ARCHIVE_LIST_MAX_ENTRIES, min_value=1, max_value=5000)
+    entries: List[Dict[str, Any]] = []
+    truncated = False
+    lowered_name = archive_path.name.lower()
+
+    try:
+        if lowered_name.endswith(".7z"):
+            try:
+                import py7zr
+            except Exception as e:
+                return {"tool": "list_archive", "ok": False, "error": "7z support requires the `py7zr` package."}
+            with py7zr.SevenZipFile(str(archive_path), mode="r") as zf:
+                for info in zf.list():
+                    if len(entries) >= max_entries_i:
+                        truncated = True
+                        break
+                    name = str(getattr(info, "filename", "") or "")
+                    is_dir = bool(getattr(info, "is_directory", False)) or name.endswith("/")
+                    entries.append(
+                        {
+                            "name": name,
+                            "size": int(getattr(info, "uncompressed", 0) or 0),
+                            "compressed_size": int(getattr(info, "compressed", 0) or 0),
+                            "is_dir": is_dir,
+                        }
+                    )
+            return {
+                "tool": "list_archive",
+                "ok": True,
+                "path": str(archive_path),
+                "format": "7z",
+                "entries": entries,
+                "count": len(entries),
+                "truncated": truncated,
+            }
+
+        if lowered_name.endswith(".rar"):
+            try:
+                import rarfile
+            except Exception as e:
+                return {"tool": "list_archive", "ok": False, "error": "RAR support requires the `rarfile` package."}
+            with rarfile.RarFile(str(archive_path), "r") as rf:
+                for info in rf.infolist():
+                    if len(entries) >= max_entries_i:
+                        truncated = True
+                        break
+                    entries.append(
+                        {
+                            "name": info.filename,
+                            "size": int(getattr(info, "file_size", 0) or 0),
+                            "compressed_size": int(getattr(info, "compress_size", 0) or 0),
+                            "is_dir": bool(info.isdir()),
+                            "is_symlink": bool(getattr(info, "is_symlink", lambda: False)()),
+                        }
+                    )
+            return {
+                "tool": "list_archive",
+                "ok": True,
+                "path": str(archive_path),
+                "format": "rar",
+                "entries": entries,
+                "count": len(entries),
+                "truncated": truncated,
+            }
+
+        if zipfile.is_zipfile(archive_path):
+            with zipfile.ZipFile(archive_path, "r") as zf:
+                for info in zf.infolist():
+                    if len(entries) >= max_entries_i:
+                        truncated = True
+                        break
+                    entries.append(
+                        {
+                            "name": info.filename,
+                            "size": int(info.file_size),
+                            "compressed_size": int(info.compress_size),
+                            "is_dir": bool(info.is_dir()),
+                        }
+                    )
+            return {
+                "tool": "list_archive",
+                "ok": True,
+                "path": str(archive_path),
+                "format": "zip",
+                "entries": entries,
+                "count": len(entries),
+                "truncated": truncated,
+            }
+
+        if tarfile.is_tarfile(archive_path):
+            with tarfile.open(archive_path, "r:*") as tf:
+                for member in tf.getmembers():
+                    if len(entries) >= max_entries_i:
+                        truncated = True
+                        break
+                    entries.append(
+                        {
+                            "name": member.name,
+                            "size": int(member.size or 0),
+                            "is_dir": bool(member.isdir()),
+                            "is_symlink": bool(member.issym() or member.islnk()),
+                        }
+                    )
+            return {
+                "tool": "list_archive",
+                "ok": True,
+                "path": str(archive_path),
+                "format": "tar",
+                "entries": entries,
+                "count": len(entries),
+                "truncated": truncated,
+            }
+
+        return {
+            "tool": "list_archive",
+            "ok": False,
+            "error": "Unsupported archive format. Supported: zip, tar(.gz/.bz2/.xz), 7z, rar.",
+        }
+    except Exception as e:
+        return {"tool": "list_archive", "ok": False, "error": str(e)}
+
+
+def _archive_output_folder_name(path: Path) -> str:
+    name = path.name
+    lowered = name.lower()
+    suffixes = [".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz", ".zip", ".tar", ".7z", ".rar"]
+    for suffix in suffixes:
+        if lowered.endswith(suffix):
+            base = name[: -len(suffix)]
+            return base or path.stem or "archive"
+    return path.stem or "archive"
+
+
+def extract_archive(
+    path: str,
+    *,
+    destination: Optional[str] = None,
+    overwrite: bool = False,
+    max_files: int = _ARCHIVE_EXTRACT_MAX_FILES,
+    max_total_bytes: int = _ARCHIVE_EXTRACT_MAX_TOTAL_BYTES,
+) -> Dict[str, Any]:
+    _ensure_dirs()
+    allowed = [AGENT_LAB_DIR]
+    archive_path = _resolve_safe_path(path, allowed)
+    if not archive_path:
+        return {"tool": "extract_archive", "ok": False, "error": "Path not allowed."}
+    if not archive_path.exists() or not archive_path.is_file():
+        return {"tool": "extract_archive", "ok": False, "error": "Archive not found."}
+
+    default_dest = f"workspace/extracted_{_archive_output_folder_name(archive_path)}"
+    dest_path = _resolve_safe_path(destination or default_dest, allowed)
+    if not dest_path:
+        return {"tool": "extract_archive", "ok": False, "error": "Destination path not allowed."}
+    if dest_path.exists() and not dest_path.is_dir():
+        return {"tool": "extract_archive", "ok": False, "error": "Destination exists and is not a directory."}
+    dest_path.mkdir(parents=True, exist_ok=True)
+
+    max_files_i = _coerce_int(max_files, default=_ARCHIVE_EXTRACT_MAX_FILES, min_value=1, max_value=20000)
+    max_bytes_i = _coerce_int(
+        max_total_bytes,
+        default=_ARCHIVE_EXTRACT_MAX_TOTAL_BYTES,
+        min_value=1,
+        max_value=2_000_000_000,
+    )
+
+    extracted: List[str] = []
+    skipped: List[Dict[str, str]] = []
+    extracted_count = 0
+    total_bytes = 0
+    limit_hit = False
+    lowered_name = archive_path.name.lower()
+
+    def _record_skip(name: str, reason: str) -> None:
+        skipped.append({"name": name, "reason": reason})
+
+    try:
+        if lowered_name.endswith(".7z"):
+            try:
+                import py7zr
+            except Exception as e:
+                return {"tool": "extract_archive", "ok": False, "error": "7z support requires the `py7zr` package."}
+            with py7zr.SevenZipFile(str(archive_path), mode="r") as zf:
+                selected_names: List[str] = []
+                selected_targets: List[Path] = []
+                selected_sizes: List[int] = []
+                for info in zf.list():
+                    name = str(getattr(info, "filename", "") or "")
+                    is_dir = bool(getattr(info, "is_directory", False)) or name.endswith("/")
+                    if is_dir:
+                        continue
+                    target = _safe_archive_target(dest_path, name)
+                    if not target:
+                        _record_skip(name, "unsafe_path")
+                        continue
+                    size = int(getattr(info, "uncompressed", 0) or 0)
+                    if size < 0:
+                        _record_skip(name, "invalid_size")
+                        continue
+                    if extracted_count >= max_files_i:
+                        _record_skip(name, "max_files_reached")
+                        limit_hit = True
+                        break
+                    if total_bytes + size > max_bytes_i:
+                        _record_skip(name, "max_total_bytes_reached")
+                        limit_hit = True
+                        break
+                    if target.exists() and not overwrite:
+                        _record_skip(name, "exists")
+                        continue
+                    selected_names.append(name)
+                    selected_targets.append(target)
+                    selected_sizes.append(size)
+                    extracted_count += 1
+                    total_bytes += size
+                    extracted.append(str(target))
+                if selected_names:
+                    zf.extract(path=str(dest_path), targets=selected_names)
+                    for target, size in zip(selected_targets, selected_sizes):
+                        _log_write("extract_archive", target, size)
+
+            return {
+                "tool": "extract_archive",
+                "ok": True,
+                "path": str(archive_path),
+                "format": "7z",
+                "destination": str(dest_path),
+                "extracted_count": extracted_count,
+                "extracted": extracted,
+                "skipped_count": len(skipped),
+                "skipped": skipped,
+                "bytes_written": total_bytes,
+                "limit_hit": limit_hit,
+            }
+
+        if lowered_name.endswith(".rar"):
+            try:
+                import rarfile
+            except Exception as e:
+                return {"tool": "extract_archive", "ok": False, "error": "RAR support requires the `rarfile` package."}
+            with rarfile.RarFile(str(archive_path), "r") as rf:
+                for info in rf.infolist():
+                    name = info.filename
+                    if info.isdir():
+                        continue
+                    is_symlink = bool(getattr(info, "is_symlink", lambda: False)())
+                    if is_symlink:
+                        _record_skip(name, "symlink_not_allowed")
+                        continue
+                    target = _safe_archive_target(dest_path, name)
+                    if not target:
+                        _record_skip(name, "unsafe_path")
+                        continue
+                    size = int(getattr(info, "file_size", 0) or 0)
+                    if size < 0:
+                        _record_skip(name, "invalid_size")
+                        continue
+                    if extracted_count >= max_files_i:
+                        _record_skip(name, "max_files_reached")
+                        limit_hit = True
+                        break
+                    if total_bytes + size > max_bytes_i:
+                        _record_skip(name, "max_total_bytes_reached")
+                        limit_hit = True
+                        break
+                    if target.exists() and not overwrite:
+                        _record_skip(name, "exists")
+                        continue
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with rf.open(info) as src, target.open("wb") as dst:
+                        shutil.copyfileobj(src, dst)
+                    total_bytes += size
+                    extracted_count += 1
+                    extracted.append(str(target))
+                    _log_write("extract_archive", target, size)
+
+            return {
+                "tool": "extract_archive",
+                "ok": True,
+                "path": str(archive_path),
+                "format": "rar",
+                "destination": str(dest_path),
+                "extracted_count": extracted_count,
+                "extracted": extracted,
+                "skipped_count": len(skipped),
+                "skipped": skipped,
+                "bytes_written": total_bytes,
+                "limit_hit": limit_hit,
+            }
+
+        if zipfile.is_zipfile(archive_path):
+            with zipfile.ZipFile(archive_path, "r") as zf:
+                for info in zf.infolist():
+                    if info.is_dir():
+                        continue
+                    name = info.filename
+                    target = _safe_archive_target(dest_path, name)
+                    if not target:
+                        _record_skip(name, "unsafe_path")
+                        continue
+                    if info.file_size < 0:
+                        _record_skip(name, "invalid_size")
+                        continue
+                    if extracted_count >= max_files_i:
+                        _record_skip(name, "max_files_reached")
+                        limit_hit = True
+                        break
+                    if total_bytes + int(info.file_size) > max_bytes_i:
+                        _record_skip(name, "max_total_bytes_reached")
+                        limit_hit = True
+                        break
+                    if target.exists() and not overwrite:
+                        _record_skip(name, "exists")
+                        continue
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(info, "r") as src, target.open("wb") as dst:
+                        shutil.copyfileobj(src, dst)
+                    total_bytes += int(info.file_size)
+                    extracted_count += 1
+                    extracted.append(str(target))
+                    _log_write("extract_archive", target, int(info.file_size))
+
+            return {
+                "tool": "extract_archive",
+                "ok": True,
+                "path": str(archive_path),
+                "format": "zip",
+                "destination": str(dest_path),
+                "extracted_count": extracted_count,
+                "extracted": extracted,
+                "skipped_count": len(skipped),
+                "skipped": skipped,
+                "bytes_written": total_bytes,
+                "limit_hit": limit_hit,
+            }
+
+        if tarfile.is_tarfile(archive_path):
+            with tarfile.open(archive_path, "r:*") as tf:
+                for member in tf.getmembers():
+                    name = member.name
+                    if member.isdir():
+                        continue
+                    if member.issym() or member.islnk():
+                        _record_skip(name, "symlink_not_allowed")
+                        continue
+                    target = _safe_archive_target(dest_path, name)
+                    if not target:
+                        _record_skip(name, "unsafe_path")
+                        continue
+                    size = int(member.size or 0)
+                    if extracted_count >= max_files_i:
+                        _record_skip(name, "max_files_reached")
+                        limit_hit = True
+                        break
+                    if total_bytes + size > max_bytes_i:
+                        _record_skip(name, "max_total_bytes_reached")
+                        limit_hit = True
+                        break
+                    if target.exists() and not overwrite:
+                        _record_skip(name, "exists")
+                        continue
+                    stream = tf.extractfile(member)
+                    if stream is None:
+                        _record_skip(name, "unreadable_entry")
+                        continue
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with stream as src, target.open("wb") as dst:
+                        shutil.copyfileobj(src, dst)
+                    total_bytes += size
+                    extracted_count += 1
+                    extracted.append(str(target))
+                    _log_write("extract_archive", target, size)
+
+            return {
+                "tool": "extract_archive",
+                "ok": True,
+                "path": str(archive_path),
+                "format": "tar",
+                "destination": str(dest_path),
+                "extracted_count": extracted_count,
+                "extracted": extracted,
+                "skipped_count": len(skipped),
+                "skipped": skipped,
+                "bytes_written": total_bytes,
+                "limit_hit": limit_hit,
+            }
+
+        return {
+            "tool": "extract_archive",
+            "ok": False,
+            "error": "Unsupported archive format. Supported: zip, tar(.gz/.bz2/.xz), 7z, rar.",
+        }
+    except Exception as e:
+        return {"tool": "extract_archive", "ok": False, "error": str(e)}
 
 
 def delete_file(path: str) -> Dict[str, Any]:

@@ -12,11 +12,14 @@ from plugin_kernel import (
 )
 from kernel_tools import (
     read_file,
+    search_files,
     write_file,
     list_directory,
     delete_file,
     read_url,
     download_file,
+    list_archive,
+    extract_archive,
     list_stable_plugins,
     list_stable_platforms,
     inspect_plugin,
@@ -35,11 +38,14 @@ META_TOOLS = {
     "get_plugin_help",
     "list_platforms_for_plugin",
     "read_file",
+    "search_files",
     "write_file",
     "list_directory",
     "delete_file",
     "read_url",
     "download_file",
+    "list_archive",
+    "extract_archive",
     "list_stable_plugins",
     "list_stable_platforms",
     "inspect_plugin",
@@ -92,7 +98,32 @@ def run_meta_tool(
         )
 
     if func == "read_file":
-        return read_file(str(args.get("path") or ""))
+        return read_file(
+            str(args.get("path") or ""),
+            start=args.get("start", 0),
+            max_chars=args.get("max_chars"),
+        )
+    if func == "search_files":
+        raw_case = args.get("case_sensitive", False)
+        case_sensitive = (
+            raw_case.strip().lower() in {"1", "true", "yes", "on"}
+            if isinstance(raw_case, str)
+            else bool(raw_case)
+        )
+        raw_hidden = args.get("include_hidden", False)
+        include_hidden = (
+            raw_hidden.strip().lower() in {"1", "true", "yes", "on"}
+            if isinstance(raw_hidden, str)
+            else bool(raw_hidden)
+        )
+        return search_files(
+            str(args.get("query") or ""),
+            path=args.get("path"),
+            max_results=int(args.get("max_results") or 100),
+            case_sensitive=case_sensitive,
+            include_hidden=include_hidden,
+            file_glob=args.get("file_glob"),
+        )
     if func == "write_file":
         return write_file(
             str(args.get("path") or ""),
@@ -117,6 +148,25 @@ def run_meta_tool(
             subdir=args.get("subdir"),
             max_bytes=int(args.get("max_bytes") or 25000000),
             timeout_sec=int(args.get("timeout_sec") or 30),
+        )
+    if func == "list_archive":
+        return list_archive(
+            str(args.get("path") or ""),
+            max_entries=int(args.get("max_entries") or 1000),
+        )
+    if func == "extract_archive":
+        raw_overwrite = args.get("overwrite", False)
+        overwrite = (
+            raw_overwrite.strip().lower() in {"1", "true", "yes", "on"}
+            if isinstance(raw_overwrite, str)
+            else bool(raw_overwrite)
+        )
+        return extract_archive(
+            str(args.get("path") or ""),
+            destination=args.get("destination"),
+            overwrite=overwrite,
+            max_files=int(args.get("max_files") or 1000),
+            max_total_bytes=int(args.get("max_total_bytes") or 100000000),
         )
 
     if func == "list_stable_plugins":

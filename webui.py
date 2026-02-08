@@ -2037,6 +2037,16 @@ def render_tater_settings():
     default_first = redis_client.get("tater:first_name") or first_name
     default_last = redis_client.get("tater:last_name") or last_name
     default_personality = redis_client.get("tater:personality") or ""
+    creation_explicit_env = os.getenv("TATER_CREATION_EXPLICIT_ONLY")
+    creation_explicit_env_forced = (
+        creation_explicit_env is not None and str(creation_explicit_env).strip() != ""
+    )
+    if creation_explicit_env_forced:
+        creation_explicit_default = str(creation_explicit_env).strip().lower() in ("1", "true", "yes", "on")
+    else:
+        creation_explicit_default = str(
+            redis_client.get("tater:agent_creation:explicit_only") or "true"
+        ).strip().lower() in ("1", "true", "yes", "on")
     first_input = st.text_input("First Name", value=default_first, key="tater_first_name")
     last_input = st.text_input("Last Name", value=default_last, key="tater_last_name")
 
@@ -2068,6 +2078,18 @@ def render_tater_settings():
     new_llm = st.number_input("Messages Sent to LLM", min_value=1, value=llm_count, key="tater_llm_limit")
     if new_store > 0 and new_llm > new_store:
         st.warning("⚠️ You're trying to send more messages to LLM than you’re storing. Consider increasing Max Stored Messages.")
+    creation_explicit_only = st.checkbox(
+        "Require explicit create wording for plugin/platform creation",
+        value=creation_explicit_default,
+        key="tater_creation_explicit_only",
+        disabled=creation_explicit_env_forced,
+        help=(
+            "When enabled, Agent Lab only switches into create mode when your request explicitly "
+            "asks to create/build/make a plugin or platform."
+        ),
+    )
+    if creation_explicit_env_forced:
+        st.caption("Creation explicit-only is currently locked by TATER_CREATION_EXPLICIT_ONLY.")
 
     if st.button("Save Tater Settings", key="save_tater_settings"):
         redis_client.set("tater:max_store", new_store)
@@ -2075,6 +2097,10 @@ def render_tater_settings():
         redis_client.set("tater:first_name", first_input)
         redis_client.set("tater:last_name", last_input)
         redis_client.set("tater:personality", personality_input)
+        redis_client.set(
+            "tater:agent_creation:explicit_only",
+            "true" if creation_explicit_only else "false",
+        )
         st.success("Tater settings updated.")
         st.rerun()
 

@@ -169,8 +169,23 @@ class PhoneEventsAlertPlugin(ToolPlugin):
 
     def _normalize_notify_service(self, raw: str) -> str:
         raw = (raw or "").strip()
-        if raw.startswith("notify."):
-            raw = raw.split("notify.", 1)[1].strip()
+        if not raw:
+            return ""
+
+        # normalize case for matching, but keep original for non-matching strings
+        low = raw.lower()
+
+        # Allow users to paste full service like "notify.mobile_app_x"
+        if low.startswith("notify."):
+            return raw.split(".", 1)[1].strip()
+
+        # If they pasted "Notify.mobile_app_x" or anything with domain prefix,
+        # still strip it (case-insensitive)
+        if "." in raw:
+            left, right = raw.split(".", 1)
+            if left.strip().lower() == "notify":
+                return right.strip()
+
         return raw
 
     def _get_notify_services(self, s: Dict[str, str]) -> List[str]:
@@ -402,7 +417,7 @@ class PhoneEventsAlertPlugin(ToolPlugin):
         )
 
         if status not in (200, 201):
-            logger.error("[phone_events_alert] HA notify failed (%s) HTTP %s: %s", notify_service, status, text[:200])
+            logger.error("[phone_events_alert] HA notify failed (%s) HTTP %s: %s", notify_service, status, text)
             return {"ok": False, "error": f"Home Assistant notify failed (HTTP {status}) for {notify_service}."}
 
         return {"ok": True, "error": ""}
