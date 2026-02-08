@@ -89,6 +89,7 @@ SHOP_MANIFEST_URL_DEFAULT = os.getenv(
     "TATER_SHOP_MANIFEST_URL",
     "https://raw.githubusercontent.com/TaterTotterson/Tater_Shop/main/manifest.json"
 )
+RETIRED_PLUGIN_IDS = {"web_search"}
 
 # Redis configuration for the web UI (using a separate DB)
 redis_host = os.getenv('REDIS_HOST', '127.0.0.1')
@@ -136,6 +137,12 @@ def _enabled_missing_plugin_ids() -> list[str]:
             pid = pid.decode("utf-8", "ignore")
         pid = str(pid).strip()
         if not pid:
+            continue
+        if pid in RETIRED_PLUGIN_IDS:
+            try:
+                redis_client.hdel("plugin_enabled", pid)
+            except Exception:
+                pass
             continue
 
         if _to_bool(raw) and not is_plugin_installed(pid):
@@ -1969,6 +1976,32 @@ def render_webui_settings():
     show_speed_default = (redis_client.get("tater:show_speed_stats") or "true").lower() == "true"
     show_speed = st.checkbox("Show tokens/sec", value=show_speed_default, key="show_speed_stats")
 
+    legacy_web_search = redis_client.hgetall("plugin_settings:Web Search") or {}
+    web_search_api_default = (
+        redis_client.get("tater:web_search:google_api_key")
+        or legacy_web_search.get("GOOGLE_API_KEY")
+        or ""
+    )
+    web_search_cx_default = (
+        redis_client.get("tater:web_search:google_cx")
+        or legacy_web_search.get("GOOGLE_CX")
+        or ""
+    )
+    st.markdown("---")
+    st.subheader("Web Search")
+    st.caption("Used by kernel `search_web` for research and current information.")
+    web_search_api = st.text_input(
+        "Google API Key",
+        value=web_search_api_default,
+        type="password",
+        key="web_search_google_api_key",
+    )
+    web_search_cx = st.text_input(
+        "Google Search Engine ID (CX)",
+        value=web_search_cx_default,
+        key="web_search_google_cx",
+    )
+
     uploaded_avatar = st.file_uploader(
         "Upload your avatar", type=["png", "jpg", "jpeg"], key="avatar_uploader"
     )
@@ -1983,6 +2016,8 @@ def render_webui_settings():
 
         redis_client.set("tater:max_display", new_display)
         redis_client.set("tater:show_speed_stats", "true" if show_speed else "false")
+        redis_client.set("tater:web_search:google_api_key", web_search_api.strip())
+        redis_client.set("tater:web_search:google_cx", web_search_cx.strip())
         st.success("WebUI settings updated.")
 
     if st.button("Clear Chat History", key="clear_history"):

@@ -46,8 +46,6 @@ class DeviceComparePlugin(ToolPlugin):
     platforms = ["discord", "webui", "matrix", "telegram"]
 
     required_settings = {
-        "GOOGLE_API_KEY": {"label": "Google API Key", "type": "string", "default": ""},
-        "GOOGLE_CX": {"label": "Google Search Engine ID", "type": "string", "default": ""},
         "RESULTS_PER_QUERY": {"label": "Results to consider (specs)", "type": "string", "default": "10"},
         "FETCH_TIMEOUT_SECONDS": {"label": "HTTP fetch timeout (s)", "type": "string", "default": "12"},
         "ENABLE_FPS_SEARCH": {"label": "Enable per-game FPS search", "type": "checkbox", "default": "true"},
@@ -64,9 +62,21 @@ class DeviceComparePlugin(ToolPlugin):
             v = s.get(key, default)
             return v.decode() if isinstance(v, (bytes, bytearray)) else v
 
+        def redis_val(key, default=""):
+            v = redis_client.get(key)
+            if isinstance(v, (bytes, bytearray)):
+                v = v.decode()
+            if v is None:
+                return default
+            return str(v)
+
+        # Use only global WebUI search config.
+        global_api_key = redis_val("tater:web_search:google_api_key", "").strip()
+        global_cx = redis_val("tater:web_search:google_cx", "").strip()
+
         return {
-            "api_key": val("GOOGLE_API_KEY", ""),
-            "cx": val("GOOGLE_CX", ""),
+            "api_key": global_api_key,
+            "cx": global_cx,
             "spec_results": int(val("RESULTS_PER_QUERY", "10") or "10"),
             "fps_results": int(val("FPS_RESULTS_PER_QUERY", "10") or "10"),
             "timeout": int(val("FETCH_TIMEOUT_SECONDS", "12") or "12"),
@@ -78,7 +88,11 @@ class DeviceComparePlugin(ToolPlugin):
         cfg = self._get_settings()
         if not cfg["api_key"] or not cfg["cx"]:
             logger.warning("DeviceCompare: Google CSE not configured.")
-            return [{"title": "Missing configuration", "href": "", "snippet": "Set GOOGLE_API_KEY and GOOGLE_CX in Device Compare settings."}]
+            return [{
+                "title": "Missing configuration",
+                "href": "",
+                "snippet": "Set Google API Key and Google Search Engine ID (CX) in WebUI Settings > Web Search.",
+            }]
         try:
             r = requests.get(
                 "https://www.googleapis.com/customsearch/v1",
@@ -616,7 +630,7 @@ class DeviceComparePlugin(ToolPlugin):
     async def _pipeline(self, device_a: str, device_b: str, llm_client) -> Dict[str, Any]:
         cfg = self._get_settings()
         if not cfg["api_key"] or not cfg["cx"]:
-            return {"error": "Search is not configured. Please add GOOGLE_API_KEY and GOOGLE_CX in Device Compare settings."}
+            return {"error": "Search is not configured. Please set Google API Key and CX in WebUI Settings > Web Search."}
 
         results_a = self.google_search(f"{device_a} official hardware specifications tech specs", cfg["spec_results"])
         results_b = self.google_search(f"{device_b} official hardware specifications tech specs", cfg["spec_results"])

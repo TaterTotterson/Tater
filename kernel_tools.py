@@ -16,6 +16,7 @@ import zipfile
 import importlib.util
 import ipaddress
 import socket
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -67,6 +68,14 @@ _SEARCH_MAX_FILE_CHARS = int(os.getenv("TATER_SEARCH_MAX_FILE_CHARS", "200000"))
 _ARCHIVE_LIST_MAX_ENTRIES = int(os.getenv("TATER_ARCHIVE_LIST_MAX_ENTRIES", "1000"))
 _ARCHIVE_EXTRACT_MAX_FILES = int(os.getenv("TATER_ARCHIVE_EXTRACT_MAX_FILES", "1000"))
 _ARCHIVE_EXTRACT_MAX_TOTAL_BYTES = int(os.getenv("TATER_ARCHIVE_EXTRACT_MAX_TOTAL_BYTES", "100000000"))
+
+WEB_SEARCH_API_KEY_REDIS_KEY = "tater:web_search:google_api_key"
+WEB_SEARCH_CX_REDIS_KEY = "tater:web_search:google_cx"
+WEB_SEARCH_LEGACY_SETTINGS_KEY = "plugin_settings:Web Search"
+WEB_SEARCH_TIMEOUT_SEC = int(os.getenv("TATER_WEB_SEARCH_TIMEOUT_SEC", "15"))
+WEB_SEARCH_MAX_RESULTS = int(os.getenv("TATER_WEB_SEARCH_MAX_RESULTS", "10"))
+WEB_SEARCH_MAX_RESPONSE_BYTES = int(os.getenv("TATER_WEB_SEARCH_MAX_RESPONSE_BYTES", "2000000"))
+WEB_SEARCH_MAX_SNIPPET_CHARS = int(os.getenv("TATER_WEB_SEARCH_MAX_SNIPPET_CHARS", "600"))
 
 
 def _ensure_dirs() -> None:
@@ -493,6 +502,161 @@ def _validate_url(url: str) -> Optional[str]:
     if is_private:
         return "Private or local network hosts are not allowed."
     return None
+
+
+def _clean_redis_str(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode("utf-8", errors="ignore").strip()
+    return str(value).strip()
+
+
+def _web_search_settings() -> Tuple[str, str]:
+    api_key = ""
+    cx = ""
+    try:
+        api_key = _clean_redis_str(redis_client.get(WEB_SEARCH_API_KEY_REDIS_KEY))
+        cx = _clean_redis_str(redis_client.get(WEB_SEARCH_CX_REDIS_KEY))
+    except Exception:
+        api_key = ""
+        cx = ""
+
+    if api_key and cx:
+        return api_key, cx
+
+    try:
+        legacy = redis_client.hgetall(WEB_SEARCH_LEGACY_SETTINGS_KEY) or {}
+    except Exception:
+        legacy = {}
+    if not api_key:
+        api_key = _clean_redis_str(legacy.get("GOOGLE_API_KEY") or legacy.get("google_api_key"))
+    if not cx:
+        cx = _clean_redis_str(legacy.get("GOOGLE_CX") or legacy.get("google_cx"))
+    return api_key, cx
+
+
+def search_web(
+    query: str,
+    *,
+    num_results: int = 5,
+    site: Optional[str] = None,
+    safe: str = "active",
+    country: Optional[str] = None,
+    language: Optional[str] = None,
+    timeout_sec: int = WEB_SEARCH_TIMEOUT_SEC,
+) -> Dict[str, Any]:
+    q = str(query or "").strip()
+    if not q:
+        return {"tool": "search_web", "ok": False, "error": "query is required."}
+
+    api_key, cx = _web_search_settings()
+    if not api_key or not cx:
+        return {
+            "tool": "search_web",
+            "ok": False,
+            "error": "Web search is not configured. Set Google API Key and Search Engine ID (CX) in WebUI Settings.",
+            "needs": [
+                "Please set Google API Key in WebUI Settings > Web Search.",
+                "Please set Google Search Engine ID (CX) in WebUI Settings > Web Search.",
+            ],
+        }
+
+    max_results = _coerce_int(num_results, default=5, min_value=1, max_value=WEB_SEARCH_MAX_RESULTS)
+    timeout_val = _coerce_int(timeout_sec, default=WEB_SEARCH_TIMEOUT_SEC, min_value=3, max_value=60)
+    safe_mode = str(safe or "active").strip().lower()
+    if safe_mode not in {"active", "off"}:
+        safe_mode = "active"
+
+    params: Dict[str, Any] = {
+        "key": api_key,
+        "cx": cx,
+        "q": q,
+        "num": max_results,
+        "safe": safe_mode,
+    }
+    site_val = str(site or "").strip()
+    if site_val:
+        params["siteSearch"] = site_val
+        params["siteSearchFilter"] = "i"
+
+    country_val = str(country or "").strip().lower()
+    if country_val and re.fullmatch(r"[a-z]{2}", country_val):
+        params["gl"] = country_val
+
+    language_val = str(language or "").strip().lower()
+    if language_val:
+        if language_val.startswith("lang_"):
+            params["lr"] = language_val
+        elif re.fullmatch(r"[a-z]{2}", language_val):
+            params["lr"] = f"lang_{language_val}"
+
+    endpoint = "https://www.googleapis.com/customsearch/v1"
+    url = endpoint + "?" + urllib.parse.urlencode(params, doseq=True)
+    req = urllib.request.Request(url, headers={"User-Agent": "Tater-AgentLab/1.0"})
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_val) as resp:
+            raw = resp.read(WEB_SEARCH_MAX_RESPONSE_BYTES)
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read(1000).decode("utf-8", errors="replace")
+        except Exception:
+            body = ""
+        message = body.strip() or str(e)
+        return {"tool": "search_web", "ok": False, "error": f"Google CSE request failed ({e.code}): {message}"}
+    except Exception as e:
+        return {"tool": "search_web", "ok": False, "error": f"Web search failed: {e}"}
+
+    try:
+        payload = json.loads(raw.decode("utf-8", errors="replace"))
+    except Exception:
+        return {"tool": "search_web", "ok": False, "error": "Invalid response from Google CSE."}
+
+    if isinstance(payload, dict) and payload.get("error"):
+        err = payload.get("error") or {}
+        msg = str(err.get("message") or "Unknown Google CSE error.")
+        return {"tool": "search_web", "ok": False, "error": msg}
+
+    items = payload.get("items") if isinstance(payload, dict) else []
+    if not isinstance(items, list):
+        items = []
+
+    results: List[Dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        link = str(item.get("link") or "").strip()
+        if not link:
+            continue
+        title = str(item.get("title") or "").strip() or link
+        snippet = str(item.get("snippet") or "").strip()
+        if len(snippet) > WEB_SEARCH_MAX_SNIPPET_CHARS:
+            snippet = snippet[:WEB_SEARCH_MAX_SNIPPET_CHARS].rstrip() + "..."
+        results.append(
+            {
+                "title": title,
+                "url": link,
+                "snippet": snippet,
+                "display_url": str(item.get("displayLink") or "").strip(),
+            }
+        )
+
+    search_info = payload.get("searchInformation") if isinstance(payload, dict) else {}
+    search_time = None
+    if isinstance(search_info, dict):
+        search_time = search_info.get("searchTime")
+
+    return {
+        "tool": "search_web",
+        "ok": True,
+        "query": q,
+        "count": len(results),
+        "results": results,
+        "site_filter": site_val or None,
+        "search_time_sec": search_time,
+    }
 
 
 def read_url(
