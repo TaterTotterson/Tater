@@ -2,7 +2,8 @@
 import io
 import json
 import logging
-from typing import List, Dict, Any
+import re
+from typing import List, Dict, Any, Tuple
 import requests
 from PIL import Image, ImageDraw, ImageFont
 from bs4 import BeautifulSoup
@@ -30,7 +31,7 @@ logger.setLevel(logging.INFO)
 class DeviceComparePlugin(ToolPlugin):
     name = "device_compare"
     plugin_name = "Device Compare"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "50"
     usage = (
         "{\n"
@@ -38,6 +39,8 @@ class DeviceComparePlugin(ToolPlugin):
         '  "arguments": {"device_a": "<first device>", "device_b": "<second device>"}\n'
         "}\n"
     )
+    required_args = ["device_a", "device_b"]
+    optional_args = ["device1", "device2", "first_device", "second_device", "left_device", "right_device", "devices", "query", "compare"]
     description = "Compares two devices by fetching specs and per-game FPS from multiple sources, then renders image tables."
     plugin_dec = "Compare two devices with spec tables and per-game FPS benchmarks."
     pretty_name = "Comparing Devices"
@@ -46,29 +49,62 @@ class DeviceComparePlugin(ToolPlugin):
     platforms = ["discord", "webui", "matrix", "telegram"]
 
     required_settings = {
-        "RESULTS_PER_QUERY": {"label": "Results to consider (specs)", "type": "string", "default": "10"},
-        "FETCH_TIMEOUT_SECONDS": {"label": "HTTP fetch timeout (s)", "type": "string", "default": "12"},
-        "ENABLE_FPS_SEARCH": {"label": "Enable per-game FPS search", "type": "checkbox", "default": "true"},
-        "FPS_RESULTS_PER_QUERY": {"label": "Results to consider (FPS)", "type": "string", "default": "10"},
-        "MAX_FPS_ROWS": {"label": "Max FPS rows in image", "type": "string", "default": "20"},
+        "RESULTS_PER_QUERY": {"label": "Results to consider (specs)", "type": "number", "default": 10},
+        "FETCH_TIMEOUT_SECONDS": {"label": "HTTP fetch timeout (s)", "type": "number", "default": 12},
+        "ENABLE_FPS_SEARCH": {"label": "Enable per-game FPS search", "type": "checkbox", "default": True},
+        "FPS_RESULTS_PER_QUERY": {"label": "Results to consider (FPS)", "type": "number", "default": 10},
+        "MAX_FPS_ROWS": {"label": "Max FPS rows in image", "type": "number", "default": 20},
     }
 
     waiting_prompt_template = "Let {mention} know you’re grabbing specs, benchmarks, and rendering comparison images now. Only output that message."
 
     # ---------- settings / http / search ----------
+    @staticmethod
+    def _decode_text(value: Any, default: str = "") -> str:
+        if isinstance(value, (bytes, bytearray)):
+            return value.decode("utf-8", "ignore")
+        if value is None:
+            return default
+        return str(value)
+
+    @classmethod
+    def _to_int(cls, value: Any, default: int, minimum: int, maximum: int) -> int:
+        try:
+            parsed = int(float(cls._decode_text(value, str(default)).strip()))
+        except Exception:
+            parsed = int(default)
+        if parsed < minimum:
+            return minimum
+        if parsed > maximum:
+            return maximum
+        return parsed
+
+    @classmethod
+    def _to_bool(cls, value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        raw = cls._decode_text(value).strip().lower()
+        if raw in ("1", "true", "yes", "y", "on", "enabled"):
+            return True
+        if raw in ("0", "false", "no", "n", "off", "disabled"):
+            return False
+        return default
+
     def _get_settings(self):
-        s = redis_client.hgetall(f"plugin_settings:{self.settings_category}")
+        s = redis_client.hgetall(f"plugin_settings:{self.settings_category}") or redis_client.hgetall(
+            f"plugin_settings: {self.settings_category}"
+        ) or {}
+
         def val(key, default=""):
-            v = s.get(key, default)
-            return v.decode() if isinstance(v, (bytes, bytearray)) else v
+            return self._decode_text(s.get(key, default), str(default))
 
         def redis_val(key, default=""):
             v = redis_client.get(key)
-            if isinstance(v, (bytes, bytearray)):
-                v = v.decode()
             if v is None:
                 return default
-            return str(v)
+            return self._decode_text(v, str(default))
 
         # Use only global WebUI search config.
         global_api_key = redis_val("tater:web_search:google_api_key", "").strip()
@@ -77,26 +113,23 @@ class DeviceComparePlugin(ToolPlugin):
         return {
             "api_key": global_api_key,
             "cx": global_cx,
-            "spec_results": int(val("RESULTS_PER_QUERY", "10") or "10"),
-            "fps_results": int(val("FPS_RESULTS_PER_QUERY", "10") or "10"),
-            "timeout": int(val("FETCH_TIMEOUT_SECONDS", "12") or "12"),
-            "enable_fps": (str(val("ENABLE_FPS_SEARCH", "true")).lower() in ("true","1","yes")),
-            "max_fps_rows": int(val("MAX_FPS_ROWS", "20") or "20"),
+            "spec_results": self._to_int(val("RESULTS_PER_QUERY", 10), default=10, minimum=1, maximum=10),
+            "fps_results": self._to_int(val("FPS_RESULTS_PER_QUERY", 10), default=10, minimum=1, maximum=10),
+            "timeout": self._to_int(val("FETCH_TIMEOUT_SECONDS", 12), default=12, minimum=3, maximum=60),
+            "enable_fps": self._to_bool(val("ENABLE_FPS_SEARCH", True), default=True),
+            "max_fps_rows": self._to_int(val("MAX_FPS_ROWS", 20), default=20, minimum=1, maximum=100),
         }
 
     def google_search(self, query: str, n: int) -> List[Dict[str, str]]:
         cfg = self._get_settings()
         if not cfg["api_key"] or not cfg["cx"]:
             logger.warning("DeviceCompare: Google CSE not configured.")
-            return [{
-                "title": "Missing configuration",
-                "href": "",
-                "snippet": "Set Google API Key and Google Search Engine ID (CX) in WebUI Settings > Web Search.",
-            }]
+            return []
+        query_n = self._to_int(n, default=cfg["spec_results"], minimum=1, maximum=10)
         try:
             r = requests.get(
                 "https://www.googleapis.com/customsearch/v1",
-                params={"key": cfg["api_key"], "cx": cfg["cx"], "q": query, "num": n},
+                params={"key": cfg["api_key"], "cx": cfg["cx"], "q": query, "num": query_n},
                 timeout=cfg["timeout"],
             )
             if r.status_code != 200:
@@ -409,9 +442,11 @@ class DeviceComparePlugin(ToolPlugin):
         return rows
 
     def _build_fps_rows(self, specs_a: dict, specs_b: dict, max_rows: int):
-        fps_a = specs_a.get("fps_by_game") or {}
-        fps_b = specs_b.get("fps_by_game") or {}
-        if not isinstance(fps_a, dict) and not isinstance(fps_b, dict):
+        fps_a_raw = specs_a.get("fps_by_game") or {}
+        fps_b_raw = specs_b.get("fps_by_game") or {}
+        fps_a = fps_a_raw if isinstance(fps_a_raw, dict) else {}
+        fps_b = fps_b_raw if isinstance(fps_b_raw, dict) else {}
+        if not fps_a and not fps_b:
             return []
         games = sorted(set(fps_a.keys()) | set(fps_b.keys()))
         out = []
@@ -626,11 +661,49 @@ class DeviceComparePlugin(ToolPlugin):
         except Exception:
             return False
 
+    @staticmethod
+    def _extract_devices(args: Dict[str, Any]) -> Tuple[str, str]:
+        args = args or {}
+
+        def first_value(*keys: str) -> str:
+            for key in keys:
+                value = args.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            return ""
+
+        device_a = first_value("device_a", "first_device", "left_device", "device1", "a")
+        device_b = first_value("device_b", "second_device", "right_device", "device2", "b")
+
+        if (not device_a or not device_b) and isinstance(args.get("devices"), list):
+            pair = [str(x).strip() for x in args.get("devices") if str(x).strip()]
+            if len(pair) >= 2:
+                if not device_a:
+                    device_a = pair[0]
+                if not device_b:
+                    device_b = pair[1]
+
+        if not device_a or not device_b:
+            compare_text = args.get("query") or args.get("compare")
+            if isinstance(compare_text, str) and compare_text.strip():
+                parts = re.split(r"\s+(?:vs\.?|versus|v)\s+", compare_text.strip(), maxsplit=1, flags=re.IGNORECASE)
+                if len(parts) == 2:
+                    left = parts[0].strip()
+                    right = parts[1].strip()
+                    if not device_a and left:
+                        device_a = left
+                    if not device_b and right:
+                        device_b = right
+
+        return device_a, device_b
+
     # ---------- main pipeline ----------
     async def _pipeline(self, device_a: str, device_b: str, llm_client) -> Dict[str, Any]:
         cfg = self._get_settings()
         if not cfg["api_key"] or not cfg["cx"]:
             return {"error": "Search is not configured. Please set Google API Key and CX in WebUI Settings > Web Search."}
+        if llm_client is None:
+            return {"error": "Device Compare requires an available LLM client to extract specs and FPS data."}
 
         results_a = self.google_search(f"{device_a} official hardware specifications tech specs", cfg["spec_results"])
         results_b = self.google_search(f"{device_b} official hardware specifications tech specs", cfg["spec_results"])
@@ -703,120 +776,57 @@ class DeviceComparePlugin(ToolPlugin):
             mimetype="image/png",
         )
 
+    async def _handle_compare(self, args: Dict[str, Any], llm_client):
+        device_a, device_b = self._extract_devices(args or {})
+        if not device_a or not device_b:
+            return ['Please provide two devices: {"device_a": "...", "device_b": "..."}']
+
+        data = await self._pipeline(device_a, device_b, llm_client)
+        if "error" in data:
+            return [data["error"]]
+
+        out = []
+        spec_png = self._render_table_image(
+            headers=data["spec_headers"],
+            rows=data["spec_rows"],
+            title=data["title"]
+        )
+        out.append(self._img_payload(spec_png, "comparison.png"))
+
+        if data.get("fps_rows"):
+            fps_png = self._render_table_image(
+                headers=data["fps_headers"],
+                rows=data["fps_rows"],
+                title="Per-Game FPS"
+            )
+            out.append(self._img_payload(fps_png, "fps.png"))
+
+        if data.get("sources_text"):
+            out.append("**Sources**\n" + data["sources_text"])
+
+        return out
+
     # ---------- platform handlers ----------
     async def handle_discord(self, message, args, llm_client):
-        a = args.get("device_a","").strip()
-        b = args.get("device_b","").strip()
-        if not a or not b:
-            return ['Please provide two devices: {"device_a": "...", "device_b": "..."}']
-
-        data = await self._pipeline(a, b, llm_client)
-        if "error" in data:
-            return [data["error"]]
-
-        out = []
-
-        spec_png = self._render_table_image(
-            headers=data["spec_headers"],
-            rows=data["spec_rows"],
-            title=data["title"]
-        )
-        out.append(self._img_payload(spec_png, "comparison.png"))
-
-        if data.get("fps_rows"):
-            fps_png = self._render_table_image(
-                headers=data["fps_headers"],
-                rows=data["fps_rows"],
-                title="Per-Game FPS"
-            )
-            out.append(self._img_payload(fps_png, "fps.png"))
-
-        if data.get("sources_text"):
-            out.append("**Sources**\n" + data["sources_text"])
-
-        return out
+        return await self._handle_compare(args or {}, llm_client)
 
     async def handle_webui(self, args, llm_client):
-        a = args.get("device_a","").strip()
-        b = args.get("device_b","").strip()
-        if not a or not b:
-            return ['Please provide two devices: {"device_a": "...", "device_b": "..."}']
-
-        data = await self._pipeline(a, b, llm_client)
-        if "error" in data:
-            return [data["error"]]
-
-        out = []
-
-        spec_png = self._render_table_image(
-            headers=data["spec_headers"],
-            rows=data["spec_rows"],
-            title=data["title"]
-        )
-        out.append(self._img_payload(spec_png, "comparison.png"))
-
-        if data.get("fps_rows"):
-            fps_png = self._render_table_image(
-                headers=data["fps_headers"],
-                rows=data["fps_rows"],
-                title="Per-Game FPS"
-            )
-            out.append(self._img_payload(fps_png, "fps.png"))
-
-        if data.get("sources_text"):
-            out.append("**Sources**\n" + data["sources_text"])
-
-        return out
+        return await self._handle_compare(args or {}, llm_client)
 
     async def handle_telegram(self, update, args, llm_client):
-        return await self.handle_webui(args, llm_client)
+        return await self._handle_compare(args or {}, llm_client)
 
     # ---------- Matrix ----------
     async def handle_matrix(self, client, room, sender, body, args, llm_client=None, **kwargs):
-        """
-        Returns image metadata with binary data so the Matrix platform can upload them
-        (and auto-encrypt via 'file' when the room is E2EE).
-        """
         if llm_client is None:
             llm_client = kwargs.get("llm") or kwargs.get("ll_client") or kwargs.get("llm_client")
-        a = (args or {}).get("device_a","").strip()
-        b = (args or {}).get("device_b","").strip()
-        if not a or not b:
+        return await self._handle_compare(args or {}, llm_client)
+
+    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
+        device_a, device_b = self._extract_devices(args or {})
+        if not device_a or not device_b:
             return ['Please provide two devices: {"device_a": "...", "device_b": "..."}']
 
-        data = await self._pipeline(a, b, llm_client)
-        if "error" in data:
-            return [data["error"]]
-
-        out = []
-
-        spec_png = self._render_table_image(
-            headers=data["spec_headers"],
-            rows=data["spec_rows"],
-            title=data["title"]
-        )
-        out.append(self._img_payload(spec_png, "comparison.png"))
-
-        if data.get("fps_rows"):
-            fps_png = self._render_table_image(
-                headers=data["fps_headers"],
-                rows=data["fps_rows"],
-                title="Per-Game FPS"
-            )
-            out.append(self._img_payload(fps_png, "fps.png"))
-
-        if data.get("sources_text"):
-            out.append("**Sources**\n" + data["sources_text"])
-
-        return out
-
-    async def handle_irc(self, message, args, llm_client):
-        """Dummy IRC handler since images are not supported."""
-        a = args.get("device_a", "").strip()
-        b = args.get("device_b", "").strip()
-        if not a or not b:
-            return ['Please provide two devices: {"device_a": "...", "device_b": "..."}']
-
-        return [f"Image comparison for '{a}' vs '{b}' is not supported on IRC."]
+        return [f"Image comparison for '{device_a}' vs '{device_b}' is not supported on IRC."]
 
 plugin = DeviceComparePlugin()

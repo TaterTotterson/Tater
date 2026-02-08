@@ -4,7 +4,6 @@ import asyncio
 import logging
 import requests
 import re
-from urllib.parse import quote_plus
 
 from dotenv import load_dotenv
 from plugin_base import ToolPlugin
@@ -18,7 +17,7 @@ logger.setLevel(logging.INFO)
 class OverseerrDetailsPlugin(ToolPlugin):
     name = "overseerr_details"
     plugin_name = "Overseerr Details"
-    version = "1.0.0"
+    version = "1.1.0"
     min_tater_version = "50"
     pretty_name = "Overseerr: Title Details"
     settings_category = "Overseerr"
@@ -52,7 +51,7 @@ class OverseerrDetailsPlugin(ToolPlugin):
         },
         "OVERSEERR_API_KEY": {
             "label": "Overseerr API Key",
-            "type": "string",
+            "type": "password",
             "default": "",
         },
     }
@@ -78,11 +77,10 @@ class OverseerrDetailsPlugin(ToolPlugin):
         url = f"{base}/api/v1/search"
         headers = {"X-Api-Key": api_key, "Accept": "application/json"}
 
-        # Overseerr requires the query value to be URL-encoded (reserved chars like ':' will 400 otherwise).
-        safe_title = quote_plus((title or "").strip())
+        raw_title = (title or "").strip()
 
         try:
-            resp = requests.get(url, params={"query": safe_title, "page": 1}, headers=headers, timeout=12)
+            resp = requests.get(url, params={"query": raw_title, "page": 1}, headers=headers, timeout=12)
             if resp.status_code != 200:
                 logger.error(f"[Overseerr search] HTTP {resp.status_code} :: {resp.text}")
                 return {"error": f"Overseerr returned HTTP {resp.status_code} for search."}
@@ -132,7 +130,47 @@ class OverseerrDetailsPlugin(ToolPlugin):
         text = re.sub(r"\s+", " ", (text or "").strip())
         return text[:max_len]
 
+    @staticmethod
+    def _fallback_details_text(detail: dict) -> str:
+        title = (
+            detail.get("title")
+            or detail.get("name")
+            or detail.get("originalTitle")
+            or detail.get("originalName")
+            or "Unknown title"
+        )
+        year = (detail.get("releaseDate") or detail.get("firstAirDate") or "")[:4]
+        rating = detail.get("voteAverage")
+        media_info = detail.get("mediaInfo")
+        media_info = media_info if isinstance(media_info, dict) else {}
+        media_status = detail.get("status") or media_info.get("status")
+        runtime = detail.get("runtime")
+        overview = re.sub(r"\s+", " ", str(detail.get("overview") or "").strip())
+
+        heading = f"{title} ({year})" if year else str(title)
+        facts = []
+        if isinstance(rating, (int, float)):
+            facts.append(f"Rating: {float(rating):.1f}/10")
+        if media_status:
+            facts.append(f"Status: {media_status}")
+        if isinstance(runtime, int) and runtime > 0:
+            facts.append(f"Runtime: {runtime} min")
+        genres = detail.get("genres") or []
+        if isinstance(genres, list) and genres:
+            names = [g.get("name") for g in genres if isinstance(g, dict) and g.get("name")]
+            if names:
+                facts.append("Genres: " + ", ".join(names[:4]))
+
+        lines = [heading]
+        if overview:
+            lines.append(overview[:420])
+        lines.extend([f"- {item}" for item in facts[:6]])
+        return "\n".join(lines).strip()
+
     async def _ask_llm_details(self, detail: dict, title: str, llm_client):
+        if llm_client is None:
+            return self._fallback_details_text(detail)
+
         first, last = get_tater_name()
         tater = f"{first} {last}"
 
@@ -151,12 +189,14 @@ class OverseerrDetailsPlugin(ToolPlugin):
         try:
             resp = await llm_client.chat([{"role": "system", "content": sys}, {"role": "user", "content": user}])
             content = ((resp or {}).get("message", {}) or {}).get("content", "") or ""
-            return content.strip() or "No details available."
+            out = content.strip()
+            return out if out else self._fallback_details_text(detail)
         except Exception as e:
             logger.exception("[Overseerr details LLM error] %s", e)
-            return "There was an error generating the details."
+            return self._fallback_details_text(detail)
 
     async def _answer(self, args, llm_client):
+        args = args or {}
         title = (args.get("title") or "").strip()
         if not title:
             return "Tell me the movie or show title you want details for."
@@ -186,7 +226,7 @@ class OverseerrDetailsPlugin(ToolPlugin):
     # ---------- Platform handlers ----------
     async def handle_discord(self, message, args, llm_client):
         answer = await self._answer(args, llm_client)
-        return await self.safe_send(message.channel, answer)
+        return [answer]
 
     async def handle_webui(self, args, llm_client):
         async def inner():
@@ -194,47 +234,30 @@ class OverseerrDetailsPlugin(ToolPlugin):
 
         try:
             asyncio.get_running_loop()
-            return await inner()
+            return [await inner()]
         except RuntimeError:
-            return asyncio.run(inner())
+            return [asyncio.run(inner())]
 
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         answer = await self._answer(args, llm_client)
-        return f"{user}: {answer}"
+        return [f"{user}: {answer}"]
 
     async def handle_homeassistant(self, args, llm_client):
         answer = await self._answer(args, llm_client)
-        return self._tame_text(answer, 700)
+        return [self._tame_text(answer, 700)]
 
     async def handle_matrix(self, client, room, sender, body, args, llm_client=None, **kwargs):
         if llm_client is None:
             llm_client = kwargs.get("llm") or kwargs.get("ll_client") or kwargs.get("llm_client")
         answer = await self._answer(args or {}, llm_client)
-        return answer
+        return [answer]
 
     async def handle_telegram(self, update, args, llm_client):
-        return await self._answer(args or {}, llm_client)
+        return [await self._answer(args or {}, llm_client)]
 
     async def handle_homekit(self, args, llm_client):
         answer = await self._answer(args or {}, llm_client)
-        return self._tame_text(answer, 500)
-
-    # ---------- Utilities ----------
-    def split_message(self, text, chunk_size=1500):
-        chunks = []
-        while len(text) > chunk_size:
-            split = text.rfind("\n", 0, chunk_size) or text.rfind(" ", 0, chunk_size) or chunk_size
-            chunks.append(text[:split])
-            text = text[split:].strip()
-        chunks.append(text)
-        return chunks
-
-    async def safe_send(self, channel, content):
-        if len(content) <= 2000:
-            await channel.send(content)
-        else:
-            for chunk in self.split_message(content, 1900):
-                await channel.send(chunk)
+        return [self._tame_text(answer, 500)]
 
 
 plugin = OverseerrDetailsPlugin()

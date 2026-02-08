@@ -147,6 +147,8 @@ AGENT_CREATION_REPAIR_PROMPT = (
     "messages=[{\"role\":\"system\",\"content\":\"...\"},{\"role\":\"user\",\"content\":\"...\"}]. "
     "For Agent Lab plugins, set `platforms` to include the current platform, and implement the matching handler "
     "(e.g., handle_webui for webui, handle_discord for discord). "
+    "Set plugin `name` to the exact file id passed to create_plugin (must match `<name>.py`). "
+    "Use `plugin_name` for human-readable labels. "
     "Always include `when_to_use` and a waiting_prompt_template for Agent Lab plugins. "
     "waiting_prompt_template must be an instruction to the LLM and should include wording like "
     "'Write ...' and 'Only output that message.'"
@@ -168,6 +170,7 @@ TOOL_NAME_ALIASES = {
 PLUGIN_REQUIREMENTS_HINT = (
     "Plugin must subclass ToolPlugin imported from plugin_base and assign an instance to module-level `plugin` (not a dict). "
     "Required attributes: name, plugin_name, version, description, platforms, usage (string). "
+    "name must exactly match the create_plugin name/id and filename stem (<name>.py); use plugin_name as display text. "
     "platforms must be a list of supported platform ids: webui, discord, irc, homeassistant, "
     "homekit, matrix, telegram, xbmc, automation, rss (or 'both'). "
     "Include when_to_use and waiting_prompt_template (required for Agent Lab plugins). "
@@ -394,24 +397,32 @@ def _agent_system_instructions(max_rounds: int, max_tool_calls: int) -> str:
         "  skills/agent_lab/plugin_authoring.md and skills/agent_lab/platform_authoring.md.\n"
         "- If a tool returns needs[], stop and ask exactly those questions.\n"
         "- If an action is destructive/high-impact, ask for explicit confirmation first.\n"
+        "- If the user asks to test or verify a plugin, call test_plugin and report explicit PASS/FAIL plus live_tested=true/false.\n"
+        "- Use memory_set only when the user explicitly asks to remember/store a preference or default.\n"
+        "- Use memory_explain when the user asks why a remembered/default value was chosen or to inspect memory conflicts.\n"
+        "- For questions like 'have we done this before' or prior outcomes, use memory_search and/or truth_get_last/truth_list before answering.\n"
         f"- Budget: max rounds={max_rounds}, max tool calls={max_tool_calls}.\n"
         "- Tool calls must be JSON only. Final replies should be plain text.\n"
         "Kernel tools available: read_file, search_web, search_files, write_file, list_directory, delete_file, read_url, download_file, "
         "list_archive, extract_archive, list_stable_plugins, list_stable_platforms, inspect_plugin, "
-        "create_plugin, validate_plugin, "
-        "create_platform, validate_platform, write_workspace_note, list_workspace.\n"
+        "create_plugin, validate_plugin, test_plugin, "
+        "create_platform, validate_platform, write_workspace_note, list_workspace, "
+        "memory_get, memory_set, memory_list, memory_delete, memory_explain, memory_search, truth_get_last, truth_list.\n"
         "For external/current facts, API docs, or library references, call search_web first and then read_url if deeper content is needed.\n"
+        "If search_web returns thin evidence, call search_web again using `next_start` (or a broader query) before finalizing.\n"
         "For broad current-events questions (for example: 'what's going on in the world'), call search_web before answering.\n"
         "read_file supports plain text and structured extraction for .pdf, .docx, .xlsx/.xlsm, .csv/.tsv, and .pptx files.\n"
         "For large files, call read_file with `start` and `max_chars` to page through content.\n"
         "Archive helpers support zip/tar plus 7z/rar when dependencies are installed.\n"
         "For kernel file paths, `/agent_lab/...` maps to the Agent Lab root, and shortcuts like "
-        "`documents/...`, `downloads/...`, `workspace/...`, `artifacts/...`, and `logs/...` "
+        "`plugins/...`, `platforms/...`, `documents/...`, `downloads/...`, `workspace/...`, "
+        "`artifacts/...`, and `logs/...` "
         "resolve under `agent_lab/`.\n"
         "When writing files or code, prefer `content_lines`/`code_lines` arrays (one string per line) to avoid JSON escaping issues; "
         "base64 fields (`content_b64`/`code_b64`) are also supported.\n"
         "For create_plugin/create_platform, do NOT use manifest/code_files. Provide `name` plus `code_lines` (preferred) "
-        "or `code`/`code_b64`. Avoid triple-quoted docstrings or unescaped double quotes inside code_lines; "
+        "or `code`/`code_b64`. Existing Agent Lab files require explicit `overwrite=true` before replacement. "
+        "Avoid triple-quoted docstrings or unescaped double quotes inside code_lines; "
         "use single quotes or comments instead.\n"
         "If the user explicitly asks for AI-generated content (e.g., AI-generated jokes, stories, summaries), "
         "the plugin must call llm_client at runtime to generate output. Do NOT hardcode a static list.\n"
@@ -500,6 +511,86 @@ def _should_try_search_fallback(user_text: str, func: str, needs_creation: bool)
     if any(marker in f for marker in ("news", "search", "lookup", "browse")):
         return True
     return False
+
+
+def _int_or(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _search_web_should_retry(
+    payload: Dict[str, Any],
+    *,
+    retry_count: int,
+) -> bool:
+    if retry_count >= 1:
+        return False
+    if not isinstance(payload, dict) or not payload.get("ok"):
+        return False
+
+    count = _int_or(payload.get("count"), 0)
+    results = payload.get("results")
+    if not isinstance(results, list):
+        results = []
+    has_more = bool(payload.get("has_more"))
+
+    snippet_chars = 0
+    nonempty_snippets = 0
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        snippet = str(item.get("snippet") or "").strip()
+        if snippet:
+            nonempty_snippets += 1
+            snippet_chars += len(snippet)
+
+    avg_snippet_len = (snippet_chars / nonempty_snippets) if nonempty_snippets else 0.0
+    thin_evidence = count < 2 or (count < 3 and avg_snippet_len < 80)
+    if thin_evidence:
+        return True
+    if has_more and count < 4:
+        return True
+    return False
+
+
+def _search_web_retry_args(args: Dict[str, Any], payload: Dict[str, Any], user_text: str) -> Optional[Dict[str, Any]]:
+    if not isinstance(args, dict):
+        args = {}
+    if not isinstance(payload, dict):
+        return None
+
+    retry = dict(args)
+    query = str(retry.get("query") or user_text or "").strip()
+    if not query:
+        return None
+
+    next_start = _int_or(payload.get("next_start"), 0)
+    has_more = bool(payload.get("has_more")) and next_start > 0
+    requested = _int_or(retry.get("num_results") or retry.get("max_results"), 5)
+    requested = max(1, min(requested, 10))
+
+    if has_more:
+        retry["query"] = query
+        retry["start"] = next_start
+        retry["num_results"] = requested
+        return retry
+
+    # Broaden once when first page was too thin.
+    broadened = query
+    lowered = query.lower()
+    if "latest" not in lowered:
+        broadened += " latest"
+    if "overview" not in lowered:
+        broadened += " overview"
+    retry["query"] = broadened.strip()
+    retry["start"] = 1
+    retry["num_results"] = min(10, max(requested + 2, 5))
+    retry.pop("site", None)
+    retry.pop("domain", None)
+    retry.pop("siteSearch", None)
+    return retry
 
 
 def _as_bool(value: Any, default: bool = False) -> bool:
@@ -985,6 +1076,7 @@ async def run_planner_loop(
     creation_fix_used = 0
     unknown_tool_fix_used = False
     unknown_tool_search_fallback_used = False
+    search_web_retry_count = 0
     created_snapshot = _creation_state(state)
     creation_followup_issued = bool(state.get("creation_followup_issued"))
     creation_precheck_done = bool(state.get("creation_precheck_done"))
@@ -1002,6 +1094,7 @@ async def run_planner_loop(
                 platform=platform,
                 registry=registry,
                 enabled_predicate=enabled_predicate,
+                origin=origin,
             )
             messages.append(
                 {
@@ -1241,6 +1334,29 @@ async def run_planner_loop(
                     "artifacts": artifacts_out,
                 }
 
+        # Attach origin for both kernel tools and plugins (preserves room/user context).
+        if origin:
+            args = dict(args or {})
+            existing = args.get("origin")
+            base_origin = dict(origin)
+            if platform and not str(base_origin.get("platform") or "").strip():
+                base_origin["platform"] = platform
+            if scope and not str(base_origin.get("scope") or "").strip():
+                base_origin["scope"] = scope
+
+            if not isinstance(existing, dict) or not existing:
+                args["origin"] = base_origin
+            else:
+                merged = dict(base_origin)
+                for k, v in existing.items():
+                    if v not in (None, ""):
+                        merged[k] = v
+                args["origin"] = merged
+
+        if func == "memory_set" and "request_text" not in args and user_text:
+            args = dict(args)
+            args["request_text"] = user_text
+
         if is_meta_tool(func):
             meta_payload = run_meta_tool(
                 func=func,
@@ -1248,12 +1364,21 @@ async def run_planner_loop(
                 platform=platform,
                 registry=registry,
                 enabled_predicate=enabled_predicate,
+                origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
             )
+            auto_search_retry_args = None
             if isinstance(meta_payload, dict):
                 ok = bool(meta_payload.get("ok"))
                 if func == "list_plugins":
                     creation_precheck_done = True
                     state["creation_precheck_done"] = True
+                if func == "search_web" and _search_web_should_retry(
+                    meta_payload, retry_count=search_web_retry_count
+                ):
+                    retry_args = _search_web_retry_args(args, meta_payload, user_text or "")
+                    if retry_args:
+                        auto_search_retry_args = retry_args
+                        search_web_retry_count += 1
                 if ok:
                     if func == "create_plugin":
                         name = meta_payload.get("name") or args.get("name")
@@ -1266,6 +1391,7 @@ async def run_planner_loop(
                                 platform=platform,
                                 registry=registry,
                                 enabled_predicate=enabled_predicate,
+                                origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
                             )
                             if not (validation or {}).get("ok"):
                                 _record_created(state, "plugins", f"{name} (invalid)")
@@ -1291,6 +1417,7 @@ async def run_planner_loop(
                                 platform=platform,
                                 registry=registry,
                                 enabled_predicate=enabled_predicate,
+                                origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
                             )
                             if not (validation or {}).get("ok"):
                                 _record_created(state, "platforms", f"{name} (invalid)")
@@ -1310,6 +1437,31 @@ async def run_planner_loop(
                     err = meta_payload.get("error") or ""
                     missing = meta_payload.get("missing_fields") or []
                     path_hint = meta_payload.get("path")
+                    overwrite_required = bool(meta_payload.get("overwrite_required"))
+                    error_code = str(meta_payload.get("error_code") or "").strip().lower()
+                    if (
+                        func in {"create_plugin", "create_platform"}
+                        and overwrite_required
+                        and error_code == "already_exists"
+                    ):
+                        overwrite_args = dict(args or {})
+                        overwrite_args["overwrite"] = True
+                        default_prompt = (
+                            f"{func} target already exists. Overwrite it? (yes/no)"
+                        )
+                        needs = meta_payload.get("needs")
+                        if not isinstance(needs, list) or not any(str(x).strip() for x in needs):
+                            needs = [default_prompt]
+                        state["status"] = "blocked"
+                        state["pending_action"] = {"function": func, "arguments": overwrite_args}
+                        state["pending_needs"] = [str(x).strip() for x in needs if str(x).strip()]
+                        save_task_state(state, r=r)
+                        return {
+                            "text": _render_needs(state["pending_needs"]),
+                            "status": "blocked",
+                            "task_id": task_id,
+                            "artifacts": artifacts_out,
+                        }
                     if func in {"create_platform", "validate_platform"}:
                         name = meta_payload.get("name") or args.get("name")
                         if name and path_hint:
@@ -1363,21 +1515,21 @@ async def run_planner_loop(
                     "content": json.dumps({"tool": func, "result": meta_payload}, ensure_ascii=False),
                 }
             )
+            if auto_search_retry_args:
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "Search results were thin. Run one more search_web call (next page or broadened query) "
+                            "before drafting the final answer."
+                        ),
+                    }
+                )
+                forced_call = {"function": "search_web", "arguments": auto_search_retry_args}
+                save_task_state(state, r=r)
+                continue
             save_task_state(state, r=r)
             continue
-
-        # Attach origin if provided (merge to preserve channel/room context)
-        if origin:
-            args = dict(args or {})
-            existing = args.get("origin")
-            if not isinstance(existing, dict) or not existing:
-                args["origin"] = origin
-            else:
-                merged = dict(origin)
-                for k, v in existing.items():
-                    if v not in (None, ""):
-                        merged[k] = v
-                args["origin"] = merged
 
         # Loop detection
         signature = _signature_for_attempt(func, args)

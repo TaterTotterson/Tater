@@ -22,7 +22,11 @@ from helpers import (
     get_llm_client_from_env,
     build_llm_host_from_env,
 )
-from admin_gate import is_admin_only_plugin
+from admin_gate import (
+    is_admin_only_plugin,
+    is_agent_lab_creation_tool,
+    is_agent_lab_creation_admin_gated,
+)
 from agent_lab_registry import build_agent_registry
 from plugin_result import action_failure
 from plugin_kernel import plugin_supports_platform
@@ -342,6 +346,69 @@ class TelegramPlatform:
                 {"chat_id": chat_id, "text": chunk, "disable_web_page_preview": False},
                 20,
             )
+
+    async def _set_message_reaction(self, chat_id: str, message_id: int, emoji: str) -> bool:
+        clean_emoji = str(emoji or "").strip()
+        if not clean_emoji:
+            return False
+        payload = {
+            "chat_id": chat_id,
+            "message_id": int(message_id),
+            "reaction": [{"type": "emoji", "emoji": clean_emoji}],
+        }
+        try:
+            await asyncio.to_thread(self._api_json, "setMessageReaction", payload, 20)
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _extract_hook_emoji(value: Any) -> str:
+        if isinstance(value, dict):
+            value = value.get("emoji")
+        if isinstance(value, str):
+            return value.strip()
+        return ""
+
+    async def _maybe_passive_reaction(
+        self,
+        *,
+        raw_message: Dict[str, Any],
+        chat_id: str,
+        user_text: str,
+        assistant_text: str,
+        merged_registry: Dict[str, Any],
+        merged_enabled,
+    ) -> None:
+        message_id = raw_message.get("message_id")
+        if not isinstance(message_id, int):
+            return
+
+        for name, plugin in merged_registry.items():
+            hook = getattr(plugin, "on_assistant_response", None)
+            if not callable(hook):
+                continue
+            if not merged_enabled(name):
+                continue
+
+            try:
+                suggested = await hook(
+                    platform="telegram",
+                    user_text=user_text or "",
+                    assistant_text=assistant_text or "",
+                    llm_client=self.llm,
+                    scope=chat_id,
+                    message=raw_message,
+                )
+                emoji = self._extract_hook_emoji(suggested)
+                if not emoji:
+                    continue
+
+                applied = await self._set_message_reaction(chat_id=chat_id, message_id=message_id, emoji=emoji)
+                if applied:
+                    return
+            except Exception as exc:
+                logger.debug(f"[{name}] passive reaction skipped: {exc}")
 
     def _load_blob(self, blob_key: str) -> bytes | None:
         if not blob_key:
@@ -697,12 +764,27 @@ class TelegramPlatform:
                     )
 
             def _admin_guard(func_name):
-                if is_admin_only_plugin(func_name) and not self._admin_user_allowed(sender):
-                    msg = (
-                        "This tool is restricted to the configured admin user on Telegram."
-                        if self.allowed_dm_users
-                        else "This tool is disabled because no Telegram admin user is configured."
-                    )
+                needs_admin = False
+                creation_guard = False
+                if is_admin_only_plugin(func_name):
+                    needs_admin = True
+                elif is_agent_lab_creation_tool(func_name) and is_agent_lab_creation_admin_gated(redis_client):
+                    needs_admin = True
+                    creation_guard = True
+
+                if needs_admin and not self._admin_user_allowed(sender):
+                    if creation_guard:
+                        msg = (
+                            "Agent Lab plugin/platform creation is restricted to the configured admin user on Telegram."
+                            if self.allowed_dm_users
+                            else "Agent Lab creation is disabled because no Telegram admin user is configured."
+                        )
+                    else:
+                        msg = (
+                            "This tool is restricted to the configured admin user on Telegram."
+                            if self.allowed_dm_users
+                            else "This tool is disabled because no Telegram admin user is configured."
+                        )
                     return action_failure(
                         code="admin_only",
                         message=msg,
@@ -740,6 +822,17 @@ class TelegramPlatform:
             artifacts = result.get("artifacts") or []
             for item in artifacts:
                 await self._send_plugin_result(chat_id, item)
+
+            if final_text or artifacts:
+                assistant_summary = final_text or "[Sent attachments]"
+                await self._maybe_passive_reaction(
+                    raw_message=message,
+                    chat_id=chat_id,
+                    user_text=message_text,
+                    assistant_text=assistant_summary,
+                    merged_registry=merged_registry,
+                    merged_enabled=merged_enabled,
+                )
             return
 
         except Exception as e:

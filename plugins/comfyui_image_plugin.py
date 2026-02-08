@@ -27,7 +27,7 @@ def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype
 class ComfyUIImagePlugin(ToolPlugin):
     name = "comfyui_image_plugin"
     plugin_name = "ComfyUI Image"
-    version = "1.0.2"
+    version = "1.0.3"
     min_tater_version = "50"
     usage = (
         "{\n"
@@ -521,13 +521,15 @@ class ComfyUIImagePlugin(ToolPlugin):
             return f"Failed to queue prompt: {type(e).__name__}: {e}"
 
     async def handle_telegram(self, update, args, llm_client):
-        return await self.handle_webui(args, llm_client)
+        return await self.handle_webui(args or {}, llm_client)
 
     # ---------------------------------------
     # Matrix
     # ---------------------------------------
-    async def handle_matrix(self, client, room, sender, body, args, llm_client):
-        user_prompt = ComfyUIImagePlugin._resolve_prompt(args)
+    async def handle_matrix(self, client, room, sender, body, args, llm_client=None, **kwargs):
+        if llm_client is None:
+            llm_client = kwargs.get("llm") or kwargs.get("ll_client") or kwargs.get("llm_client")
+        user_prompt = ComfyUIImagePlugin._resolve_prompt(args or {})
 
         try:
             neg = (args or {}).get("negative_prompt", "") or ""

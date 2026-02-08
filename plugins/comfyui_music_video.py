@@ -13,6 +13,7 @@ import yaml
 import logging
 import requests
 import mimetypes
+import uuid
 from PIL import Image
 from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 from plugin_base import ToolPlugin
@@ -41,7 +42,7 @@ class _ComfyUIImageHelper:
 
     @staticmethod
     def get_base_http():
-        settings = redis_client.hgetall(f"plugin_settings:{_ComfyUIImageHelper.settings_category}")
+        settings = redis_client.hgetall(f"plugin_settings:{_ComfyUIImageHelper.settings_category}") or {}
         raw = settings.get("COMFYUI_URL", b"")
         url = raw.decode("utf-8").strip() if isinstance(raw, (bytes, bytearray)) else (raw or "").strip()
         if not url:
@@ -57,7 +58,7 @@ class _ComfyUIImageHelper:
 
     @staticmethod
     def get_workflow_template():
-        settings = redis_client.hgetall(f"plugin_settings:{_ComfyUIImageHelper.settings_category}")
+        settings = redis_client.hgetall(f"plugin_settings:{_ComfyUIImageHelper.settings_category}") or {}
         workflow_raw = settings.get("COMFYUI_WORKFLOW", b"")
         workflow_str = workflow_raw.decode("utf-8").strip() if isinstance(workflow_raw, (bytes, bytearray)) else (workflow_raw or "").strip()
         if not workflow_str:
@@ -157,7 +158,7 @@ class _ComfyUIImageHelper:
             "720p": (1280, 720),
             "1080p": (1920, 1080),
         }
-        settings = redis_client.hgetall(f"plugin_settings:{_ComfyUIImageHelper.settings_category}")
+        settings = redis_client.hgetall(f"plugin_settings:{_ComfyUIImageHelper.settings_category}") or {}
         raw_res = settings.get("IMAGE_RESOLUTION", b"720p")
         resolution = raw_res.decode("utf-8") if isinstance(raw_res, (bytes, bytearray)) else (raw_res or "720p")
         default_w, default_h = res_map.get(resolution, (1280, 720))
@@ -180,7 +181,7 @@ class _ComfyUIImageVideoHelper:
 
     @staticmethod
     def get_base_http() -> str:
-        settings = redis_client.hgetall(f"plugin_settings:{_ComfyUIImageVideoHelper.settings_category}")
+        settings = redis_client.hgetall(f"plugin_settings:{_ComfyUIImageVideoHelper.settings_category}") or {}
         url_raw = settings.get("COMFYUI_VIDEO_URL", b"")
         url = url_raw.decode("utf-8").strip() if isinstance(url_raw, (bytes, bytearray)) else (url_raw or "").strip()
         if not url:
@@ -196,7 +197,7 @@ class _ComfyUIImageVideoHelper:
 
     @staticmethod
     def get_workflow_template() -> dict:
-        settings = redis_client.hgetall(f"plugin_settings:{_ComfyUIImageVideoHelper.settings_category}")
+        settings = redis_client.hgetall(f"plugin_settings:{_ComfyUIImageVideoHelper.settings_category}") or {}
         raw = settings.get("COMFYUI_VIDEO_WORKFLOW", b"")
         workflow_str = raw.decode("utf-8").strip() if isinstance(raw, (bytes, bytearray)) else (raw or "").strip()
         if not workflow_str:
@@ -279,7 +280,7 @@ class _ComfyUIImageVideoHelper:
         uploaded = _ComfyUIImageVideoHelper.upload_image(base_http, image_bytes, filename)
         wf = copy.deepcopy(_ComfyUIImageVideoHelper.get_workflow_template())
 
-        settings = redis_client.hgetall(f"plugin_settings:{_ComfyUIImageVideoHelper.settings_category}")
+        settings = redis_client.hgetall(f"plugin_settings:{_ComfyUIImageVideoHelper.settings_category}") or {}
         res_map = {
             "144p": (256, 144), "240p": (426, 240), "360p": (480, 360),
             "480p": (640, 480), "720p": (1280, 720), "1080p": (1920, 1080)
@@ -315,22 +316,24 @@ class _ComfyUIImageVideoHelper:
         _ComfyUIImageVideoHelper._apply_overrides(wf, prompt, uploaded, w, h, frames)
 
         prompt_id, _ = run_comfy_prompt(base_http, base_ws, wf)
-        hist = _ComfyUIImageVideoHelper.get_history(base_http, prompt_id).get(prompt_id, {})
-        outputs = hist.get("outputs", {}) if isinstance(hist, dict) else {}
+        for _ in range(40):
+            hist = _ComfyUIImageVideoHelper.get_history(base_http, prompt_id).get(prompt_id, {})
+            outputs = hist.get("outputs", {}) if isinstance(hist, dict) else {}
 
-        for node in outputs.values():
-            if "images" in node:
-                img = node["images"][0]
-                content = _ComfyUIImageVideoHelper.fetch_asset(base_http, img["filename"], img.get("subfolder", ""), img.get("type", "output"))
-                ext = os.path.splitext(img["filename"])[-1].lstrip(".") or "webp"
-                return content, ext
+            for node in outputs.values():
+                if "images" in node and node["images"]:
+                    img = node["images"][0]
+                    content = _ComfyUIImageVideoHelper.fetch_asset(base_http, img["filename"], img.get("subfolder", ""), img.get("type", "output"))
+                    ext = os.path.splitext(img["filename"])[-1].lstrip(".") or "webp"
+                    return content, ext
 
-        for node in outputs.values():
-            if "videos" in node:
-                vid = node["videos"][0]
-                content = _ComfyUIImageVideoHelper.fetch_asset(base_http, vid["filename"], vid.get("subfolder", ""), vid.get("type", "output"))
-                ext = os.path.splitext(vid["filename"])[-1].lstrip(".") or "mp4"
-                return content, ext
+            for node in outputs.values():
+                if "videos" in node and node["videos"]:
+                    vid = node["videos"][0]
+                    content = _ComfyUIImageVideoHelper.fetch_asset(base_http, vid["filename"], vid.get("subfolder", ""), vid.get("type", "output"))
+                    ext = os.path.splitext(vid["filename"])[-1].lstrip(".") or "mp4"
+                    return content, ext
+            time.sleep(0.5)
 
         for node in wf.values():
             if node.get("class_type") == "SaveVideo":
@@ -526,22 +529,24 @@ class _ComfyUIAudioAceHelper:
         workflow = _ComfyUIAudioAceHelper.build_workflow(tags, lyrics)
         prompt_id, _ = run_comfy_prompt(base_http, base_ws, workflow)
 
-        history = _ComfyUIAudioAceHelper.get_history(base_http, prompt_id).get(prompt_id, {})
-        outputs = history.get("outputs", {}) if isinstance(history, dict) else {}
+        for _ in range(50):
+            history = _ComfyUIAudioAceHelper.get_history(base_http, prompt_id).get(prompt_id, {})
+            outputs = history.get("outputs", {}) if isinstance(history, dict) else {}
 
-        for _, node_out in outputs.items():
-            if "audio" in node_out:
-                for audio_meta in node_out["audio"]:
-                    filename = audio_meta.get("filename")
-                    subfolder = audio_meta.get("subfolder", "")
-                    folder_type = audio_meta.get("type", "output")
-                    if filename:
-                        try:
-                            audio_bytes = _ComfyUIAudioAceHelper.get_audio_bytes(base_http, filename, subfolder, folder_type)
-                        except Exception:
-                            audio_bytes = None
-                        if audio_bytes:
-                            return audio_bytes
+            for _, node_out in outputs.items():
+                if "audio" in node_out:
+                    for audio_meta in node_out["audio"]:
+                        filename = audio_meta.get("filename")
+                        subfolder = audio_meta.get("subfolder", "")
+                        folder_type = audio_meta.get("type", "output")
+                        if filename:
+                            try:
+                                audio_bytes = _ComfyUIAudioAceHelper.get_audio_bytes(base_http, filename, subfolder, folder_type)
+                            except Exception:
+                                audio_bytes = None
+                            if audio_bytes:
+                                return audio_bytes
+            time.sleep(0.5)
 
         raise Exception("No audio returned.")
 
@@ -613,7 +618,7 @@ class _VisionHelper:
 class ComfyUIMusicVideoPlugin(ToolPlugin):
     name = "comfyui_music_video"
     plugin_name = "ComfyUI Music Video"
-    version = "1.0.1"
+    version = "1.0.2"
     min_tater_version = "50"
     usage = (
         '{\n'
@@ -674,13 +679,13 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
         "api_base": {
             "label": "Vision API Base URL",
             "description": "OpenAI-compatible base URL (e.g., http://127.0.0.1:1234).",
-            "type": "text",
+            "type": "string",
             "default": "http://127.0.0.1:1234"
         },
         "model": {
             "label": "Vision Model",
             "description": "OpenAI-compatible model name (e.g., qwen2.5-vl-7b-instruct, gemma-3-12b-it, etc.).",
-            "type": "text",
+            "type": "string",
             "default": "gemma3-27b-abliterated-dpo"
         },
         "MUSIC_VIDEO_RESOLUTION": {
@@ -739,10 +744,10 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
                     if os.path.exists(path):
                         os.remove(path)
         except Exception as e:
-            print(f"[Cleanup warning] {e}")
+            logger.warning("[Cleanup warning] %s", e)
 
     def webp_to_mp4(self, input_file, output_file, fps=16, duration=5):
-        frames, tmp_dir, frame_files = [], f"{os.path.dirname(input_file)}/frames", []
+        frames, tmp_dir, frame_files = [], f"{os.path.dirname(input_file)}/frames_{uuid.uuid4().hex[:6]}", []
         os.makedirs(tmp_dir, exist_ok=True)
         try:
             im = Image.open(input_file)
@@ -764,6 +769,8 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
         os.rmdir(tmp_dir)
 
     async def _generate_music_video(self, prompt, llm_client):
+        if llm_client is None:
+            return "This plugin requires an available LLM to generate lyrics and scene prompts."
         job_id = str(uuid.uuid4())[:8]
 
         # --- 1) Lyrics + tags via Audio Ace ---
@@ -816,121 +823,125 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
 
         clip_idx = 0
 
-        for section in sections:
-            for part_num in range(2):
-                part_hint = f" (Part {part_num + 1})" if part_num > 0 else ""
+        try:
+            for section in sections:
+                for part_num in range(2):
+                    part_hint = f" (Part {part_num + 1})" if part_num > 0 else ""
 
-                img_desc_prompt = (
-                    f'The following are song lyrics:\n\n"{section}"\n\n'
-                    "Write a single clear sentence describing a visual scene or illustration that conveys the meaning, emotion, or subject of these lyrics. "
-                    "If the lyrics are subjective or abstract (e.g., 'Do you think I'm beautiful?'), imagine a representative visual. "
-                    "Avoid text overlays and focus on a vivid scene." + part_hint
-                )
+                    img_desc_prompt = (
+                        f'The following are song lyrics:\n\n"{section}"\n\n'
+                        "Write a single clear sentence describing a visual scene or illustration that conveys the meaning, emotion, or subject of these lyrics. "
+                        "If the lyrics are subjective or abstract (e.g., 'Do you think I'm beautiful?'), imagine a representative visual. "
+                        "Avoid text overlays and focus on a vivid scene." + part_hint
+                    )
 
-                img_resp = await llm_client.chat([
-                    {"role": "system", "content": "You help generate creative prompts for AI-generated illustrations."},
-                    {"role": "user", "content": img_desc_prompt}
+                    try:
+                        img_resp = await llm_client.chat([
+                            {"role": "system", "content": "You help generate creative prompts for AI-generated illustrations."},
+                            {"role": "user", "content": img_desc_prompt}
+                        ])
+                        image_prompt = ((img_resp.get("message", {}) or {}).get("content", "") or "").strip() or section
+                    except Exception:
+                        image_prompt = section
+
+                    image_bytes = await asyncio.to_thread(
+                        _ComfyUIImageHelper.process_prompt,
+                        image_prompt,
+                        w,
+                        h
+                    )
+
+                    tmp_img = f"/tmp/{job_id}_frame_{clip_idx}.png"
+                    with open(tmp_img, "wb") as f:
+                        f.write(image_bytes)
+
+                    with open(tmp_img, "rb") as f:
+                        image_content = f.read()
+                    desc = await _VisionHelper.describe_image(image_content, tmp_img)
+                    desc = desc.strip() or "An interesting scene"
+
+                    animation_prompt = (
+                        f'The following is a visual description of an image:\n\n"{desc}"\n\n'
+                        f'And here is a section of song lyrics:\n\n"{section}"\n\n'
+                        "Write a single clear sentence that describes what this image depicts and how it might animate to reflect the lyrics."
+                    )
+
+                    try:
+                        resp = await llm_client.chat([
+                            {"role": "system", "content": "You generate vivid single-sentence descriptions that combine image content and lyric context for animation."},
+                            {"role": "user", "content": animation_prompt}
+                        ])
+                        animation_desc = ((resp.get("message", {}) or {}).get("content", "") or "").strip() or "A scene that reflects the lyrics."
+                    except Exception:
+                        animation_desc = "A scene that reflects the lyrics."
+
+                    upload_filename = f"frame_{clip_idx}.png"
+
+                    # frame count uses the fps we pulled from the template
+                    frame_count = int(per * fps)
+
+                    anim_bytes, ext = await asyncio.to_thread(
+                        _ComfyUIImageVideoHelper.process_prompt,
+                        animation_desc,
+                        image_bytes,
+                        upload_filename,
+                        w,
+                        h,
+                        frame_count
+                    )
+
+                    exts_used.add(ext)
+                    tmp_path = f"/tmp/{job_id}_clip_{clip_idx}.{ext}"
+                    with open(tmp_path, "wb") as f:
+                        f.write(anim_bytes)
+
+                    if ext == "webp":
+                        tmp_mp4 = f"/tmp/{job_id}_clip_{clip_idx}.mp4"
+                        # keep playback speed consistent with generation
+                        self.webp_to_mp4(tmp_path, tmp_mp4, fps=fps, duration=per)
+                        vids.append(tmp_mp4)
+                    else:
+                        vids.append(tmp_path)
+
+                    clip_idx += 1
+
+            if not vids:
+                return "❌ Failed to generate any video clips."
+
+            self.ffmpeg_concat(vids, audio_path, final_video_path)
+
+            with open(final_video_path, "rb") as f:
+                final_bytes = f.read()
+
+            try:
+                msg = await llm_client.chat([
+                    {"role": "system", "content": f"User got a music video for '{prompt}'"},
+                    {"role": "user", "content": "Send short celebration text."}
                 ])
-                image_prompt = img_resp["message"]["content"].strip()
+                msg_text = ((msg.get("message", {}) or {}).get("content", "") or "").strip() or "Here's your music video!"
+            except Exception:
+                msg_text = "Here's your music video!"
 
-                image_bytes = await asyncio.to_thread(
-                    _ComfyUIImageHelper.process_prompt,
-                    image_prompt,
-                    w,
-                    h
-                )
-
-                tmp_img = f"/tmp/{job_id}_frame_{clip_idx}.png"
-                with open(tmp_img, "wb") as f:
-                    f.write(image_bytes)
-
-                with open(tmp_img, "rb") as f:
-                    image_content = f.read()
-                desc = await _VisionHelper.describe_image(image_content, tmp_img)
-                desc = desc.strip() or "An interesting scene"
-
-                animation_prompt = (
-                    f'The following is a visual description of an image:\n\n"{desc}"\n\n'
-                    f'And here is a section of song lyrics:\n\n"{section}"\n\n'
-                    "Write a single clear sentence that describes what this image depicts and how it might animate to reflect the lyrics."
-                )
-
-                resp = await llm_client.chat([
-                    {"role": "system", "content": "You generate vivid single-sentence descriptions that combine image content and lyric context for animation."},
-                    {"role": "user", "content": animation_prompt}
-                ])
-                animation_desc = resp["message"]["content"].strip() or "A scene that reflects the lyrics."
-
-                upload_filename = f"frame_{clip_idx}.png"
-
-                # frame count uses the fps we pulled from the template
-                frame_count = int(per * fps)
-
-                anim_bytes, ext = await asyncio.to_thread(
-                    _ComfyUIImageVideoHelper.process_prompt,
-                    animation_desc,
-                    image_bytes,
-                    upload_filename,
-                    w,
-                    h,
-                    frame_count
-                )
-
-                exts_used.add(ext)
-                tmp_path = f"/tmp/{job_id}_clip_{clip_idx}.{ext}"
-                with open(tmp_path, "wb") as f:
-                    f.write(anim_bytes)
-
-                if ext == "webp":
-                    tmp_mp4 = f"/tmp/{job_id}_clip_{clip_idx}.mp4"
-                    # keep playback speed consistent with generation
-                    self.webp_to_mp4(tmp_path, tmp_mp4, fps=fps, duration=per)
-                    vids.append(tmp_mp4)
-                else:
-                    vids.append(tmp_path)
-
-                clip_idx += 1
-
-        if not vids:
-            return "❌ Failed to generate any video clips."
-
-        self.ffmpeg_concat(vids, audio_path, final_video_path)
-
-        with open(final_video_path, "rb") as f:
-            final_bytes = f.read()
-
-        msg = await llm_client.chat([
-            {"role": "system", "content": f"User got a music video for '{prompt}'"},
-            {"role": "user", "content": "Send short celebration text."}
-        ])
-
-        self.cleanup_temp_files(job_id, clip_idx, list(exts_used))
-
-        return [
-            _build_media_metadata(
-                final_bytes,
-                media_type="video",
-                name="music_video.mp4",
-                mimetype="video/mp4",
-            ),
-            msg["message"]["content"]
-        ]
+            return [
+                _build_media_metadata(
+                    final_bytes,
+                    media_type="video",
+                    name="music_video.mp4",
+                    mimetype="video/mp4",
+                ),
+                msg_text,
+            ]
+        finally:
+            self.cleanup_temp_files(job_id, clip_idx, list(exts_used))
 
     async def handle_webui(self, args, llm_client):
+        args = args or {}
         if "prompt" not in args:
             return ["No prompt given."]
-
-        async def _generate():
-            return await self._generate_music_video(args["prompt"], llm_client)
-
         try:
-            loop = asyncio.get_running_loop()
-            if loop.is_running():
-                return await _generate()
-        except RuntimeError:
-            pass  # Not in a loop, fall through
-
-        # Run from a background thread (Streamlit thread-safe)
-        return asyncio.run(_generate())
+            return await self._generate_music_video(args["prompt"], llm_client)
+        except Exception as e:
+            logger.exception("ComfyUI music-video generation failed: %s", e)
+            return [f"⚠️ Error generating music video: {e}"]
 
 plugin = ComfyUIMusicVideoPlugin()

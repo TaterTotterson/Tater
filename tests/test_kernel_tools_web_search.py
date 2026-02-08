@@ -53,6 +53,10 @@ class KernelToolsWebSearchTests(unittest.TestCase):
                     "displayLink": "example.com",
                 }
             ],
+            "queries": {
+                "request": [{"totalResults": "123", "startIndex": 1}],
+                "nextPage": [{"startIndex": 11}],
+            },
             "searchInformation": {"searchTime": 0.42},
         }
         captured = {}
@@ -65,18 +69,23 @@ class KernelToolsWebSearchTests(unittest.TestCase):
         with patch("kernel_tools.redis_client", fake_redis), patch(
             "kernel_tools.urllib.request.urlopen", side_effect=_fake_urlopen
         ):
-            result = search_web("agent lab", num_results=3, site="example.com")
+            result = search_web("agent lab", num_results=3, start=1, site="example.com")
 
         self.assertTrue(result.get("ok"), result)
         self.assertEqual(result.get("count"), 1)
         self.assertEqual(result["results"][0]["url"], "https://example.com/post")
         self.assertEqual(captured.get("timeout"), 15)
+        self.assertEqual(result.get("start"), 1)
+        self.assertEqual(result.get("next_start"), 11)
+        self.assertTrue(result.get("has_more"))
+        self.assertEqual(result.get("total_results"), 123)
 
         parsed = urllib.parse.urlparse(captured["url"])
         params = urllib.parse.parse_qs(parsed.query)
         self.assertEqual(params.get("key"), ["legacy_key"])
         self.assertEqual(params.get("cx"), ["legacy_cx"])
         self.assertEqual(params.get("num"), ["3"])
+        self.assertEqual(params.get("start"), ["1"])
         self.assertEqual(params.get("siteSearch"), ["example.com"])
 
 

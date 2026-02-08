@@ -1,4 +1,5 @@
-import json, logging, re, time, difflib, requests, mimetypes
+import asyncio, json, logging, re, time, difflib, requests, mimetypes
+from urllib.parse import urlparse, urlunparse
 from dotenv import load_dotenv
 from plugin_base import ToolPlugin
 from helpers import redis_client, extract_json  # <-- we use your extractor
@@ -20,7 +21,13 @@ load_dotenv()
 logger = logging.getLogger("mister_remote")
 logger.setLevel(logging.INFO)
 
-def _strip(s): return (s or "").strip()
+def _decode_text(value):
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode("utf-8", "ignore")
+    return "" if value is None else str(value)
+
+
+def _strip(s): return _decode_text(s).strip()
 def _norm(s):  return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
 
 # Lightweight synonyms (used only as a tiny bias if the LLM can't decide)
@@ -38,10 +45,29 @@ SYN = {
     "n64":"Nintendo64","neogeo":"NeoGeo","neo-geo":"NeoGeo",
 }
 
+COMMAND_ALIASES = {
+    "play": "play",
+    "launch": "play",
+    "start": "play",
+    "now_playing": "now_playing",
+    "now playing": "now_playing",
+    "status": "now_playing",
+    "what's_playing": "now_playing",
+    "whats_playing": "now_playing",
+    "go_to_menu": "go_to_menu",
+    "menu": "go_to_menu",
+    "home": "go_to_menu",
+    "screenshot_take": "screenshot_take",
+    "screenshot": "screenshot_take",
+    "take_screenshot": "screenshot_take",
+    "screen_shot": "screenshot_take",
+    "shot": "screenshot_take",
+}
+
 class MisterRemotePlugin(ToolPlugin):
     name = "mister_remote"
     plugin_name = "MiSTer Remote"
-    version = "1.0.1"
+    version = "1.1.0"
     min_tater_version = "50"
     pretty_name = "MiSTer Remote"
     description = (
@@ -88,29 +114,126 @@ class MisterRemotePlugin(ToolPlugin):
 
     waiting_prompt_template = "Talking to your MiSTer now…"
 
+    def _settings(self) -> dict:
+        return redis_client.hgetall("plugin_settings:MiSTer Remote") or {}
+
+    def _normalize_host(self, raw_host: str) -> str:
+        host = _strip(raw_host).rstrip("/")
+        if not host:
+            host = "http://10.4.20.167"
+        if not host.startswith("http://") and not host.startswith("https://"):
+            host = f"http://{host}"
+        return host
+
+    def _normalize_port(self, raw_port: str) -> str:
+        digits = re.sub(r"\D+", "", _strip(raw_port))
+        return digits or "8182"
+
+    def _compose_root(self, host: str, port: str) -> str:
+        parsed = urlparse(host)
+        has_port = False
+        try:
+            has_port = parsed.port is not None
+        except ValueError:
+            has_port = ":" in (parsed.netloc or "")
+        netloc = parsed.netloc
+        if not has_port:
+            netloc = f"{netloc}:{port}"
+        clean = parsed._replace(netloc=netloc, path="", params="", query="", fragment="")
+        return urlunparse(clean).rstrip("/")
+
+    def _extract_utterance(self, args: dict | None) -> str:
+        data = args or {}
+        for key in (
+            "utterance",
+            "user request",
+            "user_request",
+            "user_text",
+            "prompt",
+            "query",
+            "request",
+            "text",
+            "message",
+        ):
+            value = _strip(data.get(key, ""))
+            if value:
+                return value
+        return ""
+
+    def _normalize_command(self, raw_cmd: str) -> str:
+        key = _norm(raw_cmd).replace("whats", "what's")
+        # Preserve underscores from canonical command values before alias lookup.
+        direct = _strip(raw_cmd).lower()
+        if direct in COMMAND_ALIASES:
+            return COMMAND_ALIASES[direct]
+        if key == "nowplaying":
+            return "now_playing"
+        if key == "gotomenu":
+            return "go_to_menu"
+        if key in {"screenshottake", "takescreenshot", "screenshot"}:
+            return "screenshot_take"
+        if key in {"play", "launch", "start"}:
+            return "play"
+        return direct
+
+    def _infer_command_from_utterance(self, utterance: str) -> str:
+        text = _strip(utterance).lower()
+        if not text:
+            return ""
+        if re.search(r"\b(screenshot|screen ?shot|capture)\b", text):
+            return "screenshot_take"
+        if re.search(r"\b(now playing|what('?| i)s playing|status)\b", text):
+            return "now_playing"
+        if re.search(r"\b(menu|go to menu|main menu|home)\b", text):
+            return "go_to_menu"
+        if re.search(r"\b(play|launch|start)\b", text):
+            return "play"
+        return ""
+
+    @staticmethod
+    def _normalize_systems(items) -> list[dict]:
+        out = []
+        for item in items or []:
+            if isinstance(item, dict):
+                system_id = _strip(item.get("id", ""))
+                if not system_id:
+                    continue
+                out.append({"id": system_id, "name": _strip(item.get("name", ""))})
+                continue
+            system_id = _strip(item)
+            if system_id:
+                out.append({"id": system_id, "name": system_id})
+        return out
+
+    @staticmethod
+    def _screenshot_marker(shot: dict | None) -> tuple[str, str]:
+        if not isinstance(shot, dict):
+            return ("", "")
+        return (_strip(shot.get("filename", "")), _strip(shot.get("modified", "")))
+
     # ---------------- HTTP helpers ----------------
     def _base(self):
-        st = redis_client.hgetall("plugin_settings:MiSTer Remote") or {}
-        host = _strip(st.get("MISTER_HOST", "http://10.4.20.167")).rstrip("/")
-        port = _strip(st.get("MISTER_PORT", "8182"))
-        return f"{host}:{port}/api"
+        st = self._settings()
+        host = self._normalize_host(st.get("MISTER_HOST", "http://10.4.20.167"))
+        port = self._normalize_port(st.get("MISTER_PORT", "8182"))
+        return f"{self._compose_root(host, port)}/api"
 
     def _root(self):
         # base WITHOUT /api (used to build absolute public URLs)
-        st = redis_client.hgetall("plugin_settings:MiSTer Remote") or {}
-        host = _strip(st.get("MISTER_HOST", "http://10.4.20.167")).rstrip("/")
-        port = _strip(st.get("MISTER_PORT", "8182"))
-        return f"{host}:{port}"
+        st = self._settings()
+        host = self._normalize_host(st.get("MISTER_HOST", "http://10.4.20.167"))
+        port = self._normalize_port(st.get("MISTER_PORT", "8182"))
+        return self._compose_root(host, port)
 
     def _get(self, path, timeout=8):
         r = requests.get(self._base() + path, timeout=timeout)
         r.raise_for_status()
-        ct = r.headers.get("Content-Type", "")
+        ct = (r.headers.get("Content-Type") or "").lower()
         return r.json() if "application/json" in ct or r.text[:1] in "{[" else r.text
 
     def _post(self, path, payload=None, timeout=12):
         url = self._base() + path
-        r = requests.post(url, data=json.dumps(payload) if payload is not None else None, timeout=timeout)
+        r = requests.post(url, json=payload if payload is not None else None, timeout=timeout)
         r.raise_for_status()
         try:
             return r.json()
@@ -131,10 +254,12 @@ class MisterRemotePlugin(ToolPlugin):
         key = "mister_remote:systems"
         cached = redis_client.get(key)
         if cached:
-            try: return json.loads(cached)
+            try:
+                return self._normalize_systems(json.loads(cached))
             except: pass
-        items = self._systems()
-        try: redis_client.setex(key, 600, json.dumps(items))
+        items = self._normalize_systems(self._systems())
+        try:
+            redis_client.setex(key, 600, json.dumps(items))
         except: pass
         return items
 

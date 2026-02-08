@@ -48,6 +48,8 @@ STABLE_PLATFORMS_DIR = BASE_DIR / "platforms"
 _SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
 _SAFE_DEP_RE = re.compile(r"^[A-Za-z0-9_.\\-\\[\\]==<>!~]+$")
 _AGENT_LAB_SHORTCUT_DIRS = {
+    "plugins",
+    "platforms",
     "documents",
     "downloads",
     "workspace",
@@ -76,6 +78,33 @@ WEB_SEARCH_TIMEOUT_SEC = int(os.getenv("TATER_WEB_SEARCH_TIMEOUT_SEC", "15"))
 WEB_SEARCH_MAX_RESULTS = int(os.getenv("TATER_WEB_SEARCH_MAX_RESULTS", "10"))
 WEB_SEARCH_MAX_RESPONSE_BYTES = int(os.getenv("TATER_WEB_SEARCH_MAX_RESPONSE_BYTES", "2000000"))
 WEB_SEARCH_MAX_SNIPPET_CHARS = int(os.getenv("TATER_WEB_SEARCH_MAX_SNIPPET_CHARS", "600"))
+
+MEMORY_HASH_PREFIX = "tater:memory"
+MEMORY_EXPLICIT_ONLY_REDIS_KEY = "tater:memory:explicit_only"
+MEMORY_DEFAULT_TTL_REDIS_KEY = "tater:memory:default_ttl_sec"
+MEMORY_MAX_LIST_LIMIT = int(os.getenv("TATER_MEMORY_MAX_LIST_LIMIT", "200"))
+MEMORY_MAX_VALUE_CHARS = int(os.getenv("TATER_MEMORY_MAX_VALUE_CHARS", "4000"))
+MEMORY_SEARCH_MAX_RESULTS = int(os.getenv("TATER_MEMORY_SEARCH_MAX_RESULTS", "50"))
+MEMORY_KEY_RE = re.compile(r"^[A-Za-z0-9_.:\-]{1,120}$")
+MEMORY_EXPLICIT_PHRASES = (
+    "remember",
+    "make that the default",
+    "set that as default",
+    "use this by default",
+    "always use",
+    "yes save that",
+    "save that",
+    "save this preference",
+    "store this preference",
+)
+MEMORY_VOLATILE_PREFIXES = (
+    "volatile.",
+    "temp.",
+    "last.",
+    "recent.",
+    "cache.",
+    "session.",
+)
 
 
 def _ensure_dirs() -> None:
@@ -121,6 +150,14 @@ def _resolve_safe_path(path: str, allowed_roots: List[Path]) -> Optional[Path]:
     elif normalized.startswith("/agent_lab/"):
         suffix = normalized[len("/agent_lab/") :]
         raw = str(AGENT_LAB_DIR / suffix)
+    elif normalized.startswith("/"):
+        # Treat absolute shortcut paths like /plugins/... or /documents/...
+        # as agent_lab-relative for Agent Mode ergonomics.
+        abs_rel = normalized[1:]
+        parts = abs_rel.split("/", 1)
+        head = parts[0] if parts else ""
+        if head in _AGENT_LAB_SHORTCUT_DIRS:
+            raw = str(AGENT_LAB_DIR / abs_rel)
     else:
         parts = normalized.split("/", 1)
         head = parts[0] if parts else ""
@@ -153,6 +190,22 @@ def _coerce_int(value: Any, default: int, min_value: int = 0, max_value: Optiona
     if max_value is not None and out > max_value:
         out = max_value
     return out
+
+
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in {"1", "true", "yes", "on"}:
+            return True
+        if v in {"0", "false", "no", "off"}:
+            return False
+    return bool(default)
 
 
 def _slice_content(text: str, start: Any = 0, max_chars: Any = None) -> Tuple[str, Dict[str, Any]]:
@@ -540,6 +593,7 @@ def search_web(
     query: str,
     *,
     num_results: int = 5,
+    start: int = 1,
     site: Optional[str] = None,
     safe: str = "active",
     country: Optional[str] = None,
@@ -563,6 +617,7 @@ def search_web(
         }
 
     max_results = _coerce_int(num_results, default=5, min_value=1, max_value=WEB_SEARCH_MAX_RESULTS)
+    start_index = _coerce_int(start, default=1, min_value=1, max_value=91)
     timeout_val = _coerce_int(timeout_sec, default=WEB_SEARCH_TIMEOUT_SEC, min_value=3, max_value=60)
     safe_mode = str(safe or "active").strip().lower()
     if safe_mode not in {"active", "off"}:
@@ -573,6 +628,7 @@ def search_web(
         "cx": cx,
         "q": q,
         "num": max_results,
+        "start": start_index,
         "safe": safe_mode,
     }
     site_val = str(site or "").strip()
@@ -648,14 +704,42 @@ def search_web(
     if isinstance(search_info, dict):
         search_time = search_info.get("searchTime")
 
+    next_start = None
+    total_results = None
+    queries_blob = payload.get("queries") if isinstance(payload, dict) else None
+    if isinstance(queries_blob, dict):
+        req_pages = queries_blob.get("request")
+        if isinstance(req_pages, list) and req_pages:
+            req0 = req_pages[0] if isinstance(req_pages[0], dict) else {}
+            raw_total = req0.get("totalResults")
+            if raw_total is not None:
+                try:
+                    total_results = int(str(raw_total))
+                except Exception:
+                    total_results = None
+        next_pages = queries_blob.get("nextPage")
+        if isinstance(next_pages, list) and next_pages:
+            np0 = next_pages[0] if isinstance(next_pages[0], dict) else {}
+            raw_next = np0.get("startIndex")
+            if raw_next is not None:
+                try:
+                    next_start = int(raw_next)
+                except Exception:
+                    next_start = None
+
     return {
         "tool": "search_web",
         "ok": True,
         "query": q,
+        "start": start_index,
         "count": len(results),
+        "num_results": max_results,
         "results": results,
         "site_filter": site_val or None,
         "search_time_sec": search_time,
+        "total_results": total_results,
+        "has_more": bool(next_start),
+        "next_start": next_start,
     }
 
 
@@ -1833,6 +1917,21 @@ def validate_plugin(name: str, auto_install: bool = True) -> Dict[str, Any]:
         usage_val = getattr(plugin, "usage", None)
         if not isinstance(usage_val, str) or not usage_val.strip():
             missing.append("usage")
+        declared_name = getattr(plugin, "name", None)
+        if not isinstance(declared_name, str) or not declared_name.strip():
+            missing.append("name")
+        else:
+            declared_name = declared_name.strip()
+            if not _SAFE_NAME_RE.fullmatch(declared_name):
+                missing.append("name")
+                warnings.append(
+                    "name must use only letters, numbers, underscore, or hyphen."
+                )
+            if declared_name != name:
+                missing.append("name")
+                warnings.append(
+                    f"name must match filename id '{name}' to load reliably in Agent Lab."
+                )
         explicit_wait_prompt = None
         try:
             if "waiting_prompt_template" in getattr(plugin, "__dict__", {}):
@@ -1884,11 +1983,168 @@ def validate_plugin(name: str, auto_install: bool = True) -> Dict[str, Any]:
         "warnings": warnings,
     }
     if ok:
-        report["plugin_name"] = getattr(plugin, "name", name)
+        report["plugin_name"] = getattr(plugin, "plugin_name", None) or getattr(plugin, "name", name)
         report["version"] = getattr(plugin, "version", "")
         report["platforms"] = getattr(plugin, "platforms", []) or []
     _store_validation("plugin", name, report)
     return report
+
+
+def test_plugin(name: str, platform: Optional[str] = None, auto_install: bool = False) -> Dict[str, Any]:
+    _ensure_dirs()
+    if not _SAFE_NAME_RE.fullmatch(name or ""):
+        return {"tool": "test_plugin", "ok": False, "error": "Invalid plugin name."}
+
+    agent_path = _exp_plugin_path(name)
+    stable_path = STABLE_PLUGINS_DIR / f"{name}.py"
+
+    source_kind = ""
+    path: Optional[Path] = None
+    validation: Optional[Dict[str, Any]] = None
+    if agent_path.exists():
+        source_kind = "agent_lab"
+        path = agent_path
+        validation = validate_plugin(name, auto_install=auto_install)
+        if not validation.get("ok"):
+            return {
+                "tool": "test_plugin",
+                "ok": False,
+                "name": name,
+                "source": source_kind,
+                "path": str(path),
+                "static_tested": True,
+                "live_tested": False,
+                "error": "Validation failed.",
+                "validation": validation,
+                "summary": "Static test failed: plugin validation did not pass.",
+            }
+    elif stable_path.exists():
+        source_kind = "stable"
+        path = stable_path
+    else:
+        return {"tool": "test_plugin", "ok": False, "error": "Plugin file not found."}
+
+    module = _import_from_path(path)
+    if not module:
+        return {
+            "tool": "test_plugin",
+            "ok": False,
+            "name": name,
+            "source": source_kind,
+            "path": str(path),
+            "static_tested": True,
+            "live_tested": False,
+            "error": "Import failed.",
+            "summary": "Static test failed: plugin import failed.",
+        }
+
+    plugin = getattr(module, "plugin", None)
+    if not isinstance(plugin, ToolPlugin):
+        return {
+            "tool": "test_plugin",
+            "ok": False,
+            "name": name,
+            "source": source_kind,
+            "path": str(path),
+            "static_tested": True,
+            "live_tested": False,
+            "error": "Missing module-level ToolPlugin instance `plugin`.",
+            "summary": "Static test failed: plugin instance is missing or invalid.",
+        }
+
+    try:
+        from plugin_kernel import expand_plugin_platforms
+
+        supported_platforms = expand_plugin_platforms(getattr(plugin, "platforms", []) or [])
+    except Exception:
+        supported_platforms = list(getattr(plugin, "platforms", []) or [])
+
+    requested_platform = str(platform or "").strip().lower()
+    if not requested_platform:
+        requested_platform = supported_platforms[0] if supported_platforms else ""
+
+    if not requested_platform:
+        return {
+            "tool": "test_plugin",
+            "ok": False,
+            "name": name,
+            "source": source_kind,
+            "path": str(path),
+            "static_tested": True,
+            "live_tested": False,
+            "error": "Plugin does not declare any supported platforms.",
+            "summary": "Static test failed: plugin has no supported platform handlers to test.",
+        }
+
+    handler_name = f"handle_{requested_platform}"
+    class_dict = getattr(plugin.__class__, "__dict__", {})
+    handler_obj = getattr(plugin, handler_name, None)
+    handler_present = bool(handler_name in class_dict and callable(handler_obj))
+
+    usage_raw = getattr(plugin, "usage", None)
+    usage_parse_ok = False
+    usage_function = None
+    usage_matches_name = False
+    usage_error = ""
+    if not isinstance(usage_raw, str) or not usage_raw.strip():
+        usage_error = "usage is missing or empty."
+    else:
+        try:
+            usage_obj = json.loads(usage_raw)
+            if not isinstance(usage_obj, dict):
+                usage_error = "usage must parse to a JSON object."
+            else:
+                usage_function = _as_text(usage_obj.get("function")).strip()
+                usage_args = usage_obj.get("arguments")
+                usage_parse_ok = bool(usage_function and isinstance(usage_args, dict))
+                usage_matches_name = usage_function == _as_text(getattr(plugin, "name", name)).strip()
+                if not usage_parse_ok:
+                    usage_error = "usage must include function and arguments object."
+                elif not usage_matches_name:
+                    usage_error = "usage.function must match plugin name."
+        except Exception as e:
+            usage_error = f"usage JSON parse failed: {e}"
+
+    errors: List[str] = []
+    if requested_platform not in supported_platforms:
+        errors.append(f"requested platform '{requested_platform}' is not in plugin platforms.")
+    if not handler_present:
+        errors.append(f"missing callable handler `{handler_name}`.")
+    if not usage_parse_ok or not usage_matches_name:
+        errors.append(usage_error or "usage metadata check failed.")
+
+    ok = not errors
+    summary = (
+        f"Static test passed for `{name}` on `{requested_platform}`. "
+        "Live platform execution was not run."
+        if ok
+        else f"Static test failed for `{name}` on `{requested_platform}`: " + "; ".join(errors)
+    )
+
+    return {
+        "tool": "test_plugin",
+        "ok": ok,
+        "name": name,
+        "source": source_kind,
+        "path": str(path),
+        "platform_tested": requested_platform,
+        "supported_platforms": supported_platforms,
+        "handler_name": handler_name,
+        "handler_present": handler_present,
+        "usage_parse_ok": usage_parse_ok,
+        "usage_function": usage_function,
+        "usage_matches_name": usage_matches_name,
+        "usage_error": usage_error,
+        "static_tested": True,
+        "live_tested": False,
+        "limitations": [
+            "This runs static readiness checks only (import/metadata/handler).",
+            "It does not execute the live platform event loop or send real platform messages.",
+        ],
+        "errors": errors,
+        "validation": validation,
+        "summary": summary,
+    }
 
 
 def create_plugin(
@@ -1897,11 +2153,23 @@ def create_plugin(
     *,
     code_b64: Optional[str] = None,
     code_lines: Optional[List[str]] = None,
+    overwrite: bool = False,
 ) -> Dict[str, Any]:
     _ensure_dirs()
     if not _SAFE_NAME_RE.fullmatch(name or ""):
         return {"tool": "create_plugin", "ok": False, "error": "Invalid plugin name."}
     path = _exp_plugin_path(name)
+    if path.exists() and not _coerce_bool(overwrite, default=False):
+        return {
+            "tool": "create_plugin",
+            "ok": False,
+            "error": f"Plugin '{name}' already exists.",
+            "error_code": "already_exists",
+            "name": name,
+            "path": str(path),
+            "overwrite_required": True,
+            "needs": [f"Plugin `{name}` already exists. Overwrite it? (yes/no)"],
+        }
     try:
         if code_b64:
             try:
@@ -2040,11 +2308,23 @@ def create_platform(
     *,
     code_b64: Optional[str] = None,
     code_lines: Optional[List[str]] = None,
+    overwrite: bool = False,
 ) -> Dict[str, Any]:
     _ensure_dirs()
     if not _SAFE_NAME_RE.fullmatch(name or ""):
         return {"tool": "create_platform", "ok": False, "error": "Invalid platform name."}
     path = _exp_platform_path(name)
+    if path.exists() and not _coerce_bool(overwrite, default=False):
+        return {
+            "tool": "create_platform",
+            "ok": False,
+            "error": f"Platform '{name}' already exists.",
+            "error_code": "already_exists",
+            "name": name,
+            "path": str(path),
+            "overwrite_required": True,
+            "needs": [f"Platform `{name}` already exists. Overwrite it? (yes/no)"],
+        }
     try:
         if code_b64:
             try:
@@ -2076,6 +2356,907 @@ def create_platform(
     report = validate_platform(name)
     report["tool"] = "create_platform"
     return report
+
+
+def _as_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            return value.decode("utf-8", errors="replace")
+        except Exception:
+            return str(value)
+    return str(value)
+
+
+def _origin_value(origin: Optional[Dict[str, Any]], *keys: str) -> str:
+    if not isinstance(origin, dict):
+        return ""
+    for key in keys:
+        val = origin.get(key)
+        if val in (None, ""):
+            continue
+        text = _as_text(val).strip()
+        if text:
+            return text
+    return ""
+
+
+def _normalize_key_segment(value: Any, *, default: str) -> str:
+    raw = _as_text(value).strip().lower()
+    if not raw:
+        raw = default
+    cleaned = re.sub(r"[^a-z0-9_.:\-]+", "_", raw).strip("_")
+    return cleaned or default
+
+
+def _memory_scope_target(
+    *,
+    scope: Optional[str],
+    user_id: Optional[str],
+    room_id: Optional[str],
+    platform: Optional[str],
+    origin: Optional[Dict[str, Any]],
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    scope_name = _as_text(scope or "global").strip().lower() or "global"
+    if scope_name not in {"global", "user", "room"}:
+        return None, "scope must be one of: global, user, room."
+
+    platform_name = _normalize_key_segment(
+        platform or _origin_value(origin, "platform"),
+        default="webui",
+    )
+    if scope_name == "global":
+        return {
+            "scope": "global",
+            "platform": None,
+            "user_id": None,
+            "room_id": None,
+            "redis_key": f"{MEMORY_HASH_PREFIX}:global",
+        }, None
+
+    if scope_name == "user":
+        uid_raw = _as_text(
+            user_id
+            or _origin_value(origin, "user_id", "user", "username", "sender")
+        ).strip()
+        if not uid_raw:
+            return None, "user_id is required for scope='user'."
+        uid = _normalize_key_segment(uid_raw, default="")
+        if not uid:
+            return None, "user_id is invalid."
+        return {
+            "scope": "user",
+            "platform": None,
+            "user_id": uid_raw,
+            "room_id": None,
+            "redis_key": f"{MEMORY_HASH_PREFIX}:user:{uid}",
+        }, None
+
+    room_raw = _as_text(
+        room_id
+        or _origin_value(origin, "room_id", "room", "channel_id", "channel", "chat_id", "scope")
+        or "chat"
+    ).strip()
+    room_name = _normalize_key_segment(room_raw, default="chat")
+    return {
+        "scope": "room",
+        "platform": platform_name,
+        "user_id": None,
+        "room_id": room_raw,
+        "redis_key": f"{MEMORY_HASH_PREFIX}:room:{platform_name}:{room_name}",
+    }, None
+
+
+def _memory_explicit_only_enabled() -> bool:
+    raw = redis_client.get(MEMORY_EXPLICIT_ONLY_REDIS_KEY)
+    if raw in (None, ""):
+        return True
+    return _coerce_bool(raw, default=True)
+
+
+def _memory_default_ttl() -> int:
+    raw = redis_client.get(MEMORY_DEFAULT_TTL_REDIS_KEY)
+    return _coerce_int(raw, default=0, min_value=0, max_value=31_536_000)
+
+
+def _memory_has_explicit_intent(text: Any) -> bool:
+    lowered = _as_text(text).strip().lower()
+    if not lowered:
+        return False
+    return any(phrase in lowered for phrase in MEMORY_EXPLICIT_PHRASES)
+
+
+def _json_safe(value: Any) -> Any:
+    try:
+        json.dumps(value, ensure_ascii=False)
+        return value
+    except Exception:
+        return _as_text(value)
+
+
+def _memory_parse_entry(raw: Any) -> Dict[str, Any]:
+    text = _as_text(raw)
+    if not text:
+        return {"value": "", "updated_at": 0.0, "expires_at": None, "source": ""}
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        parsed = None
+
+    if isinstance(parsed, dict) and "value" in parsed:
+        updated_at = parsed.get("updated_at")
+        expires_at = parsed.get("expires_at")
+        try:
+            updated_at_f = float(updated_at) if updated_at is not None else 0.0
+        except Exception:
+            updated_at_f = 0.0
+        try:
+            expires_at_f = float(expires_at) if expires_at is not None else None
+        except Exception:
+            expires_at_f = None
+        return {
+            "value": parsed.get("value"),
+            "updated_at": updated_at_f,
+            "expires_at": expires_at_f,
+            "source": _as_text(parsed.get("source") or "").strip(),
+        }
+
+    if parsed is not None:
+        return {"value": parsed, "updated_at": 0.0, "expires_at": None, "source": ""}
+
+    return {"value": text, "updated_at": 0.0, "expires_at": None, "source": ""}
+
+
+def _memory_load_scope(redis_key: str, *, prune_expired: bool = True) -> Dict[str, Dict[str, Any]]:
+    try:
+        raw_map = redis_client.hgetall(redis_key) or {}
+    except Exception:
+        raw_map = {}
+
+    now = time.time()
+    out: Dict[str, Dict[str, Any]] = {}
+    expired_fields: List[str] = []
+    for raw_key, raw_value in raw_map.items():
+        key = _as_text(raw_key).strip()
+        if not key:
+            continue
+        entry = _memory_parse_entry(raw_value)
+        expires_at = entry.get("expires_at")
+        if isinstance(expires_at, (int, float)) and expires_at > 0 and expires_at <= now:
+            expired_fields.append(key)
+            continue
+        out[key] = entry
+
+    if prune_expired and expired_fields:
+        try:
+            redis_client.hdel(redis_key, *expired_fields)
+        except Exception:
+            pass
+    return out
+
+
+def _memory_item(key: str, entry: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "key": key,
+        "value": entry.get("value"),
+        "updated_at": entry.get("updated_at"),
+        "expires_at": entry.get("expires_at"),
+        "source": entry.get("source") or "",
+    }
+
+
+def _normalize_keys(keys: Any) -> List[str]:
+    if isinstance(keys, str):
+        parts = [x.strip() for x in keys.split(",")]
+    elif isinstance(keys, list):
+        parts = [_as_text(x).strip() for x in keys]
+    else:
+        parts = []
+    out: List[str] = []
+    for key in parts:
+        if key and key not in out:
+            out.append(key)
+    return out
+
+
+def _memory_is_volatile_key(key: str) -> bool:
+    k = _as_text(key).strip().lower()
+    if not k:
+        return False
+    return any(k.startswith(prefix) for prefix in MEMORY_VOLATILE_PREFIXES)
+
+
+def _memory_query_tokens(query: str) -> List[str]:
+    tokens = re.findall(r"[a-z0-9]+", _as_text(query).lower())
+    out: List[str] = []
+    for token in tokens:
+        if len(token) < 2:
+            continue
+        if token not in out:
+            out.append(token)
+    return out
+
+
+def _value_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        return _as_text(value)
+
+
+def _score_memory_text(query: str, tokens: List[str], *, key: str, value_text: str, source: str) -> int:
+    if not tokens:
+        return 0
+    key_l = key.lower()
+    val_l = value_text.lower()
+    src_l = source.lower()
+    joined = f"{key_l}\n{val_l}\n{src_l}"
+    phrase = _as_text(query).strip().lower()
+
+    score = 0
+    if phrase and len(phrase) >= 3 and phrase in joined:
+        score += 6
+
+    for token in tokens:
+        if token in key_l:
+            score += 4
+        if token in val_l:
+            score += 3
+        if token in src_l:
+            score += 1
+    return score
+
+
+def _score_truth_text(query: str, tokens: List[str], *, plugin_id: str, truth_text: str) -> int:
+    if not tokens:
+        return 0
+    pid_l = plugin_id.lower()
+    truth_l = truth_text.lower()
+    joined = f"{pid_l}\n{truth_l}"
+    phrase = _as_text(query).strip().lower()
+
+    score = 0
+    if phrase and len(phrase) >= 3 and phrase in joined:
+        score += 5
+
+    for token in tokens:
+        if token in pid_l:
+            score += 4
+        if token in truth_l:
+            score += 2
+    return score
+
+
+def _memory_targets_for_search(
+    *,
+    scope: Optional[str],
+    user_id: Optional[str],
+    room_id: Optional[str],
+    platform: Optional[str],
+    origin: Optional[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    scope_name = _as_text(scope or "auto").strip().lower() or "auto"
+    if scope_name not in {"auto", "all", "global", "user", "room"}:
+        return [], "scope must be one of: auto, all, global, user, room."
+
+    candidates: List[Tuple[str, Optional[str], Optional[str], Optional[str]]] = []
+    if scope_name in {"auto", "all"}:
+        candidates.append(("global", None, None, None))
+        candidates.append(("user", user_id, None, None))
+        candidates.append(("room", None, room_id, platform))
+    elif scope_name == "global":
+        candidates.append(("global", None, None, None))
+    elif scope_name == "user":
+        candidates.append(("user", user_id, None, None))
+    elif scope_name == "room":
+        candidates.append(("room", None, room_id, platform))
+
+    targets: List[Dict[str, Any]] = []
+    seen = set()
+    for s_name, uid, rid, p_name in candidates:
+        target, err = _memory_scope_target(
+            scope=s_name,
+            user_id=uid,
+            room_id=rid,
+            platform=p_name,
+            origin=origin,
+        )
+        if err or not target:
+            # For auto/all we skip unavailable user/room scopes silently.
+            if scope_name in {"auto", "all"} and s_name in {"user", "room"}:
+                continue
+            return [], err or "Invalid memory target."
+        redis_key = target.get("redis_key")
+        if redis_key in seen:
+            continue
+        seen.add(redis_key)
+        targets.append(target)
+    return targets, None
+
+
+def memory_set(
+    entries: Dict[str, Any],
+    *,
+    scope: str = "global",
+    user_id: Optional[str] = None,
+    room_id: Optional[str] = None,
+    platform: Optional[str] = None,
+    ttl_sec: Optional[int] = None,
+    source: Optional[str] = None,
+    request_text: Optional[str] = None,
+    confirmed: bool = False,
+    origin: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    if not isinstance(entries, dict) or not entries:
+        return {"tool": "memory_set", "ok": False, "error": "entries must be a non-empty object."}
+
+    target, err = _memory_scope_target(
+        scope=scope,
+        user_id=user_id,
+        room_id=room_id,
+        platform=platform,
+        origin=origin,
+    )
+    if err or not target:
+        return {"tool": "memory_set", "ok": False, "error": err or "Invalid memory target."}
+
+    if _memory_explicit_only_enabled() and not _coerce_bool(confirmed, default=False):
+        if not _memory_has_explicit_intent(request_text):
+            return {
+                "tool": "memory_set",
+                "ok": False,
+                "error": "Memory write blocked until user explicitly asks to remember this.",
+                "needs": [
+                    "Ask the user to confirm memory write (for example: 'remember this' or 'make this the default')."
+                ],
+            }
+
+    default_ttl = _memory_default_ttl()
+    ttl = _coerce_int(ttl_sec if ttl_sec is not None else default_ttl, default=default_ttl, min_value=0, max_value=31_536_000)
+    now = time.time()
+    expires_at = now + ttl if ttl > 0 else None
+    source_text = _as_text(source or "agent").strip() or "agent"
+    ttl_applied: List[str] = []
+    ttl_skipped: List[str] = []
+
+    mapping: Dict[str, str] = {}
+    rejected: Dict[str, str] = {}
+    for raw_key, raw_value in entries.items():
+        key = _as_text(raw_key).strip()
+        if not MEMORY_KEY_RE.fullmatch(key):
+            rejected[key or "<empty>"] = "invalid key format"
+            continue
+        value = _json_safe(raw_value)
+        if isinstance(value, str) and len(value) > MEMORY_MAX_VALUE_CHARS:
+            rejected[key] = f"value too large (>{MEMORY_MAX_VALUE_CHARS} chars)"
+            continue
+        # TTL is intentionally limited to volatile keys (e.g., last.*, temp.*).
+        entry_expires_at = None
+        if expires_at is not None:
+            if _memory_is_volatile_key(key):
+                entry_expires_at = expires_at
+                ttl_applied.append(key)
+            else:
+                ttl_skipped.append(key)
+        payload = {
+            "value": value,
+            "updated_at": now,
+            "expires_at": entry_expires_at,
+            "source": source_text,
+        }
+        mapping[key] = json.dumps(payload, ensure_ascii=False)
+
+    if not mapping:
+        return {
+            "tool": "memory_set",
+            "ok": False,
+            "error": "No memory entries were accepted.",
+            "rejected": rejected,
+        }
+
+    try:
+        redis_client.hset(target["redis_key"], mapping=mapping)
+    except Exception as e:
+        return {"tool": "memory_set", "ok": False, "error": str(e)}
+
+    return {
+        "tool": "memory_set",
+        "ok": True,
+        "scope": target["scope"],
+        "platform": target.get("platform"),
+        "user_id": target.get("user_id"),
+        "room_id": target.get("room_id"),
+        "ttl_sec": ttl,
+        "ttl_applied": sorted(ttl_applied),
+        "ttl_skipped": sorted(ttl_skipped),
+        "written": sorted(mapping.keys()),
+        "rejected": rejected,
+        "count": len(mapping),
+    }
+
+
+def memory_get(
+    keys: Optional[Any] = None,
+    *,
+    prefix: Optional[str] = None,
+    scope: str = "global",
+    user_id: Optional[str] = None,
+    room_id: Optional[str] = None,
+    platform: Optional[str] = None,
+    limit: int = 50,
+    include_meta: bool = True,
+    origin: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    target, err = _memory_scope_target(
+        scope=scope,
+        user_id=user_id,
+        room_id=room_id,
+        platform=platform,
+        origin=origin,
+    )
+    if err or not target:
+        return {"tool": "memory_get", "ok": False, "error": err or "Invalid memory target."}
+
+    store = _memory_load_scope(target["redis_key"], prune_expired=True)
+    key_list = _normalize_keys(keys)
+    prefix_text = _as_text(prefix).strip()
+    max_items = _coerce_int(limit, default=50, min_value=1, max_value=MEMORY_MAX_LIST_LIMIT)
+
+    selected: List[str] = []
+    missing: List[str] = []
+    if key_list:
+        for key in key_list:
+            if key in store:
+                selected.append(key)
+            else:
+                missing.append(key)
+    else:
+        for key in sorted(store.keys()):
+            if prefix_text and not key.startswith(prefix_text):
+                continue
+            selected.append(key)
+            if len(selected) >= max_items:
+                break
+
+    values: Dict[str, Any] = {}
+    items: List[Dict[str, Any]] = []
+    for key in selected:
+        entry = store.get(key)
+        if not entry:
+            continue
+        values[key] = entry.get("value")
+        if include_meta:
+            items.append(_memory_item(key, entry))
+
+    payload: Dict[str, Any] = {
+        "tool": "memory_get",
+        "ok": True,
+        "scope": target["scope"],
+        "platform": target.get("platform"),
+        "user_id": target.get("user_id"),
+        "room_id": target.get("room_id"),
+        "values": values,
+        "count": len(values),
+        "missing": missing,
+    }
+    if include_meta:
+        payload["items"] = items
+    return payload
+
+
+def memory_list(
+    *,
+    prefix: Optional[str] = None,
+    scope: str = "global",
+    user_id: Optional[str] = None,
+    room_id: Optional[str] = None,
+    platform: Optional[str] = None,
+    limit: int = 50,
+    origin: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    target, err = _memory_scope_target(
+        scope=scope,
+        user_id=user_id,
+        room_id=room_id,
+        platform=platform,
+        origin=origin,
+    )
+    if err or not target:
+        return {"tool": "memory_list", "ok": False, "error": err or "Invalid memory target."}
+
+    store = _memory_load_scope(target["redis_key"], prune_expired=True)
+    prefix_text = _as_text(prefix).strip()
+    max_items = _coerce_int(limit, default=50, min_value=1, max_value=MEMORY_MAX_LIST_LIMIT)
+
+    filtered = [key for key in sorted(store.keys()) if (not prefix_text or key.startswith(prefix_text))]
+    items = [_memory_item(key, store[key]) for key in filtered[:max_items]]
+    return {
+        "tool": "memory_list",
+        "ok": True,
+        "scope": target["scope"],
+        "platform": target.get("platform"),
+        "user_id": target.get("user_id"),
+        "room_id": target.get("room_id"),
+        "prefix": prefix_text or None,
+        "count": len(items),
+        "total_count": len(filtered),
+        "has_more": len(filtered) > len(items),
+        "items": items,
+    }
+
+
+def memory_delete(
+    keys: Any,
+    *,
+    scope: str = "global",
+    user_id: Optional[str] = None,
+    room_id: Optional[str] = None,
+    platform: Optional[str] = None,
+    origin: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    target, err = _memory_scope_target(
+        scope=scope,
+        user_id=user_id,
+        room_id=room_id,
+        platform=platform,
+        origin=origin,
+    )
+    if err or not target:
+        return {"tool": "memory_delete", "ok": False, "error": err or "Invalid memory target."}
+
+    key_list = _normalize_keys(keys)
+    if not key_list:
+        return {"tool": "memory_delete", "ok": False, "error": "keys must be a non-empty list or comma-separated string."}
+
+    store = _memory_load_scope(target["redis_key"], prune_expired=True)
+    existing = [key for key in key_list if key in store]
+    missing = [key for key in key_list if key not in store]
+    deleted = 0
+    if existing:
+        try:
+            deleted = int(redis_client.hdel(target["redis_key"], *existing) or 0)
+        except Exception as e:
+            return {"tool": "memory_delete", "ok": False, "error": str(e)}
+
+    return {
+        "tool": "memory_delete",
+        "ok": True,
+        "scope": target["scope"],
+        "platform": target.get("platform"),
+        "user_id": target.get("user_id"),
+        "room_id": target.get("room_id"),
+        "deleted": deleted,
+        "missing": missing,
+    }
+
+
+def _scope_priority(scope_name: Any) -> int:
+    scope_text = _as_text(scope_name).strip().lower()
+    if scope_text == "room":
+        return 3
+    if scope_text == "user":
+        return 2
+    if scope_text == "global":
+        return 1
+    return 0
+
+
+def memory_explain(
+    key: str,
+    *,
+    scope: str = "auto",
+    user_id: Optional[str] = None,
+    room_id: Optional[str] = None,
+    platform: Optional[str] = None,
+    origin: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    mem_key = _as_text(key).strip()
+    if not mem_key:
+        return {"tool": "memory_explain", "ok": False, "error": "key is required."}
+
+    targets, err = _memory_targets_for_search(
+        scope=scope,
+        user_id=user_id,
+        room_id=room_id,
+        platform=platform,
+        origin=origin,
+    )
+    if err:
+        return {"tool": "memory_explain", "ok": False, "error": err}
+
+    entries: List[Dict[str, Any]] = []
+    for target in targets:
+        store = _memory_load_scope(target["redis_key"], prune_expired=True)
+        entry = store.get(mem_key)
+        if not entry:
+            continue
+        entries.append(
+            {
+                "scope": target.get("scope"),
+                "platform": target.get("platform"),
+                "user_id": target.get("user_id"),
+                "room_id": target.get("room_id"),
+                "key": mem_key,
+                "value": entry.get("value"),
+                "source": entry.get("source") or "",
+                "updated_at": entry.get("updated_at"),
+                "expires_at": entry.get("expires_at"),
+            }
+        )
+
+    if not entries:
+        return {
+            "tool": "memory_explain",
+            "ok": False,
+            "key": mem_key,
+            "scope": _as_text(scope or "auto").strip().lower() or "auto",
+            "error": "No memory entry found for key in the selected scope(s).",
+        }
+
+    entries.sort(
+        key=lambda item: (
+            -_scope_priority(item.get("scope")),
+            -float(item.get("updated_at") or 0.0),
+        )
+    )
+    active = entries[0]
+    value_fingerprint = {json.dumps(_json_safe(item.get("value")), ensure_ascii=False, sort_keys=True) for item in entries}
+    has_conflict = len(value_fingerprint) > 1
+
+    explanation_parts = [
+        "Highest-precedence scope wins (room > user > global).",
+        f"Active value comes from {active.get('scope')} scope.",
+    ]
+    if has_conflict:
+        explanation_parts.append("Conflicting values exist across scopes for this key.")
+    else:
+        explanation_parts.append("No conflicts detected across matching scopes.")
+    if active.get("expires_at"):
+        explanation_parts.append("Active value is volatile (has TTL).")
+    else:
+        explanation_parts.append("Active value has no TTL.")
+
+    return {
+        "tool": "memory_explain",
+        "ok": True,
+        "key": mem_key,
+        "scope": _as_text(scope or "auto").strip().lower() or "auto",
+        "active": active,
+        "entries": entries,
+        "has_conflict": has_conflict,
+        "explanation": " ".join(explanation_parts),
+    }
+
+
+def memory_search(
+    query: str,
+    *,
+    scope: str = "auto",
+    user_id: Optional[str] = None,
+    room_id: Optional[str] = None,
+    platform: Optional[str] = None,
+    include_truth: bool = True,
+    limit: int = 8,
+    min_score: int = 1,
+    origin: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    q = _as_text(query).strip()
+    if not q:
+        return {"tool": "memory_search", "ok": False, "error": "query is required."}
+    tokens = _memory_query_tokens(q)
+    if not tokens:
+        return {"tool": "memory_search", "ok": False, "error": "query must include searchable text."}
+
+    max_items = _coerce_int(limit, default=8, min_value=1, max_value=MEMORY_SEARCH_MAX_RESULTS)
+    min_score_i = _coerce_int(min_score, default=1, min_value=1, max_value=1000)
+    include_truth_b = _coerce_bool(include_truth, default=True)
+    targets, err = _memory_targets_for_search(
+        scope=scope,
+        user_id=user_id,
+        room_id=room_id,
+        platform=platform,
+        origin=origin,
+    )
+    if err:
+        return {"tool": "memory_search", "ok": False, "error": err}
+
+    hits: List[Dict[str, Any]] = []
+    for target in targets:
+        store = _memory_load_scope(target["redis_key"], prune_expired=True)
+        for key, entry in store.items():
+            value_text = _value_text(entry.get("value"))
+            source_text = _as_text(entry.get("source") or "").strip()
+            score = _score_memory_text(q, tokens, key=key, value_text=value_text, source=source_text)
+            if score < min_score_i:
+                continue
+            hits.append(
+                {
+                    "kind": "memory",
+                    "scope": target.get("scope"),
+                    "platform": target.get("platform"),
+                    "user_id": target.get("user_id"),
+                    "room_id": target.get("room_id"),
+                    "key": key,
+                    "value": entry.get("value"),
+                    "source": source_text,
+                    "updated_at": entry.get("updated_at"),
+                    "expires_at": entry.get("expires_at"),
+                    "score": score,
+                }
+            )
+
+    truth_scanned = 0
+    if include_truth_b:
+        truth_target = _truth_target(platform=platform, scope=room_id, origin=origin)
+        rows = redis_client.lrange(truth_target["list_key"], -300, -1) or []
+        truth_scanned = len(rows)
+        for raw in reversed(rows):
+            entry = _truth_entry(raw)
+            if not entry:
+                continue
+            plugin_id_text = _as_text(entry.get("plugin_id") or "").strip()
+            truth_text = _value_text(entry.get("truth"))
+            score = _score_truth_text(q, tokens, plugin_id=plugin_id_text, truth_text=truth_text)
+            if score < min_score_i:
+                continue
+            hits.append(
+                {
+                    "kind": "truth",
+                    "scope": entry.get("scope"),
+                    "platform": entry.get("platform"),
+                    "plugin_id": plugin_id_text,
+                    "ts": entry.get("ts"),
+                    "truth": entry.get("truth"),
+                    "score": score,
+                }
+            )
+
+    hits.sort(
+        key=lambda item: (
+            -_coerce_int(item.get("score"), 0, min_value=0),
+            -float(item.get("updated_at") or item.get("ts") or 0.0),
+            _as_text(item.get("key") or item.get("plugin_id") or ""),
+        )
+    )
+    trimmed = hits[:max_items]
+    return {
+        "tool": "memory_search",
+        "ok": True,
+        "query": q,
+        "scope": _as_text(scope or "auto").strip().lower() or "auto",
+        "include_truth": include_truth_b,
+        "count": len(trimmed),
+        "total_matches": len(hits),
+        "has_more": len(hits) > len(trimmed),
+        "memory_scopes": [t.get("scope") for t in targets],
+        "truth_scanned": truth_scanned,
+        "results": trimmed,
+    }
+
+
+def _truth_target(
+    *,
+    platform: Optional[str],
+    scope: Optional[str],
+    origin: Optional[Dict[str, Any]],
+) -> Dict[str, str]:
+    platform_name = _as_text(platform or _origin_value(origin, "platform") or "webui").strip().lower() or "webui"
+    scope_name = _as_text(
+        scope or _origin_value(origin, "scope", "channel_id", "channel", "room_id", "room", "chat_id") or "chat"
+    ).strip() or "chat"
+    return {
+        "platform": platform_name,
+        "scope": scope_name,
+        "list_key": f"tater:truth:{platform_name}:{scope_name}",
+        "latest_key": f"tater:truth:last:{platform_name}:{scope_name}",
+    }
+
+
+def _truth_entry(raw: Any) -> Optional[Dict[str, Any]]:
+    text = _as_text(raw)
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return {
+        "ts": parsed.get("ts"),
+        "platform": parsed.get("platform"),
+        "scope": parsed.get("scope"),
+        "plugin_id": parsed.get("plugin_id"),
+        "truth": parsed.get("truth"),
+    }
+
+
+def truth_get_last(
+    *,
+    platform: Optional[str] = None,
+    scope: Optional[str] = None,
+    plugin_id: Optional[str] = None,
+    scan_limit: int = 200,
+    origin: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    target = _truth_target(platform=platform, scope=scope, origin=origin)
+    plugin_filter = _as_text(plugin_id).strip()
+    max_scan = _coerce_int(scan_limit, default=200, min_value=1, max_value=1000)
+
+    latest = _truth_entry(redis_client.get(target["latest_key"]))
+    if latest and (not plugin_filter or _as_text(latest.get("plugin_id")) == plugin_filter):
+        return {
+            "tool": "truth_get_last",
+            "ok": True,
+            "platform": target["platform"],
+            "scope": target["scope"],
+            "entry": latest,
+        }
+
+    rows = redis_client.lrange(target["list_key"], -max_scan, -1) or []
+    for raw in reversed(rows):
+        entry = _truth_entry(raw)
+        if not entry:
+            continue
+        if plugin_filter and _as_text(entry.get("plugin_id")) != plugin_filter:
+            continue
+        return {
+            "tool": "truth_get_last",
+            "ok": True,
+            "platform": target["platform"],
+            "scope": target["scope"],
+            "entry": entry,
+        }
+
+    return {
+        "tool": "truth_get_last",
+        "ok": False,
+        "platform": target["platform"],
+        "scope": target["scope"],
+        "error": "No matching truth snapshot found.",
+    }
+
+
+def truth_list(
+    *,
+    platform: Optional[str] = None,
+    scope: Optional[str] = None,
+    plugin_id: Optional[str] = None,
+    limit: int = 10,
+    origin: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    target = _truth_target(platform=platform, scope=scope, origin=origin)
+    plugin_filter = _as_text(plugin_id).strip()
+    max_items = _coerce_int(limit, default=10, min_value=1, max_value=100)
+    scan = min(1000, max(max_items * 6, max_items))
+
+    rows = redis_client.lrange(target["list_key"], -scan, -1) or []
+    items: List[Dict[str, Any]] = []
+    total_matches = 0
+    for raw in reversed(rows):
+        entry = _truth_entry(raw)
+        if not entry:
+            continue
+        if plugin_filter and _as_text(entry.get("plugin_id")) != plugin_filter:
+            continue
+        total_matches += 1
+        if len(items) < max_items:
+            items.append(entry)
+
+    return {
+        "tool": "truth_list",
+        "ok": True,
+        "platform": target["platform"],
+        "scope": target["scope"],
+        "plugin_id": plugin_filter or None,
+        "count": len(items),
+        "total_count": total_matches,
+        "has_more": total_matches > len(items),
+        "entries": items,
+    }
 
 
 def write_workspace_note(content: str) -> Dict[str, Any]:
