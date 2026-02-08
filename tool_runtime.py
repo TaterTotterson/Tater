@@ -12,6 +12,7 @@ from plugin_kernel import (
 )
 from kernel_tools import (
     read_file,
+    search_web,
     search_files,
     write_file,
     list_directory,
@@ -38,6 +39,7 @@ META_TOOLS = {
     "get_plugin_help",
     "list_platforms_for_plugin",
     "read_file",
+    "search_web",
     "search_files",
     "write_file",
     "list_directory",
@@ -102,6 +104,16 @@ def run_meta_tool(
             str(args.get("path") or ""),
             start=args.get("start", 0),
             max_chars=args.get("max_chars"),
+        )
+    if func == "search_web":
+        return search_web(
+            str(args.get("query") or ""),
+            num_results=int(args.get("num_results") or args.get("max_results") or 5),
+            site=args.get("site") or args.get("domain"),
+            safe=str(args.get("safe") or "active"),
+            country=args.get("country"),
+            language=args.get("language"),
+            timeout_sec=int(args.get("timeout_sec") or 15),
         )
     if func == "search_files":
         raw_case = args.get("case_sensitive", False)
