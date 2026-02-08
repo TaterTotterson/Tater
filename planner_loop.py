@@ -159,6 +159,12 @@ AGENT_UNKNOWN_TOOL_REPAIR_PROMPT = (
 AGENT_UNKNOWN_TOOL_FAILURE_TEXT = "I don't have that tool available. Please rephrase or choose another tool."
 CREATION_MAX_REPROMPTS = 4
 
+TOOL_NAME_ALIASES = {
+    "web_search": "search_web",
+    "google_search": "search_web",
+    "google_cse_search": "search_web",
+}
+
 PLUGIN_REQUIREMENTS_HINT = (
     "Plugin must subclass ToolPlugin imported from plugin_base and assign an instance to module-level `plugin` (not a dict). "
     "Required attributes: name, plugin_name, version, description, platforms, usage (string). "
@@ -395,6 +401,7 @@ def _agent_system_instructions(max_rounds: int, max_tool_calls: int) -> str:
         "create_plugin, validate_plugin, "
         "create_platform, validate_platform, write_workspace_note, list_workspace.\n"
         "For external/current facts, API docs, or library references, call search_web first and then read_url if deeper content is needed.\n"
+        "For broad current-events questions (for example: 'what's going on in the world'), call search_web before answering.\n"
         "read_file supports plain text and structured extraction for .pdf, .docx, .xlsx/.xlsm, .csv/.tsv, and .pptx files.\n"
         "For large files, call read_file with `start` and `max_chars` to page through content.\n"
         "Archive helpers support zip/tar plus 7z/rar when dependencies are installed.\n"
@@ -436,6 +443,63 @@ def _has_phrase(text: str, phrase: str) -> bool:
     if " " in needle or "_" in needle:
         return needle in text
     return re.search(rf"\b{re.escape(needle)}\b", text) is not None
+
+
+def _canonical_tool_name(name: str) -> str:
+    key = str(name or "").strip()
+    if not key:
+        return ""
+    return TOOL_NAME_ALIASES.get(key, key)
+
+
+def _should_try_search_fallback(user_text: str, func: str, needs_creation: bool) -> bool:
+    if needs_creation:
+        return False
+    text = str(user_text or "").strip().lower()
+    if not text:
+        return False
+
+    action_markers = (
+        "turn on",
+        "turn off",
+        "set ",
+        "start ",
+        "stop ",
+        "run ",
+        "open ",
+        "close ",
+        "unlock ",
+        "lock ",
+    )
+    if any(marker in text for marker in action_markers):
+        return False
+
+    info_markers = (
+        "latest",
+        "news",
+        "what's going on",
+        "whats going on",
+        "happening",
+        "update",
+        "current",
+        "world",
+        "what ",
+        "when ",
+        "where ",
+        "who ",
+        "why ",
+        "how ",
+        "tell me",
+        "explain",
+        "summarize",
+    )
+    if any(marker in text for marker in info_markers):
+        return True
+
+    f = str(func or "").strip().lower()
+    if any(marker in f for marker in ("news", "search", "lookup", "browse")):
+        return True
+    return False
 
 
 def _as_bool(value: Any, default: bool = False) -> bool:
@@ -920,6 +984,7 @@ async def run_planner_loop(
     missing_args_fix_used = 0
     creation_fix_used = 0
     unknown_tool_fix_used = False
+    unknown_tool_search_fallback_used = False
     created_snapshot = _creation_state(state)
     creation_followup_issued = bool(state.get("creation_followup_issued"))
     creation_precheck_done = bool(state.get("creation_precheck_done"))
@@ -965,7 +1030,7 @@ async def run_planner_loop(
         state["rounds_used"] = rounds_used
 
         if forced_call:
-            func = str(forced_call.get("function") or "").strip()
+            func = _canonical_tool_name(str(forced_call.get("function") or "").strip())
             args = forced_call.get("arguments", {}) or {}
             forced_call = None
         else:
@@ -1043,7 +1108,7 @@ async def run_planner_loop(
                     "artifacts": artifacts_out,
                 }
 
-            func = str(parsed.get("function") or "").strip()
+            func = _canonical_tool_name(str(parsed.get("function") or "").strip())
             args = parsed.get("arguments", {}) or {}
 
         if not func:
@@ -1060,6 +1125,30 @@ async def run_planner_loop(
                     )
                 messages.append({"role": "system", "content": prompt})
                 unknown_tool_fix_used = True
+                continue
+            if not unknown_tool_search_fallback_used and _should_try_search_fallback(user_text or "", func, needs_creation):
+                fallback_query = str(
+                    (args or {}).get("query")
+                    or (args or {}).get("q")
+                    or (args or {}).get("topic")
+                    or (user_text or "")
+                ).strip()
+                if not fallback_query:
+                    fallback_query = user_text or "latest world news"
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "Unknown tool detected. Use search_web with the user's request to gather sources, "
+                            "then answer based on those results."
+                        ),
+                    }
+                )
+                forced_call = {
+                    "function": "search_web",
+                    "arguments": {"query": fallback_query, "num_results": 5},
+                }
+                unknown_tool_search_fallback_used = True
                 continue
             state["status"] = "done"
             _update_progress_summary(state, f"Unknown tool: {func}")
