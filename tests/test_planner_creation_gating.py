@@ -7,8 +7,10 @@ from planner_loop import (
     AGENT_CREATION_PLATFORM_REPAIR_PROMPT,
     AGENT_CREATION_PLUGIN_REPAIR_PROMPT,
     AGENT_CREATION_SHARED_REPAIR_PROMPT,
+    _agent_system_instructions,
     _autofill_delivery_args,
     _canonical_tool_name,
+    _enabled_tool_mini_index,
     _creation_advanced_reference_paths,
     _creation_explicit_only,
     _creation_repair_prompt_for_intent,
@@ -52,6 +54,24 @@ class PlannerCreationGatingTests(unittest.TestCase):
         self.assertEqual(_canonical_tool_name("web_search"), "search_web")
         self.assertEqual(_canonical_tool_name("google_search"), "search_web")
         self.assertEqual(_canonical_tool_name("search_web"), "search_web")
+
+    def test_agent_system_instructions_prefer_kernel_tools(self):
+        text = _agent_system_instructions(6, 8)
+        self.assertIn("Prefer kernel tools first", text)
+        self.assertIn("Use plugin tools for platform/service actions", text)
+
+    def test_enabled_tool_mini_index_includes_kernel_tools_section(self):
+        text = _enabled_tool_mini_index(
+            platform="discord",
+            registry={},
+            enabled_predicate=None,
+        )
+        self.assertIn("Kernel tools (prefer first for generic tasks):", text)
+        self.assertIn("- search_web", text)
+        self.assertIn("- read_url", text)
+        self.assertIn("- write_file", text)
+        self.assertIn("- truth_list", text)
+        self.assertIn("Enabled plugin tools on this platform:", text)
 
     def test_explicit_plugin_request_is_create(self):
         result = _creation_request_analysis("create a plugin that posts weather updates")
@@ -291,7 +311,7 @@ class PlannerCreationGatingTests(unittest.TestCase):
                 if self.calls == 1:
                     return {
                         "message": {
-                            "content": "{\"function\":\"list_plugins\",\"arguments\":{\"platform\":\"webui\"}}"
+                            "content": "{\"function\":\"get_plugin_help\",\"arguments\":{\"plugin_id\":\"missing_plugin\"}}"
                         }
                     }
                 return {"message": {"content": "Done"}}
@@ -317,7 +337,7 @@ class PlannerCreationGatingTests(unittest.TestCase):
 
         result = asyncio.run(_run())
         self.assertEqual(result.get("status"), "done")
-        self.assertIn(("list_plugins", True), events)
+        self.assertIn(("get_plugin_help", True), events)
 
 
 if __name__ == "__main__":

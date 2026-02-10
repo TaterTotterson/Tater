@@ -11,7 +11,7 @@ from helpers import (
     TOOL_MARKUP_FAILURE_TEXT,
 )
 from plugin_result import narrate_result, redis_truth_payload
-from tool_runtime import execute_plugin_call, is_meta_tool, run_meta_tool
+from tool_runtime import META_TOOLS, execute_plugin_call, is_meta_tool, run_meta_tool
 from plugin_kernel import plugin_supports_platform, plugin_when_to_use
 
 TOOL_NAME_ALIASES = {
@@ -22,6 +22,57 @@ TOOL_NAME_ALIASES = {
     "describe_latest_image": "vision_describer",
     "vision_describe": "vision_describer",
     "vision_describe_image": "vision_describer",
+}
+
+_KERNEL_TOOL_PRIORITY = [
+    "search_web",
+    "read_url",
+    "download_file",
+    "read_file",
+    "search_files",
+    "list_directory",
+    "list_archive",
+    "extract_archive",
+    "memory_get",
+    "memory_set",
+    "memory_search",
+    "list_workspace",
+    "vision_describer",
+    "get_plugin_help",
+]
+
+_KERNEL_TOOL_PURPOSE_HINTS = {
+    "get_plugin_help": "show plugin schema and required args",
+    "list_platforms_for_plugin": "list platforms supported by a plugin",
+    "read_file": "read local file contents",
+    "search_web": "web search for current information",
+    "search_files": "search text across local files",
+    "write_file": "write content to a local file",
+    "list_directory": "list files and folders",
+    "delete_file": "delete a local file",
+    "read_url": "fetch and read webpage text",
+    "download_file": "download files from URLs",
+    "list_archive": "inspect archive entries",
+    "extract_archive": "extract archives to workspace",
+    "list_stable_plugins": "list stable built-in plugins",
+    "list_stable_platforms": "list stable built-in platforms",
+    "inspect_plugin": "inspect plugin metadata and methods",
+    "validate_plugin": "validate an Agent Lab plugin file",
+    "test_plugin": "run plugin test harness",
+    "validate_platform": "validate an Agent Lab platform file",
+    "create_plugin": "create/update an Agent Lab plugin",
+    "create_platform": "create/update an Agent Lab platform",
+    "write_workspace_note": "append a workspace note",
+    "list_workspace": "list workspace notes",
+    "memory_get": "read saved memory",
+    "memory_set": "save memory entries",
+    "memory_list": "list saved memory keys",
+    "memory_delete": "delete saved memory keys",
+    "memory_explain": "explain memory value/source",
+    "memory_search": "search saved memory",
+    "truth_get_last": "get latest truth snapshot",
+    "truth_list": "list truth snapshots",
+    "vision_describer": "describe an image from explicit source",
 }
 
 
@@ -44,28 +95,49 @@ def _tool_purpose(plugin: Any) -> str:
     return text
 
 
+def _kernel_tool_purpose(tool_id: str) -> str:
+    text = _KERNEL_TOOL_PURPOSE_HINTS.get(str(tool_id or "").strip(), "")
+    if text:
+        return text
+    fallback = str(tool_id or "").strip().replace("_", " ")
+    return fallback or "kernel tool"
+
+
+def _ordered_kernel_tool_ids() -> List[str]:
+    preferred = [tool_id for tool_id in _KERNEL_TOOL_PRIORITY if tool_id in META_TOOLS]
+    preferred_set = set(preferred)
+    remainder = sorted(tool_id for tool_id in META_TOOLS if tool_id not in preferred_set)
+    return preferred + remainder
+
+
 def _enabled_tool_index(
     *,
     platform: str,
     registry: Dict[str, Any],
     enabled_predicate: Optional[Callable[[str], bool]],
 ) -> str:
+    kernel_rows: List[str] = []
+    for tool_id in _ordered_kernel_tool_ids():
+        kernel_rows.append(f"- {tool_id} — {_kernel_tool_purpose(tool_id)}")
+    if not kernel_rows:
+        kernel_rows.append("- (none)")
+
     enabled_check = enabled_predicate or (lambda _name: True)
-    rows: List[str] = []
+    plugin_rows: List[str] = []
     for plugin_id, plugin in sorted(registry.items(), key=lambda kv: str(kv[0]).lower()):
         if not enabled_check(plugin_id):
             continue
         if not plugin_supports_platform(plugin, platform):
             continue
-        rows.append(f"- {plugin_id} — {_tool_purpose(plugin)}")
-    if not rows:
-        rows.append("- (none)")
+        plugin_rows.append(f"- {plugin_id} — {_tool_purpose(plugin)}")
+    if not plugin_rows:
+        plugin_rows.append("- (none)")
+
     return (
-        "Enabled tools on this platform:\n"
-        + "\n".join(rows)
-        + "\nMeta tools:\n"
-        + "- get_plugin_help(plugin_id)\n"
-        + "- vision_describer(prompt?, path?|url?|blob_key?|file_id?)"
+        "Kernel tools (prefer first for generic tasks):\n"
+        + "\n".join(kernel_rows)
+        + "\nEnabled plugin tools on this platform:\n"
+        + "\n".join(plugin_rows)
     )
 
 
@@ -76,12 +148,15 @@ def _upsert_tool_index_message(
     registry: Dict[str, Any],
     enabled_predicate: Optional[Callable[[str], bool]],
 ) -> None:
-    prefix = "Enabled tools on this platform:"
+    prefixes = (
+        "Enabled tools on this platform:",
+        "Kernel tools (prefer first for generic tasks):",
+    )
     for i in range(len(messages) - 1, -1, -1):
         m = messages[i]
         if m.get("role") != "system":
             continue
-        if str(m.get("content") or "").startswith(prefix):
+        if str(m.get("content") or "").startswith(prefixes):
             messages.pop(i)
     messages.append(
         {
@@ -109,7 +184,10 @@ def build_compact_system_prompt(platform: str, extra_instructions: str = "") -> 
 
     core_rules = (
         f"Current platform: {platform}.\n"
-        "Use only tool ids from the enabled tool index message.\n"
+        "Use only tool ids from the tool index message.\n"
+        "Prefer kernel tools first for generic tasks (web/file/download/search/memory/workspace).\n"
+        "Use plugin tools for platform/service actions (devices, messaging, media/service APIs).\n"
+        "If both can solve the request, choose the kernel tool.\n"
         "If a tool matches user intent, call it directly.\n"
         "If args are unclear, call get_plugin_help(plugin_id) once.\n"
         "Tool call format must be strict JSON only:\n"

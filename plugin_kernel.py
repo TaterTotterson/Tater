@@ -1,6 +1,6 @@
 import json
 import re
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 KNOWN_PLATFORMS: Tuple[str, ...] = (
@@ -242,47 +242,6 @@ def plugin_arguments_help(plugin: Any) -> Dict[str, List[Dict[str, str]]]:
             req_items.append(item)
 
     return {"required": req_items, "optional": opt_items}
-
-
-def list_plugins_metadata(
-    *,
-    platform: str,
-    include_incompatible: bool,
-    registry: Dict[str, Any],
-    enabled_predicate: Optional[Callable[[str], bool]] = None,
-) -> Dict[str, Any]:
-    p = normalize_platform(platform)
-    if not p:
-        p = "webui"
-
-    enabled_check = enabled_predicate or (lambda _name: True)
-    items: List[Dict[str, Any]] = []
-
-    for plugin_id, plugin in sorted(registry.items(), key=lambda kv: kv[0].lower()):
-        if not enabled_check(plugin_id):
-            continue
-        platforms = expand_plugin_platforms(getattr(plugin, "platforms", []) or [])
-        compatible = p in platforms
-        if not include_incompatible and not compatible:
-            continue
-        items.append(
-            {
-                "id": plugin_id,
-                "name": plugin_display_name(plugin),
-                "when_to_use": plugin_when_to_use(plugin),
-                "needs": infer_needs_from_plugin(plugin),
-                "platforms": platforms,
-                "compatible": compatible,
-            }
-        )
-
-    return {
-        "tool": "list_plugins",
-        "platform": p,
-        "include_incompatible": bool(include_incompatible),
-        "plugins": items,
-        "count": len(items),
-    }
 
 
 def get_plugin_help(

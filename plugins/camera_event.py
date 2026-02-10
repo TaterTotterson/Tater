@@ -36,7 +36,7 @@ class CameraEventPlugin(ToolPlugin):
 
     name = "camera_event"
     plugin_name = "Camera Event"
-    version = "1.1.0"
+    version = "1.2.0"
     min_tater_version = "50"
     description = (
         "Capture a Home Assistant camera snapshot, describe it with vision AI, log the event, "
@@ -45,7 +45,7 @@ class CameraEventPlugin(ToolPlugin):
     plugin_dec = (
         "Capture a camera snapshot, describe it, store an event, and optionally notify via Home Assistant Notifier."
     )
-    usage = '{"function":"camera_event","arguments":{"area":"front yard | back yard | garage | ...","camera":"camera.front_door_high","query":"optional hint for the vision model","title":"optional notification title override","priority":"critical|high|normal|low","cooldown_seconds":30,"ignore_vehicles":false,"send_phone_alerts":false,"persistent_notifications":false,"api_notification":true}}'
+    usage = '{"function":"camera_event","arguments":{"area":"front yard | back yard | garage | ...","camera":"camera.front_door_high","query":"optional hint for the vision model","title":"optional notification title override","priority":"critical|high|normal|low","cooldown_seconds":30,"notification_cooldown_seconds":0,"ignore_vehicles":false,"send_phone_alerts":false,"persistent_notifications":false,"api_notification":true}}'
 
     platforms = ["automation"]
     settings_category = "Camera Event"
@@ -111,6 +111,12 @@ class CameraEventPlugin(ToolPlugin):
             "default": "high",
             "options": ["critical", "high", "normal", "low"],
             "description": "critical/high map to high; normal/low map to normal for notifier delivery.",
+        },
+        "NOTIFICATION_COOLDOWN_SECONDS": {
+            "label": "Notification cooldown (seconds)",
+            "type": "number",
+            "default": 0,
+            "description": "Minimum seconds between Home Assistant notifier sends for the same camera. 0 disables this cooldown.",
         },
         "MOBILE_NOTIFY_SERVICE": {
             "label": "Phone notifier #1 (optional)",
@@ -280,9 +286,21 @@ class CameraEventPlugin(ToolPlugin):
     def _cooldown_key(self, camera_entity: str) -> str:
         return f"tater:camera_event:last_ts:{camera_entity}"
 
+    def _notification_cooldown_key(self, camera_entity: str) -> str:
+        return f"tater:camera_event:last_notify_ts:{camera_entity}"
+
     def _within_cooldown(self, camera_entity: str, cooldown_seconds: int) -> bool:
         try:
             last = redis_client.get(self._cooldown_key(camera_entity))
+            if not last:
+                return False
+            return (int(time.time()) - int(last)) < max(0, int(cooldown_seconds))
+        except Exception:
+            return False
+
+    def _within_notification_cooldown(self, camera_entity: str, cooldown_seconds: int) -> bool:
+        try:
+            last = redis_client.get(self._notification_cooldown_key(camera_entity))
             if not last:
                 return False
             return (int(time.time()) - int(last)) < max(0, int(cooldown_seconds))
@@ -294,6 +312,12 @@ class CameraEventPlugin(ToolPlugin):
             redis_client.set(self._cooldown_key(camera_entity), str(int(time.time())))
         except Exception:
             logger.warning("[camera_event] failed to set cooldown key for %s", camera_entity)
+
+    def _mark_notification_fired(self, camera_entity: str) -> None:
+        try:
+            redis_client.set(self._notification_cooldown_key(camera_entity), str(int(time.time())))
+        except Exception:
+            logger.warning("[camera_event] failed to set notification cooldown key for %s", camera_entity)
 
     def _get_camera_jpeg(self, ha_base: str, token: str, camera_entity: str) -> bytes:
         url = f"{ha_base}/api/camera_proxy/{quote(camera_entity, safe='')}"
@@ -406,7 +430,7 @@ class CameraEventPlugin(ToolPlugin):
         area: str,
         camera: str,
     ) -> Dict[str, Any]:
-        if not (send_phone_alerts or persistent_notifications):
+        if not (send_phone_alerts or persistent_notifications or api_notification):
             return {"ok": True, "sent_count": 0, "skipped": "notifications_disabled"}
 
         dispatch_targets: List[Dict[str, Any]] = []
@@ -423,6 +447,8 @@ class CameraEventPlugin(ToolPlugin):
             dispatch_targets.append(targets)
         elif persistent_notifications:
             dispatch_targets.append({"persistent": True})
+        elif api_notification:
+            dispatch_targets.append({})
 
         if not dispatch_targets:
             return {
@@ -487,6 +513,17 @@ class CameraEventPlugin(ToolPlugin):
         except Exception:
             cooldown_seconds = 30
         cooldown_seconds = max(0, min(cooldown_seconds, 86_400))
+
+        try:
+            notification_cooldown_seconds = int(
+                args.get(
+                    "notification_cooldown_seconds",
+                    settings.get("NOTIFICATION_COOLDOWN_SECONDS", 0),
+                )
+            )
+        except Exception:
+            notification_cooldown_seconds = 0
+        notification_cooldown_seconds = max(0, min(notification_cooldown_seconds, 86_400))
 
         ignore_default = self._boolish(settings.get("IGNORE_VEHICLES_DEFAULT"), False)
         if "ignore_vehicles" in args:
@@ -567,8 +604,20 @@ class CameraEventPlugin(ToolPlugin):
         self._mark_fired(camera)
 
         notify_result: Dict[str, Any] = {"ok": True, "sent_count": 0, "skipped": "notifications_disabled"}
+        notify_requested = bool(send_phone_alerts or persistent_notifications or api_notification)
         if description.strip().lower().startswith("nothing notable"):
             notify_result = {"ok": True, "sent_count": 0, "skipped": "nothing_notable"}
+        elif (
+            notify_requested
+            and notification_cooldown_seconds > 0
+            and self._within_notification_cooldown(camera, notification_cooldown_seconds)
+        ):
+            notify_result = {
+                "ok": True,
+                "sent_count": 0,
+                "skipped": "notification_cooldown",
+                "notification_cooldown_seconds": notification_cooldown_seconds,
+            }
         else:
             notify_result = await self._notify_via_homeassistant_notifier(
                 title=notification_title,
@@ -581,6 +630,8 @@ class CameraEventPlugin(ToolPlugin):
                 area=area,
                 camera=camera,
             )
+            if bool((notify_result or {}).get("ok")) and int((notify_result or {}).get("sent_count") or 0) > 0:
+                self._mark_notification_fired(camera)
 
         return {
             "ok": True,
@@ -588,6 +639,7 @@ class CameraEventPlugin(ToolPlugin):
             "camera": camera,
             "area": area,
             "cooldown_seconds": cooldown_seconds,
+            "notification_cooldown_seconds": notification_cooldown_seconds,
             "ignore_vehicles": ignore_vehicles,
             "summary": description,
             "vision_fallback_used": used_generic_snapshot,
