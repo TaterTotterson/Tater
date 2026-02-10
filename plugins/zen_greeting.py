@@ -37,18 +37,7 @@ class ZenGreetingPlugin(ToolPlugin):
     )
     plugin_dec = "Generate a calming daily greeting and message for dashboards."
 
-    usage = (
-        "{\n"
-        '  "function": "zen_greeting",\n'
-        '  "arguments": {\n'
-        '    // all optional\n'
-        '    "input_text_entity": "input_text.daily_zen_greeting",\n'
-        '    "include_date": false,\n'
-        '    "tone": "zen",\n'
-        '    "prompt_hint": "focus on patience and gratitude"\n'
-        "  }\n"
-        "}\n"
-    )
+    usage = '{"function":"zen_greeting","arguments":{"input_text_entity":"input_text.daily_zen_greeting","include_date":false,"tone":"zen","prompt_hint":"focus on patience and gratitude"}}'
 
     platforms = ["automation"]
     settings_category = "Zen Greeting"

@@ -19,8 +19,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import plugin_registry as pr
-from notify_queue import is_expired
-from notify_media import load_queue_attachments
+from notify.queue import is_expired
+from notify.media import load_queue_attachments
 
 from helpers import (
     get_tater_name,
@@ -38,6 +38,7 @@ from agent_lab_registry import build_agent_registry
 from plugin_result import action_failure
 from plugin_kernel import plugin_supports_platform
 from planner_loop import should_use_agent_mode, run_planner_loop
+from latest_image_ref import load_latest_image_ref, save_latest_image_ref
 
 # Matrix SDK
 from nio import (
@@ -48,6 +49,11 @@ from nio import (
     MegolmEvent,
     InviteMemberEvent,
 )
+
+try:
+    from nio import RoomMessageImage
+except Exception:
+    RoomMessageImage = None
 
 try:
     from nio.events.room_events import RoomEncryptionEvent
@@ -379,6 +385,23 @@ def save_matrix_message(room_id: str, role: str, username: str, content: Any):
     if max_store > 0:
         redis_client.ltrim(key, -max_store, -1)
 
+
+def _save_latest_room_image_ref(room_id: str, ref: Dict[str, Any]) -> None:
+    save_latest_image_ref(
+        redis_client,
+        platform="matrix",
+        scope=room_id,
+        ref=ref,
+    )
+
+
+def _load_latest_room_image_ref(room_id: str) -> Optional[Dict[str, Any]]:
+    return load_latest_image_ref(
+        redis_client,
+        platform="matrix",
+        scope=room_id,
+    )
+
 def _to_template_msg(role: str, content: Any, sender: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
     Matrix variant (aligned with Discord/IRC):
@@ -475,33 +498,13 @@ def build_system_prompt() -> str:
             "This affects tone only and never overrides tool rules.\n\n"
         )
 
+    # Planner mode injects canonical tool-use rules and enabled-tool index each turn.
     return (
         f"Current Date and Time is: {now}\n\n"
-        f"You are {first} {last}, an AI assistant on Matrix.\n\n"
-        f"{persona_clause}"
+        f"You are {first} {last}, an AI assistant on Matrix.\n"
         "Current platform: matrix.\n"
-        "Tool strategy:\n"
-        "- Answer directly when no external action/live data is needed.\n"
-        "- Tools are discovered on-demand; not all tools are described here. If unsure, call list_plugins.\n"
-        "- Examples that require list_plugins: weather/forecast, news, stocks, sports scores, downloads, music/song generation, image/video generation, camera feeds/snapshots (front/back yard, porch, driveway, garage), camera/sensor status, smart-home actions.\n"
-        "- The user does not need to explicitly request tool use; if a tool is appropriate, use it.\n"
-        "- Prefer using a tool over attempting to answer from scratch when a tool could fulfill the request.\n"
-        "- If a tool may be needed, call list_plugins first.\n- If the user asks to control devices or services or interact with external systems, call list_plugins first.\n"
-        "- If the user asks about a specific tool/plugin by name or asks what a tool can do, call list_plugins or get_plugin_help instead of guessing.\n"
-        "- If the user asks to run a plugin by name (even approximate), call list_plugins and pick the closest match (ignore minor typos/plurals). If a close match exists, use it and do not claim it’s unavailable; optionally confirm.\n"
-        "- When calling a plugin, use its id from list_plugins (not the display name).\n"
-        "- If the user asks to schedule or run a recurring task (daily/weekly/every), use the `ai_tasks` plugin; do not create a platform or tool.\n"
-        "- For scheduled tasks, assume local timezone if none is provided. If no destination is given, use the current channel/room from origin (do not ask for channel IDs).\n"
-        "- If you might need a tool or are unsure a capability exists, call list_plugins before saying it is unavailable.\n"
-        "- If the user asks for multiple independent actions, you may call tools one at a time until all actions are complete, then respond.\n"
-        "- Optionally call get_plugin_help before calling a plugin.\n"
-        "- Ask concise follow-up questions for missing required inputs.\n"
-        "- Only ask for inputs a tool explicitly requires (from list_plugins needs or get_plugin_help required_args). If defaults exist, proceed without asking.\n"
-        "- Call only plugins compatible with matrix.\n"
-        "- If unsupported here, explain and list supported platforms.\n"
-        "- Tool calls must be JSON only: {\"function\":\"name\",\"arguments\":{...}}\n"
-        "- Meta-tools: list_plugins, get_plugin_help, list_platforms_for_plugin.\n"
-        "- Never claim success unless tool output confirms success.\n"
+        "Keep replies concise and natural for chat.\n\n"
+        f"{persona_clause}"
     )
 
 # ---------------- Mention helpers & trigger policy ----------------
@@ -928,6 +931,39 @@ class MatrixPlatform:
         if not ref:
             return None
 
+        def _norm_room_name(value: Any) -> str:
+            text = str(value or "").strip()
+            if not text:
+                return ""
+            if text.startswith("#"):
+                text = text[1:]
+            if ":" in text:
+                text = text.split(":", 1)[0]
+            return text.strip().lower()
+
+        def _match_joined_room(value: str) -> Optional[str]:
+            needle = _norm_room_name(value)
+            if not needle:
+                return None
+            for room_id, room in (self.client.rooms or {}).items():
+                candidates: List[str] = [str(room_id)]
+                for attr in ("display_name", "name", "canonical_alias"):
+                    v = getattr(room, attr, None)
+                    if v:
+                        candidates.append(str(v))
+                aliases = getattr(room, "aliases", None)
+                if isinstance(aliases, (list, tuple, set)):
+                    candidates.extend([str(a) for a in aliases if a])
+                for candidate in candidates:
+                    if _norm_room_name(candidate) == needle:
+                        return room_id
+            return None
+
+        # Friendly room names (for example "tater", "#tater", "General") can map to joined rooms.
+        matched = _match_joined_room(ref)
+        if matched:
+            return matched
+
         if ref.startswith("#"):
             room_id = None
             try:
@@ -939,6 +975,9 @@ class MatrixPlatform:
                 logger.warning(f"[notifyq] Matrix failed to resolve alias {ref}: {e}")
 
             if not room_id:
+                matched = _match_joined_room(ref)
+                if matched:
+                    return matched
                 try:
                     join_resp = await self.client.join(ref)
                     room_id = getattr(join_resp, "room_id", None)
@@ -1167,6 +1206,83 @@ class MatrixPlatform:
         if self.trust_unverified_devices:
             await self._auto_trust_room_devices(room)
 
+    @staticmethod
+    def _download_response_bytes(resp) -> Optional[bytes]:
+        if resp is None:
+            return None
+        body = getattr(resp, "body", None)
+        if isinstance(body, (bytes, bytearray)):
+            return bytes(body)
+        data = getattr(resp, "data", None)
+        if isinstance(data, (bytes, bytearray)):
+            return bytes(data)
+        if isinstance(resp, dict):
+            for key in ("body", "data", "content"):
+                val = resp.get(key)
+                if isinstance(val, (bytes, bytearray)):
+                    return bytes(val)
+        return None
+
+    async def _capture_latest_image_from_event(self, room, event) -> Optional[Dict[str, Any]]:
+        sender = getattr(event, "sender", "")
+        if sender == self.user_id:
+            return _load_latest_room_image_ref(room.room_id)
+
+        source = getattr(event, "source", {}) or {}
+        content = source.get("content") if isinstance(source, dict) else {}
+        if not isinstance(content, dict):
+            content = {}
+
+        msgtype = str(content.get("msgtype") or "").strip().lower()
+        if msgtype != "m.image":
+            return _load_latest_room_image_ref(room.room_id)
+
+        mxc_url = str(content.get("url") or "").strip()
+        if not mxc_url:
+            return _load_latest_room_image_ref(room.room_id)
+
+        name = str(content.get("body") or "").strip() or "matrix_image"
+        info = content.get("info") if isinstance(content.get("info"), dict) else {}
+        mimetype = str(info.get("mimetype") or content.get("mimetype") or "").strip().lower()
+
+        try:
+            downloaded = await self.client.download(mxc_url)
+            image_bytes = self._download_response_bytes(downloaded)
+            if not image_bytes:
+                raise RuntimeError("Matrix download returned no bytes")
+            blob_key = store_blob(image_bytes)
+        except Exception as e:
+            logger.warning(f"[Matrix] Failed to capture image event in {room.room_id}: {e}")
+            return _load_latest_room_image_ref(room.room_id)
+
+        if not mimetype:
+            mimetype = _guess_mime(image_bytes)
+            if not mimetype or not mimetype.startswith("image/"):
+                mimetype = "image/png"
+
+        ref = {
+            "blob_key": blob_key,
+            "name": name,
+            "mimetype": mimetype,
+            "source": "matrix_attachment",
+            "updated_at": time.time(),
+            "size": len(image_bytes),
+        }
+        _save_latest_room_image_ref(room.room_id, ref)
+        save_matrix_message(
+            room.room_id,
+            "user",
+            sender,
+            {
+                "type": "image",
+                "name": name,
+                "mimetype": mimetype,
+                "blob_key": blob_key,
+                "size": len(image_bytes),
+            },
+        )
+        return ref
+
     async def _notify_queue_worker(self):
         while True:
             if self.stop_event and self.stop_event.is_set():
@@ -1261,6 +1377,9 @@ class MatrixPlatform:
                     "user": sender,
                     "request_id": str(time.time()),
                 }
+                latest_image_ref = _load_latest_room_image_ref(room.room_id)
+                if latest_image_ref:
+                    origin["latest_image_ref"] = latest_image_ref
                 origin = {k: v for k, v in origin.items() if v not in (None, "")}
 
                 async def _wait_callback(func_name, plugin_obj):
@@ -1343,6 +1462,20 @@ class MatrixPlatform:
                 for item in artifacts:
                     if isinstance(item, dict):
                         await self._send_media_item(room.room_id, item)
+                        item_type = str(item.get("type") or "").strip().lower()
+                        item_mime = str(item.get("mimetype") or "").strip().lower()
+                        if item_type == "image" or item_mime.startswith("image/"):
+                            ref = {
+                                "blob_key": str(item.get("blob_key") or "").strip() or None,
+                                "name": str(item.get("name") or "image.png").strip() or "image.png",
+                                "mimetype": item_mime or "image/png",
+                                "source": "matrix_artifact",
+                                "updated_at": time.time(),
+                            }
+                            if not ref.get("blob_key") and isinstance(item.get("bytes"), (bytes, bytearray)):
+                                ref["blob_key"] = store_blob(bytes(item.get("bytes")))
+                            if ref.get("blob_key"):
+                                _save_latest_room_image_ref(room.room_id, ref)
 
                 if (final_text or artifacts) and event_id:
                     assistant_summary = final_text or "[Sent attachments]"
@@ -1370,6 +1503,11 @@ class MatrixPlatform:
             str(getattr(event, "event_id", "") or ""),
         )
 
+    async def on_image(self, room, event):
+        if not self._should_process_event(event):
+            return
+        await self._capture_latest_image_from_event(room, event)
+
     async def on_megolm(self, room, event: MegolmEvent):
         if not self._should_process_event(event):
             return
@@ -1384,6 +1522,8 @@ class MatrixPlatform:
     async def sync_forever(self):
         self.client.add_event_callback(self.on_invite, InviteMemberEvent)
         self.client.add_event_callback(self.on_text, RoomMessageText)
+        if RoomMessageImage:
+            self.client.add_event_callback(self.on_image, RoomMessageImage)
         self.client.add_event_callback(self.on_megolm, MegolmEvent)
         if RoomEncryptionEvent:
             self.client.add_event_callback(self.on_room_encryption, RoomEncryptionEvent)

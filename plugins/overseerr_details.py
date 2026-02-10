@@ -22,15 +22,7 @@ class OverseerrDetailsPlugin(ToolPlugin):
     pretty_name = "Overseerr: Title Details"
     settings_category = "Overseerr"
 
-    usage = (
-        "{\n"
-        '  "function": "overseerr_details",\n'
-        '  "arguments": {\n'
-        '    "title": "<movie or show title>",\n'
-        '    "media_type": "movie|tv (optional)"\n'
-        "  }\n"
-        "}\n"
-    )
+    usage = '{"function":"overseerr_details","arguments":{"title":"<movie or show title>","media_type":"movie|tv (optional)"}}'
 
     description = (
         "Get details for ONE movie or TV show from Overseerr. "

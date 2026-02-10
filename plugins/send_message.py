@@ -1,10 +1,11 @@
-import asyncio
-import inspect
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from plugin_base import ToolPlugin
-from notify_queue import ALLOWED_PLATFORMS, normalize_platform
+from helpers import redis_client
+from notify import dispatch_notification
+from notify.queue import ALLOWED_PLATFORMS, normalize_platform
 
 logger = logging.getLogger("send_message")
 logger.setLevel(logging.INFO)
@@ -12,38 +13,71 @@ logger.setLevel(logging.INFO)
 
 class SendMessagePlugin(ToolPlugin):
     name = "send_message"
-    usage = (
-        "{\n"
-        "  \"function\": \"send_message\",\n"
-        "  \"arguments\": {\n"
-        "    \"message\": \"Optional body text when sending attachments\",\n"
-        "    \"title\": \"Optional short title\",\n"
-        "    \"platform\": \"discord|irc|matrix|homeassistant|ntfy|telegram (optional; defaults to origin)\",\n"
-        "    \"targets\": {\n"
-        "      \"channel_id\": \"discord only, optional\",\n"
-        "      \"channel\": \"discord/irc, optional (#tater)\",\n"
-        "      \"guild_id\": \"discord only, optional\",\n"
-        "      \"room_id\": \"matrix room id or alias, optional (!id:server or #alias:server)\",\n"
-        "      \"room_alias\": \"matrix alias, optional (#alias:server)\",\n"
-        "      \"device_service\": \"homeassistant only, optional\",\n"
-        "      \"persistent\": \"homeassistant only, optional (true/false)\",\n"
-        "      \"chat_id\": \"telegram chat id, optional\"\n"
-        "    },\n"
-        "    \"attachments\": [{\"type\":\"image|audio|video|file\",\"name\":\"optional\",\"mimetype\":\"optional\",\"bytes\":\"optional-bytes\",\"blob_key\":\"optional\"}],\n"
-        "    \"priority\": \"normal|high\",\n"
-        "    \"tags\": [\"optional\", \"strings\"],\n"
-        "    \"ttl_sec\": 0\n"
-        "  }\n"
-        "}\n"
-    )
+    required_args = []
+    optional_args = [
+        "message",
+        "title",
+        "platform",
+        "targets",
+        "attachments",
+        "priority",
+        "tags",
+        "ttl_sec",
+        "origin",
+        "channel_id",
+        "channel",
+        "guild_id",
+        "room_id",
+        "room_alias",
+        "device_service",
+        "persistent",
+        "api_notification",
+        "chat_id",
+    ]
+    common_needs = [
+        "message to send",
+        "destination platform (optional; defaults to current platform)",
+        "destination room/channel (optional; names like #tater are valid)",
+    ]
+    usage = '{"function":"send_message","arguments":{"message":"Optional body text when sending attachments","title":"Optional short title","platform":"discord|irc|matrix|homeassistant|ntfy|telegram (optional; defaults to origin)","targets":{"channel":"discord/irc channel name, optional (#tater works; numeric IDs are not required)","channel_id":"discord only, optional numeric ID","guild_id":"discord only, optional","room_id":"matrix room id or alias, optional (!id:server or #alias:server)","room_alias":"matrix alias, optional (#alias:server)","device_service":"homeassistant only, optional","persistent":"homeassistant only, optional (true/false)","api_notification":"homeassistant only, optional (true/false)","chat_id":"telegram chat id or @username, optional"},"attachments":[{"type":"image|audio|video|file","name":"optional","mimetype":"optional","bytes":"optional-bytes","blob_key":"optional"}],"priority":"normal|high","tags":["optional","strings"],"ttl_sec":0}}'
     description = (
         "Queue a message via the notifier system. If no destination is provided, "
         "it defaults to the origin platform (Discord/IRC/Matrix/Home Assistant/Telegram). "
+        "Room/channel names like #tater are accepted for routing. "
         "When used from Discord, attached files are forwarded automatically."
     )
     pretty_name = "Send Message"
 
     platforms = ["discord", "irc", "matrix", "homeassistant", "telegram", "webui"]
+    settings_category = "Send Message"
+    required_settings = {
+        "ENABLE_HA_API_NOTIFICATION": {
+            "label": "Enable Home Assistant API notifications",
+            "type": "checkbox",
+            "default": True,
+            "description": "Default for Home Assistant sends when api_notification is not set in arguments.",
+        },
+    }
+
+    @staticmethod
+    def _boolish(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on", "enabled"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "disabled"}:
+            return False
+        return bool(default)
+
+    def _load_settings(self) -> Dict[str, str]:
+        return (
+            redis_client.hgetall(f"plugin_settings:{self.settings_category}")
+            or redis_client.hgetall(f"plugin_settings: {self.settings_category}")
+            or {}
+        )
 
     @staticmethod
     def _normalize_matrix_room_ref(room_ref: Any) -> str:
@@ -67,17 +101,33 @@ class SendMessagePlugin(ToolPlugin):
         return out
 
     @staticmethod
-    def _notifier_supports_attachments(notifier: Any) -> bool:
-        notify_fn = getattr(notifier, "notify", None)
-        if not callable(notify_fn):
-            return False
-        try:
-            sig = inspect.signature(notify_fn)
-        except Exception:
-            return False
-        if "attachments" in sig.parameters:
-            return True
-        return any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+    def _extract_target_hint(raw: Any) -> str:
+        text = str(raw or "").strip()
+        if not text:
+            return ""
+        for pattern in (r"![^\s]+", r"#[A-Za-z0-9][A-Za-z0-9._:-]*", r"@[A-Za-z0-9_]+"):
+            m = re.search(pattern, text)
+            if m:
+                return m.group(0)
+        text = re.sub(r"^(?:room|channel|chat)\s+", "", text, flags=re.IGNORECASE)
+        text = re.sub(
+            r"\s+(?:in|on)\s+(?:discord|irc|matrix|telegram|home\s*assistant|homeassistant)\b.*$",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+        return text.strip(" .")
+
+    @staticmethod
+    def _coerce_targets(payload: Any) -> Dict[str, Any]:
+        if isinstance(payload, dict):
+            return dict(payload)
+        # LLMs sometimes send a raw channel/room string instead of a targets map.
+        if isinstance(payload, str):
+            hint = SendMessagePlugin._extract_target_hint(payload)
+            if hint:
+                return {"channel": hint}
+        return {}
 
     async def _discord_attachments(self, message) -> List[Dict[str, Any]]:
         items: List[Dict[str, Any]] = []
@@ -114,9 +164,19 @@ class SendMessagePlugin(ToolPlugin):
         platform = args.get("platform")
         attachments = self._clean_attachment_payload(args.get("attachments"))
 
-        targets = dict(args.get("targets") or {})
-        for key in ("channel_id", "channel", "guild_id", "room_id", "room_alias", "device_service", "persistent", "chat_id"):
-            if args.get(key) and key not in targets:
+        targets = self._coerce_targets(args.get("targets"))
+        for key in (
+            "channel_id",
+            "channel",
+            "guild_id",
+            "room_id",
+            "room_alias",
+            "device_service",
+            "persistent",
+            "api_notification",
+            "chat_id",
+        ):
+            if key in args and key not in targets:
                 targets[key] = args.get(key)
 
         meta = {
@@ -155,37 +215,20 @@ class SendMessagePlugin(ToolPlugin):
                     targets["room_id"] = alias
             if targets.get("room_id"):
                 targets["room_id"] = self._normalize_matrix_room_ref(targets.get("room_id"))
+        elif dest == "homeassistant":
+            if "api_notification" not in targets:
+                settings = self._load_settings()
+                targets["api_notification"] = self._boolish(settings.get("ENABLE_HA_API_NOTIFICATION"), True)
 
-        notifier_name = f"notify_{dest}"
-
-        try:
-            import plugin_registry as pr
-            from plugin_settings import get_plugin_enabled
-        except Exception as e:
-            logger.error(f"Failed to load plugin registry: {e}")
-            return "Cannot queue: notifier registry unavailable"
-
-        plugins = pr.get_registry_snapshot()
-        notifier = plugins.get(notifier_name)
-        if not notifier or not getattr(notifier, "notifier", False):
-            return f"Cannot queue: no notifier for {dest}"
-
-        if not get_plugin_enabled(notifier_name):
-            return f"Cannot queue: notifier for {dest} is disabled"
-
-        kwargs = {
-            "title": title,
-            "content": message,
-            "targets": targets,
-            "origin": origin,
-            "meta": meta,
-        }
-        if attachments and self._notifier_supports_attachments(notifier):
-            kwargs["attachments"] = attachments
-
-        result = notifier.notify(**kwargs)
-        if asyncio.iscoroutine(result):
-            result = await result
+        result = await dispatch_notification(
+            platform=dest,
+            title=title,
+            content=message,
+            targets=targets,
+            origin=origin,
+            meta=meta,
+            attachments=attachments,
+        )
         return result
 
     async def handle_discord(self, message, args, llm_client):

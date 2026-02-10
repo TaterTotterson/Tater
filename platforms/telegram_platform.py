@@ -3,7 +3,9 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
+import uuid
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, Dict, List
@@ -14,8 +16,8 @@ from dotenv import load_dotenv
 
 import plugin_registry as pr
 from plugin_base import ToolPlugin
-from notify_media import load_queue_attachments
-from notify_queue import is_expired
+from notify.media import load_queue_attachments
+from notify.queue import is_expired
 from helpers import (
     get_tater_name,
     get_tater_personality,
@@ -31,6 +33,7 @@ from agent_lab_registry import build_agent_registry
 from plugin_result import action_failure
 from plugin_kernel import plugin_supports_platform
 from planner_loop import should_use_agent_mode, run_planner_loop
+from latest_image_ref import load_latest_image_ref, save_latest_image_ref
 
 load_dotenv()
 
@@ -53,6 +56,8 @@ blob_client = redis.Redis(
 NOTIFY_QUEUE_KEY = "notifyq:telegram"
 NOTIFY_POLL_INTERVAL = 0.5
 TELEGRAM_TEXT_LIMIT = 4096
+TELEGRAM_CHAT_LOOKUP_HASH = "tater:telegram:chat_lookup"
+TELEGRAM_BLOB_PREFIX = "tater:blob:telegram"
 
 PLATFORM_SETTINGS = {
     "category": "Telegram Settings",
@@ -99,11 +104,113 @@ def _history_key(chat_id: str) -> str:
     return f"tater:telegram:{chat_id}:history"
 
 
+def _blob_key() -> str:
+    return f"{TELEGRAM_BLOB_PREFIX}:{uuid.uuid4().hex}"
+
+
+def _store_blob(binary: bytes, ttl_seconds: int = 60 * 60 * 24 * 7) -> str:
+    key = _blob_key()
+    blob_client.set(key.encode("utf-8"), binary)
+    if ttl_seconds and ttl_seconds > 0:
+        blob_client.expire(key.encode("utf-8"), int(ttl_seconds))
+    return key
+
+
+def _save_latest_chat_image_ref(chat_id: str, ref: Dict[str, Any]) -> None:
+    save_latest_image_ref(
+        redis_client,
+        platform="telegram",
+        scope=chat_id,
+        ref=ref,
+    )
+
+
+def _load_latest_chat_image_ref(chat_id: str) -> Dict[str, Any] | None:
+    return load_latest_image_ref(
+        redis_client,
+        platform="telegram",
+        scope=chat_id,
+    )
+
+
 def _normalize_chat_id(value: Any) -> str:
     raw = str(value or "").strip()
     if raw.startswith("#"):
         raw = raw[1:].strip()
     return raw
+
+
+def _chat_lookup_key(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if raw.startswith("#") or raw.startswith("@"):
+        raw = raw[1:].strip()
+    return re.sub(r"\s+", " ", raw).strip()
+
+
+def _remember_chat_lookup(chat: Dict[str, Any], sender: Dict[str, Any]) -> None:
+    chat_id = _normalize_chat_id(chat.get("id"))
+    if not chat_id:
+        return
+
+    keys = set()
+    title = str(chat.get("title") or "").strip()
+    username = str(chat.get("username") or "").strip()
+    if title:
+        keys.add(_chat_lookup_key(title))
+    if username:
+        keys.add(_chat_lookup_key(username))
+
+    if str(chat.get("type") or "").strip().lower() == "private":
+        sender_username = str((sender or {}).get("username") or "").strip()
+        first = str((sender or {}).get("first_name") or "").strip()
+        last = str((sender or {}).get("last_name") or "").strip()
+        full_name = " ".join([part for part in (first, last) if part]).strip()
+        for val in (sender_username, first, last, full_name):
+            if val:
+                keys.add(_chat_lookup_key(val))
+
+    for key in keys:
+        if key:
+            try:
+                redis_client.hset(TELEGRAM_CHAT_LOOKUP_HASH, key, chat_id)
+            except Exception:
+                pass
+
+
+def _resolve_chat_target(value: Any) -> str:
+    ref = _normalize_chat_id(value)
+    if not ref:
+        return ""
+
+    if ref.startswith("@"):
+        return ref
+    if ref.isdigit() or (ref.startswith("-") and ref[1:].isdigit()):
+        return ref
+
+    lookup_key = _chat_lookup_key(ref)
+    if lookup_key:
+        try:
+            mapped = redis_client.hget(TELEGRAM_CHAT_LOOKUP_HASH, lookup_key)
+        except Exception:
+            mapped = None
+        if mapped:
+            return _normalize_chat_id(mapped)
+
+    for prefix in ("room ", "channel ", "chat ", "group "):
+        if lookup_key.startswith(prefix):
+            trimmed = lookup_key[len(prefix):].strip()
+            if not trimmed:
+                continue
+            try:
+                mapped = redis_client.hget(TELEGRAM_CHAT_LOOKUP_HASH, trimmed)
+            except Exception:
+                mapped = None
+            if mapped:
+                return _normalize_chat_id(mapped)
+
+    if " " not in ref:
+        return f"@{ref}"
+    return ref
 
 
 def _normalize_user_ref(value: Any) -> str:
@@ -334,6 +441,61 @@ class TelegramPlatform:
             raise RuntimeError(str(data.get("description") or "Unknown Telegram API error"))
         return data
 
+    def _download_file_bytes(self, file_id: str, timeout: int = 30) -> bytes:
+        resp = self._api_json("getFile", {"file_id": file_id}, timeout)
+        result = resp.get("result") or {}
+        file_path = str(result.get("file_path") or "").strip()
+        if not file_path:
+            raise RuntimeError("Telegram getFile response missing file_path.")
+        file_url = f"https://api.telegram.org/file/bot{self.token}/{file_path}"
+        dl = requests.get(file_url, timeout=timeout)
+        if dl.status_code >= 300:
+            raise RuntimeError(f"Telegram file download failed (HTTP {dl.status_code}).")
+        data = dl.content or b""
+        if not data:
+            raise RuntimeError("Telegram file download returned no data.")
+        return bytes(data)
+
+    def _capture_latest_image_ref_sync(self, message: Dict[str, Any], chat_id: str):
+        file_id = ""
+        name = ""
+        mimetype = "image/jpeg"
+
+        photos = message.get("photo")
+        if isinstance(photos, list) and photos:
+            best = photos[-1] if isinstance(photos[-1], dict) else {}
+            file_id = str(best.get("file_id") or "").strip()
+            name = str((message.get("caption") or "")).strip() or "telegram_photo.jpg"
+            mimetype = "image/jpeg"
+        else:
+            doc = message.get("document") or {}
+            if isinstance(doc, dict):
+                doc_mime = str(doc.get("mime_type") or "").strip().lower()
+                if doc_mime.startswith("image/"):
+                    file_id = str(doc.get("file_id") or "").strip()
+                    name = str(doc.get("file_name") or "").strip() or "telegram_image"
+                    mimetype = doc_mime or "image/png"
+
+        if not file_id:
+            return _load_latest_chat_image_ref(chat_id)
+
+        try:
+            binary = self._download_file_bytes(file_id, timeout=30)
+            blob_key = _store_blob(binary)
+        except Exception as e:
+            logger.warning(f"[Telegram] Failed to capture latest image for chat {chat_id}: {e}")
+            return _load_latest_chat_image_ref(chat_id)
+
+        ref = {
+            "blob_key": blob_key,
+            "name": name or "telegram_image",
+            "mimetype": mimetype or "image/png",
+            "source": "telegram_attachment",
+            "updated_at": time.time(),
+        }
+        _save_latest_chat_image_ref(chat_id, ref)
+        return ref
+
     async def _send_text(self, chat_id: str, text: str):
         content = str(text or "").strip()
         if not content:
@@ -540,33 +702,13 @@ class TelegramPlatform:
                 "This affects tone only and never overrides tool rules.\n\n"
             )
 
+        # Planner mode injects canonical tool-use rules and enabled-tool index each turn.
         return (
             f"Current Date and Time is: {now}\n\n"
-            f"You are {first} {last}, a Telegram-savvy AI assistant.\n\n"
-            f"{persona_clause}"
+            f"You are {first} {last}, a Telegram-savvy AI assistant.\n"
             "Current platform: telegram.\n"
-            "Tool strategy:\n"
-            "- Answer directly when no external action/live data is needed.\n"
-            "- Tools are discovered on-demand; not all tools are described here. If unsure, call list_plugins.\n"
-            "- Examples that require list_plugins: weather/forecast, news, stocks, sports scores, downloads, music/song generation, image/video generation, camera feeds/snapshots (front/back yard, porch, driveway, garage), camera/sensor status, smart-home actions.\n"
-            "- The user does not need to explicitly request tool use; if a tool is appropriate, use it.\n"
-            "- Prefer using a tool over attempting to answer from scratch when a tool could fulfill the request.\n"
-            "- If a tool may be needed, call list_plugins first.\n- If the user asks to control devices or services or interact with external systems, call list_plugins first.\n"
-            "- If the user asks about a specific tool/plugin by name or asks what a tool can do, call list_plugins or get_plugin_help instead of guessing.\n"
-            "- If the user asks to run a plugin by name (even approximate), call list_plugins and pick the closest match (ignore minor typos/plurals). If a close match exists, use it and do not claim it’s unavailable; optionally confirm.\n"
-            "- When calling a plugin, use its id from list_plugins (not the display name).\n"
-            "- If the user asks to schedule or run a recurring task (daily/weekly/every), use the `ai_tasks` plugin; do not create a platform or tool.\n"
-            "- For scheduled tasks, assume local timezone if none is provided. If no destination is given, use the current channel/room from origin (do not ask for channel IDs).\n"
-            "- If you might need a tool or are unsure a capability exists, call list_plugins before saying it is unavailable.\n"
-            "- If the user asks for multiple independent actions, you may call tools one at a time until all actions are complete, then respond.\n"
-            "- Optionally call get_plugin_help before calling a plugin.\n"
-            "- Ask concise follow-up questions for missing required inputs.\n"
-            "- Only ask for inputs a tool explicitly requires (from list_plugins needs or get_plugin_help required_args). If defaults exist, proceed without asking.\n"
-            "- Call only plugins compatible with telegram.\n"
-            "- If unsupported here, explain and list supported platforms.\n"
-            "- Tool calls must be JSON only: {\"function\":\"name\",\"arguments\":{...}}\n"
-            "- Meta-tools: list_plugins, get_plugin_help, list_platforms_for_plugin.\n"
-            "- Never claim success unless tool output confirms success.\n"
+            "Keep replies concise and natural for chat.\n\n"
+            f"{persona_clause}"
         )
 
     def _chat_allowed(self, chat_id: str) -> bool:
@@ -626,6 +768,20 @@ class TelegramPlatform:
 
             if isinstance(item, dict) and item.get("type") in ("image", "audio", "video", "file"):
                 await self._send_attachment_dict(chat_id, item)
+                item_type = str(item.get("type") or "").strip().lower()
+                item_mime = str(item.get("mimetype") or "").strip().lower()
+                if item_type == "image" or item_mime.startswith("image/"):
+                    ref = {
+                        "blob_key": str(item.get("blob_key") or "").strip() or None,
+                        "name": str(item.get("name") or "image.png").strip() or "image.png",
+                        "mimetype": item_mime or "image/png",
+                        "source": "telegram_artifact",
+                        "updated_at": time.time(),
+                    }
+                    if not ref.get("blob_key") and isinstance(item.get("bytes"), (bytes, bytearray)):
+                        ref["blob_key"] = _store_blob(bytes(item.get("bytes")))
+                    if ref.get("blob_key"):
+                        _save_latest_chat_image_ref(chat_id, ref)
                 self._save_message(
                     chat_id,
                     "assistant",
@@ -703,6 +859,8 @@ class TelegramPlatform:
             logger.info("[Telegram] Ignoring message from chat %s (not in allowed_chat_id list).", chat_id)
             return
 
+        _remember_chat_lookup(chat, sender)
+
         username = (
             str(sender.get("username") or "").strip()
             or str(sender.get("first_name") or "").strip()
@@ -712,6 +870,7 @@ class TelegramPlatform:
         if not message_text:
             return
 
+        latest_image_ref = await asyncio.to_thread(self._capture_latest_image_ref_sync, message, chat_id)
         self._save_message(chat_id, "user", username, message_text)
 
         system_prompt = self.build_system_prompt()
@@ -737,6 +896,8 @@ class TelegramPlatform:
                 "user": username,
                 "request_id": str(message.get("message_id") or f"{chat_id}:{time.time():.3f}"),
             }
+            if latest_image_ref:
+                origin["latest_image_ref"] = latest_image_ref
             origin = {k: v for k, v in origin.items() if v not in (None, "")}
 
             async def _wait_callback(func_name, plugin_obj):
@@ -927,7 +1088,7 @@ class TelegramPlatform:
 
             attachments = load_queue_attachments(redis_client, item.get("id"))
             targets = item.get("targets") or {}
-            chat_id = _normalize_chat_id(
+            chat_id = _resolve_chat_target(
                 targets.get("chat_id")
                 or targets.get("channel_id")
                 or targets.get("channel")

@@ -1,5 +1,4 @@
 import asyncio
-import inspect
 import json
 import logging
 import os
@@ -18,6 +17,7 @@ from helpers import (
     get_tater_personality,
 )
 from planner_loop import should_use_agent_mode, run_planner_loop
+from notify import dispatch_notification
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -318,28 +318,8 @@ async def _render_scheduled_message(
         f"You are {first} {last}, running a scheduled task.\n"
         f"{persona}"
         f"Current platform: {platform}.\n"
-        "Tool strategy:\n"
-        "- Answer directly when no external action/live data is required.\n"
-        "- Examples that require list_plugins: weather/forecast, news, stocks, sports scores, downloads, music/song generation, image/video generation, camera feeds/snapshots (front/back yard, porch, driveway, garage), camera/sensor status, smart-home actions.\n"
-        "- The user does not need to explicitly request tool use; if a tool is appropriate, use it.\n"
-        "- Prefer using a tool over attempting to answer from scratch when a tool could fulfill the request.\n"
-        "- If a tool may be needed, call list_plugins first.\n- If the user asks to control devices or services or interact with external systems, call list_plugins first.\n"
-        "- If the user asks about a specific tool/plugin by name or asks what a tool can do, call list_plugins or get_plugin_help instead of guessing.\n"
-        "- If the user asks to run a plugin by name (even approximate), call list_plugins and pick the closest match (ignore minor typos/plurals). If a close match exists, use it and do not claim it’s unavailable; optionally confirm.\n"
-        "- When calling a plugin, use its id from list_plugins (not the display name).\n"
-        "- If the user asks to schedule or run a recurring task (daily/weekly/every), use the `ai_tasks` plugin; do not create a platform or tool.\n"
-        "- For scheduled tasks, assume local timezone if none is provided. If no destination is given, use the current channel/room from origin (do not ask for channel IDs).\n"
-        "- If you might need a tool or are unsure a capability exists, call list_plugins before saying it is unavailable.\n"
-        "- If the user asks for multiple independent actions, you may call tools one at a time until all actions are complete, then respond.\n"
-        "- Optionally call get_plugin_help before calling a plugin.\n"
-        "- Ask concise follow-up questions for missing required inputs.\n"
-        "- Only ask for inputs a tool explicitly requires (from list_plugins needs or get_plugin_help required_args). If defaults exist, proceed without asking.\n"
-        "- Call only plugins compatible with the destination platform.\n"
-        "- If unsupported here, explain and list supported platforms.\n"
-        "- Tool calls must be JSON only: {\"function\":\"name\",\"arguments\":{...}}\n"
-        "- Do NOT use repo_browser.* tool syntax.\n"
-        "- Meta-tools: list_plugins, get_plugin_help, list_platforms_for_plugin.\n"
-        "- Never claim success unless tool output confirms success.\n"
+        "Keep replies concise and task-focused.\n"
+        "Do not use repo_browser.* tool syntax.\n"
     )
 
     now_str = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -403,35 +383,6 @@ async def _render_scheduled_message(
     return text, attachments
 
 
-def _notifier_supports_attachments(plugin) -> bool:
-    notify_fn = getattr(plugin, "notify", None)
-    if not callable(notify_fn):
-        return False
-    try:
-        sig = inspect.signature(notify_fn)
-    except Exception:
-        return False
-    if "attachments" in sig.parameters:
-        return True
-    return any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
-
-
-async def _call_notifier(plugin, title, message, targets, origin, meta, attachments=None):
-    kwargs = {
-        "title": title,
-        "content": message,
-        "targets": targets,
-        "origin": origin,
-        "meta": meta,
-    }
-    if attachments and _notifier_supports_attachments(plugin):
-        kwargs["attachments"] = attachments
-    result = plugin.notify(**kwargs)
-    if asyncio.iscoroutine(result):
-        result = await result
-    return result
-
-
 def run(stop_event: Optional[object] = None):
     logger.info("[AI Tasks] Platform started.")
     llm_client = get_llm_client_from_env()
@@ -475,58 +426,44 @@ def run(stop_event: Optional[object] = None):
                 _delete_reminder(reminder_id)
                 continue
 
-            notifier_name = f"notify_{dest}"
-            merged_registry, merged_enabled, _collisions = build_agent_registry(
-                pr.get_registry_snapshot(),
-                get_plugin_enabled,
-            )
-            notifier = merged_registry.get(notifier_name)
-            if not notifier or not getattr(notifier, "notifier", False):
-                logger.warning(f"[AI Tasks] Missing notifier for {dest}; dropping reminder {reminder_id}.")
-                _delete_reminder(reminder_id)
-                continue
-
-            if not merged_enabled(notifier_name):
-                logger.info(f"[AI Tasks] Notifier {notifier_name} disabled; skipping reminder {reminder_id}.")
-            else:
-                try:
+            try:
+                outbound_message = (message or "").strip()
+                rendered_text, rendered_attachments = loop.run_until_complete(
+                    _render_scheduled_message(
+                        llm_client=llm_client,
+                        reminder_id=reminder_id,
+                        task_prompt=(task_prompt or message or ""),
+                        origin=origin,
+                        platform=dest,
+                        targets=targets,
+                    )
+                )
+                if rendered_text:
+                    outbound_message = rendered_text
+                else:
                     outbound_message = (message or "").strip()
-                    rendered_text, rendered_attachments = loop.run_until_complete(
-                        _render_scheduled_message(
-                            llm_client=llm_client,
-                            reminder_id=reminder_id,
-                            task_prompt=(task_prompt or message or ""),
-                            origin=origin,
-                            platform=dest,
-                            targets=targets,
-                        )
-                    )
-                    if rendered_text:
-                        outbound_message = rendered_text
+
+                if not outbound_message:
+                    if rendered_attachments:
+                        outbound_message = "Scheduled task completed with attachment."
                     else:
-                        outbound_message = (message or "").strip()
+                        outbound_message = "Scheduled task completed."
 
-                    if not outbound_message:
-                        if rendered_attachments:
-                            outbound_message = "Scheduled task completed with attachment."
-                        else:
-                            outbound_message = "Scheduled task completed."
-
-                    result = loop.run_until_complete(
-                        _call_notifier(
-                            notifier,
-                            title,
-                            outbound_message,
-                            targets,
-                            origin,
-                            meta,
-                            attachments=rendered_attachments,
-                        )
+                result = loop.run_until_complete(
+                    dispatch_notification(
+                        platform=dest,
+                        title=title,
+                        content=outbound_message,
+                        targets=targets,
+                        origin=origin,
+                        meta=meta,
+                        attachments=rendered_attachments,
                     )
-                    if isinstance(result, str) and result.startswith("Cannot queue"):
-                        logger.warning(f"[AI Tasks] {result} (reminder {reminder_id})")
-                except Exception as e:
-                    logger.error(f"[AI Tasks] Failed to enqueue reminder {reminder_id}: {e}")
+                )
+                if isinstance(result, str) and result.startswith("Cannot queue"):
+                    logger.warning(f"[AI Tasks] {result} (reminder {reminder_id})")
+            except Exception as e:
+                logger.error(f"[AI Tasks] Failed to enqueue reminder {reminder_id}: {e}")
 
             interval = 0.0
             try:

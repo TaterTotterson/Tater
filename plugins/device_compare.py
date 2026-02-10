@@ -33,12 +33,7 @@ class DeviceComparePlugin(ToolPlugin):
     plugin_name = "Device Compare"
     version = "1.0.1"
     min_tater_version = "50"
-    usage = (
-        "{\n"
-        '  "function": "device_compare",\n'
-        '  "arguments": {"device_a": "<first device>", "device_b": "<second device>"}\n'
-        "}\n"
-    )
+    usage = '{"function":"device_compare","arguments":{"device_a":"<first device>","device_b":"<second device>"}}'
     required_args = ["device_a", "device_b"]
     optional_args = ["device1", "device2", "first_device", "second_device", "left_device", "right_device", "devices", "query", "compare"]
     description = "Compares two devices by fetching specs and per-game FPS from multiple sources, then renders image tables."

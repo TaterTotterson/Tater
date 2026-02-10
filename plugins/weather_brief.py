@@ -36,15 +36,7 @@ class WeatherBriefPlugin(ToolPlugin):
     )
     plugin_dec = "Give a short automation-friendly recap of recent weather conditions."
 
-    usage = (
-        "{\n"
-        '  "function": "weather_brief",\n'
-        '  "arguments": {\n'
-        '    "hours": 12,  // optional, default 12\n'
-        '    "query": "What was the weather like outside in the last 12 hours?"\n'
-        "  }\n"
-        "}\n"
-    )
+    usage = '{"function":"weather_brief","arguments":{"hours":12,"query":"What was the weather like outside in the last 12 hours?"}}'
 
     platforms = ["automation"]
     settings_category = "Weather Brief"

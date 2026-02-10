@@ -44,15 +44,7 @@ class UnifiNetworkPlugin(ToolPlugin):
     settings_category = "UniFi Network"
     platforms = ["webui", "homeassistant", "homekit", "xbmc", "discord", "telegram", "matrix", "irc"]
 
-    usage = (
-        "{\n"
-        '  "function": "unifi_network",\n'
-        '  "arguments": {\n'
-        '    "action": "summary|clients_online|clients_wired|clients_wireless|devices_offline|list_clients|list_devices|find_client|find_device",\n'
-        '    "name": "Optional client/device name for find_* actions."\n'
-        "  }\n"
-        "}\n"
-    )
+    usage = '{"function":"unifi_network","arguments":{"action":"summary|clients_online|clients_wired|clients_wireless|devices_offline|list_clients|list_devices|find_client|find_device","name":"Optional client/device name for find_* actions."}}'
 
     waiting_prompt_template = (
         "Write a friendly message telling {mention} you’re checking the UniFi network now. "

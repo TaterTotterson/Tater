@@ -46,17 +46,7 @@ class EventsQueryBriefPlugin(ToolPlugin):
 
     # Cleaner: automation users usually just pick the tool name.
     # Args are optional overrides.
-    usage = (
-        "{\n"
-        '  "function": "events_query_brief",\n'
-        '  "arguments": {\n'
-        '    "area": "front yard",\n'
-        '    "timeframe": "today|yesterday|last_24h|<date>",\n'
-        '    "query": "brief summary",\n'
-        '    "input_text_entity": "input_text.front_yard_events_brief"\n'
-        "  }\n"
-        "}\n"
-    )
+    usage = '{"function":"events_query_brief","arguments":{"area":"front yard","timeframe":"today|yesterday|last_24h|<date>","query":"brief summary","input_text_entity":"input_text.front_yard_events_brief"}}'
 
     platforms = ["automation"]
     settings_category = "Events Query"

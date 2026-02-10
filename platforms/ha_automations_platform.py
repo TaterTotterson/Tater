@@ -295,7 +295,16 @@ def run(stop_event: Optional[threading.Event] = None):
         loop = asyncio.get_event_loop()
 
         async def _start():
-            await server.serve()
+            try:
+                await server.serve()
+            except SystemExit as exc:
+                code = getattr(exc, "code", 1)
+                if code not in (None, 0):
+                    logger.error(
+                        f"[Automations] Server failed to start on {BIND_HOST}:{port} (likely already in use)."
+                    )
+            except Exception:
+                logger.exception(f"[Automations] Server failed on {BIND_HOST}:{port}")
 
         task = loop.create_task(_start())
 
@@ -319,5 +328,5 @@ def run(stop_event: Optional[threading.Event] = None):
                 loop.stop()
                 loop.close()
 
-    threading.Thread(target=_serve, daemon=True).start()
     logger.info(f"[Automations] Listening on http://{BIND_HOST}:{port}")
+    _serve()

@@ -144,6 +144,43 @@ def _extract_usage_arguments(plugin: Any) -> Dict[str, Any]:
     return args if isinstance(args, dict) else {}
 
 
+def _canonical_usage_example(plugin: Any, plugin_id: str) -> str:
+    usage = (getattr(plugin, "usage", None) or "").strip()
+    obj_txt = _find_first_json_object(usage)
+    data: Dict[str, Any] = {}
+    if obj_txt:
+        try:
+            parsed = json.loads(obj_txt)
+            if isinstance(parsed, dict):
+                data = dict(parsed)
+        except Exception:
+            data = {}
+    if not data:
+        data = {"function": plugin_id, "arguments": {}}
+    data["function"] = str(plugin_id)
+    if not isinstance(data.get("arguments"), dict):
+        data["arguments"] = {}
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+
+
+def _required_settings_summary(plugin: Any) -> Dict[str, Dict[str, Any]]:
+    raw = getattr(plugin, "required_settings", None)
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[str, Dict[str, Any]] = {}
+    for key in sorted(raw.keys()):
+        meta = raw.get(key)
+        if not isinstance(meta, dict):
+            out[str(key)] = {}
+            continue
+        item: Dict[str, Any] = {}
+        for field in ("type", "label", "description", "default"):
+            if field in meta and meta.get(field) not in (None, ""):
+                item[field] = meta.get(field)
+        out[str(key)] = item
+    return out
+
+
 def infer_needs_from_plugin(plugin: Any) -> List[str]:
     explicit = getattr(plugin, "common_needs", None)
     if isinstance(explicit, list) and explicit:
@@ -265,7 +302,7 @@ def get_plugin_help(
 
     expanded_platforms = expand_plugin_platforms(getattr(plugin, "platforms", []) or [])
     arg_help = plugin_arguments_help(plugin)
-    usage = (getattr(plugin, "usage", None) or "").strip()
+    usage = _canonical_usage_example(plugin, pid)
     examples = getattr(plugin, "example_calls", None)
     if not isinstance(examples, list) or not examples:
         examples = [usage] if usage else []
@@ -281,10 +318,10 @@ def get_plugin_help(
         "ok": True,
         "plugin_id": pid,
         "plugin_name": plugin_display_name(plugin),
-        "description": (
-            (getattr(plugin, "description", None) or "").strip()
-            or (getattr(plugin, "plugin_dec", None) or "").strip()
-        ),
+        "description": plugin_when_to_use(plugin),
+        "supported_platforms": expanded_platforms,
+        "required_settings": _required_settings_summary(plugin),
+        "usage_example": usage,
         "required_args": arg_help["required"],
         "optional_args": arg_help["optional"],
         "example_calls": [str(x).strip() for x in examples[:2] if str(x).strip()],

@@ -10,7 +10,7 @@ import re
 import plugin_registry as pr
 import time
 import irc3
-from notify_queue import is_expired
+from notify.queue import is_expired
 from helpers import (
     get_tater_name,
     get_tater_personality,
@@ -443,34 +443,14 @@ def build_system_prompt():
             "This changes tone only and never overrides tool rules.\n\n"
         )
 
+    # Planner mode injects canonical tool-use rules and enabled-tool index each turn.
     return (
         f"Current Date and Time is: {now}\n\n"
-        f"You are {first} {last}, an IRC-savvy AI assistant.\n\n"
-        f"{persona_clause}"
+        f"You are {first} {last}, an IRC-savvy AI assistant.\n"
         "Current platform: irc.\n"
-        "Tool strategy:\n"
-        "- Answer directly when no external action/live data is needed.\n"
-        "- Tools are discovered on-demand; not all tools are described here. If unsure, call list_plugins.\n"
-        "- Examples that require list_plugins: weather/forecast, news, stocks, sports scores, downloads, music/song generation, image/video generation, camera feeds/snapshots (front/back yard, porch, driveway, garage), camera/sensor status, smart-home actions.\n"
-        "- The user does not need to explicitly request tool use; if a tool is appropriate, use it.\n"
-        "- Prefer using a tool over attempting to answer from scratch when a tool could fulfill the request.\n"
-        "- If tool use might be needed, call list_plugins first.\n- If the user asks to control devices or services or interact with external systems, call list_plugins first.\n"
-        "- If the user asks about a specific tool/plugin by name or asks what a tool can do, call list_plugins or get_plugin_help instead of guessing.\n"
-        "- If the user asks to run a plugin by name (even approximate), call list_plugins and pick the closest match (ignore minor typos/plurals). If a close match exists, use it and do not claim it’s unavailable; optionally confirm.\n"
-        "- When calling a plugin, use its id from list_plugins (not the display name).\n"
-        "- If the user asks to schedule or run a recurring task (daily/weekly/every), use the `ai_tasks` plugin; do not create a platform or tool.\n"
-        "- For scheduled tasks, assume local timezone if none is provided. If no destination is given, use the current channel/room from origin (do not ask for channel IDs).\n"
-        "- If you might need a tool or are unsure a capability exists, call list_plugins before saying it is unavailable.\n"
-        "- If the user asks for multiple independent actions, you may call tools one at a time until all actions are complete, then respond.\n"
-        "- Optionally call get_plugin_help before plugin execution.\n"
-        "- Ask concise follow-up questions for missing required inputs.\n"
-        "- Only ask for inputs a tool explicitly requires (from list_plugins needs or get_plugin_help required_args). If defaults exist, proceed without asking.\n"
-        "- Call only plugins compatible with irc.\n"
-        "- If unsupported on irc, explain and list supported platforms.\n"
-        "- Tool calls must be JSON only: {\"function\":\"name\",\"arguments\":{...}}\n"
-        "- Meta-tools: list_plugins, get_plugin_help, list_platforms_for_plugin.\n"
-        "- Never claim success unless tool output confirms success.\n"
-        "Use plain ASCII text; no markdown and no emoji.\n"
+        "Use plain ASCII text only; no markdown and no emoji.\n"
+        "Keep replies concise and natural for chat.\n\n"
+        f"{persona_clause}"
     )
 
 @irc3.event(irc3.rfc.PRIVMSG)

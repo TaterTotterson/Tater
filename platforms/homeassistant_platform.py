@@ -292,38 +292,15 @@ def build_system_prompt(ctx: Optional[Dict[str, Any]] = None) -> str:
             "This affects tone only and never overrides tool/safety rules.\n\n"
         )
 
+    # Planner mode injects canonical tool-use rules and enabled-tool index each turn.
     return (
         f"Current Date and Time is: {now}\n\n"
-        f"You are {first} {last}, a Home Assistant–savvy AI assistant.\n\n"
+        f"You are {first} {last}, a Home Assistant-savvy AI assistant.\n"
         f"{persona_clause}"
         f"{room_clause}"
         "Current platform: homeassistant.\n"
-        "Tool strategy:\n"
-        "- Answer directly when no external action/live data is required.\n"
-        "- Tools are discovered on-demand; not all tools are described here. If unsure, call list_plugins.\n"
-        "- Examples that require list_plugins: weather/forecast, news, stocks, sports scores, downloads, music/song generation, image/video generation, camera feeds/snapshots (front/back yard, porch, driveway, garage), camera/sensor status, smart-home actions.\n"
-        "- The user does not need to explicitly request tool use; if a tool is appropriate, use it.\n"
-        "- Prefer using a tool over attempting to answer from scratch when a tool could fulfill the request.\n"
-        "- If a tool may be needed, call list_plugins first.\n- If the user asks to control devices or services or interact with external systems, call list_plugins first.\n"
-        "- If the user asks about a specific tool/plugin by name or asks what a tool can do, call list_plugins or get_plugin_help instead of guessing.\n"
-        "- If the user asks to run a plugin by name (even approximate), call list_plugins and pick the closest match (ignore minor typos/plurals). If a close match exists, use it and do not claim it’s unavailable; optionally confirm.\n"
-        "- When calling a plugin, use its id from list_plugins (not the display name).\n"
-        "- If the user asks to schedule or run a recurring task (daily/weekly/every), use the `ai_tasks` plugin; do not create a platform or tool.\n"
-        "- For scheduled tasks, assume local timezone if none is provided. If no destination is given, use the current channel/room from origin (do not ask for channel IDs).\n"
-        "- If you might need a tool or are unsure a capability exists, call list_plugins before saying it is unavailable.\n"
-        "- If the user asks for multiple independent actions, you may call tools one at a time until all actions are complete, then respond.\n"
-        "- Optionally call get_plugin_help before calling a plugin.\n"
-        "- Ask concise follow-up questions for missing required inputs.\n"
-        "- Only ask for inputs a tool explicitly requires (from list_plugins needs or get_plugin_help required_args). If defaults exist, proceed without asking.\n"
-        "- Call only plugins compatible with homeassistant.\n"
-        "- If unsupported here, explain and list supported platforms.\n"
-        "- Tool calls must be JSON only: {\"function\":\"name\",\"arguments\":{...}}\n"
-        "- Meta-tools: list_plugins, get_plugin_help, list_platforms_for_plugin.\n"
-        "- Never claim success unless tool output confirms success.\n"
-        "IMPORTANT:\n"
-        "- Do not use emojis.\n"
-        "- Do not include markdown formatting.\n"
-        "- Keep replies concise and easy to understand.\n"
+        "Use plain text only; no emojis and no markdown formatting.\n"
+        "Keep replies concise and easy to understand.\n"
     )
 
 # -------------------- History shaping (Discord-style alternation) --------------------
@@ -1094,7 +1071,16 @@ def run(stop_event: Optional[threading.Event] = None):
         loop = asyncio.get_event_loop()
 
         async def _start():
-            await server.serve()
+            try:
+                await server.serve()
+            except SystemExit as exc:
+                code = getattr(exc, "code", 1)
+                if code not in (None, 0):
+                    logger.error(
+                        f"[HA Bridge] Server failed to start on {BIND_HOST}:{port} (likely already in use)."
+                    )
+            except Exception:
+                logger.exception(f"[HA Bridge] Server failed on {BIND_HOST}:{port}")
 
         task = loop.create_task(_start())
 
@@ -1118,5 +1104,5 @@ def run(stop_event: Optional[threading.Event] = None):
                 loop.stop()
                 loop.close()
 
-    threading.Thread(target=_serve, daemon=True).start()
     logger.info(f"[HA Bridge] Listening on http://{BIND_HOST}:{port}")
+    _serve()

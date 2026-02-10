@@ -15,6 +15,7 @@ import urllib3
 from plugin_base import ToolPlugin
 from plugin_result import action_failure
 from helpers import redis_client, get_tater_name, get_tater_personality
+from vision_settings import get_vision_settings as get_shared_vision_settings
 
 def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str) -> dict:
     if not isinstance(binary, (bytes, bytearray)):
@@ -175,9 +176,13 @@ class ProtectClient:
         api_key = (settings.get("UNIFI_PROTECT_API_KEY") or "").strip()
 
         # Vision endpoint settings (OpenAI-compatible)
-        vision_api_base = (settings.get("VISION_API_BASE") or "http://127.0.0.1:1234").strip().rstrip("/")
-        vision_model = (settings.get("VISION_MODEL") or "qwen2.5-vl-7b-instruct").strip()
-        vision_api_key = (settings.get("VISION_API_KEY") or os.getenv("OPENAI_API_KEY", "") or "").strip()
+        vision_settings = get_shared_vision_settings(
+            default_api_base="http://127.0.0.1:1234",
+            default_model="qwen2.5-vl-7b-instruct",
+        )
+        vision_api_base = str(vision_settings.get("api_base") or "http://127.0.0.1:1234").strip().rstrip("/")
+        vision_model = str(vision_settings.get("model") or "qwen2.5-vl-7b-instruct").strip()
+        vision_api_key = str(vision_settings.get("api_key") or "").strip()
 
         # Defaults (as requested)
         self.verify_ssl = False
@@ -357,18 +362,7 @@ class UniFiProtectPlugin(ToolPlugin):
 
     platforms = ["webui", "homeassistant", "homekit", "xbmc", "discord", "telegram", "matrix", "irc"]
 
-    usage = (
-        "{\n"
-        '  "function": "unifi_protect",\n'
-        '  "arguments": {\n'
-        '    "action": "Optional: sensors_status|sensor_detail|list_cameras|describe_camera|describe_area.",\n'
-        '    "target": "Optional name hint (front door, garage, doorbell, front yard).",\n'
-        '    "camera": "Optional camera name (alias of target for describe_camera).",\n'
-        '    "area": "Optional area name (alias of target for describe_area).",\n'
-        '    "query": "Optional: user request text; plugin will infer action/target if omitted."\n'
-        "  }\n"
-        "}\n"
-    )
+    usage = '{"function":"unifi_protect","arguments":{"action":"Optional: sensors_status|sensor_detail|list_cameras|describe_camera|describe_area.","target":"Optional name hint (front door, garage, doorbell, front yard).","camera":"Optional camera name (alias of target for describe_camera).","area":"Optional area name (alias of target for describe_area).","query":"Optional: user request text; plugin will infer action/target if omitted."}}'
 
     description = (
         "Query UniFi Protect sensors (door/motion/temp/humidity/battery) and cameras "

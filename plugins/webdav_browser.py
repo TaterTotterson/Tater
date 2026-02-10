@@ -17,12 +17,7 @@ class WebDAVBrowserPlugin(ToolPlugin):
     plugin_name = "WebDAV Browser"
     version = "1.0.0"
     min_tater_version = "50"
-    usage = (
-        "{\n"
-        '  "function": "webdav_browser",\n'
-        '  "arguments": {"path": "/optional/path"}\n'
-        "}\n"
-    )
+    usage = '{"function":"webdav_browser","arguments":{"path":"/optional/path"}}'
     description = "Lets the user browse and download files from the WebDAV server."
     plugin_dec = "Browse and download files from the configured WebDAV server."
     pretty_name = "Connecting to WebDAV"

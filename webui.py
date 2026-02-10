@@ -54,6 +54,11 @@ from kernel_tools import (
     memory_list,
 )
 from planner_loop import should_use_agent_mode, run_planner_loop
+from vision_settings import (
+    get_vision_settings as get_shared_vision_settings,
+    save_vision_settings as save_shared_vision_settings,
+)
+from latest_image_ref import load_latest_image_ref, save_latest_image_ref
 
 # Remove any prior handlers
 for handler in logging.root.handlers[:]:
@@ -88,6 +93,7 @@ WEBUI_ATTACH_INDEX_MAX = int(os.getenv("WEBUI_ATTACH_INDEX_MAX", "500"))
 
 FILE_BLOB_KEY_PREFIX = "webui:file:"
 FILE_INDEX_KEY = "webui:file_index"
+WEBUI_IMAGE_SCOPE = "chat"
 
 # ------------------ Plugin Store / Installed Plugins ------------------
 PLUGIN_DIR = os.getenv("TATER_PLUGIN_DIR", "plugins")  # where installed plugin .py files live
@@ -95,7 +101,16 @@ SHOP_MANIFEST_URL_DEFAULT = os.getenv(
     "TATER_SHOP_MANIFEST_URL",
     "https://raw.githubusercontent.com/TaterTotterson/Tater_Shop/main/manifest.json"
 )
-RETIRED_PLUGIN_IDS = {"web_search"}
+RETIRED_PLUGIN_IDS = {
+    "web_search",
+    "notify_discord",
+    "notify_irc",
+    "notify_matrix",
+    "notify_homeassistant",
+    "notify_ntfy",
+    "notify_telegram",
+    "notify_wordpress",
+}
 
 # Redis configuration for the web UI (using a separate DB)
 redis_host = os.getenv('REDIS_HOST', '127.0.0.1')
@@ -835,6 +850,49 @@ def save_message(role, username, content):
     if max_store > 0:
         redis_client.ltrim(history_key, -max_store, -1)
 
+
+def _extract_image_ref(content):
+    if isinstance(content, dict) and content.get("marker") == "plugin_response":
+        return _extract_image_ref(content.get("content"))
+    if isinstance(content, list):
+        for item in content:
+            ref = _extract_image_ref(item)
+            if ref:
+                return ref
+        return None
+    if not isinstance(content, dict):
+        return None
+
+    media_type = str(content.get("type") or "").strip().lower()
+    mimetype = str(content.get("mimetype") or "").strip().lower()
+    is_image = media_type == "image" or mimetype.startswith("image/")
+    if not is_image:
+        return None
+
+    ref = {
+        "file_id": str(content.get("id") or "").strip() or None,
+        "blob_key": str(content.get("blob_key") or "").strip() or None,
+        "name": str(content.get("name") or "image.png").strip() or "image.png",
+        "mimetype": mimetype or "image/png",
+        "source": "webui",
+        "updated_at": time.time(),
+    }
+    if not ref.get("file_id") and not ref.get("blob_key"):
+        return None
+    return ref
+
+
+def _save_latest_webui_image_ref(content):
+    ref = _extract_image_ref(content)
+    if not ref:
+        return
+    save_latest_image_ref(
+        redis_client,
+        platform="webui",
+        scope=WEBUI_IMAGE_SCOPE,
+        ref=ref,
+    )
+
 def load_chat_history_tail(n: int):
     if n <= 0:
         return []
@@ -910,6 +968,23 @@ def save_homeassistant_settings(base_url: str, token: str) -> None:
             "HA_TOKEN": token,
         },
     )
+
+
+def get_vision_settings():
+    settings = get_shared_vision_settings(
+        default_api_base="http://127.0.0.1:1234",
+        default_model="qwen2.5-vl-7b-instruct",
+    )
+    return {
+        "api_base": settings.get("api_base") or "http://127.0.0.1:1234",
+        "model": settings.get("model") or "qwen2.5-vl-7b-instruct",
+        "api_key": settings.get("api_key") or "",
+    }
+
+
+def save_vision_settings(api_base: str, model: str, api_key: str) -> None:
+    save_shared_vision_settings(api_base=api_base, model=model, api_key=api_key)
+
 
 def render_plugin_controls(plugin_name, label=None):
     current_state = get_plugin_enabled(plugin_name)
@@ -1422,7 +1497,7 @@ def render_platform_controls(platform, redis_client):
 
 def render_rss_feed_manager():
     st.subheader("Feeds")
-    st.caption("Add feeds and customize delivery per feed. Leave targets blank to use notifier defaults.")
+    st.caption("Add feeds and customize delivery per feed. Leave targets blank to use default routing.")
 
     add_url = st.text_input("RSS Feed URL", key="rss_add_url")
     cols = st.columns([1, 1, 2])
@@ -2175,6 +2250,36 @@ def render_homeassistant_settings():
         save_homeassistant_settings(base_url.strip(), token.strip())
         st.success("Home Assistant settings updated.")
 
+
+def render_vision_settings():
+    st.subheader("Vision Settings")
+    current_settings = get_vision_settings()
+
+    api_base = st.text_input(
+        "Vision API Base URL",
+        value=current_settings["api_base"],
+        help="OpenAI-compatible base URL for vision calls (example: http://127.0.0.1:1234).",
+        key="vision_api_base",
+    )
+    model = st.text_input(
+        "Vision Model",
+        value=current_settings["model"],
+        help="Shared vision model used by all vision-enabled plugins.",
+        key="vision_model",
+    )
+    api_key = st.text_input(
+        "Vision API Key (optional)",
+        value=current_settings["api_key"],
+        help="Leave blank for local stacks that do not require authentication.",
+        type="password",
+        key="vision_api_key",
+    )
+
+    if st.button("Save Vision Settings", key="save_vision_settings"):
+        save_vision_settings(api_base.strip(), model.strip(), api_key.strip())
+        st.success("Vision settings updated.")
+
+
 def render_tater_settings():
     st.subheader(f"{first_name} Settings")
     stored_count = int(redis_client.get("tater:max_store") or 20)
@@ -2310,17 +2415,11 @@ def render_settings_page():
     st.markdown("---")
     render_homeassistant_settings()
     st.markdown("---")
+    render_vision_settings()
+    st.markdown("---")
     render_tater_settings()
     st.markdown("---")
     render_admin_gating_settings()
-
-def render_notifiers_page(notifier_plugins):
-    st.title("Notifiers")
-    st.write("Manage notifier plugins used by RSS and other systems.")
-    st.subheader("Notifier Plugins")
-    st.caption("Enable at least one notifier to receive notifications.")
-    render_plugin_list(notifier_plugins, "No notifier plugins available.")
-
 
 def _load_schedules():
     items_by_id = {}
@@ -2870,36 +2969,16 @@ def build_system_prompt():
     if personality:
         persona_clause = (
             f"Voice style: {personality}. "
-            "This affects tone only. "
-            "You must always follow tool and safety rules.\n\n"
+            "This affects tone only and never overrides tool/safety rules.\n\n"
         )
 
+    # Planner mode injects canonical tool-use rules and enabled-tool index each turn.
     return (
         f"Current Date and Time is: {now}\n\n"
-        f"You are {first} {last}, an AI assistant with tool access.\n\n"
-        f"{persona_clause}"
+        f"You are {first} {last}, an AI assistant with tool access.\n"
         "Current platform: webui.\n"
-        "Tool strategy:\n"
-        "- Answer directly when no tool is required.\n"
-        "- Tools are discovered on-demand; not all tools are described here. If unsure, call list_plugins.\n"
-        "- Examples that require list_plugins: weather/forecast, news, stocks, sports scores, downloads, music/song generation, image/video generation, camera feeds/snapshots (front/back yard, porch, driveway, garage), camera/sensor status, smart-home actions.\n"
-        "- The user does not need to explicitly request tool use; if a tool is appropriate, use it.\n"
-        "- Prefer using a tool over attempting to answer from scratch when a tool could fulfill the request.\n"
-        "- If external actions/live data are needed, call list_plugins first.\n- If the user asks to control devices or services or interact with external systems, call list_plugins first.\n"
-        "- If the user asks about a specific tool/plugin by name or asks what a tool can do, call list_plugins or get_plugin_help instead of guessing.\n"
-        "- If the user asks to run a plugin by name (even approximate), call list_plugins and pick the closest match (ignore minor typos/plurals). If a close match exists, use it and do not claim it’s unavailable; optionally confirm.\n"
-        "- When calling a plugin, use its id from list_plugins (not the display name).\n"
-        "- If the user asks to schedule or run a recurring task (daily/weekly/every), use the `ai_tasks` plugin; do not create a platform or tool.\n"
-        "- For scheduled tasks, assume local timezone if none is provided. If no destination is given, use the current channel/room from origin (do not ask for channel IDs).\n"
-        "- If you might need a tool or are unsure a capability exists, call list_plugins before saying it is unavailable.\n"
-        "- Optionally call get_plugin_help before calling a plugin.\n"
-        "- If missing required information, ask concise follow-up questions.\n"
-        "- Only ask for inputs a tool explicitly requires (from list_plugins needs or get_plugin_help required_args). If defaults exist, proceed without asking.\n"
-        "- Only call plugins compatible with webui.\n"
-        "- If a capability is unavailable here, explain and list where it is available.\n"
-        "- For tool calls, output only JSON: {\"function\":\"name\",\"arguments\":{...}}\n"
-        "- Meta-tools always available: list_plugins, get_plugin_help, list_platforms_for_plugin.\n"
-        "- Never claim tool success unless the tool result confirms success.\n"
+        "Keep replies concise and clear.\n\n"
+        f"{persona_clause}"
     )
 
 # ----------------- UNIVERSAL MESSAGE NORMALIZATION ----------------------------
@@ -3058,6 +3137,13 @@ async def process_message(user_name, message_content, wait_callback=None):
         "platform": "webui",
         "user": user_name,
     }
+    latest_image_ref = load_latest_image_ref(
+        redis_client,
+        platform="webui",
+        scope=WEBUI_IMAGE_SCOPE,
+    )
+    if latest_image_ref:
+        origin["latest_image_ref"] = latest_image_ref
     result = await run_planner_loop(
         llm_client=llm_client,
         platform="webui",
@@ -3081,8 +3167,10 @@ async def process_message(user_name, message_content, wait_callback=None):
 
 
 # ------------------ NAVIGATION ------------------
-nav_options = ["Chat", "Plugins", "Auto Plugins", "Notifiers", "Platforms", "AI Tasks", "Agent Lab", "Plugin Store", "Settings"]
+nav_options = ["Chat", "Plugins", "Auto Plugins", "Platforms", "AI Tasks", "Agent Lab", "Plugin Store", "Settings"]
 if "active_view" not in st.session_state:
+    st.session_state.active_view = nav_options[0]
+elif st.session_state.active_view not in nav_options:
     st.session_state.active_view = nav_options[0]
 
 st.sidebar.markdown("**Navigation**")
@@ -3123,10 +3211,6 @@ for exp in exp_platforms:
             _start_experiment_platform(exp_key, exp_path)
 
 # Prepare plugin groupings
-notifier_plugins = _sort_plugins_for_display([
-    p for p in get_registry().values()
-    if getattr(p, "notifier", False)
-])
 automation_plugins = _sort_plugins_for_display([
     p for p in get_registry().values()
     if set(getattr(p, "platforms", []) or []) == {"automation"} and not getattr(p, "notifier", False)
@@ -3299,6 +3383,7 @@ if active_view == "Chat":
                 "size": len(data),
             }
             save_message("user", uname, msg)
+            _save_latest_webui_image_ref(msg)
             st.session_state.chat_messages.append({"role": "user", "content": msg})
 
         # ---- Send to LLM (even if only files were uploaded) ----
@@ -3313,12 +3398,15 @@ if active_view == "Chat":
         async def _wait_callback(func_name, plugin_obj):
             if not status_box:
                 return
-            display_name = (
-                getattr(plugin_obj, "plugin_name", None)
-                or getattr(plugin_obj, "pretty_name", None)
-                or getattr(plugin_obj, "name", None)
-                or func_name
-            )
+            if plugin_obj is None:
+                display_name = f"kernel::{func_name}"
+            else:
+                display_name = (
+                    getattr(plugin_obj, "plugin_name", None)
+                    or getattr(plugin_obj, "pretty_name", None)
+                    or getattr(plugin_obj, "name", None)
+                    or func_name
+                )
             status_box.update(
                 label=f"{first_name} is working on: {display_name}",
                 state="running",
@@ -3342,6 +3430,7 @@ if active_view == "Chat":
         for item in responses:
             st.session_state.chat_messages.append({"role": "assistant", "content": item})
             save_message("assistant", "assistant", item)
+            _save_latest_webui_image_ref(item)
 
         st.rerun()
 
@@ -3378,9 +3467,6 @@ elif active_view == "Auto Plugins":
 elif active_view == "Platforms":
     st.title("Platforms")
     render_platforms_panel(auto_connected)
-
-elif active_view == "Notifiers":
-    render_notifiers_page(notifier_plugins)
 
 elif active_view == "AI Tasks":
     render_ai_tasks_page()

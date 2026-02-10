@@ -60,22 +60,7 @@ class AutomaticPlugin(ToolPlugin):
     pretty_name = "Your Image"
     settings_category = "Automatic111"
 
-    usage = (
-        "{\n"
-        '  "function": "automatic_plugin",\n'
-        '  "arguments": {\n'
-        '    "prompt": "<Text prompt for the image>",\n'
-        '    "negative_prompt": "<Optional negative prompt>",\n'
-        '    "steps": 20,\n'
-        '    "cfg_scale": 7,\n'
-        '    "width": 1024,\n'
-        '    "height": 1024,\n'
-        '    "sampler_name": "DPM++ 2M",\n'
-        '    "scheduler": "Simple",\n'
-        '    "seed": -1\n'
-        "  }\n"
-        "}\n"
-    )
+    usage = '{"function":"automatic_plugin","arguments":{"prompt":"<Text prompt for the image>","negative_prompt":"<Optional negative prompt>","steps":20,"cfg_scale":7,"width":1024,"height":1024,"sampler_name":"DPM++ 2M","scheduler":"Simple","seed":-1}}'
     required_args = ["prompt"]
     optional_args = [
         "negative_prompt",

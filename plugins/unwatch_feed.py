@@ -48,12 +48,7 @@ class UnwatchFeedPlugin(ToolPlugin):
     min_tater_version = "50"
     when_to_use = "Use when the user asks to stop watching or unsubscribe from an RSS/Atom feed."
     optional_args = ["url", "rss_url", "feed"]
-    usage = (
-        "{\n"
-        '  "function": "rss_unwatch",\n'
-        '  "arguments": {"feed_url": "<RSS feed URL>"}\n'
-        "}\n"
-    )
+    usage = '{"function":"unwatch_feed","arguments":{"feed_url":"<RSS feed URL>"}}'
     description = "Removes an RSS feed provided by the user from the RSS watch list."
     plugin_dec = "Remove an RSS feed from the watch list."
     pretty_name = "Unwatch RSS Feed"

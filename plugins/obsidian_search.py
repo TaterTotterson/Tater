@@ -48,17 +48,7 @@ class ObsidianSearchPlugin(ToolPlugin):
     description = "Search markdown notes in Obsidian with bounded scan limits and ranked snippets."
     plugin_dec = "Search your Obsidian vault quickly and return relevant snippets with optional AI synthesis."
     when_to_use = "Use when the user asks to find information in Obsidian notes."
-    usage = (
-        "{\n"
-        '  "function": "obsidian_search",\n'
-        '  "arguments": {\n'
-        '    "query": "<keywords or question>",\n'
-        '    "limit": 6,\n'
-        '    "max_files": 120,\n'
-        '    "ai_synthesis": true\n'
-        "  }\n"
-        "}\n"
-    )
+    usage = '{"function":"obsidian_search","arguments":{"query":"<keywords or question>","limit":6,"max_files":120,"ai_synthesis":true}}'
     required_args = ["query"]
     optional_args = ["user_question", "limit", "max_files", "max_note_chars", "max_snippet_chars", "ai_synthesis"]
 

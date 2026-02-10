@@ -21,15 +21,7 @@ class OverseerrTrendingPlugin(ToolPlugin):
     pretty_name = "Overseerr: Trending & Upcoming"
     settings_category = "Overseerr"
 
-    usage = (
-        "{\n"
-        '  "function": "overseerr_trending",\n'
-        '  "arguments": {\n'
-        '    "kind": "movies|tv",\n'
-        '    "when": "trending|upcoming"\n'
-        "  }\n"
-        "}\n"
-    )
+    usage = '{"function":"overseerr_trending","arguments":{"kind":"movies|tv","when":"trending|upcoming"}}'
 
     description = "Lists trending or upcoming movies/TV from Overseerr. Use this ONLY to list titles."
     plugin_dec = "List trending or upcoming movies/TV from Overseerr."

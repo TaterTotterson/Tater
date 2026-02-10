@@ -138,7 +138,7 @@ def build_system_prompt() -> str:
             "You are running on an original Xbox using XBMC4Xbox, shown on a TV screen.\n"
             "Keep responses short, readable, and suitable for viewing from across the room.\n"
             "Avoid long walls of text; aim for 1–3 short paragraphs at most.\n\n"
-            "Even while staying in character, you must strictly follow the tool-calling rules below.\n\n"
+            "Even while staying in character, you must follow tool and safety rules.\n\n"
         )
 
     # Otherwise, use the built-in Cortana personality
@@ -152,35 +152,15 @@ def build_system_prompt() -> str:
             "- Keep answers short, readable, and friendly — ideal for a TV at a distance.\n"
             "- Avoid long walls of text; aim for 1–3 short paragraphs at most.\n\n"
             "However, if the user explicitly asks who you REALLY are, what your REAL name is, or mentions 'Tater', "
-            f"you should honestly explain that your real name is {first} {last} (nicknamed Tater), and you are just "
+            f"you should honestly explain that your real name is {first} {last}, and you are just "
             "pretending to be Cortana on this original Xbox for fun.\n\n"
         )
 
+    # Planner mode injects canonical tool-use rules and enabled-tool index each turn.
     return (
         f"Current Date and Time is: {now}\n\n"
         f"{base_prompt}"
         "Current platform: xbmc.\n"
-        "Tool strategy:\n"
-        "- Answer directly when no external action/live data is required.\n"
-        "- Examples that require list_plugins: weather/forecast, news, stocks, sports scores, downloads, music/song generation, image/video generation, camera feeds/snapshots (front/back yard, porch, driveway, garage), camera/sensor status, smart-home actions.\n"
-        "- The user does not need to explicitly request tool use; if a tool is appropriate, use it.\n"
-        "- Prefer using a tool over attempting to answer from scratch when a tool could fulfill the request.\n"
-        "- If a tool may be needed, call list_plugins first.\n- If the user asks to control devices or services or interact with external systems, call list_plugins first.\n"
-        "- If the user asks about a specific tool/plugin by name or asks what a tool can do, call list_plugins or get_plugin_help instead of guessing.\n"
-        "- If the user asks to run a plugin by name (even approximate), call list_plugins and pick the closest match (ignore minor typos/plurals). If a close match exists, use it and do not claim it’s unavailable; optionally confirm.\n"
-        "- When calling a plugin, use its id from list_plugins (not the display name).\n"
-        "- If the user asks to schedule or run a recurring task (daily/weekly/every), use the `ai_tasks` plugin; do not create a platform or tool.\n"
-        "- For scheduled tasks, assume local timezone if none is provided. If no destination is given, use the current channel/room from origin (do not ask for channel IDs).\n"
-        "- If you might need a tool or are unsure a capability exists, call list_plugins before saying it is unavailable.\n"
-        "- If the user asks for multiple independent actions, you may call tools one at a time until all actions are complete, then respond.\n"
-        "- Optionally call get_plugin_help before calling a plugin.\n"
-        "- Ask concise follow-up questions for missing required inputs.\n"
-        "- Only ask for inputs a tool explicitly requires (from list_plugins needs or get_plugin_help required_args). If defaults exist, proceed without asking.\n"
-        "- Call only plugins compatible with xbmc.\n"
-        "- If unsupported here, explain and list supported platforms.\n"
-        "- Tool calls must be JSON only: {\"function\":\"name\",\"arguments\":{...}}\n"
-        "- Meta-tools: list_plugins, get_plugin_help, list_platforms_for_plugin.\n"
-        "- Never claim success unless tool output confirms success.\n"
         "Avoid emoji and markdown formatting; keep responses short.\n"
     )
 
@@ -410,7 +390,16 @@ def run(stop_event: Optional[threading.Event] = None):
         loop = asyncio.get_event_loop()
 
         async def _start():
-            await server.serve()
+            try:
+                await server.serve()
+            except SystemExit as exc:
+                code = getattr(exc, "code", 1)
+                if code not in (None, 0):
+                    logger.error(
+                        f"[XBMC Bridge] Server failed to start on {BIND_HOST}:{port} (likely already in use)."
+                    )
+            except Exception:
+                logger.exception(f"[XBMC Bridge] Server failed on {BIND_HOST}:{port}")
 
         task = loop.create_task(_start())
 
@@ -434,5 +423,5 @@ def run(stop_event: Optional[threading.Event] = None):
                 loop.stop()
                 loop.close()
 
-    threading.Thread(target=_serve, daemon=True).start()
     logger.info(f"[XBMC Bridge] Listening on http://{BIND_HOST}:{port}")
+    _serve()
