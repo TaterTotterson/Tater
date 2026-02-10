@@ -15,12 +15,7 @@ class ListFeedsPlugin(ToolPlugin):
     version = "1.1.0"
     min_tater_version = "50"
     when_to_use = "Use when the user asks to list, show, or review watched RSS feeds."
-    usage = (
-        "{\n"
-        '  "function": "rss_list",\n'
-        '  "arguments": {}\n'
-        "}\n"
-    )
+    usage = '{"function":"list_feeds","arguments":{}}'
     description = "Lists the RSS feeds currently being watched."
     plugin_dec = "Show the RSS feeds currently being watched."
     pretty_name = "Listing RSS Feeds"

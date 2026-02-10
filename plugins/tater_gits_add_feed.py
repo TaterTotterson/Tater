@@ -18,12 +18,7 @@ class TaterGitsAddFeedPlugin(ToolPlugin):
     plugin_name = "Tater Gits Add Feed"
     version = "1.0.0"
     min_tater_version = "50"
-    usage = (
-        "{\n"
-        '  "function": "tater_gits_add_feed",\n'
-        '  "arguments": {"url": "https://github.com/OWNER/REPO/releases.atom"}\n'
-        "}\n"
-    )
+    usage = '{"function":"tater_gits_add_feed","arguments":{"url":"https://github.com/OWNER/REPO/releases.atom"}}'
     description = "Adds a GitHub releases feed to the tater-gits watcher. Infers title prefix and category via LLM."
     plugin_dec = "Add a GitHub releases feed to the tater-gits watcher with smart naming."
     pretty_name = "Add Git Feed"

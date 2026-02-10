@@ -33,17 +33,7 @@ class FindMyPhonePlugin(ToolPlugin):
     version = "1.0.3"
     min_tater_version = "50"
     when_to_use = "Use when the user asks to find, ring, locate, or make their phone beep."
-    usage = (
-        "{\n"
-        '  "function": "find_my_phone",\n'
-        '  "arguments": {\n'
-        '    "notify_service": "optional override (notify.mobile_app_<device> or mobile_app_<device>)",\n'
-        '    "count": 2,\n'
-        '    "title": "Find My Phone",\n'
-        '    "message": "🔔 Phone alert requested!"\n'
-        "  }\n"
-        "}\n"
-    )
+    usage = '{"function":"find_my_phone","arguments":{"notify_service":"optional override (notify.mobile_app_<device> or mobile_app_<device>)","count":2,"title":"Find My Phone","message":"🔔 Phone alert requested!"}}'
     optional_args = ["notify_service", "mobile_notify_service", "device_service", "count", "alert_count", "title", "message", "content"]
     description = (
         "Use this when the user asks where their phone is, or asks to find, ring, "

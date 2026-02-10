@@ -1,5 +1,4 @@
 # plugins/camera_event.py
-import asyncio
 import base64
 import json
 import logging
@@ -14,6 +13,8 @@ from dotenv import load_dotenv
 
 from plugin_base import ToolPlugin
 from helpers import redis_client
+from notify import dispatch_notification
+from vision_settings import get_vision_settings as get_shared_vision_settings
 
 load_dotenv()
 logger = logging.getLogger("camera_event")
@@ -29,7 +30,7 @@ class CameraEventPlugin(ToolPlugin):
     - Fetch a Home Assistant camera snapshot.
     - Describe the image with a vision model.
     - Record the event to the Automations event endpoint.
-    - Optionally send Home Assistant notifications through notify_homeassistant
+    - Optionally send Home Assistant notifications through the core notifier
       (phone push and/or persistent notifications).
     """
 
@@ -44,22 +45,7 @@ class CameraEventPlugin(ToolPlugin):
     plugin_dec = (
         "Capture a camera snapshot, describe it, store an event, and optionally notify via Home Assistant Notifier."
     )
-    usage = (
-        "{\n"
-        '  "function": "camera_event",\n'
-        '  "arguments": {\n'
-        '    "area": "front yard | back yard | garage | ...",\n'
-        '    "camera": "camera.front_door_high",\n'
-        '    "query": "optional hint for the vision model",\n'
-        '    "title": "optional notification title override",\n'
-        '    "priority": "critical|high|normal|low",\n'
-        '    "cooldown_seconds": 30,\n'
-        '    "ignore_vehicles": false,\n'
-        '    "send_phone_alerts": false,\n'
-        '    "persistent_notifications": false\n'
-        "  }\n"
-        "}\n"
-    )
+    usage = '{"function":"camera_event","arguments":{"area":"front yard | back yard | garage | ...","camera":"camera.front_door_high","query":"optional hint for the vision model","title":"optional notification title override","priority":"critical|high|normal|low","cooldown_seconds":30,"ignore_vehicles":false,"send_phone_alerts":false,"persistent_notifications":false,"api_notification":true}}'
 
     platforms = ["automation"]
     settings_category = "Camera Event"
@@ -106,6 +92,12 @@ class CameraEventPlugin(ToolPlugin):
             "type": "checkbox",
             "default": False,
             "description": "If enabled, send Home Assistant persistent notifications.",
+        },
+        "ENABLE_HA_API_NOTIFICATION": {
+            "label": "Enable Home Assistant API notifications",
+            "type": "checkbox",
+            "default": True,
+            "description": "If enabled, also send to the Home Assistant platform notification endpoint.",
         },
         "DEFAULT_NOTIFICATION_TITLE": {
             "label": "Default notification title",
@@ -258,11 +250,10 @@ class CameraEventPlugin(ToolPlugin):
         return {"base": base, "token": token}
 
     def _vision(self, settings: Dict[str, str]) -> Dict[str, Optional[str]]:
-        return {
-            "api_base": (settings.get("VISION_API_BASE") or "http://127.0.0.1:1234").strip().rstrip("/"),
-            "model": (settings.get("VISION_MODEL") or "qwen2.5-vl-7b-instruct").strip(),
-            "api_key": (settings.get("VISION_API_KEY") or "").strip() or None,
-        }
+        return get_shared_vision_settings(
+            default_api_base="http://127.0.0.1:1234",
+            default_model="qwen2.5-vl-7b-instruct",
+        )
 
     def _automation_base_url(self) -> str:
         try:
@@ -410,38 +401,13 @@ class CameraEventPlugin(ToolPlugin):
         priority: str,
         send_phone_alerts: bool,
         persistent_notifications: bool,
+        api_notification: bool,
         phone_services: List[str],
         area: str,
         camera: str,
     ) -> Dict[str, Any]:
         if not (send_phone_alerts or persistent_notifications):
             return {"ok": True, "sent_count": 0, "skipped": "notifications_disabled"}
-
-        try:
-            import plugin_registry as pr
-            from plugin_settings import get_plugin_enabled
-        except Exception as exc:
-            return {
-                "ok": False,
-                "sent_count": 0,
-                "errors": [f"Notifier registry unavailable: {exc}"],
-            }
-
-        plugins = pr.get_registry_snapshot() or {}
-        notifier = plugins.get("notify_homeassistant")
-        if not notifier or not getattr(notifier, "notifier", False):
-            return {
-                "ok": False,
-                "sent_count": 0,
-                "errors": ["notify_homeassistant plugin is not available."],
-            }
-
-        if not get_plugin_enabled("notify_homeassistant"):
-            return {
-                "ok": False,
-                "sent_count": 0,
-                "errors": ["notify_homeassistant plugin is disabled."],
-            }
 
         dispatch_targets: List[Dict[str, Any]] = []
         if send_phone_alerts and phone_services:
@@ -477,22 +443,22 @@ class CameraEventPlugin(ToolPlugin):
         errors: List[str] = []
 
         for targets in dispatch_targets:
+            targets["api_notification"] = bool(api_notification)
             try:
-                result = notifier.notify(
+                result = await dispatch_notification(
+                    platform="homeassistant",
                     title=title,
                     content=message,
                     targets=targets,
                     origin=origin,
                     meta=meta,
                 )
-                if asyncio.iscoroutine(result):
-                    result = await result
 
                 result_text = str(result or "").strip()
                 if result_text.lower().startswith("queued notification"):
                     sent_count += 1
                 else:
-                    errors.append(result_text or "notify_homeassistant returned an empty response")
+                    errors.append(result_text or "homeassistant notifier returned an empty response")
             except Exception as exc:
                 errors.append(str(exc))
 
@@ -542,6 +508,12 @@ class CameraEventPlugin(ToolPlugin):
             persistent_notifications = self._boolish(args.get("persistent"), persistent_default)
         else:
             persistent_notifications = persistent_default
+
+        api_notification_default = self._boolish(settings.get("ENABLE_HA_API_NOTIFICATION"), True)
+        if "api_notification" in args:
+            api_notification = self._boolish(args.get("api_notification"), api_notification_default)
+        else:
+            api_notification = api_notification_default
 
         default_title = (settings.get("DEFAULT_NOTIFICATION_TITLE") or "Camera Event").strip()
         notification_title = (args.get("title") or default_title or f"{area.title()} Alert").strip()
@@ -604,6 +576,7 @@ class CameraEventPlugin(ToolPlugin):
                 priority=notification_priority,
                 send_phone_alerts=send_phone_alerts,
                 persistent_notifications=persistent_notifications,
+                api_notification=api_notification,
                 phone_services=phone_services,
                 area=area,
                 camera=camera,

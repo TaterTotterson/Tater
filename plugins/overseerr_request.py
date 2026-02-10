@@ -28,15 +28,7 @@ class OverseerrRequestPlugin(ToolPlugin):
     plugin_name = "Overseerr Request"
     version = "1.0.2"
     min_tater_version = "50"
-    usage = (
-        "{\n"
-        '  "function": "overseerr_request",\n'
-        '  "arguments": {\n'
-        '    "title": "<title string>",\n'
-        '    "kind": "movie|tv (optional)"\n'
-        "  }\n"
-        "}\n"
-    )
+    usage = '{"function":"overseerr_request","arguments":{"title":"<title string>","kind":"movie|tv (optional)"}}'
     description = (
         "Adds a movie or TV show to Overseerr by title, creating a new request for it. "
         "Example: add the movie F1, request the TV show One Piece, request the movie Dune."

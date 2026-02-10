@@ -8,7 +8,7 @@ from typing import Any, Dict
 
 from plugin_base import ToolPlugin
 from helpers import redis_client
-from notify_queue import (
+from notify.queue import (
     ALLOWED_PLATFORMS,
     load_default_targets,
     normalize_origin,
@@ -41,28 +41,7 @@ class AITasksPlugin(ToolPlugin):
         "origin",
     ]
     version = "1.0.1"
-    usage = (
-        "{\n"
-        "  \"function\": \"ai_tasks\",\n"
-        "  \"arguments\": {\n"
-        "    \"message\": \"Required task prompt\",\n"
-        "    \"task_prompt\": \"Optional explicit scheduled task prompt\",\n"
-        "    \"title\": \"Optional short title\",\n"
-        "    \"platform\": \"discord|irc|matrix|homeassistant|ntfy|telegram (optional; defaults to origin)\",\n"
-        "    \"targets\": {\n"
-        "      \"channel\": \"optional destination (discord/irc channel, matrix room/alias, or HA notify service). If omitted, uses the current channel/room from origin\",\n"
-        "      \"chat_id\": \"optional telegram destination chat id\"\n"
-        "    },\n"
-        "    \"when_ts\": 1730000000.0,\n"
-        "    \"when\": \"2026-02-03 15:04:05 or 10am (local time)\",\n"
-        "    \"in_seconds\": 3600,\n"
-        "    \"every_seconds\": 0,\n"
-        "    \"priority\": \"normal|high\",\n"
-        "    \"tags\": [\"optional\", \"strings\"],\n"
-        "    \"ttl_sec\": 0\n"
-        "  }\n"
-        "}\n"
-    )
+    usage = '{"function":"ai_tasks","arguments":{"message":"Required task prompt","task_prompt":"Optional explicit scheduled task prompt","title":"Optional short title","platform":"discord|irc|matrix|homeassistant|ntfy|telegram (optional; defaults to origin)","targets":{"channel":"optional destination (discord/irc channel, matrix room/alias, or HA notify service). If omitted, uses the current channel/room from origin","chat_id":"optional telegram destination chat id"},"when_ts":1730000000.0,"when":"2026-02-03 15:04:05 or 10am (local time)","in_seconds":3600,"every_seconds":0,"priority":"normal|high","tags":["optional","strings"],"ttl_sec":0}}'
     description = (
         "Schedule an AI task. Supports one-shot or recurring runs via every_seconds. "
         "At run time, AI can answer directly or call one tool before sending the final response."
@@ -121,6 +100,35 @@ class AITasksPlugin(ToolPlugin):
 
         return {"channel": ref}
 
+    @staticmethod
+    def _extract_target_hint(raw: Any) -> str:
+        text = str(raw or "").strip()
+        if not text:
+            return ""
+        for pattern in (r"![^\s]+", r"#[A-Za-z0-9][A-Za-z0-9._:-]*", r"@[A-Za-z0-9_]+"):
+            m = re.search(pattern, text)
+            if m:
+                return m.group(0)
+        text = re.sub(r"^(?:room|channel|chat)\s+", "", text, flags=re.IGNORECASE)
+        text = re.sub(
+            r"\s+(?:in|on)\s+(?:discord|irc|matrix|telegram|home\s*assistant|homeassistant)\b.*$",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+        return text.strip(" .")
+
+    @staticmethod
+    def _coerce_targets(payload: Any) -> Dict[str, Any]:
+        if isinstance(payload, dict):
+            return dict(payload)
+        # Allow a shorthand string target like "#alerts" for scheduler calls.
+        if isinstance(payload, str):
+            hint = AITasksPlugin._extract_target_hint(payload)
+            if hint:
+                return {"channel": hint}
+        return {}
+
     def _extract_args(self, args: Dict[str, Any]):
         args = args or {}
         title = args.get("title")
@@ -131,7 +139,7 @@ class AITasksPlugin(ToolPlugin):
 
         platform = args.get("platform")
 
-        targets = dict(args.get("targets") or {})
+        targets = self._coerce_targets(args.get("targets"))
         for key in ("channel", "channel_id", "room_id", "device_service", "chat_id"):
             if args.get(key) and key not in targets:
                 targets[key] = args.get(key)

@@ -16,12 +16,7 @@ class GetNotificationsPlugin(ToolPlugin):
     plugin_name = "Get Notifications"
     version = "1.1.0"
     min_tater_version = "50"
-    usage = (
-        "{\n"
-        '  "function": "get_notifications",\n'
-        '  "arguments": {"limit": 8}\n'
-        "}\n"
-    )
+    usage = '{"function":"get_notifications","arguments":{"limit":8}}'
     optional_args = ["limit"]
     when_to_use = (
         "Use when the user asks for notifications, alerts, or what happened recently in Home Assistant."

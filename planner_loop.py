@@ -6,12 +6,19 @@ import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from helpers import (
+    get_tater_name,
     parse_function_json,
     looks_like_tool_markup,
     TOOL_MARKUP_REPAIR_PROMPT,
     TOOL_MARKUP_FAILURE_TEXT,
 )
-from plugin_kernel import normalize_platform, plugin_display_name, plugin_supports_platform, expand_plugin_platforms
+from plugin_kernel import (
+    normalize_platform,
+    plugin_display_name,
+    plugin_supports_platform,
+    expand_plugin_platforms,
+    plugin_when_to_use,
+)
 from plugin_result import (
     action_failure,
     narrate_result,
@@ -131,32 +138,33 @@ HIGH_IMPACT_KEYWORDS = (
     "promote",
 )
 
-AGENT_CREATION_REPAIR_PROMPT = (
-    "If the user asks to create a plugin, platform, server, API endpoint, website, or tool, "
-    "you must use Agent Lab kernel tools to create the files under agent_lab/. "
-    "Do not respond with manual steps or code blocks alone. "
+AGENT_CREATION_SHARED_REPAIR_PROMPT = (
+    "For Agent Lab creation requests, use kernel tools to write files under agent_lab/. "
+    "Do not reply with manual steps or code blocks alone. "
     "Use create_plugin/create_platform (not write_file for plugins/platforms). "
-    "Agent Lab platforms require a PLATFORM dict and a run(stop_event) function. "
-    "Agent Lab plugins must subclass ToolPlugin and expose a module-level `plugin` instance (not a dict). "
     "Always include full file content via code_lines (preferred) or code/code_b64. "
-    "When using code_lines, keep `usage` as a single-line JSON string to avoid quoting errors "
-    "(example: usage = '{\"function\":\"my_plugin\",\"arguments\":{}}'). "
-    "Each code_lines entry must be a single line (no embedded \\n). Use single-quoted strings to avoid escaping. "
+    "Each code_lines entry must be a single line (no embedded \\n). "
     "Do NOT split list/dict literals across multiple code_lines entries. "
-    "If you call llm_client.chat, keep the messages list on ONE line: "
-    "messages=[{\"role\":\"system\",\"content\":\"...\"},{\"role\":\"user\",\"content\":\"...\"}]. "
-    "For Agent Lab plugins, set `platforms` to include the current platform, and implement the matching handler "
-    "(e.g., handle_webui for webui, handle_discord for discord). "
-    "Set plugin `name` to the exact file id passed to create_plugin (must match `<name>.py`). "
-    "Use `plugin_name` for human-readable labels. "
-    "Always include `when_to_use` and a waiting_prompt_template for Agent Lab plugins. "
-    "waiting_prompt_template must be an instruction to the LLM and should include wording like "
-    "'Write ...' and 'Only output that message.'"
+    "If you call llm_client.chat in generated code, keep the messages list on ONE line: "
+    "messages=[{\"role\":\"system\",\"content\":\"...\"},{\"role\":\"user\",\"content\":\"...\"}]."
+)
+AGENT_CREATION_PLUGIN_REPAIR_PROMPT = (
+    "Plugin-specific rules: subclass ToolPlugin from plugin_base and expose a module-level `plugin` instance (not a dict). "
+    "Set `name` to the exact create_plugin id and filename stem (<name>.py), and use `plugin_name` for display. "
+    "Set `platforms` to include the current platform and implement matching handle_<platform> methods. "
+    "Keep `usage` as single-line JSON with function id equal to plugin name "
+    "(example: usage = '{\"function\":\"my_plugin\",\"arguments\":{}}'). "
+    "Include `when_to_use` and `waiting_prompt_template`; waiting_prompt_template must instruct output "
+    "(for example: 'Write ...' and 'Only output that message.')."
+)
+AGENT_CREATION_PLATFORM_REPAIR_PROMPT = (
+    "Platform-specific rules: include a module-level PLATFORM dict and run(stop_event=None). "
+    "Keep the run loop cooperative: check stop_event regularly and avoid long blocking operations."
 )
 AGENT_CREATION_FAILURE_TEXT = "Sorry, I couldn't generate the required tool calls. Please try again."
 AGENT_UNKNOWN_TOOL_REPAIR_PROMPT = (
-    "The tool you tried does not exist. Call list_plugins to see available tools, "
-    "then choose a valid tool and call it with proper arguments."
+    "The tool id is invalid for this turn. Choose a valid id from the enabled tool index and "
+    "return a strict JSON tool call only."
 )
 AGENT_UNKNOWN_TOOL_FAILURE_TEXT = "I don't have that tool available. Please rephrase or choose another tool."
 CREATION_MAX_REPROMPTS = 4
@@ -165,7 +173,13 @@ TOOL_NAME_ALIASES = {
     "web_search": "search_web",
     "google_search": "search_web",
     "google_cse_search": "search_web",
+    "describe_image": "vision_describer",
+    "describe_latest_image": "vision_describer",
+    "vision_describe": "vision_describer",
+    "vision_describe_image": "vision_describer",
 }
+
+DELIVERY_PLATFORMS = {"discord", "irc", "matrix", "telegram", "homeassistant"}
 
 PLUGIN_REQUIREMENTS_HINT = (
     "Plugin must subclass ToolPlugin imported from plugin_base and assign an instance to module-level `plugin` (not a dict). "
@@ -178,6 +192,215 @@ PLUGIN_REQUIREMENTS_HINT = (
     "Each code_lines entry must be a single line (no embedded \\n). "
     "If you call llm_client.chat, put the messages list on ONE line with a comma between dicts."
 )
+
+PLUGIN_ADVANCED_REFERENCE_RULES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    (
+        "skills/agent_lab/references/plugin_api_auth.md",
+        (
+            "api",
+            "oauth",
+            "token",
+            "auth",
+            "http",
+            "rest",
+            "graphql",
+            "webhook",
+            "endpoint",
+        ),
+    ),
+    (
+        "skills/agent_lab/references/plugin_ai_generation.md",
+        (
+            "llm",
+            "ai-generated",
+            "summarize",
+            "summary",
+            "rewrite",
+            "caption",
+            "joke",
+            "story",
+        ),
+    ),
+    (
+        "skills/agent_lab/references/plugin_artifacts.md",
+        (
+            "image",
+            "audio",
+            "video",
+            "file",
+            "attachment",
+            "artifact",
+            "screenshot",
+            "thumbnail",
+        ),
+    ),
+    (
+        "skills/agent_lab/references/plugin_result_contract.md",
+        (
+            "action_failure",
+            "action_success",
+            "needs",
+            "follow-up question",
+            "error code",
+            "say_hint",
+            "facts",
+        ),
+    ),
+    (
+        "skills/agent_lab/references/plugin_http_resilience.md",
+        (
+            "timeout",
+            "retry",
+            "backoff",
+            "rate limit",
+            "429",
+            "requests",
+            "httpx",
+            "network failure",
+        ),
+    ),
+    (
+        "skills/agent_lab/references/plugin_settings_and_secrets.md",
+        (
+            "required_settings",
+            "settings",
+            "api key",
+            "token",
+            "secret",
+            "password",
+            "credentials",
+            "auth header",
+        ),
+    ),
+    (
+        "skills/agent_lab/references/plugin_multiplatform_handlers.md",
+        (
+            "multi-platform",
+            "multiplatform",
+            "cross-platform",
+            "handle_webui",
+            "handle_discord",
+            "handle_telegram",
+            "handle_matrix",
+            "all platforms",
+        ),
+    ),
+    (
+        "skills/agent_lab/references/plugin_notification_delivery.md",
+        (
+            "notify",
+            "notification",
+            "send message",
+            "send_message",
+            "room",
+            "channel",
+            "target",
+            "origin",
+        ),
+    ),
+    (
+        "skills/agent_lab/references/plugin_argument_schema.md",
+        (
+            "argument_schema",
+            "schema",
+            "required args",
+            "optional args",
+            "typed arguments",
+            "validation schema",
+            "json schema",
+        ),
+    ),
+)
+
+PLATFORM_ADVANCED_REFERENCE_RULES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    (
+        "skills/agent_lab/references/platform_network_events.md",
+        (
+            "webhook",
+            "socket",
+            "websocket",
+            "mqtt",
+            "tcp",
+            "udp",
+            "server",
+            "endpoint",
+            "stream",
+            "bridge",
+        ),
+    ),
+    (
+        "skills/agent_lab/references/platform_pollers_workers.md",
+        (
+            "poll",
+            "watch",
+            "monitor",
+            "feed",
+            "queue",
+            "worker",
+            "cron",
+            "schedule",
+            "interval",
+            "retry",
+            "backoff",
+        ),
+    ),
+)
+
+
+def _contains_creation_phrase(text: str, phrase: str) -> bool:
+    s = str(text or "").strip().lower()
+    p = str(phrase or "").strip().lower()
+    if not s or not p:
+        return False
+    if " " in p or "-" in p or "_" in p:
+        return p in s
+    return re.search(rf"\b{re.escape(p)}\b", s) is not None
+
+
+def _creation_advanced_reference_paths(
+    *,
+    need_plugin: bool,
+    need_platform: bool,
+    request_text: str,
+) -> List[str]:
+    text = str(request_text or "").strip().lower()
+    if not text:
+        return []
+
+    out: List[str] = []
+    if need_plugin:
+        for path, triggers in PLUGIN_ADVANCED_REFERENCE_RULES:
+            if any(_contains_creation_phrase(text, t) for t in triggers):
+                out.append(path)
+    if need_platform:
+        for path, triggers in PLATFORM_ADVANCED_REFERENCE_RULES:
+            if any(_contains_creation_phrase(text, t) for t in triggers):
+                out.append(path)
+
+    seen = set()
+    deduped: List[str] = []
+    for item in out:
+        if item in seen:
+            continue
+        seen.add(item)
+        deduped.append(item)
+    return deduped
+
+
+def _creation_repair_prompt_for_intent(intent: Optional[Dict[str, Any]]) -> str:
+    info = intent if isinstance(intent, dict) else {}
+    need_plugin = bool(info.get("need_plugin"))
+    need_platform = bool(info.get("need_platform"))
+
+    parts: List[str] = [AGENT_CREATION_SHARED_REPAIR_PROMPT]
+    if need_plugin:
+        parts.append(AGENT_CREATION_PLUGIN_REPAIR_PROMPT)
+    if need_platform:
+        parts.append(AGENT_CREATION_PLATFORM_REPAIR_PROMPT)
+    if not need_plugin and not need_platform:
+        parts.append(AGENT_CREATION_PLUGIN_REPAIR_PROMPT)
+        parts.append(AGENT_CREATION_PLATFORM_REPAIR_PROMPT)
+    return "\n".join(parts)
 
 
 def agent_mode_enabled(r=None) -> bool:
@@ -376,60 +599,82 @@ def _needs_for_missing_args(plugin: Any, missing: List[str]) -> List[str]:
     return [f"Please provide: {', '.join(missing)}."]
 
 
+def _short_tool_purpose(plugin: Any) -> str:
+    text = str(plugin_when_to_use(plugin) or "").strip()
+    if not text:
+        text = str(getattr(plugin, "description", "") or "").strip()
+    if not text:
+        return "no description"
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > 80:
+        text = text[:77].rstrip() + "..."
+    return text
+
+
+def _enabled_tool_mini_index(
+    *,
+    platform: str,
+    registry: Dict[str, Any],
+    enabled_predicate: Optional[Callable[[str], bool]],
+) -> str:
+    enabled_check = enabled_predicate or (lambda _name: True)
+    rows: List[str] = []
+    for plugin_id, plugin in sorted(registry.items(), key=lambda kv: str(kv[0]).lower()):
+        if not enabled_check(plugin_id):
+            continue
+        if not plugin_supports_platform(plugin, platform):
+            continue
+        rows.append(f"- {plugin_id} — {_short_tool_purpose(plugin)}")
+    if not rows:
+        rows.append("- (none)")
+    return (
+        "Enabled tools on this platform:\n"
+        + "\n".join(rows)
+        + "\nMeta tools:\n"
+        + "- get_plugin_help(plugin_id)\n"
+        + "- vision_describer(prompt?, path?|url?|blob_key?|file_id?)"
+    )
+
+
+def _upsert_tool_index_message(
+    messages: List[Dict[str, Any]],
+    *,
+    platform: str,
+    registry: Dict[str, Any],
+    enabled_predicate: Optional[Callable[[str], bool]],
+) -> None:
+    prefix = "Enabled tools on this platform:"
+    for i in range(len(messages) - 1, -1, -1):
+        m = messages[i]
+        if m.get("role") != "system":
+            continue
+        if str(m.get("content") or "").startswith(prefix):
+            messages.pop(i)
+    messages.append(
+        {
+            "role": "system",
+            "content": _enabled_tool_mini_index(
+                platform=platform,
+                registry=registry,
+                enabled_predicate=enabled_predicate,
+            ),
+        }
+    )
+
+
 def _agent_system_instructions(max_rounds: int, max_tool_calls: int) -> str:
     return (
-        "Agent Mode is ON. You may take multiple steps to complete the user's goal.\n"
-        "Rules:\n"
-        "- Decide the next step each round: tool call, question, or finish.\n"
-        "- Use list_plugins to discover tools; use get_plugin_help if arguments are unclear.\n"
-        "- If the user asks to schedule or run a recurring task (daily/weekly/every), use the `ai_tasks` plugin; do not create a platform or tool.\n"
-        "- For scheduled tasks, assume local timezone if none is provided. If no destination is given, use the current channel/room from origin (do not ask for channel IDs).\n"
-        "- If the user asks to run a plugin by name (even approximate), call list_plugins and pick the closest match (ignore minor typos/plurals). If a close match exists, use it and do not claim it’s unavailable; optionally confirm.\n"
-        "- When calling a plugin, use its id from list_plugins (not the display name).\n"
-        "- Examples that require list_plugins: weather/forecast, news, stocks, sports scores, downloads, music/song generation, image/video generation, camera feeds/snapshots (front/back yard, porch, driveway, garage), camera/sensor status, smart-home actions.\n"
-        "- The user does not need to explicitly request tool use; if a tool is appropriate, use it.\n"
-        "- Prefer using a tool over attempting to answer from scratch when a tool could fulfill the request.\n"
-        "- Only call tools compatible with this platform.\n"
-        "- For any create/generate request (content, media, files, or other artifacts), always call list_plugins before responding.\n"
-        "- Do not provide a creative or alternative response until you have verified no compatible tool exists.\n"
-        "- Before saying you cannot do something in this environment, call list_plugins to verify tool availability.\n"
-        "- Before creating Agent Lab plugins/platforms, read the authoring skills via read_file:\n"
-        "  skills/agent_lab/plugin_authoring.md and skills/agent_lab/platform_authoring.md.\n"
-        "- If a tool returns needs[], stop and ask exactly those questions.\n"
-        "- If an action is destructive/high-impact, ask for explicit confirmation first.\n"
-        "- If the user asks to test or verify a plugin, call test_plugin and report explicit PASS/FAIL plus live_tested=true/false.\n"
-        "- Use memory_set only when the user explicitly asks to remember/store a preference or default.\n"
-        "- Use memory_explain when the user asks why a remembered/default value was chosen or to inspect memory conflicts.\n"
-        "- For questions like 'have we done this before' or prior outcomes, use memory_search and/or truth_get_last/truth_list before answering.\n"
-        f"- Budget: max rounds={max_rounds}, max tool calls={max_tool_calls}.\n"
-        "- Tool calls must be JSON only. Final replies should be plain text.\n"
-        "Kernel tools available: read_file, search_web, search_files, write_file, list_directory, delete_file, read_url, download_file, "
-        "list_archive, extract_archive, list_stable_plugins, list_stable_platforms, inspect_plugin, "
-        "create_plugin, validate_plugin, test_plugin, "
-        "create_platform, validate_platform, write_workspace_note, list_workspace, "
-        "memory_get, memory_set, memory_list, memory_delete, memory_explain, memory_search, truth_get_last, truth_list.\n"
-        "For external/current facts, API docs, or library references, call search_web first and then read_url if deeper content is needed.\n"
-        "If search_web returns thin evidence, call search_web again using `next_start` (or a broader query) before finalizing.\n"
-        "For broad current-events questions (for example: 'what's going on in the world'), call search_web before answering.\n"
-        "read_file supports plain text and structured extraction for .pdf, .docx, .xlsx/.xlsm, .csv/.tsv, and .pptx files.\n"
-        "For large files, call read_file with `start` and `max_chars` to page through content.\n"
-        "Archive helpers support zip/tar plus 7z/rar when dependencies are installed.\n"
-        "For kernel file paths, `/agent_lab/...` maps to the Agent Lab root, and shortcuts like "
-        "`plugins/...`, `platforms/...`, `documents/...`, `downloads/...`, `workspace/...`, "
-        "`artifacts/...`, and `logs/...` "
-        "resolve under `agent_lab/`.\n"
-        "When writing files or code, prefer `content_lines`/`code_lines` arrays (one string per line) to avoid JSON escaping issues; "
-        "base64 fields (`content_b64`/`code_b64`) are also supported.\n"
-        "For create_plugin/create_platform, do NOT use manifest/code_files. Provide `name` plus `code_lines` (preferred) "
-        "or `code`/`code_b64`. Existing Agent Lab files require explicit `overwrite=true` before replacement. "
-        "Avoid triple-quoted docstrings or unescaped double quotes inside code_lines; "
-        "use single quotes or comments instead.\n"
-        "If the user explicitly asks for AI-generated content (e.g., AI-generated jokes, stories, summaries), "
-        "the plugin must call llm_client at runtime to generate output. Do NOT hardcode a static list.\n"
-        "File writes are restricted to agent_lab/; stable code is read-only.\n"
-        "Use read_url for small text downloads. Use download_file to save files under agent_lab/downloads.\n"
-        "You cannot start/stop platforms yourself; after creating one, instruct the user to enable/start it from the Agent Lab tab.\n"
-        "Do not refuse by claiming you can't create plugins or servers here; create the Agent Lab code and explain how to activate it.\n"
+        "Agent mode is ON.\n"
+        f"Budget: rounds={max_rounds}, tool_calls={max_tool_calls}.\n"
+        "Use only tool ids listed in the enabled tool index.\n"
+        "If a tool matches intent, call it directly.\n"
+        "If args are unclear, call get_plugin_help(plugin_id) once.\n"
+        "Tool calls must be strict single-line JSON: {\"function\":\"tool_id\",\"arguments\":{...}}\n"
+        "No markdown fences or extra text around tool calls.\n"
+        "If a tool returns needs[], ask exactly those questions.\n"
+        "Do not claim success unless the tool result confirms success.\n"
+        "Ask confirmation before destructive/high-impact actions.\n"
+        "Final user replies must be plain text.\n"
     )
 
 
@@ -440,6 +685,37 @@ def _task_context_message(state: Dict[str, Any]) -> str:
         "facts": state.get("facts"),
     }
     return "Task context (read-only):\n" + json.dumps(payload, ensure_ascii=False)
+
+
+def _compact_planner_history(
+    history_messages: List[Dict[str, Any]],
+    *,
+    platform: str,
+) -> List[Dict[str, Any]]:
+    first, last = get_tater_name()
+    out: List[Dict[str, Any]] = [
+        {
+            "role": "system",
+            "content": f"You are {first} {last}, an AI assistant.\nCurrent platform: {platform}.",
+        }
+    ]
+    for msg in list(history_messages or []):
+        if not isinstance(msg, dict):
+            continue
+        role = str(msg.get("role") or "").strip().lower()
+        content = msg.get("content")
+        if role not in {"system", "user", "assistant", "tool"}:
+            continue
+        if role == "system":
+            text = str(content or "").strip()
+            if not text:
+                continue
+            # Keep only lightweight contextual system notes.
+            if text.startswith("The user's name is "):
+                out.append({"role": "system", "content": text})
+            continue
+        out.append({"role": role, "content": content})
+    return out
 
 
 def _looks_high_impact(plugin_id: str, args: Dict[str, Any]) -> bool:
@@ -461,6 +737,377 @@ def _canonical_tool_name(name: str) -> str:
     if not key:
         return ""
     return TOOL_NAME_ALIASES.get(key, key)
+
+
+def _looks_like_send_intent(text: str) -> bool:
+    s = str(text or "").strip().lower()
+    if not s:
+        return False
+    if "send" in s and "message" in s:
+        return True
+    return "notify" in s
+
+
+def _infer_destination_platform(text: str) -> str:
+    s = str(text or "").strip().lower()
+    if not s:
+        return ""
+    if re.search(r"\bhome\s*assistant\b|\bhomeassistant\b", s):
+        return "homeassistant"
+    if re.search(r"\bdiscord\b", s):
+        return "discord"
+    if re.search(r"\bmatrix\b", s):
+        return "matrix"
+    if re.search(r"\btelegram\b", s):
+        return "telegram"
+    if re.search(r"\birc\b", s):
+        return "irc"
+    return ""
+
+
+def _looks_like_platform_followup(text: str) -> bool:
+    s = str(text or "").strip().lower()
+    if not s:
+        return False
+    if "which platform" in s or "what platform" in s:
+        return True
+    if "platform to use" in s or "specify" in s and "platform" in s:
+        return True
+    if "need to know" in s and "platform" in s:
+        return True
+    return False
+
+
+def _flatten_text_values(value: Any) -> List[str]:
+    out: List[str] = []
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            out.append(text)
+        return out
+    if isinstance(value, dict):
+        for item in value.values():
+            out.extend(_flatten_text_values(item))
+        return out
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            out.extend(_flatten_text_values(item))
+        return out
+    return out
+
+
+def _infer_destination_platform_from_args(args: Dict[str, Any]) -> str:
+    data = dict(args or {})
+    platform = normalize_platform(data.get("platform"))
+    if platform in DELIVERY_PLATFORMS:
+        return platform
+
+    targets = data.get("targets")
+    if isinstance(targets, dict):
+        if targets.get("room_id") or targets.get("room_alias"):
+            return "matrix"
+        if targets.get("chat_id"):
+            return "telegram"
+        if targets.get("device_service") is not None or targets.get("persistent") is not None:
+            return "homeassistant"
+
+    for text in _flatten_text_values(data):
+        hint = _infer_destination_platform(text)
+        if hint:
+            return hint
+    return ""
+
+
+def _extract_target_ref(text: str) -> str:
+    s = str(text or "").strip()
+    if not s:
+        return ""
+
+    for pattern in (r"![^\s,]+", r"#[A-Za-z0-9][A-Za-z0-9._:-]*", r"@[A-Za-z0-9_]+"):
+        match = re.search(pattern, s)
+        if match:
+            return match.group(0)
+
+    match = re.search(
+        r"\b(?:room|channel|chat)\s+([^\n,]+?)(?:\s+(?:in|on|via)\s+\w+|\s+(?:saying|say)\b|$)",
+        s,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    ref = str(match.group(1) or "").strip().strip("\"'“”")
+    return ref.strip(" .")
+
+
+def _extract_message_text(text: str) -> str:
+    s = str(text or "").strip()
+    if not s:
+        return ""
+
+    for pattern in (
+        r"\bsaying\s+[\"'“”]?(.+?)[\"'”]?\s*$",
+        r"\bsay\s+[\"'“”]?(.+?)[\"'”]?\s*$",
+        r"\bmessage\s+[\"'“”]?(.+?)[\"'”]?\s*$",
+    ):
+        match = re.search(pattern, s, flags=re.IGNORECASE)
+        if match:
+            content = str(match.group(1) or "").strip().strip("\"'“”")
+            if content:
+                return content
+
+    quoted = re.search(r"[\"'“”]([^\"'“”]{1,500})[\"'“”]", s)
+    if quoted:
+        return str(quoted.group(1) or "").strip()
+    return ""
+
+
+def _inject_platform_into_request(request: str, platform: str) -> str:
+    base = str(request or "").strip()
+    target_platform = str(platform or "").strip().lower()
+    if not base or target_platform not in DELIVERY_PLATFORMS:
+        return base
+    if _infer_destination_platform(base) == target_platform:
+        return base
+
+    split_match = re.search(r"\s+(saying|say)\b", base, flags=re.IGNORECASE)
+    if split_match:
+        idx = split_match.start()
+        return f"{base[:idx]} in {target_platform}{base[idx:]}"
+    return f"{base} in {target_platform}"
+
+
+def _autofill_delivery_args(
+    func: str,
+    args: Dict[str, Any],
+    *,
+    user_text: str,
+    origin: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    if func not in {"send_message", "ai_tasks"}:
+        return dict(args or {})
+
+    out = dict(args or {})
+    platform = normalize_platform(out.get("platform"))
+    if platform not in DELIVERY_PLATFORMS:
+        hint = _infer_destination_platform_from_args(out)
+        if not hint:
+            hint = _infer_destination_platform(user_text)
+        if not hint and isinstance(origin, dict):
+            origin_platform = normalize_platform(origin.get("platform"))
+            if origin_platform in DELIVERY_PLATFORMS:
+                hint = origin_platform
+        if hint:
+            out["platform"] = hint
+            platform = hint
+
+    if func == "send_message" and not out.get("targets") and platform:
+        target_ref = _extract_target_ref(user_text)
+        if target_ref:
+            if platform == "matrix":
+                out["targets"] = {"room_id": target_ref}
+            elif platform == "telegram":
+                out["targets"] = {"chat_id": target_ref}
+            elif platform == "homeassistant":
+                out["targets"] = {"device_service": target_ref}
+            else:
+                out["targets"] = {"channel": target_ref}
+
+    if func == "send_message" and not out.get("message"):
+        message = _extract_message_text(user_text)
+        if message:
+            out["message"] = message
+
+    return out
+
+
+def _force_send_message_call(user_text: str) -> Optional[Dict[str, Any]]:
+    if not _looks_like_send_intent(user_text):
+        return None
+
+    platform = _infer_destination_platform(user_text)
+    if platform not in DELIVERY_PLATFORMS:
+        return None
+
+    args: Dict[str, Any] = {"platform": platform}
+    target_ref = _extract_target_ref(user_text)
+    if target_ref:
+        if platform == "matrix":
+            args["targets"] = {"room_id": target_ref}
+        elif platform == "telegram":
+            args["targets"] = {"chat_id": target_ref}
+        elif platform == "homeassistant":
+            args["targets"] = {"device_service": target_ref}
+        else:
+            args["targets"] = {"channel": target_ref}
+
+    message = _extract_message_text(user_text)
+    if not message:
+        return None
+    args["message"] = message
+
+    return {"function": "send_message", "arguments": args}
+
+
+def _platform_reply_token(text: str) -> str:
+    raw = str(text or "").strip().lower()
+    if not raw:
+        return ""
+    raw = raw.strip(" .!?")
+    raw = re.sub(r"^(?:on|in|via)\s+", "", raw)
+    raw = re.sub(r"\s+please$", "", raw).strip()
+    raw = re.sub(r"\s+", " ", raw)
+
+    if raw in {"discord", "matrix", "telegram", "irc"}:
+        return raw
+    if raw in {"home assistant", "homeassistant"}:
+        return "homeassistant"
+    return ""
+
+
+def _history_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, dict):
+        for key in ("text", "message", "content", "summary"):
+            val = content.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+    return ""
+
+
+def _is_short_followup_value(text: str) -> bool:
+    s = str(text or "").strip()
+    if not s:
+        return False
+    if len(s) > 80:
+        return False
+    lower = s.lower().strip(" .!?")
+    if lower in {"yes", "y", "no", "n", "ok", "okay", "sure", "cancel", "stop"}:
+        return False
+    if re.search(r"[.!?]\s+[A-Za-z]", s):
+        return False
+    words = re.findall(r"\b[\w@#:-]+\b", s)
+    if len(words) > 8:
+        return False
+    if re.match(r"^(send|set|turn|run|create|build|list|show|tell)\b", lower):
+        return False
+    return True
+
+
+def _looks_like_clarification_prompt(text: str) -> bool:
+    s = str(text or "").strip().lower()
+    if not s:
+        return False
+    if "?" in s:
+        return True
+    cues = (
+        "need more info",
+        "need a bit more",
+        "please provide",
+        "could you provide",
+        "which ",
+        "what ",
+        "where ",
+        "when ",
+        "specify",
+        "missing",
+        "clarify",
+    )
+    return any(cue in s for cue in cues)
+
+
+def _resolve_generic_followup_user_text(
+    history_messages: List[Dict[str, Any]],
+    user_text: str,
+) -> Tuple[str, bool]:
+    if not _is_short_followup_value(user_text):
+        return str(user_text or ""), False
+    if not isinstance(history_messages, list) or not history_messages:
+        return str(user_text or ""), False
+
+    current = str(user_text or "").strip()
+    saw_current_user = False
+    prior_user = ""
+    prior_assistant = ""
+
+    for msg in reversed(history_messages):
+        if not isinstance(msg, dict):
+            continue
+        role = str(msg.get("role") or "").strip().lower()
+        content = _history_text(msg.get("content"))
+        if not content:
+            continue
+
+        if role == "assistant" and not prior_assistant:
+            prior_assistant = content
+            continue
+
+        if role == "user":
+            if not saw_current_user and content == current:
+                saw_current_user = True
+                continue
+            prior_user = content
+            break
+
+    if not prior_user:
+        return str(user_text or ""), False
+    if prior_assistant and not _looks_like_clarification_prompt(prior_assistant):
+        return str(user_text or ""), False
+    if prior_user.strip().lower() == current.lower():
+        return str(user_text or ""), False
+
+    rebuilt = f"{prior_user}\n\nAdditional detail from user: {current}"
+    return rebuilt, True
+
+
+def _resolve_delivery_followup_user_text(
+    history_messages: List[Dict[str, Any]],
+    user_text: str,
+) -> Tuple[str, bool]:
+    platform = _platform_reply_token(user_text)
+    if platform not in DELIVERY_PLATFORMS:
+        return str(user_text or ""), False
+    if not isinstance(history_messages, list) or not history_messages:
+        return str(user_text or ""), False
+
+    current = str(user_text or "").strip()
+    saw_current_user = False
+    prior_user = ""
+    prior_assistant = ""
+
+    for msg in reversed(history_messages):
+        if not isinstance(msg, dict):
+            continue
+        role = str(msg.get("role") or "").strip().lower()
+        content = _history_text(msg.get("content"))
+        if not content:
+            continue
+
+        if role == "assistant" and not prior_assistant:
+            prior_assistant = content
+            continue
+
+        if role == "user":
+            if not saw_current_user and content == current:
+                saw_current_user = True
+                continue
+            prior_user = content
+            break
+
+    if not prior_user or not _looks_like_send_intent(prior_user):
+        return str(user_text or ""), False
+
+    if prior_assistant and not _looks_like_platform_followup(prior_assistant):
+        return str(user_text or ""), False
+
+    inferred = _infer_destination_platform(prior_user)
+    if inferred == platform:
+        return prior_user, True
+
+    if inferred in DELIVERY_PLATFORMS and inferred != platform:
+        return _inject_platform_into_request(prior_user, platform), True
+
+    return _inject_platform_into_request(prior_user, platform), True
 
 
 def _should_try_search_fallback(user_text: str, func: str, needs_creation: bool) -> bool:
@@ -925,6 +1572,14 @@ async def run_planner_loop(
     platform = normalize_platform(platform)
     scope = str(scope or "default")
 
+    async def _emit_wait(func_name: str, plugin_obj: Any = None) -> None:
+        if not wait_callback:
+            return
+        try:
+            await wait_callback(func_name, plugin_obj)
+        except Exception:
+            pass
+
     state = None
     if task_id:
         state = load_task_state(task_id, r=r)
@@ -981,7 +1636,21 @@ async def run_planner_loop(
     else:
         forced_call = None
 
-    creation_analysis = _creation_request_analysis(user_text or "")
+    effective_user_text = str(user_text or "")
+    followup_recovered = False
+    generic_followup_recovered = False
+    if not forced_call:
+        effective_user_text, followup_recovered = _resolve_delivery_followup_user_text(
+            history_messages,
+            user_text,
+        )
+        if not followup_recovered:
+            effective_user_text, generic_followup_recovered = _resolve_generic_followup_user_text(
+                history_messages,
+                user_text,
+            )
+
+    creation_analysis = _creation_request_analysis(effective_user_text or "")
     explicit_only = _creation_explicit_only(r=r)
     if explicit_only and not state.get("creation_user_confirmed"):
         if creation_analysis.get("mode") == "create" and not creation_analysis.get("explicit"):
@@ -1038,16 +1707,17 @@ async def run_planner_loop(
         state["status"] = "running"
         save_task_state(state, r=r)
         user_text = source_text
+        effective_user_text = source_text
     elif creation_analysis.get("mode") == "ask":
         question = _creation_confirmation_prompt(creation_intent)
         state["pending_creation_confirmation"] = True
         state["pending_creation_intent"] = creation_intent
-        state["pending_creation_source_text"] = user_text or ""
+        state["pending_creation_source_text"] = effective_user_text or ""
         state["pending_creation_question"] = question
         save_task_state(state, r=r)
         return {"text": question, "status": "blocked", "task_id": task_id, "artifacts": []}
 
-    messages = list(history_messages or [])
+    messages = _compact_planner_history(history_messages or [], platform=platform)
     agent_msg = {"role": "system", "content": _agent_system_instructions(max_rounds, max_tool_calls)}
     if messages and messages[0].get("role") == "system":
         messages.insert(1, agent_msg)
@@ -1066,6 +1736,38 @@ async def run_planner_loop(
         last_content = str(messages[-1].get("content") or "").strip() if messages else ""
         if last_role != "user" or last_content != user_text.strip():
             messages.append({"role": "user", "content": user_text})
+        explicit_delivery_platform = _infer_destination_platform(effective_user_text)
+        if _looks_like_send_intent(effective_user_text) and explicit_delivery_platform in DELIVERY_PLATFORMS:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        f"The active delivery request uses destination platform '{explicit_delivery_platform}'. "
+                        "For send_message/ai_tasks, use that platform and do not ask which platform."
+                    ),
+                }
+            )
+        if followup_recovered:
+            token = _platform_reply_token(user_text)
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        f"Interpret the latest user reply '{str(user_text or '').strip()}' as selecting platform "
+                        f"'{token}' for the prior delivery request: {effective_user_text}"
+                    ),
+                }
+            )
+        elif generic_followup_recovered:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "Interpret the latest user reply as additional details for the previous request. "
+                        "Use those details to complete the same task; do not treat it as a new unrelated request."
+                    ),
+                }
+            )
 
     artifacts_out: List[Dict[str, Any]] = []
     rounds_used = int(state.get("rounds_used") or 0)
@@ -1077,42 +1779,97 @@ async def run_planner_loop(
     unknown_tool_fix_used = False
     unknown_tool_search_fallback_used = False
     search_web_retry_count = 0
+    platform_followup_fix_used = 0
     created_snapshot = _creation_state(state)
     creation_followup_issued = bool(state.get("creation_followup_issued"))
     creation_precheck_done = bool(state.get("creation_precheck_done"))
 
-    if needs_creation and not state.get("skills_loaded"):
-        skill_paths = []
+    async def _append_creation_read_file(path: str) -> None:
+        await _emit_wait("read_file", None)
+        meta_payload = run_meta_tool(
+            func="read_file",
+            args={"path": path},
+            platform=platform,
+            registry=registry,
+            enabled_predicate=enabled_predicate,
+            origin=origin,
+        )
+        messages.append(
+            {
+                "role": "assistant",
+                "content": json.dumps({"function": "read_file", "arguments": {"path": path}}, ensure_ascii=False),
+            }
+        )
+        messages.append(
+            {
+                "role": "tool",
+                "content": json.dumps({"tool": "read_file", "result": meta_payload}, ensure_ascii=False),
+            }
+        )
+
+    if needs_creation:
+        base_skill_paths: List[str] = []
         if creation_intent.get("need_plugin"):
-            skill_paths.append("skills/agent_lab/plugin_authoring.md")
+            base_skill_paths.append("skills/agent_lab/plugin_authoring.md")
         if creation_intent.get("need_platform"):
-            skill_paths.append("skills/agent_lab/platform_authoring.md")
-        for spath in skill_paths:
-            meta_payload = run_meta_tool(
-                func="read_file",
-                args={"path": spath},
-                platform=platform,
-                registry=registry,
-                enabled_predicate=enabled_predicate,
-                origin=origin,
-            )
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": json.dumps({"function": "read_file", "arguments": {"path": spath}}, ensure_ascii=False),
-                }
-            )
-            messages.append(
-                {
-                    "role": "tool",
-                    "content": json.dumps({"tool": "read_file", "result": meta_payload}, ensure_ascii=False),
-                }
-            )
-        state["skills_loaded"] = True
-        save_task_state(state, r=r)
+            base_skill_paths.append("skills/agent_lab/platform_authoring.md")
+
+        reference_paths = _creation_advanced_reference_paths(
+            need_plugin=bool(creation_intent.get("need_plugin")),
+            need_platform=bool(creation_intent.get("need_platform")),
+            request_text="\n".join(
+                [
+                    str(effective_user_text or ""),
+                    str(user_text or ""),
+                    str(state.get("goal") or ""),
+                ]
+            ),
+        )
+
+        desired_paths = list(base_skill_paths) + list(reference_paths)
+        loaded_paths = state.get("skills_paths_loaded") or []
+        if not isinstance(loaded_paths, list):
+            loaded_paths = []
+        loaded_set = {str(p).strip() for p in loaded_paths if str(p).strip()}
+        to_load = [p for p in desired_paths if p not in loaded_set]
+
+        for spath in to_load:
+            await _append_creation_read_file(spath)
+            loaded_set.add(spath)
+
+        changed = False
+        skills_loaded_now = bool(base_skill_paths) and all(p in loaded_set for p in base_skill_paths)
+        if bool(state.get("skills_loaded")) != skills_loaded_now:
+            state["skills_loaded"] = skills_loaded_now
+            changed = True
+
+        new_paths_sorted = sorted(loaded_set)
+        if state.get("skills_paths_loaded") != new_paths_sorted:
+            state["skills_paths_loaded"] = new_paths_sorted
+            changed = True
+
+        refs_loaded = state.get("skills_refs_loaded") or []
+        if not isinstance(refs_loaded, list):
+            refs_loaded = []
+        refs_set = {str(p).strip() for p in refs_loaded if str(p).strip()}
+        for ref_path in reference_paths:
+            if ref_path in loaded_set:
+                refs_set.add(ref_path)
+        new_refs_sorted = sorted(refs_set)
+        if state.get("skills_refs_loaded") != new_refs_sorted:
+            state["skills_refs_loaded"] = new_refs_sorted
+            changed = True
+
+        if changed:
+            save_task_state(state, r=r)
 
     if needs_creation and not state.get("creation_guidance_loaded"):
-        messages.append({"role": "system", "content": AGENT_CREATION_REPAIR_PROMPT})
+        messages.append(
+            {
+                "role": "system",
+                "content": _creation_repair_prompt_for_intent(creation_intent),
+            }
+        )
         state["creation_guidance_loaded"] = True
         save_task_state(state, r=r)
 
@@ -1127,6 +1884,12 @@ async def run_planner_loop(
             args = forced_call.get("arguments", {}) or {}
             forced_call = None
         else:
+            _upsert_tool_index_message(
+                messages,
+                platform=platform,
+                registry=registry,
+                enabled_predicate=enabled_predicate,
+            )
             response = await llm_client.chat(messages)
             text = (response.get("message", {}) or {}).get("content", "").strip()
             if not text:
@@ -1138,6 +1901,31 @@ async def run_planner_loop(
                 if parsed_func not in {"create_plugin", "create_platform"}:
                     _log_creation_response(task_id or "unknown", user_text or "", text)
             if not parsed:
+                explicit_delivery_platform = _infer_destination_platform(effective_user_text)
+                if (
+                    _looks_like_send_intent(effective_user_text)
+                    and explicit_delivery_platform in DELIVERY_PLATFORMS
+                    and _looks_like_platform_followup(text)
+                ):
+                    if platform_followup_fix_used < 1:
+                        messages.append(
+                            {
+                                "role": "system",
+                                "content": (
+                                    f"The user already provided destination platform '{explicit_delivery_platform}' in the request. "
+                                    "Do not ask follow-up questions about platform. "
+                                    "Return only a valid JSON tool call to `send_message`."
+                                ),
+                            }
+                        )
+                        platform_followup_fix_used += 1
+                        continue
+                    forced = _force_send_message_call(effective_user_text or "")
+                    if forced:
+                        forced_call = forced
+                        platform_followup_fix_used += 1
+                        continue
+
                 created_snapshot = _creation_state(state)
                 already_created = bool(
                     created_snapshot.get("plugins")
@@ -1165,7 +1953,12 @@ async def run_planner_loop(
                 elif needs_creation and missing_parts:
                     if creation_fix_used < CREATION_MAX_REPROMPTS:
                         need_line = " and ".join(missing_parts)
-                        messages.append({"role": "system", "content": AGENT_CREATION_REPAIR_PROMPT})
+                        messages.append(
+                            {
+                                "role": "system",
+                                "content": _creation_repair_prompt_for_intent(creation_intent),
+                            }
+                        )
                         messages.append(
                             {
                                 "role": "system",
@@ -1204,10 +1997,22 @@ async def run_planner_loop(
             func = _canonical_tool_name(str(parsed.get("function") or "").strip())
             args = parsed.get("arguments", {}) or {}
 
+        args = _autofill_delivery_args(
+            func,
+            args,
+            user_text=effective_user_text or "",
+            origin=origin,
+        )
+
         if not func:
             break
 
         if not is_meta_tool(func) and func not in registry:
+            forced_delivery = _force_send_message_call(effective_user_text or "")
+            if forced_delivery and not unknown_tool_fix_used:
+                forced_call = forced_delivery
+                unknown_tool_fix_used = True
+                continue
             if not unknown_tool_fix_used:
                 prompt = AGENT_UNKNOWN_TOOL_REPAIR_PROMPT
                 if needs_creation:
@@ -1219,15 +2024,15 @@ async def run_planner_loop(
                 messages.append({"role": "system", "content": prompt})
                 unknown_tool_fix_used = True
                 continue
-            if not unknown_tool_search_fallback_used and _should_try_search_fallback(user_text or "", func, needs_creation):
+            if not unknown_tool_search_fallback_used and _should_try_search_fallback(effective_user_text or "", func, needs_creation):
                 fallback_query = str(
                     (args or {}).get("query")
                     or (args or {}).get("q")
                     or (args or {}).get("topic")
-                    or (user_text or "")
+                    or (effective_user_text or "")
                 ).strip()
                 if not fallback_query:
-                    fallback_query = user_text or "latest world news"
+                    fallback_query = effective_user_text or "latest world news"
                 messages.append(
                     {
                         "role": "system",
@@ -1267,11 +2072,13 @@ async def run_planner_loop(
                 messages.append({
                     "role": "system",
                     "content": (
-                        "Before creating new Agent Lab code, call list_plugins first. "
-                        "If an existing tool can satisfy the request, use that tool instead of create_plugin/create_platform."
+                        "Before creating new Agent Lab code, check the enabled tool index already provided. "
+                        "If an existing tool fits, use it. Otherwise continue with create_plugin/create_platform."
                     ),
                 })
                 state["creation_precheck_prompted"] = True
+                creation_precheck_done = True
+                state["creation_precheck_done"] = True
                 save_task_state(state, r=r)
                 continue
             if func == "create_plugin":
@@ -1353,11 +2160,12 @@ async def run_planner_loop(
                         merged[k] = v
                 args["origin"] = merged
 
-        if func == "memory_set" and "request_text" not in args and user_text:
+        if func == "memory_set" and "request_text" not in args and effective_user_text:
             args = dict(args)
-            args["request_text"] = user_text
+            args["request_text"] = effective_user_text
 
         if is_meta_tool(func):
+            await _emit_wait(func, None)
             meta_payload = run_meta_tool(
                 func=func,
                 args=args,
@@ -1375,7 +2183,7 @@ async def run_planner_loop(
                 if func == "search_web" and _search_web_should_retry(
                     meta_payload, retry_count=search_web_retry_count
                 ):
-                    retry_args = _search_web_retry_args(args, meta_payload, user_text or "")
+                    retry_args = _search_web_retry_args(args, meta_payload, effective_user_text or "")
                     if retry_args:
                         auto_search_retry_args = retry_args
                         search_web_retry_count += 1
@@ -1385,6 +2193,7 @@ async def run_planner_loop(
                         if name:
                             _record_created(state, "plugins", str(name))
                             _update_progress_summary(state, f"Created Agent Lab plugin {name}.")
+                            await _emit_wait("validate_plugin", None)
                             validation = run_meta_tool(
                                 func="validate_plugin",
                                 args={"name": str(name), "auto_install": True},
@@ -1411,6 +2220,7 @@ async def run_planner_loop(
                         if name:
                             _record_created(state, "platforms", str(name))
                             _update_progress_summary(state, f"Created Agent Lab platform {name}.")
+                            await _emit_wait("validate_platform", None)
                             validation = run_meta_tool(
                                 func="validate_platform",
                                 args={"name": str(name), "auto_install": True},
@@ -1612,11 +2422,7 @@ async def run_planner_loop(
         if tool_calls_used >= max_tool_calls:
             break
 
-        if wait_callback:
-            try:
-                await wait_callback(func, plugin)
-            except Exception:
-                pass
+        await _emit_wait(func, plugin)
 
         tool_calls_used += 1
         state["tool_calls_used"] = tool_calls_used

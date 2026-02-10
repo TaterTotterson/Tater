@@ -19,6 +19,7 @@ from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 from plugin_base import ToolPlugin
 from plugin_settings import get_plugin_settings
 from helpers import redis_client, run_comfy_prompt
+from vision_settings import get_vision_settings as get_shared_vision_settings
 
 SETTINGS_CATEGORY = "ComfyUI Music Video"
 
@@ -556,11 +557,15 @@ class _VisionHelper:
 
     @staticmethod
     def get_vision_settings():
-        s = get_plugin_settings(_VisionHelper.settings_category)
-        api_base = s.get("api_base", "http://127.0.0.1:1234").rstrip("/")
-        model = s.get("model", "gemma3-27b-abliterated-dpo")
-        api_key = os.getenv("OPENAI_API_KEY", "").strip()
-        return api_base, model, api_key
+        settings = get_shared_vision_settings(
+            default_api_base="http://127.0.0.1:1234",
+            default_model="gemma3-27b-abliterated-dpo",
+        )
+        return (
+            str(settings.get("api_base") or "http://127.0.0.1:1234").rstrip("/"),
+            str(settings.get("model") or "gemma3-27b-abliterated-dpo"),
+            str(settings.get("api_key") or ""),
+        )
 
     @staticmethod
     def _to_data_url(image_bytes: bytes, filename: str = "image.png") -> str:
@@ -620,12 +625,7 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
     plugin_name = "ComfyUI Music Video"
     version = "1.0.2"
     min_tater_version = "50"
-    usage = (
-        '{\n'
-        '  "function": "comfyui_music_video",\n'
-        '  "arguments": {"prompt": "<Concept for the song>"}\n'
-        '}\n'
-    )
+    usage = '{"function":"comfyui_music_video","arguments":{"prompt":"<Concept for the song>"}}'
     description = "Generates a complete AI music video including lyrics, music, and animated visuals by orchestrating ComfyUI plugins."
     plugin_dec = "Build a full AI music video\u2014lyrics, music, and animated visuals\u2014using ComfyUI."
     pretty_name = "Your Music Video"

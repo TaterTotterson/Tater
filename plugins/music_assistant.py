@@ -48,19 +48,7 @@ class MusicAssistantPlugin(ToolPlugin):
     version = "1.0.8"
     min_tater_version = "50"
 
-    usage = (
-        "{\n"
-        '  "function": "music_assistant",\n'
-        '  "arguments": {\n'
-        '    "action": "play|queue|pause|resume|stop|next|previous|volume",\n'
-        '    "query": "What to play or queue (artist/album/track/playlist). Required for play/queue.",\n'
-        '    "room": "Optional room name like Kitchen.",\n'
-        '    "volume": "0-100 (only for action=volume).",\n'
-        '    "prefer": "Optional hint like artist|album|track|playlist|radio.",\n'
-        '    "random": false\n'
-        "  }\n"
-        "}\n"
-    )
+    usage = '{"function":"music_assistant","arguments":{"action":"play|queue|pause|resume|stop|next|previous|volume","query":"What to play or queue (artist/album/track/playlist). Required for play/queue.","room":"Optional room name like Kitchen.","volume":"0-100 (only for action=volume).","prefer":"Optional hint like artist|album|track|playlist|radio.","random":false}}'
 
     description = (
         "Play music and control playback via Music Assistant in Home Assistant."

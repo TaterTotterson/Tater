@@ -1,5 +1,4 @@
 # plugins/doorbell_alert.py
-import asyncio
 import json
 import base64
 import logging
@@ -13,6 +12,8 @@ from dotenv import load_dotenv
 
 from plugin_base import ToolPlugin
 from helpers import redis_client
+from notify import dispatch_notification
+from vision_settings import get_vision_settings as get_shared_vision_settings
 
 load_dotenv()
 logger = logging.getLogger("doorbell_alert")
@@ -36,21 +37,7 @@ class DoorbellAlertPlugin(ToolPlugin):
     min_tater_version = "50"
     description = "Doorbell alert tool for when the user requests or says to run a doorbell alert."
     plugin_dec = "Handle doorbell events: snapshot, describe with vision, announce, and log notifications."
-    usage = (
-        "{\n"
-        '  "function": "doorbell_alert",\n'
-        '  "arguments": {\n'
-        '    // optional overrides\n'
-        '    "camera": "camera.doorbell_high",\n'
-        '    "players": ["media_player.kitchen"],\n'
-        '    "tts_entity": "tts.piper",\n'
-        '    "notifications": true,\n'
-        '    "persistent_notifications": true,\n'
-        '    "device_service": "notify.mobile_app_my_phone",\n'
-        '    "area": "front door"\n'
-        "  }\n"
-        "}\n"
-    )
+    usage = '{"function":"doorbell_alert","arguments":{"camera":"camera.doorbell_high","players":["media_player.kitchen"],"tts_entity":"tts.piper","notifications":true,"persistent_notifications":true,"api_notification":true,"device_service":"notify.mobile_app_my_phone","area":"front door"}}'
 
     platforms = ["automation"]
 
@@ -97,6 +84,12 @@ class DoorbellAlertPlugin(ToolPlugin):
             "type": "boolean",
             "default": True,
             "description": "If true, also create Home Assistant persistent notifications via Home Assistant Notifier.",
+        },
+        "ENABLE_HA_API_NOTIFICATION": {
+            "label": "Enable Home Assistant API notifications",
+            "type": "boolean",
+            "default": True,
+            "description": "If true, also send to the Home Assistant platform notification endpoint.",
         },
         "AREA_LABEL": {
             "label": "Area Label",
@@ -170,10 +163,10 @@ class DoorbellAlertPlugin(ToolPlugin):
         return {"base": base, "token": token, "tts_entity": tts_entity}
 
     def _vision(self, s: Dict[str, str]) -> Dict[str, Optional[str]]:
-        api_base = (s.get("VISION_API_BASE") or "http://127.0.0.1:1234").rstrip("/")
-        model = s.get("VISION_MODEL") or "gemma3-27b-abliterated-dpo"
-        api_key = s.get("VISION_API_KEY") or None
-        return {"api_base": api_base, "model": model, "api_key": api_key}
+        return get_shared_vision_settings(
+            default_api_base="http://127.0.0.1:1234",
+            default_model="gemma3-27b-abliterated-dpo",
+        )
 
     def _ha_headers(self, token: str) -> Dict[str, str]:
         return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
@@ -237,27 +230,17 @@ class DoorbellAlertPlugin(ToolPlugin):
         title: str,
         message: str,
         persistent_notifications: bool,
+        api_notification: bool,
         device_service: Optional[str],
         area: str,
         camera: str,
         players: List[str],
         tts_entity: str,
     ) -> Dict[str, Any]:
-        try:
-            import plugin_registry as pr
-            from plugin_settings import get_plugin_enabled
-        except Exception as exc:
-            return {"ok": False, "error": f"Notifier registry unavailable: {exc}"}
-
-        plugins = pr.get_registry_snapshot() or {}
-        notifier = plugins.get("notify_homeassistant")
-        if not notifier or not getattr(notifier, "notifier", False):
-            return {"ok": False, "error": "notify_homeassistant plugin is not available."}
-
-        if not get_plugin_enabled("notify_homeassistant"):
-            return {"ok": False, "error": "notify_homeassistant plugin is disabled."}
-
-        targets: Dict[str, Any] = {"persistent": bool(persistent_notifications)}
+        targets: Dict[str, Any] = {
+            "persistent": bool(persistent_notifications),
+            "api_notification": bool(api_notification),
+        }
         service = (device_service or "").strip()
         if service:
             targets["device_service"] = service
@@ -272,22 +255,21 @@ class DoorbellAlertPlugin(ToolPlugin):
         }
         meta = {"priority": "normal"}
         try:
-            result = notifier.notify(
+            result = await dispatch_notification(
+                platform="homeassistant",
                 title=title,
                 content=message,
                 targets=targets,
                 origin=origin,
                 meta=meta,
             )
-            if asyncio.iscoroutine(result):
-                result = await result
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
         result_text = str(result or "").strip()
         if result_text.lower().startswith("queued notification"):
             return {"ok": True, "result": result_text}
-        return {"ok": False, "error": result_text or "notify_homeassistant returned an empty response."}
+        return {"ok": False, "error": result_text or "homeassistant notifier returned an empty response."}
 
     # ---------- Vision / TTS ----------
     def _vision_describe(self, image_bytes: bytes, api_base: str, model: str, api_key: Optional[str]) -> str:
@@ -397,6 +379,11 @@ class DoorbellAlertPlugin(ToolPlugin):
             persistent_notifications = self._boolish(args.get("persistent"), persistent_default)
         else:
             persistent_notifications = persistent_default
+        api_notification_default = self._boolish(s.get("ENABLE_HA_API_NOTIFICATION"), True)
+        if "api_notification" in args:
+            api_notification = self._boolish(args.get("api_notification"), api_notification_default)
+        else:
+            api_notification = api_notification_default
         device_service = (args.get("device_service") or "").strip() if "device_service" in args else ""
 
         # Validate requireds
@@ -425,6 +412,7 @@ class DoorbellAlertPlugin(ToolPlugin):
                     title="Doorbell",
                     message=generic,
                     persistent_notifications=persistent_notifications,
+                    api_notification=api_notification,
                     device_service=device_service,
                     area=area,
                     camera=camera,
@@ -463,6 +451,7 @@ class DoorbellAlertPlugin(ToolPlugin):
                 title="Doorbell",
                 message=desc,
                 persistent_notifications=persistent_notifications,
+                api_notification=api_notification,
                 device_service=device_service,
                 area=area,
                 camera=camera,

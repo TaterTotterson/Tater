@@ -1,9 +1,11 @@
 import ast
+import base64
 import codecs
 import csv
 import fnmatch
 import io
 import json
+import mimetypes
 import os
 import re
 import shutil
@@ -16,6 +18,7 @@ import zipfile
 import importlib.util
 import ipaddress
 import socket
+import redis
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -27,6 +30,7 @@ from plugin_loader import load_plugins_from_directory
 from plugin_base import ToolPlugin
 from plugin_registry import reload_plugins
 from plugin_settings import get_plugin_enabled
+from vision_settings import get_vision_settings as get_shared_vision_settings
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -70,6 +74,24 @@ _SEARCH_MAX_FILE_CHARS = int(os.getenv("TATER_SEARCH_MAX_FILE_CHARS", "200000"))
 _ARCHIVE_LIST_MAX_ENTRIES = int(os.getenv("TATER_ARCHIVE_LIST_MAX_ENTRIES", "1000"))
 _ARCHIVE_EXTRACT_MAX_FILES = int(os.getenv("TATER_ARCHIVE_EXTRACT_MAX_FILES", "1000"))
 _ARCHIVE_EXTRACT_MAX_TOTAL_BYTES = int(os.getenv("TATER_ARCHIVE_EXTRACT_MAX_TOTAL_BYTES", "100000000"))
+_VISION_WEBUI_BLOB_PREFIX = "webui:file:"
+_VISION_MAX_SCAN_LIMIT = int(os.getenv("TATER_VISION_MAX_SCAN_LIMIT", "400"))
+_VISION_MAX_IMAGE_BYTES = int(os.getenv("TATER_VISION_MAX_IMAGE_BYTES", str(12 * 1024 * 1024)))
+_VISION_ALLOWED_MIMETYPES = {
+    "image/png",
+    "image/jpeg",
+    "image/jpg",
+    "image/webp",
+    "image/gif",
+    "image/bmp",
+    "image/tiff",
+}
+_VISION_DEFAULT_PROMPT = (
+    "Describe this image clearly and concisely. Mention important objects, people, actions, "
+    "and any visible text."
+)
+
+_VISION_BLOB_REDIS: Any = None
 
 WEB_SEARCH_API_KEY_REDIS_KEY = "tater:web_search:google_api_key"
 WEB_SEARCH_CX_REDIS_KEY = "tater:web_search:google_cx"
@@ -1297,12 +1319,15 @@ def extract_archive(
         return {"tool": "extract_archive", "ok": False, "error": "Archive not found."}
 
     default_dest = f"workspace/extracted_{_archive_output_folder_name(archive_path)}"
+    auto_destination = destination in (None, "")
     dest_path = _resolve_safe_path(destination or default_dest, allowed)
     if not dest_path:
         return {"tool": "extract_archive", "ok": False, "error": "Destination path not allowed."}
     if dest_path.exists() and not dest_path.is_dir():
         return {"tool": "extract_archive", "ok": False, "error": "Destination exists and is not a directory."}
-    dest_path.mkdir(parents=True, exist_ok=True)
+    dest_existed_before = dest_path.exists()
+    if not dest_existed_before:
+        dest_path.mkdir(parents=True, exist_ok=True)
 
     max_files_i = _coerce_int(max_files, default=_ARCHIVE_EXTRACT_MAX_FILES, min_value=1, max_value=20000)
     max_bytes_i = _coerce_int(
@@ -1540,6 +1565,19 @@ def extract_archive(
         }
     except Exception as e:
         return {"tool": "extract_archive", "ok": False, "error": str(e)}
+    finally:
+        # Clean up auto-created default extraction dirs when nothing was written.
+        if auto_destination and not dest_existed_before:
+            try:
+                if (
+                    dest_path.exists()
+                    and dest_path.is_dir()
+                    and dest_path != AGENT_WORKSPACE_DIR
+                    and next(dest_path.iterdir(), None) is None
+                ):
+                    dest_path.rmdir()
+            except Exception:
+                pass
 
 
 def delete_file(path: str) -> Dict[str, Any]:
@@ -2380,6 +2418,482 @@ def _origin_value(origin: Optional[Dict[str, Any]], *keys: str) -> str:
         if text:
             return text
     return ""
+
+
+def _get_blob_redis_client():
+    global _VISION_BLOB_REDIS
+    if _VISION_BLOB_REDIS is None:
+        host = os.getenv("REDIS_HOST", "127.0.0.1")
+        port = _coerce_int(os.getenv("REDIS_PORT", "6379"), default=6379, min_value=1, max_value=65535)
+        _VISION_BLOB_REDIS = redis.Redis(host=host, port=port, db=0, decode_responses=False)
+    return _VISION_BLOB_REDIS
+
+
+def _vision_decode_base64(data: str) -> Optional[bytes]:
+    text = _as_text(data).strip()
+    if not text:
+        return None
+    if text.startswith("data:") and "," in text:
+        text = text.split(",", 1)[1]
+    padding = len(text) % 4
+    if padding:
+        text += "=" * (4 - padding)
+    try:
+        decoded = base64.b64decode(text)
+    except Exception:
+        return None
+    return bytes(decoded) if decoded else None
+
+
+def _vision_mimetype_allowed(value: Any) -> bool:
+    mimetype = _as_text(value).strip().lower()
+    if not mimetype:
+        return False
+    return mimetype in _VISION_ALLOWED_MIMETYPES
+
+
+def _vision_ext_from_mime(value: Any) -> str:
+    mimetype = _as_text(value).strip().lower()
+    if mimetype in {"image/jpeg", "image/jpg"}:
+        return "jpg"
+    if mimetype == "image/webp":
+        return "webp"
+    if mimetype == "image/gif":
+        return "gif"
+    if mimetype == "image/bmp":
+        return "bmp"
+    if mimetype == "image/tiff":
+        return "tiff"
+    return "png"
+
+
+def _vision_to_data_url(image_bytes: bytes, filename: str) -> str:
+    mime = mimetypes.guess_type(filename or "")[0] or "image/png"
+    b64 = base64.b64encode(image_bytes).decode("utf-8")
+    return f"data:{mime};base64,{b64}"
+
+
+def _vision_normalize_name(name: Any, mimetype: Any) -> str:
+    cleaned = _as_text(name).strip()
+    if cleaned:
+        return cleaned
+    if mimetype:
+        return f"image.{_vision_ext_from_mime(mimetype)}"
+    return "image.png"
+
+
+def _vision_blob_candidates(*, blob_key: Any, file_id: Any) -> List[str]:
+    candidates: List[str] = []
+    blob = _as_text(blob_key).strip()
+    if blob:
+        candidates.append(blob)
+    fid = _as_text(file_id).strip()
+    if fid:
+        if fid.startswith(_VISION_WEBUI_BLOB_PREFIX) or fid.startswith("tater:blob:") or fid.startswith("tater:matrix:"):
+            candidates.append(fid)
+        else:
+            candidates.append(f"{_VISION_WEBUI_BLOB_PREFIX}{fid}")
+            candidates.append(fid)
+    unique: List[str] = []
+    seen = set()
+    for key in candidates:
+        if key and key not in seen:
+            unique.append(key)
+            seen.add(key)
+    return unique
+
+
+def _vision_load_blob_bytes(*, blob_key: Any = None, file_id: Any = None) -> Optional[bytes]:
+    keys = _vision_blob_candidates(blob_key=blob_key, file_id=file_id)
+    if not keys:
+        return None
+    client = _get_blob_redis_client()
+    for key in keys:
+        try:
+            raw = client.get(key)
+        except Exception:
+            raw = None
+        if raw is None:
+            continue
+        if isinstance(raw, (bytes, bytearray)):
+            return bytes(raw)
+        if isinstance(raw, str):
+            return raw.encode("utf-8", errors="replace")
+    return None
+
+
+def _vision_extract_image_from_payload(payload: Any) -> Tuple[Optional[bytes], Optional[str], Optional[str]]:
+    if payload is None:
+        return None, None, None
+
+    if isinstance(payload, dict) and payload.get("marker") == "plugin_response":
+        return _vision_extract_image_from_payload(payload.get("content"))
+
+    if isinstance(payload, list):
+        for item in payload:
+            image_bytes, name, mimetype = _vision_extract_image_from_payload(item)
+            if image_bytes:
+                return image_bytes, name, mimetype
+        return None, None, None
+
+    if not isinstance(payload, dict):
+        return None, None, None
+
+    media_type = _as_text(payload.get("type")).strip().lower()
+    mimetype = _as_text(payload.get("mimetype")).strip().lower()
+    if not mimetype:
+        guess_name = _as_text(payload.get("name")).strip()
+        mimetype = _as_text(mimetypes.guess_type(guess_name)[0]).strip().lower()
+
+    if media_type in {"image", "file"}:
+        if media_type == "file" and (not mimetype or not mimetype.startswith("image/")):
+            return None, None, None
+        if mimetype and not _vision_mimetype_allowed(mimetype):
+            return None, None, None
+
+        name = _vision_normalize_name(payload.get("name"), mimetype)
+        raw: Optional[bytes] = None
+
+        if isinstance(payload.get("bytes"), (bytes, bytearray)):
+            raw = bytes(payload["bytes"])
+        elif isinstance(payload.get("data"), (bytes, bytearray)):
+            raw = bytes(payload["data"])
+        elif isinstance(payload.get("data"), str):
+            raw = _vision_decode_base64(payload.get("data") or "")
+
+        if raw is None:
+            raw = _vision_load_blob_bytes(blob_key=payload.get("blob_key"), file_id=payload.get("id"))
+
+        if raw:
+            return raw, name, mimetype or _as_text(mimetypes.guess_type(name)[0]).strip().lower() or "image/png"
+        return None, None, None
+
+    if payload.get("blob_key") or payload.get("id"):
+        raw = _vision_load_blob_bytes(blob_key=payload.get("blob_key"), file_id=payload.get("id"))
+        if raw:
+            name = _vision_normalize_name(payload.get("name"), mimetype)
+            mm = mimetype or _as_text(mimetypes.guess_type(name)[0]).strip().lower() or "image/png"
+            if mm.startswith("image/"):
+                return raw, name, mm
+    return None, None, None
+
+
+def _vision_read_local_image(path: Any) -> Tuple[Optional[bytes], Optional[str], Optional[str], Optional[str]]:
+    raw_path = _as_text(path).strip()
+    if not raw_path:
+        return None, None, None, "Local image path is empty."
+
+    allowed_roots = [
+        BASE_DIR,
+        AGENT_LAB_DIR,
+        AGENT_DOWNLOADS_DIR,
+        AGENT_WORKSPACE_DIR,
+    ]
+    resolved = _resolve_safe_path(raw_path, allowed_roots)
+    if resolved is None:
+        return None, None, None, "Path is outside allowed workspace roots."
+    if not resolved.exists() or not resolved.is_file():
+        return None, None, None, f"Local image path does not exist: {resolved}"
+
+    try:
+        data = resolved.read_bytes()
+    except Exception as e:
+        return None, None, None, f"Failed to read local image: {e}"
+    if not data:
+        return None, None, None, "Local image file is empty."
+    if len(data) > _VISION_MAX_IMAGE_BYTES:
+        return (
+            None,
+            None,
+            None,
+            f"Local image is too large ({len(data)} bytes). Max supported size is {_VISION_MAX_IMAGE_BYTES} bytes.",
+        )
+
+    name = resolved.name or "image.png"
+    mimetype = _as_text(mimetypes.guess_type(name)[0]).strip().lower() or "image/png"
+    return data, name, mimetype, None
+
+
+def _vision_read_remote_image(url: Any) -> Tuple[Optional[bytes], Optional[str], Optional[str], Optional[str]]:
+    raw_url = _as_text(url).strip()
+    if not raw_url:
+        return None, None, None, "Image URL is empty."
+    blocked = _validate_url(raw_url)
+    if blocked:
+        return None, None, None, blocked
+    try:
+        req = urllib.request.Request(raw_url, headers={"User-Agent": "Tater/1.0"})
+        with urllib.request.urlopen(req, timeout=30) as response:
+            content_type = _as_text(response.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            data = response.read(_VISION_MAX_IMAGE_BYTES + 1)
+            final_url = response.geturl() or raw_url
+    except urllib.error.HTTPError as e:
+        return None, None, None, f"Image URL request failed with HTTP {e.code}."
+    except Exception as e:
+        return None, None, None, f"Image URL request failed: {e}"
+
+    if not data:
+        return None, None, None, "Image URL returned no data."
+    if len(data) > _VISION_MAX_IMAGE_BYTES:
+        return (
+            None,
+            None,
+            None,
+            f"Image URL payload is too large ({len(data)} bytes). Max supported size is {_VISION_MAX_IMAGE_BYTES} bytes.",
+        )
+
+    parsed = urllib.parse.urlparse(final_url)
+    guessed_name = Path(parsed.path).name if parsed.path else ""
+    if not guessed_name:
+        guessed_name = "image.png"
+    mimetype = content_type or _as_text(mimetypes.guess_type(guessed_name)[0]).strip().lower() or "image/png"
+    if mimetype and mimetype.startswith("image/") and not _vision_mimetype_allowed(mimetype):
+        return None, None, None, f"Unsupported image MIME type from URL: {mimetype}"
+    return data, guessed_name, mimetype, None
+
+
+def _vision_load_explicit_ref(
+    *,
+    path: Any,
+    url: Any,
+    blob_key: Any,
+    file_id: Any,
+    image_ref: Optional[Dict[str, Any]],
+    origin: Optional[Dict[str, Any]],
+) -> Tuple[Optional[bytes], Optional[str], Optional[str], Optional[str], Optional[str]]:
+    def _from_ref(ref: Dict[str, Any], source_name: str):
+        ref_path = _as_text(ref.get("path")).strip()
+        ref_url = _as_text(ref.get("url")).strip()
+        ref_blob = _as_text(ref.get("blob_key")).strip()
+        ref_file = _as_text(ref.get("file_id")).strip()
+        ref_name = _as_text(ref.get("name")).strip()
+        ref_mimetype = _as_text(ref.get("mimetype")).strip().lower()
+
+        if ref_path:
+            data, name, mimetype, err = _vision_read_local_image(ref_path)
+            if err:
+                return None, None, None, source_name, err
+            return data, (ref_name or name), (ref_mimetype or mimetype), source_name, None
+        if ref_url:
+            data, name, mimetype, err = _vision_read_remote_image(ref_url)
+            if err:
+                return None, None, None, source_name, err
+            return data, (ref_name or name), (ref_mimetype or mimetype), source_name, None
+        if ref_blob or ref_file:
+            data = _vision_load_blob_bytes(blob_key=ref_blob, file_id=ref_file)
+            if not data:
+                return None, None, None, source_name, "Image blob could not be loaded from Redis."
+            name = ref_name or _vision_normalize_name("", ref_mimetype)
+            mimetype = ref_mimetype or _as_text(mimetypes.guess_type(name)[0]).strip().lower() or "image/png"
+            if mimetype and mimetype.startswith("image/") and not _vision_mimetype_allowed(mimetype):
+                return None, None, None, source_name, f"Unsupported image MIME type: {mimetype}"
+            return data, name, mimetype, source_name, None
+        return None, None, None, source_name, "Image reference is missing path/url/blob_key/file_id."
+
+    explicit_path = _as_text(path).strip()
+    if explicit_path:
+        data, name, mimetype, err = _vision_read_local_image(explicit_path)
+        return data, name, mimetype, "path", err
+
+    explicit_url = _as_text(url).strip()
+    if explicit_url:
+        data, name, mimetype, err = _vision_read_remote_image(explicit_url)
+        return data, name, mimetype, "url", err
+
+    explicit_blob = _as_text(blob_key).strip()
+    explicit_file_id = _as_text(file_id).strip()
+    if explicit_blob or explicit_file_id:
+        data = _vision_load_blob_bytes(blob_key=explicit_blob, file_id=explicit_file_id)
+        if not data:
+            return None, None, None, "blob", "Image blob could not be loaded from Redis."
+        name = _vision_normalize_name("", "")
+        mimetype = "image/png"
+        return data, name, mimetype, "blob", None
+
+    if isinstance(image_ref, dict):
+        data, name, mimetype, source_name, err = _from_ref(image_ref, "image_ref")
+        if data or err:
+            return data, name, mimetype, source_name, err
+
+    if isinstance(origin, dict) and isinstance(origin.get("latest_image_ref"), dict):
+        data, name, mimetype, source_name, err = _from_ref(origin.get("latest_image_ref"), "origin.latest_image_ref")
+        if data or err:
+            return data, name, mimetype, source_name, err
+
+    return None, None, None, None, None
+
+
+def _vision_extract_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        chunks: List[str] = []
+        for item in content:
+            if isinstance(item, str) and item.strip():
+                chunks.append(item.strip())
+            elif isinstance(item, dict):
+                if item.get("type") == "text" and _as_text(item.get("text")).strip():
+                    chunks.append(_as_text(item.get("text")).strip())
+                elif _as_text(item.get("content")).strip():
+                    chunks.append(_as_text(item.get("content")).strip())
+        return "\n".join(chunks).strip()
+    if isinstance(content, dict):
+        for key in ("text", "content", "value"):
+            value = content.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return _as_text(content).strip()
+
+
+def _vision_call_openai_compatible(
+    *,
+    api_base: str,
+    model: str,
+    api_key: Optional[str],
+    image_bytes: bytes,
+    filename: str,
+    prompt: str,
+) -> Tuple[Optional[str], Optional[str]]:
+    url = f"{_as_text(api_base).strip().rstrip('/')}/v1/chat/completions"
+    payload = {
+        "model": _as_text(model).strip(),
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": _as_text(prompt).strip() or _VISION_DEFAULT_PROMPT},
+                    {"type": "image_url", "image_url": {"url": _vision_to_data_url(image_bytes, filename)}},
+                ],
+            }
+        ],
+        "temperature": 0.2,
+    }
+    headers = {"Content-Type": "application/json"}
+    if _as_text(api_key).strip():
+        headers["Authorization"] = f"Bearer {_as_text(api_key).strip()}"
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=90) as response:
+            raw = response.read(2_000_000)
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = _as_text(e.read(400)).strip()
+        except Exception:
+            detail = ""
+        if detail:
+            return None, f"Vision API request failed with HTTP {e.code}: {detail}"
+        return None, f"Vision API request failed with HTTP {e.code}."
+    except Exception as e:
+        return None, f"Vision API request failed: {e}"
+    try:
+        parsed = json.loads(_as_text(raw))
+    except Exception:
+        return None, "Vision API returned non-JSON output."
+    choices = parsed.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None, "Vision API response did not include choices."
+    message = choices[0].get("message") if isinstance(choices[0], dict) else None
+    content = message.get("content") if isinstance(message, dict) else None
+    text = _vision_extract_text(content)
+    if not text:
+        return None, "Vision API returned an empty description."
+    return text, None
+
+
+def vision_describer(
+    prompt: str = "",
+    path: Optional[str] = None,
+    url: Optional[str] = None,
+    blob_key: Optional[str] = None,
+    file_id: Optional[str] = None,
+    image_ref: Optional[Dict[str, Any]] = None,
+    history_key: Optional[str] = None,
+    platform: Optional[str] = None,
+    origin: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    image_bytes, filename, mimetype, source_name, resolve_err = _vision_load_explicit_ref(
+        path=path,
+        url=url,
+        blob_key=blob_key,
+        file_id=file_id,
+        image_ref=image_ref,
+        origin=origin,
+    )
+    if resolve_err:
+        return {
+            "tool": "vision_describer",
+            "ok": False,
+            "error": resolve_err,
+            "needs": [
+                "Provide one explicit image source: `path`, `url`, `blob_key`, `file_id`, `image_ref`, or `origin.latest_image_ref`."
+            ],
+        }
+    if not image_bytes:
+        return {
+            "tool": "vision_describer",
+            "ok": False,
+            "error": "No image source was provided.",
+            "needs": [
+                "Provide one explicit image source: `path`, `url`, `blob_key`, `file_id`, `image_ref`, or `origin.latest_image_ref`."
+            ],
+        }
+
+    if len(image_bytes) > _VISION_MAX_IMAGE_BYTES:
+        return {
+            "tool": "vision_describer",
+            "ok": False,
+            "error": (
+                f"Latest image is too large ({len(image_bytes)} bytes). "
+                f"Max supported size is {_VISION_MAX_IMAGE_BYTES} bytes."
+            ),
+            "filename": filename or "image.png",
+        }
+
+    settings = get_shared_vision_settings()
+    api_base = _as_text(settings.get("api_base")).strip().rstrip("/")
+    model = _as_text(settings.get("model")).strip()
+    api_key = _as_text(settings.get("api_key")).strip()
+    if not api_base or not model:
+        return {
+            "tool": "vision_describer",
+            "ok": False,
+            "error": "Vision settings are incomplete. Configure Vision API base and model in Settings.",
+            "needs": ["Set Vision API base URL and model in Settings."],
+        }
+
+    final_prompt = _as_text(prompt).strip() or _VISION_DEFAULT_PROMPT
+    image_name = _vision_normalize_name(filename, mimetype)
+    description, err = _vision_call_openai_compatible(
+        api_base=api_base,
+        model=model,
+        api_key=api_key,
+        image_bytes=image_bytes,
+        filename=image_name,
+        prompt=final_prompt,
+    )
+    if err:
+        return {
+            "tool": "vision_describer",
+            "ok": False,
+            "error": err,
+            "filename": image_name,
+            "model": model,
+            "source": source_name or "unknown",
+        }
+
+    return {
+        "tool": "vision_describer",
+        "ok": True,
+        "description": description or "",
+        "text": description or "",
+        "filename": image_name,
+        "mimetype": mimetype or _as_text(mimetypes.guess_type(image_name)[0]).strip() or "image/png",
+        "model": model,
+        "source": source_name or "unknown",
+        "history_key_ignored": _as_text(history_key).strip() or None,
+    }
 
 
 def _normalize_key_segment(value: Any, *, default: str) -> str:

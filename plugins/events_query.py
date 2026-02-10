@@ -44,16 +44,7 @@ class EventsQueryPlugin(ToolPlugin):
     plugin_dec = "Answer questions about stored household events by area and timeframe."
     when_to_use = "Use for historical event summaries from stored automations logs (not live camera snapshots)."
 
-    usage = (
-        "{\n"
-        '  "function": "events_query",\n'
-        '  "arguments": {\n'
-        '    "area": "front yard",            // optional\n'
-        '    "timeframe": "today|yesterday|last_24h|<date like Oct 14 or 2025-10-14>",\n'
-        '    "query": "is anyone currently in the back yard"  // original user question\n'
-        "  }\n"
-        "}\n"
-    )
+    usage = '{"function":"events_query","arguments":{"area":"front yard","timeframe":"today","query":"is anyone currently in the back yard"}}'
 
     platforms = ["webui", "homeassistant", "homekit", "discord", "telegram", "matrix", "irc"]
     settings_category = "Events Query"

@@ -50,12 +50,7 @@ class WatchFeedPlugin(ToolPlugin):
     min_tater_version = "50"
     when_to_use = "Use when the user asks to subscribe to or watch an RSS/Atom feed URL."
     optional_args = ["url", "rss_url", "feed"]
-    usage = (
-        "{\n"
-        '  "function": "rss_watch",\n'
-        '  "arguments": {"feed_url": "<RSS feed URL>"}\n'
-        "}\n"
-    )
+    usage = '{"function":"watch_feed","arguments":{"feed_url":"<RSS feed URL>"}}'
     description = "Adds an RSS/Atom feed to the watch list; the poller posts only the newest item once, then tracks new entries."
     plugin_dec = "Add an RSS/Atom feed to the watch list and post only the newest item once."
     pretty_name = "Adding Your Feed"

@@ -27,12 +27,7 @@ class FtpBrowserPlugin(ToolPlugin):
     plugin_name = "FTP Browser"
     version = "1.1.0"
     min_tater_version = "50"
-    usage = (
-        "{\n"
-        '  "function": "ftp_browser",\n'
-        '  "arguments": {"path": "/optional/path", "page": 0}\n'
-        "}\n"
-    )
+    usage = '{"function":"ftp_browser","arguments":{"path":"/optional/path","page":0}}'
     optional_args = ["path", "page"]
     description = "Lets the user browse and download files from the FTP server."
     plugin_dec = "Browse and download files from the configured FTP server."

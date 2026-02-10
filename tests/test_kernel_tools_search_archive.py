@@ -70,6 +70,31 @@ class KernelToolsSearchArchiveTests(unittest.TestCase):
         skipped = extracted.get("skipped", [])
         self.assertTrue(any(item.get("reason") == "unsafe_path" for item in skipped), skipped)
 
+    def test_extract_archive_default_destination_removed_when_empty(self):
+        archive = AGENT_DOWNLOADS_DIR / f"tmp_archive_{uuid.uuid4().hex}.zip"
+        self._cleanup_paths.append(archive)
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("../evil.txt", "evil")
+
+        extracted = extract_archive(f"downloads/{archive.name}")
+        self.assertTrue(extracted.get("ok"), extracted)
+        self.assertEqual(extracted.get("extracted_count"), 0)
+
+        dest = Path(str(extracted.get("destination", "")))
+        self.assertTrue(str(dest).startswith(str(AGENT_WORKSPACE_DIR)))
+        self.assertFalse(dest.exists())
+
+    def test_extract_archive_error_cleans_default_destination(self):
+        archive = AGENT_DOWNLOADS_DIR / f"tmp_archive_{uuid.uuid4().hex}.7z"
+        self._cleanup_paths.append(archive)
+        expected_dest = AGENT_WORKSPACE_DIR / f"extracted_{archive.stem}"
+        self._cleanup_paths.append(expected_dest)
+        archive.write_bytes(b"not-a-7z")
+
+        extracted = extract_archive(f"downloads/{archive.name}")
+        self.assertFalse(extracted.get("ok"), extracted)
+        self.assertFalse(expected_dest.exists())
+
     def test_list_archive_7z_reports_dependency_or_invalid_archive(self):
         p = AGENT_DOWNLOADS_DIR / f"tmp_archive_{uuid.uuid4().hex}.7z"
         p.write_bytes(b"not-a-7z")

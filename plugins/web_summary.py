@@ -16,12 +16,7 @@ class WebSummaryPlugin(ToolPlugin):
     plugin_name = "Web Summary"
     version = "1.0.1"
     min_tater_version = "50"
-    usage = (
-        "{\n"
-        '  "function": "web_summary",\n'
-        '  "arguments": {"url": "<Webpage URL>"}\n'
-        "}\n"
-    )
+    usage = '{"function":"web_summary","arguments":{"url":"<Webpage URL>"}}'
     description = "Summarizes an article from a URL provided by the user."
     plugin_dec = "Summarize the main points of a webpage from its URL."
     pretty_name = "Summarizing Your Article"

@@ -8,10 +8,8 @@ import redis
 import requests
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
-import plugin_registry as pr
-from agent_lab_registry import build_agent_registry
-from plugin_settings import get_plugin_enabled
 from helpers import get_llm_client_from_env
+from notify import core_notifier_platforms, dispatch_notification
 from rss_store import get_all_feeds, update_feed, ensure_feed, delete_feed
 
 logger = logging.getLogger("rss")
@@ -51,15 +49,12 @@ def _get_poll_interval() -> int:
     except Exception:
         return env_default
 
-NOTIFIER_PLATFORM_MAP = {
-    "notify_discord": "discord",
-    "notify_irc": "irc",
-    "notify_matrix": "matrix",
-    "notify_homeassistant": "homeassistant",
-    "notify_ntfy": "ntfy",
-    "notify_telegram": "telegram",
-    "notify_wordpress": "wordpress",
-}
+
+def _coerce_targets(payload) -> dict:
+    if isinstance(payload, dict):
+        return dict(payload)
+    return {}
+
 
 def _rss_notifier_rules(settings: dict) -> dict:
     del settings
@@ -78,7 +73,7 @@ def _merge_feed_rules(global_rules: dict, feed_platforms: dict) -> dict:
     for key, rule in (global_rules or {}).items():
         merged[key] = {
             "enabled": bool(rule.get("enabled", True)),
-            "targets": dict(rule.get("targets") or {}),
+            "targets": _coerce_targets(rule.get("targets")),
         }
 
     for key, conf in (feed_platforms or {}).items():
@@ -87,14 +82,14 @@ def _merge_feed_rules(global_rules: dict, feed_platforms: dict) -> dict:
         if key not in merged:
             merged[key] = {
                 "enabled": bool(conf.get("enabled", True)),
-                "targets": dict(conf.get("targets") or {}),
+                "targets": _coerce_targets(conf.get("targets")),
             }
             continue
         if "enabled" in conf:
             merged[key]["enabled"] = bool(conf.get("enabled", True))
         targets = conf.get("targets") or {}
         if targets:
-            merged[key]["targets"] = dict(targets)
+            merged[key]["targets"] = _coerce_targets(targets)
 
     return merged
 
@@ -260,78 +255,50 @@ class RSSManager:
             "request_id": f"rss:{feed_title}",
         }
 
-        merged_registry, merged_enabled, _collisions = build_agent_registry(
-            pr.get_registry_snapshot(),
-            get_plugin_enabled,
-        )
-        for name, plugin in merged_registry.items():
-            if getattr(plugin, "notifier", False) and merged_enabled(name):
-                platform_key = NOTIFIER_PLATFORM_MAP.get(name)
-                rule = merged_rules.get(platform_key) if platform_key else None
-                if rule and not rule.get("enabled", True):
-                    continue
-                targets = rule.get("targets") if rule else None
-                try:
-                    if targets:
-                        try:
-                            await plugin.notify(
-                                title=entry_title,
-                                content=announcement,
-                                targets=targets,
-                                origin=origin,
-                                meta={"tags": ["rss"]},
-                            )
-                        except TypeError:
-                            await plugin.notify(title=entry_title, content=announcement)
-                    else:
-                        try:
-                            await plugin.notify(
-                                title=entry_title,
-                                content=announcement,
-                                origin=origin,
-                                meta={"tags": ["rss"]},
-                            )
-                        except TypeError:
-                            await plugin.notify(title=entry_title, content=announcement)
-                except Exception as e:
-                    logger.warning(f"{name} plugin failed: {e}")
+        for platform_key in core_notifier_platforms():
+            rule = merged_rules.get(platform_key) or {"enabled": True, "targets": {}}
+            if not rule.get("enabled", True):
+                continue
+
+            targets = _coerce_targets(rule.get("targets"))
+            try:
+                result = await dispatch_notification(
+                    platform=platform_key,
+                    title=entry_title,
+                    content=announcement,
+                    targets=targets,
+                    origin=origin,
+                    meta={"tags": ["rss"]},
+                )
+                if isinstance(result, str) and result.startswith("Cannot queue"):
+                    logger.warning("[RSS] %s (%s)", result, platform_key)
+            except Exception as e:
+                logger.warning("[RSS] %s notifier failed: %s", platform_key, e)
 
     def any_notifier_enabled(self) -> bool:
         rules = _rss_notifier_rules({})
         feeds = self.get_feeds()
 
-        merged_registry, merged_enabled, _collisions = build_agent_registry(
-            pr.get_registry_snapshot(),
-            get_plugin_enabled,
-        )
         enabled_notifiers = []
-
-        for name, plugin in merged_registry.items():
-            if not getattr(plugin, "notifier", False):
-                continue
-            if not merged_enabled(name):
-                continue
-
-            platform_key = NOTIFIER_PLATFORM_MAP.get(name, "")
+        for platform_key in core_notifier_platforms():
             global_enabled = rules.get(platform_key, {}).get("enabled", True)
             if global_enabled:
-                enabled_notifiers.append(plugin)
+                enabled_notifiers.append(platform_key)
                 continue
 
-            # Global disabled: check per-feed overrides for this platform
-            if platform_key:
-                for _url, cfg in feeds.items():
-                    if not cfg.get("enabled", True):
-                        continue
-                    platforms = cfg.get("platforms") or {}
-                    pcfg = platforms.get(platform_key)
-                    if pcfg and pcfg.get("enabled", True):
-                        enabled_notifiers.append(plugin)
-                        break
+            # Global disabled: check per-feed overrides for this platform.
+            for _url, cfg in feeds.items():
+                if not cfg.get("enabled", True):
+                    continue
+                platforms = cfg.get("platforms") or {}
+                pcfg = platforms.get(platform_key)
+                if pcfg and pcfg.get("enabled", True):
+                    enabled_notifiers.append(platform_key)
+                    break
 
         logger.debug(
-            "[RSS] Number of plugins visible: %s | Number of enabled notifier tools: %s",
-            len(merged_registry),
+            "[RSS] Number of built-in notifier tools: %s | Number of enabled notifier routes: %s",
+            len(core_notifier_platforms()),
             len(enabled_notifiers),
         )
         return bool(enabled_notifiers)
@@ -341,7 +308,7 @@ class RSSManager:
         try:
             while not (stop_event and stop_event.is_set()):
                 if not self.any_notifier_enabled():
-                    logger.debug("No notifier plugins are enabled. Skipping RSS check.")
+                    logger.debug("No notifier routes are enabled. Skipping RSS check.")
                     await asyncio.sleep(_get_poll_interval())
                     continue
 

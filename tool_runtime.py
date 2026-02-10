@@ -39,6 +39,7 @@ from kernel_tools import (
     memory_search,
     truth_get_last,
     truth_list,
+    vision_describer,
 )
 from plugin_result import action_failure, normalize_plugin_result
 
@@ -46,6 +47,7 @@ from plugin_result import action_failure, normalize_plugin_result
 META_TOOLS = {
     "list_plugins",
     "get_plugin_help",
+    "vision_describer",
     "list_platforms_for_plugin",
     "read_file",
     "search_web",
@@ -117,6 +119,19 @@ def run_meta_tool(
             plugin_id=str(args.get("plugin_id") or ""),
             platform=args.get("platform") or platform,
             registry=registry,
+        )
+
+    if func == "vision_describer":
+        return vision_describer(
+            prompt=str(args.get("prompt") or args.get("query") or ""),
+            path=args.get("path"),
+            url=args.get("url"),
+            blob_key=args.get("blob_key"),
+            file_id=args.get("file_id"),
+            image_ref=args.get("image_ref") if isinstance(args.get("image_ref"), dict) else None,
+            history_key=args.get("history_key"),
+            platform=args.get("platform") or platform,
+            origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
         )
 
     if func == "list_platforms_for_plugin":

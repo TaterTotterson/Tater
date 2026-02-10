@@ -23,14 +23,7 @@ class BroadcastPlugin(ToolPlugin):
     plugin_name = "Broadcast"
     version = "1.1.1"
     min_tater_version = "50"
-    usage = (
-        "{\n"
-        '  "function": "broadcast",\n'
-        '  "arguments": {\n'
-        '    "text": "<what to announce>"\n'
-        "  }\n"
-        "}\n"
-    )
+    usage = '{"function":"broadcast","arguments":{"text":"<what to announce>"}}'
     required_args = ["text"]
     optional_args = ["message", "content", "announcement", "request"]
     description = (

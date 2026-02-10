@@ -12,6 +12,87 @@ from helpers import (
 )
 from plugin_result import narrate_result, redis_truth_payload
 from tool_runtime import execute_plugin_call, is_meta_tool, run_meta_tool
+from plugin_kernel import plugin_supports_platform, plugin_when_to_use
+
+TOOL_NAME_ALIASES = {
+    "web_search": "search_web",
+    "google_search": "search_web",
+    "google_cse_search": "search_web",
+    "describe_image": "vision_describer",
+    "describe_latest_image": "vision_describer",
+    "vision_describe": "vision_describer",
+    "vision_describe_image": "vision_describer",
+}
+
+
+def _canonical_tool_name(name: str) -> str:
+    key = str(name or "").strip()
+    if not key:
+        return ""
+    return TOOL_NAME_ALIASES.get(key, key)
+
+
+def _tool_purpose(plugin: Any) -> str:
+    text = str(plugin_when_to_use(plugin) or "").strip()
+    if not text:
+        text = str(getattr(plugin, "description", "") or "").strip()
+    text = " ".join(text.split())
+    if not text:
+        return "no description"
+    if len(text) > 80:
+        text = text[:77].rstrip() + "..."
+    return text
+
+
+def _enabled_tool_index(
+    *,
+    platform: str,
+    registry: Dict[str, Any],
+    enabled_predicate: Optional[Callable[[str], bool]],
+) -> str:
+    enabled_check = enabled_predicate or (lambda _name: True)
+    rows: List[str] = []
+    for plugin_id, plugin in sorted(registry.items(), key=lambda kv: str(kv[0]).lower()):
+        if not enabled_check(plugin_id):
+            continue
+        if not plugin_supports_platform(plugin, platform):
+            continue
+        rows.append(f"- {plugin_id} — {_tool_purpose(plugin)}")
+    if not rows:
+        rows.append("- (none)")
+    return (
+        "Enabled tools on this platform:\n"
+        + "\n".join(rows)
+        + "\nMeta tools:\n"
+        + "- get_plugin_help(plugin_id)\n"
+        + "- vision_describer(prompt?, path?|url?|blob_key?|file_id?)"
+    )
+
+
+def _upsert_tool_index_message(
+    messages: List[Dict[str, Any]],
+    *,
+    platform: str,
+    registry: Dict[str, Any],
+    enabled_predicate: Optional[Callable[[str], bool]],
+) -> None:
+    prefix = "Enabled tools on this platform:"
+    for i in range(len(messages) - 1, -1, -1):
+        m = messages[i]
+        if m.get("role") != "system":
+            continue
+        if str(m.get("content") or "").startswith(prefix):
+            messages.pop(i)
+    messages.append(
+        {
+            "role": "system",
+            "content": _enabled_tool_index(
+                platform=platform,
+                registry=registry,
+                enabled_predicate=enabled_predicate,
+            ),
+        }
+    )
 
 
 def build_compact_system_prompt(platform: str, extra_instructions: str = "") -> str:
@@ -26,36 +107,15 @@ def build_compact_system_prompt(platform: str, extra_instructions: str = "") -> 
             "Never violate tool-use or safety rules.\n\n"
         )
 
-    platform_rule = (
+    core_rules = (
         f"Current platform: {platform}.\n"
-        "Only use plugins compatible with this platform.\n"
-        "If a user asks for an unsupported capability, explain it is unavailable here and list platforms where it works.\n"
-    )
-
-    tool_rules = (
-        "Tool use policy:\n"
-        "- Answer directly when no external action or live lookup is needed.\n"
-        "- Tools are discovered on-demand; not all tools are described here. If unsure, call list_plugins.\n"
-        "- Examples that require list_plugins: weather/forecast, news, stocks, sports scores, downloads, music/song generation, image/video generation, camera feeds/snapshots (front/back yard, porch, driveway, garage), camera/sensor status, smart-home actions.\n"
-        "- The user does not need to explicitly request tool use; if a tool is appropriate, use it.\n"
-        "- Prefer using a tool over attempting to answer from scratch when a tool could fulfill the request.\n"
-        "- If a tool may be needed, call `list_plugins` first.\n"
-        "- If the user asks to control devices or services or interact with external systems, call list_plugins first.\n"
-        "- If the user asks about a specific tool/plugin by name or asks what a tool can do, call `list_plugins` or `get_plugin_help` instead of guessing.\n"
-        "- If the user asks to run a plugin by name (even approximate), call `list_plugins` and pick the closest match (ignore minor typos/plurals). If a close match exists, use it and do not claim it’s unavailable; optionally confirm.\n"
-        "- When calling a plugin, use its `id` from list_plugins (not the display name).\n"
-        "- If the user asks to schedule or run a recurring task (daily/weekly/every), use the `ai_tasks` plugin; do not create a platform or tool.\n"
-        "- For scheduled tasks, assume local timezone if none is provided. If no destination is given, use the current channel/room from origin (do not ask for channel IDs).\n"
-        "- If you might need a tool or are unsure a capability exists, call list_plugins before saying it is unavailable.\n"
-        "- Before saying you cannot do something in this environment, call list_plugins to verify availability.\n"
-        "- For any create/generate request (content, media, files, or other artifacts), call list_plugins before answering.\n"
-        "- Do not provide a creative or alternative response until you have verified no compatible tool exists.\n"
-        "- If the user asks for multiple independent actions, you may call tools one at a time until all actions are complete, then respond.\n"
-        "- After choosing a tool, call `get_plugin_help` if args are unclear.\n"
-        "- Ask concise follow-up questions when required args are missing.\n"
-        "- Return tool calls strictly as JSON: {\"function\":\"name\",\"arguments\":{...}}\n"
-        "- Meta tools: list_plugins, get_plugin_help, list_platforms_for_plugin.\n"
-        "- Do not claim success unless tool result confirms success.\n"
+        "Use only tool ids from the enabled tool index message.\n"
+        "If a tool matches user intent, call it directly.\n"
+        "If args are unclear, call get_plugin_help(plugin_id) once.\n"
+        "Tool call format must be strict JSON only:\n"
+        "{\"function\":\"tool_id\",\"arguments\":{...}}\n"
+        "No markdown fences or extra commentary around tool calls.\n"
+        "Do not claim success unless tool output confirms success.\n"
     )
 
     plain_text_rule = ""
@@ -66,8 +126,7 @@ def build_compact_system_prompt(platform: str, extra_instructions: str = "") -> 
         f"Current Date and Time is: {now}\n\n"
         f"You are {first} {last}, an AI assistant.\n\n"
         f"{persona_clause}"
-        f"{platform_rule}\n"
-        f"{tool_rules}\n"
+        f"{core_rules}\n"
         f"{plain_text_rule}"
         f"{extra_instructions}".strip()
     )
@@ -109,6 +168,12 @@ async def run_tool_loop(
     format_fix_used = False
 
     for _ in range(max_steps):
+        _upsert_tool_index_message(
+            messages,
+            platform=platform,
+            registry=registry,
+            enabled_predicate=enabled_predicate,
+        )
         response = await llm_client.chat(messages)
         text = (response.get("message", {}) or {}).get("content", "").strip()
         if not text:
@@ -132,7 +197,7 @@ async def run_tool_loop(
                 "last_tool_result": last_tool_result,
             }
 
-        func = str(parsed.get("function") or "").strip()
+        func = _canonical_tool_name(str(parsed.get("function") or "").strip())
         args = parsed.get("arguments", {}) or {}
         if not func:
             return {"text": text, "tool_calls": tool_calls, "last_tool_result": last_tool_result}
@@ -140,12 +205,14 @@ async def run_tool_loop(
         tool_calls.append({"function": func, "arguments": args})
 
         if is_meta_tool(func):
+            origin = tool_context.get("origin") if isinstance(tool_context.get("origin"), dict) else None
             meta_payload = run_meta_tool(
                 func=func,
                 args=args,
                 platform=platform,
                 registry=registry,
                 enabled_predicate=enabled_predicate,
+                origin=origin,
             )
             messages.append(_tool_call_message(func, args))
             messages.append(_tool_result_message(func, meta_payload))

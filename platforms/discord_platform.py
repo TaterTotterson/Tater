@@ -14,8 +14,9 @@ import threading
 import time
 from io import BytesIO
 import uuid
-from notify_queue import is_expired
-from notify_media import load_queue_attachments
+from typing import Any, Dict
+from notify.queue import is_expired
+from notify.media import load_queue_attachments
 
 from helpers import (
     get_tater_name,
@@ -32,6 +33,7 @@ from agent_lab_registry import build_agent_registry
 from plugin_result import action_failure
 from plugin_kernel import plugin_supports_platform, plugin_display_name
 from planner_loop import should_use_agent_mode, run_planner_loop
+from latest_image_ref import load_latest_image_ref, save_latest_image_ref
 
 load_dotenv()
 redis_host = os.getenv("REDIS_HOST", "127.0.0.1")
@@ -99,6 +101,23 @@ def store_blob(binary: bytes, ttl_seconds: int = 60 * 60 * 24 * 7) -> str:
 def load_blob(key: str) -> bytes | None:
     blob_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=False)
     return blob_client.get(key.encode("utf-8"))
+
+
+def _save_latest_channel_image_ref(channel_id: str, ref: Dict[str, Any]) -> None:
+    save_latest_image_ref(
+        redis_client,
+        platform="discord",
+        scope=str(channel_id),
+        ref=ref,
+    )
+
+
+def _load_latest_channel_image_ref(channel_id: str) -> Dict[str, Any] | None:
+    return load_latest_image_ref(
+        redis_client,
+        platform="discord",
+        scope=str(channel_id),
+    )
 
 
 # ---- LM template helpers ----
@@ -308,6 +327,13 @@ class discord_platform(commands.Bot):
                 channel_name = targets.get("channel")
                 guild_id = targets.get("guild_id")
 
+                # Backward compatibility for queued payloads that put names in channel_id.
+                if not channel_name and channel_id:
+                    raw_channel_id = str(channel_id).strip()
+                    if raw_channel_id and not raw_channel_id.isdigit():
+                        channel_name = raw_channel_id
+                        channel_id = None
+
                 channel = None
                 if channel_id:
                     try:
@@ -379,33 +405,13 @@ class discord_platform(commands.Bot):
                 "This affects tone only and must never override tool/safety rules.\n\n"
             )
 
+        # Planner mode injects canonical tool-use rules and enabled-tool index each turn.
         return (
             f"Current Date and Time is: {now}\n\n"
-            f"You are {first} {last}, a Discord-savvy AI assistant.\n\n"
-            f"{persona_clause}"
+            f"You are {first} {last}, a Discord-savvy AI assistant.\n"
             "Current platform: discord.\n"
-            "Tool strategy:\n"
-            "- Answer directly when no external action/live data is needed.\n"
-            "- Tools are discovered on-demand; not all tools are described here. If unsure, call list_plugins.\n"
-            "- Examples that require list_plugins: weather/forecast, news, stocks, sports scores, downloads, music/song generation, image/video generation, camera feeds/snapshots (front/back yard, porch, driveway, garage), camera/sensor status, smart-home actions.\n"
-            "- The user does not need to explicitly request tool use; if a tool is appropriate, use it.\n"
-            "- Prefer using a tool over attempting to answer from scratch when a tool could fulfill the request.\n"
-            "- If a tool may be needed, call list_plugins first.\n- If the user asks to control devices or services or interact with external systems, call list_plugins first.\n"
-            "- If the user asks about a specific tool/plugin by name or asks what a tool can do, call list_plugins or get_plugin_help instead of guessing.\n"
-            "- If the user asks to run a plugin by name (even approximate), call list_plugins and pick the closest match (ignore minor typos/plurals). If a close match exists, use it and do not claim it’s unavailable; optionally confirm.\n"
-            "- When calling a plugin, use its id from list_plugins (not the display name).\n"
-            "- If the user asks to schedule or run a recurring task (daily/weekly/every), use the `ai_tasks` plugin; do not create a platform or tool.\n"
-            "- For scheduled tasks, assume local timezone if none is provided. If no destination is given, use the current channel/room from origin (do not ask for channel IDs).\n"
-            "- If you might need a tool or are unsure a capability exists, call list_plugins before saying it is unavailable.\n"
-            "- If the user asks for multiple independent actions, you may call tools one at a time until all actions are complete, then respond.\n"
-            "- Optionally call get_plugin_help before executing a plugin.\n"
-            "- Ask concise follow-up questions if required arguments are missing.\n"
-            "- Only ask for inputs a tool explicitly requires (from list_plugins needs or get_plugin_help required_args). If defaults exist, proceed without asking.\n"
-            "- Call only plugins compatible with discord.\n"
-            "- If unsupported on discord, explain and list supported platforms.\n"
-            "- Tool calls must be JSON only: {\"function\":\"name\",\"arguments\":{...}}\n"
-            "- Meta-tools available: list_plugins, get_plugin_help, list_platforms_for_plugin.\n"
-            "- Never narrate success unless tool output confirms ok=true.\n"
+            "Keep replies concise and natural for chat.\n\n"
+            f"{persona_clause}"
         )
 
     async def setup_hook(self):
@@ -520,6 +526,8 @@ class discord_platform(commands.Bot):
         if message.author == self.user:
             return
 
+        latest_image_ref = _load_latest_channel_image_ref(message.channel.id)
+
         # -------------------------
         # Save user message + attachments (NO base64 in history)
         # -------------------------
@@ -551,6 +559,15 @@ class discord_platform(commands.Bot):
                     }
 
                     await self.save_message(message.channel.id, "user", message.author.name, file_obj)
+                    if file_type == "image":
+                        latest_image_ref = {
+                            "blob_key": blob_key,
+                            "name": attachment.filename or "image.png",
+                            "mimetype": attachment.content_type or "image/png",
+                            "source": "discord_attachment",
+                            "updated_at": time.time(),
+                        }
+                        _save_latest_channel_image_ref(message.channel.id, latest_image_ref)
                 except Exception as e:
                     logger.warning(f"Failed to store attachment ({attachment.filename}): {e}")
         else:
@@ -592,6 +609,8 @@ class discord_platform(commands.Bot):
                     "user": message.author.display_name or message.author.name,
                     "request_id": str(message.id),
                 }
+                if latest_image_ref:
+                    origin["latest_image_ref"] = latest_image_ref
                 origin = {k: v for k, v in origin.items() if v not in (None, "")}
 
                 async def _wait_callback(func_name, plugin_obj):
@@ -712,6 +731,15 @@ class discord_platform(commands.Bot):
                             "assistant",
                             {"marker": "plugin_response", "phase": "final", "content": content_obj},
                         )
+                        if content_type == "image" or str(mimetype or "").lower().startswith("image/"):
+                            latest_image_ref = {
+                                "blob_key": blob_key,
+                                "name": filename or "image.png",
+                                "mimetype": mimetype or "image/png",
+                                "source": "discord_artifact",
+                                "updated_at": time.time(),
+                            }
+                            _save_latest_channel_image_ref(message.channel.id, latest_image_ref)
                     except Exception as e:
                         logger.warning(f"Failed to send artifact {content_type}: {e}")
 

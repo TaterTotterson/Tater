@@ -13,14 +13,7 @@ class YouTubeSummaryPlugin(ToolPlugin):
     plugin_name = "YouTube Summary"
     version = "1.0.0"
     min_tater_version = "50"
-    usage = (
-        '{\n'
-        '  "function": "youtube_summary",\n'
-        '  "arguments": {\n'
-        '    "video_url": "<YouTube URL>"\n'
-        '  }\n'
-        '}'
-    )
+    usage = '{"function":"youtube_summary","arguments":{"video_url":"<YouTube URL>"}}'
     description = "Summarizes a YouTube video using its transcript."
     plugin_dec = "Summarize a YouTube video using its transcript."
     pretty_name = "Summarizing Your Video"

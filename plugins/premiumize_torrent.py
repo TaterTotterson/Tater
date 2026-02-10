@@ -24,12 +24,7 @@ class PremiumizeTorrentPlugin(ToolPlugin):
     plugin_name = "Premiumize Torrent"
     version = "1.0.1"
     min_tater_version = "50"
-    usage = (
-        "{\n"
-        '  "function": "premiumize_torrent",\n'
-        '  "arguments": {}\n'
-        "}\n"
-    )
+    usage = '{"function":"premiumize_torrent","arguments":{}}'
     description = "Checks if a .torrent file in recent chat history is cached on Premiumize.me and returns direct links if available."
     plugin_dec = "Check the latest torrent or magnet against Premiumize cache and provide direct links."
     pretty_name = "Getting Links"

@@ -34,15 +34,7 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
     pretty_name = "Voice PE Remote Timer"
     settings_category = "Voice PE Remote Timer"
 
-    usage = (
-        "{\n"
-        '  "function": "voicepe_remote_timer",\n'
-        '  "arguments": {\n'
-        '    "duration": "5 minutes (or omit duration to check remaining time)",\n'
-        '    "action": "cancel (optional, to cancel the running timer)"\n'
-        "  }\n"
-        "}\n"
-    )
+    usage = '{"function":"voicepe_remote_timer","arguments":{"duration":"5 minutes (or omit duration to check remaining time)","action":"cancel (optional, to cancel the running timer)"}}'
 
     description = (
         "Start, cancel, or check remaining time for a device-local timer on a Voice PE (ESPHome). "

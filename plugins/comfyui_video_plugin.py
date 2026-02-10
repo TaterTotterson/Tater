@@ -356,12 +356,7 @@ class ComfyUIVideoPlugin(ToolPlugin):
     plugin_name = "ComfyUI Video"
     version = "1.0.2"
     min_tater_version = "50"
-    usage = (
-        '{\n'
-        '  "function": "comfyui_video_plugin",\n'
-        '  "arguments": {"prompt": "<Describe the video you want>"}\n'
-        '}\n'
-    )
+    usage = '{"function":"comfyui_video_plugin","arguments":{"prompt":"<Describe the video you want>"}}'
     description = "Generates a video from a text prompt by creating multiple animated clips using ComfyUI, then merging them into one MP4."
     plugin_dec = "Create a short video from a text prompt by stitching ComfyUI-generated clips."
     pretty_name = "Your Video"

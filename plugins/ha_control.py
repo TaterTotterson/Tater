@@ -69,14 +69,7 @@ class HAControlPlugin(ToolPlugin):
     settings_category = "Home Assistant Control"
     platforms = ["homeassistant", "webui", "xbmc", "homekit", "discord", "telegram", "matrix", "irc"]
 
-    usage = (
-        "{\n"
-        '  "function": "ha_control",\n'
-        '  "arguments": {\n'
-        '    "query": "Single Home Assistant command in natural language (e.g., \\"turn off the office lights\\", \\"set the thermostat to 72\\", \\"what is the kitchen temperature\\"). If the user asked multiple things, include ONLY the Home Assistant part. If the user uses pronouns (it/them/those/that), restate the request with the actual device or area."\n'
-        "  }\n"
-        "}\n"
-    )
+    usage = '{"function":"ha_control","arguments":{"query":"Single Home Assistant command in natural language. If the user asked multiple things, include only the Home Assistant part and resolve pronouns to explicit devices or areas."}}'
 
     description = (
         "Control or check Home Assistant devices like lights, switches, thermostats, locks, covers, "

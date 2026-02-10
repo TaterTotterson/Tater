@@ -50,14 +50,7 @@ class WeatherForecastPlugin(ToolPlugin):
     pretty_name = "Checking the Weather"
     settings_category = "Weather Forecast"
 
-    usage = (
-        "{\n"
-        '  "function": "weather_forecast",\n'
-        '  "arguments": {\n'
-        '    "request": "User’s weather request in natural language (e.g., \\"forecast for tomorrow in 76114\\", \\"what’s the weather tonight\\"). If the user asked multiple things, include only the weather part."\n'
-        "  }\n"
-        "}\n"
-    )
+    usage = '{"function":"weather_forecast","arguments":{"request":"User weather request in natural language. If the user asked multiple things, include only the weather part."}}'
 
     required_settings = {
         "WEATHERAPI_KEY": {

@@ -79,24 +79,7 @@ class MisterRemotePlugin(ToolPlugin):
 
     platforms = ["discord", "webui", "irc", "homeassistant", "matrix", "homekit", "telegram"]
 
-    usage = (
-        "{\n"
-        '  "function": "mister_remote",\n'
-        '  "arguments": {\n'
-        '    "command": "<play|now_playing|go_to_menu|screenshot_take>",\n'
-        '    "utterance": "<FULL original user message (required for play)>"\n'
-        "  }\n"
-        "}\n"
-        "\n"
-        "Example:\n"
-        "{\n"
-        '  "function": "mister_remote",\n'
-        '  "arguments": {\n'
-        '    "command": "play",\n'
-        '    "utterance": "play super mario 3 on mister"\n'
-        "  }\n"
-        "}\n"
-    )
+    usage = '{"function":"mister_remote","arguments":{"command":"<play|now_playing|go_to_menu|screenshot_take>","utterance":"<FULL original user message (required for play)>"}}'
 
     settings_category = "MiSTer Remote"
     required_settings = {
