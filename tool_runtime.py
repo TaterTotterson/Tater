@@ -5,7 +5,6 @@ from typing import Any, Callable, Dict, Optional
 from plugin_kernel import (
     get_plugin_help,
     list_platforms_for_plugin,
-    list_plugins_metadata,
     plugin_display_name,
     plugin_supports_platform,
     infer_needs_from_plugin,
@@ -45,7 +44,6 @@ from plugin_result import action_failure, normalize_plugin_result
 
 
 META_TOOLS = {
-    "list_plugins",
     "get_plugin_help",
     "vision_describer",
     "list_platforms_for_plugin",
@@ -100,20 +98,6 @@ def run_meta_tool(
     enabled_predicate: Optional[Callable[[str], bool]] = None,
     origin: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    if func == "list_plugins":
-        arg_platform = str(args.get("platform") or platform or "webui")
-        raw_flag = args.get("include_incompatible", False)
-        if isinstance(raw_flag, str):
-            include_incompatible = raw_flag.strip().lower() in {"1", "true", "yes", "on"}
-        else:
-            include_incompatible = bool(raw_flag)
-        return list_plugins_metadata(
-            platform=arg_platform,
-            include_incompatible=include_incompatible,
-            registry=registry,
-            enabled_predicate=enabled_predicate,
-        )
-
     if func == "get_plugin_help":
         return get_plugin_help(
             plugin_id=str(args.get("plugin_id") or ""),

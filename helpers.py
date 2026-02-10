@@ -349,7 +349,7 @@ def parse_function_json(response_text: str):
 
     # ---------------------------------------------------------
     # Tool-call markup (Codex/OpenAI style) support:
-    #   <|channel|>commentary to=repo_browser.list_plugins <|message|>{"type":"list"}
+    #   <|channel|>commentary to=repo_browser.get_plugin_help <|message|>{"plugin_id":"weather_forecast"}
     # ---------------------------------------------------------
     m_tool = re.search(r"to=([a-zA-Z0-9_.-]+).*?<\|message\|>(\{.*\})", s, re.DOTALL)
     if m_tool:
@@ -359,9 +359,6 @@ def parse_function_json(response_text: str):
         try:
             args = json.loads(blob)
             if isinstance(args, dict):
-                # normalize odd list payloads from other tool schemas
-                if tool_name == "list_plugins" and args.get("type") == "list":
-                    args = {}
                 if tool_name in {"get_plugin_help", "list_platforms_for_plugin"}:
                     if "plugin_id" not in args and "name" in args:
                         args["plugin_id"] = args.get("name")
