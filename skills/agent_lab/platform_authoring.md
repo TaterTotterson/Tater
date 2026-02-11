@@ -24,7 +24,6 @@ Preferred form:
 
 Also supported:
 - `code`
-- `code_b64`
 - `overwrite` (set `true` only when explicitly replacing existing file)
 
 Compatibility note:

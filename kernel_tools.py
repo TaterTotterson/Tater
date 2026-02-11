@@ -18,6 +18,7 @@ import zipfile
 import importlib.util
 import ipaddress
 import socket
+from html.parser import HTMLParser
 import redis
 import urllib.error
 import urllib.parse
@@ -579,6 +580,20 @@ def _validate_url(url: str) -> Optional[str]:
     return None
 
 
+def _normalize_url_input(url: Any) -> str:
+    raw = _as_text(url).strip()
+    if not raw:
+        return ""
+    if raw.startswith("//"):
+        return f"https:{raw}"
+    parsed = urllib.parse.urlparse(raw)
+    if parsed.scheme:
+        return raw
+    if re.match(r"^(?:www\.)?[A-Za-z0-9][A-Za-z0-9.-]+\.[A-Za-z]{2,}(?:[/:?#].*)?$", raw):
+        return f"https://{raw}"
+    return raw
+
+
 def _clean_redis_str(value: Any) -> str:
     if value is None:
         return ""
@@ -771,16 +786,18 @@ def read_url(
     max_bytes: int = 200_000,
     timeout_sec: int = 15,
 ) -> Dict[str, Any]:
-    err = _validate_url(url)
+    normalized_url = _normalize_url_input(url)
+    err = _validate_url(normalized_url)
     if err:
         return {"tool": "read_url", "ok": False, "error": err}
     try:
         req = urllib.request.Request(
-            url,
+            normalized_url,
             headers={"User-Agent": "Tater-AgentLab/1.0"},
         )
         with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
             content_type = resp.headers.get("Content-Type", "") or ""
+            final_url = resp.geturl() or normalized_url
             raw = resp.read(max_bytes + 1)
         truncated = len(raw) > max_bytes
         if truncated:
@@ -805,7 +822,7 @@ def read_url(
         return {
             "tool": "read_url",
             "ok": True,
-            "url": url,
+            "url": final_url,
             "content_type": content_type,
             "bytes": len(raw),
             "truncated": truncated,
@@ -813,6 +830,301 @@ def read_url(
         }
     except Exception as e:
         return {"tool": "read_url", "ok": False, "error": str(e)}
+
+
+class _WebpageInspectorParser(HTMLParser):
+    def __init__(self, *, base_url: str, max_links: int, max_images: int):
+        super().__init__(convert_charrefs=True)
+        self.base_url = base_url
+        self.max_links = max(1, int(max_links))
+        self.max_images = max(1, int(max_images))
+        self.title = ""
+        self.description = ""
+        self._in_title = False
+        self._suppress_depth = 0
+        self._anchor_href = ""
+        self._anchor_text_parts: List[str] = []
+        self.links: List[Dict[str, Any]] = []
+        self.images: List[Dict[str, Any]] = []
+        self._text_parts: List[str] = []
+
+    def _attrs(self, attrs) -> Dict[str, str]:
+        out: Dict[str, str] = {}
+        for k, v in attrs or []:
+            key = _as_text(k).strip().lower()
+            if not key:
+                continue
+            out[key] = _as_text(v).strip()
+        return out
+
+    def _abs(self, ref: str) -> str:
+        raw = _as_text(ref).strip()
+        if not raw:
+            return ""
+        return urllib.parse.urljoin(self.base_url, raw)
+
+    def _push_link(self, href: str, text: str, *, source: str = "a") -> None:
+        if len(self.links) >= self.max_links:
+            return
+        url = self._abs(href)
+        if not url:
+            return
+        self.links.append(
+            {
+                "url": url,
+                "text": " ".join(_as_text(text).split()).strip(),
+                "source": source,
+            }
+        )
+
+    def _push_image(
+        self,
+        src: str,
+        *,
+        alt: str = "",
+        title: str = "",
+        class_name: str = "",
+        id_name: str = "",
+        source: str = "img",
+    ) -> None:
+        if len(self.images) >= self.max_images:
+            return
+        url = self._abs(src)
+        if not url:
+            return
+        self.images.append(
+            {
+                "url": url,
+                "alt": " ".join(_as_text(alt).split()).strip(),
+                "title": " ".join(_as_text(title).split()).strip(),
+                "class": " ".join(_as_text(class_name).split()).strip(),
+                "id": " ".join(_as_text(id_name).split()).strip(),
+                "source": source,
+            }
+        )
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        t = _as_text(tag).strip().lower()
+        amap = self._attrs(attrs)
+        if t in {"script", "style", "noscript"}:
+            self._suppress_depth += 1
+            return
+        if t == "title":
+            self._in_title = True
+            return
+        if t == "meta":
+            meta_key = _as_text(amap.get("name") or amap.get("property")).strip().lower()
+            content = _as_text(amap.get("content")).strip()
+            if meta_key == "description" and content and not self.description:
+                self.description = content
+            if meta_key in {"og:image", "twitter:image", "twitter:image:src"} and content:
+                self._push_image(content, source="meta")
+            return
+        if t == "link":
+            rel = _as_text(amap.get("rel")).strip().lower()
+            href = _as_text(amap.get("href")).strip()
+            if not href:
+                return
+            if "icon" in rel or "apple-touch-icon" in rel:
+                self._push_image(href, source="icon")
+            elif rel in {"canonical", "alternate"}:
+                self._push_link(href, "", source="link")
+            return
+        if t == "a":
+            self._anchor_href = _as_text(amap.get("href")).strip()
+            self._anchor_text_parts = []
+            return
+        if t == "img":
+            self._push_image(
+                _as_text(amap.get("src")).strip(),
+                alt=amap.get("alt", ""),
+                title=amap.get("title", ""),
+                class_name=amap.get("class", ""),
+                id_name=amap.get("id", ""),
+                source="img",
+            )
+
+    def handle_endtag(self, tag: str) -> None:
+        t = _as_text(tag).strip().lower()
+        if t in {"script", "style", "noscript"}:
+            self._suppress_depth = max(0, self._suppress_depth - 1)
+            return
+        if t == "title":
+            self._in_title = False
+            return
+        if t == "a":
+            if self._anchor_href:
+                text = " ".join(" ".join(self._anchor_text_parts).split()).strip()
+                self._push_link(self._anchor_href, text, source="a")
+            self._anchor_href = ""
+            self._anchor_text_parts = []
+
+    def handle_data(self, data: str) -> None:
+        text = " ".join(_as_text(data).split()).strip()
+        if not text:
+            return
+        if self._in_title and not self.title:
+            self.title = text
+        if self._suppress_depth > 0:
+            return
+        if self._anchor_href:
+            self._anchor_text_parts.append(text)
+        if len(self._text_parts) < 400:
+            self._text_parts.append(text)
+
+    def visible_text(self, *, max_chars: int = 1200) -> str:
+        joined = " ".join(self._text_parts).strip()
+        if len(joined) <= max_chars:
+            return joined
+        clipped = joined[:max_chars]
+        if " " in clipped[200:]:
+            clipped = clipped[: clipped.rfind(" ")]
+        return clipped.rstrip(" .,;:") + "..."
+
+
+def _score_image_candidate(image: Dict[str, Any]) -> int:
+    words = " ".join(
+        [
+            _as_text(image.get("alt")).lower(),
+            _as_text(image.get("title")).lower(),
+            _as_text(image.get("class")).lower(),
+            _as_text(image.get("id")).lower(),
+            _as_text(image.get("url")).lower(),
+            _as_text(image.get("source")).lower(),
+        ]
+    )
+    score = 0
+    if any(token in words for token in ("logo", "brand", "wordmark", "logotype")):
+        score += 4
+    if any(token in words for token in ("icon", "favicon")):
+        score += 2
+    if ".svg" in words:
+        score += 1
+    if any(token in words for token in ("sprite", "blank", "placeholder", "spacer")):
+        score -= 3
+    return score
+
+
+def inspect_webpage(
+    url: str,
+    *,
+    max_bytes: int = 300_000,
+    timeout_sec: int = 20,
+    max_links: int = 20,
+    max_images: int = 20,
+) -> Dict[str, Any]:
+    normalized_url = _normalize_url_input(url)
+    err = _validate_url(normalized_url)
+    if err:
+        return {"tool": "inspect_webpage", "ok": False, "error": err}
+    try:
+        req = urllib.request.Request(
+            normalized_url,
+            headers={"User-Agent": "Tater-AgentLab/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+            content_type = _as_text(resp.headers.get("Content-Type") or "")
+            final_url = resp.geturl() or normalized_url
+            raw = resp.read(max_bytes + 1)
+    except Exception as e:
+        return {"tool": "inspect_webpage", "ok": False, "error": str(e)}
+
+    truncated = len(raw) > max_bytes
+    if truncated:
+        raw = raw[:max_bytes]
+
+    content_type_norm = content_type.split(";", 1)[0].strip().lower()
+    if content_type_norm and not (
+        content_type_norm.startswith("text/html")
+        or content_type_norm.startswith("application/xhtml+xml")
+        or content_type_norm.startswith("text/")
+    ):
+        return {
+            "tool": "inspect_webpage",
+            "ok": False,
+            "url": final_url,
+            "content_type": content_type,
+            "error": f"Non-HTML content type ({content_type_norm or 'unknown'}).",
+        }
+
+    try:
+        html = raw.decode("utf-8")
+    except Exception:
+        html = raw.decode("utf-8", errors="replace")
+
+    parser = _WebpageInspectorParser(
+        base_url=final_url,
+        max_links=max_links,
+        max_images=max_images,
+    )
+    try:
+        parser.feed(html)
+    except Exception:
+        pass
+    parser.close()
+
+    unique_links: List[Dict[str, Any]] = []
+    seen_links = set()
+    for item in parser.links:
+        link_url = _as_text(item.get("url")).strip()
+        if not link_url or link_url in seen_links:
+            continue
+        seen_links.add(link_url)
+        unique_links.append(item)
+
+    unique_images: List[Dict[str, Any]] = []
+    seen_images = set()
+    for item in parser.images:
+        image_url = _as_text(item.get("url")).strip()
+        if not image_url or image_url in seen_images:
+            continue
+        seen_images.add(image_url)
+        scored = dict(item)
+        score = _score_image_candidate(scored)
+        scored["score"] = score
+        scored["logo_hint"] = bool(score >= 2)
+        unique_images.append(scored)
+
+    best_image_url = ""
+    if unique_images:
+        ranked = sorted(
+            enumerate(unique_images),
+            key=lambda pair: (int(pair[1].get("score") or 0), -pair[0]),
+            reverse=True,
+        )
+        best_image_url = _as_text(ranked[0][1].get("url")).strip()
+
+    latest_image_ref = None
+    if best_image_url:
+        path_name = Path(urllib.parse.urlparse(best_image_url).path).name or "image.png"
+        guessed_mime = _as_text(mimetypes.guess_type(path_name)[0]).strip().lower()
+        if not guessed_mime.startswith("image/"):
+            guessed_mime = "image/png"
+        latest_image_ref = {
+            "url": best_image_url,
+            "name": path_name,
+            "mimetype": guessed_mime,
+            "source": "inspect_webpage",
+            "updated_at": time.time(),
+        }
+
+    return {
+        "tool": "inspect_webpage",
+        "ok": True,
+        "url": final_url,
+        "content_type": content_type,
+        "bytes": len(raw),
+        "truncated": truncated,
+        "title": _as_text(parser.title).strip(),
+        "description": _as_text(parser.description).strip(),
+        "text_preview": parser.visible_text(),
+        "links": unique_links,
+        "link_count": len(unique_links),
+        "images": unique_images,
+        "image_count": len(unique_images),
+        "best_image_url": best_image_url or None,
+        "latest_image_ref": latest_image_ref,
+    }
 
 
 def download_file(
@@ -824,7 +1136,8 @@ def download_file(
     timeout_sec: int = 30,
 ) -> Dict[str, Any]:
     _ensure_dirs()
-    err = _validate_url(url)
+    normalized_url = _normalize_url_input(url)
+    err = _validate_url(normalized_url)
     if err:
         return {"tool": "download_file", "ok": False, "error": err}
 
@@ -841,7 +1154,7 @@ def download_file(
         return {"tool": "download_file", "ok": False, "error": "Target directory not allowed."}
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    parsed = urllib.parse.urlparse(url)
+    parsed = urllib.parse.urlparse(normalized_url)
     default_name = _sanitize_filename(os.path.basename(parsed.path)) or "download.bin"
     safe_name = _sanitize_filename(filename or default_name) or "download.bin"
     dest = target_dir / safe_name
@@ -852,9 +1165,10 @@ def download_file(
     size = 0
     content_type = ""
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Tater-AgentLab/1.0"})
+        req = urllib.request.Request(normalized_url, headers={"User-Agent": "Tater-AgentLab/1.0"})
         with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
             content_type = resp.headers.get("Content-Type", "") or ""
+            final_url = resp.geturl() or normalized_url
             length = resp.headers.get("Content-Length")
             if length:
                 try:
@@ -897,7 +1211,7 @@ def download_file(
     return {
         "tool": "download_file",
         "ok": True,
-        "url": url,
+        "url": final_url,
         "path": str(dest),
         "bytes": size,
         "sha256": hasher.hexdigest(),
@@ -1729,7 +2043,96 @@ def _validate_plugin_source(source: str) -> Tuple[bool, str]:
         return False, "Missing ToolPlugin subclass."
     if not has_toolplugin_import:
         return False, "Import ToolPlugin from plugin_base."
+    action_failure_issues = _action_failure_call_issues(tree)
+    if action_failure_issues:
+        return False, "; ".join(action_failure_issues)
     return True, ""
+
+
+def _action_failure_call_issues(tree: ast.AST) -> List[str]:
+    issues: List[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func_name = ""
+        if isinstance(node.func, ast.Name):
+            func_name = node.func.id
+        elif isinstance(node.func, ast.Attribute):
+            func_name = node.func.attr
+        if func_name != "action_failure":
+            continue
+
+        kw_names = {kw.arg for kw in node.keywords if kw.arg}
+        if node.args:
+            issues.append("action_failure must use keyword args only (`code` and `message`).")
+        if "fail_text" in kw_names:
+            issues.append("action_failure does not accept `fail_text`; use `code` and `message`.")
+        if "code" not in kw_names or "message" not in kw_names:
+            issues.append("action_failure requires `code` and `message` keyword arguments.")
+
+    # Keep output deterministic and compact.
+    deduped: List[str] = []
+    for item in issues:
+        if item not in deduped:
+            deduped.append(item)
+    return deduped
+
+
+def _waiting_prompt_style_issues(template: str) -> List[str]:
+    text = str(template or "").strip()
+    if not text:
+        return ["missing waiting_prompt_template text"]
+
+    lowered = text.lower()
+    issues: List[str] = []
+
+    if "{mention}" not in text:
+        issues.append("must include {mention}")
+
+    has_wait_tone = any(
+        token in lowered
+        for token in (
+            "wait",
+            "working on",
+            "working",
+            "creating",
+            "processing",
+            "loading",
+            "one moment",
+            "hang tight",
+            "be right back",
+            "right now",
+            "in progress",
+        )
+    )
+    if not has_wait_tone:
+        issues.append("must describe progress/please-wait status")
+
+    has_message_constraint = any(
+        phrase in lowered
+        for phrase in (
+            "only output that message",
+            "output only that message",
+            "return only that message",
+            "only output the message",
+            "return only the message",
+        )
+    )
+    if not has_message_constraint:
+        issues.append("must constrain output to only that message")
+
+    if any(
+        phrase in lowered
+        for phrase in (
+            "only output the joke",
+            "only output the summary",
+            "only output the answer",
+            "tell me a random joke",
+        )
+    ):
+        issues.append("must be a wait/status message, not the final task output")
+
+    return issues
 
 
 def _missing_dependencies(deps: List[str]) -> List[str]:
@@ -1904,13 +2307,26 @@ def validate_plugin(name: str, auto_install: bool = True) -> Dict[str, Any]:
     # Syntax check
     try:
         source = path.read_text(encoding="utf-8")
-        ast.parse(source, filename=str(path))
+        tree = ast.parse(source, filename=str(path))
     except Exception as e:
         report = {
             "tool": "validate_plugin",
             "ok": False,
             "error": f"Syntax error: {e}",
             "path": str(path),
+        }
+        _store_validation("plugin", name, report)
+        return report
+
+    action_failure_issues = _action_failure_call_issues(tree)
+    if action_failure_issues:
+        report = {
+            "tool": "validate_plugin",
+            "ok": False,
+            "error": "; ".join(action_failure_issues),
+            "path": str(path),
+            "missing_fields": ["action_failure_signature"],
+            "warnings": action_failure_issues,
         }
         _store_validation("plugin", name, report)
         return report
@@ -1982,15 +2398,13 @@ def validate_plugin(name: str, auto_install: bool = True) -> Dict[str, Any]:
         if not isinstance(explicit_wait_prompt, str) or not explicit_wait_prompt.strip():
             missing.append("waiting_prompt_template")
         else:
-            lowered = explicit_wait_prompt.lower()
-            has_instruction = any(word in lowered for word in ("write", "generate", "tell", "say", "respond"))
-            has_output_constraint = any(
-                phrase in lowered for phrase in ("only output", "output only", "only return", "return only")
-            )
-            if not (has_instruction and has_output_constraint):
+            issues = _waiting_prompt_style_issues(explicit_wait_prompt)
+            if issues:
+                missing.append("waiting_prompt_template")
                 warnings.append(
-                    "waiting_prompt_template should instruct the LLM (e.g., 'Write ...') "
-                    "and constrain output (e.g., 'Only output that message.')."
+                    "waiting_prompt_template must be a friendly progress/wait message for {mention} "
+                    "and end with an only-that-message output constraint. "
+                    "Issues: " + "; ".join(issues) + "."
                 )
         # Validate platform ids
         try:
@@ -2189,7 +2603,6 @@ def create_plugin(
     name: str,
     code: Optional[str] = None,
     *,
-    code_b64: Optional[str] = None,
     code_lines: Optional[List[str]] = None,
     overwrite: bool = False,
 ) -> Dict[str, Any]:
@@ -2209,13 +2622,7 @@ def create_plugin(
             "needs": [f"Plugin `{name}` already exists. Overwrite it? (yes/no)"],
         }
     try:
-        if code_b64:
-            try:
-                import base64
-                payload = base64.b64decode(code_b64.encode("utf-8")).decode("utf-8")
-            except Exception as e:
-                return {"tool": "create_plugin", "ok": False, "error": f"Invalid code_b64: {e}"}
-        elif isinstance(code_lines, list):
+        if isinstance(code_lines, list):
             for idx, line in enumerate(code_lines):
                 if isinstance(line, str) and ("\n" in line or "\r" in line):
                     return {
@@ -2344,7 +2751,6 @@ def create_platform(
     name: str,
     code: Optional[str] = None,
     *,
-    code_b64: Optional[str] = None,
     code_lines: Optional[List[str]] = None,
     overwrite: bool = False,
 ) -> Dict[str, Any]:
@@ -2364,13 +2770,7 @@ def create_platform(
             "needs": [f"Platform `{name}` already exists. Overwrite it? (yes/no)"],
         }
     try:
-        if code_b64:
-            try:
-                import base64
-                payload = base64.b64decode(code_b64.encode("utf-8")).decode("utf-8")
-            except Exception as e:
-                return {"tool": "create_platform", "ok": False, "error": f"Invalid code_b64: {e}"}
-        elif isinstance(code_lines, list):
+        if isinstance(code_lines, list):
             for idx, line in enumerate(code_lines):
                 if isinstance(line, str) and ("\n" in line or "\r" in line):
                     return {
@@ -2615,7 +3015,7 @@ def _vision_read_local_image(path: Any) -> Tuple[Optional[bytes], Optional[str],
 
 
 def _vision_read_remote_image(url: Any) -> Tuple[Optional[bytes], Optional[str], Optional[str], Optional[str]]:
-    raw_url = _as_text(url).strip()
+    raw_url = _normalize_url_input(url)
     if not raw_url:
         return None, None, None, "Image URL is empty."
     blocked = _validate_url(raw_url)
@@ -2646,7 +3046,12 @@ def _vision_read_remote_image(url: Any) -> Tuple[Optional[bytes], Optional[str],
     guessed_name = Path(parsed.path).name if parsed.path else ""
     if not guessed_name:
         guessed_name = "image.png"
-    mimetype = content_type or _as_text(mimetypes.guess_type(guessed_name)[0]).strip().lower() or "image/png"
+    guessed_mime = _as_text(mimetypes.guess_type(guessed_name)[0]).strip().lower()
+    mimetype = content_type or guessed_mime or "image/png"
+    if content_type and not content_type.startswith("image/"):
+        return None, None, None, "URL did not return an image content type. Use inspect_webpage first."
+    if not content_type and (not guessed_mime or not guessed_mime.startswith("image/")):
+        return None, None, None, "URL does not look like a direct image. Use inspect_webpage first."
     if mimetype and mimetype.startswith("image/") and not _vision_mimetype_allowed(mimetype):
         return None, None, None, f"Unsupported image MIME type from URL: {mimetype}"
     return data, guessed_name, mimetype, None

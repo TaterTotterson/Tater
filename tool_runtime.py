@@ -17,6 +17,7 @@ from kernel_tools import (
     list_directory,
     delete_file,
     read_url,
+    inspect_webpage,
     download_file,
     list_archive,
     extract_archive,
@@ -54,6 +55,7 @@ META_TOOLS = {
     "list_directory",
     "delete_file",
     "read_url",
+    "inspect_webpage",
     "download_file",
     "list_archive",
     "extract_archive",
@@ -83,6 +85,29 @@ def _to_int(value: Any, default: int) -> int:
         return int(value)
     except Exception:
         return int(default)
+
+
+def _normalize_creation_payload_args(args: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(args or {})
+    if isinstance(out.get("code_lines"), list):
+        normalized_lines = []
+        for line in (out.get("code_lines") or []):
+            text = str(line)
+            if "\r" in text:
+                text = text.replace("\r", "")
+            if "\n" in text:
+                normalized_lines.extend(text.split("\n"))
+            else:
+                normalized_lines.append(text)
+        out["code_lines"] = normalized_lines
+        out.pop("code", None)
+        return out
+
+    if out.get("code") is not None:
+        text = str(out.get("code") or "")
+        out["code_lines"] = text.splitlines()
+        out.pop("code", None)
+    return out
 
 
 def is_meta_tool(name: Optional[str]) -> bool:
@@ -179,6 +204,14 @@ def run_meta_tool(
             max_bytes=int(args.get("max_bytes") or 200000),
             timeout_sec=int(args.get("timeout_sec") or 15),
         )
+    if func == "inspect_webpage":
+        return inspect_webpage(
+            str(args.get("url") or ""),
+            max_bytes=int(args.get("max_bytes") or 300000),
+            timeout_sec=int(args.get("timeout_sec") or 20),
+            max_links=int(args.get("max_links") or 20),
+            max_images=int(args.get("max_images") or 20),
+        )
     if func == "download_file":
         return download_file(
             str(args.get("url") or ""),
@@ -221,7 +254,8 @@ def run_meta_tool(
         )
 
     if func == "create_plugin":
-        if not args.get("code") and not args.get("code_b64") and not args.get("code_lines"):
+        args = _normalize_creation_payload_args(args)
+        if not args.get("code") and not args.get("code_lines"):
             manifest = args.get("manifest")
             code_files = args.get("code_files")
             if isinstance(manifest, dict) and not args.get("name"):
@@ -250,6 +284,7 @@ def run_meta_tool(
                     elif isinstance(selected.get("content"), str):
                         args = dict(args)
                         args["code"] = selected.get("content")
+        args = _normalize_creation_payload_args(args)
         if args.get("plugin_id"):
             args = dict(args)
             args["name"] = args.get("plugin_id")
@@ -269,7 +304,6 @@ def run_meta_tool(
         return create_plugin(
             str(args.get("name") or ""),
             args.get("code"),
-            code_b64=args.get("code_b64"),
             code_lines=args.get("code_lines"),
             overwrite=overwrite,
         )
@@ -279,7 +313,8 @@ def run_meta_tool(
             bool(args.get("auto_install", True)),
         )
     if func == "create_platform":
-        if not args.get("code") and not args.get("code_b64") and not args.get("code_lines"):
+        args = _normalize_creation_payload_args(args)
+        if not args.get("code") and not args.get("code_lines"):
             manifest = args.get("manifest")
             code_files = args.get("code_files")
             if isinstance(manifest, dict) and not args.get("name"):
@@ -308,6 +343,7 @@ def run_meta_tool(
                     elif isinstance(selected.get("content"), str):
                         args = dict(args)
                         args["code"] = selected.get("content")
+        args = _normalize_creation_payload_args(args)
         if not args.get("name") and args.get("platform_name"):
             args = dict(args)
             args["name"] = args.get("platform_name")
@@ -323,7 +359,6 @@ def run_meta_tool(
         return create_platform(
             str(args.get("name") or ""),
             args.get("code"),
-            code_b64=args.get("code_b64"),
             code_lines=args.get("code_lines"),
             overwrite=overwrite,
         )

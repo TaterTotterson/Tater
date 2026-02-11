@@ -18,6 +18,8 @@ TOOL_NAME_ALIASES = {
     "web_search": "search_web",
     "google_search": "search_web",
     "google_cse_search": "search_web",
+    "inspect_page": "inspect_webpage",
+    "inspect_website": "inspect_webpage",
     "describe_image": "vision_describer",
     "describe_latest_image": "vision_describer",
     "vision_describe": "vision_describer",
@@ -26,6 +28,7 @@ TOOL_NAME_ALIASES = {
 
 _KERNEL_TOOL_PRIORITY = [
     "search_web",
+    "inspect_webpage",
     "read_url",
     "download_file",
     "read_file",
@@ -51,6 +54,7 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
     "list_directory": "list files and folders",
     "delete_file": "delete a local file",
     "read_url": "fetch and read webpage text",
+    "inspect_webpage": "inspect webpage structure, links, and image candidates",
     "download_file": "download files from URLs",
     "list_archive": "inspect archive entries",
     "extract_archive": "extract archives to workspace",
@@ -75,12 +79,74 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
     "vision_describer": "describe an image from explicit source",
 }
 
+CREATION_MAX_FAILURES = 2
+
 
 def _canonical_tool_name(name: str) -> str:
     key = str(name or "").strip()
     if not key:
         return ""
     return TOOL_NAME_ALIASES.get(key, key)
+
+
+def _looks_like_invalid_tool_call_text(text: str) -> bool:
+    s = str(text or "").strip()
+    if not s:
+        return False
+    lower = s.lower()
+    if "\"function\"" in lower and ("\"arguments\"" in lower or "'arguments'" in lower):
+        return True
+    if s.startswith("{") and ("function" in lower or "tool" in lower):
+        return True
+    return False
+
+
+def _normalize_creation_payload_args(func: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(args or {})
+    if str(func or "").strip() not in {"create_plugin", "create_platform"}:
+        return out
+
+    if isinstance(out.get("code_lines"), list):
+        normalized_lines: List[str] = []
+        for line in (out.get("code_lines") or []):
+            text = str(line)
+            if "\r" in text:
+                text = text.replace("\r", "")
+            if "\n" in text:
+                normalized_lines.extend(text.split("\n"))
+            else:
+                normalized_lines.append(text)
+        out["code_lines"] = normalized_lines
+        out.pop("code", None)
+        return out
+
+    if out.get("code") is not None:
+        text = str(out.get("code") or "")
+        out["code_lines"] = text.splitlines()
+        out.pop("code", None)
+    return out
+
+
+def _clean_args_for_signature(args: Dict[str, Any]) -> Dict[str, Any]:
+    def _strip(obj: Any) -> Any:
+        if isinstance(obj, dict):
+            cleaned: Dict[str, Any] = {}
+            for k, v in obj.items():
+                key = str(k)
+                if key in {"origin", "request_id", "timestamp", "ts", "context"}:
+                    continue
+                cleaned[key] = _strip(v)
+            return cleaned
+        if isinstance(obj, list):
+            return [_strip(x) for x in obj]
+        return obj
+
+    return _strip(args or {})
+
+
+def _signature_for_attempt(func: str, args: Dict[str, Any]) -> str:
+    payload = {"function": str(func or ""), "arguments": _clean_args_for_signature(args)}
+    return json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
 
 
 def _tool_purpose(plugin: Any) -> str:
@@ -243,7 +309,9 @@ async def run_tool_loop(
     tool_context = tool_context or {}
     last_tool_result: Optional[Dict[str, Any]] = None
     tool_calls: List[Dict[str, Any]] = []
+    attempts_seen: set[str] = set()
     format_fix_used = False
+    creation_failures = 0
 
     for _ in range(max_steps):
         _upsert_tool_index_message(
@@ -269,6 +337,24 @@ async def run_tool_loop(
                     "tool_calls": tool_calls,
                     "last_tool_result": last_tool_result,
                 }
+            if _looks_like_invalid_tool_call_text(text):
+                if not format_fix_used:
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": (
+                                "Invalid tool-call JSON detected. Return only strict JSON: "
+                                "{\"function\":\"tool_id\",\"arguments\":{...}}."
+                            ),
+                        }
+                    )
+                    format_fix_used = True
+                    continue
+                return {
+                    "text": "I had trouble formatting a tool call. Please try again.",
+                    "tool_calls": tool_calls,
+                    "last_tool_result": last_tool_result,
+                }
             return {
                 "text": text,
                 "tool_calls": tool_calls,
@@ -279,6 +365,17 @@ async def run_tool_loop(
         args = parsed.get("arguments", {}) or {}
         if not func:
             return {"text": text, "tool_calls": tool_calls, "last_tool_result": last_tool_result}
+        if func in {"create_plugin", "create_platform"}:
+            args = _normalize_creation_payload_args(func, args)
+
+        signature = _signature_for_attempt(func, args)
+        if signature in attempts_seen:
+            return {
+                "text": "Loop detected: repeated the same tool call. Tell me what to change and I will continue.",
+                "tool_calls": tool_calls,
+                "last_tool_result": last_tool_result,
+            }
+        attempts_seen.add(signature)
 
         tool_calls.append({"function": func, "arguments": args})
 
@@ -295,6 +392,27 @@ async def run_tool_loop(
             messages.append(_tool_call_message(func, args))
             messages.append(_tool_result_message(func, meta_payload))
             last_tool_result = {"function": func, "result": meta_payload}
+            if func in {"create_plugin", "create_platform"} and isinstance(meta_payload, dict):
+                if bool(meta_payload.get("ok")):
+                    creation_failures = 0
+                else:
+                    creation_failures += 1
+                    if creation_failures >= CREATION_MAX_FAILURES:
+                        needs = meta_payload.get("needs") if isinstance(meta_payload, dict) else None
+                        prompt = ""
+                        if isinstance(needs, list):
+                            prompt = "\n".join(str(x).strip() for x in needs if str(x).strip())
+                        if not prompt:
+                            kind = "plugin" if func == "create_plugin" else "platform"
+                            prompt = (
+                                f"Creation kept failing for {kind}. "
+                                "Tell me exactly what it should do, required inputs/outputs, and target platform(s)."
+                            )
+                        return {
+                            "text": prompt,
+                            "tool_calls": tool_calls,
+                            "last_tool_result": last_tool_result,
+                        }
             continue
 
         plugin_exec = await execute_plugin_call(

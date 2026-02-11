@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import unittest
 from unittest.mock import patch
@@ -12,17 +13,22 @@ from planner_loop import (
     _canonical_tool_name,
     _enabled_tool_mini_index,
     _creation_advanced_reference_paths,
+    _confirm_from_text,
     _creation_explicit_only,
     _creation_repair_prompt_for_intent,
     _creation_request_analysis,
     _force_send_message_call,
+    _force_creation_tool_call,
+    _force_webpage_visual_call,
     _infer_destination_platform,
+    _looks_like_standalone_request,
     _looks_like_platform_followup,
     _resolve_generic_followup_user_text,
     _resolve_delivery_followup_user_text,
     _search_web_retry_args,
     _search_web_should_retry,
     _should_try_search_fallback,
+    _normalize_creation_payload_args,
     run_planner_loop,
 )
 
@@ -68,6 +74,7 @@ class PlannerCreationGatingTests(unittest.TestCase):
         )
         self.assertIn("Kernel tools (prefer first for generic tasks):", text)
         self.assertIn("- search_web", text)
+        self.assertIn("- inspect_webpage", text)
         self.assertIn("- read_url", text)
         self.assertIn("- write_file", text)
         self.assertIn("- truth_list", text)
@@ -79,6 +86,27 @@ class PlannerCreationGatingTests(unittest.TestCase):
         self.assertTrue(result.get("explicit"))
         self.assertTrue(result.get("need_plugin"))
         self.assertFalse(result.get("need_platform"))
+
+    def test_generic_plugin_request_requires_details(self):
+        result = _creation_request_analysis("Will you make a plugin")
+        self.assertEqual(result.get("mode"), "ask")
+        self.assertTrue(result.get("need_plugin"))
+        self.assertTrue(result.get("missing_details"))
+
+    def test_tool_only_create_plugin_request_requires_details(self):
+        result = _creation_request_analysis("Use create plugin")
+        self.assertEqual(result.get("mode"), "ask")
+        self.assertTrue(result.get("need_plugin"))
+        self.assertTrue(result.get("missing_details"))
+
+    def test_normalize_creation_payload_args_promotes_code_to_code_lines(self):
+        normalized = _normalize_creation_payload_args(
+            "create_plugin",
+            {"name": "demo", "code": "line one\nline two"},
+        )
+        self.assertEqual(normalized.get("name"), "demo")
+        self.assertEqual(normalized.get("code_lines"), ["line one", "line two"])
+        self.assertNotIn("code", normalized)
 
     def test_creation_advanced_references_plugin_api_and_artifacts(self):
         refs = _creation_advanced_reference_paths(
@@ -200,6 +228,75 @@ class PlannerCreationGatingTests(unittest.TestCase):
         self.assertEqual(result.get("mode"), "none")
         self.assertIn("run", result.get("guards") or [])
 
+    def test_create_plugin_not_blocked_by_high_impact_keywords(self):
+        class _LLM:
+            def __init__(self):
+                self.calls = 0
+
+            async def chat(self, messages, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    payload = {
+                        "function": "create_plugin",
+                        "arguments": {
+                            "name": "safe_creator",
+                            "code_lines": [
+                                "from plugin_base import ToolPlugin",
+                                "from plugin_result import action_success",
+                                "",
+                                "class SafeCreator(ToolPlugin):",
+                                "    name = \"safe_creator\"",
+                                "    plugin_name = \"Safe Creator\"",
+                                "    version = \"1.0.0\"",
+                                "    description = \"Creates content with words like remove and delete.\"",
+                                "    platforms = [\"webui\"]",
+                                "    usage = '{\"function\":\"safe_creator\",\"arguments\":{}}'",
+                                "    when_to_use = \"Use when asked to generate. Can mention remove/delete terms.\"",
+                                "    waiting_prompt_template = \"Write a short message. Only output that message.\"",
+                                "",
+                                "    async def handle_webui(self, args, llm_client, context=None):",
+                                "        return action_success(facts={\"ok\": True}, say_hint=\"done\")",
+                                "",
+                                "plugin = SafeCreator()",
+                            ],
+                        },
+                    }
+                    return {
+                        "message": {
+                            "content": json.dumps(payload)
+                        }
+                    }
+                return {"message": {"content": "done"}}
+
+        def _fake_run_meta_tool(*, func, args, platform, registry, enabled_predicate=None, origin=None):
+            if func == "create_plugin":
+                return {"tool": "create_plugin", "ok": True, "name": str(args.get("name") or "safe_creator")}
+            if func == "validate_plugin":
+                return {"tool": "validate_plugin", "ok": True}
+            if func == "read_file":
+                return {"tool": "read_file", "ok": True, "content": ""}
+            return {"tool": func, "ok": True}
+
+        async def _run():
+            with patch("planner_loop.run_meta_tool", side_effect=_fake_run_meta_tool):
+                return await run_planner_loop(
+                    llm_client=_LLM(),
+                    platform="webui",
+                    history_messages=[{"role": "system", "content": "system"}],
+                    registry={},
+                    enabled_predicate=lambda _name: True,
+                    context={},
+                    user_text="make it higher res",
+                    scope="test",
+                    redis_client=_StateRedis(),
+                    max_rounds=4,
+                    max_tool_calls=4,
+                )
+
+        result = asyncio.run(_run())
+        self.assertEqual(result.get("status"), "done")
+        self.assertNotIn("Please confirm", str(result.get("text") or ""))
+
     def test_agent_lab_ambiguous_is_ask(self):
         result = _creation_request_analysis("agent lab plugin for jokes")
         self.assertEqual(result.get("mode"), "ask")
@@ -239,6 +336,19 @@ class PlannerCreationGatingTests(unittest.TestCase):
         self.assertEqual(args.get("platform"), "discord")
         self.assertEqual((args.get("targets") or {}).get("channel"), "#tater")
         self.assertEqual(args.get("message"), "hello")
+
+    def test_force_webpage_visual_call_detects_logo_request_with_domain(self):
+        forced = _force_webpage_visual_call(
+            "can you describe the logo on this web page taternews.com"
+        )
+        self.assertIsInstance(forced, dict)
+        self.assertEqual(forced.get("function"), "inspect_webpage")
+        args = forced.get("arguments") or {}
+        self.assertEqual(args.get("url"), "https://taternews.com")
+
+    def test_force_webpage_visual_call_ignores_non_visual_requests(self):
+        forced = _force_webpage_visual_call("what's the weather today in Dallas")
+        self.assertIsNone(forced)
 
     def test_resolve_delivery_followup_rebuilds_request_from_platform_reply(self):
         history = [
@@ -299,6 +409,17 @@ class PlannerCreationGatingTests(unittest.TestCase):
         self.assertFalse(recovered)
         self.assertEqual(rebuilt, current)
 
+    def test_standalone_request_detection_prefers_latest_request(self):
+        self.assertTrue(_looks_like_standalone_request("show available tools"))
+        self.assertTrue(_looks_like_standalone_request("can you search for weather?"))
+        self.assertFalse(_looks_like_standalone_request("discord"))
+        self.assertFalse(_looks_like_standalone_request("yes"))
+
+    def test_confirm_from_text_does_not_misread_substrings(self):
+        self.assertIsNone(_confirm_from_text("can you search for weather?"))
+        self.assertTrue(_confirm_from_text("yes"))
+        self.assertFalse(_confirm_from_text("no"))
+
     def test_wait_callback_runs_for_kernel_meta_tools(self):
         events = []
 
@@ -338,6 +459,346 @@ class PlannerCreationGatingTests(unittest.TestCase):
         result = asyncio.run(_run())
         self.assertEqual(result.get("status"), "done")
         self.assertIn(("get_plugin_help", True), events)
+
+    def test_repeated_meta_tool_call_triggers_loop_detection(self):
+        class _LLM:
+            async def chat(self, messages, **kwargs):
+                return {
+                    "message": {
+                        "content": (
+                            "{\"function\":\"get_plugin_help\","
+                            "\"arguments\":{\"plugin_id\":\"missing_plugin\"}}"
+                        )
+                    }
+                }
+
+        async def _run():
+            return await run_planner_loop(
+                llm_client=_LLM(),
+                platform="webui",
+                history_messages=[{"role": "system", "content": "system"}],
+                registry={},
+                enabled_predicate=lambda _name: True,
+                context={},
+                user_text="show available tools",
+                scope="test",
+                redis_client=_StateRedis(),
+                max_rounds=4,
+                max_tool_calls=4,
+            )
+
+        result = asyncio.run(_run())
+        self.assertEqual(result.get("status"), "stopped")
+        self.assertIn("Loop detected", str(result.get("text") or ""))
+
+    def test_confirmed_high_impact_pending_action_executes_without_loop(self):
+        redis_state = _StateRedis()
+
+        class _LLMBlock:
+            async def chat(self, messages, **kwargs):
+                return {
+                    "message": {
+                        "content": "{\"function\":\"delete_file\",\"arguments\":{\"path\":\"tmp.txt\"}}"
+                    }
+                }
+
+        async def _run_block():
+            return await run_planner_loop(
+                llm_client=_LLMBlock(),
+                platform="webui",
+                history_messages=[{"role": "system", "content": "system"}],
+                registry={},
+                enabled_predicate=lambda _name: True,
+                context={},
+                user_text="delete temp file",
+                scope="test",
+                redis_client=redis_state,
+                max_rounds=4,
+                max_tool_calls=4,
+            )
+
+        first = asyncio.run(_run_block())
+        self.assertEqual(first.get("status"), "blocked")
+        self.assertIn("Please confirm", str(first.get("text") or ""))
+        task_id = str(first.get("task_id") or "")
+        self.assertTrue(task_id)
+
+        class _LLMResume:
+            async def chat(self, messages, **kwargs):
+                return {"message": {"content": "Done"}}
+
+        def _fake_run_meta_tool(*, func, args, platform, registry, enabled_predicate=None, origin=None):
+            if func == "delete_file":
+                return {"tool": "delete_file", "ok": True, "path": str(args.get("path") or "")}
+            return {"tool": func, "ok": True}
+
+        async def _run_resume():
+            with patch("planner_loop.run_meta_tool", side_effect=_fake_run_meta_tool):
+                return await run_planner_loop(
+                    llm_client=_LLMResume(),
+                    platform="webui",
+                    history_messages=[{"role": "system", "content": "system"}],
+                    registry={},
+                    enabled_predicate=lambda _name: True,
+                    context={},
+                    user_text="yes",
+                    scope="test",
+                    task_id=task_id,
+                    redis_client=redis_state,
+                    max_rounds=4,
+                    max_tool_calls=4,
+                )
+
+        second = asyncio.run(_run_resume())
+        self.assertEqual(second.get("status"), "done")
+        self.assertNotIn("Loop detected", str(second.get("text") or ""))
+
+    def test_pending_action_new_request_supersedes_confirmation(self):
+        redis_state = _StateRedis()
+
+        class _LLMBlock:
+            async def chat(self, messages, **kwargs):
+                return {
+                    "message": {
+                        "content": "{\"function\":\"delete_file\",\"arguments\":{\"path\":\"tmp.txt\"}}"
+                    }
+                }
+
+        async def _run_block():
+            return await run_planner_loop(
+                llm_client=_LLMBlock(),
+                platform="webui",
+                history_messages=[{"role": "system", "content": "system"}],
+                registry={},
+                enabled_predicate=lambda _name: True,
+                context={},
+                user_text="delete temp file",
+                scope="test",
+                redis_client=redis_state,
+                max_rounds=4,
+                max_tool_calls=4,
+            )
+
+        first = asyncio.run(_run_block())
+        self.assertEqual(first.get("status"), "blocked")
+        task_id = str(first.get("task_id") or "")
+        self.assertTrue(task_id)
+
+        class _LLMNew:
+            async def chat(self, messages, **kwargs):
+                return {"message": {"content": "Done"}}
+
+        async def _run_new():
+            return await run_planner_loop(
+                llm_client=_LLMNew(),
+                platform="webui",
+                history_messages=[{"role": "system", "content": "system"}],
+                registry={},
+                enabled_predicate=lambda _name: True,
+                context={},
+                user_text="show available tools",
+                scope="test",
+                task_id=task_id,
+                redis_client=redis_state,
+                max_rounds=4,
+                max_tool_calls=4,
+            )
+
+        second = asyncio.run(_run_new())
+        self.assertEqual(second.get("status"), "done")
+        self.assertIn("Done", str(second.get("text") or ""))
+        self.assertNotIn("Please confirm", str(second.get("text") or ""))
+
+    def test_pending_creation_confirmation_new_request_supersedes_confirmation(self):
+        redis_state = _StateRedis()
+
+        class _LLMUnused:
+            async def chat(self, messages, **kwargs):
+                return {"message": {"content": "unused"}}
+
+        async def _run_first():
+            return await run_planner_loop(
+                llm_client=_LLMUnused(),
+                platform="webui",
+                history_messages=[{"role": "system", "content": "system"}],
+                registry={},
+                enabled_predicate=lambda _name: True,
+                context={},
+                user_text="agent lab plugin for jokes",
+                scope="test",
+                redis_client=redis_state,
+                max_rounds=4,
+                max_tool_calls=4,
+            )
+
+        first = asyncio.run(_run_first())
+        self.assertEqual(first.get("status"), "blocked")
+        task_id = str(first.get("task_id") or "")
+        self.assertTrue(task_id)
+
+        class _LLMNew:
+            async def chat(self, messages, **kwargs):
+                return {"message": {"content": "Done"}}
+
+        async def _run_second():
+            return await run_planner_loop(
+                llm_client=_LLMNew(),
+                platform="webui",
+                history_messages=[{"role": "system", "content": "system"}],
+                registry={},
+                enabled_predicate=lambda _name: True,
+                context={},
+                user_text="show available tools",
+                scope="test",
+                task_id=task_id,
+                redis_client=redis_state,
+                max_rounds=4,
+                max_tool_calls=4,
+            )
+
+        second = asyncio.run(_run_second())
+        self.assertEqual(second.get("status"), "done")
+        self.assertIn("Done", str(second.get("text") or ""))
+
+    def test_create_plugin_failure_limit_blocks_instead_of_spinning(self):
+        class _LLM:
+            def __init__(self):
+                self.calls = 0
+
+            async def chat(self, messages, **kwargs):
+                self.calls += 1
+                payload = {
+                    "function": "create_plugin",
+                    "arguments": {
+                        "name": f"tmp_fail_{self.calls}",
+                        "code_lines": ["from plugin_base import ToolPlugin"],
+                    },
+                }
+                return {
+                    "message": {
+                        "content": json.dumps(payload)
+                    }
+                }
+
+        def _fake_run_meta_tool(*, func, args, platform, registry, enabled_predicate=None, origin=None):
+            if func == "read_file":
+                return {"tool": "read_file", "ok": True, "path": str(args.get("path") or ""), "content": ""}
+            if func == "create_plugin":
+                name = str(args.get("name") or "tmp_fail")
+                return {
+                    "tool": "create_plugin",
+                    "ok": False,
+                    "name": name,
+                    "path": f"agent_lab/plugins/{name}.py",
+                    "error": "Validation failed.",
+                }
+            return {"tool": func, "ok": True}
+
+        async def _run():
+            with patch("planner_loop.run_meta_tool", side_effect=_fake_run_meta_tool):
+                return await run_planner_loop(
+                    llm_client=_LLM(),
+                    platform="webui",
+                    history_messages=[{"role": "system", "content": "system"}],
+                    registry={},
+                    enabled_predicate=lambda _name: True,
+                    context={},
+                    user_text="create a plugin that tells jokes",
+                    scope="test",
+                    redis_client=_StateRedis(),
+                    max_rounds=12,
+                    max_tool_calls=12,
+                )
+
+        result = asyncio.run(_run())
+        self.assertEqual(result.get("status"), "blocked")
+        text = str(result.get("text") or "")
+        self.assertIn("Creation kept failing", text)
+        self.assertIn("Tell me exactly what it should do", text)
+
+    def test_run_blocks_for_missing_creation_details(self):
+        class _LLM:
+            async def chat(self, messages, **kwargs):
+                return {"message": {"content": "should not be called"}}
+
+        async def _run():
+            return await run_planner_loop(
+                llm_client=_LLM(),
+                platform="webui",
+                history_messages=[{"role": "system", "content": "system"}],
+                registry={},
+                enabled_predicate=lambda _name: True,
+                context={},
+                user_text="Will you make a plugin",
+                scope="test",
+                redis_client=_StateRedis(),
+                max_rounds=4,
+                max_tool_calls=4,
+            )
+
+        result = asyncio.run(_run())
+        self.assertEqual(result.get("status"), "blocked")
+        self.assertIn("Tell me exactly what it should do", str(result.get("text") or ""))
+
+    def test_invalid_tool_json_is_not_echoed_back_to_user(self):
+        malformed = (
+            '{"function":"create_plugin","arguments":{"name":"hukked_jokes",'
+            '"code_lines":["class A:","    msg = "broken""]}}'
+        )
+
+        class _LLM:
+            def __init__(self):
+                self.calls = 0
+
+            async def chat(self, messages, **kwargs):
+                self.calls += 1
+                return {"message": {"content": malformed}}
+
+        async def _run():
+            return await run_planner_loop(
+                llm_client=_LLM(),
+                platform="webui",
+                history_messages=[{"role": "system", "content": "system"}],
+                registry={},
+                enabled_predicate=lambda _name: True,
+                context={},
+                user_text="hello there",
+                scope="test",
+                redis_client=_StateRedis(),
+                max_rounds=2,
+                max_tool_calls=2,
+            )
+
+        result = asyncio.run(_run())
+        self.assertEqual(result.get("status"), "done")
+        self.assertIn("I don't have that tool available", str(result.get("text") or ""))
+
+    def test_force_creation_tool_call_normalizes_code_to_code_lines(self):
+        class _LLM:
+            async def chat(self, messages, **kwargs):
+                return {
+                    "message": {
+                        "content": (
+                            '{"function":"create_plugin","arguments":'
+                            '{"name":"demo_plugin","code":"print(\\"hello\\")\\n"}}'
+                        )
+                    }
+                }
+
+        async def _run():
+            return await _force_creation_tool_call(
+                llm_client=_LLM(),
+                user_text="create a plugin that says hello",
+                missing_parts=["plugin"],
+            )
+
+        forced = asyncio.run(_run())
+        self.assertIsInstance(forced, dict)
+        self.assertEqual(forced.get("function"), "create_plugin")
+        args = forced.get("arguments") or {}
+        self.assertEqual(args.get("name"), "demo_plugin")
+        self.assertEqual(args.get("code_lines"), ['print("hello")'])
+        self.assertNotIn("code", args)
 
 
 if __name__ == "__main__":

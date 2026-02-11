@@ -22,7 +22,7 @@ class TempPlugin(ToolPlugin):
     platforms = ["webui"]
     usage = '{{"function":"{name}","arguments":{{}}}}'
     when_to_use = "Use for overwrite guard tests."
-    waiting_prompt_template = "Write a short wait message. Only output that message."
+    waiting_prompt_template = "Write a friendly, casual message telling {{mention}} you are working on it now. Only output that message."
 
     async def handle_webui(self, args, llm_client, context=None):
         return {{"ok": True}}
@@ -143,6 +143,44 @@ class KernelToolsCreationOverwriteTests(unittest.TestCase):
         )
         self.assertTrue(replaced.get("ok"), replaced)
         self.assertIn("replacement version", path.read_text(encoding="utf-8"))
+
+    def test_run_meta_tool_create_plugin_accepts_code_lines(self):
+        name = f"tmp_plugin_meta_lines_{uuid.uuid4().hex}"
+        path = AGENT_PLUGINS_DIR / f"{name}.py"
+        self._created_paths.append(path)
+
+        source_lines = _plugin_source(name, "lines payload").splitlines()
+        result = run_meta_tool(
+            func="create_plugin",
+            args={"name": name, "code_lines": source_lines},
+            platform="webui",
+            registry={},
+            enabled_predicate=None,
+        )
+
+        self.assertTrue(result.get("ok"), result)
+        self.assertTrue(path.exists())
+        content = path.read_text(encoding="utf-8")
+        self.assertIn("lines payload", content)
+
+    def test_run_meta_tool_create_platform_normalizes_code_to_code_lines(self):
+        name = f"tmp_platform_meta_lines_{uuid.uuid4().hex}"
+        path = AGENT_PLATFORMS_DIR / f"{name}.py"
+        self._created_paths.append(path)
+
+        source = _platform_source(name, "lines normalized")
+        result = run_meta_tool(
+            func="create_platform",
+            args={"name": name, "code": source},
+            platform="webui",
+            registry={},
+            enabled_predicate=None,
+        )
+
+        self.assertTrue(result.get("ok"), result)
+        self.assertTrue(path.exists())
+        content = path.read_text(encoding="utf-8")
+        self.assertIn("lines normalized", content)
 
 
 if __name__ == "__main__":

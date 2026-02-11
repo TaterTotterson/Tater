@@ -7,7 +7,13 @@ from kernel_tools import AGENT_PLUGINS_DIR, test_plugin, validate_plugin
 from plugin_loader import load_plugins_from_directory
 
 
-def _plugin_source(declared_name: str, plugin_name: str, usage_function: str) -> str:
+def _plugin_source(
+    declared_name: str,
+    plugin_name: str,
+    usage_function: str,
+    waiting_prompt_template: str = "Write a friendly, casual message telling {mention} you are working on it now. Only output that message.",
+    handler_body: str = "return {\"ok\": True}",
+) -> str:
     return f"""from plugin_base import ToolPlugin
 
 class TempPlugin(ToolPlugin):
@@ -18,10 +24,10 @@ class TempPlugin(ToolPlugin):
     platforms = ["webui"]
     usage = '{{"function":"{usage_function}","arguments":{{}}}}'
     when_to_use = "Use for validation tests."
-    waiting_prompt_template = "Write a short wait message. Only output that message."
+    waiting_prompt_template = "{waiting_prompt_template}"
 
     async def handle_webui(self, args, llm_client, context=None):
-        return {{"ok": True}}
+        {handler_body}
 
 plugin = TempPlugin()
 """
@@ -40,13 +46,22 @@ class KernelToolsPluginValidationTests(unittest.TestCase):
             except Exception:
                 pass
 
-    def _write_agent_plugin(self, file_id: str, declared_name: str, plugin_name: str) -> Path:
+    def _write_agent_plugin(
+        self,
+        file_id: str,
+        declared_name: str,
+        plugin_name: str,
+        waiting_prompt_template: str = "Write a friendly, casual message telling {mention} you are working on it now. Only output that message.",
+        handler_body: str = "return {\"ok\": True}",
+    ) -> Path:
         path = AGENT_PLUGINS_DIR / f"{file_id}.py"
         path.write_text(
             _plugin_source(
                 declared_name=declared_name,
                 plugin_name=plugin_name,
                 usage_function=file_id,
+                waiting_prompt_template=waiting_prompt_template,
+                handler_body=handler_body,
             ),
             encoding="utf-8",
         )
@@ -72,6 +87,38 @@ class KernelToolsPluginValidationTests(unittest.TestCase):
 
         self.assertTrue(result.get("ok"), result)
         self.assertEqual(result.get("missing_fields"), [])
+
+    def test_validate_plugin_fails_when_waiting_prompt_is_task_output_prompt(self):
+        file_id = f"tmp_plugin_{uuid.uuid4().hex}"
+        self._write_agent_plugin(
+            file_id,
+            declared_name=file_id,
+            plugin_name="Temp Plugin",
+            waiting_prompt_template="Write one short clean joke. Only output the joke text.",
+        )
+
+        result = validate_plugin(file_id, auto_install=False)
+
+        self.assertFalse(result.get("ok"), result)
+        self.assertIn("waiting_prompt_template", result.get("missing_fields", []))
+        warnings = " ".join(result.get("warnings", []))
+        self.assertIn("friendly progress/wait message", warnings)
+
+    def test_validate_plugin_fails_when_action_failure_uses_fail_text(self):
+        file_id = f"tmp_plugin_{uuid.uuid4().hex}"
+        self._write_agent_plugin(
+            file_id,
+            declared_name=file_id,
+            plugin_name="Temp Plugin",
+            handler_body='return action_failure(fail_text="No joke generated.")',
+        )
+
+        result = validate_plugin(file_id, auto_install=False)
+
+        self.assertFalse(result.get("ok"), result)
+        self.assertIn("action_failure_signature", result.get("missing_fields", []))
+        msg = " ".join(result.get("warnings", [])) + " " + str(result.get("error") or "")
+        self.assertIn("fail_text", msg)
 
     def test_loader_can_use_filename_ids_for_agent_lab(self):
         file_id = f"tmp_plugin_{uuid.uuid4().hex}"

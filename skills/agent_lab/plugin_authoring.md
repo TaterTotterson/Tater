@@ -39,7 +39,6 @@ Preferred form:
 
 Also supported:
 - `code`
-- `code_b64`
 - `overwrite` (set `true` only when explicitly replacing existing file)
 
 Compatibility note:
@@ -55,8 +54,12 @@ Compatibility note:
 - dependencies that cannot be imported after auto-install attempt
 
 `waiting_prompt_template` should be an instruction to the LLM and constrain output.
+Required pattern:
+- Friendly/casual "please wait" progress message for `{mention}`.
+- Must NOT be the final task output prompt.
+- Must constrain output to only that status message.
 Good pattern:
-- `"Write a short status message for {mention}. Only output that message."`
+- `"Write a friendly, casual message telling {mention} you are working on it now. Only output that message."`
 
 ## Minimal Example
 ```python
@@ -70,7 +73,7 @@ class MyPlugin(ToolPlugin):
     description = "Does one small task."
     platforms = ["webui"]
     usage = '{"function":"my_plugin","arguments":{"text":"hello"}}'
-    waiting_prompt_template = "Write a short status line for {mention}. Only output that message."
+    waiting_prompt_template = "Write a friendly, casual message telling {mention} you are working on it now. Only output that message."
     when_to_use = "Use when the user asks for the my_plugin task."
 
     async def handle_webui(self, args, llm_client, context=None):

@@ -3,6 +3,8 @@ import time
 import uuid
 import os
 import re
+import mimetypes
+import urllib.parse
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from helpers import (
@@ -29,6 +31,7 @@ from plugin_result import (
 from tool_runtime import META_TOOLS, execute_plugin_call, is_meta_tool, run_meta_tool
 from truth_store import save_truth_snapshot
 from helpers import redis_client as default_redis
+from latest_image_ref import normalize_latest_image_ref, save_latest_image_ref
 
 
 AGENT_MODE_KEY = "tater:agent_mode"
@@ -100,6 +103,20 @@ CREATION_PLATFORM_PHRASES = (
     "create_platform",
 )
 
+GENERIC_PLUGIN_REQUEST_RE = re.compile(
+    r"^(?:hey[\s,]+)?(?:can|could|will|would|please)?\s*(?:you\s+)?"
+    r"(?:create|make|build|set\s+up|setup|generate|write|scaffold)\s+"
+    r"(?:me\s+)?(?:a|an|new)?\s*(?:agent\s*lab\s+)?(?:plugin|tool)\??$"
+)
+GENERIC_PLATFORM_REQUEST_RE = re.compile(
+    r"^(?:hey[\s,]+)?(?:can|could|will|would|please)?\s*(?:you\s+)?"
+    r"(?:create|make|build|set\s+up|setup|generate|write|scaffold)\s+"
+    r"(?:me\s+)?(?:a|an|new)?\s*(?:agent\s*lab\s+)?(?:platform|server|endpoint|api|service|website)\??$"
+)
+TOOL_ONLY_CREATION_REQUEST_RE = re.compile(
+    r"^(?:please\s+)?(?:use|run|call|invoke)\s+(?:the\s+)?create[_\s]*(plugin|platform)\b\??$"
+)
+
 CREATION_NEGATIVE_GUARDS = (
     "review",
     "debug",
@@ -142,9 +159,8 @@ AGENT_CREATION_SHARED_REPAIR_PROMPT = (
     "For Agent Lab creation requests, use kernel tools to write files under agent_lab/. "
     "Do not reply with manual steps or code blocks alone. "
     "Use create_plugin/create_platform (not write_file for plugins/platforms). "
-    "Always include full file content via code_lines (preferred) or code/code_b64. "
-    "Each code_lines entry must be a single line (no embedded \\n). "
-    "Do NOT split list/dict literals across multiple code_lines entries. "
+    "Always include full file content using code_lines (one source line per array entry). "
+    "Do not include embedded newlines inside a single code_lines entry. "
     "If you call llm_client.chat in generated code, keep the messages list on ONE line: "
     "messages=[{\"role\":\"system\",\"content\":\"...\"},{\"role\":\"user\",\"content\":\"...\"}]."
 )
@@ -154,8 +170,9 @@ AGENT_CREATION_PLUGIN_REPAIR_PROMPT = (
     "Set `platforms` to include the current platform and implement matching handle_<platform> methods. "
     "Keep `usage` as single-line JSON with function id equal to plugin name "
     "(example: usage = '{\"function\":\"my_plugin\",\"arguments\":{}}'). "
-    "Include `when_to_use` and `waiting_prompt_template`; waiting_prompt_template must instruct output "
-    "(for example: 'Write ...' and 'Only output that message.')."
+    "Include `when_to_use` and `waiting_prompt_template`; waiting_prompt_template must be a friendly progress/wait "
+    "message for {mention} (not the final task output) and constrain output with 'Only output that message.'. "
+    "Example: 'Write a friendly, casual message telling {mention} you are working on it now. Only output that message.'."
 )
 AGENT_CREATION_PLATFORM_REPAIR_PROMPT = (
     "Platform-specific rules: include a module-level PLATFORM dict and run(stop_event=None). "
@@ -168,11 +185,14 @@ AGENT_UNKNOWN_TOOL_REPAIR_PROMPT = (
 )
 AGENT_UNKNOWN_TOOL_FAILURE_TEXT = "I don't have that tool available. Please rephrase or choose another tool."
 CREATION_MAX_REPROMPTS = 4
+CREATION_MAX_FAILURES = 2
 
 TOOL_NAME_ALIASES = {
     "web_search": "search_web",
     "google_search": "search_web",
     "google_cse_search": "search_web",
+    "inspect_page": "inspect_webpage",
+    "inspect_website": "inspect_webpage",
     "describe_image": "vision_describer",
     "describe_latest_image": "vision_describer",
     "vision_describe": "vision_describer",
@@ -181,6 +201,7 @@ TOOL_NAME_ALIASES = {
 
 _KERNEL_TOOL_PRIORITY: List[str] = [
     "search_web",
+    "inspect_webpage",
     "read_url",
     "download_file",
     "read_file",
@@ -206,6 +227,7 @@ _KERNEL_TOOL_PURPOSE_HINTS: Dict[str, str] = {
     "list_directory": "list files and folders",
     "delete_file": "delete a local file",
     "read_url": "fetch and read webpage text",
+    "inspect_webpage": "inspect webpage structure, links, and image candidates",
     "download_file": "download files from URLs",
     "list_archive": "inspect archive entries",
     "extract_archive": "extract archives to workspace",
@@ -239,8 +261,10 @@ PLUGIN_REQUIREMENTS_HINT = (
     "platforms must be a list of supported platform ids: webui, discord, irc, homeassistant, "
     "homekit, matrix, telegram, xbmc, automation, rss (or 'both'). "
     "Include when_to_use and waiting_prompt_template (required for Agent Lab plugins). "
+    "waiting_prompt_template must be a friendly progress/wait message for {mention}, not task content, "
+    "and should end with 'Only output that message.'. "
     "Keep usage as a single-line JSON string, e.g., usage = '{\"function\":\"my_plugin\",\"arguments\":{}}'. "
-    "Each code_lines entry must be a single line (no embedded \\n). "
+    "Provide full source via code_lines (one source line per list entry). "
     "If you call llm_client.chat, put the messages list on ONE line with a comma between dicts."
 )
 
@@ -1094,10 +1118,43 @@ def _looks_like_clarification_prompt(text: str) -> bool:
     return any(cue in s for cue in cues)
 
 
+def _looks_like_standalone_request(text: str) -> bool:
+    s = str(text or "").strip()
+    if not s:
+        return False
+    lower = s.lower().strip()
+
+    if _platform_reply_token(s):
+        return False
+    decision = _confirm_from_text(s)
+    if decision is not None:
+        return False
+
+    if "?" in s:
+        return True
+    if re.match(
+        r"^(?:hey|hi|hello|please|can|could|will|would|what|who|where|when|why|how|"
+        r"show|tell|send|create|make|build|set|turn|play|run|check|list|find|search|"
+        r"open|close|delete|remove|summarize|explain)\b",
+        lower,
+    ):
+        return True
+    if any(
+        phrase in lower
+        for phrase in ("can you", "could you", "will you", "would you", "help me", "i need ")
+    ):
+        return True
+    if _is_short_followup_value(s):
+        return False
+    return False
+
+
 def _resolve_generic_followup_user_text(
     history_messages: List[Dict[str, Any]],
     user_text: str,
 ) -> Tuple[str, bool]:
+    if _looks_like_standalone_request(user_text):
+        return str(user_text or ""), False
     if not _is_short_followup_value(user_text):
         return str(user_text or ""), False
     if not isinstance(history_messages, list) or not history_messages:
@@ -1142,6 +1199,8 @@ def _resolve_delivery_followup_user_text(
     history_messages: List[Dict[str, Any]],
     user_text: str,
 ) -> Tuple[str, bool]:
+    if _looks_like_standalone_request(user_text):
+        return str(user_text or ""), False
     platform = _platform_reply_token(user_text)
     if platform not in DELIVERY_PLATFORMS:
         return str(user_text or ""), False
@@ -1186,6 +1245,227 @@ def _resolve_delivery_followup_user_text(
         return _inject_platform_into_request(prior_user, platform), True
 
     return _inject_platform_into_request(prior_user, platform), True
+
+
+def _normalize_url_candidate(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith("//"):
+        return f"https:{raw}"
+    parsed = urllib.parse.urlparse(raw)
+    if parsed.scheme:
+        return raw
+    if re.match(r"^(?:www\.)?[A-Za-z0-9][A-Za-z0-9.-]+\.[A-Za-z]{2,}(?:[/:?#].*)?$", raw):
+        return f"https://{raw}"
+    return ""
+
+
+def _extract_web_url_candidate(text: str) -> str:
+    s = str(text or "").strip()
+    if not s:
+        return ""
+    url_match = re.search(r"\bhttps?://[^\s<>()\"']+", s, flags=re.IGNORECASE)
+    if url_match:
+        return _normalize_url_candidate(url_match.group(0))
+    domain_match = re.search(
+        r"\b(?:www\.)?[A-Za-z0-9][A-Za-z0-9.-]+\.[A-Za-z]{2,}(?:/[^\s<>()\"']*)?",
+        s,
+        flags=re.IGNORECASE,
+    )
+    if not domain_match:
+        return ""
+    return _normalize_url_candidate(domain_match.group(0))
+
+
+def _looks_like_webpage_visual_request(text: str) -> bool:
+    s = str(text or "").strip().lower()
+    if not s:
+        return False
+    has_visual = any(
+        token in s
+        for token in (
+            "logo",
+            "image",
+            "picture",
+            "photo",
+            "icon",
+            "banner",
+            "describe",
+            "what is in",
+            "what's in",
+            "whats in",
+        )
+    )
+    if not has_visual:
+        return False
+    has_web_hint = any(token in s for token in ("web page", "webpage", "website", "site", "page"))
+    return bool(has_web_hint or _extract_web_url_candidate(text))
+
+
+def _force_webpage_visual_call(user_text: str) -> Optional[Dict[str, Any]]:
+    if not _looks_like_webpage_visual_request(user_text):
+        return None
+    url = _extract_web_url_candidate(user_text)
+    if not url:
+        return None
+    return {"function": "inspect_webpage", "arguments": {"url": url}}
+
+
+def _vision_args_have_source(args: Dict[str, Any], origin: Optional[Dict[str, Any]]) -> bool:
+    data = args if isinstance(args, dict) else {}
+    for key in ("path", "url", "blob_key", "file_id"):
+        if str(data.get(key) or "").strip():
+            return True
+    if isinstance(data.get("image_ref"), dict):
+        return True
+    if isinstance(origin, dict) and isinstance(origin.get("latest_image_ref"), dict):
+        return True
+    return False
+
+
+def _image_mimetype_from_name(name: str) -> str:
+    guess = str(mimetypes.guess_type(name or "")[0] or "").strip().lower()
+    if guess.startswith("image/"):
+        return guess
+    return "image/png"
+
+
+def _build_url_image_ref(url: str, *, source: str) -> Optional[Dict[str, Any]]:
+    raw = _normalize_url_candidate(url)
+    if not raw:
+        return None
+    parsed = urllib.parse.urlparse(raw)
+    name = os.path.basename(parsed.path or "") or "image.png"
+    ref = {
+        "url": raw,
+        "name": name,
+        "mimetype": _image_mimetype_from_name(name),
+        "source": source,
+        "updated_at": time.time(),
+    }
+    return normalize_latest_image_ref(ref)
+
+
+def _latest_image_ref_from_meta_result(
+    func: str,
+    args: Dict[str, Any],
+    payload: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(payload, dict) or not bool(payload.get("ok")):
+        return None
+    f = str(func or "").strip()
+    if f == "inspect_webpage":
+        direct = normalize_latest_image_ref(payload.get("latest_image_ref"))
+        if direct:
+            return direct
+        best = str(payload.get("best_image_url") or "").strip()
+        if best:
+            return _build_url_image_ref(best, source="inspect_webpage")
+        return None
+    if f == "download_file":
+        path = str(payload.get("path") or "").strip()
+        if not path:
+            return None
+        content_type = str(payload.get("content_type") or "").split(";", 1)[0].strip().lower()
+        name = os.path.basename(path) or "image.png"
+        guessed = str(mimetypes.guess_type(name)[0] or "").strip().lower()
+        if not (content_type.startswith("image/") or guessed.startswith("image/")):
+            return None
+        ref = {
+            "path": path,
+            "name": name,
+            "mimetype": content_type if content_type.startswith("image/") else _image_mimetype_from_name(name),
+            "source": "download_file",
+            "updated_at": time.time(),
+        }
+        return normalize_latest_image_ref(ref)
+    if f == "vision_describer":
+        if isinstance(args.get("image_ref"), dict):
+            direct = normalize_latest_image_ref(args.get("image_ref"))
+            if direct:
+                return direct
+        for key in ("url", "path"):
+            value = str(args.get(key) or "").strip()
+            if value:
+                if key == "url":
+                    return _build_url_image_ref(value, source="vision_describer")
+                ref = {
+                    "path": value,
+                    "name": os.path.basename(value) or "image.png",
+                    "mimetype": _image_mimetype_from_name(value),
+                    "source": "vision_describer",
+                    "updated_at": time.time(),
+                }
+                return normalize_latest_image_ref(ref)
+    return None
+
+
+def _latest_image_ref_from_plugin_result(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return None
+    artifacts = payload.get("artifacts")
+    if not isinstance(artifacts, list):
+        return None
+    for item in artifacts:
+        if not isinstance(item, dict):
+            continue
+        direct = normalize_latest_image_ref(item.get("image_ref"))
+        if direct:
+            return direct
+        path = str(item.get("path") or "").strip()
+        url = str(item.get("url") or "").strip()
+        mimetype = str(item.get("mimetype") or "").strip().lower()
+        if path:
+            guessed = str(mimetypes.guess_type(path)[0] or "").strip().lower()
+            if mimetype.startswith("image/") or guessed.startswith("image/"):
+                ref = {
+                    "path": path,
+                    "name": str(item.get("name") or os.path.basename(path) or "image.png"),
+                    "mimetype": mimetype if mimetype.startswith("image/") else _image_mimetype_from_name(path),
+                    "source": "plugin_artifact",
+                    "updated_at": time.time(),
+                }
+                return normalize_latest_image_ref(ref)
+        if url:
+            if mimetype.startswith("image/"):
+                ref = {
+                    "url": _normalize_url_candidate(url) or url,
+                    "name": str(item.get("name") or os.path.basename(urllib.parse.urlparse(url).path) or "image.png"),
+                    "mimetype": mimetype,
+                    "source": "plugin_artifact",
+                    "updated_at": time.time(),
+                }
+                return normalize_latest_image_ref(ref)
+            guessed = str(mimetypes.guess_type(url)[0] or "").strip().lower()
+            if guessed.startswith("image/"):
+                return _build_url_image_ref(url, source="plugin_artifact")
+    return None
+
+
+def _persist_latest_image_ref_for_scope(
+    *,
+    redis_client: Any,
+    platform: str,
+    scope: str,
+    origin: Optional[Dict[str, Any]],
+    ref: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    normalized = normalize_latest_image_ref(ref)
+    if not normalized:
+        return origin
+    updated_origin = dict(origin or {})
+    updated_origin["latest_image_ref"] = normalized
+    try:
+        save_latest_image_ref(
+            redis_client,
+            platform=platform,
+            scope=scope,
+            ref=normalized,
+        )
+    except Exception:
+        pass
+    return updated_origin
 
 
 def _should_try_search_fallback(user_text: str, func: str, needs_creation: bool) -> bool:
@@ -1236,6 +1516,46 @@ def _should_try_search_fallback(user_text: str, func: str, needs_creation: bool)
     if any(marker in f for marker in ("news", "search", "lookup", "browse")):
         return True
     return False
+
+
+def _looks_like_invalid_tool_call_text(text: str) -> bool:
+    s = str(text or "").strip()
+    if not s:
+        return False
+    lower = s.lower()
+    if "\"function\"" in lower and ("\"arguments\"" in lower or "'arguments'" in lower):
+        return True
+    if re.search(r"\bfunction\s*:\s*['\"]?[a-z_][a-z0-9_]*['\"]?", lower):
+        return True
+    if s.startswith("{") and ("function" in lower or "tool" in lower):
+        return True
+    return False
+
+
+def _normalize_creation_payload_args(func: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(args or {})
+    if str(func or "").strip() not in {"create_plugin", "create_platform"}:
+        return out
+
+    if isinstance(out.get("code_lines"), list):
+        normalized_lines: List[str] = []
+        for line in (out.get("code_lines") or []):
+            text = str(line)
+            if "\r" in text:
+                text = text.replace("\r", "")
+            if "\n" in text:
+                normalized_lines.extend(text.split("\n"))
+            else:
+                normalized_lines.append(text)
+        out["code_lines"] = normalized_lines
+        out.pop("code", None)
+        return out
+
+    if out.get("code") is not None:
+        payload = str(out.get("code") or "")
+        out["code_lines"] = payload.splitlines()
+        out.pop("code", None)
+    return out
 
 
 def _int_or(value: Any, default: int) -> int:
@@ -1361,6 +1681,12 @@ def _creation_request_analysis(text: str) -> Dict[str, Any]:
 
     s = re.sub(r"\s+", " ", s).strip()
     has_agent_lab_context = "agent lab" in s or "agent mode" in s
+    tool_only_match = TOOL_ONLY_CREATION_REQUEST_RE.fullmatch(s)
+    missing_details = bool(
+        GENERIC_PLUGIN_REQUEST_RE.fullmatch(s)
+        or GENERIC_PLATFORM_REQUEST_RE.fullmatch(s)
+        or tool_only_match
+    )
     has_verbs = any(v in s for v in CREATION_VERBS)
     plugin_keyword_hit = any(k in s for k in CREATION_PLUGIN_KEYWORDS)
     platform_keyword_hit = any(k in s for k in CREATION_PLATFORM_KEYWORDS)
@@ -1429,12 +1755,25 @@ def _creation_request_analysis(text: str) -> Dict[str, Any]:
         elif platform_score > plugin_score:
             need_platform = True
 
+    if missing_details:
+        mode = "ask"
+        confidence = max(confidence, 0.7)
+        if GENERIC_PLUGIN_REQUEST_RE.fullmatch(s):
+            need_plugin = True
+        if GENERIC_PLATFORM_REQUEST_RE.fullmatch(s):
+            need_platform = True
+        if tool_only_match and tool_only_match.group(1) == "plugin":
+            need_plugin = True
+        if tool_only_match and tool_only_match.group(1) == "platform":
+            need_platform = True
+
     return {
         "mode": mode,
         "confidence": confidence,
         "explicit": explicit_request,
         "need_plugin": bool(need_plugin),
         "need_platform": bool(need_platform),
+        "missing_details": bool(missing_details),
         "scores": {"plugin": int(plugin_score), "platform": int(platform_score)},
         "guards": guards,
     }
@@ -1464,6 +1803,19 @@ def _creation_confirmation_prompt(intent: Dict[str, bool]) -> str:
     return (
         f"I can create a new Agent Lab {target_text}, but I want to confirm first. "
         f"Do you want me to generate a new {target_text} now? (yes/no)"
+    )
+
+
+def _creation_details_prompt(intent: Dict[str, bool]) -> str:
+    targets: List[str] = []
+    if intent.get("need_plugin"):
+        targets.append("plugin")
+    if intent.get("need_platform"):
+        targets.append("platform")
+    target_text = " and ".join(targets) if targets else "plugin or platform"
+    return (
+        f"I can build that {target_text}. "
+        "Tell me exactly what it should do, required inputs/outputs, and target platform(s)."
     )
 
 
@@ -1558,9 +1910,9 @@ async def _force_creation_tool_call(
     system = (
         "You MUST return ONLY valid JSON with a single tool call.\n"
         f"Tool to call: {tool_name}.\n"
-        "Use fields: name, code_lines (preferred) or code/code_b64.\n"
+        "Use fields: name and code_lines.\n"
         "Do NOT use manifest/code_files.\n"
-        "Avoid triple-quoted docstrings and unescaped double quotes in code_lines.\n"
+        "code_lines must be a JSON array with one source line per entry.\n"
         "If the user asked for AI-generated content, the plugin must call llm_client at runtime (no static lists).\n"
         "Return ONLY JSON. No extra text."
     )
@@ -1588,7 +1940,12 @@ async def _force_creation_tool_call(
     func = str(parsed.get("function") or "").strip()
     if func not in {"create_plugin", "create_platform"}:
         return None
-    return parsed
+    normalized_args = _normalize_creation_payload_args(func, parsed.get("arguments", {}) or {})
+    if not str(normalized_args.get("name") or "").strip():
+        return None
+    if not isinstance(normalized_args.get("code_lines"), list) or not normalized_args.get("code_lines"):
+        return None
+    return {"function": func, "arguments": normalized_args}
 
 def _missing_creation_parts(state: Dict[str, Any], intent: Dict[str, bool]) -> List[str]:
     created = _creation_state(state)
@@ -1619,11 +1976,18 @@ def _confirm_from_text(text: str) -> Optional[bool]:
     s = (text or "").strip().lower()
     if not s:
         return None
-    yes = {"yes", "y", "yep", "sure", "ok", "okay", "confirm", "do it", "proceed"}
-    no = {"no", "n", "nope", "stop", "cancel", "don't", "do not"}
-    if any(w == s or w in s for w in yes):
+    s = re.sub(r"\s+", " ", s).strip(" .!?")
+
+    yes_exact = {"yes", "y", "yep", "yeah", "sure", "ok", "okay", "confirm", "do it", "proceed"}
+    no_exact = {"no", "n", "nope", "stop", "cancel", "don't", "do not"}
+    if s in yes_exact:
         return True
-    if any(w == s or w in s for w in no):
+    if s in no_exact:
+        return False
+
+    if re.match(r"^(?:yes|yeah|yep|sure|ok(?:ay)?|confirm|do it|proceed)\b", s):
+        return True
+    if re.match(r"^(?:no|nope|stop|cancel|don't|do not)\b", s):
         return False
     return None
 
@@ -1681,6 +2045,7 @@ async def run_planner_loop(
         save_task_state(state, r=r)
 
     # Resume logic
+    confirmed_pending_action: Optional[Dict[str, Any]] = None
     if state.get("status") == "blocked":
         pending_action = state.get("pending_action")
         if pending_action:
@@ -1694,25 +2059,78 @@ async def run_planner_loop(
                 save_task_state(state, r=r)
                 return {"text": "Okay, I won’t proceed.", "status": "stopped", "task_id": task_id, "artifacts": []}
             if decision is None:
+                if _looks_like_standalone_request(user_text):
+                    clear_active_task_id(platform, scope, r=r)
+                    state["status"] = "stopped"
+                    state["pending_action"] = None
+                    state["pending_needs"] = []
+                    _update_progress_summary(state, "Superseded by a new user request.")
+                    save_task_state(state, r=r)
+                    state = None
+                    task_id = None
+                    forced_call = None
+                else:
+                    question = _render_needs(state.get("pending_needs") or [])
+                    if not question:
+                        question = "Please confirm whether I should proceed (yes/no)."
+                    save_task_state(state, r=r)
+                    return {"text": question, "status": "blocked", "task_id": task_id, "artifacts": []}
+            if state is None:
+                pass
+            elif decision is None:
                 question = _render_needs(state.get("pending_needs") or [])
                 if not question:
                     question = "Please confirm whether I should proceed (yes/no)."
                 save_task_state(state, r=r)
                 return {"text": question, "status": "blocked", "task_id": task_id, "artifacts": []}
-            # decision is True -> continue with pending action
-            state["pending_action"] = None
-            state["pending_needs"] = []
-            state["status"] = "running"
-            save_task_state(state, r=r)
-            forced_call = pending_action
+            else:
+                # decision is True -> continue with pending action
+                state["pending_action"] = None
+                state["pending_needs"] = []
+                state["status"] = "running"
+                if isinstance(pending_action, dict):
+                    confirmed_pending_action = dict(pending_action)
+                    try:
+                        pending_func = _canonical_tool_name(str(pending_action.get("function") or "").strip())
+                        pending_args = pending_action.get("arguments", {}) or {}
+                        if pending_func in {"create_plugin", "create_platform"}:
+                            pending_args = _normalize_creation_payload_args(pending_func, pending_args)
+                        pending_sig = _signature_for_attempt(pending_func, pending_args)
+                        existing_attempts = state.get("attempts")
+                        if isinstance(existing_attempts, list) and pending_sig in existing_attempts:
+                            state["attempts"] = [x for x in existing_attempts if x != pending_sig]
+                    except Exception:
+                        pass
+                save_task_state(state, r=r)
+                forced_call = pending_action
         else:
             # clear pending needs and continue with user's reply
             state["pending_needs"] = []
             state["status"] = "running"
+            if str(user_text or "").strip() and _looks_like_standalone_request(user_text):
+                state["goal"] = str(user_text).strip()
             save_task_state(state, r=r)
             forced_call = None
     else:
         forced_call = None
+
+    if not state:
+        task_id = task_id or str(uuid.uuid4())
+        state = {
+            "task_id": task_id,
+            "platform": platform,
+            "goal": user_text,
+            "rounds_used": 0,
+            "tool_calls_used": 0,
+            "facts": {},
+            "attempts": [],
+            "pending_needs": [],
+            "status": "running",
+            "progress_summary": "",
+            "created_at": time.time(),
+        }
+        set_active_task_id(platform, scope, task_id, r=r)
+        save_task_state(state, r=r)
 
     effective_user_text = str(user_text or "")
     followup_recovered = False
@@ -1742,15 +2160,33 @@ async def run_planner_loop(
     needs_creation = creation_analysis.get("mode") == "create"
     creation_user_confirmed = bool(state.get("creation_user_confirmed")) or needs_creation
 
+    if creation_analysis.get("missing_details"):
+        question = _creation_details_prompt(creation_intent)
+        state["status"] = "blocked"
+        state["pending_needs"] = [question]
+        save_task_state(state, r=r)
+        return {"text": question, "status": "blocked", "task_id": task_id, "artifacts": []}
+
     if state.get("pending_creation_confirmation"):
         decision = _confirm_from_text(user_text)
         question = str(state.get("pending_creation_question") or "").strip()
         if not question:
             question = _creation_confirmation_prompt(state.get("pending_creation_intent") or creation_intent)
         if decision is None:
-            save_task_state(state, r=r)
-            return {"text": question, "status": "blocked", "task_id": task_id, "artifacts": []}
-        if decision is False:
+            if _looks_like_standalone_request(user_text):
+                state["pending_creation_confirmation"] = False
+                state["pending_creation_intent"] = {}
+                state["pending_creation_source_text"] = ""
+                state["pending_creation_question"] = ""
+                state["creation_user_confirmed"] = False
+                state["status"] = "running"
+                if str(user_text or "").strip():
+                    state["goal"] = str(user_text).strip()
+                save_task_state(state, r=r)
+            else:
+                save_task_state(state, r=r)
+                return {"text": question, "status": "blocked", "task_id": task_id, "artifacts": []}
+        elif decision is False:
             clear_active_task_id(platform, scope, r=r)
             state["status"] = "stopped"
             state["pending_creation_confirmation"] = False
@@ -1766,26 +2202,27 @@ async def run_planner_loop(
                 "task_id": task_id,
                 "artifacts": [],
             }
-        source_text = str(state.get("pending_creation_source_text") or state.get("goal") or user_text or "")
-        pending_intent = state.get("pending_creation_intent")
-        if not isinstance(pending_intent, dict):
-            pending_intent = _creation_intent(source_text)
-        creation_analysis = _creation_request_analysis(source_text)
-        creation_intent = {
-            "need_plugin": bool(pending_intent.get("need_plugin")),
-            "need_platform": bool(pending_intent.get("need_platform")),
-        }
-        needs_creation = True
-        creation_user_confirmed = True
-        state["pending_creation_confirmation"] = False
-        state["pending_creation_intent"] = {}
-        state["pending_creation_source_text"] = ""
-        state["pending_creation_question"] = ""
-        state["creation_user_confirmed"] = True
-        state["status"] = "running"
-        save_task_state(state, r=r)
-        user_text = source_text
-        effective_user_text = source_text
+        else:
+            source_text = str(state.get("pending_creation_source_text") or state.get("goal") or user_text or "")
+            pending_intent = state.get("pending_creation_intent")
+            if not isinstance(pending_intent, dict):
+                pending_intent = _creation_intent(source_text)
+            creation_analysis = _creation_request_analysis(source_text)
+            creation_intent = {
+                "need_plugin": bool(pending_intent.get("need_plugin")),
+                "need_platform": bool(pending_intent.get("need_platform")),
+            }
+            needs_creation = True
+            creation_user_confirmed = True
+            state["pending_creation_confirmation"] = False
+            state["pending_creation_intent"] = {}
+            state["pending_creation_source_text"] = ""
+            state["pending_creation_question"] = ""
+            state["creation_user_confirmed"] = True
+            state["status"] = "running"
+            save_task_state(state, r=r)
+            user_text = source_text
+            effective_user_text = source_text
     elif creation_analysis.get("mode") == "ask":
         question = _creation_confirmation_prompt(creation_intent)
         state["pending_creation_confirmation"] = True
@@ -1858,9 +2295,11 @@ async def run_planner_loop(
     unknown_tool_search_fallback_used = False
     search_web_retry_count = 0
     platform_followup_fix_used = 0
+    webpage_visual_fix_used = False
     created_snapshot = _creation_state(state)
     creation_followup_issued = bool(state.get("creation_followup_issued"))
     creation_precheck_done = bool(state.get("creation_precheck_done"))
+    creation_failures = int(state.get("creation_failures") or 0)
 
     async def _append_creation_read_file(path: str) -> None:
         await _emit_wait("read_file", None)
@@ -1976,9 +2415,47 @@ async def run_planner_loop(
             parsed = parse_function_json(text)
             if needs_creation:
                 parsed_func = str(parsed.get("function") or "").strip() if parsed else ""
-                if parsed_func not in {"create_plugin", "create_platform"}:
-                    _log_creation_response(task_id or "unknown", user_text or "", text)
+                _log_creation_response(task_id or "unknown", user_text or "", text)
             if not parsed:
+                looked_invalid_tool_json = _looks_like_invalid_tool_call_text(text)
+                if looked_invalid_tool_json and not format_fix_used:
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": (
+                                "Invalid tool-call JSON detected. Return ONLY one strict JSON tool call: "
+                                "{\"function\":\"tool_id\",\"arguments\":{...}}. No extra text."
+                            ),
+                        }
+                    )
+                    format_fix_used = True
+                    continue
+                if looked_invalid_tool_json and format_fix_used and needs_creation:
+                    missing_parts_now = _missing_creation_parts(state, creation_intent)
+                    if missing_parts_now:
+                        forced = await _force_creation_tool_call(
+                            llm_client=llm_client,
+                            user_text=user_text or "",
+                            missing_parts=missing_parts_now,
+                        )
+                        if forced:
+                            forced_call = forced
+                            continue
+
+                forced_webpage_visual = _force_webpage_visual_call(effective_user_text or "")
+                if forced_webpage_visual and not webpage_visual_fix_used:
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": (
+                                "For webpage image/logo requests, inspect the webpage first to identify concrete image URLs, "
+                                "then use vision_describer on the selected image."
+                            ),
+                        }
+                    )
+                    forced_call = forced_webpage_visual
+                    webpage_visual_fix_used = True
+                    continue
                 explicit_delivery_platform = _infer_destination_platform(effective_user_text)
                 if (
                     _looks_like_send_intent(effective_user_text)
@@ -2017,7 +2494,7 @@ async def run_planner_loop(
                         "content": (
                             "Your tool-call JSON was invalid. Return ONLY valid JSON.\n"
                             "For create_plugin/create_platform, do NOT use manifest/code_files. "
-                            "Use name plus code_lines (preferred) or code/code_b64."
+                            "Use name plus code_lines (one source line per list entry)."
                         ),
                     })
                     format_fix_used = True
@@ -2061,6 +2538,8 @@ async def run_planner_loop(
                     text = _creation_summary(state) or AGENT_CREATION_FAILURE_TEXT
                 elif needs_creation and already_created:
                     text = _creation_summary(state) or text
+                if looked_invalid_tool_json:
+                    text = AGENT_UNKNOWN_TOOL_FAILURE_TEXT
                 state["status"] = "done"
                 _update_progress_summary(state, "Completed response.")
                 save_task_state(state, r=r)
@@ -2084,6 +2563,25 @@ async def run_planner_loop(
 
         if not func:
             break
+
+        if func in {"create_plugin", "create_platform"}:
+            args = _normalize_creation_payload_args(func, args)
+
+        if func == "vision_describer" and not _vision_args_have_source(args, origin):
+            forced_webpage_visual = _force_webpage_visual_call(effective_user_text or "")
+            if forced_webpage_visual and not webpage_visual_fix_used:
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "vision_describer needs an explicit image source. "
+                            "Inspect the webpage first, then describe the selected image URL."
+                        ),
+                    }
+                )
+                forced_call = forced_webpage_visual
+                webpage_visual_fix_used = True
+                continue
 
         if not is_meta_tool(func) and func not in registry:
             forced_delivery = _force_send_message_call(effective_user_text or "")
@@ -2166,12 +2664,11 @@ async def run_planner_loop(
             missing_name = not str(name_hint or "").strip()
             has_code = args.get("code") is not None
             has_code_lines = isinstance(args.get("code_lines"), list) and len(args.get("code_lines")) > 0
-            has_code_b64 = bool(args.get("code_b64"))
-            if missing_name or not (has_code or has_code_lines or has_code_b64):
+            if missing_name or not (has_code or has_code_lines):
                 if creation_fix_used < CREATION_MAX_REPROMPTS:
                     prompt = (
                         f"{func} requires a name and full file content. "
-                        "Provide name plus code_lines (preferred) or code/code_b64."
+                        "Provide name plus code_lines (one source line per list entry)."
                     )
                     messages.append({"role": "system", "content": prompt})
                     creation_fix_used += 1
@@ -2242,6 +2739,57 @@ async def run_planner_loop(
             args = dict(args)
             args["request_text"] = effective_user_text
 
+        confirmed_pending = False
+        if isinstance(confirmed_pending_action, dict):
+            confirmed_func = _canonical_tool_name(str(confirmed_pending_action.get("function") or "").strip())
+            confirmed_args = confirmed_pending_action.get("arguments", {}) or {}
+            if confirmed_func in {"create_plugin", "create_platform"}:
+                confirmed_args = _normalize_creation_payload_args(confirmed_func, confirmed_args)
+            if (
+                confirmed_func == func
+                and _clean_args_for_signature(confirmed_args) == _clean_args_for_signature(args)
+            ):
+                confirmed_pending = True
+                confirmed_pending_action = None
+
+        # High-impact confirmation should not re-trigger for a confirmed pending action.
+        if (
+            not confirmed_pending
+            and func not in {"create_plugin", "create_platform"}
+            and _looks_high_impact(func, args)
+        ):
+            state["status"] = "blocked"
+            state["pending_action"] = {"function": func, "arguments": args}
+            state["pending_needs"] = ["Please confirm you want me to proceed (yes/no)."]
+            save_task_state(state, r=r)
+            return {
+                "text": _render_needs(state["pending_needs"]),
+                "status": "blocked",
+                "task_id": task_id,
+                "artifacts": artifacts_out,
+            }
+
+        # Loop detection applies to both kernel/meta tools and plugins.
+        signature = _signature_for_attempt(func, args)
+        if signature in attempts:
+            if confirmed_pending:
+                attempts = [x for x in attempts if x != signature]
+                state["attempts"] = attempts
+            else:
+                state["status"] = "stopped"
+                _update_progress_summary(state, "Loop detected; repeated the same tool call.")
+                save_task_state(state, r=r)
+                clear_active_task_id(platform, scope, r=r)
+                summary = _build_progress_summary(state)
+                return {
+                    "text": f"Loop detected. {summary} Tell me what to change so I can continue.",
+                    "status": "stopped",
+                    "task_id": task_id,
+                    "artifacts": artifacts_out,
+                }
+        attempts.append(signature)
+        state["attempts"] = attempts
+
         if is_meta_tool(func):
             await _emit_wait(func, None)
             meta_payload = run_meta_tool(
@@ -2252,9 +2800,26 @@ async def run_planner_loop(
                 enabled_predicate=enabled_predicate,
                 origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
             )
+            latest_ref = _latest_image_ref_from_meta_result(func, args, meta_payload)
+            if latest_ref:
+                origin = _persist_latest_image_ref_for_scope(
+                    redis_client=r,
+                    platform=platform,
+                    scope=scope,
+                    origin=origin,
+                    ref=latest_ref,
+                )
+                facts_now = state.get("facts") if isinstance(state.get("facts"), dict) else {}
+                facts_now = dict(facts_now or {})
+                facts_now["latest_image_ref"] = latest_ref
+                state["facts"] = facts_now
             auto_search_retry_args = None
+            creation_call_outcome: Optional[bool] = None
+            creation_post_validation_failed = False
             if isinstance(meta_payload, dict):
                 ok = bool(meta_payload.get("ok"))
+                if func in {"create_plugin", "create_platform"}:
+                    creation_call_outcome = ok
                 if func == "search_web" and _search_web_should_retry(
                     meta_payload, retry_count=search_web_retry_count
                 ):
@@ -2278,6 +2843,7 @@ async def run_planner_loop(
                                 origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
                             )
                             if not (validation or {}).get("ok"):
+                                creation_post_validation_failed = True
                                 _record_created(state, "plugins", f"{name} (invalid)")
                                 detail = validation.get("missing_fields") if isinstance(validation, dict) else None
                                 missing = f" Missing fields: {detail}." if detail else ""
@@ -2305,6 +2871,7 @@ async def run_planner_loop(
                                 origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
                             )
                             if not (validation or {}).get("ok"):
+                                creation_post_validation_failed = True
                                 _record_created(state, "platforms", f"{name} (invalid)")
                                 messages.append({
                                     "role": "system",
@@ -2371,6 +2938,49 @@ async def run_planner_loop(
                             + PLUGIN_REQUIREMENTS_HINT,
                         })
 
+            if func in {"create_plugin", "create_platform"}:
+                if creation_call_outcome is True and not creation_post_validation_failed:
+                    creation_failures = 0
+                    state["creation_failures"] = 0
+                    if needs_creation:
+                        missing_after = _missing_creation_parts(state, creation_intent)
+                        if not missing_after:
+                            state["status"] = "done"
+                            state["pending_needs"] = []
+                            _update_progress_summary(state, "Completed requested Agent Lab creation.")
+                            save_task_state(state, r=r)
+                            clear_active_task_id(platform, scope, r=r)
+                            return {
+                                "text": _creation_summary(state) or "Agent Lab creation completed.",
+                                "status": "done",
+                                "task_id": task_id,
+                                "artifacts": artifacts_out,
+                            }
+                elif creation_call_outcome is False or creation_post_validation_failed:
+                    creation_failures += 1
+                    state["creation_failures"] = creation_failures
+                    if creation_failures >= CREATION_MAX_FAILURES:
+                        if needs_creation:
+                            detail_prompt = _creation_details_prompt(creation_intent)
+                        else:
+                            detail_prompt = (
+                                "Tell me exactly what the plugin/platform should do, required inputs/outputs, "
+                                "and target platform(s)."
+                            )
+                        needs = [
+                            "Creation kept failing due to invalid tool payload or validation errors.",
+                            detail_prompt,
+                        ]
+                        state["status"] = "blocked"
+                        state["pending_needs"] = needs
+                        save_task_state(state, r=r)
+                        return {
+                            "text": _render_needs(needs),
+                            "status": "blocked",
+                            "task_id": task_id,
+                            "artifacts": artifacts_out,
+                        }
+
             # After creating one piece, encourage finishing the other if needed.
             if needs_creation and not creation_followup_issued:
                 created = _creation_state(state)
@@ -2415,35 +3025,6 @@ async def run_planner_loop(
                 continue
             save_task_state(state, r=r)
             continue
-
-        # Loop detection
-        signature = _signature_for_attempt(func, args)
-        if signature in attempts:
-            state["status"] = "stopped"
-            _update_progress_summary(state, "Loop detected; repeated the same tool call.")
-            save_task_state(state, r=r)
-            clear_active_task_id(platform, scope, r=r)
-            summary = _build_progress_summary(state)
-            return {
-                "text": f"Loop detected. {summary} Tell me what to change so I can continue.",
-                "status": "stopped",
-                "task_id": task_id,
-                "artifacts": artifacts_out,
-            }
-        attempts.append(signature)
-        state["attempts"] = attempts
-
-        if _looks_high_impact(func, args):
-            state["status"] = "blocked"
-            state["pending_action"] = {"function": func, "arguments": args}
-            state["pending_needs"] = ["Please confirm you want me to proceed (yes/no)."]
-            save_task_state(state, r=r)
-            return {
-                "text": _render_needs(state["pending_needs"]),
-                "status": "blocked",
-                "task_id": task_id,
-                "artifacts": artifacts_out,
-            }
 
         if admin_guard:
             guard_result = admin_guard(func)
@@ -2513,6 +3094,19 @@ async def run_planner_loop(
             context=context,
         )
         result_payload = exec_result.get("result") or {}
+        plugin_latest_ref = _latest_image_ref_from_plugin_result(result_payload)
+        if plugin_latest_ref:
+            origin = _persist_latest_image_ref_for_scope(
+                redis_client=r,
+                platform=platform,
+                scope=scope,
+                origin=origin,
+                ref=plugin_latest_ref,
+            )
+            facts_now = state.get("facts") if isinstance(state.get("facts"), dict) else {}
+            facts_now = dict(facts_now or {})
+            facts_now["latest_image_ref"] = plugin_latest_ref
+            state["facts"] = facts_now
 
         # Save truth snapshot
         try:
