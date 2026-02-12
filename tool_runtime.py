@@ -39,6 +39,7 @@ from kernel_tools import (
     memory_search,
     truth_get_last,
     truth_list,
+    send_message,
     vision_describer,
 )
 from plugin_result import action_failure, normalize_plugin_result
@@ -77,6 +78,7 @@ META_TOOLS = {
     "memory_search",
     "truth_get_last",
     "truth_list",
+    "send_message",
 }
 
 
@@ -124,8 +126,69 @@ def run_meta_tool(
     origin: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     if func == "get_plugin_help":
+        plugin_id = str(args.get("plugin_id") or "").strip()
+        if plugin_id == "send_message":
+            return {
+                "tool": "get_plugin_help",
+                "ok": True,
+                "plugin_id": "send_message",
+                "name": "Send Message (Kernel Tool)",
+                "description": (
+                    "Send cross-platform messages and optional media attachments via "
+                    "discord/irc/matrix/homeassistant/ntfy/telegram/wordpress."
+                ),
+                "supported_platforms": ["webui", "discord", "irc", "matrix", "telegram", "homeassistant", "automation"],
+                "required_settings": [],
+                "required_args": [],
+                "optional_args": [
+                    "message",
+                    "title",
+                    "platform",
+                    "targets",
+                    "attachments",
+                    "artifacts",
+                    "media",
+                    "files",
+                    "priority",
+                    "tags",
+                    "ttl_sec",
+                    "origin",
+                    "channel_id",
+                    "channel",
+                    "guild_id",
+                    "room_id",
+                    "room_alias",
+                    "device_service",
+                    "persistent",
+                    "api_notification",
+                    "chat_id",
+                    "blob_key",
+                    "file_id",
+                    "path",
+                    "url",
+                    "name",
+                    "mimetype",
+                    "type",
+                    "use_latest_image",
+                    "image_ref",
+                ],
+                "when_to_use": (
+                    "Use for sending outbound notifications/messages (including image/audio/video/file attachments) "
+                    "to a room/channel/chat on supported platforms."
+                ),
+                "usage_example": (
+                    "{\"function\":\"send_message\",\"arguments\":{\"platform\":\"discord\","
+                    "\"targets\":{\"channel\":\"#tater\"},\"message\":\"hello\","
+                    "\"attachments\":[{\"type\":\"image\",\"blob_key\":\"tater:blob:xyz\",\"name\":\"logo.png\","
+                    "\"mimetype\":\"image/png\"}]}}"
+                ),
+                "examples": [
+                    "{\"function\":\"send_message\",\"arguments\":{\"platform\":\"discord\",\"targets\":{\"channel\":\"#tater\"},\"message\":\"hello\"}}",
+                    "{\"function\":\"send_message\",\"arguments\":{\"platform\":\"telegram\",\"targets\":{\"chat_id\":\"@tater\"},\"message\":\"hello\"}}",
+                ],
+            }
         return get_plugin_help(
-            plugin_id=str(args.get("plugin_id") or ""),
+            plugin_id=plugin_id,
             platform=args.get("platform") or platform,
             registry=registry,
         )
@@ -462,6 +525,40 @@ def run_meta_tool(
             limit=_to_int(args.get("limit") or 8, 8),
             min_score=_to_int(args.get("min_score") or 1, 1),
             origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
+        )
+    if func == "send_message":
+        return send_message(
+            message=args.get("message"),
+            content=args.get("content"),
+            title=args.get("title"),
+            platform=args.get("platform") or platform,
+            targets=args.get("targets"),
+            attachments=args.get("attachments"),
+            artifacts=args.get("artifacts"),
+            media=args.get("media"),
+            files=args.get("files"),
+            priority=args.get("priority"),
+            tags=args.get("tags"),
+            ttl_sec=args.get("ttl_sec"),
+            origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
+            channel_id=args.get("channel_id"),
+            channel=args.get("channel"),
+            guild_id=args.get("guild_id"),
+            room_id=args.get("room_id"),
+            room_alias=args.get("room_alias"),
+            device_service=args.get("device_service"),
+            persistent=args.get("persistent"),
+            api_notification=args.get("api_notification"),
+            chat_id=args.get("chat_id"),
+            blob_key=args.get("blob_key"),
+            file_id=args.get("file_id"),
+            path=args.get("path"),
+            url=args.get("url"),
+            name=args.get("name"),
+            mimetype=args.get("mimetype"),
+            media_type=args.get("type") or args.get("media_type"),
+            use_latest_image=args.get("use_latest_image") or args.get("attach_latest_image"),
+            image_ref=args.get("image_ref") if isinstance(args.get("image_ref"), dict) else None,
         )
     if func == "truth_get_last":
         return truth_get_last(

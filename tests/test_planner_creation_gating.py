@@ -5,9 +5,13 @@ import unittest
 from unittest.mock import patch
 
 from planner_loop import (
+    AGENT_MAX_ROUNDS_KEY,
+    AGENT_MAX_TOOL_CALLS_KEY,
     AGENT_CREATION_PLATFORM_REPAIR_PROMPT,
     AGENT_CREATION_PLUGIN_REPAIR_PROMPT,
     AGENT_CREATION_SHARED_REPAIR_PROMPT,
+    DEFAULT_MAX_ROUNDS,
+    DEFAULT_MAX_TOOL_CALLS,
     _agent_system_instructions,
     _autofill_delivery_args,
     _canonical_tool_name,
@@ -25,6 +29,7 @@ from planner_loop import (
     _looks_like_platform_followup,
     _resolve_generic_followup_user_text,
     _resolve_delivery_followup_user_text,
+    _resolve_agent_budget_limits,
     _search_web_retry_args,
     _search_web_should_retry,
     _should_try_search_fallback,
@@ -65,6 +70,45 @@ class PlannerCreationGatingTests(unittest.TestCase):
         text = _agent_system_instructions(6, 8)
         self.assertIn("Prefer kernel tools first", text)
         self.assertIn("Use plugin tools for platform/service actions", text)
+
+    def test_agent_system_instructions_show_unlimited_for_zero_limits(self):
+        text = _agent_system_instructions(0, 0)
+        self.assertIn("rounds=unlimited", text)
+        self.assertIn("tool_calls=unlimited", text)
+
+    def test_resolve_agent_budget_limits_reads_redis_defaults(self):
+        fake = _StateRedis()
+        fake.set(AGENT_MAX_ROUNDS_KEY, "23")
+        fake.set(AGENT_MAX_TOOL_CALLS_KEY, "11")
+        rounds, tool_calls = _resolve_agent_budget_limits(
+            max_rounds=None,
+            max_tool_calls=None,
+            r=fake,
+        )
+        self.assertEqual(rounds, 23)
+        self.assertEqual(tool_calls, 11)
+
+    def test_resolve_agent_budget_limits_uses_explicit_values(self):
+        fake = _StateRedis()
+        fake.set(AGENT_MAX_ROUNDS_KEY, "23")
+        fake.set(AGENT_MAX_TOOL_CALLS_KEY, "11")
+        rounds, tool_calls = _resolve_agent_budget_limits(
+            max_rounds=7,
+            max_tool_calls=0,
+            r=fake,
+        )
+        self.assertEqual(rounds, 7)
+        self.assertEqual(tool_calls, 0)
+
+    def test_resolve_agent_budget_limits_falls_back_to_module_defaults(self):
+        fake = _StateRedis()
+        rounds, tool_calls = _resolve_agent_budget_limits(
+            max_rounds=None,
+            max_tool_calls=None,
+            r=fake,
+        )
+        self.assertEqual(rounds, DEFAULT_MAX_ROUNDS)
+        self.assertEqual(tool_calls, DEFAULT_MAX_TOOL_CALLS)
 
     def test_enabled_tool_mini_index_includes_kernel_tools_section(self):
         text = _enabled_tool_mini_index(
@@ -328,6 +372,24 @@ class PlannerCreationGatingTests(unittest.TestCase):
         )
         self.assertEqual(out.get("platform"), "discord")
 
+    def test_autofill_delivery_args_sets_use_latest_image_for_send_this(self):
+        out = _autofill_delivery_args(
+            "send_message",
+            {"platform": "discord", "targets": {"channel": "#tater"}, "message": "Here is the image"},
+            user_text="send this to room #tater in discord",
+            origin={"platform": "webui", "latest_image_ref": {"blob_key": "tater:blob:test"}},
+        )
+        self.assertTrue(out.get("use_latest_image"))
+
+    def test_autofill_delivery_args_does_not_set_use_latest_image_for_send_this_message(self):
+        out = _autofill_delivery_args(
+            "send_message",
+            {"platform": "discord", "targets": {"channel": "#tater"}, "message": "hello"},
+            user_text="send this message to room #tater in discord saying hello",
+            origin={"platform": "webui", "latest_image_ref": {"blob_key": "tater:blob:test"}},
+        )
+        self.assertNotIn("use_latest_image", out)
+
     def test_force_send_message_call_parses_common_phrase(self):
         forced = _force_send_message_call("send a message to room #tater in discord saying hello")
         self.assertIsInstance(forced, dict)
@@ -336,6 +398,15 @@ class PlannerCreationGatingTests(unittest.TestCase):
         self.assertEqual(args.get("platform"), "discord")
         self.assertEqual((args.get("targets") or {}).get("channel"), "#tater")
         self.assertEqual(args.get("message"), "hello")
+
+    def test_force_send_message_call_supports_send_this_phrase(self):
+        forced = _force_send_message_call("send this to room #tater in discord")
+        self.assertIsInstance(forced, dict)
+        self.assertEqual(forced.get("function"), "send_message")
+        args = forced.get("arguments") or {}
+        self.assertEqual(args.get("platform"), "discord")
+        self.assertEqual((args.get("targets") or {}).get("channel"), "#tater")
+        self.assertTrue(args.get("use_latest_image"))
 
     def test_force_webpage_visual_call_detects_logo_request_with_domain(self):
         forced = _force_webpage_visual_call(
@@ -460,7 +531,7 @@ class PlannerCreationGatingTests(unittest.TestCase):
         self.assertEqual(result.get("status"), "done")
         self.assertIn(("get_plugin_help", True), events)
 
-    def test_repeated_meta_tool_call_triggers_loop_detection(self):
+    def test_repeated_meta_tool_call_stops_on_budget_without_loop_message(self):
         class _LLM:
             async def chat(self, messages, **kwargs):
                 return {
@@ -489,7 +560,8 @@ class PlannerCreationGatingTests(unittest.TestCase):
 
         result = asyncio.run(_run())
         self.assertEqual(result.get("status"), "stopped")
-        self.assertIn("Loop detected", str(result.get("text") or ""))
+        self.assertIn("I reached my planning limit", str(result.get("text") or ""))
+        self.assertNotIn("Loop detected", str(result.get("text") or ""))
 
     def test_confirmed_high_impact_pending_action_executes_without_loop(self):
         redis_state = _StateRedis()

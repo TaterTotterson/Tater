@@ -562,7 +562,7 @@ def _send_wordpress(title: Optional[str], message: str, targets: Optional[Dict[s
         return False
 
 
-async def dispatch_notification(
+def dispatch_notification_sync(
     platform: str,
     title: Optional[str],
     content: str,
@@ -582,15 +582,47 @@ async def dispatch_notification(
         return _dispatch_homeassistant(title, content, targets, origin, meta)
 
     if dest == "ntfy":
-        ok = await asyncio.to_thread(_send_ntfy, title, content, targets)
+        ok = _send_ntfy(title, content, targets)
         if ok:
             return "Queued notification for ntfy"
         return "Cannot queue: missing ntfy topic or send failed"
 
     if dest == "wordpress":
-        ok = await asyncio.to_thread(_send_wordpress, title, content, targets)
+        ok = _send_wordpress(title, content, targets)
         if ok:
             return "Queued notification for wordpress"
         return "Cannot queue: missing wordpress settings or send failed"
 
     return "Cannot queue: missing destination platform"
+
+
+async def dispatch_notification(
+    platform: str,
+    title: Optional[str],
+    content: str,
+    targets: Optional[Dict[str, Any]] = None,
+    origin: Optional[Dict[str, Any]] = None,
+    meta: Optional[Dict[str, Any]] = None,
+    attachments: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    dest = normalize_platform(platform)
+    if dest in {"ntfy", "wordpress"}:
+        return await asyncio.to_thread(
+            dispatch_notification_sync,
+            platform=platform,
+            title=title,
+            content=content,
+            targets=targets,
+            origin=origin,
+            meta=meta,
+            attachments=attachments,
+        )
+    return dispatch_notification_sync(
+        platform=platform,
+        title=title,
+        content=content,
+        targets=targets,
+        origin=origin,
+        meta=meta,
+        attachments=attachments,
+    )

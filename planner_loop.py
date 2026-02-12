@@ -40,6 +40,8 @@ ACTIVE_TASK_PREFIX = "tater:tasks:active:"
 
 DEFAULT_MAX_ROUNDS = 15
 DEFAULT_MAX_TOOL_CALLS = 6
+AGENT_MAX_ROUNDS_KEY = "tater:agent:max_rounds"
+AGENT_MAX_TOOL_CALLS_KEY = "tater:agent:max_tool_calls"
 
 AGENT_MODE_TRIGGERS = (
     "agent mode",
@@ -202,6 +204,7 @@ TOOL_NAME_ALIASES = {
 _KERNEL_TOOL_PRIORITY: List[str] = [
     "search_web",
     "inspect_webpage",
+    "send_message",
     "read_url",
     "download_file",
     "read_file",
@@ -228,6 +231,7 @@ _KERNEL_TOOL_PURPOSE_HINTS: Dict[str, str] = {
     "delete_file": "delete a local file",
     "read_url": "fetch and read webpage text",
     "inspect_webpage": "inspect webpage structure, links, and image candidates",
+    "send_message": "send cross-platform messages/media via notifier delivery",
     "download_file": "download files from URLs",
     "list_archive": "inspect archive entries",
     "extract_archive": "extract archives to workspace",
@@ -252,7 +256,7 @@ _KERNEL_TOOL_PURPOSE_HINTS: Dict[str, str] = {
     "vision_describer": "describe an image from explicit source",
 }
 
-DELIVERY_PLATFORMS = {"discord", "irc", "matrix", "telegram", "homeassistant"}
+DELIVERY_PLATFORMS = {"discord", "irc", "matrix", "telegram", "homeassistant", "ntfy"}
 
 PLUGIN_REQUIREMENTS_HINT = (
     "Plugin must subclass ToolPlugin imported from plugin_base and assign an instance to module-level `plugin` (not a dict). "
@@ -762,12 +766,14 @@ def _upsert_tool_index_message(
 
 
 def _agent_system_instructions(max_rounds: int, max_tool_calls: int) -> str:
+    rounds_text = "unlimited" if int(max_rounds) <= 0 else str(int(max_rounds))
+    tool_calls_text = "unlimited" if int(max_tool_calls) <= 0 else str(int(max_tool_calls))
     return (
         "Agent mode is ON.\n"
-        f"Budget: rounds={max_rounds}, tool_calls={max_tool_calls}.\n"
+        f"Budget: rounds={rounds_text}, tool_calls={tool_calls_text}.\n"
         "Use only tool ids listed in the tool index message.\n"
         "Prefer kernel tools first for generic tasks (web/file/download/search/memory/workspace).\n"
-        "Use plugin tools for platform/service actions (devices, messaging, media/service APIs).\n"
+        "Use plugin tools for platform/service actions (devices and service APIs). `send_message` is a kernel tool.\n"
         "If both can solve the request, choose the kernel tool.\n"
         "If a tool matches intent, call it directly.\n"
         "If args are unclear, call get_plugin_help(plugin_id) once.\n"
@@ -845,9 +851,34 @@ def _looks_like_send_intent(text: str) -> bool:
     s = str(text or "").strip().lower()
     if not s:
         return False
-    if "send" in s and "message" in s:
+    if "notify" in s:
         return True
-    return "notify" in s
+    if "send" not in s:
+        return False
+    if "message" in s:
+        return True
+    if re.search(r"\b(this|that|it|these|those)\b", s):
+        return True
+    if re.search(
+        r"\b(room|channel|chat|discord|matrix|telegram|irc|ntfy|home\s*assistant|homeassistant)\b",
+        s,
+    ):
+        return True
+    return False
+
+
+def _looks_like_latest_media_reference(text: str) -> bool:
+    s = str(text or "").strip().lower()
+    if not s:
+        return False
+    if re.search(r"\b(image|photo|picture|pic|screenshot|logo|file|attachment|media|video|audio)\b", s):
+        return True
+    if re.search(r"\b(send|share|post|upload|forward)\b", s) and re.search(r"\b(this|that|it|these|those)\b", s):
+        # Avoid accidental image forwarding on plain "send this message ..." phrasing.
+        if re.search(r"\bmessage\b", s):
+            return False
+        return True
+    return False
 
 
 def _infer_destination_platform(text: str) -> str:
@@ -864,6 +895,8 @@ def _infer_destination_platform(text: str) -> str:
         return "telegram"
     if re.search(r"\birc\b", s):
         return "irc"
+    if re.search(r"\bntfy\b", s):
+        return "ntfy"
     return ""
 
 
@@ -1018,6 +1051,14 @@ def _autofill_delivery_args(
         message = _extract_message_text(user_text)
         if message:
             out["message"] = message
+    if func == "send_message" and "use_latest_image" not in out:
+        explicit_media = any(
+            out.get(key)
+            for key in ("attachments", "artifacts", "media", "files", "image_ref", "blob_key", "file_id", "path", "url")
+        )
+        has_latest_ref = isinstance(origin, dict) and isinstance(origin.get("latest_image_ref"), dict)
+        if has_latest_ref and not explicit_media and _looks_like_latest_media_reference(user_text):
+            out["use_latest_image"] = True
 
     return out
 
@@ -1043,9 +1084,15 @@ def _force_send_message_call(user_text: str) -> Optional[Dict[str, Any]]:
             args["targets"] = {"channel": target_ref}
 
     message = _extract_message_text(user_text)
-    if not message:
+    wants_latest_image = _looks_like_latest_media_reference(user_text)
+    if message:
+        args["message"] = message
+    elif wants_latest_image:
+        args["use_latest_image"] = True
+    else:
         return None
-    args["message"] = message
+    if wants_latest_image and "use_latest_image" not in args:
+        args["use_latest_image"] = True
 
     return {"function": "send_message", "arguments": args}
 
@@ -1059,7 +1106,7 @@ def _platform_reply_token(text: str) -> str:
     raw = re.sub(r"\s+please$", "", raw).strip()
     raw = re.sub(r"\s+", " ", raw)
 
-    if raw in {"discord", "matrix", "telegram", "irc"}:
+    if raw in {"discord", "matrix", "telegram", "irc", "ntfy"}:
         return raw
     if raw in {"home assistant", "homeassistant"}:
         return "homeassistant"
@@ -1653,6 +1700,51 @@ def _as_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
+def _as_non_negative_int(value: Any, default: int) -> int:
+    if value is None:
+        return int(default)
+    try:
+        out = int(str(value).strip())
+    except Exception:
+        return int(default)
+    if out < 0:
+        return 0
+    return out
+
+
+def _resolve_agent_budget_limits(
+    *,
+    max_rounds: Optional[int],
+    max_tool_calls: Optional[int],
+    r=None,
+) -> Tuple[int, int]:
+    r = r or default_redis
+
+    stored_rounds_raw = None
+    stored_tool_calls_raw = None
+    try:
+        stored_rounds_raw = r.get(AGENT_MAX_ROUNDS_KEY)
+    except Exception:
+        stored_rounds_raw = None
+    try:
+        stored_tool_calls_raw = r.get(AGENT_MAX_TOOL_CALLS_KEY)
+    except Exception:
+        stored_tool_calls_raw = None
+
+    stored_rounds = _as_non_negative_int(stored_rounds_raw, DEFAULT_MAX_ROUNDS)
+    stored_tool_calls = _as_non_negative_int(stored_tool_calls_raw, DEFAULT_MAX_TOOL_CALLS)
+
+    resolved_rounds = (
+        stored_rounds if max_rounds is None else _as_non_negative_int(max_rounds, stored_rounds)
+    )
+    resolved_tool_calls = (
+        stored_tool_calls
+        if max_tool_calls is None
+        else _as_non_negative_int(max_tool_calls, stored_tool_calls)
+    )
+    return resolved_rounds, resolved_tool_calls
+
+
 def _creation_explicit_only(r=None) -> bool:
     env = os.getenv("TATER_CREATION_EXPLICIT_ONLY")
     if env is not None and str(env).strip() != "":
@@ -2004,8 +2096,8 @@ async def run_planner_loop(
     scope: str,
     task_id: Optional[str] = None,
     origin: Optional[Dict[str, Any]] = None,
-    max_rounds: int = DEFAULT_MAX_ROUNDS,
-    max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS,
+    max_rounds: Optional[int] = None,
+    max_tool_calls: Optional[int] = None,
     wait_callback: Optional[Callable[[str, Any], Any]] = None,
     admin_guard: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
     redis_client: Any = None,
@@ -2013,6 +2105,11 @@ async def run_planner_loop(
     r = redis_client or default_redis
     platform = normalize_platform(platform)
     scope = str(scope or "default")
+    max_rounds, max_tool_calls = _resolve_agent_budget_limits(
+        max_rounds=max_rounds,
+        max_tool_calls=max_tool_calls,
+        r=r,
+    )
 
     async def _emit_wait(func_name: str, plugin_obj: Any = None) -> None:
         if not wait_callback:
@@ -2392,7 +2489,7 @@ async def run_planner_loop(
 
     # No automatic stable-example reads for creation requests.
 
-    while rounds_used < max_rounds:
+    while max_rounds <= 0 or rounds_used < max_rounds:
         rounds_used += 1
         state["rounds_used"] = rounds_used
 
@@ -2769,24 +2866,7 @@ async def run_planner_loop(
                 "artifacts": artifacts_out,
             }
 
-        # Loop detection applies to both kernel/meta tools and plugins.
         signature = _signature_for_attempt(func, args)
-        if signature in attempts:
-            if confirmed_pending:
-                attempts = [x for x in attempts if x != signature]
-                state["attempts"] = attempts
-            else:
-                state["status"] = "stopped"
-                _update_progress_summary(state, "Loop detected; repeated the same tool call.")
-                save_task_state(state, r=r)
-                clear_active_task_id(platform, scope, r=r)
-                summary = _build_progress_summary(state)
-                return {
-                    "text": f"Loop detected. {summary} Tell me what to change so I can continue.",
-                    "status": "stopped",
-                    "task_id": task_id,
-                    "artifacts": artifacts_out,
-                }
         attempts.append(signature)
         state["attempts"] = attempts
 
@@ -3075,7 +3155,7 @@ async def run_planner_loop(
                     "artifacts": artifacts_out,
                 }
 
-        if tool_calls_used >= max_tool_calls:
+        if max_tool_calls > 0 and tool_calls_used >= max_tool_calls:
             break
 
         await _emit_wait(func, plugin)
@@ -3176,7 +3256,7 @@ async def run_planner_loop(
 
         save_task_state(state, r=r)
 
-        if tool_calls_used >= max_tool_calls:
+        if max_tool_calls > 0 and tool_calls_used >= max_tool_calls:
             break
 
     # Budget reached

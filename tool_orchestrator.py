@@ -29,6 +29,7 @@ TOOL_NAME_ALIASES = {
 _KERNEL_TOOL_PRIORITY = [
     "search_web",
     "inspect_webpage",
+    "send_message",
     "read_url",
     "download_file",
     "read_file",
@@ -55,6 +56,7 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
     "delete_file": "delete a local file",
     "read_url": "fetch and read webpage text",
     "inspect_webpage": "inspect webpage structure, links, and image candidates",
+    "send_message": "send cross-platform messages/media via notifier delivery",
     "download_file": "download files from URLs",
     "list_archive": "inspect archive entries",
     "extract_archive": "extract archives to workspace",
@@ -125,28 +127,6 @@ def _normalize_creation_payload_args(func: str, args: Dict[str, Any]) -> Dict[st
         out["code_lines"] = text.splitlines()
         out.pop("code", None)
     return out
-
-
-def _clean_args_for_signature(args: Dict[str, Any]) -> Dict[str, Any]:
-    def _strip(obj: Any) -> Any:
-        if isinstance(obj, dict):
-            cleaned: Dict[str, Any] = {}
-            for k, v in obj.items():
-                key = str(k)
-                if key in {"origin", "request_id", "timestamp", "ts", "context"}:
-                    continue
-                cleaned[key] = _strip(v)
-            return cleaned
-        if isinstance(obj, list):
-            return [_strip(x) for x in obj]
-        return obj
-
-    return _strip(args or {})
-
-
-def _signature_for_attempt(func: str, args: Dict[str, Any]) -> str:
-    payload = {"function": str(func or ""), "arguments": _clean_args_for_signature(args)}
-    return json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
 
 
 def _tool_purpose(plugin: Any) -> str:
@@ -252,7 +232,7 @@ def build_compact_system_prompt(platform: str, extra_instructions: str = "") -> 
         f"Current platform: {platform}.\n"
         "Use only tool ids from the tool index message.\n"
         "Prefer kernel tools first for generic tasks (web/file/download/search/memory/workspace).\n"
-        "Use plugin tools for platform/service actions (devices, messaging, media/service APIs).\n"
+        "Use plugin tools for platform/service actions (devices and service APIs). `send_message` is a kernel tool.\n"
         "If both can solve the request, choose the kernel tool.\n"
         "If a tool matches user intent, call it directly.\n"
         "If args are unclear, call get_plugin_help(plugin_id) once.\n"
@@ -309,7 +289,6 @@ async def run_tool_loop(
     tool_context = tool_context or {}
     last_tool_result: Optional[Dict[str, Any]] = None
     tool_calls: List[Dict[str, Any]] = []
-    attempts_seen: set[str] = set()
     format_fix_used = False
     creation_failures = 0
 
@@ -367,15 +346,6 @@ async def run_tool_loop(
             return {"text": text, "tool_calls": tool_calls, "last_tool_result": last_tool_result}
         if func in {"create_plugin", "create_platform"}:
             args = _normalize_creation_payload_args(func, args)
-
-        signature = _signature_for_attempt(func, args)
-        if signature in attempts_seen:
-            return {
-                "text": "Loop detected: repeated the same tool call. Tell me what to change and I will continue.",
-                "tool_calls": tool_calls,
-                "last_tool_result": last_tool_result,
-            }
-        attempts_seen.add(signature)
 
         tool_calls.append({"function": func, "arguments": args})
 

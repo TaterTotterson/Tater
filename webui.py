@@ -53,7 +53,14 @@ from kernel_tools import (
     delete_file,
     memory_list,
 )
-from planner_loop import should_use_agent_mode, run_planner_loop
+from planner_loop import (
+    should_use_agent_mode,
+    run_planner_loop,
+    DEFAULT_MAX_ROUNDS,
+    DEFAULT_MAX_TOOL_CALLS,
+    AGENT_MAX_ROUNDS_KEY,
+    AGENT_MAX_TOOL_CALLS_KEY,
+)
 from vision_settings import (
     get_vision_settings as get_shared_vision_settings,
     save_vision_settings as save_shared_vision_settings,
@@ -103,6 +110,7 @@ SHOP_MANIFEST_URL_DEFAULT = os.getenv(
 )
 RETIRED_PLUGIN_IDS = {
     "web_search",
+    "send_message",
     "notify_discord",
     "notify_irc",
     "notify_matrix",
@@ -2281,9 +2289,21 @@ def render_vision_settings():
 
 
 def render_tater_settings():
+    def _read_non_negative_int_setting(key: str, default: int) -> int:
+        raw = redis_client.get(key)
+        try:
+            value = int(str(raw).strip()) if raw is not None else int(default)
+        except Exception:
+            value = int(default)
+        if value < 0:
+            return 0
+        return value
+
     st.subheader(f"{first_name} Settings")
-    stored_count = int(redis_client.get("tater:max_store") or 20)
-    llm_count = int(redis_client.get("tater:max_llm") or 8)
+    stored_count = _read_non_negative_int_setting("tater:max_store", 20)
+    llm_count = max(1, _read_non_negative_int_setting("tater:max_llm", 8))
+    agent_round_limit = _read_non_negative_int_setting(AGENT_MAX_ROUNDS_KEY, DEFAULT_MAX_ROUNDS)
+    agent_tool_limit = _read_non_negative_int_setting(AGENT_MAX_TOOL_CALLS_KEY, DEFAULT_MAX_TOOL_CALLS)
     default_first = redis_client.get("tater:first_name") or first_name
     default_last = redis_client.get("tater:last_name") or last_name
     default_personality = redis_client.get("tater:personality") or ""
@@ -2328,6 +2348,21 @@ def render_tater_settings():
     new_llm = st.number_input("Messages Sent to LLM", min_value=1, value=llm_count, key="tater_llm_limit")
     if new_store > 0 and new_llm > new_store:
         st.warning("⚠️ You're trying to send more messages to LLM than you’re storing. Consider increasing Max Stored Messages.")
+    new_agent_rounds = st.number_input(
+        "Agent Max Rounds (0 = unlimited)",
+        min_value=0,
+        value=agent_round_limit,
+        key="tater_agent_max_rounds",
+    )
+    new_agent_tool_calls = st.number_input(
+        "Agent Max Tool Calls (0 = unlimited)",
+        min_value=0,
+        value=agent_tool_limit,
+        key="tater_agent_max_tool_calls",
+    )
+    st.caption("These limits apply to planner runs across all platforms.")
+    if new_agent_rounds == 0 or new_agent_tool_calls == 0:
+        st.warning("⚠️ Unlimited planner limits are enabled. Long-running loops may increase cost and latency.")
     creation_explicit_only = st.checkbox(
         "Require explicit create wording for plugin/platform creation",
         value=creation_explicit_default,
@@ -2344,6 +2379,8 @@ def render_tater_settings():
     if st.button("Save Tater Settings", key="save_tater_settings"):
         redis_client.set("tater:max_store", new_store)
         redis_client.set("tater:max_llm", new_llm)
+        redis_client.set(AGENT_MAX_ROUNDS_KEY, int(new_agent_rounds))
+        redis_client.set(AGENT_MAX_TOOL_CALLS_KEY, int(new_agent_tool_calls))
         redis_client.set("tater:first_name", first_input)
         redis_client.set("tater:last_name", last_input)
         redis_client.set("tater:personality", personality_input)
