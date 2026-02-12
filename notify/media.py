@@ -1,6 +1,11 @@
 import base64
+import ipaddress
 import json
 import os
+import socket
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -10,6 +15,8 @@ MEDIA_TYPES = {"image", "audio", "video", "file"}
 MEDIA_REF_PREFIX = "notifyq:media"
 BLOB_PREFIX = "tater:blob:notify"
 DEFAULT_TTL_SECONDS = 60 * 60 * 24 * 7
+DEFAULT_URL_FETCH_MAX_BYTES = int(os.getenv("TATER_NOTIFY_MEDIA_URL_MAX_BYTES", "25000000"))
+DEFAULT_URL_FETCH_TIMEOUT_SEC = int(os.getenv("TATER_NOTIFY_MEDIA_URL_TIMEOUT_SEC", "20"))
 
 
 def _redis_host() -> str:
@@ -79,6 +86,84 @@ def _coerce_size(value: Any) -> Optional[int]:
     return None
 
 
+def _name_from_url(url: str) -> str:
+    try:
+        path = urllib.parse.urlparse(url).path or ""
+    except Exception:
+        path = ""
+    name = os.path.basename(path).strip()
+    return name
+
+
+def _is_private_ip(ip_str: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    except Exception:
+        return False
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    )
+
+
+def _host_is_private(host: str) -> bool:
+    host = str(host or "").strip()
+    if not host:
+        return True
+    if _is_private_ip(host):
+        return True
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except Exception:
+        return True
+    for info in infos:
+        ip_str = info[4][0]
+        if _is_private_ip(ip_str):
+            return True
+    return False
+
+
+def _validate_remote_url(url: str) -> bool:
+    try:
+        parsed = urllib.parse.urlparse(str(url or "").strip())
+    except Exception:
+        return False
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    if not parsed.hostname:
+        return False
+    if _host_is_private(parsed.hostname):
+        return False
+    return True
+
+
+def _read_url(url: str) -> tuple[Optional[bytes], Optional[str]]:
+    if not _validate_remote_url(url):
+        return None, None
+    try:
+        req = urllib.request.Request(
+            str(url).strip(),
+            headers={"User-Agent": "Tater-Notify/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=DEFAULT_URL_FETCH_TIMEOUT_SEC) as resp:
+            raw = resp.read(DEFAULT_URL_FETCH_MAX_BYTES + 1)
+            content_type = str(resp.headers.get("Content-Type") or "").strip()
+        if len(raw) > DEFAULT_URL_FETCH_MAX_BYTES:
+            return None, None
+        mime = content_type.split(";", 1)[0].strip().lower()
+        return raw, mime
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError):
+        return None, None
+    except Exception:
+        return None, None
+
+
 def _normalize_media_item(item: Any, ttl_seconds: int = DEFAULT_TTL_SECONDS) -> Optional[Dict[str, Any]]:
     if not isinstance(item, dict):
         return None
@@ -90,6 +175,7 @@ def _normalize_media_item(item: Any, ttl_seconds: int = DEFAULT_TTL_SECONDS) -> 
     name = str(item.get("name") or f"{kind}.bin").strip()
     mimetype = str(item.get("mimetype") or "application/octet-stream").strip()
     size = _coerce_size(item.get("size"))
+    remote_url = str(item.get("url") or "").strip()
 
     blob_key = str(item.get("blob_key") or "").strip()
     if blob_key and _load_blob(blob_key) is None:
@@ -101,6 +187,15 @@ def _normalize_media_item(item: Any, ttl_seconds: int = DEFAULT_TTL_SECONDS) -> 
             binary = _decode_b64(item.get("data"))
         if binary is None and isinstance(item.get("path"), str):
             binary = _read_path(item.get("path"))
+        remote_mimetype = ""
+        if binary is None and remote_url:
+            binary, remote_mimetype = _read_url(remote_url)
+            if not name or name == f"{kind}.bin":
+                guessed_name = _name_from_url(remote_url)
+                if guessed_name:
+                    name = guessed_name
+            if remote_mimetype and (not mimetype or mimetype == "application/octet-stream"):
+                mimetype = remote_mimetype
 
         if binary is not None:
             blob_key = _store_blob(binary, ttl_seconds=ttl_seconds)

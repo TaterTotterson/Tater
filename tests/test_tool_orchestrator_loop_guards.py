@@ -6,7 +6,7 @@ from tool_orchestrator import run_tool_loop
 
 
 class ToolOrchestratorLoopGuardTests(unittest.TestCase):
-    def test_repeated_meta_call_stops_with_loop_message(self):
+    def test_repeated_meta_call_stops_on_step_budget_without_loop_message(self):
         class _LLM:
             async def chat(self, messages, **kwargs):
                 return {
@@ -26,11 +26,13 @@ class ToolOrchestratorLoopGuardTests(unittest.TestCase):
                 registry={},
                 enabled_predicate=lambda _name: True,
                 tool_context={},
-                max_steps=6,
+                max_steps=4,
             )
 
         result = asyncio.run(_run())
-        self.assertIn("Loop detected", str(result.get("text") or ""))
+        self.assertIn("I need a bit more information", str(result.get("text") or ""))
+        self.assertNotIn("Loop detected", str(result.get("text") or ""))
+        self.assertEqual(len(result.get("tool_calls") or []), 4)
 
     def test_repeated_failed_creation_stops_with_guidance(self):
         class _LLM:

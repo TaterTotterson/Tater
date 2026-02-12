@@ -32,6 +32,9 @@ from plugin_base import ToolPlugin
 from plugin_registry import reload_plugins
 from plugin_settings import get_plugin_enabled
 from vision_settings import get_vision_settings as get_shared_vision_settings
+from notify import dispatch_notification_sync, notifier_supports_attachments
+from notify.queue import ALLOWED_PLATFORMS as NOTIFY_ALLOWED_PLATFORMS
+from notify.queue import normalize_platform as normalize_notify_platform
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -101,6 +104,12 @@ WEB_SEARCH_TIMEOUT_SEC = int(os.getenv("TATER_WEB_SEARCH_TIMEOUT_SEC", "15"))
 WEB_SEARCH_MAX_RESULTS = int(os.getenv("TATER_WEB_SEARCH_MAX_RESULTS", "10"))
 WEB_SEARCH_MAX_RESPONSE_BYTES = int(os.getenv("TATER_WEB_SEARCH_MAX_RESPONSE_BYTES", "2000000"))
 WEB_SEARCH_MAX_SNIPPET_CHARS = int(os.getenv("TATER_WEB_SEARCH_MAX_SNIPPET_CHARS", "600"))
+
+SEND_MESSAGE_SETTINGS_KEYS = (
+    "plugin_settings:Send Message",
+    "plugin_settings: Send Message",
+)
+SEND_MESSAGE_HA_API_DEFAULT_KEY = "ENABLE_HA_API_NOTIFICATION"
 
 MEMORY_HASH_PREFIX = "tater:memory"
 MEMORY_EXPLICIT_ONLY_REDIS_KEY = "tater:memory:explicit_only"
@@ -778,6 +787,350 @@ def search_web(
         "has_more": bool(next_start),
         "next_start": next_start,
     }
+
+
+def _send_message_boolish(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on", "enabled"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "disabled"}:
+        return False
+    return bool(default)
+
+
+def _send_message_normalize_platform(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return ""
+    if raw in {"home assistant", "ha"}:
+        return "homeassistant"
+    compact = raw.replace(" ", "")
+    if compact == "homeassistant":
+        return "homeassistant"
+    return normalize_notify_platform(raw)
+
+
+def _send_message_load_settings() -> Dict[str, Any]:
+    for key in SEND_MESSAGE_SETTINGS_KEYS:
+        try:
+            data = redis_client.hgetall(key) or {}
+        except Exception:
+            data = {}
+        if isinstance(data, dict) and data:
+            return data
+    return {}
+
+
+def _send_message_extract_target_hint(raw: Any) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    for pattern in (r"![^\s]+", r"#[A-Za-z0-9][A-Za-z0-9._:-]*", r"@[A-Za-z0-9_]+"):
+        match = re.search(pattern, text)
+        if match:
+            return match.group(0)
+    text = re.sub(r"^(?:room|channel|chat)\s+", "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"\s+(?:in|on)\s+(?:discord|irc|matrix|telegram|home\s*assistant|homeassistant|ntfy|wordpress)\b.*$",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return text.strip(" .")
+
+
+def _send_message_coerce_targets(payload: Any) -> Dict[str, Any]:
+    if isinstance(payload, dict):
+        return dict(payload)
+    if isinstance(payload, str):
+        hint = _send_message_extract_target_hint(payload)
+        if hint:
+            return {"channel": hint}
+    return {}
+
+
+def _send_message_clean_attachment_payload(payload: Any) -> List[Dict[str, Any]]:
+    if not isinstance(payload, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for item in payload:
+        if isinstance(item, dict):
+            out.append(dict(item))
+    return out
+
+
+def _send_message_blob_candidates(*, blob_key: Any, file_id: Any) -> List[str]:
+    candidates: List[str] = []
+    blob = str(blob_key or "").strip()
+    if blob:
+        candidates.append(blob)
+    fid = str(file_id or "").strip()
+    if fid:
+        if fid.startswith(_VISION_WEBUI_BLOB_PREFIX) or fid.startswith("tater:blob:") or fid.startswith("tater:matrix:"):
+            candidates.append(fid)
+        else:
+            candidates.append(f"{_VISION_WEBUI_BLOB_PREFIX}{fid}")
+            candidates.append(fid)
+    unique: List[str] = []
+    seen = set()
+    for key in candidates:
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(key)
+    return unique
+
+
+def _send_message_resolve_blob_key(*, blob_key: Any, file_id: Any) -> str:
+    candidates = _send_message_blob_candidates(blob_key=blob_key, file_id=file_id)
+    if not candidates:
+        return ""
+    client = _get_blob_redis_client()
+    for key in candidates:
+        try:
+            found = client.get(key)
+        except Exception:
+            found = None
+        if found is not None:
+            return key
+    return ""
+
+
+def _send_message_attachment_from_ref(ref: Any, *, default_type: str = "image") -> Optional[Dict[str, Any]]:
+    if not isinstance(ref, dict):
+        return None
+    out: Dict[str, Any] = {}
+    media_type = str(ref.get("type") or default_type).strip().lower()
+    if media_type not in {"image", "audio", "video", "file"}:
+        media_type = default_type if default_type in {"image", "audio", "video", "file"} else "file"
+    out["type"] = media_type
+
+    name = str(ref.get("name") or "").strip()
+    if name:
+        out["name"] = name
+    mimetype = str(ref.get("mimetype") or "").strip()
+    if mimetype:
+        out["mimetype"] = mimetype
+
+    resolved_blob = _send_message_resolve_blob_key(blob_key=ref.get("blob_key"), file_id=ref.get("file_id"))
+    if resolved_blob:
+        out["blob_key"] = resolved_blob
+        return out
+
+    path = str(ref.get("path") or "").strip()
+    if path:
+        out["path"] = path
+        return out
+
+    url = str(ref.get("url") or "").strip()
+    if url:
+        out["url"] = url
+        return out
+    return None
+
+
+def _send_message_build_needs(error_text: str) -> List[str]:
+    text = str(error_text or "").strip().lower()
+    if "missing destination platform" in text:
+        return ["Which platform should I send to? (discord, irc, matrix, telegram, homeassistant, ntfy, wordpress)"]
+    if "missing target channel/room" in text:
+        return ["What room/channel/chat should I send this to?"]
+    if "missing message" in text:
+        return ["What message should I send? You can also include attachments/media."]
+    if "missing ntfy topic" in text:
+        return ["What ntfy topic should I send this to? You can pass targets.topic or targets.channel."]
+    if "missing wordpress settings" in text:
+        return ["WordPress is not configured. Provide wordpress site URL, username, and app password settings."]
+    return []
+
+
+def _send_message_text_refs_media(text: Any) -> bool:
+    s = str(text or "").strip().lower()
+    if not s:
+        return False
+    return bool(
+        re.search(
+            r"\b(image|photo|picture|pic|screenshot|logo|attachment|media|video|audio|file)\b",
+            s,
+        )
+    )
+
+
+def send_message(
+    *,
+    message: Any = None,
+    content: Any = None,
+    title: Any = None,
+    platform: Any = None,
+    targets: Any = None,
+    attachments: Any = None,
+    artifacts: Any = None,
+    media: Any = None,
+    files: Any = None,
+    priority: Any = None,
+    tags: Any = None,
+    ttl_sec: Any = None,
+    origin: Optional[Dict[str, Any]] = None,
+    channel_id: Any = None,
+    channel: Any = None,
+    guild_id: Any = None,
+    room_id: Any = None,
+    room_alias: Any = None,
+    device_service: Any = None,
+    persistent: Any = None,
+    api_notification: Any = None,
+    chat_id: Any = None,
+    blob_key: Any = None,
+    file_id: Any = None,
+    path: Any = None,
+    url: Any = None,
+    name: Any = None,
+    mimetype: Any = None,
+    media_type: Any = None,
+    use_latest_image: Any = None,
+    image_ref: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    text = str(message if message is not None else content or "").strip()
+    destination = _send_message_normalize_platform(platform)
+    origin_map = dict(origin) if isinstance(origin, dict) else {}
+
+    if not destination and isinstance(origin_map, dict):
+        origin_platform = _send_message_normalize_platform(origin_map.get("platform"))
+        if origin_platform in NOTIFY_ALLOWED_PLATFORMS:
+            destination = origin_platform
+
+    if destination not in NOTIFY_ALLOWED_PLATFORMS:
+        error = "Cannot queue: missing destination platform"
+        return {
+            "tool": "send_message",
+            "ok": False,
+            "error": error,
+            "needs": _send_message_build_needs(error),
+            "supported_platforms": list(NOTIFY_ALLOWED_PLATFORMS),
+        }
+
+    target_map = _send_message_coerce_targets(targets)
+    for key, value in (
+        ("channel_id", channel_id),
+        ("channel", channel),
+        ("guild_id", guild_id),
+        ("room_id", room_id),
+        ("room_alias", room_alias),
+        ("device_service", device_service),
+        ("persistent", persistent),
+        ("api_notification", api_notification),
+        ("chat_id", chat_id),
+    ):
+        if value is not None and key not in target_map:
+            target_map[key] = value
+
+    payload_attachments: List[Dict[str, Any]] = []
+    for raw in (attachments, artifacts, media, files):
+        payload_attachments.extend(_send_message_clean_attachment_payload(raw))
+
+    single_attachment = _send_message_attachment_from_ref(
+        {
+            "type": media_type,
+            "name": name,
+            "mimetype": mimetype,
+            "blob_key": blob_key,
+            "file_id": file_id,
+            "path": path,
+            "url": url,
+        },
+        default_type="file",
+    )
+    if single_attachment:
+        payload_attachments.append(single_attachment)
+
+    image_ref_attachment = _send_message_attachment_from_ref(image_ref, default_type="image")
+    if image_ref_attachment:
+        payload_attachments.append(image_ref_attachment)
+
+    latest_ref = origin_map.get("latest_image_ref") if isinstance(origin_map.get("latest_image_ref"), dict) else None
+    explicit_use_latest: Optional[bool] = None
+    if use_latest_image is not None:
+        explicit_use_latest = _send_message_boolish(use_latest_image, False)
+    auto_use_latest_from_text = (
+        explicit_use_latest is None
+        and bool(text)
+        and _send_message_text_refs_media(text)
+    )
+    should_attach_latest = (
+        explicit_use_latest is True
+        or auto_use_latest_from_text
+        or (explicit_use_latest is not False and not text and not payload_attachments)
+    )
+    if not payload_attachments and should_attach_latest and latest_ref:
+        latest_attachment = _send_message_attachment_from_ref(latest_ref, default_type="image")
+        if latest_attachment:
+            payload_attachments.append(latest_attachment)
+
+    if destination == "homeassistant" and "api_notification" not in target_map:
+        settings = _send_message_load_settings()
+        target_map["api_notification"] = _send_message_boolish(
+            settings.get(SEND_MESSAGE_HA_API_DEFAULT_KEY),
+            True,
+        )
+
+    meta: Dict[str, Any] = {
+        "priority": priority,
+        "tags": tags,
+        "ttl_sec": ttl_sec,
+    }
+
+    if not text and payload_attachments:
+        text = "Attachment"
+    if not text and not payload_attachments:
+        error = "Cannot queue: missing message"
+        return {
+            "tool": "send_message",
+            "ok": False,
+            "error": error,
+            "needs": _send_message_build_needs(error),
+            "platform": destination,
+        }
+
+    try:
+        result_text = dispatch_notification_sync(
+            platform=destination,
+            title=str(title or "").strip() or None,
+            content=text,
+            targets=target_map,
+            origin=origin_map,
+            meta=meta,
+            attachments=payload_attachments,
+        )
+    except Exception as e:
+        return {
+            "tool": "send_message",
+            "ok": False,
+            "error": f"Send failed: {e}",
+            "platform": destination,
+        }
+
+    ok = str(result_text or "").strip().lower().startswith("queued notification for")
+    out: Dict[str, Any] = {
+        "tool": "send_message",
+        "ok": ok,
+        "platform": destination,
+        "result": str(result_text or "").strip(),
+        "targets": target_map,
+        "attachment_count": len(payload_attachments),
+    }
+    if payload_attachments and not notifier_supports_attachments(destination):
+        out["attachment_warning"] = (
+            f"{destination} notifications currently ignore attachments; text was sent instead."
+        )
+    if not ok:
+        out["error"] = out["result"] or "Send failed."
+        needs = _send_message_build_needs(out["error"])
+        if needs:
+            out["needs"] = needs
+    return out
 
 
 def read_url(
