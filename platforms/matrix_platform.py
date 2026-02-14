@@ -37,8 +37,9 @@ from admin_gate import (
 from agent_lab_registry import build_agent_registry
 from plugin_result import action_failure
 from plugin_kernel import plugin_supports_platform
-from planner_loop import should_use_agent_mode, run_planner_loop
-from latest_image_ref import load_latest_image_ref, save_latest_image_ref
+from cerberus import run_cerberus_turn, resolve_agent_limits
+from conversation_media_refs import load_recent_media_refs, save_media_ref
+from emoji_responder import emoji_responder
 
 # Matrix SDK
 from nio import (
@@ -54,6 +55,13 @@ try:
     from nio import RoomMessageImage
 except Exception:
     RoomMessageImage = None
+
+try:
+    from nio import RoomMessageVideo, RoomMessageAudio, RoomMessageFile
+except Exception:
+    RoomMessageVideo = None
+    RoomMessageAudio = None
+    RoomMessageFile = None
 
 try:
     from nio.events.room_events import RoomEncryptionEvent
@@ -386,8 +394,8 @@ def save_matrix_message(room_id: str, role: str, username: str, content: Any):
         redis_client.ltrim(key, -max_store, -1)
 
 
-def _save_latest_room_image_ref(room_id: str, ref: Dict[str, Any]) -> None:
-    save_latest_image_ref(
+def _save_recent_room_media_ref(room_id: str, ref: Dict[str, Any]) -> None:
+    save_media_ref(
         redis_client,
         platform="matrix",
         scope=room_id,
@@ -395,11 +403,12 @@ def _save_latest_room_image_ref(room_id: str, ref: Dict[str, Any]) -> None:
     )
 
 
-def _load_latest_room_image_ref(room_id: str) -> Optional[Dict[str, Any]]:
-    return load_latest_image_ref(
+def _load_recent_room_media_refs(room_id: str, limit: int = 8) -> List[Dict[str, Any]]:
+    return load_recent_media_refs(
         redis_client,
         platform="matrix",
         scope=room_id,
+        limit=limit,
     )
 
 def _to_template_msg(role: str, content: Any, sender: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -893,38 +902,26 @@ class MatrixPlatform:
         event_id: str,
         user_text: str,
         assistant_text: str,
-        merged_registry: Dict[str, Any],
-        merged_enabled,
     ) -> None:
         if not event_id:
             return
 
-        for name, plugin in merged_registry.items():
-            hook = getattr(plugin, "on_assistant_response", None)
-            if not callable(hook):
-                continue
-            if not merged_enabled(name):
-                continue
-
-            try:
-                suggested = await hook(
-                    platform="matrix",
-                    user_text=user_text or "",
-                    assistant_text=assistant_text or "",
-                    llm_client=llm_client,
-                    scope=room_id,
-                    room_id=room_id,
-                    event_id=event_id,
-                )
-                emoji = self._extract_hook_emoji(suggested)
-                if not emoji:
-                    continue
-
-                applied = await self._send_reaction(room_id=room_id, event_id=event_id, emoji=emoji)
-                if applied:
-                    return
-            except Exception as exc:
-                logger.debug(f"[{name}] passive reaction skipped: {exc}")
+        try:
+            suggested = await emoji_responder.on_assistant_response(
+                platform="matrix",
+                user_text=user_text or "",
+                assistant_text=assistant_text or "",
+                llm_client=llm_client,
+                scope=room_id,
+                room_id=room_id,
+                event_id=event_id,
+            )
+            emoji = self._extract_hook_emoji(suggested)
+            if not emoji:
+                return
+            await self._send_reaction(room_id=room_id, event_id=event_id, emoji=emoji)
+        except Exception as exc:
+            logger.debug(f"[emoji_responder] passive reaction skipped: {exc}")
 
     async def _resolve_room_ref(self, room_ref: str) -> Optional[str]:
         ref = (room_ref or "").strip()
@@ -1226,7 +1223,7 @@ class MatrixPlatform:
     async def _capture_latest_image_from_event(self, room, event) -> Optional[Dict[str, Any]]:
         sender = getattr(event, "sender", "")
         if sender == self.user_id:
-            return _load_latest_room_image_ref(room.room_id)
+            return None
 
         source = getattr(event, "source", {}) or {}
         content = source.get("content") if isinstance(source, dict) else {}
@@ -1234,54 +1231,79 @@ class MatrixPlatform:
             content = {}
 
         msgtype = str(content.get("msgtype") or "").strip().lower()
-        if msgtype != "m.image":
-            return _load_latest_room_image_ref(room.room_id)
+        media_type = {
+            "m.image": "image",
+            "m.video": "video",
+            "m.audio": "audio",
+            "m.file": "file",
+        }.get(msgtype)
+        if not media_type:
+            return None
 
         mxc_url = str(content.get("url") or "").strip()
         if not mxc_url:
-            return _load_latest_room_image_ref(room.room_id)
+            return None
 
-        name = str(content.get("body") or "").strip() or "matrix_image"
+        default_name = {
+            "image": "matrix_image",
+            "video": "matrix_video",
+            "audio": "matrix_audio",
+            "file": "matrix_file",
+        }.get(media_type, "matrix_file")
+        name = str(content.get("body") or "").strip() or default_name
         info = content.get("info") if isinstance(content.get("info"), dict) else {}
         mimetype = str(info.get("mimetype") or content.get("mimetype") or "").strip().lower()
 
         try:
             downloaded = await self.client.download(mxc_url)
-            image_bytes = self._download_response_bytes(downloaded)
-            if not image_bytes:
+            media_bytes = self._download_response_bytes(downloaded)
+            if not media_bytes:
                 raise RuntimeError("Matrix download returned no bytes")
-            blob_key = store_blob(image_bytes)
+            blob_key = store_blob(media_bytes)
         except Exception as e:
-            logger.warning(f"[Matrix] Failed to capture image event in {room.room_id}: {e}")
-            return _load_latest_room_image_ref(room.room_id)
+            logger.warning(f"[Matrix] Failed to capture media event in {room.room_id}: {e}")
+            return None
 
         if not mimetype:
-            mimetype = _guess_mime(image_bytes)
-            if not mimetype or not mimetype.startswith("image/"):
-                mimetype = "image/png"
+            guessed = _guess_mime(media_bytes)
+            if guessed:
+                mimetype = guessed
+            else:
+                mimetype = {
+                    "image": "image/png",
+                    "video": "video/mp4",
+                    "audio": "audio/mpeg",
+                    "file": "application/octet-stream",
+                }.get(media_type, "application/octet-stream")
 
         ref = {
+            "type": media_type,
             "blob_key": blob_key,
             "name": name,
             "mimetype": mimetype,
             "source": "matrix_attachment",
             "updated_at": time.time(),
-            "size": len(image_bytes),
+            "size": len(media_bytes),
         }
-        _save_latest_room_image_ref(room.room_id, ref)
+        try:
+            _save_recent_room_media_ref(room.room_id, ref)
+        except Exception:
+            pass
         save_matrix_message(
             room.room_id,
             "user",
             sender,
             {
-                "type": "image",
+                "type": media_type,
                 "name": name,
                 "mimetype": mimetype,
                 "blob_key": blob_key,
-                "size": len(image_bytes),
+                "size": len(media_bytes),
             },
         )
-        return ref
+        if media_type == "image":
+            return ref
+        return None
 
     async def _notify_queue_worker(self):
         while True:
@@ -1357,7 +1379,7 @@ class MatrixPlatform:
 
         system_prompt = build_system_prompt()
         history = load_matrix_history(room.room_id)
-        messages = [{"role": "system", "content": system_prompt}] + history
+        messages = history
         merged_registry, merged_enabled, _collisions = build_agent_registry(
             pr.get_registry_snapshot(),
             get_plugin_enabled,
@@ -1365,21 +1387,15 @@ class MatrixPlatform:
 
         async with self.typing(room.room_id):
             try:
-                _use_agent, active_task_id, _reason = should_use_agent_mode(
-                    user_text=effective_body,
-                    platform="matrix",
-                    scope=room.room_id,
-                    r=redis_client,
-                )
                 origin = {
                     "platform": "matrix",
                     "room_id": room.room_id,
                     "user": sender,
                     "request_id": str(time.time()),
                 }
-                latest_image_ref = _load_latest_room_image_ref(room.room_id)
-                if latest_image_ref:
-                    origin["latest_image_ref"] = latest_image_ref
+                recent_media_refs = _load_recent_room_media_refs(room.room_id, limit=8)
+                if recent_media_refs:
+                    origin["media_refs"] = recent_media_refs
                 origin = {k: v for k, v in origin.items() if v not in (None, "")}
 
                 async def _wait_callback(func_name, plugin_obj):
@@ -1434,7 +1450,8 @@ class MatrixPlatform:
                         )
                     return None
 
-                result = await run_planner_loop(
+                agent_max_rounds, agent_max_tool_calls = resolve_agent_limits(redis_client)
+                result = await run_cerberus_turn(
                     llm_client=llm_client,
                     platform="matrix",
                     history_messages=messages,
@@ -1442,12 +1459,14 @@ class MatrixPlatform:
                     enabled_predicate=merged_enabled,
                     context={"client": self.client, "room": room, "sender": sender, "body": effective_body},
                     user_text=effective_body,
-                    scope=room.room_id,
-                    task_id=active_task_id,
+                    scope=f"room:{room.room_id}",
                     origin=origin,
                     wait_callback=_wait_callback,
                     admin_guard=_admin_guard,
                     redis_client=redis_client,
+                    max_rounds=agent_max_rounds,
+                    max_tool_calls=agent_max_tool_calls,
+                    platform_preamble=system_prompt,
                 )
 
                 final_text = (result.get("text") or "").strip()
@@ -1464,18 +1483,21 @@ class MatrixPlatform:
                         await self._send_media_item(room.room_id, item)
                         item_type = str(item.get("type") or "").strip().lower()
                         item_mime = str(item.get("mimetype") or "").strip().lower()
-                        if item_type == "image" or item_mime.startswith("image/"):
-                            ref = {
-                                "blob_key": str(item.get("blob_key") or "").strip() or None,
-                                "name": str(item.get("name") or "image.png").strip() or "image.png",
-                                "mimetype": item_mime or "image/png",
-                                "source": "matrix_artifact",
-                                "updated_at": time.time(),
-                            }
-                            if not ref.get("blob_key") and isinstance(item.get("bytes"), (bytes, bytearray)):
-                                ref["blob_key"] = store_blob(bytes(item.get("bytes")))
-                            if ref.get("blob_key"):
-                                _save_latest_room_image_ref(room.room_id, ref)
+                        ref = {
+                            "type": item_type or "file",
+                            "blob_key": str(item.get("blob_key") or "").strip() or None,
+                            "name": str(item.get("name") or "output.bin").strip() or "output.bin",
+                            "mimetype": item_mime or "application/octet-stream",
+                            "source": "matrix_artifact",
+                            "updated_at": time.time(),
+                        }
+                        if not ref.get("blob_key") and isinstance(item.get("bytes"), (bytes, bytearray)):
+                            ref["blob_key"] = store_blob(bytes(item.get("bytes")))
+                        if ref.get("blob_key"):
+                            try:
+                                _save_recent_room_media_ref(room.room_id, ref)
+                            except Exception:
+                                pass
 
                 if (final_text or artifacts) and event_id:
                     assistant_summary = final_text or "[Sent attachments]"
@@ -1484,8 +1506,6 @@ class MatrixPlatform:
                         event_id=event_id,
                         user_text=effective_body,
                         assistant_text=assistant_summary,
-                        merged_registry=merged_registry,
-                        merged_enabled=merged_enabled,
                     )
                 return
 
@@ -1508,6 +1528,11 @@ class MatrixPlatform:
             return
         await self._capture_latest_image_from_event(room, event)
 
+    async def on_media(self, room, event):
+        if not self._should_process_event(event):
+            return
+        await self._capture_latest_image_from_event(room, event)
+
     async def on_megolm(self, room, event: MegolmEvent):
         if not self._should_process_event(event):
             return
@@ -1524,6 +1549,9 @@ class MatrixPlatform:
         self.client.add_event_callback(self.on_text, RoomMessageText)
         if RoomMessageImage:
             self.client.add_event_callback(self.on_image, RoomMessageImage)
+        for media_cls in (RoomMessageVideo, RoomMessageAudio, RoomMessageFile):
+            if media_cls:
+                self.client.add_event_callback(self.on_media, media_cls)
         self.client.add_event_callback(self.on_megolm, MegolmEvent)
         if RoomEncryptionEvent:
             self.client.add_event_callback(self.on_room_encryption, RoomEncryptionEvent)

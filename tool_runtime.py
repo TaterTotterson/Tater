@@ -10,6 +10,7 @@ from plugin_kernel import (
     infer_needs_from_plugin,
 )
 from kernel_tools import (
+    ai_tasks,
     read_file,
     search_web,
     search_files,
@@ -79,6 +80,7 @@ META_TOOLS = {
     "truth_get_last",
     "truth_list",
     "send_message",
+    "ai_tasks",
 }
 
 
@@ -110,6 +112,118 @@ def _normalize_creation_payload_args(args: Dict[str, Any]) -> Dict[str, Any]:
         out["code_lines"] = text.splitlines()
         out.pop("code", None)
     return out
+
+
+def _coerce_memory_entries(args: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(args, dict):
+        return {}
+
+    direct_entries = args.get("entries")
+    if isinstance(direct_entries, dict) and direct_entries:
+        return dict(direct_entries)
+
+    values = args.get("values")
+    if isinstance(values, dict) and values:
+        return dict(values)
+
+    memory_obj = args.get("memory")
+    if isinstance(memory_obj, dict) and memory_obj:
+        return dict(memory_obj)
+
+    entry_obj = args.get("entry")
+    if isinstance(entry_obj, dict) and entry_obj:
+        entry_key = str(entry_obj.get("key") or "").strip()
+        if entry_key:
+            return {entry_key: entry_obj.get("value")}
+        # If no explicit key/value shape, accept dict payload directly.
+        return dict(entry_obj)
+
+    out: Dict[str, Any] = {}
+    items = args.get("items")
+    if isinstance(items, list):
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item_key = str(item.get("key") or "").strip()
+            if not item_key:
+                continue
+            out[item_key] = item.get("value")
+    if out:
+        return out
+
+    key_name = str(args.get("key") or args.get("memory_key") or "").strip()
+    if key_name:
+        if "value" in args:
+            return {key_name: args.get("value")}
+        if "memory_value" in args:
+            return {key_name: args.get("memory_value")}
+
+    return {}
+
+
+_MEMORY_SCOPE_GLOBAL_HINTS = (
+    "for everyone",
+    "for all users",
+    "all users",
+    "global",
+)
+_MEMORY_SCOPE_ROOM_HINTS = (
+    "this room",
+    "this channel",
+    "this chat",
+    "in this room",
+    "in this channel",
+    "in this chat",
+    "for this room",
+    "for this channel",
+    "for this chat",
+)
+
+
+def _origin_text(origin: Any, *keys: str) -> str:
+    if not isinstance(origin, dict):
+        return ""
+    for key in keys:
+        value = str(origin.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _resolve_memory_scope(args: Dict[str, Any], origin: Optional[Dict[str, Any]]) -> str:
+    raw_scope = str(args.get("scope") or "").strip().lower()
+    if raw_scope in {"global", "user", "room"}:
+        return raw_scope
+    if raw_scope:
+        # Preserve invalid explicit values so kernel validation can return a useful error.
+        return raw_scope
+
+    args_origin = args.get("origin") if isinstance(args.get("origin"), dict) else None
+    merged_origin = dict(origin or {})
+    if isinstance(args_origin, dict):
+        merged_origin.update(args_origin)
+
+    request_text = str(
+        args.get("request_text")
+        or merged_origin.get("request_text")
+        or ""
+    ).strip().lower()
+    if request_text:
+        if any(marker in request_text for marker in _MEMORY_SCOPE_GLOBAL_HINTS):
+            return "global"
+        if any(marker in request_text for marker in _MEMORY_SCOPE_ROOM_HINTS):
+            return "room"
+
+    if str(args.get("user_id") or "").strip():
+        return "user"
+    if str(args.get("room_id") or "").strip():
+        return "room"
+
+    if _origin_text(merged_origin, "user_id", "user", "username", "sender"):
+        return "user"
+    if _origin_text(merged_origin, "room_id", "room", "channel_id", "channel", "chat_id", "scope"):
+        return "room"
+    return "global"
 
 
 def is_meta_tool(name: Optional[str]) -> bool:
@@ -169,8 +283,11 @@ def run_meta_tool(
                     "name",
                     "mimetype",
                     "type",
-                    "use_latest_image",
+                    "use_latest_media",
+                    "use_recent_media",
                     "image_ref",
+                    "media_ref",
+                    "media_refs",
                 ],
                 "when_to_use": (
                     "Use for sending outbound notifications/messages (including image/audio/video/file attachments) "
@@ -187,6 +304,49 @@ def run_meta_tool(
                     "{\"function\":\"send_message\",\"arguments\":{\"platform\":\"telegram\",\"targets\":{\"chat_id\":\"@tater\"},\"message\":\"hello\"}}",
                 ],
             }
+        if plugin_id == "ai_tasks":
+            return {
+                "tool": "get_plugin_help",
+                "ok": True,
+                "plugin_id": "ai_tasks",
+                "name": "AI Tasks (Kernel Tool)",
+                "description": (
+                    "Schedule one-off or recurring AI tasks that run later and deliver results "
+                    "to supported notifier platforms."
+                ),
+                "supported_platforms": ["webui", "discord", "irc", "matrix", "telegram", "homeassistant", "automation"],
+                "required_settings": [],
+                "required_args": ["message"],
+                "optional_args": [
+                    "task_prompt",
+                    "title",
+                    "platform",
+                    "targets",
+                    "when_ts",
+                    "when",
+                    "in_seconds",
+                    "in_minutes",
+                    "in_hours",
+                    "every_seconds",
+                    "every_minutes",
+                    "every_hours",
+                    "priority",
+                    "tags",
+                    "ttl_sec",
+                    "origin",
+                    "channel_id",
+                    "channel",
+                    "guild_id",
+                    "room_id",
+                    "device_service",
+                    "chat_id",
+                ],
+                "when_to_use": "Use to schedule AI tasks/reminders to run at a specific time or recurrence.",
+                "usage_example": (
+                    "{\"function\":\"ai_tasks\",\"arguments\":{\"message\":\"Post daily summary\","
+                    "\"when\":\"6am every day\",\"platform\":\"discord\",\"targets\":{\"channel\":\"#ops\"}}}"
+                ),
+            }
         return get_plugin_help(
             plugin_id=plugin_id,
             platform=args.get("platform") or platform,
@@ -200,6 +360,8 @@ def run_meta_tool(
             url=args.get("url"),
             blob_key=args.get("blob_key"),
             file_id=args.get("file_id"),
+            media_ref=args.get("media_ref") if isinstance(args.get("media_ref"), dict) else None,
+            media_refs=args.get("media_refs") if isinstance(args.get("media_refs"), list) else None,
             image_ref=args.get("image_ref") if isinstance(args.get("image_ref"), dict) else None,
             history_key=args.get("history_key"),
             platform=args.get("platform") or platform,
@@ -274,6 +436,8 @@ def run_meta_tool(
             timeout_sec=int(args.get("timeout_sec") or 20),
             max_links=int(args.get("max_links") or 20),
             max_images=int(args.get("max_images") or 20),
+            platform=platform,
+            origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
         )
     if func == "download_file":
         return download_file(
@@ -282,6 +446,8 @@ def run_meta_tool(
             subdir=args.get("subdir"),
             max_bytes=int(args.get("max_bytes") or 25000000),
             timeout_sec=int(args.get("timeout_sec") or 30),
+            platform=platform,
+            origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
         )
     if func == "list_archive":
         return list_archive(
@@ -441,10 +607,11 @@ def run_meta_tool(
             if isinstance(raw_include, str)
             else bool(raw_include)
         )
+        scope_value = _resolve_memory_scope(args, origin)
         return memory_get(
             keys=args.get("keys"),
             prefix=args.get("prefix"),
-            scope=str(args.get("scope") or "global"),
+            scope=scope_value,
             user_id=args.get("user_id"),
             room_id=args.get("room_id"),
             platform=args.get("platform") or platform,
@@ -453,31 +620,37 @@ def run_meta_tool(
             origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
         )
     if func == "memory_set":
-        entries = args.get("entries")
-        if not isinstance(entries, dict):
-            entries = args.get("values") if isinstance(args.get("values"), dict) else {}
+        entries = _coerce_memory_entries(args)
         raw_confirmed = args.get("confirmed", False)
         confirmed = (
             raw_confirmed.strip().lower() in {"1", "true", "yes", "on"}
             if isinstance(raw_confirmed, str)
             else bool(raw_confirmed)
         )
+        request_text = args.get("request_text")
+        if not str(request_text or "").strip():
+            if isinstance(args.get("origin"), dict):
+                request_text = args["origin"].get("request_text")
+            if (not str(request_text or "").strip()) and isinstance(origin, dict):
+                request_text = origin.get("request_text")
+        scope_value = _resolve_memory_scope(args, origin)
         return memory_set(
             entries=entries,
-            scope=str(args.get("scope") or "global"),
+            scope=scope_value,
             user_id=args.get("user_id"),
             room_id=args.get("room_id"),
             platform=args.get("platform") or platform,
             ttl_sec=args.get("ttl_sec"),
             source=args.get("source"),
-            request_text=args.get("request_text"),
+            request_text=request_text,
             confirmed=confirmed,
             origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
         )
     if func == "memory_list":
+        scope_value = _resolve_memory_scope(args, origin)
         return memory_list(
             prefix=args.get("prefix"),
-            scope=str(args.get("scope") or "global"),
+            scope=scope_value,
             user_id=args.get("user_id"),
             room_id=args.get("room_id"),
             platform=args.get("platform") or platform,
@@ -485,9 +658,10 @@ def run_meta_tool(
             origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
         )
     if func == "memory_delete":
+        scope_value = _resolve_memory_scope(args, origin)
         return memory_delete(
             keys=args.get("keys"),
-            scope=str(args.get("scope") or "global"),
+            scope=scope_value,
             user_id=args.get("user_id"),
             room_id=args.get("room_id"),
             platform=args.get("platform") or platform,
@@ -557,8 +731,37 @@ def run_meta_tool(
             name=args.get("name"),
             mimetype=args.get("mimetype"),
             media_type=args.get("type") or args.get("media_type"),
-            use_latest_image=args.get("use_latest_image") or args.get("attach_latest_image"),
+            use_latest_media=args.get("use_latest_media") or args.get("use_recent_media"),
+            media_ref=args.get("media_ref") if isinstance(args.get("media_ref"), dict) else None,
+            media_refs=args.get("media_refs") if isinstance(args.get("media_refs"), list) else None,
             image_ref=args.get("image_ref") if isinstance(args.get("image_ref"), dict) else None,
+        )
+    if func == "ai_tasks":
+        return ai_tasks(
+            message=args.get("message"),
+            content=args.get("content"),
+            task_prompt=args.get("task_prompt"),
+            title=args.get("title"),
+            platform=args.get("platform") or platform,
+            targets=args.get("targets"),
+            when_ts=args.get("when_ts"),
+            when=args.get("when"),
+            in_seconds=args.get("in_seconds"),
+            every_seconds=args.get("every_seconds"),
+            in_minutes=args.get("in_minutes"),
+            in_hours=args.get("in_hours"),
+            every_minutes=args.get("every_minutes"),
+            every_hours=args.get("every_hours"),
+            priority=args.get("priority"),
+            tags=args.get("tags"),
+            ttl_sec=args.get("ttl_sec"),
+            origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
+            channel_id=args.get("channel_id"),
+            channel=args.get("channel"),
+            guild_id=args.get("guild_id"),
+            room_id=args.get("room_id"),
+            device_service=args.get("device_service"),
+            chat_id=args.get("chat_id"),
         )
     if func == "truth_get_last":
         return truth_get_last(
@@ -663,6 +866,53 @@ def _needs_request_arg(needs: Any) -> bool:
     return False
 
 
+def _required_arg_names(plugin: Any) -> list[str]:
+    raw = getattr(plugin, "required_args", None)
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for item in raw:
+        text = str(item or "").strip().lower()
+        if text:
+            out.append(text)
+    return out
+
+
+def _has_non_empty_arg(args: Dict[str, Any], key: str) -> bool:
+    if key not in args:
+        return False
+    value = args.get(key)
+    if isinstance(value, str):
+        return bool(value.strip())
+    if value is None:
+        return False
+    return True
+
+
+def _autofill_textual_required_args(plugin: Any, args: Dict[str, Any], context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    If planner omitted required text-like args (query/prompt/etc), copy the user's
+    request text from context so execution can proceed instead of looping on
+    clarification.
+    """
+    request_text = _extract_request_text(context).strip()
+    if not request_text:
+        return args
+
+    required = _required_arg_names(plugin)
+    if not required:
+        return args
+
+    text_keys = {"query", "request", "prompt", "text", "content", "message"}
+    for key in required:
+        if key not in text_keys:
+            continue
+        if _has_non_empty_arg(args, key):
+            continue
+        args[key] = request_text
+    return args
+
+
 def _autofill_request_arg(plugin: Any, args: Dict[str, Any], context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     try:
         needs = infer_needs_from_plugin(plugin)
@@ -753,6 +1003,7 @@ async def execute_plugin_call(
 
     args = dict(args or {})
     args = _autofill_request_arg(plugin, args, context)
+    args = _autofill_textual_required_args(plugin, args, context)
 
     if enabled_predicate and not enabled_predicate(func):
         return {

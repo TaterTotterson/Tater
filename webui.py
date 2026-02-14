@@ -19,10 +19,12 @@ import feedparser
 import plugin_registry as plugin_registry_mod
 from urllib.parse import urljoin
 from datetime import datetime
+from typing import Any, Dict, List, Optional
 from PIL import Image
 from io import BytesIO
 from platform_registry import platform_registry
 from plugin_loader import load_plugins_from_directory
+from plugin_kernel import normalize_platform
 from helpers import (
     run_async,
     set_main_loop,
@@ -52,20 +54,40 @@ from kernel_tools import (
     validate_platform,
     delete_file,
     memory_list,
+    memory_delete,
 )
-from planner_loop import (
-    should_use_agent_mode,
-    run_planner_loop,
+from cerberus import (
+    run_cerberus_turn,
+    resolve_agent_limits,
     DEFAULT_MAX_ROUNDS,
     DEFAULT_MAX_TOOL_CALLS,
+    DEFAULT_AGENT_STATE_TTL_SECONDS,
+    DEFAULT_PLANNER_MAX_TOKENS,
+    DEFAULT_CHECKER_MAX_TOKENS,
+    DEFAULT_DOER_MAX_TOKENS,
+    DEFAULT_TOOL_REPAIR_MAX_TOKENS,
+    DEFAULT_OVERCLAR_REPAIR_MAX_TOKENS,
+    DEFAULT_SEND_REPAIR_MAX_TOKENS,
+    DEFAULT_RECOVERY_MAX_TOKENS,
+    DEFAULT_MAX_LEDGER_ITEMS,
     AGENT_MAX_ROUNDS_KEY,
     AGENT_MAX_TOOL_CALLS_KEY,
+    CERBERUS_AGENT_STATE_TTL_SECONDS_KEY,
+    CERBERUS_PLANNER_MAX_TOKENS_KEY,
+    CERBERUS_CHECKER_MAX_TOKENS_KEY,
+    CERBERUS_DOER_MAX_TOKENS_KEY,
+    CERBERUS_TOOL_REPAIR_MAX_TOKENS_KEY,
+    CERBERUS_OVERCLAR_REPAIR_MAX_TOKENS_KEY,
+    CERBERUS_SEND_REPAIR_MAX_TOKENS_KEY,
+    CERBERUS_RECOVERY_MAX_TOKENS_KEY,
+    CERBERUS_MAX_LEDGER_ITEMS_KEY,
 )
 from vision_settings import (
     get_vision_settings as get_shared_vision_settings,
     save_vision_settings as save_shared_vision_settings,
 )
-from latest_image_ref import load_latest_image_ref, save_latest_image_ref
+from conversation_media_refs import load_recent_media_refs, save_media_ref
+from emoji_responder import get_emoji_settings as get_core_emoji_settings, save_emoji_settings as save_core_emoji_settings
 
 # Remove any prior handlers
 for handler in logging.root.handlers[:]:
@@ -859,47 +881,63 @@ def save_message(role, username, content):
         redis_client.ltrim(history_key, -max_store, -1)
 
 
-def _extract_image_ref(content):
+def _media_type_from_mimetype(mimetype: str) -> str:
+    mm = str(mimetype or "").strip().lower()
+    if mm.startswith("image/"):
+        return "image"
+    if mm.startswith("audio/"):
+        return "audio"
+    if mm.startswith("video/"):
+        return "video"
+    return "file"
+
+
+def _extract_media_refs(content):
     if isinstance(content, dict) and content.get("marker") == "plugin_response":
-        return _extract_image_ref(content.get("content"))
+        return _extract_media_refs(content.get("content"))
     if isinstance(content, list):
+        refs = []
         for item in content:
-            ref = _extract_image_ref(item)
-            if ref:
-                return ref
-        return None
+            refs.extend(_extract_media_refs(item))
+        return refs
     if not isinstance(content, dict):
-        return None
+        return []
 
     media_type = str(content.get("type") or "").strip().lower()
     mimetype = str(content.get("mimetype") or "").strip().lower()
-    is_image = media_type == "image" or mimetype.startswith("image/")
-    if not is_image:
-        return None
+    inferred_type = media_type if media_type in {"image", "audio", "video", "file"} else _media_type_from_mimetype(mimetype)
+    if inferred_type not in {"image", "audio", "video", "file"}:
+        return []
 
     ref = {
+        "type": inferred_type,
         "file_id": str(content.get("id") or "").strip() or None,
         "blob_key": str(content.get("blob_key") or "").strip() or None,
-        "name": str(content.get("name") or "image.png").strip() or "image.png",
-        "mimetype": mimetype or "image/png",
+        "name": str(content.get("name") or f"{inferred_type}.bin").strip() or f"{inferred_type}.bin",
+        "mimetype": mimetype or "application/octet-stream",
         "source": "webui",
         "updated_at": time.time(),
     }
     if not ref.get("file_id") and not ref.get("blob_key"):
-        return None
-    return ref
+        return []
+    return [ref]
 
 
-def _save_latest_webui_image_ref(content):
-    ref = _extract_image_ref(content)
-    if not ref:
+def _save_recent_webui_media_refs(content):
+    refs = _extract_media_refs(content)
+    if not refs:
         return
-    save_latest_image_ref(
-        redis_client,
-        platform="webui",
-        scope=WEBUI_IMAGE_SCOPE,
-        ref=ref,
-    )
+    for ref in refs:
+        try:
+            save_media_ref(
+                redis_client,
+                platform="webui",
+                scope=WEBUI_IMAGE_SCOPE,
+                ref=ref,
+            )
+        except Exception:
+            continue
+
 
 def load_chat_history_tail(n: int):
     if n <= 0:
@@ -992,6 +1030,42 @@ def get_vision_settings():
 
 def save_vision_settings(api_base: str, model: str, api_key: str) -> None:
     save_shared_vision_settings(api_base=api_base, model=model, api_key=api_key)
+
+
+def get_emoji_responder_settings() -> Dict[str, Any]:
+    settings = get_core_emoji_settings() or {}
+    return {
+        "enable_on_reaction_add": bool(settings.get("enable_on_reaction_add", True)),
+        "enable_auto_reaction_on_reply": bool(settings.get("enable_auto_reaction_on_reply", True)),
+        "reaction_chain_chance_percent": int(settings.get("reaction_chain_chance_percent", 100)),
+        "reply_reaction_chance_percent": int(settings.get("reply_reaction_chance_percent", 12)),
+        "reaction_chain_cooldown_seconds": int(settings.get("reaction_chain_cooldown_seconds", 30)),
+        "reply_reaction_cooldown_seconds": int(settings.get("reply_reaction_cooldown_seconds", 120)),
+        "min_message_length": int(settings.get("min_message_length", 4)),
+    }
+
+
+def save_emoji_responder_settings(
+    *,
+    enable_on_reaction_add: bool,
+    enable_auto_reaction_on_reply: bool,
+    reaction_chain_chance_percent: int,
+    reply_reaction_chance_percent: int,
+    reaction_chain_cooldown_seconds: int,
+    reply_reaction_cooldown_seconds: int,
+    min_message_length: int,
+) -> None:
+    save_core_emoji_settings(
+        {
+            "enable_on_reaction_add": bool(enable_on_reaction_add),
+            "enable_auto_reaction_on_reply": bool(enable_auto_reaction_on_reply),
+            "reaction_chain_chance_percent": max(0, min(100, int(reaction_chain_chance_percent))),
+            "reply_reaction_chance_percent": max(0, min(100, int(reply_reaction_chance_percent))),
+            "reaction_chain_cooldown_seconds": max(0, min(86_400, int(reaction_chain_cooldown_seconds))),
+            "reply_reaction_cooldown_seconds": max(0, min(86_400, int(reply_reaction_cooldown_seconds))),
+            "min_message_length": max(0, min(200, int(min_message_length))),
+        }
+    )
 
 
 def render_plugin_controls(plugin_name, label=None):
@@ -2143,6 +2217,64 @@ def render_web_search_settings():
         st.success("Web Search settings updated.")
 
 
+def _memory_scope_discovery() -> Dict[str, Any]:
+    users: set[str] = set()
+    rooms_by_platform: Dict[str, set[str]] = {}
+
+    try:
+        global_entries = int(redis_client.hlen("tater:memory:global") or 0)
+    except Exception:
+        global_entries = 0
+
+    try:
+        for raw_key in redis_client.scan_iter(match="tater:memory:user:*", count=200):
+            key = str(raw_key or "").strip()
+            if not key:
+                continue
+            user_id = key.split("tater:memory:user:", 1)[-1].strip()
+            if not user_id:
+                continue
+            try:
+                if int(redis_client.hlen(key) or 0) <= 0:
+                    continue
+            except Exception:
+                continue
+            users.add(user_id)
+    except Exception:
+        pass
+
+    try:
+        for raw_key in redis_client.scan_iter(match="tater:memory:room:*", count=200):
+            key = str(raw_key or "").strip()
+            if not key:
+                continue
+            payload = key.split("tater:memory:room:", 1)[-1].strip()
+            platform_name, sep, room_id = payload.partition(":")
+            if not sep:
+                continue
+            platform_name = (platform_name or "webui").strip()
+            room_id = room_id.strip()
+            if not room_id:
+                continue
+            try:
+                if int(redis_client.hlen(key) or 0) <= 0:
+                    continue
+            except Exception:
+                continue
+            rooms_by_platform.setdefault(platform_name, set()).add(room_id)
+    except Exception:
+        pass
+
+    room_options = {platform: sorted(room_ids) for platform, room_ids in rooms_by_platform.items()}
+    room_count = sum(len(room_ids) for room_ids in room_options.values())
+    return {
+        "global_entries": global_entries,
+        "users": sorted(users),
+        "room_options": room_options,
+        "room_count": room_count,
+    }
+
+
 def render_memory_settings():
     st.subheader("Memory")
     st.caption("Manage durable memory behavior and inspect stored memory entries.")
@@ -2180,6 +2312,21 @@ def render_memory_settings():
 
     st.markdown("---")
     st.caption("Inspect stored memory entries.")
+    scope_discovery = _memory_scope_discovery()
+    if (
+        int(scope_discovery.get("global_entries", 0) or 0) <= 0
+        and not scope_discovery.get("users")
+        and int(scope_discovery.get("room_count", 0) or 0) <= 0
+    ):
+        st.info("No stored memory entries found yet. Ask Tater to remember something, then inspect again.")
+    else:
+        st.caption(
+            "Detected scopes: "
+            f"global entries={int(scope_discovery.get('global_entries', 0) or 0)}, "
+            f"user scopes={len(scope_discovery.get('users') or [])}, "
+            f"room scopes={int(scope_discovery.get('room_count', 0) or 0)}."
+        )
+
     inspect_scope = st.selectbox(
         "Inspect Scope",
         options=["global", "user", "room"],
@@ -2199,41 +2346,102 @@ def render_memory_settings():
     inspect_user_id = None
     inspect_room_id = None
     inspect_platform = "webui"
+    can_inspect = True
     if inspect_scope == "user":
-        inspect_user_id = st.text_input(
-            "User Id",
-            value=(get_chat_settings().get("username") or "User"),
-            key="memory_inspect_user_id",
-        ).strip()
+        stored_user_ids = list(scope_discovery.get("users") or [])
+        if stored_user_ids:
+            inspect_user_id = st.selectbox(
+                "Stored User Ids",
+                options=stored_user_ids,
+                key="memory_inspect_user_select",
+            )
+        else:
+            can_inspect = False
+            st.info("No stored user scopes found yet.")
     elif inspect_scope == "room":
-        inspect_platform = st.text_input(
-            "Room Platform",
-            value="webui",
-            key="memory_inspect_platform",
-        ).strip() or "webui"
-        inspect_room_id = st.text_input(
-            "Room Id",
-            value="chat",
-            key="memory_inspect_room_id",
-        ).strip() or "chat"
+        room_options_by_platform = dict(scope_discovery.get("room_options") or {})
+        if room_options_by_platform:
+            platform_options = sorted(room_options_by_platform.keys())
+            if "webui" in platform_options:
+                platform_options.remove("webui")
+                platform_options.insert(0, "webui")
+            inspect_platform = st.selectbox(
+                "Stored Room Platforms",
+                options=platform_options,
+                key="memory_inspect_platform_select",
+            )
+            room_options = list(room_options_by_platform.get(inspect_platform) or [])
+            if room_options:
+                inspect_room_id = st.selectbox(
+                    "Stored Room Ids",
+                    options=room_options,
+                    key="memory_inspect_room_select",
+                )
+            else:
+                can_inspect = False
+                st.info("No stored room ids found for the selected platform.")
+        else:
+            can_inspect = False
+            st.info("No stored room scopes found yet.")
 
-    snapshot = memory_list(
-        prefix=inspect_prefix or None,
-        scope=inspect_scope,
-        user_id=inspect_user_id,
-        room_id=inspect_room_id,
-        platform=inspect_platform,
-        limit=int(inspect_limit),
-    )
-
-    if snapshot.get("ok"):
-        st.caption(
-            f"Showing {snapshot.get('count', 0)} of {snapshot.get('total_count', 0)} entries "
-            f"for `{snapshot.get('scope', inspect_scope)}` scope."
+    if can_inspect:
+        snapshot = memory_list(
+            prefix=inspect_prefix or None,
+            scope=inspect_scope,
+            user_id=inspect_user_id,
+            room_id=inspect_room_id,
+            platform=inspect_platform,
+            limit=int(inspect_limit),
         )
-        st.json(snapshot.get("items", []))
-    else:
-        st.error(snapshot.get("error") or "Unable to load memory entries.")
+
+        if snapshot.get("ok"):
+            st.caption(
+                f"Showing {snapshot.get('count', 0)} of {snapshot.get('total_count', 0)} entries "
+                f"for `{snapshot.get('scope', inspect_scope)}` scope."
+            )
+            if int(snapshot.get("total_count", 0) or 0) <= 0:
+                st.info("No entries found for this scope/filter.")
+            else:
+                items = snapshot.get("items", [])
+                st.json(items)
+
+                key_options = []
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    key_name = str(item.get("key") or "").strip()
+                    if key_name and key_name not in key_options:
+                        key_options.append(key_name)
+
+                if key_options:
+                    st.markdown("Remove memory entries")
+                    selected_delete_keys = st.multiselect(
+                        "Select keys to delete",
+                        options=key_options,
+                        key=f"memory_delete_keys_{inspect_scope}",
+                    )
+                    if st.button(
+                        "Delete Selected Memory Entries",
+                        key=f"memory_delete_selected_{inspect_scope}",
+                        disabled=not selected_delete_keys,
+                    ):
+                        delete_result = memory_delete(
+                            keys=selected_delete_keys,
+                            scope=inspect_scope,
+                            user_id=inspect_user_id,
+                            room_id=inspect_room_id,
+                            platform=inspect_platform,
+                        )
+                        if delete_result.get("ok"):
+                            st.success(
+                                f"Deleted {int(delete_result.get('deleted') or 0)} memory entr"
+                                f"{'y' if int(delete_result.get('deleted') or 0) == 1 else 'ies'}."
+                            )
+                            st.rerun()
+                        else:
+                            st.error(delete_result.get("error") or "Failed to delete memory entries.")
+        else:
+            st.error(snapshot.get("error") or "Unable to load memory entries.")
 
 
 def render_homeassistant_settings():
@@ -2288,6 +2496,91 @@ def render_vision_settings():
         st.success("Vision settings updated.")
 
 
+def render_emoji_responder_settings():
+    st.subheader("Emoji Responder Settings")
+    settings = get_emoji_responder_settings()
+
+    enable_on_reaction_add = st.checkbox(
+        "Enable reaction-chain mode (Discord)",
+        value=bool(settings["enable_on_reaction_add"]),
+        help="When a user reacts to a Discord message, optionally add one matching emoji reaction.",
+        key="emoji_enable_on_reaction_add",
+    )
+    enable_auto_reaction_on_reply = st.checkbox(
+        "Enable auto reactions on replies",
+        value=bool(settings["enable_auto_reaction_on_reply"]),
+        help="When the assistant replies on Discord/Telegram/Matrix, occasionally add a matching emoji reaction.",
+        key="emoji_enable_auto_reaction_on_reply",
+    )
+    reaction_chain_chance_percent = int(
+        st.number_input(
+            "Reaction-chain chance (%)",
+            min_value=0,
+            max_value=100,
+            value=int(settings["reaction_chain_chance_percent"]),
+            step=1,
+            format="%d",
+            key="emoji_reaction_chain_chance_percent",
+        )
+    )
+    reply_reaction_chance_percent = int(
+        st.number_input(
+            "Reply reaction chance (%)",
+            min_value=0,
+            max_value=100,
+            value=int(settings["reply_reaction_chance_percent"]),
+            step=1,
+            format="%d",
+            key="emoji_reply_reaction_chance_percent",
+        )
+    )
+    reaction_chain_cooldown_seconds = int(
+        st.number_input(
+            "Reaction-chain cooldown (seconds)",
+            min_value=0,
+            max_value=86_400,
+            value=int(settings["reaction_chain_cooldown_seconds"]),
+            step=1,
+            format="%d",
+            key="emoji_reaction_chain_cooldown_seconds",
+        )
+    )
+    reply_reaction_cooldown_seconds = int(
+        st.number_input(
+            "Reply reaction cooldown (seconds)",
+            min_value=0,
+            max_value=86_400,
+            value=int(settings["reply_reaction_cooldown_seconds"]),
+            step=1,
+            format="%d",
+            key="emoji_reply_reaction_cooldown_seconds",
+        )
+    )
+    min_message_length = int(
+        st.number_input(
+            "Minimum message length",
+            min_value=0,
+            max_value=200,
+            value=int(settings["min_message_length"]),
+            step=1,
+            format="%d",
+            key="emoji_min_message_length",
+        )
+    )
+
+    if st.button("Save Emoji Settings", key="save_emoji_settings"):
+        save_emoji_responder_settings(
+            enable_on_reaction_add=enable_on_reaction_add,
+            enable_auto_reaction_on_reply=enable_auto_reaction_on_reply,
+            reaction_chain_chance_percent=reaction_chain_chance_percent,
+            reply_reaction_chance_percent=reply_reaction_chance_percent,
+            reaction_chain_cooldown_seconds=reaction_chain_cooldown_seconds,
+            reply_reaction_cooldown_seconds=reply_reaction_cooldown_seconds,
+            min_message_length=min_message_length,
+        )
+        st.success("Emoji settings updated.")
+
+
 def render_tater_settings():
     def _read_non_negative_int_setting(key: str, default: int) -> int:
         raw = redis_client.get(key)
@@ -2302,8 +2595,6 @@ def render_tater_settings():
     st.subheader(f"{first_name} Settings")
     stored_count = _read_non_negative_int_setting("tater:max_store", 20)
     llm_count = max(1, _read_non_negative_int_setting("tater:max_llm", 8))
-    agent_round_limit = _read_non_negative_int_setting(AGENT_MAX_ROUNDS_KEY, DEFAULT_MAX_ROUNDS)
-    agent_tool_limit = _read_non_negative_int_setting(AGENT_MAX_TOOL_CALLS_KEY, DEFAULT_MAX_TOOL_CALLS)
     default_first = redis_client.get("tater:first_name") or first_name
     default_last = redis_client.get("tater:last_name") or last_name
     default_personality = redis_client.get("tater:personality") or ""
@@ -2348,21 +2639,6 @@ def render_tater_settings():
     new_llm = st.number_input("Messages Sent to LLM", min_value=1, value=llm_count, key="tater_llm_limit")
     if new_store > 0 and new_llm > new_store:
         st.warning("⚠️ You're trying to send more messages to LLM than you’re storing. Consider increasing Max Stored Messages.")
-    new_agent_rounds = st.number_input(
-        "Agent Max Rounds (0 = unlimited)",
-        min_value=0,
-        value=agent_round_limit,
-        key="tater_agent_max_rounds",
-    )
-    new_agent_tool_calls = st.number_input(
-        "Agent Max Tool Calls (0 = unlimited)",
-        min_value=0,
-        value=agent_tool_limit,
-        key="tater_agent_max_tool_calls",
-    )
-    st.caption("These limits apply to planner runs across all platforms.")
-    if new_agent_rounds == 0 or new_agent_tool_calls == 0:
-        st.warning("⚠️ Unlimited planner limits are enabled. Long-running loops may increase cost and latency.")
     creation_explicit_only = st.checkbox(
         "Require explicit create wording for plugin/platform creation",
         value=creation_explicit_default,
@@ -2379,8 +2655,6 @@ def render_tater_settings():
     if st.button("Save Tater Settings", key="save_tater_settings"):
         redis_client.set("tater:max_store", new_store)
         redis_client.set("tater:max_llm", new_llm)
-        redis_client.set(AGENT_MAX_ROUNDS_KEY, int(new_agent_rounds))
-        redis_client.set(AGENT_MAX_TOOL_CALLS_KEY, int(new_agent_tool_calls))
         redis_client.set("tater:first_name", first_input)
         redis_client.set("tater:last_name", last_input)
         redis_client.set("tater:personality", personality_input)
@@ -2390,6 +2664,200 @@ def render_tater_settings():
         )
         st.success("Tater settings updated.")
         st.rerun()
+
+
+def render_cerberus_settings():
+    def _read_non_negative_int_setting(key: str, default: int) -> int:
+        raw = redis_client.get(key)
+        if isinstance(raw, (bytes, bytearray)):
+            try:
+                raw = raw.decode("utf-8", errors="ignore")
+            except Exception:
+                raw = None
+        try:
+            value = int(str(raw).strip()) if raw is not None else int(default)
+        except Exception:
+            value = int(default)
+        if value < 0:
+            return 0
+        return value
+
+    def _read_positive_int_setting(key: str, default: int) -> int:
+        value = _read_non_negative_int_setting(key, default)
+        if value <= 0:
+            return int(default)
+        return value
+
+    st.subheader("Cerberus")
+    st.caption("Planner / Doer / Critic runtime limits and token budgets.")
+
+    max_rounds = _read_non_negative_int_setting(AGENT_MAX_ROUNDS_KEY, DEFAULT_MAX_ROUNDS)
+    max_tool_calls = _read_non_negative_int_setting(AGENT_MAX_TOOL_CALLS_KEY, DEFAULT_MAX_TOOL_CALLS)
+    state_ttl_seconds = _read_non_negative_int_setting(
+        CERBERUS_AGENT_STATE_TTL_SECONDS_KEY,
+        DEFAULT_AGENT_STATE_TTL_SECONDS,
+    )
+    planner_max_tokens = _read_positive_int_setting(
+        CERBERUS_PLANNER_MAX_TOKENS_KEY,
+        DEFAULT_PLANNER_MAX_TOKENS,
+    )
+    checker_max_tokens = _read_positive_int_setting(
+        CERBERUS_CHECKER_MAX_TOKENS_KEY,
+        DEFAULT_CHECKER_MAX_TOKENS,
+    )
+    doer_max_tokens = _read_positive_int_setting(
+        CERBERUS_DOER_MAX_TOKENS_KEY,
+        DEFAULT_DOER_MAX_TOKENS,
+    )
+    tool_repair_max_tokens = _read_positive_int_setting(
+        CERBERUS_TOOL_REPAIR_MAX_TOKENS_KEY,
+        DEFAULT_TOOL_REPAIR_MAX_TOKENS,
+    )
+    overclar_repair_max_tokens = _read_positive_int_setting(
+        CERBERUS_OVERCLAR_REPAIR_MAX_TOKENS_KEY,
+        DEFAULT_OVERCLAR_REPAIR_MAX_TOKENS,
+    )
+    send_repair_max_tokens = _read_positive_int_setting(
+        CERBERUS_SEND_REPAIR_MAX_TOKENS_KEY,
+        DEFAULT_SEND_REPAIR_MAX_TOKENS,
+    )
+    recovery_max_tokens = _read_positive_int_setting(
+        CERBERUS_RECOVERY_MAX_TOKENS_KEY,
+        DEFAULT_RECOVERY_MAX_TOKENS,
+    )
+    max_ledger_items = _read_positive_int_setting(
+        CERBERUS_MAX_LEDGER_ITEMS_KEY,
+        DEFAULT_MAX_LEDGER_ITEMS,
+    )
+
+    new_max_rounds = int(
+        st.number_input(
+            "Agent Max Rounds (0 = unlimited)",
+            min_value=0,
+            value=max_rounds,
+            step=1,
+            format="%d",
+            key="cerberus_max_rounds",
+        )
+    )
+    new_max_tool_calls = int(
+        st.number_input(
+            "Agent Max Tool Calls (0 = unlimited)",
+            min_value=0,
+            value=max_tool_calls,
+            step=1,
+            format="%d",
+            key="cerberus_max_tool_calls",
+        )
+    )
+    new_state_ttl_seconds = int(
+        st.number_input(
+            "Agent State TTL Seconds (0 = no TTL)",
+            min_value=0,
+            value=state_ttl_seconds,
+            step=60,
+            format="%d",
+            key="cerberus_agent_state_ttl_seconds",
+        )
+    )
+    new_planner_max_tokens = int(
+        st.number_input(
+            "Planner Max Tokens",
+            min_value=1,
+            value=planner_max_tokens,
+            step=10,
+            format="%d",
+            key="cerberus_planner_max_tokens",
+        )
+    )
+    new_checker_max_tokens = int(
+        st.number_input(
+            "Checker Max Tokens",
+            min_value=1,
+            value=checker_max_tokens,
+            step=10,
+            format="%d",
+            key="cerberus_checker_max_tokens",
+        )
+    )
+    new_doer_max_tokens = int(
+        st.number_input(
+            "Doer Max Tokens",
+            min_value=1,
+            value=doer_max_tokens,
+            step=10,
+            format="%d",
+            key="cerberus_doer_max_tokens",
+        )
+    )
+    new_tool_repair_max_tokens = int(
+        st.number_input(
+            "Tool-Repair Max Tokens",
+            min_value=1,
+            value=tool_repair_max_tokens,
+            step=10,
+            format="%d",
+            key="cerberus_tool_repair_max_tokens",
+        )
+    )
+    new_overclar_repair_max_tokens = int(
+        st.number_input(
+            "Over-Clarification Repair Max Tokens",
+            min_value=1,
+            value=overclar_repair_max_tokens,
+            step=10,
+            format="%d",
+            key="cerberus_overclar_repair_max_tokens",
+        )
+    )
+    new_send_repair_max_tokens = int(
+        st.number_input(
+            "Send-Message Repair Max Tokens",
+            min_value=1,
+            value=send_repair_max_tokens,
+            step=10,
+            format="%d",
+            key="cerberus_send_repair_max_tokens",
+        )
+    )
+    new_recovery_max_tokens = int(
+        st.number_input(
+            "Recovery Max Tokens",
+            min_value=1,
+            value=recovery_max_tokens,
+            step=10,
+            format="%d",
+            key="cerberus_recovery_max_tokens",
+        )
+    )
+    new_max_ledger_items = int(
+        st.number_input(
+            "Max Ledger Items",
+            min_value=1,
+            value=max_ledger_items,
+            step=10,
+            format="%d",
+            key="cerberus_max_ledger_items",
+        )
+    )
+
+    if new_max_rounds == 0 or new_max_tool_calls == 0:
+        st.warning("Unlimited round/tool-call limits are enabled.")
+
+    if st.button("Save Cerberus Settings", key="save_cerberus_settings"):
+        redis_client.set(AGENT_MAX_ROUNDS_KEY, int(new_max_rounds))
+        redis_client.set(AGENT_MAX_TOOL_CALLS_KEY, int(new_max_tool_calls))
+        redis_client.set(CERBERUS_AGENT_STATE_TTL_SECONDS_KEY, int(new_state_ttl_seconds))
+        redis_client.set(CERBERUS_PLANNER_MAX_TOKENS_KEY, int(new_planner_max_tokens))
+        redis_client.set(CERBERUS_CHECKER_MAX_TOKENS_KEY, int(new_checker_max_tokens))
+        redis_client.set(CERBERUS_DOER_MAX_TOKENS_KEY, int(new_doer_max_tokens))
+        redis_client.set(CERBERUS_TOOL_REPAIR_MAX_TOKENS_KEY, int(new_tool_repair_max_tokens))
+        redis_client.set(CERBERUS_OVERCLAR_REPAIR_MAX_TOKENS_KEY, int(new_overclar_repair_max_tokens))
+        redis_client.set(CERBERUS_SEND_REPAIR_MAX_TOKENS_KEY, int(new_send_repair_max_tokens))
+        redis_client.set(CERBERUS_RECOVERY_MAX_TOKENS_KEY, int(new_recovery_max_tokens))
+        redis_client.set(CERBERUS_MAX_LEDGER_ITEMS_KEY, int(new_max_ledger_items))
+        st.success("Cerberus settings updated.")
+
 
 def render_admin_gating_settings():
     st.subheader("Admin Tool Gating")
@@ -2442,21 +2910,418 @@ def render_admin_gating_settings():
         st.success("Admin tool gating reset to defaults.")
         st.rerun()
 
+
+def _cerberus_ledger_keys_for_platform(platform: str) -> List[str]:
+    plat = str(platform or "all").strip().lower()
+    if plat == "all":
+        keys = []
+        if redis_client.exists("tater:cerberus:ledger"):
+            keys.append("tater:cerberus:ledger")
+        else:
+            keys.extend(sorted(str(k) for k in redis_client.scan_iter(match="tater:cerberus:ledger:*")))
+        return keys
+    return [f"tater:cerberus:ledger:{normalize_platform(plat)}"]
+
+
+def _load_cerberus_ledger_entries(platform: str, limit: int) -> List[Dict[str, Any]]:
+    entries: List[Dict[str, Any]] = []
+    keys = _cerberus_ledger_keys_for_platform(platform)
+    max_limit = max(1, int(limit or 50))
+    for key in keys:
+        raw_items = redis_client.lrange(key, -max_limit, -1) or []
+        for raw in raw_items:
+            try:
+                item = json.loads(raw)
+            except Exception:
+                continue
+            if not isinstance(item, dict):
+                continue
+            item["_ledger_key"] = key
+            entries.append(item)
+    entries.sort(key=lambda x: float(x.get("timestamp") or 0.0), reverse=True)
+    return entries[:max_limit]
+
+
+def _normalize_cerberus_validation_for_view(
+    validation: Any,
+    *,
+    planned_tool: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    raw = validation if isinstance(validation, dict) else {}
+    status = str(raw.get("status") or "").strip().lower()
+    if status in {"skipped", "ok", "failed"}:
+        out = {
+            "status": status,
+            "repair_used": bool(raw.get("repair_used")),
+            "reason": str(raw.get("reason") or ""),
+        }
+        try:
+            out["attempts"] = int(raw.get("attempts"))
+        except Exception:
+            out["attempts"] = 0 if status == "skipped" else (2 if out["repair_used"] else 1)
+        if raw.get("error") is not None:
+            out["error"] = str(raw.get("error") or "")
+        return out
+
+    # Backcompat for old entries that only had validation.ok.
+    if "ok" in raw:
+        ok = bool(raw.get("ok"))
+        reason = str(raw.get("reason") or "")
+        repair_used = bool(raw.get("repair_used"))
+        if not ok and reason == "no_tool":
+            return {"status": "skipped", "repair_used": False, "reason": "no_tool", "attempts": 0}
+        if ok:
+            return {
+                "status": "ok",
+                "repair_used": repair_used,
+                "reason": "repaired" if repair_used else (reason or "ok"),
+                "attempts": 2 if repair_used else 1,
+            }
+        return {
+            "status": "failed",
+            "repair_used": repair_used,
+            "reason": reason or "invalid_tool_call",
+            "attempts": 2 if repair_used else 1,
+        }
+
+    # If no validation object exists, infer from presence of a planned tool.
+    has_planned_tool = isinstance(planned_tool, dict) and bool(str(planned_tool.get("function") or "").strip())
+    if not has_planned_tool:
+        return {"status": "skipped", "repair_used": False, "reason": "no_tool", "attempts": 0}
+    return {"status": "failed", "repair_used": False, "reason": "invalid_tool_call", "attempts": 1}
+
+
+def _clear_cerberus_ledger(platform: str) -> int:
+    keys = _cerberus_ledger_keys_for_platform(platform)
+    deleted = 0
+    for key in keys:
+        try:
+            deleted += int(redis_client.delete(key) or 0)
+        except Exception:
+            continue
+    return deleted
+
+
+_CERBERUS_METRIC_NAMES = (
+    "total_turns",
+    "total_tools_called",
+    "total_repairs",
+    "validation_failures",
+    "tool_failures",
+)
+_CERBERUS_METRIC_PLATFORMS = (
+    "webui",
+    "discord",
+    "irc",
+    "telegram",
+    "matrix",
+    "homeassistant",
+    "homekit",
+    "xbmc",
+    "automation",
+)
+
+
+def _coerce_redis_counter(value: Any) -> int:
+    try:
+        if isinstance(value, (bytes, bytearray)):
+            value = value.decode("utf-8", errors="ignore")
+        return int(str(value).strip())
+    except Exception:
+        return 0
+
+
+def _load_cerberus_metrics(platform: str) -> tuple[str, Dict[str, int], Dict[str, int]]:
+    selected = str(platform or "").strip().lower()
+    metric_platform = normalize_platform(selected if selected and selected != "all" else "webui")
+    global_metrics: Dict[str, int] = {}
+    platform_metrics: Dict[str, int] = {}
+    for name in _CERBERUS_METRIC_NAMES:
+        global_metrics[name] = _coerce_redis_counter(redis_client.get(f"tater:cerberus:metrics:{name}"))
+        if selected == "all":
+            platform_metrics[name] = global_metrics[name]
+        else:
+            platform_metrics[name] = _coerce_redis_counter(redis_client.get(f"tater:cerberus:metrics:{name}:{metric_platform}"))
+    return metric_platform, global_metrics, platform_metrics
+
+
+def _reset_cerberus_metrics(platform: str) -> int:
+    plat = str(platform or "").strip().lower()
+    keys: List[str] = []
+    if plat == "all":
+        try:
+            keys = [str(k) for k in redis_client.scan_iter(match="tater:cerberus:metrics:*")]
+        except Exception:
+            keys = []
+    else:
+        metric_platform = normalize_platform(plat or "webui")
+        for name in _CERBERUS_METRIC_NAMES:
+            keys.append(f"tater:cerberus:metrics:{name}")
+            keys.append(f"tater:cerberus:metrics:{name}:{metric_platform}")
+    deleted = 0
+    for key in keys:
+        try:
+            deleted += int(redis_client.delete(key) or 0)
+        except Exception:
+            continue
+    return deleted
+
+
+def _safe_rate(numerator: int, denominator: int) -> float:
+    denom = max(1, int(denominator or 0))
+    return float(numerator or 0) / float(denom)
+
+
+def _cerberus_rate_rows(metrics: Dict[str, int]) -> List[Dict[str, Any]]:
+    turns = int(metrics.get("total_turns", 0) or 0)
+    tools = int(metrics.get("total_tools_called", 0) or 0)
+    repairs = int(metrics.get("total_repairs", 0) or 0)
+    validation_failures = int(metrics.get("validation_failures", 0) or 0)
+    tool_failures = int(metrics.get("tool_failures", 0) or 0)
+    return [
+        {"metric": "tool_call_rate", "value": round(_safe_rate(tools, turns), 4)},
+        {"metric": "repair_rate", "value": round(_safe_rate(repairs, turns), 4)},
+        {"metric": "validation_failure_rate", "value": round(_safe_rate(validation_failures, turns), 4)},
+        {"metric": "tool_failure_rate", "value": round(_safe_rate(tool_failures, max(1, tools)), 4)},
+    ]
+
+
+def _load_cerberus_platform_metric_rows() -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for platform in _CERBERUS_METRIC_PLATFORMS:
+        row: Dict[str, Any] = {"platform": platform}
+        for name in _CERBERUS_METRIC_NAMES:
+            row[name] = _coerce_redis_counter(redis_client.get(f"tater:cerberus:metrics:{name}:{platform}"))
+        rows.append(row)
+    return rows
+
+
+def render_cerberus_metrics_dashboard(*, key_prefix: str, allow_controls: bool):
+    st.subheader("Cerberus Metrics")
+    st.caption("Planner/Doer/Critic counters and recent ledger rows.")
+
+    platforms = ["all", *list(_CERBERUS_METRIC_PLATFORMS)]
+    selected_platform = st.selectbox(
+        "Platform",
+        options=platforms,
+        index=1,
+        key=f"{key_prefix}_platform",
+    )
+    limit = int(
+        st.slider(
+            "Ledger entries",
+            min_value=10,
+            max_value=300,
+            value=50,
+            step=10,
+            key=f"{key_prefix}_ledger_limit",
+        )
+    )
+
+    metric_platform, global_metrics, platform_metrics = _load_cerberus_metrics(selected_platform)
+
+    st.markdown("**Global Counters**")
+    global_cols = st.columns(len(_CERBERUS_METRIC_NAMES))
+    for idx, name in enumerate(_CERBERUS_METRIC_NAMES):
+        global_cols[idx].metric(name.replace("_", " ").title(), global_metrics.get(name, 0))
+
+    st.markdown("**Global Rates**")
+    st.dataframe(_cerberus_rate_rows(global_metrics), use_container_width=True)
+
+    if selected_platform != "all":
+        st.markdown(f"**Selected Platform Counters ({metric_platform})**")
+        platform_cols = st.columns(len(_CERBERUS_METRIC_NAMES))
+        for idx, name in enumerate(_CERBERUS_METRIC_NAMES):
+            platform_cols[idx].metric(name.replace("_", " ").title(), platform_metrics.get(name, 0))
+        st.markdown(f"**Selected Platform Rates ({metric_platform})**")
+        st.dataframe(_cerberus_rate_rows(platform_metrics), use_container_width=True)
+
+    st.markdown("**Per-Platform Totals**")
+    st.dataframe(_load_cerberus_platform_metric_rows(), use_container_width=True)
+
+    if allow_controls:
+        st.caption("Advanced controls")
+        control_cols = st.columns(2)
+        if control_cols[0].button("Reset Metrics", key=f"{key_prefix}_reset_metrics"):
+            removed = _reset_cerberus_metrics(selected_platform)
+            st.success(f"Removed {removed} metric key(s).")
+            st.rerun()
+        if control_cols[1].button("Clear Ledger", key=f"{key_prefix}_clear_ledger"):
+            removed = _clear_cerberus_ledger(selected_platform)
+            st.success(f"Deleted {removed} ledger list(s).")
+            st.rerun()
+
+    rows = _load_cerberus_ledger_entries(selected_platform, limit)
+    if not rows:
+        st.info("No Cerberus ledger entries found for this selection.")
+        return
+
+    outcome_filter = st.selectbox(
+        "Outcome Filter",
+        options=["all", "done", "blocked", "failed"],
+        index=0,
+        key=f"{key_prefix}_outcome_filter",
+    )
+    show_only_tool_turns = st.checkbox(
+        "Show Only Tool Turns",
+        value=False,
+        key=f"{key_prefix}_tool_turns_only",
+    )
+    tool_options = ["all"] + sorted(
+        {
+            str((row.get("planned_tool") or {}).get("function") or "").strip()
+            for row in rows
+            if isinstance(row.get("planned_tool"), dict)
+            and str((row.get("planned_tool") or {}).get("function") or "").strip()
+        }
+    )
+    selected_tool = st.selectbox(
+        "Tool Filter",
+        options=tool_options,
+        index=0,
+        key=f"{key_prefix}_tool_filter",
+    )
+
+    filtered_rows: List[Dict[str, Any]] = []
+    for row in rows:
+        planned_tool_obj = row.get("planned_tool") if isinstance(row.get("planned_tool"), dict) else {}
+        planned_tool_name = str(planned_tool_obj.get("function") or "").strip()
+        outcome = str(row.get("outcome") or "").strip().lower()
+        if outcome_filter != "all" and outcome != outcome_filter:
+            continue
+        if show_only_tool_turns and not planned_tool_name:
+            continue
+        if selected_tool != "all" and planned_tool_name != selected_tool:
+            continue
+        filtered_rows.append(row)
+
+    if not filtered_rows:
+        st.info("No ledger rows matched the current filters.")
+        return
+
+    summary_rows = []
+    for idx, item in enumerate(filtered_rows):
+        ts = float(item.get("timestamp") or 0.0)
+        planned_tool = item.get("planned_tool") if isinstance(item.get("planned_tool"), dict) else {}
+        validation = _normalize_cerberus_validation_for_view(
+            item.get("validation"),
+            planned_tool=planned_tool if isinstance(planned_tool, dict) else None,
+        )
+        tool_result = item.get("tool_result") if isinstance(item.get("tool_result"), dict) else {}
+        tool_summary = str(
+            tool_result.get("summary")
+            or item.get("tool_result_summary")
+            or ""
+        )
+        summary_rows.append(
+            {
+                "#": idx + 1,
+                "time": datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else "",
+                "platform": str(item.get("platform") or ""),
+                "scope": str(item.get("scope") or ""),
+                "planner_kind": str(item.get("planner_kind") or ""),
+                "outcome": str(item.get("outcome") or ""),
+                "outcome_reason": str(item.get("outcome_reason") or ""),
+                "planned_tool": str(planned_tool.get("function") or ""),
+                "validation_status": str(validation.get("status") or ""),
+                "tool_result_ok": tool_result.get("ok") if isinstance(tool_result, dict) else item.get("tool_result_ok"),
+                "tool_result_summary": tool_summary,
+                "validation_reason": str(validation.get("reason") or ""),
+                "checker_action": str(item.get("checker_action") or ""),
+                "total_ms": int(item.get("total_ms") or 0),
+            }
+        )
+
+    st.dataframe(summary_rows, use_container_width=True)
+
+    tool_counts: Dict[str, int] = {}
+    reason_counts: Dict[str, int] = {}
+    for item in filtered_rows:
+        planned_tool = item.get("planned_tool") if isinstance(item.get("planned_tool"), dict) else {}
+        tool_name = str(planned_tool.get("function") or "").strip()
+        if tool_name:
+            tool_counts[tool_name] = int(tool_counts.get(tool_name, 0)) + 1
+
+        validation_reason = str(item.get("validation_reason") or "").strip()
+        if validation_reason:
+            key = f"validation:{validation_reason}"
+            reason_counts[key] = int(reason_counts.get(key, 0)) + 1
+        checker_reason = str(item.get("checker_reason") or "").strip()
+        if checker_reason:
+            key = f"checker:{checker_reason}"
+            reason_counts[key] = int(reason_counts.get(key, 0)) + 1
+
+    top_tools_rows = [
+        {"tool": name, "count": count}
+        for name, count in sorted(tool_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+    ]
+    top_reasons_rows = [
+        {"reason": name, "count": count}
+        for name, count in sorted(reason_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+    ]
+
+    rollup_cols = st.columns(2)
+    with rollup_cols[0]:
+        st.markdown("**Top Tools (Last N Filtered)**")
+        if top_tools_rows:
+            st.dataframe(top_tools_rows, use_container_width=True)
+        else:
+            st.caption("No tool calls in current filtered set.")
+    with rollup_cols[1]:
+        st.markdown("**Top Failure Reasons (Last N Filtered)**")
+        if top_reasons_rows:
+            st.dataframe(top_reasons_rows, use_container_width=True)
+        else:
+            st.caption("No failure reasons in current filtered set.")
+
+    for idx, item in enumerate(filtered_rows):
+        ts = float(item.get("timestamp") or 0.0)
+        ts_text = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else "unknown time"
+        platform_text = str(item.get("platform") or "unknown")
+        outcome_text = str(item.get("outcome") or "unknown")
+        with st.expander(f"Details #{idx + 1} - {ts_text} - {platform_text} - {outcome_text}", expanded=False):
+            st.code(json.dumps(item, indent=2, ensure_ascii=False), language="json")
+
+
+def render_cerberus_ledger_settings():
+    render_cerberus_metrics_dashboard(key_prefix="cerberus_advanced_dashboard", allow_controls=True)
+
 def render_settings_page():
     st.title("Settings")
-    render_webui_settings()
-    st.markdown("---")
-    render_web_search_settings()
-    st.markdown("---")
-    render_memory_settings()
-    st.markdown("---")
-    render_homeassistant_settings()
-    st.markdown("---")
-    render_vision_settings()
-    st.markdown("---")
-    render_tater_settings()
-    st.markdown("---")
-    render_admin_gating_settings()
+    tab_general, tab_integrations, tab_memory, tab_ai_tasks, tab_emoji, tab_cerberus, tab_advanced = st.tabs(
+        ["General", "Integrations", "Memory", "AI Tasks", "Emoji", "Cerberus", "Advanced"]
+    )
+
+    with tab_general:
+        render_webui_settings()
+        st.markdown("---")
+        render_tater_settings()
+
+    with tab_integrations:
+        render_web_search_settings()
+        st.markdown("---")
+        render_homeassistant_settings()
+        st.markdown("---")
+        render_vision_settings()
+
+    with tab_memory:
+        render_memory_settings()
+
+    with tab_ai_tasks:
+        render_ai_tasks_page(embedded=True)
+
+    with tab_emoji:
+        render_emoji_responder_settings()
+
+    with tab_cerberus:
+        render_cerberus_settings()
+        st.markdown("---")
+        render_cerberus_metrics_dashboard(key_prefix="cerberus_tab_dashboard", allow_controls=False)
+
+    with tab_advanced:
+        render_admin_gating_settings()
+        st.markdown("---")
+        render_cerberus_ledger_settings()
 
 def _load_schedules():
     items_by_id = {}
@@ -2514,8 +3379,11 @@ def _delete_schedule(reminder_id: str):
     redis_client.delete(f"reminders:{rid}")
 
 
-def render_ai_tasks_page():
-    st.title("AI Tasks")
+def render_ai_tasks_page(*, embedded: bool = False):
+    if embedded:
+        st.subheader("AI Tasks")
+    else:
+        st.title("AI Tasks")
     st.caption("Manage AI tasks and reminders.")
 
     schedules = _load_schedules()
@@ -2525,6 +3393,38 @@ def render_ai_tasks_page():
 
     def _sort_key(item):
         return float(item.get("_due_ts") or 0.0)
+
+    def _recurrence_label(schedule: Dict[str, Any], interval: float) -> str:
+        recurrence = schedule.get("recurrence") if isinstance(schedule.get("recurrence"), dict) else {}
+        kind = str(recurrence.get("kind") or "").strip().lower()
+        hour = int(recurrence.get("hour") or 0)
+        minute = int(recurrence.get("minute") or 0)
+        second = int(recurrence.get("second") or 0)
+        weekdays = recurrence.get("weekdays") if isinstance(recurrence.get("weekdays"), list) else []
+        time_part = f"{hour:02d}:{minute:02d}" + (f":{second:02d}" if second else "")
+
+        day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        valid_days = []
+        for day in weekdays:
+            try:
+                day_i = int(day)
+            except Exception:
+                continue
+            if 0 <= day_i <= 6:
+                valid_days.append(day_names[day_i])
+        valid_days = sorted(set(valid_days), key=day_names.index)
+
+        if kind == "daily_local_time":
+            if valid_days:
+                return f"Weekly ({', '.join(valid_days)}) at {time_part}"
+            return f"Daily at {time_part}"
+        if kind == "weekly_local_time":
+            if valid_days:
+                return f"Weekly ({', '.join(valid_days)}) at {time_part}"
+            return f"Weekly at {time_part}"
+        if interval > 0:
+            return f"Every {int(interval)}s"
+        return "One-shot"
 
     for row in sorted(schedules, key=_sort_key):
         rid = row.get("_id", "")
@@ -2545,7 +3445,7 @@ def render_ai_tasks_page():
 
         due_local = datetime.fromtimestamp(due_ts).strftime("%Y-%m-%d %H:%M:%S")
         mode_label = "AI Task"
-        recur_label = f"Every {int(interval)}s" if interval > 0 else "One-shot"
+        recur_label = _recurrence_label(schedule, interval)
         summary = f"{mode_label} -> {platform} -> {recur_label} -> next {due_local}"
 
         with st.container():
@@ -3135,17 +4035,8 @@ def _enforce_user_assistant_alternation(loop_messages):
 
 # ----------------- PROCESSING FUNCTIONS -----------------
 async def process_message(user_name, message_content, wait_callback=None):
-    final_system_prompt = build_system_prompt()
     max_llm = int(redis_client.get("tater:max_llm") or 8)
     history = load_chat_history_tail(max_llm)
-
-    messages_list = [{"role": "system", "content": final_system_prompt}]
-
-    user_display = (get_chat_settings().get("username") or "User").strip()
-    messages_list.append({
-        "role": "system",
-        "content": f"The user's name is {user_display}. When addressing them, use their name naturally and sparingly."
-    })
 
     loop_messages = []
     for msg in history:
@@ -3157,31 +4048,34 @@ async def process_message(user_name, message_content, wait_callback=None):
         if templ_msg is not None:
             loop_messages.append(templ_msg)
     loop_messages = _enforce_user_assistant_alternation(loop_messages)
-    messages_list.extend(loop_messages)
+    messages_list = loop_messages
 
     merged_registry, merged_enabled, _collisions = build_agent_registry(
         get_registry(),
         get_plugin_enabled,
     )
 
-    _use_agent, active_task_id, _reason = should_use_agent_mode(
-        user_text=message_content or "",
-        platform="webui",
-        scope="chat",
-        r=redis_client,
-    )
+    session_scope_id = str(st.session_state.get("webui_session_id") or "").strip()
+    if not session_scope_id:
+        session_scope_id = str(uuid.uuid4())
+        st.session_state["webui_session_id"] = session_scope_id
+
     origin = {
         "platform": "webui",
         "user": user_name,
+        "user_id": user_name,
+        "session_id": session_scope_id,
     }
-    latest_image_ref = load_latest_image_ref(
+    recent_media_refs = load_recent_media_refs(
         redis_client,
         platform="webui",
         scope=WEBUI_IMAGE_SCOPE,
+        limit=8,
     )
-    if latest_image_ref:
-        origin["latest_image_ref"] = latest_image_ref
-    result = await run_planner_loop(
+    if recent_media_refs:
+        origin["media_refs"] = recent_media_refs
+    agent_max_rounds, agent_max_tool_calls = resolve_agent_limits(redis_client)
+    result = await run_cerberus_turn(
         llm_client=llm_client,
         platform="webui",
         history_messages=messages_list,
@@ -3189,11 +4083,13 @@ async def process_message(user_name, message_content, wait_callback=None):
         enabled_predicate=merged_enabled,
         context={"raw_message": message_content},
         user_text=message_content or "",
-        scope="chat",
-        task_id=active_task_id,
+        scope=f"session:{session_scope_id}",
         origin=origin,
         redis_client=redis_client,
         wait_callback=wait_callback,
+        max_rounds=agent_max_rounds,
+        max_tool_calls=agent_max_tool_calls,
+        platform_preamble="",
     )
     responses = []
     if result.get("text"):
@@ -3204,9 +4100,11 @@ async def process_message(user_name, message_content, wait_callback=None):
 
 
 # ------------------ NAVIGATION ------------------
-nav_options = ["Chat", "Plugins", "Auto Plugins", "Platforms", "AI Tasks", "Agent Lab", "Plugin Store", "Settings"]
+nav_options = ["Chat", "Plugins", "Auto Plugins", "Platforms", "Agent Lab", "Plugin Store", "Settings"]
 if "active_view" not in st.session_state:
     st.session_state.active_view = nav_options[0]
+elif st.session_state.active_view == "AI Tasks":
+    st.session_state.active_view = "Settings"
 elif st.session_state.active_view not in nav_options:
     st.session_state.active_view = nav_options[0]
 
@@ -3220,6 +4118,10 @@ active_view = st.session_state.active_view
 st.sidebar.markdown("---")
 
 # ------------------ PLATFORM MANAGEMENT ------------------
+# Always-on core background services (not user-toggleable platforms).
+if not _platform_thread_alive("ai_task_platform") and _should_autostart("ai_task_platform", exp=False):
+    _start_platform("ai_task_platform")
+
 auto_connected = []
 for platform in platform_registry:
     key = platform["key"]  # e.g. irc_platform
@@ -3413,14 +4315,14 @@ if active_view == "Chat":
             _store_file_blob_in_redis(file_id, data)
 
             msg = {
-                "type": "file",
+                "type": _media_type_from_mimetype(mimetype),
                 "id": file_id,
                 "name": name,
                 "mimetype": mimetype,
                 "size": len(data),
             }
             save_message("user", uname, msg)
-            _save_latest_webui_image_ref(msg)
+            _save_recent_webui_media_refs(msg)
             st.session_state.chat_messages.append({"role": "user", "content": msg})
 
         # ---- Send to LLM (even if only files were uploaded) ----
@@ -3467,7 +4369,7 @@ if active_view == "Chat":
         for item in responses:
             st.session_state.chat_messages.append({"role": "assistant", "content": item})
             save_message("assistant", "assistant", item)
-            _save_latest_webui_image_ref(item)
+            _save_recent_webui_media_refs(item)
 
         st.rerun()
 
@@ -3504,9 +4406,6 @@ elif active_view == "Auto Plugins":
 elif active_view == "Platforms":
     st.title("Platforms")
     render_platforms_panel(auto_connected)
-
-elif active_view == "AI Tasks":
-    render_ai_tasks_page()
 
 elif active_view == "Agent Lab":
     render_agent_lab_page()

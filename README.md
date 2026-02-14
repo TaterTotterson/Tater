@@ -6,6 +6,43 @@
 
 ---
 
+## Cerberus Orchestration
+
+Tater now uses **Cerberus**, a closed-loop **Planner -> Doer -> Checker** architecture for tool execution quality:
+
+- **Planner** chooses one next action (normal response or exactly one tool JSON call).
+- **Doer** validates and executes tools deterministically with runtime platform gating.
+- **Checker** verifies the outcome, then either finalizes, retries one tool call, or asks one short clarification question.
+
+This loop is now the default orchestration path across Tater platform handlers so tool behavior stays consistent everywhere.
+
+### Cerberus Runtime Config (Env Vars)
+
+Cerberus is safe-by-default and bounded unless you explicitly set unlimited values.
+
+- `CERBERUS_DEFAULT_MAX_ROUNDS` (default: `1`)  
+  Maximum planner rounds per turn when no per-request override is provided. `0` means unlimited.
+- `CERBERUS_DEFAULT_MAX_TOOL_CALLS` (default: `1`)  
+  Maximum tool executions per turn when no per-request override is provided. `0` means unlimited.
+- `AGENT_STATE_TTL_SECONDS` (default: `604800` / 7 days)  
+  TTL for persistent Cerberus state keys (`tater:cerberus:state:<platform>:<scope>`). `0` disables TTL.
+- `CERBERUS_MAX_LEDGER_ITEMS` (default: `300`)  
+  Max retained entries in each Redis ledger list.
+- `CERBERUS_PLANNER_MAX_TOKENS` (default: `500`)  
+- `CERBERUS_CHECKER_MAX_TOKENS` (default: `420`)  
+- `CERBERUS_DOER_MAX_TOKENS` (default: `380`)  
+  Optional token caps for planner/checker/doer calls.
+
+### Cerberus Scope + Ledger
+
+- Scope is resolved per conversation container (`channel`, `room`, `chat`, `device`, `session`) so state does not bleed across rooms/devices.
+- Ledger entries are written to:
+  - `tater:cerberus:ledger`
+  - `tater:cerberus:ledger:<platform>`
+- Each entry includes validation details, planner classification, compact tool result, outcome/reason, and timing fields for debugging.
+
+---
+
 ## 🌐 Tater Platform Overview
 
 | Platform          | Description |
@@ -156,6 +193,17 @@ git clone https://github.com/TaterTotterson/Tater.git
 cd Tater
 ```
 
+### Persist Agent Lab data in `/agent_labs` (recommended)
+
+If you want Agent Lab data to survive repo rebuilds/reinstalls, use a dedicated path and symlink:
+
+```bash
+sudo mkdir -p /agent_labs/{plugins,platforms,artifacts,documents,downloads,workspace,logs}
+cp -a agent_lab/. /agent_labs/ 2>/dev/null || true
+rm -rf agent_lab
+ln -s /agent_labs agent_lab
+```
+
 Note for Agent Lab:
 - If you plan to use Agent Lab, run Tater inside a Python virtual environment so Agent Lab dependencies stay isolated and easy to manage (recommended).
   Quickstart:
@@ -241,7 +289,7 @@ docker run -d --name tater_webui \
   -e LLM_MODEL=gemma3-27b-abliterated \
   -e REDIS_HOST=127.0.0.1 \
   -e REDIS_PORT=6379 \
-  -v /path/to/agent_lab:/app/agent_lab \
+  -v /agent_labs:/app/agent_lab \
   ghcr.io/tatertotterson/tater:latest
 ```
 ---
@@ -263,7 +311,7 @@ docker run -d --name tater_webui \
   -e LLM_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxx \
   -e REDIS_HOST=127.0.0.1 \
   -e REDIS_PORT=6379 \
-  -v /path/to/agent_lab:/app/agent_lab \
+  -v /agent_labs:/app/agent_lab \
   ghcr.io/tatertotterson/tater:latest
 ```
 Note: When using ChatGPT, leave LLM_PORT blank.  
@@ -272,7 +320,7 @@ Tater will automatically connect using HTTPS without appending a port number.
 Tip: The Agent Lab data lives in `/app/agent_lab` inside the container.  
 If you don’t mount it to the host, Agent Lab plugins/platforms/artifacts will be lost when the container is rebuilt or updated.
 
-Unraid note: add a container path mapping for `/app/agent_lab` to a persistent share (e.g., `/mnt/user/appdata/tater/agent_lab`) so you don’t lose Agent Lab data during container updates.
+Unraid note: add a container path mapping for `/app/agent_lab` to a persistent share (e.g., `/mnt/user/appdata/tater/agent_labs`) so you don’t lose Agent Lab data during container updates.
 Unraid note: also set `TZ` and map `/etc/localtime` + `/etc/timezone` if you want local time inside the container.
 
 ### 3. Access the Web UI

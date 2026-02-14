@@ -19,7 +19,7 @@ from helpers import (
     get_llm_client_from_env,
     build_llm_host_from_env,
 )
-from planner_loop import should_use_agent_mode, run_planner_loop
+from cerberus import run_cerberus_turn, resolve_agent_limits
 
 load_dotenv()
 
@@ -270,7 +270,7 @@ async def handle_message(payload: Dict[str, Any], x_tater_token: Optional[str] =
 
     system_prompt = build_system_prompt()
     loop_messages = await _load_history(session_id, history_max)
-    messages_list = [{"role": "system", "content": system_prompt}] + loop_messages + [{"role": "user", "content": text_in}]
+    messages_list = loop_messages + [{"role": "user", "content": text_in}]
 
     await _save_message(session_id, "user", text_in, history_max, session_ttl)
 
@@ -280,15 +280,16 @@ async def handle_message(payload: Dict[str, Any], x_tater_token: Optional[str] =
     )
 
     try:
-        _use_agent, active_task_id, _reason = should_use_agent_mode(
-            user_text=text_in,
-            platform="homekit",
-            scope=str(session_id),
-            r=redis_client,
-        )
-        origin = {"platform": "homekit", "request_id": session_id}
+        origin = {
+            "platform": "homekit",
+            "session_id": session_id,
+            "device_id": payload.get("device_id"),
+            "user_id": payload.get("user_id"),
+            "request_id": session_id,
+        }
         origin = {k: v for k, v in origin.items() if v not in (None, "")}
-        result = await run_planner_loop(
+        agent_max_rounds, agent_max_tool_calls = resolve_agent_limits(redis_client)
+        result = await run_cerberus_turn(
             llm_client=_llm,
             platform="homekit",
             history_messages=messages_list,
@@ -296,10 +297,12 @@ async def handle_message(payload: Dict[str, Any], x_tater_token: Optional[str] =
             enabled_predicate=merged_enabled,
             context={},
             user_text=text_in,
-            scope=str(session_id),
-            task_id=active_task_id,
+            scope=f"session:{session_id}" if str(session_id or "").strip() else "",
             origin=origin,
             redis_client=redis_client,
+            max_rounds=agent_max_rounds,
+            max_tool_calls=agent_max_tool_calls,
+            platform_preamble=system_prompt,
         )
         final_text = (result.get("text") or "").strip()
         if len(final_text) > 2000:

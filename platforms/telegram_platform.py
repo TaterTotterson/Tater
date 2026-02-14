@@ -32,8 +32,9 @@ from admin_gate import (
 from agent_lab_registry import build_agent_registry
 from plugin_result import action_failure
 from plugin_kernel import plugin_supports_platform
-from planner_loop import should_use_agent_mode, run_planner_loop
-from latest_image_ref import load_latest_image_ref, save_latest_image_ref
+from cerberus import run_cerberus_turn, resolve_agent_limits
+from conversation_media_refs import load_recent_media_refs, save_media_ref
+from emoji_responder import emoji_responder
 
 load_dotenv()
 
@@ -116,8 +117,8 @@ def _store_blob(binary: bytes, ttl_seconds: int = 60 * 60 * 24 * 7) -> str:
     return key
 
 
-def _save_latest_chat_image_ref(chat_id: str, ref: Dict[str, Any]) -> None:
-    save_latest_image_ref(
+def _save_recent_chat_media_ref(chat_id: str, ref: Dict[str, Any]) -> None:
+    save_media_ref(
         redis_client,
         platform="telegram",
         scope=chat_id,
@@ -125,11 +126,12 @@ def _save_latest_chat_image_ref(chat_id: str, ref: Dict[str, Any]) -> None:
     )
 
 
-def _load_latest_chat_image_ref(chat_id: str) -> Dict[str, Any] | None:
-    return load_latest_image_ref(
+def _load_recent_chat_media_refs(chat_id: str, limit: int = 8) -> List[Dict[str, Any]]:
+    return load_recent_media_refs(
         redis_client,
         platform="telegram",
         scope=chat_id,
+        limit=limit,
     )
 
 
@@ -456,45 +458,73 @@ class TelegramPlatform:
             raise RuntimeError("Telegram file download returned no data.")
         return bytes(data)
 
-    def _capture_latest_image_ref_sync(self, message: Dict[str, Any], chat_id: str):
-        file_id = ""
-        name = ""
-        mimetype = "image/jpeg"
+    def _capture_incoming_media_refs_sync(self, message: Dict[str, Any], chat_id: str) -> Dict[str, Any]:
+        candidates: List[Dict[str, str]] = []
 
         photos = message.get("photo")
         if isinstance(photos, list) and photos:
             best = photos[-1] if isinstance(photos[-1], dict) else {}
             file_id = str(best.get("file_id") or "").strip()
-            name = str((message.get("caption") or "")).strip() or "telegram_photo.jpg"
-            mimetype = "image/jpeg"
-        else:
-            doc = message.get("document") or {}
-            if isinstance(doc, dict):
-                doc_mime = str(doc.get("mime_type") or "").strip().lower()
-                if doc_mime.startswith("image/"):
-                    file_id = str(doc.get("file_id") or "").strip()
-                    name = str(doc.get("file_name") or "").strip() or "telegram_image"
-                    mimetype = doc_mime or "image/png"
+            if file_id:
+                candidates.append(
+                    {
+                        "type": "image",
+                        "file_id": file_id,
+                        "name": str((message.get("caption") or "")).strip() or "telegram_photo.jpg",
+                        "mimetype": "image/jpeg",
+                    }
+                )
 
-        if not file_id:
-            return _load_latest_chat_image_ref(chat_id)
+        for key, media_type, default_name, default_mime in (
+            ("video", "video", "telegram_video.mp4", "video/mp4"),
+            ("audio", "audio", "telegram_audio.mp3", "audio/mpeg"),
+            ("voice", "audio", "telegram_voice.ogg", "audio/ogg"),
+            ("document", "file", "telegram_file", "application/octet-stream"),
+        ):
+            obj = message.get(key) or {}
+            if not isinstance(obj, dict):
+                continue
+            file_id = str(obj.get("file_id") or "").strip()
+            if not file_id:
+                continue
+            mime = str(obj.get("mime_type") or "").strip().lower() or default_mime
+            entry_type = media_type
+            if key == "document" and mime.startswith("image/"):
+                entry_type = "image"
+            candidates.append(
+                {
+                    "type": entry_type,
+                    "file_id": file_id,
+                    "name": str(obj.get("file_name") or "").strip() or default_name,
+                    "mimetype": mime,
+                }
+            )
 
-        try:
-            binary = self._download_file_bytes(file_id, timeout=30)
-            blob_key = _store_blob(binary)
-        except Exception as e:
-            logger.warning(f"[Telegram] Failed to capture latest image for chat {chat_id}: {e}")
-            return _load_latest_chat_image_ref(chat_id)
-
-        ref = {
-            "blob_key": blob_key,
-            "name": name or "telegram_image",
-            "mimetype": mimetype or "image/png",
-            "source": "telegram_attachment",
-            "updated_at": time.time(),
-        }
-        _save_latest_chat_image_ref(chat_id, ref)
-        return ref
+        refs: List[Dict[str, Any]] = []
+        for candidate in candidates:
+            file_id = str(candidate.get("file_id") or "").strip()
+            try:
+                binary = self._download_file_bytes(file_id, timeout=30)
+                blob_key = _store_blob(binary)
+            except Exception as e:
+                logger.warning(f"[Telegram] Failed to capture media for chat {chat_id}: {e}")
+                continue
+            ref = {
+                "type": str(candidate.get("type") or "file").strip().lower() or "file",
+                "blob_key": blob_key,
+                "name": str(candidate.get("name") or "telegram_file").strip() or "telegram_file",
+                "mimetype": str(candidate.get("mimetype") or "application/octet-stream").strip() or "application/octet-stream",
+                "source": "telegram_attachment",
+                "updated_at": time.time(),
+                "size": len(binary),
+            }
+            refs.append(ref)
+            try:
+                _save_recent_chat_media_ref(chat_id, ref)
+            except Exception:
+                pass
+        recent_media_refs = _load_recent_chat_media_refs(chat_id, limit=8)
+        return {"media_refs": recent_media_refs}
 
     async def _send_text(self, chat_id: str, text: str):
         content = str(text or "").strip()
@@ -539,38 +569,26 @@ class TelegramPlatform:
         chat_id: str,
         user_text: str,
         assistant_text: str,
-        merged_registry: Dict[str, Any],
-        merged_enabled,
     ) -> None:
         message_id = raw_message.get("message_id")
         if not isinstance(message_id, int):
             return
 
-        for name, plugin in merged_registry.items():
-            hook = getattr(plugin, "on_assistant_response", None)
-            if not callable(hook):
-                continue
-            if not merged_enabled(name):
-                continue
-
-            try:
-                suggested = await hook(
-                    platform="telegram",
-                    user_text=user_text or "",
-                    assistant_text=assistant_text or "",
-                    llm_client=self.llm,
-                    scope=chat_id,
-                    message=raw_message,
-                )
-                emoji = self._extract_hook_emoji(suggested)
-                if not emoji:
-                    continue
-
-                applied = await self._set_message_reaction(chat_id=chat_id, message_id=message_id, emoji=emoji)
-                if applied:
-                    return
-            except Exception as exc:
-                logger.debug(f"[{name}] passive reaction skipped: {exc}")
+        try:
+            suggested = await emoji_responder.on_assistant_response(
+                platform="telegram",
+                user_text=user_text or "",
+                assistant_text=assistant_text or "",
+                llm_client=self.llm,
+                scope=chat_id,
+                message=raw_message,
+            )
+            emoji = self._extract_hook_emoji(suggested)
+            if not emoji:
+                return
+            await self._set_message_reaction(chat_id=chat_id, message_id=message_id, emoji=emoji)
+        except Exception as exc:
+            logger.debug(f"[emoji_responder] passive reaction skipped: {exc}")
 
     def _load_blob(self, blob_key: str) -> bytes | None:
         if not blob_key:
@@ -781,7 +799,26 @@ class TelegramPlatform:
                     if not ref.get("blob_key") and isinstance(item.get("bytes"), (bytes, bytearray)):
                         ref["blob_key"] = _store_blob(bytes(item.get("bytes")))
                     if ref.get("blob_key"):
-                        _save_latest_chat_image_ref(chat_id, ref)
+                        try:
+                            _save_recent_chat_media_ref(chat_id, dict(ref, type="image", source="telegram_artifact"))
+                        except Exception:
+                            pass
+                else:
+                    generic_ref = {
+                        "type": item_type or "file",
+                        "blob_key": str(item.get("blob_key") or "").strip() or None,
+                        "name": str(item.get("name") or "output.bin").strip() or "output.bin",
+                        "mimetype": item_mime or "application/octet-stream",
+                        "source": "telegram_artifact",
+                        "updated_at": time.time(),
+                    }
+                    if not generic_ref.get("blob_key") and isinstance(item.get("bytes"), (bytes, bytearray)):
+                        generic_ref["blob_key"] = _store_blob(bytes(item.get("bytes")))
+                    if generic_ref.get("blob_key"):
+                        try:
+                            _save_recent_chat_media_ref(chat_id, generic_ref)
+                        except Exception:
+                            pass
                 self._save_message(
                     chat_id,
                     "assistant",
@@ -870,24 +907,19 @@ class TelegramPlatform:
         if not message_text:
             return
 
-        latest_image_ref = await asyncio.to_thread(self._capture_latest_image_ref_sync, message, chat_id)
+        captured_media = await asyncio.to_thread(self._capture_incoming_media_refs_sync, message, chat_id)
+        recent_media_refs = captured_media.get("media_refs") if isinstance(captured_media, dict) else None
         self._save_message(chat_id, "user", username, message_text)
 
         system_prompt = self.build_system_prompt()
         history = self._load_history(chat_id)
-        messages = [{"role": "system", "content": system_prompt}] + history
+        messages = history
         merged_registry, merged_enabled, _collisions = build_agent_registry(
             pr.get_registry_snapshot(),
             _get_plugin_enabled,
         )
 
         try:
-            _use_agent, active_task_id, _reason = should_use_agent_mode(
-                user_text=message_text,
-                platform="telegram",
-                scope=chat_id,
-                r=redis_client,
-            )
             origin = {
                 "platform": "telegram",
                 "chat_id": chat_id,
@@ -896,8 +928,8 @@ class TelegramPlatform:
                 "user": username,
                 "request_id": str(message.get("message_id") or f"{chat_id}:{time.time():.3f}"),
             }
-            if latest_image_ref:
-                origin["latest_image_ref"] = latest_image_ref
+            if isinstance(recent_media_refs, list) and recent_media_refs:
+                origin["media_refs"] = recent_media_refs
             origin = {k: v for k, v in origin.items() if v not in (None, "")}
 
             async def _wait_callback(func_name, plugin_obj):
@@ -954,7 +986,8 @@ class TelegramPlatform:
                     )
                 return None
 
-            result = await run_planner_loop(
+            agent_max_rounds, agent_max_tool_calls = resolve_agent_limits(redis_client)
+            result = await run_cerberus_turn(
                 llm_client=self.llm,
                 platform="telegram",
                 history_messages=messages,
@@ -962,12 +995,14 @@ class TelegramPlatform:
                 enabled_predicate=merged_enabled,
                 context={"update": message},
                 user_text=message_text,
-                scope=chat_id,
-                task_id=active_task_id,
+                scope=f"chat:{chat_id}",
                 origin=origin,
                 wait_callback=_wait_callback,
                 admin_guard=_admin_guard,
                 redis_client=redis_client,
+                max_rounds=agent_max_rounds,
+                max_tool_calls=agent_max_tool_calls,
+                platform_preamble=system_prompt,
             )
 
             final_text = (result.get("text") or "").strip()
@@ -991,8 +1026,6 @@ class TelegramPlatform:
                     chat_id=chat_id,
                     user_text=message_text,
                     assistant_text=assistant_summary,
-                    merged_registry=merged_registry,
-                    merged_enabled=merged_enabled,
                 )
             return
 

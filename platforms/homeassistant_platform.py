@@ -23,7 +23,7 @@ from helpers import (
 )
 import plugin_registry as pr
 from agent_lab_registry import build_agent_registry
-from planner_loop import should_use_agent_mode, run_planner_loop
+from cerberus import run_cerberus_turn, resolve_agent_limits
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -993,10 +993,10 @@ async def handle_message(payload: HARequest):
     # Save the user turn
     await _save_message(conv_key, "user", text_in, history_max)
 
-    # Build the messages list: system + shaped history
+    # Build the messages list: shaped history only (Cerberus applies platform preamble)
     system_prompt = build_system_prompt(ctx if ctx else None)
     loop_messages = await _load_history(conv_key, history_max)
-    messages_list = [{"role": "system", "content": system_prompt}] + loop_messages
+    messages_list = loop_messages
 
     # Hard guard: ensure last turn is user
     if not messages_list or messages_list[-1].get("role") != "user":
@@ -1010,19 +1010,18 @@ async def handle_message(payload: HARequest):
     )
 
     try:
-        _use_agent, active_task_id, _reason = should_use_agent_mode(
-            user_text=text_in,
-            platform="homeassistant",
-            scope=conv_key,
-            r=redis_client,
-        )
         origin = {
             "platform": "homeassistant",
             "user": payload.user_id,
+            "user_id": payload.user_id,
+            "session_id": payload.session_id,
+            "device_id": payload.device_id or ctx.get("device_id"),
+            "area_id": payload.area_id or ctx.get("area_id"),
             "request_id": payload.session_id or conv_key,
         }
         origin = {k: v for k, v in origin.items() if v not in (None, "")}
-        result = await run_planner_loop(
+        agent_max_rounds, agent_max_tool_calls = resolve_agent_limits(redis_client)
+        result = await run_cerberus_turn(
             llm_client=_llm,
             platform="homeassistant",
             history_messages=messages_list,
@@ -1030,10 +1029,12 @@ async def handle_message(payload: HARequest):
             enabled_predicate=merged_enabled,
             context={"context": ctx},
             user_text=text_in,
-            scope=conv_key,
-            task_id=active_task_id,
+            scope=conv_key if conv_key != "default" else "",
             origin=origin,
             redis_client=redis_client,
+            max_rounds=agent_max_rounds,
+            max_tool_calls=agent_max_tool_calls,
+            platform_preamble=system_prompt,
         )
         final_text = (result.get("text") or "").strip()
         if len(final_text) > 4000:

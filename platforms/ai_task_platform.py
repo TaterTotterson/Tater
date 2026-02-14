@@ -3,6 +3,8 @@ import json
 import logging
 import os
 import time
+import math
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import redis
@@ -16,7 +18,7 @@ from helpers import (
     get_tater_name,
     get_tater_personality,
 )
-from planner_loop import should_use_agent_mode, run_planner_loop
+from cerberus import run_cerberus_turn, resolve_agent_limits
 from notify import dispatch_notification
 
 from dotenv import load_dotenv
@@ -31,11 +33,6 @@ redis_client = redis.Redis(
     db=0,
     decode_responses=True,
 )
-
-PLATFORM_SETTINGS = {
-    "category": "AI Task Settings",
-    "required": {},
-}
 
 REMINDER_KEY_PREFIX = "reminders:"
 REMINDER_DUE_ZSET = "reminders:due"
@@ -206,6 +203,94 @@ def _format_due_sleep(now: float, due_ts: float) -> float:
     return min(1.0, max(0.1, due_ts - now))
 
 
+def _as_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _normalize_weekdays(raw: Any) -> List[int]:
+    if not isinstance(raw, list):
+        return []
+    out: List[int] = []
+    for item in raw:
+        day = _as_int(item, -1)
+        if 0 <= day <= 6:
+            out.append(day)
+    if not out:
+        return []
+    return sorted(set(out))
+
+
+def _next_local_time_occurrence(
+    *,
+    now_ts: float,
+    hour: int,
+    minute: int,
+    second: int,
+    weekdays: Optional[List[int]] = None,
+) -> float:
+    now_local = datetime.fromtimestamp(float(now_ts)).astimezone()
+    h = min(23, max(0, int(hour)))
+    m = min(59, max(0, int(minute)))
+    s = min(59, max(0, int(second)))
+
+    candidate = now_local.replace(hour=h, minute=m, second=s, microsecond=0)
+    if candidate.timestamp() <= now_ts:
+        candidate = candidate + timedelta(days=1)
+
+    day_filter = _normalize_weekdays(weekdays or [])
+    if not day_filter:
+        return candidate.timestamp()
+
+    while candidate.weekday() not in day_filter:
+        candidate = candidate + timedelta(days=1)
+    return candidate.timestamp()
+
+
+def _next_run_for_schedule(schedule: Dict[str, Any], now_ts: float) -> float:
+    interval = _as_float(schedule.get("interval_sec"), 0.0)
+    if interval <= 0:
+        return 0.0
+
+    recurrence = schedule.get("recurrence") if isinstance(schedule.get("recurrence"), dict) else {}
+    recurrence_kind = str(recurrence.get("kind") or "").strip().lower()
+    if recurrence_kind in {"daily_local_time", "weekly_local_time"}:
+        hour = _as_int(recurrence.get("hour"), 0)
+        minute = _as_int(recurrence.get("minute"), 0)
+        second = _as_int(recurrence.get("second"), 0)
+        weekdays = recurrence.get("weekdays") if recurrence_kind == "weekly_local_time" else recurrence.get("weekdays")
+        return _next_local_time_occurrence(
+            now_ts=now_ts,
+            hour=hour,
+            minute=minute,
+            second=second,
+            weekdays=weekdays if isinstance(weekdays, list) else None,
+        )
+
+    # Fallback recurring schedule: preserve phase and avoid restart drift.
+    # Example: if due at 06:00 daily and process restarts at 21:00, next remains 06:00 next day.
+    prev_next = _as_float(schedule.get("next_run_ts"), 0.0)
+    anchor = _as_float(schedule.get("anchor_ts"), 0.0)
+    base = prev_next if prev_next > 0 else anchor
+    if base <= 0:
+        base = now_ts
+
+    if now_ts < base:
+        return base
+
+    steps = int(math.floor((now_ts - base) / interval)) + 1
+    return base + (interval * float(max(1, steps)))
+
+
 def _is_media_dict(item: Any) -> bool:
     if not isinstance(item, dict):
         return False
@@ -331,7 +416,6 @@ async def _render_scheduled_message(
     )
 
     messages = [
-        {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
     ]
 
@@ -348,12 +432,6 @@ async def _render_scheduled_message(
             return False
         return _supports_scheduled_tools(name, plugin, platform)
 
-    _use_agent, active_task_id, _reason = should_use_agent_mode(
-        user_text=task_prompt,
-        platform=platform,
-        scope=f"ai_task:{reminder_id}",
-        r=redis_client,
-    )
     origin_payload = dict(origin or {})
     origin_payload = {k: v for k, v in origin_payload.items() if v not in (None, "")}
     context = _build_platform_context(
@@ -363,7 +441,8 @@ async def _render_scheduled_message(
         task_prompt=task_prompt,
         reminder_id=reminder_id,
     )
-    result = await run_planner_loop(
+    agent_max_rounds, agent_max_tool_calls = resolve_agent_limits(redis_client)
+    result = await run_cerberus_turn(
         llm_client=llm_client,
         platform=platform,
         history_messages=messages,
@@ -372,9 +451,11 @@ async def _render_scheduled_message(
         context=context,
         user_text=task_prompt,
         scope=f"ai_task:{reminder_id}",
-        task_id=active_task_id,
         origin=origin_payload,
         redis_client=redis_client,
+        max_rounds=agent_max_rounds,
+        max_tool_calls=agent_max_tool_calls,
+        platform_preamble=system_prompt,
     )
     text = (result.get("text") or "").strip()
     attachments = result.get("artifacts") or []
@@ -384,7 +465,7 @@ async def _render_scheduled_message(
 
 
 def run(stop_event: Optional[object] = None):
-    logger.info("[AI Tasks] Platform started.")
+    logger.info("[AI Tasks] Scheduler service started.")
     llm_client = get_llm_client_from_env()
 
     loop = asyncio.new_event_loop()
@@ -472,12 +553,20 @@ def run(stop_event: Optional[object] = None):
                 interval = 0.0
 
             if interval > 0:
-                prev_next = float(schedule.get("next_run_ts") or time.time())
-                next_run = prev_next + interval
-                if next_run <= time.time():
-                    next_run = time.time() + interval
+                now_ts = time.time()
+                old_next = _as_float(schedule.get("next_run_ts"), 0.0)
+                old_anchor = _as_float(schedule.get("anchor_ts"), 0.0)
+                next_run = _next_run_for_schedule(schedule, now_ts)
+                if next_run <= now_ts:
+                    next_run = now_ts + max(1.0, interval)
 
                 schedule["next_run_ts"] = next_run
+                if old_anchor > 0:
+                    schedule["anchor_ts"] = old_anchor
+                elif old_next > 0:
+                    schedule["anchor_ts"] = old_next
+                else:
+                    schedule["anchor_ts"] = float(due_ts)
                 reminder["schedule"] = schedule
                 _save_reminder(reminder_id, reminder)
                 redis_client.zadd(REMINDER_DUE_ZSET, {reminder_id: next_run})
@@ -489,4 +578,4 @@ def run(stop_event: Optional[object] = None):
             loop.close()
         except Exception:
             pass
-        logger.info("[AI Tasks] Platform stopped.")
+        logger.info("[AI Tasks] Scheduler service stopped.")
