@@ -25,7 +25,7 @@ from admin_gate import (
 from agent_lab_registry import build_agent_registry
 from plugin_result import action_failure
 from plugin_kernel import plugin_supports_platform
-from planner_loop import should_use_agent_mode, run_planner_loop
+from cerberus import run_cerberus_turn, resolve_agent_limits
 
 load_dotenv()
 logger = logging.getLogger("irc.tater")
@@ -473,22 +473,20 @@ async def on_message(self, mask, event, target, data):
 
     logger.info(f"<{mask.nick}> {data}")
     history = load_irc_history(channel=target)
-    messages = [{"role": "system", "content": build_system_prompt()}] + history
+    messages = history
+    platform_preamble = build_system_prompt()
     merged_registry, merged_enabled, _collisions = build_agent_registry(
         pr.get_registry_snapshot(),
         get_plugin_enabled,
     )
 
     try:
-        _use_agent, active_task_id, _reason = should_use_agent_mode(
-            user_text=effective_request,
-            platform="irc",
-            scope=target,
-            r=redis_client,
-        )
+        scope_value = f"chan:{target}" if str(target or "").startswith(("#", "&")) else f"pm:{target}"
         origin = {
             "platform": "irc",
             "channel": target,
+            "target": target,
+            "chat_type": "channel" if str(target or "").startswith(("#", "&")) else "pm",
             "user": mask.nick,
             "request_id": f"{target}:{time.time():.3f}",
         }
@@ -548,7 +546,8 @@ async def on_message(self, mask, event, target, data):
                 )
             return None
 
-        result = await run_planner_loop(
+        agent_max_rounds, agent_max_tool_calls = resolve_agent_limits(redis_client)
+        result = await run_cerberus_turn(
             llm_client=llm_client,
             platform="irc",
             history_messages=messages,
@@ -556,12 +555,14 @@ async def on_message(self, mask, event, target, data):
             enabled_predicate=merged_enabled,
             context={"raw_message": data},
             user_text=effective_request,
-            scope=target,
-            task_id=active_task_id,
+            scope=scope_value,
             origin=origin,
             wait_callback=_wait_callback,
             admin_guard=_admin_guard,
             redis_client=redis_client,
+            max_rounds=agent_max_rounds,
+            max_tool_calls=agent_max_tool_calls,
+            platform_preamble=platform_preamble,
         )
 
         final_text = (result.get("text") or "").strip()

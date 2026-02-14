@@ -1,20 +1,18 @@
-# plugins/emoji_ai_responder.py
 import json
 import logging
-import os
 import random
 import time
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
-from dotenv import load_dotenv
+from helpers import extract_json, get_llm_client_from_env, redis_client
 
-from helpers import LLMClientWrapper, extract_json, redis_client
-from plugin_base import ToolPlugin
-from plugin_settings import get_plugin_enabled
+logger = logging.getLogger("emoji_responder")
 
-load_dotenv()
-
-logger = logging.getLogger("emoji_ai_responder")
+EMOJI_SETTINGS_KEY = "emoji_responder_settings"
+EMOJI_SETTINGS_LEGACY_KEYS = (
+    "plugin_settings:Emoji AI Responder",
+    "plugin_settings: Emoji AI Responder",
+)
 
 _FALLBACK_LLM = None
 
@@ -22,70 +20,11 @@ _FALLBACK_LLM = None
 def _fallback_llm_client():
     global _FALLBACK_LLM
     if _FALLBACK_LLM is None:
-        llm_host = os.getenv("LLM_HOST", "127.0.0.1")
-        llm_port = os.getenv("LLM_PORT", "11434")
-        _FALLBACK_LLM = LLMClientWrapper(host=f"http://{llm_host}:{llm_port}")
+        _FALLBACK_LLM = get_llm_client_from_env()
     return _FALLBACK_LLM
 
 
-class EmojiAIResponderPlugin(ToolPlugin):
-    name = "emoji_ai_responder"
-    plugin_name = "Emoji AI Responder"
-    pretty_name = "Emoji AI Responder"
-    version = "1.3.0"
-    min_tater_version = "50"
-    description = (
-        "Picks a context-aware emoji reaction. Supports reaction-chain mode and optional low-frequency "
-        "auto reactions on replies (Discord/Telegram/Matrix)."
-    )
-    plugin_dec = "Pick a contextual emoji reaction."
-    platforms = ["passive"]
-    settings_category = "Emoji AI Responder"
-    required_settings = {
-        "ENABLE_ON_REACTION_ADD": {
-            "label": "Enable reaction-chain mode",
-            "type": "checkbox",
-            "default": True,
-            "description": "When a user reacts to a Discord message, optionally add one matching emoji reaction.",
-        },
-        "ENABLE_AUTO_REACTION_ON_REPLY": {
-            "label": "Enable auto reactions on replies",
-            "type": "checkbox",
-            "default": True,
-            "description": "When the assistant replies, occasionally add a matching emoji reaction to the triggering message.",
-        },
-        "REACTION_CHAIN_CHANCE_PERCENT": {
-            "label": "Reaction-chain chance (%)",
-            "type": "number",
-            "default": 100,
-            "description": "Chance per reaction-add event to add one contextual emoji (0-100).",
-        },
-        "REPLY_REACTION_CHANCE_PERCENT": {
-            "label": "Reply reaction chance (%)",
-            "type": "number",
-            "default": 12,
-            "description": "Chance per assistant reply to add a contextual emoji (0-100).",
-        },
-        "REACTION_CHAIN_COOLDOWN_SECONDS": {
-            "label": "Reaction-chain cooldown (seconds)",
-            "type": "number",
-            "default": 30,
-            "description": "Minimum seconds between chain reactions per room/channel/chat (0 disables).",
-        },
-        "REPLY_REACTION_COOLDOWN_SECONDS": {
-            "label": "Reply reaction cooldown (seconds)",
-            "type": "number",
-            "default": 120,
-            "description": "Minimum seconds between reply reactions per room/channel/chat (0 disables).",
-        },
-        "MIN_MESSAGE_LENGTH": {
-            "label": "Minimum message length",
-            "type": "number",
-            "default": 4,
-            "description": "Ignore very short inputs for auto reactions.",
-        },
-    }
-
+class EmojiResponder:
     @staticmethod
     def _decode_text(value: Any, default: str = "") -> str:
         if isinstance(value, (bytes, bytearray)):
@@ -119,17 +58,23 @@ class EmojiAIResponderPlugin(ToolPlugin):
             return maximum
         return parsed
 
+    def _load_raw_settings(self) -> Dict[str, Any]:
+        raw = redis_client.hgetall(EMOJI_SETTINGS_KEY) or {}
+        if raw:
+            return raw
+        for key in EMOJI_SETTINGS_LEGACY_KEYS:
+            legacy = redis_client.hgetall(key) or {}
+            if legacy:
+                return legacy
+        return {}
+
     def _get_settings(self) -> Dict[str, Any]:
-        raw = redis_client.hgetall(f"plugin_settings:{self.settings_category}") or redis_client.hgetall(
-            f"plugin_settings: {self.settings_category}"
-        ) or {}
+        raw = self._load_raw_settings()
         reply_chance_raw = raw.get("REPLY_REACTION_CHANCE_PERCENT")
         if reply_chance_raw in (None, ""):
-            # Backward compatibility for previous single shared chance setting.
             reply_chance_raw = raw.get("AUTO_REACTION_CHANCE_PERCENT")
         reply_cooldown_raw = raw.get("REPLY_REACTION_COOLDOWN_SECONDS")
         if reply_cooldown_raw in (None, ""):
-            # Backward compatibility for previous single shared cooldown setting.
             reply_cooldown_raw = raw.get("AUTO_REACTION_COOLDOWN_SECONDS")
         return {
             "enable_on_reaction_add": self._to_bool(raw.get("ENABLE_ON_REACTION_ADD"), True),
@@ -148,6 +93,21 @@ class EmojiAIResponderPlugin(ToolPlugin):
             ),
             "min_message_length": self._to_int(raw.get("MIN_MESSAGE_LENGTH"), default=4, minimum=0, maximum=200),
         }
+
+    @staticmethod
+    def save_settings(settings: Dict[str, Any]) -> None:
+        payload = {
+            "ENABLE_ON_REACTION_ADD": "true" if bool(settings.get("enable_on_reaction_add", True)) else "false",
+            "ENABLE_AUTO_REACTION_ON_REPLY": "true"
+            if bool(settings.get("enable_auto_reaction_on_reply", True))
+            else "false",
+            "REACTION_CHAIN_CHANCE_PERCENT": str(int(settings.get("reaction_chain_chance_percent", 100))),
+            "REPLY_REACTION_CHANCE_PERCENT": str(int(settings.get("reply_reaction_chance_percent", 12))),
+            "REACTION_CHAIN_COOLDOWN_SECONDS": str(int(settings.get("reaction_chain_cooldown_seconds", 30))),
+            "REPLY_REACTION_COOLDOWN_SECONDS": str(int(settings.get("reply_reaction_cooldown_seconds", 120))),
+            "MIN_MESSAGE_LENGTH": str(int(settings.get("min_message_length", 4))),
+        }
+        redis_client.hset(EMOJI_SETTINGS_KEY, mapping=payload)
 
     @staticmethod
     def _message_has_emoji(platform: str, emoji: str, **kwargs) -> bool:
@@ -186,10 +146,8 @@ class EmojiAIResponderPlugin(ToolPlugin):
         token = text.split()[0].strip().strip('"').strip("'").strip("`")
         if not token:
             return ""
-        # Require non-ASCII to avoid LLM returning plain words.
         if all(ord(ch) < 128 for ch in token):
             return ""
-        # Favor unicode emoji for cross-platform compatibility.
         if token.startswith("<") and token.endswith(">"):
             return ""
         return token[:16]
@@ -199,7 +157,7 @@ class EmojiAIResponderPlugin(ToolPlugin):
         safe_platform = str(platform or "unknown").strip().lower() or "unknown"
         safe_scope = str(scope or "global").strip() or "global"
         safe_mode = str(mode or "reply").strip().lower() or "reply"
-        return f"tater:emoji_ai_responder:last:{safe_platform}:{safe_scope}:{safe_mode}"
+        return f"tater:emoji_responder:last:{safe_platform}:{safe_scope}:{safe_mode}"
 
     def _cooldown_allows(self, *, platform: str, scope: str, mode: str, cooldown_seconds: int) -> bool:
         if cooldown_seconds <= 0:
@@ -272,11 +230,10 @@ class EmojiAIResponderPlugin(ToolPlugin):
                 max_tokens=60,
             )
         except Exception as exc:
-            logger.debug("[emoji_ai_responder] LLM call failed: %s", exc)
+            logger.debug("[emoji_responder] LLM call failed: %s", exc)
             return ""
 
-        ai_reply = (response.get("message") or {}).get("content", "")
-        ai_reply = str(ai_reply or "").strip()
+        ai_reply = str((response.get("message") or {}).get("content", "") or "").strip()
         if not ai_reply:
             return ""
 
@@ -310,9 +267,6 @@ class EmojiAIResponderPlugin(ToolPlugin):
         scope: str = "",
         **kwargs,
     ) -> str:
-        if not get_plugin_enabled(self.name):
-            return ""
-
         settings = self._get_settings()
         if not settings["enable_auto_reaction_on_reply"]:
             return ""
@@ -345,20 +299,18 @@ class EmojiAIResponderPlugin(ToolPlugin):
             )
         return emoji
 
-    async def on_reaction_add(self, reaction, user):
+    async def on_reaction_add(self, reaction: Any, user: Any, *, llm_client=None) -> str:
         if getattr(user, "bot", False):
-            return
-        if not get_plugin_enabled(self.name):
-            return
+            return ""
 
         settings = self._get_settings()
         if not settings["enable_on_reaction_add"]:
-            return
+            return ""
 
         message = getattr(reaction, "message", None)
         message_content = str(getattr(message, "content", "") or "").strip()
         if len(message_content) < settings["min_message_length"]:
-            return
+            return ""
 
         scope = self._reaction_scope(reaction)
         if not self._cooldown_allows(
@@ -367,20 +319,20 @@ class EmojiAIResponderPlugin(ToolPlugin):
             mode="chain",
             cooldown_seconds=settings["reaction_chain_cooldown_seconds"],
         ):
-            return
+            return ""
 
         chance = float(settings["reaction_chain_chance_percent"]) / 100.0
         if chance <= 0 or random.random() > chance:
-            return
+            return ""
 
-        emoji = await self._suggest_emoji(message_content, llm_client=None)
+        emoji = await self._suggest_emoji(message_content, llm_client=llm_client)
         if not emoji:
-            return
+            return ""
 
         try:
             existing = list(getattr(message, "reactions", []) or [])
-            if any(str(getattr(r, "emoji", "")) == emoji for r in existing):
-                return
+            if any(str(getattr(r, "emoji", "")).strip() == emoji for r in existing):
+                return ""
             await message.add_reaction(emoji)
             self._mark_cooldown(
                 platform="discord",
@@ -388,8 +340,18 @@ class EmojiAIResponderPlugin(ToolPlugin):
                 mode="chain",
                 cooldown_seconds=settings["reaction_chain_cooldown_seconds"],
             )
+            return emoji
         except Exception as exc:
-            logger.debug("[emoji_ai_responder] add_reaction failed: %s", exc)
+            logger.debug("[emoji_responder] add_reaction failed: %s", exc)
+            return ""
 
 
-plugin = EmojiAIResponderPlugin()
+emoji_responder = EmojiResponder()
+
+
+def get_emoji_settings() -> Dict[str, Any]:
+    return emoji_responder._get_settings()
+
+
+def save_emoji_settings(settings: Dict[str, Any]) -> None:
+    emoji_responder.save_settings(settings)

@@ -23,7 +23,7 @@ from helpers import (
 )
 import plugin_registry as pr
 from agent_lab_registry import build_agent_registry
-from planner_loop import should_use_agent_mode, run_planner_loop
+from cerberus import run_cerberus_turn, resolve_agent_limits
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("xbmc")
@@ -327,22 +327,23 @@ async def handle_message(payload: XBMCRequest):
 
     system_prompt = build_system_prompt()
     loop_messages = await _load_history(payload.session_id, history_max)
-    messages_list = [{"role": "system", "content": system_prompt}] + loop_messages
+    messages_list = loop_messages
     merged_registry, merged_enabled, _collisions = build_agent_registry(
         pr.get_registry_snapshot(),
         get_plugin_enabled,
     )
 
     try:
-        _use_agent, active_task_id, _reason = should_use_agent_mode(
-            user_text=text_in,
-            platform="xbmc",
-            scope=str(payload.session_id or "default"),
-            r=redis_client,
-        )
-        origin = {"platform": "xbmc", "request_id": payload.session_id}
+        origin = {
+            "platform": "xbmc",
+            "session_id": payload.session_id,
+            "device_id": payload.device_id,
+            "user_id": payload.user_id,
+            "request_id": payload.session_id,
+        }
         origin = {k: v for k, v in origin.items() if v not in (None, "")}
-        result = await run_planner_loop(
+        agent_max_rounds, agent_max_tool_calls = resolve_agent_limits(redis_client)
+        result = await run_cerberus_turn(
             llm_client=_llm,
             platform="xbmc",
             history_messages=messages_list,
@@ -350,10 +351,12 @@ async def handle_message(payload: XBMCRequest):
             enabled_predicate=merged_enabled,
             context={},
             user_text=text_in,
-            scope=str(payload.session_id or "default"),
-            task_id=active_task_id,
+            scope=f"session:{payload.session_id}" if str(payload.session_id or "").strip() else "",
             origin=origin,
             redis_client=redis_client,
+            max_rounds=agent_max_rounds,
+            max_tool_calls=agent_max_tool_calls,
+            platform_preamble=system_prompt,
         )
         final_text = (result.get("text") or "").strip()
         if len(final_text) > 4000:

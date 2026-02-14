@@ -4,3 +4,4 @@ __pycache__/
 
 agent_lab/logs/*.log
 agent_lab/workspace/extracted_tmp_archive_*
+tests/

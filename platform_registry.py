@@ -2,7 +2,6 @@
 from platforms.discord_platform import PLATFORM_SETTINGS as discord_settings
 from platforms.ha_automations_platform import PLATFORM_SETTINGS as automations_settings
 from platforms.homeassistant_platform import PLATFORM_SETTINGS as ha_settings
-from platforms.ai_task_platform import PLATFORM_SETTINGS as ai_task_settings
 from platforms.homekit_platform import PLATFORM_SETTINGS as homekit_settings
 from platforms.irc_platform import PLATFORM_SETTINGS as irc_settings
 from platforms.matrix_platform import PLATFORM_SETTINGS as matrix_settings
@@ -20,11 +19,6 @@ platform_registry = [
         **ha_settings,
         "key": "homeassistant_platform",
         "label": "Home Assistant Settings",
-    },
-    {
-        **ai_task_settings,
-        "key": "ai_task_platform",
-        "label": "AI Task Settings",
     },
     {
         **automations_settings,

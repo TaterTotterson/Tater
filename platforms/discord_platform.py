@@ -32,8 +32,9 @@ from admin_gate import (
 from agent_lab_registry import build_agent_registry
 from plugin_result import action_failure
 from plugin_kernel import plugin_supports_platform, plugin_display_name
-from planner_loop import should_use_agent_mode, run_planner_loop
-from latest_image_ref import load_latest_image_ref, save_latest_image_ref
+from cerberus import run_cerberus_turn, resolve_agent_limits
+from conversation_media_refs import load_recent_media_refs, save_media_ref
+from emoji_responder import emoji_responder
 
 load_dotenv()
 redis_host = os.getenv("REDIS_HOST", "127.0.0.1")
@@ -103,8 +104,8 @@ def load_blob(key: str) -> bytes | None:
     return blob_client.get(key.encode("utf-8"))
 
 
-def _save_latest_channel_image_ref(channel_id: str, ref: Dict[str, Any]) -> None:
-    save_latest_image_ref(
+def _save_recent_channel_media_ref(channel_id: str, ref: Dict[str, Any]) -> None:
+    save_media_ref(
         redis_client,
         platform="discord",
         scope=str(channel_id),
@@ -112,11 +113,12 @@ def _save_latest_channel_image_ref(channel_id: str, ref: Dict[str, Any]) -> None
     )
 
 
-def _load_latest_channel_image_ref(channel_id: str) -> Dict[str, Any] | None:
-    return load_latest_image_ref(
+def _load_recent_channel_media_refs(channel_id: str, limit: int = 8) -> list[Dict[str, Any]]:
+    return load_recent_media_refs(
         redis_client,
         platform="discord",
         scope=str(channel_id),
+        limit=limit,
     )
 
 
@@ -463,33 +465,22 @@ class discord_platform(commands.Bot):
         message: discord.Message,
         user_text: str,
         assistant_text: str,
-        merged_registry,
-        merged_enabled,
     ):
-        for name, plugin in merged_registry.items():
-            hook = getattr(plugin, "on_assistant_response", None)
-            if not callable(hook):
-                continue
-            if not merged_enabled(name):
-                continue
-
-            try:
-                suggested = await hook(
-                    platform="discord",
-                    user_text=user_text or "",
-                    assistant_text=assistant_text or "",
-                    llm_client=self.llm,
-                    scope=str(getattr(message.channel, "id", "") or ""),
-                    message=message,
-                    user=message.author,
-                )
-                emoji = self._extract_hook_emoji(suggested)
-                if not emoji:
-                    continue
+        try:
+            suggested = await emoji_responder.on_assistant_response(
+                platform="discord",
+                user_text=user_text or "",
+                assistant_text=assistant_text or "",
+                llm_client=self.llm,
+                scope=str(getattr(message.channel, "id", "") or ""),
+                message=message,
+                user=message.author,
+            )
+            emoji = self._extract_hook_emoji(suggested)
+            if emoji:
                 await message.add_reaction(emoji)
-                return
-            except Exception as exc:
-                logger.debug(f"[{name}] passive reaction skipped: {exc}")
+        except Exception as exc:
+            logger.debug(f"[emoji_responder] passive reaction skipped: {exc}")
 
     async def load_history(self, channel_id, limit=None):
         if limit is None:
@@ -526,7 +517,7 @@ class discord_platform(commands.Bot):
         if message.author == self.user:
             return
 
-        latest_image_ref = _load_latest_channel_image_ref(message.channel.id)
+        recent_media_refs = _load_recent_channel_media_refs(message.channel.id, limit=8)
 
         # -------------------------
         # Save user message + attachments (NO base64 in history)
@@ -559,15 +550,21 @@ class discord_platform(commands.Bot):
                     }
 
                     await self.save_message(message.channel.id, "user", message.author.name, file_obj)
-                    if file_type == "image":
-                        latest_image_ref = {
-                            "blob_key": blob_key,
-                            "name": attachment.filename or "image.png",
-                            "mimetype": attachment.content_type or "image/png",
-                            "source": "discord_attachment",
-                            "updated_at": time.time(),
-                        }
-                        _save_latest_channel_image_ref(message.channel.id, latest_image_ref)
+                    media_ref = {
+                        "type": file_type,
+                        "blob_key": blob_key,
+                        "name": attachment.filename or f"{file_type}.bin",
+                        "mimetype": attachment.content_type or "application/octet-stream",
+                        "source": "discord_attachment",
+                        "updated_at": time.time(),
+                        "size": len(file_bytes),
+                    }
+                    try:
+                        _save_recent_channel_media_ref(message.channel.id, media_ref)
+                        recent_media_refs = [media_ref] + [item for item in recent_media_refs if isinstance(item, dict)]
+                        recent_media_refs = recent_media_refs[:8]
+                    except Exception:
+                        pass
                 except Exception as e:
                     logger.warning(f"Failed to store attachment ({attachment.filename}): {e}")
         else:
@@ -585,9 +582,9 @@ class discord_platform(commands.Bot):
             if message.channel.id != self.response_channel_id and not self.user.mentioned_in(message):
                 return
 
-        system_prompt = self.build_system_prompt()
         history = await self.load_history(message.channel.id)
-        messages_list = [{"role": "system", "content": system_prompt}] + history
+        messages_list = history
+        platform_preamble = self.build_system_prompt()
         merged_registry, merged_enabled, _collisions = build_agent_registry(
             pr.get_registry_snapshot(),
             get_plugin_enabled,
@@ -595,22 +592,21 @@ class discord_platform(commands.Bot):
 
         async with message.channel.typing():
             try:
-                _use_agent, active_task_id, _reason = should_use_agent_mode(
-                    user_text=message.content or "",
-                    platform="discord",
-                    scope=str(message.channel.id),
-                    r=redis_client,
-                )
+                is_dm = isinstance(message.channel, discord.DMChannel)
+                scope_value = f"dm:{message.author.id}" if is_dm else f"channel:{message.channel.id}"
                 origin = {
                     "platform": "discord",
                     "channel_id": str(message.channel.id),
                     "guild_id": str(message.guild.id) if message.guild else None,
                     "channel": f"#{message.channel.name}" if getattr(message.channel, "name", None) else None,
                     "user": message.author.display_name or message.author.name,
+                    "user_id": str(message.author.id),
+                    "chat_type": "dm" if is_dm else "channel",
+                    "dm_user_id": str(message.author.id) if is_dm else None,
                     "request_id": str(message.id),
                 }
-                if latest_image_ref:
-                    origin["latest_image_ref"] = latest_image_ref
+                if recent_media_refs:
+                    origin["media_refs"] = recent_media_refs
                 origin = {k: v for k, v in origin.items() if v not in (None, "")}
 
                 async def _wait_callback(func_name, plugin_obj):
@@ -669,7 +665,8 @@ class discord_platform(commands.Bot):
                         )
                     return None
 
-                result = await run_planner_loop(
+                agent_max_rounds, agent_max_tool_calls = resolve_agent_limits(redis_client)
+                result = await run_cerberus_turn(
                     llm_client=self.llm,
                     platform="discord",
                     history_messages=messages_list,
@@ -677,12 +674,14 @@ class discord_platform(commands.Bot):
                     enabled_predicate=merged_enabled,
                     context={"message": message},
                     user_text=message.content or "",
-                    scope=str(message.channel.id),
-                    task_id=active_task_id,
+                    scope=scope_value,
                     origin=origin,
                     wait_callback=_wait_callback,
                     admin_guard=_admin_guard,
                     redis_client=redis_client,
+                    max_rounds=agent_max_rounds,
+                    max_tool_calls=agent_max_tool_calls,
+                    platform_preamble=platform_preamble,
                 )
                 final_text = (result.get("text") or "").strip()
                 if final_text:
@@ -731,15 +730,21 @@ class discord_platform(commands.Bot):
                             "assistant",
                             {"marker": "plugin_response", "phase": "final", "content": content_obj},
                         )
-                        if content_type == "image" or str(mimetype or "").lower().startswith("image/"):
-                            latest_image_ref = {
-                                "blob_key": blob_key,
-                                "name": filename or "image.png",
-                                "mimetype": mimetype or "image/png",
-                                "source": "discord_artifact",
-                                "updated_at": time.time(),
-                            }
-                            _save_latest_channel_image_ref(message.channel.id, latest_image_ref)
+                        try:
+                            _save_recent_channel_media_ref(
+                                message.channel.id,
+                                {
+                                    "type": str(content_type or "file").strip().lower() or "file",
+                                    "blob_key": blob_key,
+                                    "name": filename or "output.bin",
+                                    "mimetype": mimetype or "application/octet-stream",
+                                    "source": "discord_artifact",
+                                    "updated_at": time.time(),
+                                    "size": len(binary),
+                                },
+                            )
+                        except Exception:
+                            pass
                     except Exception as e:
                         logger.warning(f"Failed to send artifact {content_type}: {e}")
 
@@ -749,8 +754,6 @@ class discord_platform(commands.Bot):
                         message=message,
                         user_text=message.content or "",
                         assistant_text=assistant_summary,
-                        merged_registry=merged_registry,
-                        merged_enabled=merged_enabled,
                     )
                 return
 
@@ -765,23 +768,10 @@ class discord_platform(commands.Bot):
                 await message.channel.send(error_msg)
 
     async def on_reaction_add(self, reaction, user):
-        if user.bot:
-            return
-
-        merged_registry, merged_enabled, _collisions = build_agent_registry(
-            pr.get_registry_snapshot(),
-            get_plugin_enabled,
-        )
-        for name, plugin in merged_registry.items():
-            if not hasattr(plugin, "on_reaction_add"):
-                continue
-            if not merged_enabled(name):
-                continue
-
-            try:
-                await plugin.on_reaction_add(reaction, user)
-            except Exception as e:
-                logger.error(f"[{plugin.name}] Error in on_reaction_add: {e}")
+        try:
+            await emoji_responder.on_reaction_add(reaction, user, llm_client=self.llm)
+        except Exception as e:
+            logger.debug(f"[emoji_responder] reaction handler skipped: {e}")
 
 
 class AdminCommands(commands.Cog):
