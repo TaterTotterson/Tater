@@ -125,11 +125,16 @@ def _sanitize_contract(result: Dict[str, Any]) -> Dict[str, Any]:
         out.setdefault("artifacts", [])
     else:
         err = out.get("error")
-        if not isinstance(err, dict):
-            err = {}
+        code = "plugin_error"
+        message = "The tool failed."
+        if isinstance(err, dict):
+            code = str(err.get("code") or "plugin_error")
+            message = str(err.get("message") or "The tool failed.")
+        elif isinstance(err, str) and err.strip():
+            message = err.strip()
         out["error"] = {
-            "code": str(err.get("code") or "plugin_error"),
-            "message": str(err.get("message") or "The tool failed."),
+            "code": code,
+            "message": message,
         }
         out.setdefault("diagnosis", {})
         out.setdefault("needs", [])

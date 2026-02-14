@@ -15,8 +15,6 @@ from plugin_kernel import plugin_supports_platform
 from agent_lab_registry import build_agent_registry
 from helpers import (
     get_llm_client_from_env,
-    get_tater_name,
-    get_tater_personality,
 )
 from cerberus import run_cerberus_turn, resolve_agent_limits
 from notify import dispatch_notification
@@ -391,18 +389,8 @@ async def _render_scheduled_message(
     if not task_prompt:
         return "", []
 
-    first, last = get_tater_name()
-    personality = get_tater_personality().strip()
-    persona = (
-        f"Persona style: {personality}\n"
-        if personality
-        else ""
-    )
-
     system_prompt = (
-        f"You are {first} {last}, running a scheduled task.\n"
-        f"{persona}"
-        f"Current platform: {platform}.\n"
+        "You are running a scheduled task.\n"
         "Keep replies concise and task-focused.\n"
         "Do not use repo_browser.* tool syntax.\n"
     )

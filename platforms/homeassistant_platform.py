@@ -5,7 +5,6 @@ import asyncio
 import logging
 import threading
 import time
-from datetime import datetime
 from typing import Optional, Dict, Any, List, Tuple
 
 import redis
@@ -18,8 +17,6 @@ import aiohttp
 
 from helpers import (
     get_llm_client_from_env,
-    get_tater_name,
-    get_tater_personality,
 )
 import plugin_registry as pr
 from agent_lab_registry import build_agent_registry
@@ -266,10 +263,6 @@ def _conv_key(payload: HARequest, ctx: Dict[str, Any]) -> str:
 
 # -------------------- System prompt (Discord/IRC style, HA scoped) --------------------
 def build_system_prompt(ctx: Optional[Dict[str, Any]] = None) -> str:
-    now = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
-    first, last = get_tater_name()
-    personality = get_tater_personality()
-
     # ---- Voice / room context ----
     room_clause = ""
     if ctx:
@@ -285,20 +278,10 @@ def build_system_prompt(ctx: Optional[Dict[str, Any]] = None) -> str:
                 "assume they mean the Area/Room shown above.\n\n"
             )
 
-    persona_clause = ""
-    if personality:
-        persona_clause = (
-            f"Voice style: {personality}. "
-            "This affects tone only and never overrides tool/safety rules.\n\n"
-        )
-
-    # Planner mode injects canonical tool-use rules and enabled-tool index each turn.
+    # Platform preamble should be style/format only.
     return (
-        f"Current Date and Time is: {now}\n\n"
-        f"You are {first} {last}, a Home Assistant-savvy AI assistant.\n"
-        f"{persona_clause}"
+        "You are a Home Assistant-savvy AI assistant.\n"
         f"{room_clause}"
-        "Current platform: homeassistant.\n"
         "Use plain text only; no emojis and no markdown formatting.\n"
         "Keep replies concise and easy to understand.\n"
     )

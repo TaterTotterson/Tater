@@ -68,7 +68,7 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
     "read_url": "fetch and read webpage text",
     "inspect_webpage": "inspect webpage structure, links, and image candidates",
     "send_message": "send cross-platform messages/media via notifier delivery",
-    "ai_tasks": "schedule one-off or recurring AI tasks/reminders",
+    "ai_tasks": "schedule one-off or recurring AI tasks/reminders (defaults to local timezone)",
     "download_file": "download files from URLs",
     "list_archive": "inspect archive entries",
     "extract_archive": "extract archives to workspace",
@@ -152,10 +152,28 @@ _OVER_CLARIFICATION_MARKERS = (
     "should i use 12-hour or 24-hour",
     "do you want 12-hour or 24-hour format",
     "am or pm",
+    "what timezone",
+    "which timezone",
+    "what time zone",
+    "which time zone",
+    "timezone format",
+    "timezone should",
+    "utc or local",
+    "iana",
+    "what city or coordinates",
+    "which city or coordinates",
+    "what city should i use",
+    "which city should i use",
+    "what location should i use",
+    "which location should i use",
 )
 
 _URL_RE = re.compile(r"https?://[^\s<>)\]\"']+", flags=re.IGNORECASE)
 _GENERIC_SCOPE_TOKENS = {"", "default", "chat", "unknown", "none", "null", "n/a"}
+_CHECKER_DECISION_PREFIX_RE = re.compile(
+    r"^\s*(FINAL[\s_-]*ANSWER|RETRY[\s_-]*TOOL|NEED[\s_-]*USER[\s_-]*INFO)\s*:\s*(.*)$",
+    flags=re.IGNORECASE | re.DOTALL,
+)
 
 
 def _redis_config_non_negative_int(
@@ -950,7 +968,14 @@ def _looks_like_over_clarification(text: str, *, user_text: str = "") -> bool:
         return False
     if "?" not in lowered:
         return False
-    if not any(marker in lowered for marker in _OVER_CLARIFICATION_MARKERS):
+    marker_hit = any(marker in lowered for marker in _OVER_CLARIFICATION_MARKERS)
+    generic_clarifier_hit = bool(
+        re.search(
+            r"\b(platform|environment|room|channel|chat|time\s*zone|timezone|time format|12-hour|24-hour|am or pm|city|location|coordinates?|zip|postal)\b",
+            lowered,
+        )
+    )
+    if not marker_hit and not generic_clarifier_hit:
         return False
 
     user_lowered = " ".join(str(user_text or "").strip().lower().split())
@@ -981,6 +1006,24 @@ def _looks_like_over_clarification(text: str, *, user_text: str = "") -> bool:
             )
         )
 
+    if re.search(r"\b(timezone|time zone|iana|utc|gmt)\b", lowered):
+        has_time = bool(
+            re.search(
+                r"\b(\d{1,2}(?::\d{2})?\s*(am|pm)?|at\s+\d{1,2}(?::\d{2})?\s*(am|pm)?|morning|afternoon|evening|night)\b",
+                user_lowered,
+            )
+        )
+        has_schedule = bool(
+            re.search(
+                r"\b(remind|reminder|schedule|scheduled|task|timer|alarm|forecast|every day|everyday|daily|weekly|weekdays?|weekends?)\b",
+                user_lowered,
+            )
+        )
+        return bool(has_time and has_schedule)
+
+    if re.search(r"\b(city|coordinates?|location|zip|postal)\b", lowered):
+        return bool(_looks_like_weather_request(user_lowered) or _looks_like_schedule_request(user_lowered))
+
     if re.search(r"\b(what would you like me to do|what would you like to do)\b", lowered):
         return _contains_action_intent(user_lowered)
 
@@ -991,6 +1034,53 @@ def _looks_like_over_clarification(text: str, *, user_text: str = "") -> bool:
         return True
 
     return False
+
+
+def _synthesize_tool_call_from_overclarification(
+    *,
+    user_text: str,
+    question_text: str,
+) -> str:
+    user_msg = str(user_text or "").strip()
+    question = str(question_text or "").strip().lower()
+    if not user_msg or not question:
+        return ""
+
+    asks_timezone = bool(re.search(r"\b(timezone|time zone|utc|gmt|iana)\b", question))
+    asks_time_format = bool(re.search(r"\b(time format|12-hour|24-hour|am or pm|a\.m\.|p\.m\.)\b", question))
+    asks_location = bool(re.search(r"\b(city|location|coordinates?|zip|postal)\b", question))
+    asks_schedule_disambiguation = bool(
+        re.search(r"\bdo you want\b", question)
+        and re.search(
+            r"\b(schedule|scheduled|daily|weekly|every day|automated|task|reminder|at\s+\d{1,2}(?::\d{2})?\s*(am|pm)?|local time|forecast)\b",
+            question,
+        )
+    )
+    if not (asks_timezone or asks_time_format or asks_location or asks_schedule_disambiguation):
+        return ""
+
+    if _looks_like_schedule_request(user_msg):
+        # Scheduling requests should proceed with local defaults unless user explicitly asked otherwise.
+        payload = {
+            "function": "ai_tasks",
+            "arguments": {
+                "task_prompt": user_msg,
+                "message": user_msg,
+            },
+        }
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    if asks_location and _looks_like_weather_request(user_msg):
+        # Weather requests should rely on plugin default location when user did not specify one.
+        payload = {
+            "function": "weather_forecast",
+            "arguments": {
+                "request": user_msg,
+            },
+        }
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    return ""
 
 
 def _strip_user_sender_prefix(text: str) -> str:
@@ -1105,6 +1195,174 @@ def _looks_like_download_followup(text: str) -> bool:
     return has_ref
 
 
+def _looks_like_schedule_request(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return False
+    return bool(
+        re.search(
+            r"\b(remind|reminder|schedule|scheduled|task|tasks|timer|alarm|every day|everyday|daily|weekly|weekdays?|weekends?|every\s+\d+\s*(second|seconds|minute|minutes|hour|hours|day|days|week|weeks)|at\s+\d{1,2}(?::\d{2})?\s*(am|pm)?)\b",
+            lowered,
+        )
+    )
+
+
+def _looks_like_weather_request(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return False
+    return bool(
+        re.search(
+            r"\b(weather|forecast|rain|precip|temperature|temp|humidity|wind|storm|snow)\b",
+            lowered,
+        )
+    )
+
+
+def _mentions_explicit_weather_location(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return False
+    if re.search(r"\b(my location|current location|here)\b", lowered):
+        return True
+    if re.search(r"\b-?\d{1,3}\.\d+\s*,\s*-?\d{1,3}\.\d+\b", lowered):
+        return True
+    if re.search(r"\b\d{5}(?:-\d{4})?\b", lowered):
+        return True
+    for match in re.finditer(
+        r"\b(?:in|for|at|near|around)\s+([a-z0-9][a-z0-9'._-]{1,})(?:\s+[a-z0-9][a-z0-9'._-]{1,}){0,2}",
+        lowered,
+    ):
+        token = str(match.group(1) or "").strip().lower()
+        if token in {
+            "the",
+            "a",
+            "an",
+            "today",
+            "tomorrow",
+            "tonight",
+            "day",
+            "week",
+            "weekend",
+            "weekdays",
+            "daily",
+            "hourly",
+            "forecast",
+            "weather",
+            "rain",
+            "chance",
+            "chances",
+        }:
+            continue
+        return True
+    return False
+
+
+def _mentions_explicit_timezone(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return False
+    if re.search(r"\b(timezone|time zone|utc|gmt|z)\b", lowered):
+        return True
+    if re.search(r"\b(est|edt|cst|cdt|mst|mdt|pst|pdt)\b", lowered):
+        return True
+    if re.search(r"\b(america|europe|asia|africa|australia|pacific|etc)/[a-z0-9_+\-]+\b", lowered):
+        return True
+    if re.search(r"\b(?:utc|gmt)\s*[+-]\s*\d{1,2}\b", lowered):
+        return True
+    return False
+
+
+def _looks_like_explicit_ai_task_request(text: str) -> bool:
+    lowered = " ".join(str(text or "").strip().lower().split())
+    if not lowered:
+        return False
+    if not _looks_like_schedule_request(lowered):
+        return False
+
+    has_recurrence = bool(
+        re.search(
+            r"\b(every day|everyday|daily|weekly|weekdays?|weekends?|every\s+\d+\s*(seconds?|minutes?|hours?|days?|weeks?))\b",
+            lowered,
+        )
+    )
+    has_time = bool(
+        re.search(
+            r"\b(\d{1,2}(?::\d{2})?\s*(am|pm)|at\s+\d{1,2}(?::\d{2})?\s*(am|pm)?|(?:in|for)\s+\d+\s*(seconds?|minutes?|hours?|days?|weeks?))\b",
+            lowered,
+        )
+    )
+    has_action = bool(
+        re.search(
+            r"\b(send|post|remind|reminder|notify|check|run|forecast|weather|task|tasks|timer|alarm)\b",
+            lowered,
+        )
+    )
+    return bool((has_recurrence or has_time) and has_action)
+
+
+def _ai_tasks_creation_status(
+    *,
+    payload: Optional[Dict[str, Any]],
+    checker_result: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    src = payload if isinstance(payload, dict) else {}
+    ok = bool(src.get("ok"))
+    reminder_id = _short_text(src.get("reminder_id"), limit=96)
+
+    next_run_text = ""
+    try:
+        next_run_ts = float(src.get("next_run_ts"))
+        if next_run_ts > 0:
+            next_run_text = datetime.fromtimestamp(next_run_ts).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        next_run_text = ""
+
+    result_line = _short_text(src.get("result"), limit=260)
+    if not result_line or _is_low_information_text(result_line):
+        result_line = "Scheduled task created."
+
+    if ok and reminder_id:
+        parts: List[str] = [result_line.rstrip(".") + "."]
+        if next_run_text and "next" not in result_line.lower() and "scheduled for" not in result_line.lower():
+            parts.append(f"Next run: {next_run_text}.")
+        parts.append(f"Task ID: {reminder_id}.")
+        return {
+            "created": True,
+            "code": "",
+            "success_text": " ".join(parts).strip(),
+            "failure_text": "",
+        }
+
+    err_code = ""
+    err_message = ""
+    err = src.get("error")
+    if isinstance(err, dict):
+        err_code = _short_text(err.get("code"), limit=64)
+        err_message = _short_text(err.get("message"), limit=220)
+    elif isinstance(err, str):
+        err_message = _short_text(err, limit=220)
+
+    if not err_message and isinstance(checker_result, dict):
+        errors = checker_result.get("errors")
+        if isinstance(errors, list):
+            for item in errors:
+                text = _short_text(item, limit=220)
+                if text:
+                    err_message = text
+                    break
+
+    if not err_message:
+        err_message = "I could not confirm task creation."
+
+    return {
+        "created": False,
+        "code": err_code or "task_not_created",
+        "success_text": "",
+        "failure_text": f"I couldn't create that scheduled task: {err_message}",
+    }
+
+
 def _latest_url_from_history(history_messages: List[Dict[str, Any]]) -> str:
     for msg in reversed(history_messages or []):
         if not isinstance(msg, dict):
@@ -1135,6 +1393,14 @@ def _effective_user_text(user_text: str, history_messages: List[Dict[str, Any]])
         recent_url = _latest_url_from_history(history_messages)
         if recent_url and recent_url not in out:
             out = f"{out}\nRecent URL reference: {recent_url}"
+
+    if _looks_like_schedule_request(current) and not _mentions_explicit_timezone(current):
+        if "Assume local timezone." not in out:
+            out = f"{out}\nAssume local timezone."
+    if _looks_like_weather_request(current) and not _mentions_explicit_weather_location(current):
+        hint = "If location is not specified, use the configured default weather location."
+        if hint.lower() not in out.lower():
+            out = f"{out}\n{hint}"
     return out
 
 
@@ -1177,25 +1443,19 @@ def _planner_system_prompt(platform: str) -> str:
         "1) A normal assistant response (no tool call), OR\n"
         "2) Exactly ONE strict JSON object: {\"function\":\"tool_id\",\"arguments\":{...}}\n"
         "Rules:\n"
-        "- The latest user message in this turn is the authoritative request.\n"
-        "- Use earlier history only for explicit references; if topic changed, follow the latest message.\n"
-        "- Never output multiple tool calls.\n"
+        "- The latest user message is authoritative; use earlier history only for explicit references.\n"
         "- Use only tool ids from the enabled tool index.\n"
-        "- Prefer action over clarification; answer directly whenever possible.\n"
-        "- Ask a clarification only when one required value is truly missing and cannot be safely assumed.\n"
-        "- Never ask what platform this chat is on; the current platform is already known.\n"
-        "- Use send_message ONLY for explicit delivery/posting requests (send/post/share/upload/forward).\n"
-        "- Never use send_message for normal conversational replies in the current chat.\n"
-        "- For requests like 'send/post/add ... here' or 'in this chat/channel', use send_message and current context.\n"
-        "- Do not ask for platform/room when user says 'here' unless they explicitly ask for another destination.\n"
-        "- For scheduling/time requests, assume local time and parse common formats (6am, 18:00, at 6) without asking 12h vs 24h.\n"
-        "- For memory_set, default personal facts/preferences to scope='user' unless user explicitly asks room/global.\n"
-        "- For memory_get/memory_list/memory_delete about 'me/my', default to scope='user' unless user explicitly asks room/global.\n"
-        "- Use scope='global' only when user clearly asks to store something for everyone/all chats.\n"
+        "- Never output multiple tool calls or markdown fences around tool JSON.\n"
+        "- Prefer action over clarification; ask only when a required value is truly missing and cannot be safely assumed.\n"
+        "- Never ask what platform this chat is on; it is already known.\n"
+        "- Use send_message only for explicit delivery intent (send/post/share/upload/forward) or clear 'here/this chat/channel' delivery requests; do not use it for normal chat replies.\n"
+        "- Do not ask destination platform/room when user says 'here' unless they explicitly ask for a different destination.\n"
+        "- For scheduling requests, assume local time/timezone and parse common formats (6am, 18:00, at 6); ask timezone only when the user explicitly asks for a different one.\n"
+        "- For weather requests without an explicit location, use the configured default weather location and do not ask city/coordinates first.\n"
+        "- For memory operations about 'me/my', default to scope='user'; use scope='global' only when user clearly asks for everyone/all chats.\n"
         "- For requests asking what a website/page is about, prefer inspect_webpage over read_url.\n"
         "- For plugin/platform creation requests, default to the current platform unless the user explicitly asks for another.\n"
         "- Never mention internal orchestration roles/codenames in user-facing replies.\n"
-        "- No markdown fences around tool JSON.\n"
         f"{plain_text_rule}"
     ).strip()
 
@@ -1229,6 +1489,8 @@ def _checker_system_prompt(platform: str, retry_allowed: bool) -> str:
         "- Prefer FINAL_ANSWER when sufficient facts already exist.\n"
         "- Do not ask which platform this chat is on; current platform is already known.\n"
         "- If original request says 'here'/'this chat'/'this channel', do not ask destination platform/room.\n"
+        "- For scheduling requests with clear time/recurrence, assume local timezone and do not ask timezone unless user explicitly asks for a different one.\n"
+        "- For weather requests without explicit location, continue with default weather location instead of asking city/coordinates.\n"
         "- Never mention internal orchestration roles/codenames in FINAL_ANSWER/NEED_USER_INFO.\n"
         f"{retry_rule}"
         f"{plain_text_rule}"
@@ -1396,6 +1658,8 @@ async def _repair_over_clarification_text(
         f"Current platform: {platform}\n"
         "Do not ask what platform this chat is on.\n"
         "If the user says 'here'/'this chat'/'this channel', do not ask destination platform/room.\n"
+        "For scheduling requests with clear time/recurrence, assume local timezone and do not ask timezone.\n"
+        "For weather requests without explicit location, use default weather location and do not ask city/coordinates first.\n"
         "Do not mention internal orchestration roles/codenames.\n"
         "Return only one of:\n"
         "- a direct assistant response (no prefix), OR\n"
@@ -1455,6 +1719,53 @@ async def _repair_send_message_misfire_text(
         return _coerce_text((response.get("message", {}) or {}).get("content", "")).strip()
     except Exception:
         return ""
+
+
+async def _repair_need_user_info_if_overclar(
+    *,
+    llm_client: Any,
+    platform: str,
+    user_text: str,
+    question_text: str,
+    tool_index: str,
+    platform_preamble: str = "",
+    max_tokens: Optional[int] = None,
+) -> Dict[str, Any]:
+    question = str(question_text or "").strip()
+    if not question:
+        return {"kind": "NEED_USER_INFO", "text": "", "repaired": False}
+    if not _looks_like_over_clarification(question, user_text=user_text):
+        return {"kind": "NEED_USER_INFO", "text": question, "repaired": False}
+
+    repaired = await _repair_over_clarification_text(
+        llm_client=llm_client,
+        platform=platform,
+        user_text=user_text,
+        planner_text=question,
+        tool_index=tool_index,
+        platform_preamble=platform_preamble,
+        max_tokens=max_tokens,
+    )
+    repaired_text = str(repaired or "").strip()
+    if not repaired_text:
+        synthesized = _synthesize_tool_call_from_overclarification(
+            user_text=user_text,
+            question_text=question,
+        )
+        if synthesized:
+            return {"kind": "RETRY_TOOL", "text": synthesized, "repaired": True}
+        return {"kind": "NEED_USER_INFO", "text": question, "repaired": False}
+    if _is_tool_candidate(repaired_text):
+        return {"kind": "RETRY_TOOL", "text": repaired_text, "repaired": True}
+    if _looks_like_over_clarification(repaired_text, user_text=user_text):
+        synthesized = _synthesize_tool_call_from_overclarification(
+            user_text=user_text,
+            question_text=question,
+        )
+        if synthesized:
+            return {"kind": "RETRY_TOOL", "text": synthesized, "repaired": True}
+        return {"kind": "NEED_USER_INFO", "text": question, "repaired": False}
+    return {"kind": "FINAL_ANSWER", "text": repaired_text, "repaired": True}
 
 
 async def _validate_tool_contract(
@@ -1896,14 +2207,9 @@ async def _generate_recovery_text(
         return fallback_text
     if looks_like_tool_markup(out) or parse_function_json(out):
         return fallback_text
-    if re.match(r"^\s*(FINAL_ANSWER|RETRY_TOOL|NEED_USER_INFO)\s*:", out, flags=re.IGNORECASE):
-        out = re.sub(
-            r"^\s*(FINAL_ANSWER|RETRY_TOOL|NEED_USER_INFO)\s*:\s*",
-            "",
-            out,
-            count=1,
-            flags=re.IGNORECASE,
-        ).strip()
+    match = _CHECKER_DECISION_PREFIX_RE.match(out)
+    if match:
+        out = str(match.group(2) or "").strip()
     return out or fallback_text
 
 
@@ -1978,6 +2284,13 @@ async def _execute_tool_call(
         scope=scope,
         request_text=user_text,
     )
+    if _canonical_tool_name(func) == "ai_tasks":
+        prompt_keys = ("task_prompt", "message", "content", "text")
+        has_prompt = any(str(args.get(key) or "").strip() for key in prompt_keys)
+        if not has_prompt and str(user_text or "").strip():
+            seed = str(user_text).strip()
+            args["task_prompt"] = seed
+            args.setdefault("message", seed)
 
     plugin_obj = registry.get(func)
     if admin_guard:
@@ -2047,11 +2360,7 @@ def _parse_checker_decision(text: str) -> Dict[str, Any]:
     if not raw:
         return {"kind": "FINAL_ANSWER", "text": ""}
 
-    match = re.match(
-        r"^\s*(FINAL_ANSWER|RETRY_TOOL|NEED_USER_INFO)\s*:\s*(.*)$",
-        raw,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
+    match = _CHECKER_DECISION_PREFIX_RE.match(raw)
     if not match:
         if _is_tool_candidate(raw):
             parsed = parse_function_json(raw)
@@ -2059,7 +2368,7 @@ def _parse_checker_decision(text: str) -> Dict[str, Any]:
                 return {"kind": "RETRY_TOOL", "tool_call": parsed, "text": raw}
         return {"kind": "FINAL_ANSWER", "text": raw}
 
-    kind = str(match.group(1) or "").upper().strip()
+    kind = _normalize_checker_kind(str(match.group(1) or ""))
     body = str(match.group(2) or "").strip()
     if kind == "RETRY_TOOL":
         parsed = parse_function_json(body)
@@ -2123,14 +2432,9 @@ def _sanitize_user_text(text: str, *, platform: str, tool_used: bool) -> str:
         flags=re.IGNORECASE | re.DOTALL,
     ):
         return DEFAULT_CLARIFICATION
-    if re.match(r"^\s*(FINAL_ANSWER|RETRY_TOOL|NEED_USER_INFO)\s*:", out, flags=re.IGNORECASE):
-        out = re.sub(
-            r"^\s*(FINAL_ANSWER|RETRY_TOOL|NEED_USER_INFO)\s*:\s*",
-            "",
-            out,
-            count=1,
-            flags=re.IGNORECASE,
-        ).strip()
+    match = _CHECKER_DECISION_PREFIX_RE.match(out)
+    if match:
+        out = str(match.group(2) or "").strip()
 
     if re.search(
         r"\b(planner head|doer head|critic head|internal orchestration|tool runtime|repair prompt|orchestration roles?)\b",
@@ -2152,6 +2456,17 @@ def _short_text(value: Any, *, limit: int = 280) -> str:
     if len(text) <= limit:
         return text
     return text[: max(1, limit - 1)].rstrip() + "…"
+
+
+def _normalize_checker_kind(label: str) -> str:
+    norm = re.sub(r"[\s\-]+", "_", str(label or "").strip().upper())
+    if norm == "FINAL_ANSWER":
+        return "FINAL_ANSWER"
+    if norm == "RETRY_TOOL":
+        return "RETRY_TOOL"
+    if norm == "NEED_USER_INFO":
+        return "NEED_USER_INFO"
+    return "FINAL_ANSWER"
 
 
 def _is_low_information_text(value: Any) -> bool:
@@ -3091,6 +3406,9 @@ async def run_cerberus_turn(
     effective_user_text = _effective_user_text(user_text, history)
     resolved_user_text = effective_user_text or user_text
     current_user_turn_text = _strip_user_sender_prefix(user_text).strip() or str(user_text or "").strip()
+    schedule_creation_required = _looks_like_explicit_ai_task_request(current_user_turn_text or resolved_user_text)
+    schedule_creation_confirmed = False
+    schedule_failure_text = ""
     tool_index = _enabled_tool_mini_index(
         platform=platform,
         registry=registry,
@@ -3127,8 +3445,22 @@ async def run_cerberus_turn(
         retry_tool: Optional[Dict[str, Any]] = None,
         attempted_tool_override: Optional[str] = None,
     ) -> Dict[str, Any]:
-        final_text = _sanitize_user_text(text, platform=platform, tool_used=tool_used)
-        outcome_value, outcome_reason_value = _normalize_outcome(status, checker_reason_value)
+        final_status = str(status or "").strip() or "done"
+        final_checker_action = str(checker_action_value or "").strip() or "FINAL_ANSWER"
+        final_checker_reason = str(checker_reason_value or "").strip()
+        final_text_raw = str(text or "").strip()
+
+        if schedule_creation_required and not schedule_creation_confirmed:
+            final_status = "blocked"
+            final_checker_action = "NEED_USER_INFO"
+            if not final_checker_reason:
+                final_checker_reason = "schedule_not_created"
+            final_text_raw = str(schedule_failure_text or "").strip() or (
+                "I couldn't create that scheduled task. Please restate the schedule request."
+            )
+
+        final_text = _sanitize_user_text(final_text_raw, platform=platform, tool_used=tool_used)
+        outcome_value, outcome_reason_value = _normalize_outcome(final_status, final_checker_reason)
         total_ms = int(max(0.0, (time.perf_counter() - turn_started_at) * 1000.0))
         _save_persistent_agent_state(
             redis_client=r,
@@ -3146,9 +3478,9 @@ async def run_cerberus_turn(
             planned_tool=planned_tool_override if planned_tool_override is not None else planned_tool,
             validation_status=validation_status_override if validation_status_override is not None else validation_status,
             tool_result=tool_result_for_checker,
-            checker_action=checker_action_value,
+            checker_action=final_checker_action,
             retry_count=max(0, int(critic_continue_count)),
-            checker_reason=checker_reason_value,
+            checker_reason=final_checker_reason,
             planner_kind=planner_kind_value if planner_kind_value is not None else planner_kind,
             planner_text_is_tool_candidate=(
                 planner_text_is_tool_candidate_value
@@ -3178,7 +3510,7 @@ async def run_cerberus_turn(
         )
         return {
             "text": final_text,
-            "status": status,
+            "status": final_status,
             "task_id": task_id,
             "artifacts": artifacts_out,
             "raw_tool_payload": raw_tool_payload_out,
@@ -3262,6 +3594,18 @@ async def run_cerberus_turn(
                     if planner_text.strip() != original_planner_text.strip():
                         planner_text_repaired = True
                         repairs_used_count += 1
+                if not _is_tool_candidate(planner_text) and _looks_like_over_clarification(
+                    planner_text,
+                    user_text=resolved_user_text or user_text,
+                ):
+                    synthesized = _synthesize_tool_call_from_overclarification(
+                        user_text=resolved_user_text or user_text,
+                        question_text=planner_text,
+                    )
+                    if synthesized:
+                        planner_text = synthesized
+                        planner_text_repaired = True
+                        repairs_used_count += 1
 
             if _is_tool_candidate(planner_text):
                 round_planner_kind = "tool"
@@ -3272,6 +3616,20 @@ async def run_cerberus_turn(
             else:
                 round_planner_kind = "answer"
             planner_text_is_tool_candidate = _is_tool_candidate(planner_text)
+
+            # Deterministic fallback: if planner still asks unnecessary clarifications
+            # for an explicit schedule/weather command, synthesize the next tool call.
+            if not planner_text_is_tool_candidate:
+                synthesized = _synthesize_tool_call_from_overclarification(
+                    user_text=resolved_user_text or user_text,
+                    question_text=planner_text,
+                )
+                if synthesized:
+                    planner_text = synthesized
+                    planner_text_is_tool_candidate = True
+                    planner_text_repaired = True
+                    round_planner_kind = "repaired_tool"
+                    repairs_used_count += 1
 
             if not _is_tool_candidate(planner_text):
                 planner_kind = round_planner_kind
@@ -3294,13 +3652,38 @@ async def run_cerberus_turn(
                 checker_action = str(checker_decision.get("kind") or "FINAL_ANSWER")
 
                 if checker_action == "NEED_USER_INFO":
-                    checker_reason = "needs_user_input"
-                    return _finish(
-                        text=str(checker_decision.get("text") or DEFAULT_CLARIFICATION).strip(),
-                        status="blocked",
-                        checker_action_value="NEED_USER_INFO",
-                        checker_reason_value=checker_reason,
+                    need_text = str(checker_decision.get("text") or DEFAULT_CLARIFICATION).strip()
+                    repaired_need = await _repair_need_user_info_if_overclar(
+                        llm_client=llm_client,
+                        platform=platform,
+                        user_text=resolved_user_text or user_text,
+                        question_text=need_text,
+                        tool_index=tool_index,
+                        platform_preamble=platform_preamble,
+                        max_tokens=overclar_repair_max_tokens,
                     )
+                    if bool(repaired_need.get("repaired")):
+                        repairs_used_count += 1
+                    repaired_kind = str(repaired_need.get("kind") or "NEED_USER_INFO").strip().upper()
+                    if repaired_kind == "RETRY_TOOL":
+                        checker_action = "RETRY_TOOL"
+                        checker_decision = {"kind": "RETRY_TOOL", "text": str(repaired_need.get("text") or "").strip()}
+                    elif repaired_kind == "FINAL_ANSWER":
+                        checker_reason = "overclar_repaired"
+                        return _finish(
+                            text=str(repaired_need.get("text") or need_text or DEFAULT_CLARIFICATION).strip(),
+                            status="done",
+                            checker_action_value="FINAL_ANSWER",
+                            checker_reason_value=checker_reason,
+                        )
+                    else:
+                        checker_reason = "needs_user_input"
+                        return _finish(
+                            text=need_text,
+                            status="blocked",
+                            checker_action_value="NEED_USER_INFO",
+                            checker_reason_value=checker_reason,
+                        )
 
                 if checker_action == "RETRY_TOOL":
                     retry_text = str(checker_decision.get("text") or "").strip()
@@ -3572,6 +3955,37 @@ async def run_cerberus_turn(
                     break
         tool_calls_used += 1
 
+        tool_func = _canonical_tool_name((planned_tool or {}).get("function"))
+        if tool_func == "ai_tasks":
+            task_status = _ai_tasks_creation_status(
+                payload=raw_tool_payload_out,
+                checker_result=normalized_checker_result_out,
+            )
+            if bool(task_status.get("created")):
+                schedule_creation_confirmed = True
+                if task_status.get("success_text"):
+                    draft_response = str(task_status.get("success_text") or "").strip()
+            else:
+                schedule_failure_text = str(task_status.get("failure_text") or "").strip()
+
+            if schedule_creation_required:
+                if bool(task_status.get("created")):
+                    checker_reason = "schedule_created"
+                    return _finish(
+                        text=str(task_status.get("success_text") or draft_response or "Scheduled task created.").strip(),
+                        status="done",
+                        checker_action_value="FINAL_ANSWER",
+                        checker_reason_value=checker_reason,
+                    )
+                code = str(task_status.get("code") or "task_not_created").strip().lower() or "task_not_created"
+                checker_reason = f"schedule_creation_failed:{code}"
+                return _finish(
+                    text=schedule_failure_text or "I couldn't create that scheduled task.",
+                    status="blocked",
+                    checker_action_value="NEED_USER_INFO",
+                    checker_reason_value=checker_reason,
+                )
+
         agent_state = await _run_doer_state_update(
             llm_client=llm_client,
             platform=platform,
@@ -3616,14 +4030,40 @@ async def run_cerberus_turn(
             )
 
         if checker_action == "NEED_USER_INFO":
-            checker_reason = "needs_user_input"
-            return _finish(
-                text=str(checker_decision.get("text") or DEFAULT_CLARIFICATION).strip(),
-                status="blocked",
-                checker_action_value="NEED_USER_INFO",
-                checker_reason_value=checker_reason,
-                retry_tool=queued_retry_tool_for_ledger,
+            need_text = str(checker_decision.get("text") or DEFAULT_CLARIFICATION).strip()
+            repaired_need = await _repair_need_user_info_if_overclar(
+                llm_client=llm_client,
+                platform=platform,
+                user_text=resolved_user_text or user_text,
+                question_text=need_text,
+                tool_index=tool_index,
+                platform_preamble=platform_preamble,
+                max_tokens=overclar_repair_max_tokens,
             )
+            if bool(repaired_need.get("repaired")):
+                repairs_used_count += 1
+            repaired_kind = str(repaired_need.get("kind") or "NEED_USER_INFO").strip().upper()
+            if repaired_kind == "RETRY_TOOL":
+                checker_action = "RETRY_TOOL"
+                checker_decision = {"kind": "RETRY_TOOL", "text": str(repaired_need.get("text") or "").strip()}
+            elif repaired_kind == "FINAL_ANSWER":
+                checker_reason = "overclar_repaired"
+                return _finish(
+                    text=str(repaired_need.get("text") or need_text or DEFAULT_CLARIFICATION).strip(),
+                    status="done",
+                    checker_action_value="FINAL_ANSWER",
+                    checker_reason_value=checker_reason,
+                    retry_tool=queued_retry_tool_for_ledger,
+                )
+            else:
+                checker_reason = "needs_user_input"
+                return _finish(
+                    text=need_text,
+                    status="blocked",
+                    checker_action_value="NEED_USER_INFO",
+                    checker_reason_value=checker_reason,
+                    retry_tool=queued_retry_tool_for_ledger,
+                )
 
         if checker_action == "RETRY_TOOL":
             retry_text = str(checker_decision.get("text") or "").strip()
@@ -3739,14 +4179,40 @@ async def run_cerberus_turn(
     checker_action = str(checker_decision.get("kind") or "FINAL_ANSWER")
 
     if checker_action == "NEED_USER_INFO":
-        checker_reason = "needs_user_input"
-        return _finish(
-            text=str(checker_decision.get("text") or pending_question or DEFAULT_CLARIFICATION).strip(),
-            status="blocked",
-            checker_action_value="NEED_USER_INFO",
-            checker_reason_value=checker_reason,
-            retry_tool=queued_retry_tool_for_ledger,
+        need_text = str(checker_decision.get("text") or pending_question or DEFAULT_CLARIFICATION).strip()
+        repaired_need = await _repair_need_user_info_if_overclar(
+            llm_client=llm_client,
+            platform=platform,
+            user_text=resolved_user_text or user_text,
+            question_text=need_text,
+            tool_index=tool_index,
+            platform_preamble=platform_preamble,
+            max_tokens=overclar_repair_max_tokens,
         )
+        if bool(repaired_need.get("repaired")):
+            repairs_used_count += 1
+        repaired_kind = str(repaired_need.get("kind") or "NEED_USER_INFO").strip().upper()
+        if repaired_kind == "RETRY_TOOL":
+            checker_action = "RETRY_TOOL"
+            checker_decision = {"kind": "RETRY_TOOL", "text": str(repaired_need.get("text") or "").strip()}
+        elif repaired_kind == "FINAL_ANSWER":
+            checker_reason = "overclar_repaired"
+            return _finish(
+                text=str(repaired_need.get("text") or need_text or DEFAULT_CLARIFICATION).strip(),
+                status="done",
+                checker_action_value="FINAL_ANSWER",
+                checker_reason_value=checker_reason,
+                retry_tool=queued_retry_tool_for_ledger,
+            )
+        else:
+            checker_reason = "needs_user_input"
+            return _finish(
+                text=need_text,
+                status="blocked",
+                checker_action_value="NEED_USER_INFO",
+                checker_reason_value=checker_reason,
+                retry_tool=queued_retry_tool_for_ledger,
+            )
 
     if checker_action == "RETRY_TOOL":
         retry_tool = parse_function_json(str(checker_decision.get("text") or ""))

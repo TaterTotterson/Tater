@@ -5,7 +5,6 @@ import asyncio
 import logging
 import threading
 import time
-from datetime import datetime
 from typing import Optional, Dict, Any, List
 
 import redis
@@ -123,7 +122,6 @@ class XBMCResponse(BaseModel):
 
 # -------------------- System prompt (XBMC / Cortana) --------------------
 def build_system_prompt() -> str:
-    now = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
     first, last = get_tater_name()
 
     personality = redis_client.get("tater:personality") or ""
@@ -156,11 +154,9 @@ def build_system_prompt() -> str:
             "pretending to be Cortana on this original Xbox for fun.\n\n"
         )
 
-    # Planner mode injects canonical tool-use rules and enabled-tool index each turn.
+    # Platform preamble should be style/format/persona only.
     return (
-        f"Current Date and Time is: {now}\n\n"
         f"{base_prompt}"
-        "Current platform: xbmc.\n"
         "Avoid emoji and markdown formatting; keep responses short.\n"
     )
 

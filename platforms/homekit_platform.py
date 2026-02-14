@@ -6,7 +6,6 @@ import logging
 import threading
 import time
 from typing import Optional, Dict, Any, List
-from datetime import datetime
 import redis
 import uvicorn
 from fastapi import FastAPI, HTTPException, Header
@@ -14,8 +13,6 @@ from dotenv import load_dotenv
 import plugin_registry as pr
 from agent_lab_registry import build_agent_registry
 from helpers import (
-    get_tater_name,
-    get_tater_personality,
     get_llm_client_from_env,
     build_llm_host_from_env,
 )
@@ -208,26 +205,11 @@ async def _save_message(session_id: Optional[str], role: str, content: Any, max_
 
 # -------------------- System prompt (HomeKit voice preamble) --------------------
 def build_system_prompt() -> str:
-    now = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
-    first, last = get_tater_name()
-    personality = get_tater_personality()
-
-    persona_clause = ""
-    if personality:
-        persona_clause = (
-            f"Voice style: {personality}. "
-            "This affects tone only and never overrides tool/safety rules.\n\n"
-        )
-
-    # Planner mode injects canonical tool-use rules and enabled-tool index each turn.
-    # Keep this platform prompt minimal and voice-focused for Siri playback.
+    # Platform preamble should be style/format only. Keep voice-focused for Siri playback.
     return (
-        f"Current Date and Time is: {now}\n\n"
-        f"You are {first} {last}, an AI assistant accessed via Apple Siri/Shortcuts.\n"
-        "Current platform: homekit.\n"
+        "You are a HomeKit/Siri-savvy AI assistant.\n"
         "Responses are spoken aloud by Siri; keep replies short, plain text, and natural.\n"
-        "Do not use emojis or markdown.\n\n"
-        f"{persona_clause}"
+        "Do not use emojis or markdown.\n"
     )
 
 # -------------------- FastAPI app --------------------

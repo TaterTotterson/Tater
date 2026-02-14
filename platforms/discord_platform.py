@@ -3,12 +3,12 @@ import os
 import json
 import asyncio
 import logging
+from contextlib import asynccontextmanager, suppress
 import redis
 import discord
 from discord.ext import commands
 from discord import app_commands
 from dotenv import load_dotenv
-from datetime import datetime
 import plugin_registry as pr
 import threading
 import time
@@ -20,7 +20,6 @@ from notify.media import load_queue_attachments
 
 from helpers import (
     get_tater_name,
-    get_tater_personality,
     get_llm_client_from_env,
     build_llm_host_from_env,
 )
@@ -268,6 +267,56 @@ async def safe_send(channel, content, max_length=2000):
         await channel.send(content[i : i + max_length])
 
 
+TYPING_PULSE_INTERVAL_SEC = 4.0
+TYPING_ERROR_LOG_COOLDOWN_SEC = 30.0
+
+
+async def _trigger_typing_once(channel):
+    """Best-effort one-shot typing signal across Discord channel types."""
+    if hasattr(channel, "trigger_typing"):
+        await channel.trigger_typing()
+        return
+    typing_ctx = getattr(channel, "typing", None)
+    if callable(typing_ctx):
+        async with channel.typing():
+            return
+
+
+async def _typing_pulse(channel, stop_event: asyncio.Event, *, interval_sec: float = TYPING_PULSE_INTERVAL_SEC):
+    """Send Discord typing repeatedly while work is in-flight; tolerate transient network errors."""
+    last_error_log = 0.0
+    while not stop_event.is_set():
+        try:
+            await _trigger_typing_once(channel)
+        except Exception as e:
+            now = time.monotonic()
+            if (now - last_error_log) >= TYPING_ERROR_LOG_COOLDOWN_SEC:
+                logger.warning(f"[discord] typing indicator transient failure: {e}")
+                last_error_log = now
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=max(1.0, float(interval_sec)))
+        except asyncio.TimeoutError:
+            continue
+
+
+@asynccontextmanager
+async def safe_typing(channel):
+    """Best-effort typing indicator that keeps trying during long-running turns."""
+    stop_event = asyncio.Event()
+    try:
+        await _trigger_typing_once(channel)
+    except Exception as e:
+        logger.warning(f"[discord] initial typing indicator failed: {e}")
+    pulse_task = asyncio.create_task(_typing_pulse(channel, stop_event))
+    try:
+        yield
+    finally:
+        stop_event.set()
+        pulse_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await pulse_task
+
+
 class discord_platform(commands.Bot):
     def __init__(self, llm_client, admin_user_id, response_channel_id, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -395,25 +444,10 @@ class discord_platform(commands.Bot):
                 await asyncio.sleep(1)
 
     def build_system_prompt(self):
-        now = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
-
-        first, last = get_tater_name()
-        personality = get_tater_personality()
-
-        persona_clause = ""
-        if personality:
-            persona_clause = (
-                f"Voice style: {personality}. "
-                "This affects tone only and must never override tool/safety rules.\n\n"
-            )
-
-        # Planner mode injects canonical tool-use rules and enabled-tool index each turn.
+        # Platform preamble should be style/format only.
         return (
-            f"Current Date and Time is: {now}\n\n"
-            f"You are {first} {last}, a Discord-savvy AI assistant.\n"
-            "Current platform: discord.\n"
-            "Keep replies concise and natural for chat.\n\n"
-            f"{persona_clause}"
+            "You are a Discord-savvy AI assistant.\n"
+            "Keep replies concise and natural for chat.\n"
         )
 
     async def setup_hook(self):
@@ -590,7 +624,7 @@ class discord_platform(commands.Bot):
             get_plugin_enabled,
         )
 
-        async with message.channel.typing():
+        async with safe_typing(message.channel):
             try:
                 is_dm = isinstance(message.channel, discord.DMChannel)
                 scope_value = f"dm:{message.author.id}" if is_dm else f"channel:{message.channel.id}"
