@@ -6,7 +6,7 @@ import os
 import re
 import time
 import uuid
-from datetime import datetime
+from contextlib import asynccontextmanager, suppress
 from types import SimpleNamespace
 from typing import Any, Dict, List
 
@@ -19,8 +19,6 @@ from plugin_base import ToolPlugin
 from notify.media import load_queue_attachments
 from notify.queue import is_expired
 from helpers import (
-    get_tater_name,
-    get_tater_personality,
     get_llm_client_from_env,
     build_llm_host_from_env,
 )
@@ -57,6 +55,7 @@ blob_client = redis.Redis(
 NOTIFY_QUEUE_KEY = "notifyq:telegram"
 NOTIFY_POLL_INTERVAL = 0.5
 TELEGRAM_TEXT_LIMIT = 4096
+TELEGRAM_TYPING_PULSE_SECONDS = 4.0
 TELEGRAM_CHAT_LOOKUP_HASH = "tater:telegram:chat_lookup"
 TELEGRAM_BLOB_PREFIX = "tater:blob:telegram"
 
@@ -407,6 +406,7 @@ class TelegramPlatform:
         self.poll_timeout_sec = max(1, int(poll_timeout_sec))
         self.response_chat_id = _normalize_chat_id(response_chat_id)
         self.offset = None
+        self._typing_warn_at = 0.0
 
         allowed = str(allowed_chat_id or "").strip()
         normalized_allowed = [_normalize_chat_id(item) for item in allowed.split(",")]
@@ -427,6 +427,40 @@ class TelegramPlatform:
         if not data.get("ok"):
             raise RuntimeError(str(data.get("description") or "Unknown Telegram API error"))
         return data
+
+    async def _send_typing_action(self, chat_id: str) -> None:
+        if not chat_id:
+            return
+        try:
+            await asyncio.to_thread(
+                self._api_json,
+                "sendChatAction",
+                {"chat_id": chat_id, "action": "typing"},
+                15,
+            )
+        except Exception as exc:
+            now = time.time()
+            if now >= self._typing_warn_at:
+                logger.warning("[Telegram] typing indicator failed: %s", exc)
+                self._typing_warn_at = now + 60.0
+
+    async def _typing_pulse(self, chat_id: str) -> None:
+        while True:
+            await asyncio.sleep(TELEGRAM_TYPING_PULSE_SECONDS)
+            await self._send_typing_action(chat_id)
+
+    @asynccontextmanager
+    async def _safe_typing(self, chat_id: str):
+        task = None
+        try:
+            await self._send_typing_action(chat_id)
+            task = asyncio.create_task(self._typing_pulse(chat_id))
+            yield
+        finally:
+            if task is not None:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
 
     def _api_multipart(
         self,
@@ -709,24 +743,10 @@ class TelegramPlatform:
         return bool("telegram" in platforms or "both" in platforms)
 
     def build_system_prompt(self):
-        now = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
-        first, last = get_tater_name()
-        personality = get_tater_personality()
-
-        persona_clause = ""
-        if personality:
-            persona_clause = (
-                f"Voice style: {personality}. "
-                "This affects tone only and never overrides tool rules.\n\n"
-            )
-
-        # Planner mode injects canonical tool-use rules and enabled-tool index each turn.
+        # Platform preamble should be style/format only.
         return (
-            f"Current Date and Time is: {now}\n\n"
-            f"You are {first} {last}, a Telegram-savvy AI assistant.\n"
-            "Current platform: telegram.\n"
-            "Keep replies concise and natural for chat.\n\n"
-            f"{persona_clause}"
+            "You are a Telegram-savvy AI assistant.\n"
+            "Keep replies concise and natural for chat.\n"
         )
 
     def _chat_allowed(self, chat_id: str) -> bool:
@@ -986,38 +1006,41 @@ class TelegramPlatform:
                     )
                 return None
 
-            agent_max_rounds, agent_max_tool_calls = resolve_agent_limits(redis_client)
-            result = await run_cerberus_turn(
-                llm_client=self.llm,
-                platform="telegram",
-                history_messages=messages,
-                registry=merged_registry,
-                enabled_predicate=merged_enabled,
-                context={"update": message},
-                user_text=message_text,
-                scope=f"chat:{chat_id}",
-                origin=origin,
-                wait_callback=_wait_callback,
-                admin_guard=_admin_guard,
-                redis_client=redis_client,
-                max_rounds=agent_max_rounds,
-                max_tool_calls=agent_max_tool_calls,
-                platform_preamble=system_prompt,
-            )
-
-            final_text = (result.get("text") or "").strip()
-            if final_text:
-                await self._send_text(chat_id, final_text)
-                self._save_message(
-                    chat_id,
-                    "assistant",
-                    "assistant",
-                    {"marker": "plugin_response", "phase": "final", "content": final_text},
+            final_text = ""
+            artifacts = []
+            async with self._safe_typing(chat_id):
+                agent_max_rounds, agent_max_tool_calls = resolve_agent_limits(redis_client)
+                result = await run_cerberus_turn(
+                    llm_client=self.llm,
+                    platform="telegram",
+                    history_messages=messages,
+                    registry=merged_registry,
+                    enabled_predicate=merged_enabled,
+                    context={"update": message},
+                    user_text=message_text,
+                    scope=f"chat:{chat_id}",
+                    origin=origin,
+                    wait_callback=_wait_callback,
+                    admin_guard=_admin_guard,
+                    redis_client=redis_client,
+                    max_rounds=agent_max_rounds,
+                    max_tool_calls=agent_max_tool_calls,
+                    platform_preamble=system_prompt,
                 )
 
-            artifacts = result.get("artifacts") or []
-            for item in artifacts:
-                await self._send_plugin_result(chat_id, item)
+                final_text = (result.get("text") or "").strip()
+                if final_text:
+                    await self._send_text(chat_id, final_text)
+                    self._save_message(
+                        chat_id,
+                        "assistant",
+                        "assistant",
+                        {"marker": "plugin_response", "phase": "final", "content": final_text},
+                    )
+
+                artifacts = result.get("artifacts") or []
+                for item in artifacts:
+                    await self._send_plugin_result(chat_id, item)
 
             if final_text or artifacts:
                 assistant_summary = final_text or "[Sent attachments]"

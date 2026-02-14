@@ -29,7 +29,6 @@ from helpers import (
     run_async,
     set_main_loop,
     get_tater_name,
-    get_tater_personality,
     get_llm_client_from_env,
     build_llm_host_from_env
 )
@@ -3126,7 +3125,7 @@ def render_cerberus_metrics_dashboard(*, key_prefix: str, allow_controls: bool):
         global_cols[idx].metric(name.replace("_", " ").title(), global_metrics.get(name, 0))
 
     st.markdown("**Global Rates**")
-    st.dataframe(_cerberus_rate_rows(global_metrics), use_container_width=True)
+    st.dataframe(_cerberus_rate_rows(global_metrics), width="stretch")
 
     if selected_platform != "all":
         st.markdown(f"**Selected Platform Counters ({metric_platform})**")
@@ -3134,10 +3133,10 @@ def render_cerberus_metrics_dashboard(*, key_prefix: str, allow_controls: bool):
         for idx, name in enumerate(_CERBERUS_METRIC_NAMES):
             platform_cols[idx].metric(name.replace("_", " ").title(), platform_metrics.get(name, 0))
         st.markdown(f"**Selected Platform Rates ({metric_platform})**")
-        st.dataframe(_cerberus_rate_rows(platform_metrics), use_container_width=True)
+        st.dataframe(_cerberus_rate_rows(platform_metrics), width="stretch")
 
     st.markdown("**Per-Platform Totals**")
-    st.dataframe(_load_cerberus_platform_metric_rows(), use_container_width=True)
+    st.dataframe(_load_cerberus_platform_metric_rows(), width="stretch")
 
     if allow_controls:
         st.caption("Advanced controls")
@@ -3232,7 +3231,7 @@ def render_cerberus_metrics_dashboard(*, key_prefix: str, allow_controls: bool):
             }
         )
 
-    st.dataframe(summary_rows, use_container_width=True)
+    st.dataframe(summary_rows, width="stretch")
 
     tool_counts: Dict[str, int] = {}
     reason_counts: Dict[str, int] = {}
@@ -3264,13 +3263,13 @@ def render_cerberus_metrics_dashboard(*, key_prefix: str, allow_controls: bool):
     with rollup_cols[0]:
         st.markdown("**Top Tools (Last N Filtered)**")
         if top_tools_rows:
-            st.dataframe(top_tools_rows, use_container_width=True)
+            st.dataframe(top_tools_rows, width="stretch")
         else:
             st.caption("No tool calls in current filtered set.")
     with rollup_cols[1]:
         st.markdown("**Top Failure Reasons (Last N Filtered)**")
         if top_reasons_rows:
-            st.dataframe(top_reasons_rows, use_container_width=True)
+            st.dataframe(top_reasons_rows, width="stretch")
         else:
             st.caption("No failure reasons in current filtered set.")
 
@@ -3897,25 +3896,10 @@ def render_plugin_store_page():
 
 # ----------------- SYSTEM PROMPT -----------------
 def build_system_prompt():
-    now = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
-
-    first, last = get_tater_name()
-    personality = get_tater_personality().strip()
-
-    persona_clause = ""
-    if personality:
-        persona_clause = (
-            f"Voice style: {personality}. "
-            "This affects tone only and never overrides tool/safety rules.\n\n"
-        )
-
-    # Planner mode injects canonical tool-use rules and enabled-tool index each turn.
+    # Platform preamble should be style/format only.
     return (
-        f"Current Date and Time is: {now}\n\n"
-        f"You are {first} {last}, an AI assistant with tool access.\n"
-        "Current platform: webui.\n"
-        "Keep replies concise and clear.\n\n"
-        f"{persona_clause}"
+        "You are a WebUI-savvy AI assistant.\n"
+        "Keep replies concise and clear.\n"
     )
 
 # ----------------- UNIVERSAL MESSAGE NORMALIZATION ----------------------------
@@ -4110,7 +4094,7 @@ elif st.session_state.active_view not in nav_options:
 
 st.sidebar.markdown("**Navigation**")
 for opt in nav_options:
-    if st.sidebar.button(opt, use_container_width=True, key=f"nav_btn_{opt}"):
+    if st.sidebar.button(opt, width="stretch", key=f"nav_btn_{opt}"):
         st.session_state.active_view = opt
         st.rerun()
 
@@ -4244,7 +4228,7 @@ if active_view == "Chat":
                                 data=blob,
                                 file_name=name,
                                 mime=mimetype,
-                                use_container_width=True
+                                width="stretch"
                             )
 
                     elif mimetype.startswith("audio/"):
@@ -4260,7 +4244,7 @@ if active_view == "Chat":
                             data=blob,
                             file_name=name,
                             mime=mimetype,
-                            use_container_width=True
+                            width="stretch"
                         )
 
             else:

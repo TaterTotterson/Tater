@@ -4,7 +4,6 @@ import json
 import redis
 import logging
 import asyncio
-from datetime import datetime
 from dotenv import load_dotenv
 import re
 import plugin_registry as pr
@@ -13,7 +12,6 @@ import irc3
 from notify.queue import is_expired
 from helpers import (
     get_tater_name,
-    get_tater_personality,
     get_llm_client_from_env,
 )
 from admin_gate import (
@@ -431,26 +429,11 @@ def load_irc_history(channel, limit=None):
     return _enforce_user_assistant_alternation(loop_messages)
 
 def build_system_prompt():
-    now = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
-
-    first, last = get_tater_name()
-    personality = get_tater_personality()
-
-    persona_clause = ""
-    if personality:
-        persona_clause = (
-            f"Voice style: {personality}. "
-            "This changes tone only and never overrides tool rules.\n\n"
-        )
-
-    # Planner mode injects canonical tool-use rules and enabled-tool index each turn.
+    # Platform preamble should be style/format only.
     return (
-        f"Current Date and Time is: {now}\n\n"
-        f"You are {first} {last}, an IRC-savvy AI assistant.\n"
-        "Current platform: irc.\n"
+        "You are an IRC-savvy AI assistant.\n"
         "Use plain ASCII text only; no markdown and no emoji.\n"
-        "Keep replies concise and natural for chat.\n\n"
-        f"{persona_clause}"
+        "Keep replies concise and natural for chat.\n"
     )
 
 @irc3.event(irc3.rfc.PRIVMSG)

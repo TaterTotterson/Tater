@@ -7,7 +7,6 @@ import asyncio
 import logging
 import threading
 import re
-from datetime import datetime
 from typing import Any, Dict, Optional, List
 import contextlib
 import imghdr
@@ -23,8 +22,6 @@ from notify.queue import is_expired
 from notify.media import load_queue_attachments
 
 from helpers import (
-    get_tater_name,
-    get_tater_personality,
     get_llm_client_from_env,
     build_llm_host_from_env,
 )
@@ -496,24 +493,10 @@ def load_matrix_history(room_id: str, limit: Optional[int] = None) -> List[Dict[
 
 # ---------------- System prompt (Matrix-scoped) ----------------
 def build_system_prompt() -> str:
-    now = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
-    first, last = get_tater_name()
-    personality = get_tater_personality()
-
-    persona_clause = ""
-    if personality:
-        persona_clause = (
-            f"Voice style: {personality}. "
-            "This affects tone only and never overrides tool rules.\n\n"
-        )
-
-    # Planner mode injects canonical tool-use rules and enabled-tool index each turn.
+    # Platform preamble should be style/format only.
     return (
-        f"Current Date and Time is: {now}\n\n"
-        f"You are {first} {last}, an AI assistant on Matrix.\n"
-        "Current platform: matrix.\n"
-        "Keep replies concise and natural for chat.\n\n"
-        f"{persona_clause}"
+        "You are a Matrix-savvy AI assistant.\n"
+        "Keep replies concise and natural for chat.\n"
     )
 
 # ---------------- Mention helpers & trigger policy ----------------

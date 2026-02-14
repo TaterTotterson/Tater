@@ -312,7 +312,7 @@ def run_meta_tool(
                 "name": "AI Tasks (Kernel Tool)",
                 "description": (
                     "Schedule one-off or recurring AI tasks that run later and deliver results "
-                    "to supported notifier platforms."
+                    "to supported notifier platforms. Local timezone is used by default unless explicitly provided otherwise."
                 ),
                 "supported_platforms": ["webui", "discord", "irc", "matrix", "telegram", "homeassistant", "automation"],
                 "required_settings": [],
@@ -341,7 +341,7 @@ def run_meta_tool(
                     "device_service",
                     "chat_id",
                 ],
-                "when_to_use": "Use to schedule AI tasks/reminders to run at a specific time or recurrence.",
+                "when_to_use": "Use to schedule AI tasks/reminders to run at a specific time or recurrence. If timezone is not specified, local timezone is assumed.",
                 "usage_example": (
                     "{\"function\":\"ai_tasks\",\"arguments\":{\"message\":\"Post daily summary\","
                     "\"when\":\"6am every day\",\"platform\":\"discord\",\"targets\":{\"channel\":\"#ops\"}}}"
