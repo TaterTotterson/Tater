@@ -347,6 +347,42 @@ def run_meta_tool(
                     "\"when\":\"6am every day\",\"platform\":\"discord\",\"targets\":{\"channel\":\"#ops\"}}}"
                 ),
             }
+        if plugin_id == "vision_describer":
+            return {
+                "tool": "get_plugin_help",
+                "ok": True,
+                "plugin_id": "vision_describer",
+                "name": "Vision Describer (Kernel Tool)",
+                "description": (
+                    "Describe an image from an explicit source (path/url/blob/file/media ref). "
+                    "Use `path` as the canonical local-file argument."
+                ),
+                "supported_platforms": ["webui", "discord", "irc", "matrix", "telegram", "homeassistant", "homekit", "xbmc", "automation"],
+                "required_settings": [],
+                "required_args": [],
+                "optional_args": [
+                    "prompt",
+                    "query",
+                    "path",
+                    "url",
+                    "blob_key",
+                    "file_id",
+                    "media_ref",
+                    "media_refs",
+                    "image_ref",
+                    "history_key",
+                    "platform",
+                    "origin",
+                ],
+                "when_to_use": "Use to analyze a specific image. Prefer `path` for local files.",
+                "usage_example": (
+                    "{\"function\":\"vision_describer\",\"arguments\":"
+                    "{\"path\":\"/app/agent_lab/downloads/logo.png\",\"prompt\":\"Describe this image\"}}"
+                ),
+                "notes": [
+                    "`source` is accepted as an alias for `path`.",
+                ],
+            }
         return get_plugin_help(
             plugin_id=plugin_id,
             platform=args.get("platform") or platform,
@@ -354,9 +390,10 @@ def run_meta_tool(
         )
 
     if func == "vision_describer":
+        image_path = args.get("path") or args.get("source") or args.get("file")
         return vision_describer(
             prompt=str(args.get("prompt") or args.get("query") or ""),
-            path=args.get("path"),
+            path=image_path,
             url=args.get("url"),
             blob_key=args.get("blob_key"),
             file_id=args.get("file_id"),
