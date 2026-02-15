@@ -236,6 +236,7 @@ def build_compact_system_prompt(platform: str, extra_instructions: str = "") -> 
         "If both can solve the request, choose the kernel tool.\n"
         "If a tool matches user intent, call it directly.\n"
         "If args are unclear, call get_plugin_help(plugin_id) once.\n"
+        "For create_plugin/create_platform requests, do not use get_plugin_help; read /app/skills/agent_lab/plugin_authoring.md or /app/skills/agent_lab/platform_authoring.md and /app/skills/agent_lab/references/*, and use search_files to locate code.\n"
         "Tool call format must be strict JSON only:\n"
         "{\"function\":\"tool_id\",\"arguments\":{...}}\n"
         "No markdown fences or extra commentary around tool calls.\n"

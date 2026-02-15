@@ -1882,6 +1882,7 @@ def _planner_system_prompt(platform: str) -> str:
         "- Use only tool ids from the enabled tool index.\n"
         "- Use argument keys exactly as listed for that tool in the enabled tool index; do not invent argument keys.\n"
         "- If plugin arguments are unclear, call get_plugin_help first, then issue the plugin tool call.\n"
+        "- For create_plugin/create_platform requests, do not use get_plugin_help; use read_file on /app/skills/agent_lab/plugin_authoring.md or /app/skills/agent_lab/platform_authoring.md and /app/skills/agent_lab/references/*, and use search_files to locate existing code.\n"
         "- Never output multiple tool calls or markdown fences around tool JSON.\n"
         "- Prefer action over clarification; ask only when a required value is truly missing and cannot be safely assumed.\n"
         "- Never ask what platform this chat is on; it is already known.\n"
@@ -2661,6 +2662,31 @@ async def _validate_or_recover_tool_call(
         registry=registry,
         user_text=user_text,
     )
+    creation_redirect = _redirect_get_plugin_help_for_creation(
+        tool_call=tool_call,
+        user_text=user_text,
+    )
+    if isinstance(creation_redirect, dict):
+        redirected_validation = dict(validation_status) if isinstance(validation_status, dict) else {}
+        redirected_validation.update(
+            {
+                "ok": True,
+                "reason": "creation_help_redirect",
+                "repair_used": True,
+                "tool_call": creation_redirect,
+                "platform_supported": True,
+            }
+        )
+        return {
+            "ok": True,
+            "tool_call": creation_redirect,
+            "repair_used": True,
+            "reason": "creation_help_redirect",
+            "recovery_text_if_blocked": None,
+            "attempted_tool": str(creation_redirect.get("function") or "").strip() or attempted_tool,
+            "validation_status": redirected_validation,
+            "send_reason": "",
+        }
     if isinstance(validation_status, dict):
         validation_status["tool_call"] = tool_call
 
@@ -2731,6 +2757,35 @@ def _creation_target_tool_for_recovery(*, user_text: str, attempted_tool: str) -
     return ""
 
 
+def _redirect_get_plugin_help_for_creation(
+    *,
+    tool_call: Optional[Dict[str, Any]],
+    user_text: str,
+) -> Optional[Dict[str, Any]]:
+    call = tool_call if isinstance(tool_call, dict) else {}
+    func = _canonical_tool_name(call.get("function"))
+    if func != "get_plugin_help":
+        return None
+    creation_target = _creation_target_tool_for_recovery(
+        user_text=user_text,
+        attempted_tool="",
+    )
+    creation_kind = _creation_kind_from_tool_name(creation_target)
+    if creation_kind not in {"plugin", "platform"}:
+        return None
+    skill_path = _creation_skill_main_path(creation_kind)
+    if skill_path:
+        return {"function": "read_file", "arguments": {"path": skill_path}}
+    return {
+        "function": "search_files",
+        "arguments": {
+            "query": "skills/agent_lab/references",
+            "path": ".",
+            "max_results": 20,
+        },
+    }
+
+
 def _is_creation_recovery_reason(reason: str) -> bool:
     code = str(reason or "").strip().lower()
     return code in {
@@ -2741,6 +2796,7 @@ def _is_creation_recovery_reason(reason: str) -> bool:
         "missing_function",
         "not_object",
         "arguments_not_object",
+        "creation_help_redirect",
         "bad_args:missing_name",
         "bad_args:missing_code",
     }
