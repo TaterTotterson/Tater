@@ -377,6 +377,20 @@ def _supports_scheduled_tools(plugin_name: str, plugin: ToolPlugin, platform: st
     return _has_platform_handler(plugin, platform)
 
 
+def _normalize_runtime_task_prompt(task_prompt: str) -> str:
+    text = str(task_prompt or "").strip()
+    if not text:
+        return ""
+    try:
+        from kernel_tools import _ai_tasks_clean_task_prompt
+        normalized = str(_ai_tasks_clean_task_prompt(text) or "").strip()
+        if normalized:
+            return normalized
+    except Exception:
+        pass
+    return text
+
+
 async def _render_scheduled_message(
     llm_client,
     reminder_id: str,
@@ -385,7 +399,7 @@ async def _render_scheduled_message(
     platform: str,
     targets: Dict[str, Any],
 ) -> Tuple[str, List[Dict[str, Any]]]:
-    task_prompt = (task_prompt or "").strip()
+    task_prompt = _normalize_runtime_task_prompt(task_prompt)
     if not task_prompt:
         return "", []
 
@@ -393,6 +407,7 @@ async def _render_scheduled_message(
         "You are running a scheduled task.\n"
         "Keep replies concise and task-focused.\n"
         "Do not use repo_browser.* tool syntax.\n"
+        "Execute the task now; do not create, modify, or cancel schedules.\n"
     )
 
     now_str = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -429,6 +444,22 @@ async def _render_scheduled_message(
         task_prompt=task_prompt,
         reminder_id=reminder_id,
     )
+    blocked_scheduler_tools = {str(name).strip().lower() for name in SCHEDULER_EXCLUDED_TOOLS}
+
+    def _scheduler_admin_guard(tool_name: str) -> Optional[Dict[str, Any]]:
+        func = str(tool_name or "").strip().lower()
+        if func in blocked_scheduler_tools:
+            return {
+                "tool": func,
+                "ok": False,
+                "error": {
+                    "code": "scheduler_tool_blocked",
+                    "message": "That scheduling tool is unavailable while running a scheduled task.",
+                },
+                "summary_for_user": "Running the scheduled task now.",
+            }
+        return None
+
     agent_max_rounds, agent_max_tool_calls = resolve_agent_limits(redis_client)
     result = await run_cerberus_turn(
         llm_client=llm_client,
@@ -444,6 +475,7 @@ async def _render_scheduled_message(
         max_rounds=agent_max_rounds,
         max_tool_calls=agent_max_tool_calls,
         platform_preamble=system_prompt,
+        admin_guard=_scheduler_admin_guard,
     )
     text = (result.get("text") or "").strip()
     attachments = result.get("artifacts") or []

@@ -144,6 +144,37 @@ AI_TASKS_WEEKDAY_MAP = {
     "sunday": 6,
     "sun": 6,
 }
+AI_TASKS_LOCAL_TZ_HINT_RE = re.compile(r"\bassume\s+local\s+timezone\b\.?", re.IGNORECASE)
+AI_TASKS_WEATHER_DEFAULT_HINT_RE = re.compile(
+    r"\bif\s+location\s+is\s+not\s+specified,\s+use\s+the\s+configured\s+default\s+weather\s+location\b\.?",
+    re.IGNORECASE,
+)
+AI_TASKS_TIME_PREFIX_RE = re.compile(
+    r"^\s*(?:(?:in|after)\s+\d+\s*(?:seconds?|minutes?|hours?|days?|weeks?)|at\s+(?:\d{3,4}|\d{1,2}(?::\d{2})?(?::\d{2})?)\s*(?:am|pm)?)\b",
+    re.IGNORECASE,
+)
+AI_TASKS_SCHEDULE_PREFIX_PATTERNS = (
+    re.compile(
+        r"^\s*(?:every\s+day|everyday|daily|each\s+day|weekdays?|weekends?)\b(?:\s+at\s+(?:\d{3,4}|\d{1,2}(?::\d{2})?(?::\d{2})?)\s*(?:am|pm)?)?\s*(?:,|:|-)?\s*",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:every\s+week|weekly)\b(?:\s+on\s+[a-z,\s]+)?(?:\s+at\s+(?:\d{3,4}|\d{1,2}(?::\d{2})?(?::\d{2})?)\s*(?:am|pm)?)?\s*(?:,|:|-)?\s*",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*every\s+\d+\s*(?:seconds?|minutes?|hours?|days?|weeks?)\b\s*(?:,|:|-)?\s*",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:in|after)\s+\d+\s*(?:seconds?|minutes?|hours?|days?|weeks?)\b\s*(?:,|:|-)?\s*",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*at\s+(?:\d{3,4}|\d{1,2}(?::\d{2})?(?::\d{2})?)\s*(?:am|pm)?\b\s*(?:,|:|-)?\s*",
+        re.IGNORECASE,
+    ),
+)
 
 MEMORY_HASH_PREFIX = "tater:memory"
 MEMORY_EXPLICIT_ONLY_REDIS_KEY = "tater:memory:explicit_only"
@@ -1234,6 +1265,19 @@ def _ai_tasks_extract_time_of_day_parts(text: str) -> Optional[Tuple[int, int, i
     if m24:
         return (int(m24.group(1)), int(m24.group(2)), int(m24.group(3) or 0))
 
+    # Accept compact local times like "at 710" or "at 0710".
+    m_compact = re.search(r"\bat\s+(\d{3,4})(?:\b|$)", raw)
+    if m_compact:
+        digits = str(m_compact.group(1) or "")
+        if len(digits) == 3:
+            hour = int(digits[0])
+            minute = int(digits[1:])
+        else:
+            hour = int(digits[:2])
+            minute = int(digits[2:])
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return (hour, minute, 0)
+
     # Accept common natural phrasing like "at 6" / "at 18" / "at 6:30"
     m_at = re.search(r"\bat\s+([01]?\d|2[0-3])(?::([0-5]\d))?(?::([0-5]\d))?(?:\b|$)", raw)
     if m_at:
@@ -1426,6 +1470,67 @@ def _ai_tasks_parse_when(when_ts: Any, when_txt: Any, in_seconds: Any) -> Option
     return None
 
 
+def _ai_tasks_clean_task_prompt(task_text: Any) -> str:
+    raw = str(task_text or "").strip()
+    if not raw:
+        return ""
+    compact = re.sub(r"\s+", " ", raw).strip()
+    compact = AI_TASKS_LOCAL_TZ_HINT_RE.sub("", compact).strip(" ,.-")
+    compact = AI_TASKS_WEATHER_DEFAULT_HINT_RE.sub("", compact).strip(" ,.-")
+    if not compact:
+        return ""
+
+    cleaned = compact
+    for pattern in AI_TASKS_SCHEDULE_PREFIX_PATTERNS:
+        match = pattern.match(cleaned)
+        if not match:
+            continue
+        remainder = cleaned[match.end() :].strip(" ,.-")
+        if remainder:
+            cleaned = remainder
+            break
+    time_prefix = AI_TASKS_TIME_PREFIX_RE.match(cleaned)
+    if time_prefix:
+        remainder = cleaned[time_prefix.end() :].strip(" ,.-")
+        if remainder:
+            cleaned = remainder
+    cleaned = re.sub(r"^(?:to\s+)", "", cleaned, flags=re.IGNORECASE).strip()
+    return cleaned or compact
+
+
+def _ai_tasks_default_title(task_prompt: str, recurrence: Dict[str, Any], interval: float) -> str:
+    base = _ai_tasks_clean_task_prompt(task_prompt)
+    if base:
+        base = re.sub(
+            r"^(?:please\s+)?(?:hey\s+\w+\s*,?\s*)?(?:can you|could you|would you|will you|do)\s+",
+            "",
+            base,
+            flags=re.IGNORECASE,
+        ).strip()
+        base = re.sub(r"\s+", " ", base).strip(" .")
+    recurrence_kind = str((recurrence or {}).get("kind") or "").strip().lower()
+    cadence_prefix = ""
+    if recurrence_kind == "daily_local_time":
+        cadence_prefix = "Daily"
+    elif recurrence_kind == "weekly_local_time":
+        cadence_prefix = "Weekly"
+    elif float(interval or 0.0) > 0:
+        cadence_prefix = "Recurring"
+
+    lowered = base.lower()
+    if any(token in lowered for token in ("weather", "forecast", "rain chance", "rain chances")):
+        return f"{cadence_prefix} Weather Forecast".strip()
+
+    if base:
+        if len(base) > 80:
+            base = base[:77].rstrip() + "..."
+        return base[0].upper() + base[1:] if len(base) > 1 else base.upper()
+
+    if cadence_prefix:
+        return f"{cadence_prefix} AI task"
+    return "Scheduled AI task"
+
+
 def ai_tasks(
     *,
     message: Any = None,
@@ -1454,7 +1559,8 @@ def ai_tasks(
     chat_id: Any = None,
 ) -> Dict[str, Any]:
     text = str(message if message is not None else content or "").strip()
-    task_text = str(task_prompt if task_prompt is not None else text or "").strip()
+    task_text_raw = str(task_prompt if task_prompt is not None else text or "").strip()
+    task_text = _ai_tasks_clean_task_prompt(task_text_raw)
     if not task_text:
         return {"tool": "ai_tasks", "ok": False, "error": "Cannot queue: missing task prompt"}
     if not text:
@@ -1516,13 +1622,14 @@ def ai_tasks(
         interval = 0.0
     if interval < 0:
         interval = 0.0
+    timing_seed_text = str(when if when is not None else "").strip() or task_text_raw
     if interval <= 0:
-        interval = _ai_tasks_infer_interval_from_text(str(when or "")) or _ai_tasks_infer_interval_from_text(task_text)
+        interval = _ai_tasks_infer_interval_from_text(timing_seed_text)
 
     now = time.time()
     next_run = _ai_tasks_parse_when(when_ts, when, in_seconds_val)
     if next_run is None and interval > 0:
-        next_run = _ai_tasks_parse_when(None, task_text, None)
+        next_run = _ai_tasks_parse_when(None, timing_seed_text, None)
     if next_run is None and interval > 0:
         next_run = now + max(1.0, interval)
     if next_run is None:
@@ -1540,8 +1647,9 @@ def ai_tasks(
         when_txt=when,
         interval=float(interval),
         next_run_ts=float(next_run),
-        fallback_text=task_text,
+        fallback_text=task_text_raw or task_text,
     )
+    resolved_title = str(title or "").strip() or _ai_tasks_default_title(task_text, recurrence, float(interval))
 
     reminder_id = str(uuid.uuid4())
     schedule: Dict[str, Any] = {
@@ -1556,8 +1664,8 @@ def ai_tasks(
         "id": reminder_id,
         "created_at": float(now),
         "platform": destination,
-        "title": str(title or "").strip() or None,
-        "message": text,
+        "title": resolved_title or None,
+        "message": task_text,
         "task_prompt": task_text,
         "targets": resolved_targets or {},
         "origin": normalize_origin(origin_map),
@@ -1565,6 +1673,7 @@ def ai_tasks(
             "priority": priority,
             "tags": tags,
             "ttl_sec": ttl_sec,
+            "source_request": text,
         },
         "schedule": schedule,
     }
