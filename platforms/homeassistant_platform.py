@@ -1010,7 +1010,7 @@ async def handle_message(payload: HARequest):
             history_messages=messages_list,
             registry=merged_registry,
             enabled_predicate=merged_enabled,
-            context={"context": ctx},
+            context=ctx,
             user_text=text_in,
             scope=conv_key if conv_key != "default" else "",
             origin=origin,
