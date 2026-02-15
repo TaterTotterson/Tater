@@ -114,6 +114,10 @@ You can install both:
 
 directly from the Unraid App Store with a one-click template.
 
+Important for Docker/Unraid persistence:
+- Add a path mapping for Agent Lab data: `/app/agent_lab` (container) -> `/mnt/user/appdata/tater/agent_labs` (host example).
+- Without this mapping, Agent Lab plugins/platforms/artifacts can be lost on container rebuilds/updates.
+
 ## 🏠 Home Assistant
 
 A dedicated Home Assistant add-on repository is available here:
