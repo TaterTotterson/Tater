@@ -2687,6 +2687,71 @@ def render_cerberus_settings():
             return int(default)
         return value
 
+    def _cerberus_values_from_inputs() -> Dict[str, int]:
+        return {
+            AGENT_MAX_ROUNDS_KEY: int(new_max_rounds),
+            AGENT_MAX_TOOL_CALLS_KEY: int(new_max_tool_calls),
+            CERBERUS_AGENT_STATE_TTL_SECONDS_KEY: int(new_state_ttl_seconds),
+            CERBERUS_PLANNER_MAX_TOKENS_KEY: int(new_planner_max_tokens),
+            CERBERUS_CHECKER_MAX_TOKENS_KEY: int(new_checker_max_tokens),
+            CERBERUS_DOER_MAX_TOKENS_KEY: int(new_doer_max_tokens),
+            CERBERUS_TOOL_REPAIR_MAX_TOKENS_KEY: int(new_tool_repair_max_tokens),
+            CERBERUS_OVERCLAR_REPAIR_MAX_TOKENS_KEY: int(new_overclar_repair_max_tokens),
+            CERBERUS_SEND_REPAIR_MAX_TOKENS_KEY: int(new_send_repair_max_tokens),
+            CERBERUS_RECOVERY_MAX_TOKENS_KEY: int(new_recovery_max_tokens),
+            CERBERUS_MAX_LEDGER_ITEMS_KEY: int(new_max_ledger_items),
+        }
+
+    def _cerberus_default_values() -> Dict[str, int]:
+        return {
+            AGENT_MAX_ROUNDS_KEY: int(DEFAULT_MAX_ROUNDS),
+            AGENT_MAX_TOOL_CALLS_KEY: int(DEFAULT_MAX_TOOL_CALLS),
+            CERBERUS_AGENT_STATE_TTL_SECONDS_KEY: int(DEFAULT_AGENT_STATE_TTL_SECONDS),
+            CERBERUS_PLANNER_MAX_TOKENS_KEY: int(DEFAULT_PLANNER_MAX_TOKENS),
+            CERBERUS_CHECKER_MAX_TOKENS_KEY: int(DEFAULT_CHECKER_MAX_TOKENS),
+            CERBERUS_DOER_MAX_TOKENS_KEY: int(DEFAULT_DOER_MAX_TOKENS),
+            CERBERUS_TOOL_REPAIR_MAX_TOKENS_KEY: int(DEFAULT_TOOL_REPAIR_MAX_TOKENS),
+            CERBERUS_OVERCLAR_REPAIR_MAX_TOKENS_KEY: int(DEFAULT_OVERCLAR_REPAIR_MAX_TOKENS),
+            CERBERUS_SEND_REPAIR_MAX_TOKENS_KEY: int(DEFAULT_SEND_REPAIR_MAX_TOKENS),
+            CERBERUS_RECOVERY_MAX_TOKENS_KEY: int(DEFAULT_RECOVERY_MAX_TOKENS),
+            CERBERUS_MAX_LEDGER_ITEMS_KEY: int(DEFAULT_MAX_LEDGER_ITEMS),
+        }
+
+    def _apply_cerberus_settings(values: Dict[str, int]) -> None:
+        for setting_key, setting_value in values.items():
+            redis_client.set(setting_key, int(setting_value))
+
+    def _sync_cerberus_widget_state(values: Dict[str, int]) -> None:
+        st.session_state["cerberus_max_rounds"] = int(values.get(AGENT_MAX_ROUNDS_KEY, DEFAULT_MAX_ROUNDS))
+        st.session_state["cerberus_max_tool_calls"] = int(values.get(AGENT_MAX_TOOL_CALLS_KEY, DEFAULT_MAX_TOOL_CALLS))
+        st.session_state["cerberus_agent_state_ttl_seconds"] = int(
+            values.get(CERBERUS_AGENT_STATE_TTL_SECONDS_KEY, DEFAULT_AGENT_STATE_TTL_SECONDS)
+        )
+        st.session_state["cerberus_planner_max_tokens"] = int(
+            values.get(CERBERUS_PLANNER_MAX_TOKENS_KEY, DEFAULT_PLANNER_MAX_TOKENS)
+        )
+        st.session_state["cerberus_checker_max_tokens"] = int(
+            values.get(CERBERUS_CHECKER_MAX_TOKENS_KEY, DEFAULT_CHECKER_MAX_TOKENS)
+        )
+        st.session_state["cerberus_doer_max_tokens"] = int(
+            values.get(CERBERUS_DOER_MAX_TOKENS_KEY, DEFAULT_DOER_MAX_TOKENS)
+        )
+        st.session_state["cerberus_tool_repair_max_tokens"] = int(
+            values.get(CERBERUS_TOOL_REPAIR_MAX_TOKENS_KEY, DEFAULT_TOOL_REPAIR_MAX_TOKENS)
+        )
+        st.session_state["cerberus_overclar_repair_max_tokens"] = int(
+            values.get(CERBERUS_OVERCLAR_REPAIR_MAX_TOKENS_KEY, DEFAULT_OVERCLAR_REPAIR_MAX_TOKENS)
+        )
+        st.session_state["cerberus_send_repair_max_tokens"] = int(
+            values.get(CERBERUS_SEND_REPAIR_MAX_TOKENS_KEY, DEFAULT_SEND_REPAIR_MAX_TOKENS)
+        )
+        st.session_state["cerberus_recovery_max_tokens"] = int(
+            values.get(CERBERUS_RECOVERY_MAX_TOKENS_KEY, DEFAULT_RECOVERY_MAX_TOKENS)
+        )
+        st.session_state["cerberus_max_ledger_items"] = int(
+            values.get(CERBERUS_MAX_LEDGER_ITEMS_KEY, DEFAULT_MAX_LEDGER_ITEMS)
+        )
+
     st.subheader("Cerberus")
     st.caption("Planner / Doer / Critic runtime limits and token budgets.")
 
@@ -2843,19 +2908,19 @@ def render_cerberus_settings():
     if new_max_rounds == 0 or new_max_tool_calls == 0:
         st.warning("Unlimited round/tool-call limits are enabled.")
 
-    if st.button("Save Cerberus Settings", key="save_cerberus_settings"):
-        redis_client.set(AGENT_MAX_ROUNDS_KEY, int(new_max_rounds))
-        redis_client.set(AGENT_MAX_TOOL_CALLS_KEY, int(new_max_tool_calls))
-        redis_client.set(CERBERUS_AGENT_STATE_TTL_SECONDS_KEY, int(new_state_ttl_seconds))
-        redis_client.set(CERBERUS_PLANNER_MAX_TOKENS_KEY, int(new_planner_max_tokens))
-        redis_client.set(CERBERUS_CHECKER_MAX_TOKENS_KEY, int(new_checker_max_tokens))
-        redis_client.set(CERBERUS_DOER_MAX_TOKENS_KEY, int(new_doer_max_tokens))
-        redis_client.set(CERBERUS_TOOL_REPAIR_MAX_TOKENS_KEY, int(new_tool_repair_max_tokens))
-        redis_client.set(CERBERUS_OVERCLAR_REPAIR_MAX_TOKENS_KEY, int(new_overclar_repair_max_tokens))
-        redis_client.set(CERBERUS_SEND_REPAIR_MAX_TOKENS_KEY, int(new_send_repair_max_tokens))
-        redis_client.set(CERBERUS_RECOVERY_MAX_TOKENS_KEY, int(new_recovery_max_tokens))
-        redis_client.set(CERBERUS_MAX_LEDGER_ITEMS_KEY, int(new_max_ledger_items))
+    action_cols = st.columns(2)
+    if action_cols[0].button("Save Cerberus Settings", key="save_cerberus_settings"):
+        values = _cerberus_values_from_inputs()
+        _apply_cerberus_settings(values)
+        _sync_cerberus_widget_state(values)
         st.success("Cerberus settings updated.")
+        st.rerun()
+    if action_cols[1].button("Set Default Values", key="reset_cerberus_settings_defaults"):
+        defaults = _cerberus_default_values()
+        _apply_cerberus_settings(defaults)
+        _sync_cerberus_widget_state(defaults)
+        st.success("Cerberus settings reset to defaults.")
+        st.rerun()
 
 
 def render_admin_gating_settings():
@@ -3007,6 +3072,7 @@ _CERBERUS_METRIC_NAMES = (
     "total_repairs",
     "validation_failures",
     "tool_failures",
+    "creation_contract_fixes",
 )
 _CERBERUS_METRIC_PLATFORMS = (
     "webui",
@@ -3227,6 +3293,8 @@ def render_cerberus_metrics_dashboard(*, key_prefix: str, allow_controls: bool):
                 "tool_result_summary": tool_summary,
                 "validation_reason": str(validation.get("reason") or ""),
                 "checker_action": str(item.get("checker_action") or ""),
+                "creation_contract_fix_used": bool(item.get("creation_contract_fix_used")),
+                "creation_contract_fix_count": int(item.get("creation_contract_fix_count") or 0),
                 "total_ms": int(item.get("total_ms") or 0),
             }
         )
@@ -3441,6 +3509,9 @@ def render_ai_tasks_page(*, embedded: bool = False):
         message = str(row.get("message") or "").strip()
         preview = task_prompt or message or "(empty)"
         preview = preview[:140] + ("..." if len(preview) > 140 else "")
+        derived_title = title or (task_prompt or message or "Scheduled task")
+        if len(derived_title) > 80:
+            derived_title = derived_title[:77].rstrip() + "..."
 
         due_local = datetime.fromtimestamp(due_ts).strftime("%Y-%m-%d %H:%M:%S")
         mode_label = "AI Task"
@@ -3450,7 +3521,7 @@ def render_ai_tasks_page(*, embedded: bool = False):
         with st.container():
             cols = st.columns([10, 2])
             with cols[0]:
-                st.markdown(f"**{title or 'Untitled schedule'}**")
+                st.markdown(f"**{derived_title}**")
                 st.caption(summary)
                 st.write(preview)
             with cols[1]:
