@@ -3757,6 +3757,215 @@ def _tool_failure_checker_reason(tool_result: Optional[Dict[str, Any]]) -> str:
     return "tool_failed"
 
 
+_BAD_ARGS_FAILURE_CODES = {
+    "bad_args",
+    "invalid_args",
+    "invalid_argument",
+    "invalid_arguments",
+    "missing_args",
+    "missing_argument",
+    "missing_arguments",
+    "missing_required",
+    "missing_required_arg",
+    "missing_required_argument",
+    "missing_required_field",
+    "unknown_arg",
+    "unknown_args",
+    "unknown_argument",
+    "unknown_arguments",
+    "unknown_field",
+    "validation_error",
+    "schema_error",
+    "type_error",
+    "plugin_exception",
+}
+
+_BAD_ARGS_FAILURE_TEXT_MARKERS = (
+    "missing required",
+    "missing field",
+    "required field",
+    "required argument",
+    "required args",
+    "required parameter",
+    "missing argument",
+    "invalid argument",
+    "invalid args",
+    "unknown field",
+    "unknown argument",
+    "unexpected keyword",
+    "unexpected argument",
+    "validation error",
+    "schema validation",
+    "failed validation",
+    "typeerror",
+    "valueerror",
+    "keyerror",
+    "exception",
+)
+
+
+def _tool_failure_code_and_text(
+    *,
+    tool_result: Optional[Dict[str, Any]],
+    payload: Optional[Dict[str, Any]],
+) -> tuple[str, str]:
+    code = ""
+    text_parts: List[str] = []
+
+    src_payload = payload if isinstance(payload, dict) else {}
+    payload_error = src_payload.get("error")
+    if isinstance(payload_error, dict):
+        code = str(payload_error.get("code") or "").strip().lower()
+        message = str(payload_error.get("message") or "").strip()
+        if message:
+            text_parts.append(message)
+
+    src_result = tool_result if isinstance(tool_result, dict) else {}
+    data = src_result.get("data")
+    if not code and isinstance(data, dict):
+        err = data.get("error")
+        if isinstance(err, dict):
+            code = str(err.get("code") or "").strip().lower()
+            msg = str(err.get("message") or "").strip()
+            if msg:
+                text_parts.append(msg)
+
+    summary = str(src_result.get("summary_for_user") or "").strip()
+    if summary:
+        text_parts.append(summary)
+
+    errors = src_result.get("errors")
+    if isinstance(errors, list):
+        for item in errors:
+            line = str(item or "").strip()
+            if line:
+                text_parts.append(line)
+
+    compact_text = " | ".join(part for part in text_parts if part).strip().lower()
+    return code, compact_text
+
+
+def _looks_like_bad_args_plugin_failure(
+    *,
+    tool_call: Optional[Dict[str, Any]],
+    tool_result: Optional[Dict[str, Any]],
+    payload: Optional[Dict[str, Any]],
+    registry: Dict[str, Any],
+) -> tuple[bool, str]:
+    plugin_id = _plugin_tool_id_for_call(tool_call, registry)
+    if not plugin_id:
+        return False, ""
+    if not isinstance(tool_result, dict) or bool(tool_result.get("ok")):
+        return False, ""
+
+    code, text = _tool_failure_code_and_text(tool_result=tool_result, payload=payload)
+    if code:
+        if code in _BAD_ARGS_FAILURE_CODES:
+            return True, code
+        if code.startswith("bad_args"):
+            return True, code
+        if code in {"plugin_error", "plugin_failed"}:
+            if any(marker in text for marker in _BAD_ARGS_FAILURE_TEXT_MARKERS):
+                return True, code
+    if any(marker in text for marker in _BAD_ARGS_FAILURE_TEXT_MARKERS):
+        return True, "bad_args_text"
+    return False, ""
+
+
+def _help_arg_names(help_payload: Optional[Dict[str, Any]]) -> List[str]:
+    src = help_payload if isinstance(help_payload, dict) else {}
+    out: List[str] = []
+    seen: set[str] = set()
+
+    def _add(name: Any) -> None:
+        key = str(name or "").strip()
+        lowered = key.lower()
+        if not key or lowered in seen:
+            return
+        seen.add(lowered)
+        out.append(key)
+
+    for field in ("required_args", "optional_args"):
+        items = src.get(field)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if isinstance(item, dict):
+                _add(item.get("name"))
+            else:
+                _add(item)
+
+    usage_example = str(src.get("usage_example") or "").strip()
+    usage_parsed = parse_function_json(usage_example)
+    usage_args = usage_parsed.get("arguments") if isinstance(usage_parsed, dict) else None
+    if isinstance(usage_args, dict):
+        for key in usage_args.keys():
+            _add(key)
+
+    return out
+
+
+def _constrain_args_from_plugin_help(
+    *,
+    args: Optional[Dict[str, Any]],
+    help_payload: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    source_args = args if isinstance(args, dict) else {}
+    allowed = _help_arg_names(help_payload)
+    if not allowed:
+        return {}
+    canonical_lookup = {name.lower(): name for name in allowed}
+    out: Dict[str, Any] = {}
+    for key, value in source_args.items():
+        raw_key = str(key or "").strip()
+        if not raw_key:
+            continue
+        canonical = canonical_lookup.get(raw_key.lower())
+        if not canonical:
+            continue
+        out[canonical] = value
+    return out
+
+
+def _tool_call_signature(tool_call: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(tool_call, dict):
+        return ""
+    func = _canonical_tool_name(tool_call.get("function"))
+    if not func:
+        return ""
+    args = tool_call.get("arguments") if isinstance(tool_call.get("arguments"), dict) else {}
+    args_hash = _hash_tool_args(args)
+    return f"{func}:{args_hash}" if args_hash else func
+
+
+def _build_help_constrained_retry_tool_call(
+    *,
+    failed_tool_call: Optional[Dict[str, Any]],
+    help_payload: Optional[Dict[str, Any]],
+    registry: Dict[str, Any],
+    user_text: str,
+) -> Optional[Dict[str, Any]]:
+    plugin_id = _plugin_tool_id_for_call(failed_tool_call, registry)
+    if not plugin_id:
+        return None
+    source_args = (
+        failed_tool_call.get("arguments")
+        if isinstance(failed_tool_call, dict) and isinstance(failed_tool_call.get("arguments"), dict)
+        else {}
+    )
+    constrained_args = _constrain_args_from_plugin_help(
+        args=source_args,
+        help_payload=help_payload,
+    )
+    plugin_obj = registry.get(plugin_id)
+    normalized_args = _apply_full_user_request_requirement(
+        plugin_obj=plugin_obj,
+        args=constrained_args,
+        user_text=user_text,
+    )
+    return {"function": plugin_id, "arguments": normalized_args}
+
+
 def _user_disallows_overwrite(text: str) -> bool:
     lowered = " ".join(str(text or "").strip().lower().split())
     if not lowered:
@@ -4398,6 +4607,8 @@ async def run_cerberus_turn(
     creation_last_generated_path = ""
     plugin_help_attempted: set[str] = set()
     plugin_help_prefetch_target = ""
+    bad_args_help_retry_signatures: set[str] = set()
+    bad_args_help_pending: Optional[Dict[str, Any]] = None
 
     def _retry_allowed_within_limits() -> bool:
         rounds_left = effective_max_rounds == 0 or rounds_used < effective_max_rounds
@@ -5149,6 +5360,57 @@ async def run_cerberus_turn(
             if helped_plugin_id:
                 plugin_help_attempted.add(helped_plugin_id)
             if (
+                isinstance(bad_args_help_pending, dict)
+                and helped_plugin_id
+                and helped_plugin_id == _canonical_tool_name(bad_args_help_pending.get("plugin_id"))
+                and not bool(payload_obj.get("ok"))
+            ):
+                bad_args_help_pending = None
+            if (
+                bool(payload_obj.get("ok"))
+                and isinstance(bad_args_help_pending, dict)
+                and helped_plugin_id
+                and helped_plugin_id == _canonical_tool_name(bad_args_help_pending.get("plugin_id"))
+            ):
+                if helped_plugin_id == plugin_help_prefetch_target:
+                    plugin_help_prefetch_target = ""
+                retry_call = _build_help_constrained_retry_tool_call(
+                    failed_tool_call=bad_args_help_pending.get("failed_tool_call"),
+                    help_payload=payload_obj,
+                    registry=registry,
+                    user_text=resolved_user_text or user_text,
+                )
+                bad_args_help_pending = None
+                if isinstance(retry_call, dict):
+                    if _retry_allowed_within_limits():
+                        queued_tool_call = retry_call
+                        queued_retry_tool_for_ledger = retry_call
+                        attempted_tool_for_ledger = str(retry_call.get("function") or attempted_tool_for_ledger or "")
+                        validation_status = {
+                            "status": "ok",
+                            "repair_used": True,
+                            "reason": "bad_args_help_retry",
+                            "attempts": 2,
+                            "ok": True,
+                            "tool_call": retry_call,
+                        }
+                        retries_signature = _tool_call_signature(retry_call)
+                        if retries_signature:
+                            bad_args_help_retry_signatures.add(retries_signature)
+                        repairs_used_count += 1
+                        checker_reason = "continue_after_bad_args_help_retry"
+                        planner_kind = "repaired_tool"
+                        planner_text_is_tool_candidate = True
+                        continue
+                    checker_reason = "bad_args_help_retry_budget_exhausted"
+                    return _finish(
+                        text="I need one more tool call to retry with the plugin's required argument schema.",
+                        status="blocked",
+                        checker_action_value="NEED_USER_INFO",
+                        checker_reason_value=checker_reason,
+                        retry_tool=retry_call,
+                    )
+            if (
                 bool(payload_obj.get("ok"))
                 and plugin_help_prefetch_target
                 and helped_plugin_id
@@ -5236,6 +5498,52 @@ async def run_cerberus_turn(
                     status="blocked",
                     checker_action_value="NEED_USER_INFO",
                     checker_reason_value=checker_reason,
+                )
+
+        bad_args_failure, bad_args_reason = _looks_like_bad_args_plugin_failure(
+            tool_call=planned_tool,
+            tool_result=tool_result_for_checker,
+            payload=raw_tool_payload_out,
+            registry=registry,
+        )
+        if bad_args_failure:
+            failed_signature = _tool_call_signature(planned_tool)
+            already_retried = bool(failed_signature and failed_signature in bad_args_help_retry_signatures)
+            if not already_retried:
+                retry_plugin_id = _plugin_tool_id_for_call(planned_tool, registry)
+                help_retry_call = {"function": "get_plugin_help", "arguments": {"plugin_id": retry_plugin_id}}
+                if _retry_allowed_within_limits() and retry_plugin_id:
+                    if failed_signature:
+                        bad_args_help_retry_signatures.add(failed_signature)
+                    bad_args_help_pending = {
+                        "plugin_id": retry_plugin_id,
+                        "failed_tool_call": planned_tool,
+                        "reason": bad_args_reason or "bad_args",
+                    }
+                    queued_tool_call = help_retry_call
+                    queued_retry_tool_for_ledger = help_retry_call
+                    attempted_tool_for_ledger = "get_plugin_help"
+                    validation_status = {
+                        "status": "ok",
+                        "repair_used": True,
+                        "reason": "bad_args_help_lookup",
+                        "attempts": 2,
+                        "ok": True,
+                        "tool_call": help_retry_call,
+                    }
+                    repairs_used_count += 1
+                    checker_reason = f"continue_after_bad_args_help:{bad_args_reason or 'bad_args'}"
+                    planner_kind = "repaired_tool"
+                    planner_text_is_tool_candidate = True
+                    continue
+                checker_reason = "bad_args_help_budget_exhausted"
+                return _finish(
+                    text="I need one more tool call to fetch that plugin's argument schema before retrying.",
+                    status="blocked",
+                    checker_action_value="NEED_USER_INFO",
+                    checker_reason_value=checker_reason,
+                    retry_tool=help_retry_call,
+                    attempted_tool_override=retry_plugin_id or tool_func,
                 )
 
         overwrite_retry_call = _build_overwrite_retry_tool_call(

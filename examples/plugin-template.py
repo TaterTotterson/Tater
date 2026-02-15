@@ -50,6 +50,10 @@ class ExamplePlugin(ToolPlugin):
 
     # Platforms this plugin supports
     platforms = ["discord", "webui", "irc", "homeassistant", "matrix", "homekit", "xbmc"]
+    when_to_use = ""
+    common_needs = []
+    missing_info_prompts = []
+
 
     # ──────────────────────────────────────────────────────────────────────────
     # Core logic for this plugin

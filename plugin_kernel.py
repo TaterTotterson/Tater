@@ -266,6 +266,9 @@ def get_plugin_help(
     if not isinstance(examples, list) or not examples:
         examples = [usage] if usage else []
 
+    raw_missing = getattr(plugin, "missing_info_prompts", []) or []
+    missing_info_prompts = [str(x).strip() for x in raw_missing if str(x).strip()][:5]
+
     missing_prompts = getattr(plugin, "missing_info_prompts", None)
     if not isinstance(missing_prompts, list):
         missing_prompts = []
@@ -277,7 +280,10 @@ def get_plugin_help(
         "ok": True,
         "plugin_id": pid,
         "plugin_name": plugin_display_name(plugin),
-        "description": plugin_when_to_use(plugin),
+        "description": str(getattr(plugin, "description", "") or ""),
+        "when_to_use": str(plugin_when_to_use(plugin) or ""),
+        "common_needs": list(getattr(plugin, "common_needs", []) or []),
+        "missing_info_prompts": missing_info_prompts,
         "supported_platforms": expanded_platforms,
         "required_settings": _required_settings_summary(plugin),
         "usage_example": usage,
