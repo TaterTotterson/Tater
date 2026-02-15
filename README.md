@@ -16,22 +16,25 @@ Tater now uses **Cerberus**, a closed-loop **Planner -> Doer -> Checker** archit
 
 This loop is now the default orchestration path across Tater platform handlers so tool behavior stays consistent everywhere.
 
-### Cerberus Runtime Config (Env Vars)
+### Cerberus Runtime Config (WebUI)
 
-Cerberus is safe-by-default and bounded unless you explicitly set unlimited values.
+Cerberus runtime config is managed in **WebUI -> Settings -> Cerberus** (Redis-backed).
 
-- `CERBERUS_DEFAULT_MAX_ROUNDS` (default: `1`)  
-  Maximum planner rounds per turn when no per-request override is provided. `0` means unlimited.
-- `CERBERUS_DEFAULT_MAX_TOOL_CALLS` (default: `1`)  
-  Maximum tool executions per turn when no per-request override is provided. `0` means unlimited.
-- `AGENT_STATE_TTL_SECONDS` (default: `604800` / 7 days)  
-  TTL for persistent Cerberus state keys (`tater:cerberus:state:<platform>:<scope>`). `0` disables TTL.
-- `CERBERUS_MAX_LEDGER_ITEMS` (default: `300`)  
-  Max retained entries in each Redis ledger list.
-- `CERBERUS_PLANNER_MAX_TOKENS` (default: `500`)  
-- `CERBERUS_CHECKER_MAX_TOKENS` (default: `420`)  
-- `CERBERUS_DOER_MAX_TOKENS` (default: `380`)  
-  Optional token caps for planner/checker/doer calls.
+Available settings:
+
+- `Max rounds` (`0` = unlimited)
+- `Max tool calls` (`0` = unlimited)
+- `Agent state TTL seconds` (`0` disables TTL)
+- `Planner max tokens`
+- `Checker max tokens`
+- `Doer max tokens`
+- `Tool-repair max tokens`
+- `Over-clarification repair max tokens`
+- `Send-message repair max tokens`
+- `Recovery max tokens`
+- `Max ledger items`
+
+You can also use the **Set Default Values** button in the Cerberus settings tab to restore built-in defaults.
 
 ### Cerberus Scope + Ledger
 
