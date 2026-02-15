@@ -130,7 +130,9 @@ _CREATION_SKILL_CONTEXT_MAX_CHARS = 7000
 _CREATION_SKILL_MAIN_CONTEXT_CHARS = 3600
 _CREATION_SKILL_REFERENCE_CONTEXT_CHARS = 1800
 _CREATION_SKILL_MAX_REFERENCE_HINTS = 6
-_SKILL_REFERENCE_RE = re.compile(r"`skills/agent_lab/references/([A-Za-z0-9_.-]+\.md)`")
+_SKILL_REFERENCE_RE = re.compile(
+    r"`(?:/app/|/)?skills/agent_lab/references/([A-Za-z0-9_.-]+\.md)`"
+)
 
 _PLATFORM_DISPLAY = {
     "webui": "WebUI",
@@ -351,8 +353,30 @@ def _creation_kind_from_user_text(text: str) -> str:
     lowered = " ".join(str(text or "").strip().lower().split())
     if not lowered:
         return ""
+    plugin_explicit = re.search(
+        r"\b(create|make|build|write|generate)\s+(?:an?\s+)?plugin(?:s)?\b",
+        lowered,
+    )
+    platform_explicit = re.search(
+        r"\b(create|make|build|write|generate)\s+(?:an?\s+)?platform(?:s)?\b",
+        lowered,
+    )
+    if plugin_explicit and not platform_explicit:
+        return "plugin"
+    if platform_explicit and not plugin_explicit:
+        return "platform"
+    if plugin_explicit and platform_explicit:
+        if plugin_explicit.start() <= platform_explicit.start():
+            return "plugin"
+        return "platform"
+
     plugin_hit = bool(re.search(r"\b(plugin|plugins)\b", lowered))
     platform_hit = bool(re.search(r"\b(platform|platforms)\b", lowered))
+    if plugin_hit and platform_hit:
+        plugin_pos = lowered.find("plugin")
+        platform_pos = lowered.find("platform")
+        if plugin_pos != -1 and platform_pos != -1:
+            return "plugin" if plugin_pos <= platform_pos else "platform"
     if plugin_hit and not platform_hit:
         return "plugin"
     if platform_hit and not plugin_hit:
@@ -390,6 +414,36 @@ def _creation_kind_from_skill_path(path: Any) -> str:
     return ""
 
 
+def _creation_reference_prefix(kind: Any) -> str:
+    key = str(kind or "").strip().lower()
+    if key == "plugin":
+        return "plugin_"
+    if key == "platform":
+        return "platform_"
+    return ""
+
+
+def _creation_references_dir_path() -> str:
+    return _normalize_abs_path((_SKILLS_ROOT / "references").resolve())
+
+
+def _is_allowed_creation_reference_path(kind: Any, path: Any) -> bool:
+    prefix = _creation_reference_prefix(kind)
+    if not prefix:
+        return False
+    normalized = _normalize_abs_path(path)
+    if not normalized:
+        return False
+    try:
+        ref_dir = Path(_creation_references_dir_path()).resolve()
+        ref_path = Path(normalized).resolve()
+    except Exception:
+        return False
+    if ref_path.parent != ref_dir:
+        return False
+    return ref_path.name.lower().startswith(prefix)
+
+
 def _creation_reference_paths_from_content(kind: str, content: str) -> List[str]:
     key = str(kind or "").strip().lower()
     if key not in {"plugin", "platform"}:
@@ -411,6 +465,8 @@ def _creation_reference_paths_from_content(kind: str, content: str) -> List[str]
         except Exception:
             continue
         if references_dir != ref_path.parent:
+            continue
+        if not _is_allowed_creation_reference_path(key, ref_path):
             continue
         ref_text = str(ref_path)
         if ref_text in seen:
@@ -2776,11 +2832,14 @@ def _redirect_get_plugin_help_for_creation(
     skill_path = _creation_skill_main_path(creation_kind)
     if skill_path:
         return {"function": "read_file", "arguments": {"path": skill_path}}
+    ref_prefix = _creation_reference_prefix(creation_kind)
+    ref_glob = f"{ref_prefix}*.md" if ref_prefix else "*.md"
     return {
         "function": "search_files",
         "arguments": {
-            "query": "skills/agent_lab/references",
-            "path": ".",
+            "query": ref_prefix or "references",
+            "path": "skills/agent_lab/references",
+            "file_glob": ref_glob,
             "max_results": 20,
         },
     }
@@ -4705,6 +4764,8 @@ async def run_cerberus_turn(
             normalized = _normalize_abs_path(path)
             if not normalized:
                 continue
+            if not _is_allowed_creation_reference_path(creation_kind, normalized):
+                continue
             if normalized in creation_read_attempted_paths:
                 continue
             return normalized
@@ -4720,6 +4781,18 @@ async def run_cerberus_turn(
         normalized = _normalize_abs_path(path)
         if not normalized:
             return False
+        if creation_kind in {"plugin", "platform"}:
+            opposite_kind = "platform" if creation_kind == "plugin" else "plugin"
+            if normalized == _creation_skill_main_path(opposite_kind):
+                return False
+            ref_dir = _creation_references_dir_path()
+            try:
+                ref_dir_path = Path(ref_dir).resolve()
+                path_obj = Path(normalized).resolve()
+                if path_obj.parent == ref_dir_path and not _is_allowed_creation_reference_path(creation_kind, normalized):
+                    return False
+            except Exception:
+                pass
         if normalized in creation_read_attempted_paths:
             return False
         creation_read_attempted_paths.add(normalized)
@@ -5519,6 +5592,12 @@ async def run_cerberus_turn(
                         content_text,
                         max_chars=_CREATION_SKILL_REFERENCE_CONTEXT_CHARS,
                     )
+                if read_ok and _retry_allowed_within_limits():
+                    next_ref_path = _next_creation_reference_path()
+                    if next_ref_path and _queue_creation_skill_read(next_ref_path, repaired=True):
+                        repairs_used_count += 1
+                        checker_reason = "continue_after_creation_reference_prefetch"
+                        continue
                 if read_ok and (read_path == creation_main_path or read_path in creation_reference_paths):
                     checker_reason = "continue_after_skill_read"
                     continue
