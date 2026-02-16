@@ -129,7 +129,7 @@ _PLATFORM_AUTHORING_SKILL_PATH = _SKILLS_ROOT / "platform_authoring.md"
 _CREATION_SKILL_CONTEXT_MAX_CHARS = 7000
 _CREATION_SKILL_MAIN_CONTEXT_CHARS = 3600
 _CREATION_SKILL_REFERENCE_CONTEXT_CHARS = 1800
-_CREATION_SKILL_MAX_REFERENCE_HINTS = 6
+_CREATION_SKILL_MAX_REFERENCE_HINTS = 12
 _SKILL_REFERENCE_RE = re.compile(
     r"`(?:/app/|/)?skills/agent_lab/references/([A-Za-z0-9_.-]+\.md)`"
 )
@@ -428,6 +428,15 @@ def _creation_skill_main_path(kind: str) -> str:
     return ""
 
 
+def _creation_skill_main_relpath(kind: Any) -> str:
+    key = str(kind or "").strip().lower()
+    if key == "plugin":
+        return "skills/agent_lab/plugin_authoring.md"
+    if key == "platform":
+        return "skills/agent_lab/platform_authoring.md"
+    return ""
+
+
 def _creation_workspace_subdir(kind: Any) -> str:
     key = str(kind or "").strip().lower()
     if key == "plugin":
@@ -608,12 +617,21 @@ def _creation_skill_prompt_for_turn(
         return ""
     target_tool = "create_plugin" if kind == "plugin" else "create_platform"
     main_path = _normalize_abs_path(main_skill_path) or _creation_skill_main_path(kind)
+    main_rel_path = _creation_skill_main_relpath(kind)
     lines: List[str] = [f"Agent Lab {kind} authoring workflow:"]
     if main_path:
         if main_skill_loaded:
-            lines.append(f"- Main authoring skill is loaded from: {main_path}")
+            lines.append(
+                f"- Main authoring skill is loaded from: {main_rel_path or main_path}"
+            )
         else:
-            lines.append(f"- Before `{target_tool}`, call `read_file` for: {main_path}")
+            lines.append(
+                f"- Before `{target_tool}`, call `read_file` for: {main_rel_path or main_path}"
+            )
+    if main_rel_path:
+        lines.append(
+            "- Skills are under `skills/agent_lab/...` (not `agent_lab/skills/...`)."
+        )
     lines.append("- Read reference files only when additional implementation detail is needed.")
     refs = reference_paths if isinstance(reference_paths, list) else []
     compact_refs: List[str] = []
@@ -3075,7 +3093,7 @@ def _redirect_get_plugin_help_for_creation(
     creation_kind = _creation_kind_from_tool_name(creation_target)
     if creation_kind not in {"plugin", "platform"}:
         return None
-    skill_path = _creation_skill_main_path(creation_kind)
+    skill_path = _creation_skill_main_relpath(creation_kind) or _creation_skill_main_path(creation_kind)
     if skill_path:
         return {"function": "read_file", "arguments": {"path": skill_path}}
     ref_prefix = _creation_reference_prefix(creation_kind)
@@ -3089,6 +3107,56 @@ def _redirect_get_plugin_help_for_creation(
             "max_results": 20,
         },
     }
+
+
+def _normalize_creation_skill_path_alias(path_value: Any) -> Any:
+    raw = str(path_value or "").strip()
+    if not raw:
+        return path_value
+    normalized = raw.replace("\\", "/")
+    lowered = normalized.lower()
+    has_agent_lab_skills = (
+        "/agent_lab/skills/" in lowered
+        or lowered.startswith("agent_lab/skills/")
+        or "/agent_labs/skills/" in lowered
+        or lowered.startswith("agent_labs/skills/")
+    )
+    if has_agent_lab_skills:
+        if lowered.startswith("/app/agent_lab/skills/"):
+            suffix = normalized[len("/app/agent_lab/skills/") :].lstrip("/")
+            return f"/app/skills/agent_lab/{suffix}" if suffix else "skills/agent_lab"
+        if lowered.startswith("/app/agent_labs/skills/"):
+            suffix = normalized[len("/app/agent_labs/skills/") :].lstrip("/")
+            return f"/app/skills/agent_lab/{suffix}" if suffix else "skills/agent_lab"
+        if lowered.startswith("/agent_lab/skills/"):
+            suffix = normalized[len("/agent_lab/skills/") :].lstrip("/")
+            return f"skills/agent_lab/{suffix}" if suffix else "skills/agent_lab"
+        if lowered.startswith("/agent_labs/skills/"):
+            suffix = normalized[len("/agent_labs/skills/") :].lstrip("/")
+            return f"skills/agent_lab/{suffix}" if suffix else "skills/agent_lab"
+        if lowered.startswith("agent_lab/skills/"):
+            suffix = normalized[len("agent_lab/skills/") :].lstrip("/")
+            return f"skills/agent_lab/{suffix}" if suffix else "skills/agent_lab"
+        if lowered.startswith("agent_labs/skills/"):
+            suffix = normalized[len("agent_labs/skills/") :].lstrip("/")
+            return f"skills/agent_lab/{suffix}" if suffix else "skills/agent_lab"
+    return path_value
+
+
+def _normalize_creation_skill_tool_call(tool_call: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    call = tool_call if isinstance(tool_call, dict) else None
+    if not isinstance(call, dict):
+        return call
+    func = _canonical_tool_name(call.get("function"))
+    if func not in {"read_file", "search_files", "list_directory"}:
+        return call
+    args = call.get("arguments")
+    if not isinstance(args, dict):
+        return call
+    out_args = dict(args)
+    if "path" in out_args:
+        out_args["path"] = _normalize_creation_skill_path_alias(out_args.get("path"))
+    return {"function": str(call.get("function") or "").strip(), "arguments": out_args}
 
 
 def _is_creation_recovery_reason(reason: str) -> bool:
@@ -4981,6 +5049,7 @@ async def run_cerberus_turn(
 
     def _activate_creation_kind(kind_hint: Any) -> None:
         nonlocal creation_kind, creation_main_path
+        nonlocal creation_reference_paths
         candidate = str(kind_hint or "").strip().lower()
         if candidate not in {"plugin", "platform"}:
             return
@@ -4988,6 +5057,12 @@ async def run_cerberus_turn(
             return
         creation_kind = candidate
         creation_main_path = _creation_skill_main_path(candidate)
+        for ref_path in _default_creation_reference_paths(candidate):
+            normalized = _normalize_abs_path(ref_path)
+            if not normalized:
+                continue
+            if normalized not in creation_reference_paths:
+                creation_reference_paths.append(normalized)
 
     def _record_creation_note(label: str, text: Any, *, max_chars: int) -> None:
         compact = _compact_creation_text_for_prompt(text, max_chars=max_chars)
@@ -5161,7 +5236,7 @@ async def run_cerberus_turn(
             _queue_creation_skill_read(creation_main_path, repaired=False)
 
         if isinstance(queued_tool_call, dict):
-            planned_tool = dict(queued_tool_call)
+            planned_tool = _normalize_creation_skill_tool_call(dict(queued_tool_call))
             attempted_tool_for_ledger = str((planned_tool or {}).get("function") or attempted_tool_for_ledger or "")
             planner_text_is_tool_candidate = True
             validation_status = {
@@ -5572,6 +5647,7 @@ async def run_cerberus_turn(
                 )
 
             planned_tool = tool_eval.get("tool_call") if isinstance(tool_eval.get("tool_call"), dict) else None
+            planned_tool = _normalize_creation_skill_tool_call(planned_tool)
             planner_text_is_tool_candidate = True
             if not planned_tool:
                 validation_failures_count += 1
@@ -5609,6 +5685,13 @@ async def run_cerberus_turn(
                     repairs_used_count += 1
                     planner_kind = "repaired_tool"
                     checker_reason = "creation_main_skill_read_required"
+                    continue
+            if _retry_allowed_within_limits():
+                next_ref_path = _next_creation_reference_path()
+                if next_ref_path and _queue_creation_skill_read(next_ref_path, repaired=True):
+                    repairs_used_count += 1
+                    planner_kind = "repaired_tool"
+                    checker_reason = "creation_reference_read_required"
                     continue
 
         planned_plugin_tool = _plugin_tool_id_for_call(planned_tool, registry)
@@ -5820,8 +5903,10 @@ async def run_cerberus_turn(
                             max_chars=_CREATION_SKILL_MAIN_CONTEXT_CHARS,
                         )
                         candidate_refs = _creation_reference_paths_from_content(creation_kind, content_text)
-                        if not candidate_refs:
-                            candidate_refs = _default_creation_reference_paths(creation_kind)
+                        fallback_refs = _default_creation_reference_paths(creation_kind)
+                        for fallback_path in fallback_refs:
+                            if fallback_path not in candidate_refs:
+                                candidate_refs.append(fallback_path)
                         for ref_path in candidate_refs:
                             normalized_ref = _normalize_abs_path(ref_path)
                             if not normalized_ref:
