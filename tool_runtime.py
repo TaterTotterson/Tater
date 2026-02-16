@@ -441,8 +441,14 @@ def run_meta_tool(
             if isinstance(raw_hidden, str)
             else bool(raw_hidden)
         )
+        search_query = str(
+            args.get("query")
+            or args.get("pattern")
+            or args.get("text")
+            or ""
+        )
         return search_files(
-            str(args.get("query") or ""),
+            search_query,
             path=args.get("path"),
             max_results=int(args.get("max_results") or 100),
             case_sensitive=case_sensitive,

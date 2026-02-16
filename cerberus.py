@@ -441,11 +441,32 @@ def _creation_kind_from_skill_path(path: Any) -> str:
     normalized = _normalize_abs_path(path)
     if not normalized:
         return ""
+    compact = normalized.replace("\\", "/").strip().lower()
+    if compact.endswith("/skills/agent_lab/plugin_authoring.md"):
+        return "plugin"
+    if compact.endswith("/skills/agent_lab/platform_authoring.md"):
+        return "platform"
     if normalized == _creation_skill_main_path("plugin"):
         return "plugin"
     if normalized == _creation_skill_main_path("platform"):
         return "platform"
     return ""
+
+
+def _is_creation_main_skill_path(kind: Any, path: Any) -> bool:
+    key = str(kind or "").strip().lower()
+    if key not in {"plugin", "platform"}:
+        return False
+    normalized = _normalize_abs_path(path)
+    if not normalized:
+        return False
+    canonical = _creation_skill_main_path(key)
+    if canonical and normalized == canonical:
+        return True
+    compact = normalized.replace("\\", "/").strip().lower()
+    if key == "plugin":
+        return compact.endswith("/skills/agent_lab/plugin_authoring.md")
+    return compact.endswith("/skills/agent_lab/platform_authoring.md")
 
 
 def _creation_reference_prefix(kind: Any) -> str:
@@ -468,14 +489,38 @@ def _is_allowed_creation_reference_path(kind: Any, path: Any) -> bool:
     normalized = _normalize_abs_path(path)
     if not normalized:
         return False
+    filename = Path(normalized).name.strip().lower()
+    if not filename.startswith(prefix):
+        return False
     try:
         ref_dir = Path(_creation_references_dir_path()).resolve()
         ref_path = Path(normalized).resolve()
+        if ref_path.parent == ref_dir:
+            return True
     except Exception:
-        return False
-    if ref_path.parent != ref_dir:
-        return False
-    return ref_path.name.lower().startswith(prefix)
+        pass
+    compact = normalized.replace("\\", "/").strip().lower()
+    return compact.endswith(f"/skills/agent_lab/references/{filename}")
+
+
+def _default_creation_reference_paths(kind: Any) -> List[str]:
+    prefix = _creation_reference_prefix(kind)
+    if not prefix:
+        return []
+    ref_dir = (_SKILLS_ROOT / "references").resolve()
+    out: List[str] = []
+    try:
+        for ref_path in sorted(ref_dir.glob(f"{prefix}*.md"), key=lambda p: p.name):
+            ref_text = _normalize_abs_path(ref_path)
+            if not ref_text:
+                continue
+            if ref_text not in out:
+                out.append(ref_text)
+            if len(out) >= _CREATION_SKILL_MAX_REFERENCE_HINTS:
+                break
+    except Exception:
+        return out
+    return out
 
 
 def _creation_reference_paths_from_content(kind: str, content: str) -> List[str]:
@@ -1980,9 +2025,10 @@ def _planner_system_prompt(platform: str) -> str:
         "- Use only tool ids from the enabled tool index.\n"
         "- Use argument keys exactly as listed for that tool in the enabled tool index; do not invent argument keys.\n"
         "- If plugin arguments are unclear, call get_plugin_help first, then issue the plugin tool call.\n"
-        "- For create_plugin/create_platform requests, do not use get_plugin_help; use read_file on /app/skills/agent_lab/plugin_authoring.md or /app/skills/agent_lab/platform_authoring.md and /app/skills/agent_lab/references/*, and use search_files to locate existing code.\n"
+        "- For create_plugin/create_platform requests, do not use get_plugin_help; use read_file on skills/agent_lab/plugin_authoring.md or skills/agent_lab/platform_authoring.md and skills/agent_lab/references/*, and use search_files to locate existing code.\n"
         "- For create_plugin/create_platform requests, never use run_shell/shell/terminal tools; inspect agent_lab/plugins or agent_lab/platforms with list_directory/search_files/read_file.\n"
         "- For local file/code/workspace tasks in general, use search_files to locate targets and read_file to inspect them before acting; do not guess paths or filenames.\n"
+        "- Prefer workspace-relative paths (agent_lab/... and skills/...) over absolute /app/... paths.\n"
         "- Never output multiple tool calls or markdown fences around tool JSON.\n"
         "- Prefer action over clarification; ask only when a required value is truly missing and cannot be safely assumed.\n"
         "- Never ask what platform this chat is on; it is already known.\n"
@@ -5763,7 +5809,7 @@ async def run_cerberus_turn(
             if derived_kind:
                 _activate_creation_kind(derived_kind)
             if creation_kind and read_path:
-                if read_path == creation_main_path:
+                if _is_creation_main_skill_path(creation_kind, read_path):
                     creation_main_read_attempted = True
                     if read_ok:
                         creation_main_read_ok = True
@@ -5773,7 +5819,10 @@ async def run_cerberus_turn(
                             content_text,
                             max_chars=_CREATION_SKILL_MAIN_CONTEXT_CHARS,
                         )
-                        for ref_path in _creation_reference_paths_from_content(creation_kind, content_text):
+                        candidate_refs = _creation_reference_paths_from_content(creation_kind, content_text)
+                        if not candidate_refs:
+                            candidate_refs = _default_creation_reference_paths(creation_kind)
+                        for ref_path in candidate_refs:
                             normalized_ref = _normalize_abs_path(ref_path)
                             if not normalized_ref:
                                 continue
@@ -5781,7 +5830,7 @@ async def run_cerberus_turn(
                                 creation_reference_paths.append(normalized_ref)
                     else:
                         creation_main_read_ok = False
-                elif read_path in creation_reference_paths and read_ok:
+                elif _is_allowed_creation_reference_path(creation_kind, read_path) and read_ok:
                     content_text = _coerce_text(payload_obj.get("content"))
                     _record_creation_note(
                         f"Reference ({Path(read_path).name}):",
@@ -5801,7 +5850,10 @@ async def run_cerberus_turn(
                         repairs_used_count += 1
                         checker_reason = "continue_after_creation_reference_prefetch"
                         continue
-                if read_ok and (read_path == creation_main_path or read_path in creation_reference_paths):
+                if read_ok and (
+                    _is_creation_main_skill_path(creation_kind, read_path)
+                    or _is_allowed_creation_reference_path(creation_kind, read_path)
+                ):
                     checker_reason = "continue_after_skill_read"
                     continue
                 if read_ok and creation_last_generated_path and read_path == creation_last_generated_path:
