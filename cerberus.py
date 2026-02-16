@@ -563,6 +563,7 @@ def _creation_reference_paths_from_content(kind: str, content: str) -> List[str]
         out.append(ref_text)
     if key == "plugin":
         preferred_names = [
+            "plugin_waiting_prompt_template.md",
             "plugin_multiplatform_handlers.md",
             "plugin_result_contract.md",
             "plugin_argument_schema.md",

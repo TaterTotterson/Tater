@@ -112,6 +112,8 @@ plugin = MyPlugin()
   - `skills/agent_lab/references/plugin_http_resilience.md`
 - Settings and secret patterns:
   - `skills/agent_lab/references/plugin_settings_and_secrets.md`
+- `waiting_prompt_template` guidance and default:
+  - `skills/agent_lab/references/plugin_waiting_prompt_template.md`
 - Multi-platform handler signatures and shared-core pattern:
   - `skills/agent_lab/references/plugin_multiplatform_handlers.md`
 - Notification routing/targets/origin patterns:
