@@ -28,6 +28,21 @@ _BOTH_EXPANSION: Tuple[str, ...] = (
 )
 
 
+def _coerce_attr_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (list, tuple, set)):
+        parts: List[str] = []
+        for item in value:
+            text = str(item).strip()
+            if text:
+                parts.append(text)
+        return " ".join(parts).strip()
+    return str(value).strip()
+
+
 def normalize_platform(platform: Optional[str]) -> str:
     return (platform or "").strip().lower()
 
@@ -65,19 +80,19 @@ def plugin_supports_platform(plugin: Any, platform: str) -> bool:
 
 def plugin_display_name(plugin: Any) -> str:
     return (
-        (getattr(plugin, "plugin_name", None) or "").strip()
-        or (getattr(plugin, "name", None) or "").strip()
+        _coerce_attr_text(getattr(plugin, "plugin_name", None))
+        or _coerce_attr_text(getattr(plugin, "name", None))
         or "Unknown Plugin"
     )
 
 
 def plugin_when_to_use(plugin: Any) -> str:
-    explicit = (getattr(plugin, "when_to_use", None) or "").strip()
+    explicit = _coerce_attr_text(getattr(plugin, "when_to_use", None))
     if explicit:
         return explicit
     desc = (
-        (getattr(plugin, "description", None) or "").strip()
-        or (getattr(plugin, "plugin_dec", None) or "").strip()
+        _coerce_attr_text(getattr(plugin, "description", None))
+        or _coerce_attr_text(getattr(plugin, "plugin_dec", None))
     )
     if not desc:
         return "Use this plugin when the user asks for this capability."
@@ -126,7 +141,7 @@ def _infer_type(value: Any) -> str:
 
 
 def _extract_usage_arguments(plugin: Any) -> Dict[str, Any]:
-    usage = (getattr(plugin, "usage", None) or "").strip()
+    usage = _coerce_attr_text(getattr(plugin, "usage", None))
     if not usage:
         return {}
 
@@ -145,7 +160,7 @@ def _extract_usage_arguments(plugin: Any) -> Dict[str, Any]:
 
 
 def _canonical_usage_example(plugin: Any, plugin_id: str) -> str:
-    usage = (getattr(plugin, "usage", None) or "").strip()
+    usage = _coerce_attr_text(getattr(plugin, "usage", None))
     obj_txt = _find_first_json_object(usage)
     data: Dict[str, Any] = {}
     if obj_txt:
