@@ -4461,6 +4461,15 @@ _DEFAULT_WAITING_PROMPT_TEMPLATE = (
     "Write a friendly, casual message telling {mention} you are working on it now. Only output that message."
 )
 
+_CREATION_SYNTAX_ERROR_MARKERS = (
+    "syntax error",
+    "invalid syntax",
+    "was never closed",
+    "never closed",
+    "unterminated",
+    "eol while scanning string",
+)
+
 
 def _creation_missing_fields(payload: Optional[Dict[str, Any]]) -> set[str]:
     src = payload if isinstance(payload, dict) else {}
@@ -4487,6 +4496,26 @@ def _creation_error_text(payload: Optional[Dict[str, Any]]) -> str:
             if isinstance(item, str) and item.strip():
                 text_parts.append(item.strip())
     return " | ".join(text_parts).strip().lower()
+
+
+def _looks_like_creation_syntax_error(error_text: Any) -> bool:
+    text = str(error_text or "").strip().lower()
+    if not text:
+        return False
+    return any(marker in text for marker in _CREATION_SYNTAX_ERROR_MARKERS)
+
+
+def _close_unterminated_square_brackets(code: str) -> str:
+    src = str(code or "")
+    if not src:
+        return src
+    opens = src.count("[")
+    closes = src.count("]")
+    missing = opens - closes
+    if missing <= 0:
+        return src
+    suffix = "\n".join("]" for _ in range(missing))
+    return src.rstrip() + "\n" + suffix + "\n"
 
 
 def _inject_waiting_prompt_template_into_code(code: str) -> str:
@@ -4527,6 +4556,8 @@ def _repair_generated_plugin_code(code: str, *, payload: Optional[Dict[str, Any]
     error_text = _creation_error_text(payload)
     if "waiting_prompt_template" in missing_fields or "waiting_prompt_template" in error_text:
         fixed = _inject_waiting_prompt_template_into_code(fixed)
+    if _looks_like_creation_syntax_error(error_text):
+        fixed = _close_unterminated_square_brackets(fixed)
 
     # Ensure module-level plugin export exists.
     if not re.search(r"(?m)^\s*plugin\s*=\s*[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\)\s*$", fixed):
@@ -4570,6 +4601,7 @@ def _build_creation_contract_retry_tool_call(
 
     missing_fields = _creation_missing_fields(src)
     error_text = _creation_error_text(src)
+    syntax_failure = _looks_like_creation_syntax_error(error_text)
     must_repair = bool(
         missing_fields.intersection(
             {
@@ -4582,11 +4614,17 @@ def _build_creation_contract_retry_tool_call(
         )
         or "waiting_prompt_template" in error_text
         or "import failed" in error_text
+        or syntax_failure
     )
     if not must_repair:
         return None
 
     repaired_code = _repair_generated_plugin_code(raw_code, payload=src)
+    if syntax_failure:
+        try:
+            compile(repaired_code, "<creation_retry>", "exec")
+        except Exception:
+            return None
     if repaired_code.strip() == raw_code.strip():
         return None
 
