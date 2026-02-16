@@ -242,7 +242,10 @@ def _resolve_safe_path(path: str, allowed_roots: List[Path]) -> Optional[Path]:
     while normalized.startswith("./"):
         normalized = normalized[2:]
 
-    if normalized == "/agent_lab":
+    if normalized.startswith("/app/"):
+        app_rel = normalized[len("/app/") :]
+        raw = str(BASE_DIR / app_rel)
+    elif normalized == "/agent_lab":
         raw = str(AGENT_LAB_DIR)
     elif normalized.startswith("/agent_lab/"):
         suffix = normalized[len("/agent_lab/") :]
