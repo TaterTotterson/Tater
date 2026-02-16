@@ -1084,9 +1084,25 @@ def _looks_like_invalid_tool_call_text(text: str) -> bool:
 
 
 def _tool_purpose(plugin: Any) -> str:
-    text = str(plugin_when_to_use(plugin) or "").strip()
+    def _meta_text(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, (list, tuple, set)):
+            parts = [str(item).strip() for item in value if str(item).strip()]
+            return " ".join(parts).strip()
+        return str(value).strip()
+
+    text = ""
+    try:
+        text = _meta_text(plugin_when_to_use(plugin))
+    except Exception:
+        text = ""
     if not text:
-        text = str(getattr(plugin, "description", "") or "").strip()
+        text = _meta_text(getattr(plugin, "description", "") or "")
+    if not text:
+        text = _meta_text(getattr(plugin, "plugin_dec", "") or "")
     text = " ".join(text.split())
     if not text:
         return "no description"
