@@ -489,7 +489,7 @@ async def on_message(self, mask, event, target, data):
                     {"role": "user", "content": wait_msg},
                 ]
             )
-            wait_text = (wait_response.get("message", {}) or {}).get("content", "").strip()
+            wait_text = str((wait_response.get("message", {}) or {}).get("content", "") or "").strip()
             if wait_text:
                 self.privmsg(target, f"{mask.nick}: {wait_text}")
                 save_irc_message(
@@ -548,7 +548,7 @@ async def on_message(self, mask, event, target, data):
             platform_preamble=platform_preamble,
         )
 
-        final_text = (result.get("text") or "").strip()
+        final_text = str(result.get("text") or "").strip()
         if final_text:
             send_formatted(self, target, final_text)
             save_irc_message(
