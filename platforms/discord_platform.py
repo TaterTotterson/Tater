@@ -263,6 +263,7 @@ def clear_channel_history(channel_id):
 
 
 async def safe_send(channel, content, max_length=2000):
+    content = str(content or "")
     for i in range(0, len(content), max_length):
         await channel.send(content[i : i + max_length])
 
@@ -481,7 +482,7 @@ class discord_platform(commands.Bot):
                     {"role": "user", "content": prompt},
                 ]
             )
-            return error_response["message"].get("content", "").strip() or fallback
+            return str(error_response["message"].get("content", "") or "").strip() or fallback
         except Exception as e:
             logger.error(f"Error generating error message: {e}")
             return fallback
@@ -657,7 +658,7 @@ class discord_platform(commands.Bot):
                             {"role": "user", "content": wait_msg},
                         ]
                     )
-                    wait_text = (wait_response.get("message", {}) or {}).get("content", "").strip()
+                    wait_text = str((wait_response.get("message", {}) or {}).get("content", "") or "").strip()
                     if wait_text:
                         await self.save_message(
                             message.channel.id,
@@ -717,7 +718,7 @@ class discord_platform(commands.Bot):
                     max_tool_calls=agent_max_tool_calls,
                     platform_preamble=platform_preamble,
                 )
-                final_text = (result.get("text") or "").strip()
+                final_text = str(result.get("text") or "").strip()
                 if final_text:
                     await safe_send(message.channel, final_text, self.max_response_length)
                     await self.save_message(
@@ -792,7 +793,7 @@ class discord_platform(commands.Bot):
                 return
 
             except Exception as e:
-                logger.error(f"Exception in message handler: {e}")
+                logger.exception(f"Exception in message handler: {e}")
                 fallback = "An error occurred while processing your request."
                 error_prompt = (
                     f"Generate a friendly error message to {message.author.mention} "

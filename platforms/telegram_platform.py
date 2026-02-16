@@ -966,7 +966,7 @@ class TelegramPlatform:
                         {"role": "user", "content": wait_msg},
                     ]
                 )
-                wait_text = (wait_response.get("message", {}) or {}).get("content", "").strip()
+                wait_text = str((wait_response.get("message", {}) or {}).get("content", "") or "").strip()
                 if wait_text:
                     await self._send_text(chat_id, wait_text)
                     self._save_message(
@@ -1028,7 +1028,7 @@ class TelegramPlatform:
                     platform_preamble=system_prompt,
                 )
 
-                final_text = (result.get("text") or "").strip()
+                final_text = str(result.get("text") or "").strip()
                 if final_text:
                     await self._send_text(chat_id, final_text)
                     self._save_message(

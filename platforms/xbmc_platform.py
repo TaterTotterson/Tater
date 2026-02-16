@@ -354,7 +354,7 @@ async def handle_message(payload: XBMCRequest):
             max_tool_calls=agent_max_tool_calls,
             platform_preamble=system_prompt,
         )
-        final_text = (result.get("text") or "").strip()
+        final_text = str(result.get("text") or "").strip()
         if len(final_text) > 4000:
             final_text = final_text[:4000] + "…"
         await _save_message(

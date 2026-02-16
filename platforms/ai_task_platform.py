@@ -477,7 +477,7 @@ async def _render_scheduled_message(
         platform_preamble=system_prompt,
         admin_guard=_scheduler_admin_guard,
     )
-    text = (result.get("text") or "").strip()
+    text = str(result.get("text") or "").strip()
     attachments = result.get("artifacts") or []
     if not text and not attachments:
         text = "Scheduled task completed."
