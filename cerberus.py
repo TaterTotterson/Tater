@@ -203,6 +203,31 @@ _FULL_USER_TEXT_ARG_CANDIDATES = (
     "raw_message",
     "body",
 )
+_WORKSPACE_DISCOVERY_HINT_RE = re.compile(
+    r"\b(plugin|platform|file|files|code|path|paths|folder|directory|workspace|skill|skills|reference|references|readme|edit|update|fix|create|build)\b",
+    flags=re.IGNORECASE,
+)
+_WORKSPACE_QUERY_STOPWORDS = {
+    "the",
+    "a",
+    "an",
+    "and",
+    "or",
+    "to",
+    "for",
+    "of",
+    "in",
+    "on",
+    "with",
+    "please",
+    "can",
+    "you",
+    "me",
+    "my",
+    "this",
+    "that",
+    "it",
+}
 
 
 def _creation_kind_from_tool_name(tool_name: Any) -> str:
@@ -403,6 +428,15 @@ def _creation_skill_main_path(kind: str) -> str:
     return ""
 
 
+def _creation_workspace_subdir(kind: Any) -> str:
+    key = str(kind or "").strip().lower()
+    if key == "plugin":
+        return "agent_lab/plugins"
+    if key == "platform":
+        return "agent_lab/platforms"
+    return ""
+
+
 def _creation_kind_from_skill_path(path: Any) -> str:
     normalized = _normalize_abs_path(path)
     if not normalized:
@@ -551,6 +585,14 @@ def _creation_skill_prompt_for_turn(
     lines.append(
         f"- `{target_tool}` must include `arguments.name` and full Python source in `arguments.code`."
     )
+    workspace_hint = _creation_workspace_subdir(kind)
+    if workspace_hint:
+        lines.append(
+            f"- For editing/discovery, inspect existing files under `{workspace_hint}` using list_directory/search_files/read_file."
+        )
+        lines.append(
+            "- Never use shell/terminal tools for file discovery in Agent Lab creation flows."
+        )
     context_text = _compact_creation_text_for_prompt(
         loaded_context,
         max_chars=_CREATION_SKILL_CONTEXT_MAX_CHARS,
@@ -1939,6 +1981,8 @@ def _planner_system_prompt(platform: str) -> str:
         "- Use argument keys exactly as listed for that tool in the enabled tool index; do not invent argument keys.\n"
         "- If plugin arguments are unclear, call get_plugin_help first, then issue the plugin tool call.\n"
         "- For create_plugin/create_platform requests, do not use get_plugin_help; use read_file on /app/skills/agent_lab/plugin_authoring.md or /app/skills/agent_lab/platform_authoring.md and /app/skills/agent_lab/references/*, and use search_files to locate existing code.\n"
+        "- For create_plugin/create_platform requests, never use run_shell/shell/terminal tools; inspect agent_lab/plugins or agent_lab/platforms with list_directory/search_files/read_file.\n"
+        "- For local file/code/workspace tasks in general, use search_files to locate targets and read_file to inspect them before acting; do not guess paths or filenames.\n"
         "- Never output multiple tool calls or markdown fences around tool JSON.\n"
         "- Prefer action over clarification; ask only when a required value is truly missing and cannot be safely assumed.\n"
         "- Never ask what platform this chat is on; it is already known.\n"
@@ -2633,6 +2677,57 @@ async def _validate_or_recover_tool_call(
     attempted_tool = str((tool_call or {}).get("function") or "").strip() or None
     if not validation_status.get("ok"):
         reason = str(validation_status.get("reason") or "invalid_tool_call")
+        shell_redirect = _redirect_shell_like_tool_for_creation(
+            tool_call=tool_call,
+            user_text=user_text,
+        )
+        if reason == "unknown_tool" and isinstance(shell_redirect, dict):
+            redirected_validation = dict(validation_status) if isinstance(validation_status, dict) else {}
+            redirected_validation.update(
+                {
+                    "ok": True,
+                    "reason": "creation_shell_redirect",
+                    "repair_used": True,
+                    "tool_call": shell_redirect,
+                    "platform_supported": True,
+                }
+            )
+            return {
+                "ok": True,
+                "tool_call": shell_redirect,
+                "repair_used": True,
+                "reason": "creation_shell_redirect",
+                "recovery_text_if_blocked": None,
+                "attempted_tool": str(shell_redirect.get("function") or "").strip() or attempted_tool,
+                "validation_status": redirected_validation,
+                "send_reason": "",
+            }
+        workspace_redirect = _redirect_unknown_tool_to_search_files(
+            reason=reason,
+            user_text=user_text,
+            tool_call=tool_call,
+        )
+        if isinstance(workspace_redirect, dict):
+            redirected_validation = dict(validation_status) if isinstance(validation_status, dict) else {}
+            redirected_validation.update(
+                {
+                    "ok": True,
+                    "reason": "workspace_discovery_redirect",
+                    "repair_used": True,
+                    "tool_call": workspace_redirect,
+                    "platform_supported": True,
+                }
+            )
+            return {
+                "ok": True,
+                "tool_call": workspace_redirect,
+                "repair_used": True,
+                "reason": "workspace_discovery_redirect",
+                "recovery_text_if_blocked": None,
+                "attempted_tool": str(workspace_redirect.get("function") or "").strip() or attempted_tool,
+                "validation_status": redirected_validation,
+                "send_reason": "",
+            }
         creation_target = _creation_target_tool_for_recovery(
             user_text=user_text,
             attempted_tool=attempted_tool or str((tool_call or {}).get("function") or ""),
@@ -2813,6 +2908,111 @@ def _creation_target_tool_for_recovery(*, user_text: str, attempted_tool: str) -
     return ""
 
 
+def _looks_like_shell_tool_name(value: Any) -> bool:
+    func = _canonical_tool_name(value)
+    if not func:
+        return False
+    shell_like = {
+        "run_shell",
+        "shell",
+        "terminal",
+        "bash",
+        "sh",
+        "exec",
+        "execute_command",
+        "command",
+    }
+    if func in shell_like:
+        return True
+    return ("shell" in func) or ("terminal" in func)
+
+
+def _redirect_shell_like_tool_for_creation(
+    *,
+    tool_call: Optional[Dict[str, Any]],
+    user_text: str,
+) -> Optional[Dict[str, Any]]:
+    call = tool_call if isinstance(tool_call, dict) else {}
+    func = _canonical_tool_name(call.get("function"))
+    if not func:
+        return None
+    if not _looks_like_shell_tool_name(func):
+        return None
+
+    creation_target = _creation_target_tool_for_recovery(
+        user_text=user_text,
+        attempted_tool="",
+    )
+    creation_kind = _creation_kind_from_tool_name(creation_target)
+    if creation_kind not in {"plugin", "platform"}:
+        return None
+
+    workspace_path = _creation_workspace_subdir(creation_kind)
+    if not workspace_path:
+        return None
+
+    return {"function": "list_directory", "arguments": {"path": workspace_path}}
+
+
+def _workspace_discovery_query(user_text: str) -> str:
+    lowered = str(user_text or "").strip().lower()
+    if not lowered:
+        return "plugin"
+    tokens = re.findall(r"[a-z0-9_.-]+", lowered)
+    picked: List[str] = []
+    for token in tokens:
+        if not token or token in _WORKSPACE_QUERY_STOPWORDS:
+            continue
+        if token.isdigit():
+            continue
+        picked.append(token)
+        if len(picked) >= 8:
+            break
+    if picked:
+        return " ".join(picked)
+    return "plugin"
+
+
+def _redirect_unknown_tool_to_search_files(
+    *,
+    reason: str,
+    user_text: str,
+    tool_call: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    if str(reason or "").strip().lower() != "unknown_tool":
+        return None
+    text = str(user_text or "").strip()
+    lowered = text.lower()
+    call = tool_call if isinstance(tool_call, dict) else {}
+    func = _canonical_tool_name(call.get("function"))
+    shell_like_unknown = _looks_like_shell_tool_name(func)
+    if not lowered:
+        lowered = func
+    if not lowered:
+        return None
+    if not shell_like_unknown and not _WORKSPACE_DISCOVERY_HINT_RE.search(lowered):
+        return None
+    query = _workspace_discovery_query(lowered)
+    args: Dict[str, Any] = {
+        "query": query,
+        "path": ".",
+        "max_results": 20,
+    }
+    if "plugin" in lowered:
+        args["path"] = "agent_lab/plugins"
+        args["file_glob"] = "*.py"
+    elif "platform" in lowered:
+        args["path"] = "agent_lab/platforms"
+        args["file_glob"] = "*.py"
+    elif "skill" in lowered or "reference" in lowered:
+        args["path"] = "skills/agent_lab"
+        args["file_glob"] = "*.md"
+    elif "readme" in lowered:
+        args["path"] = "."
+        args["file_glob"] = "README*.md"
+    return {"function": "search_files", "arguments": args}
+
+
 def _redirect_get_plugin_help_for_creation(
     *,
     tool_call: Optional[Dict[str, Any]],
@@ -2855,7 +3055,9 @@ def _is_creation_recovery_reason(reason: str) -> bool:
         "missing_function",
         "not_object",
         "arguments_not_object",
+        "creation_shell_redirect",
         "creation_help_redirect",
+        "workspace_discovery_redirect",
         "bad_args:missing_name",
         "bad_args:missing_code",
     }
@@ -4724,6 +4926,7 @@ async def run_cerberus_turn(
     plugin_help_prefetch_target = ""
     bad_args_help_retry_signatures: set[str] = set()
     bad_args_help_pending: Optional[Dict[str, Any]] = None
+    workspace_discovery_read_attempted_paths: set[str] = set()
 
     def _retry_allowed_within_limits() -> bool:
         rounds_left = effective_max_rounds == 0 or rounds_used < effective_max_rounds
@@ -5603,6 +5806,46 @@ async def run_cerberus_turn(
                     continue
                 if read_ok and creation_last_generated_path and read_path == creation_last_generated_path:
                     checker_reason = "continue_after_skill_read"
+                    continue
+
+        if tool_func == "search_files":
+            payload_obj = raw_tool_payload_out if isinstance(raw_tool_payload_out, dict) else {}
+            search_ok = bool(payload_obj.get("ok"))
+            if (
+                search_ok
+                and str(validation_status.get("reason") or "").strip().lower() == "workspace_discovery_redirect"
+                and _retry_allowed_within_limits()
+            ):
+                queued_workspace_read = False
+                results = payload_obj.get("results")
+                if isinstance(results, list):
+                    for item in results:
+                        if not isinstance(item, dict):
+                            continue
+                        candidate_path = _normalize_abs_path(item.get("path"))
+                        if not candidate_path:
+                            continue
+                        if candidate_path in workspace_discovery_read_attempted_paths:
+                            continue
+                        workspace_discovery_read_attempted_paths.add(candidate_path)
+                        queued_tool_call = {"function": "read_file", "arguments": {"path": candidate_path}}
+                        queued_retry_tool_for_ledger = queued_tool_call
+                        attempted_tool_for_ledger = "read_file"
+                        validation_status = {
+                            "status": "ok",
+                            "repair_used": True,
+                            "reason": "workspace_discovery_read",
+                            "attempts": 2,
+                            "ok": True,
+                            "tool_call": queued_tool_call,
+                        }
+                        repairs_used_count += 1
+                        checker_reason = "continue_after_workspace_discovery_read"
+                        planner_kind = "repaired_tool"
+                        planner_text_is_tool_candidate = True
+                        queued_workspace_read = True
+                        break
+                if queued_workspace_read:
                     continue
 
         if tool_func == "ai_tasks":
