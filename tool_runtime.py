@@ -1,5 +1,4 @@
 import inspect
-import re
 from typing import Any, Callable, Dict, Optional
 
 from plugin_kernel import (
@@ -10,7 +9,6 @@ from plugin_kernel import (
     infer_needs_from_plugin,
 )
 from kernel_tools import (
-    ai_tasks,
     read_file,
     search_web,
     search_files,
@@ -28,8 +26,6 @@ from kernel_tools import (
     validate_plugin,
     test_plugin,
     validate_platform,
-    create_plugin,
-    create_platform,
     write_workspace_note,
     list_workspace,
     memory_get,
@@ -40,15 +36,12 @@ from kernel_tools import (
     memory_search,
     truth_get_last,
     truth_list,
-    send_message,
-    vision_describer,
 )
 from plugin_result import action_failure, normalize_plugin_result
 
 
 META_TOOLS = {
     "get_plugin_help",
-    "vision_describer",
     "list_platforms_for_plugin",
     "read_file",
     "search_web",
@@ -67,8 +60,6 @@ META_TOOLS = {
     "validate_plugin",
     "test_plugin",
     "validate_platform",
-    "create_plugin",
-    "create_platform",
     "write_workspace_note",
     "list_workspace",
     "memory_get",
@@ -79,8 +70,11 @@ META_TOOLS = {
     "memory_search",
     "truth_get_last",
     "truth_list",
-    "send_message",
-    "ai_tasks",
+}
+
+_PLUGIN_ID_ALIASES = {
+    "describe_image": "image_describe",
+    "describe_latest_image": "image_describe",
 }
 
 
@@ -89,29 +83,6 @@ def _to_int(value: Any, default: int) -> int:
         return int(value)
     except Exception:
         return int(default)
-
-
-def _normalize_creation_payload_args(args: Dict[str, Any]) -> Dict[str, Any]:
-    out = dict(args or {})
-    if isinstance(out.get("code_lines"), list):
-        normalized_lines = []
-        for line in (out.get("code_lines") or []):
-            text = str(line)
-            if "\r" in text:
-                text = text.replace("\r", "")
-            if "\n" in text:
-                normalized_lines.extend(text.split("\n"))
-            else:
-                normalized_lines.append(text)
-        out["code_lines"] = normalized_lines
-        out.pop("code", None)
-        return out
-
-    if out.get("code") is not None:
-        text = str(out.get("code") or "")
-        out["code_lines"] = text.splitlines()
-        out.pop("code", None)
-    return out
 
 
 def _coerce_memory_entries(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -241,173 +212,19 @@ def run_meta_tool(
 ) -> Dict[str, Any]:
     if func == "get_plugin_help":
         plugin_id = str(args.get("plugin_id") or "").strip()
-        if plugin_id == "send_message":
-            return {
-                "tool": "get_plugin_help",
-                "ok": True,
-                "plugin_id": "send_message",
-                "name": "Send Message (Kernel Tool)",
-                "description": (
-                    "Send cross-platform messages and optional media attachments via "
-                    "discord/irc/matrix/homeassistant/ntfy/telegram/wordpress."
-                ),
-                "supported_platforms": ["webui", "discord", "irc", "matrix", "telegram", "homeassistant", "automation"],
-                "required_settings": [],
-                "required_args": [],
-                "optional_args": [
-                    "message",
-                    "title",
-                    "platform",
-                    "targets",
-                    "attachments",
-                    "artifacts",
-                    "media",
-                    "files",
-                    "priority",
-                    "tags",
-                    "ttl_sec",
-                    "origin",
-                    "channel_id",
-                    "channel",
-                    "guild_id",
-                    "room_id",
-                    "room_alias",
-                    "device_service",
-                    "persistent",
-                    "api_notification",
-                    "chat_id",
-                    "blob_key",
-                    "file_id",
-                    "path",
-                    "url",
-                    "name",
-                    "mimetype",
-                    "type",
-                    "use_latest_media",
-                    "use_recent_media",
-                    "image_ref",
-                    "media_ref",
-                    "media_refs",
-                ],
-                "when_to_use": (
-                    "Use for sending outbound notifications/messages (including image/audio/video/file attachments) "
-                    "to a room/channel/chat on supported platforms."
-                ),
-                "usage_example": (
-                    "{\"function\":\"send_message\",\"arguments\":{\"platform\":\"discord\","
-                    "\"targets\":{\"channel\":\"#tater\"},\"message\":\"hello\","
-                    "\"attachments\":[{\"type\":\"image\",\"blob_key\":\"tater:blob:xyz\",\"name\":\"logo.png\","
-                    "\"mimetype\":\"image/png\"}]}}"
-                ),
-                "examples": [
-                    "{\"function\":\"send_message\",\"arguments\":{\"platform\":\"discord\",\"targets\":{\"channel\":\"#tater\"},\"message\":\"hello\"}}",
-                    "{\"function\":\"send_message\",\"arguments\":{\"platform\":\"telegram\",\"targets\":{\"chat_id\":\"@tater\"},\"message\":\"hello\"}}",
-                ],
-            }
-        if plugin_id == "ai_tasks":
-            return {
-                "tool": "get_plugin_help",
-                "ok": True,
-                "plugin_id": "ai_tasks",
-                "name": "AI Tasks (Kernel Tool)",
-                "description": (
-                    "Schedule one-off or recurring AI tasks that run later and deliver results "
-                    "to supported notifier platforms. Local timezone is used by default unless explicitly provided otherwise."
-                ),
-                "supported_platforms": ["webui", "discord", "irc", "matrix", "telegram", "homeassistant", "automation"],
-                "required_settings": [],
-                "required_args": ["message"],
-                "optional_args": [
-                    "task_prompt",
-                    "title",
-                    "platform",
-                    "targets",
-                    "when_ts",
-                    "when",
-                    "in_seconds",
-                    "in_minutes",
-                    "in_hours",
-                    "every_seconds",
-                    "every_minutes",
-                    "every_hours",
-                    "priority",
-                    "tags",
-                    "ttl_sec",
-                    "origin",
-                    "channel_id",
-                    "channel",
-                    "guild_id",
-                    "room_id",
-                    "device_service",
-                    "chat_id",
-                ],
-                "when_to_use": "Use to schedule AI tasks/reminders to run at a specific time or recurrence. If timezone is not specified, local timezone is assumed.",
-                "usage_example": (
-                    "{\"function\":\"ai_tasks\",\"arguments\":{\"message\":\"Post daily summary\","
-                    "\"when\":\"6am every day\",\"platform\":\"discord\",\"targets\":{\"channel\":\"#ops\"}}}"
-                ),
-            }
-        if plugin_id == "vision_describer":
-            return {
-                "tool": "get_plugin_help",
-                "ok": True,
-                "plugin_id": "vision_describer",
-                "name": "Vision Describer (Kernel Tool)",
-                "description": (
-                    "Describe an image from an explicit source (path/url/blob/file/media ref). "
-                    "Use `path` as the canonical local-file argument."
-                ),
-                "supported_platforms": ["webui", "discord", "irc", "matrix", "telegram", "homeassistant", "homekit", "xbmc", "automation"],
-                "required_settings": [],
-                "required_args": [],
-                "optional_args": [
-                    "prompt",
-                    "query",
-                    "path",
-                    "url",
-                    "blob_key",
-                    "file_id",
-                    "media_ref",
-                    "media_refs",
-                    "image_ref",
-                    "history_key",
-                    "platform",
-                    "origin",
-                ],
-                "when_to_use": "Use to analyze a specific image. Prefer `path` for local files.",
-                "usage_example": (
-                    "{\"function\":\"vision_describer\",\"arguments\":"
-                    "{\"path\":\"/app/agent_lab/downloads/logo.png\",\"prompt\":\"Describe this image\"}}"
-                ),
-                "notes": [
-                    "`source` is accepted as an alias for `path`.",
-                ],
-            }
+        plugin_id = _PLUGIN_ID_ALIASES.get(plugin_id, plugin_id)
         return get_plugin_help(
             plugin_id=plugin_id,
             platform=args.get("platform") or platform,
             registry=registry,
         )
 
-    if func == "vision_describer":
-        image_path = args.get("path") or args.get("source") or args.get("file")
-        return vision_describer(
-            prompt=str(args.get("prompt") or args.get("query") or ""),
-            path=image_path,
-            url=args.get("url"),
-            blob_key=args.get("blob_key"),
-            file_id=args.get("file_id"),
-            media_ref=args.get("media_ref") if isinstance(args.get("media_ref"), dict) else None,
-            media_refs=args.get("media_refs") if isinstance(args.get("media_refs"), list) else None,
-            image_ref=args.get("image_ref") if isinstance(args.get("image_ref"), dict) else None,
-            history_key=args.get("history_key"),
-            platform=args.get("platform") or platform,
-            origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
-        )
-
     if func == "list_platforms_for_plugin":
         return list_platforms_for_plugin(
-            plugin_id=str(args.get("plugin_id") or ""),
+            plugin_id=_PLUGIN_ID_ALIASES.get(
+                str(args.get("plugin_id") or "").strip(),
+                str(args.get("plugin_id") or "").strip(),
+            ),
             registry=registry,
         )
 
@@ -525,114 +342,10 @@ def run_meta_tool(
             auto_install=bool(args.get("auto_install", False)),
         )
 
-    if func == "create_plugin":
-        args = _normalize_creation_payload_args(args)
-        if not args.get("code") and not args.get("code_lines"):
-            manifest = args.get("manifest")
-            code_files = args.get("code_files")
-            if isinstance(manifest, dict) and not args.get("name"):
-                args = dict(args)
-                args["name"] = (
-                    manifest.get("id")
-                    or manifest.get("name")
-                    or manifest.get("plugin_id")
-                    or manifest.get("plugin_name")
-                    or ""
-                )
-            if isinstance(code_files, list) and code_files:
-                selected = None
-                for entry in code_files:
-                    if isinstance(entry, dict):
-                        path = str(entry.get("path") or "").lower()
-                        if path.endswith("main.py") or path.endswith(".py"):
-                            selected = entry
-                            break
-                if selected is None:
-                    selected = code_files[0] if isinstance(code_files[0], dict) else None
-                if isinstance(selected, dict):
-                    if isinstance(selected.get("content_lines"), list):
-                        args = dict(args)
-                        args["code_lines"] = selected.get("content_lines")
-                    elif isinstance(selected.get("content"), str):
-                        args = dict(args)
-                        args["code"] = selected.get("content")
-        args = _normalize_creation_payload_args(args)
-        if args.get("plugin_id"):
-            args = dict(args)
-            args["name"] = args.get("plugin_id")
-        if not args.get("name") and args.get("plugin_name"):
-            args = dict(args)
-            args["name"] = args.get("plugin_name")
-        name = str(args.get("name") or "").strip()
-        if name and not re.match(r"^[A-Za-z0-9_-]+$", name) and args.get("plugin_id"):
-            args = dict(args)
-            args["name"] = str(args.get("plugin_id") or "").strip()
-        raw_overwrite = args.get("overwrite", False)
-        overwrite = (
-            raw_overwrite.strip().lower() in {"1", "true", "yes", "on"}
-            if isinstance(raw_overwrite, str)
-            else bool(raw_overwrite)
-        )
-        return create_plugin(
-            str(args.get("name") or ""),
-            args.get("code"),
-            code_lines=args.get("code_lines"),
-            overwrite=overwrite,
-        )
     if func == "validate_plugin":
         return validate_plugin(
             str(args.get("name") or ""),
             bool(args.get("auto_install", True)),
-        )
-    if func == "create_platform":
-        args = _normalize_creation_payload_args(args)
-        if not args.get("code") and not args.get("code_lines"):
-            manifest = args.get("manifest")
-            code_files = args.get("code_files")
-            if isinstance(manifest, dict) and not args.get("name"):
-                args = dict(args)
-                args["name"] = (
-                    manifest.get("id")
-                    or manifest.get("name")
-                    or manifest.get("platform_key")
-                    or manifest.get("platform_name")
-                    or ""
-                )
-            if isinstance(code_files, list) and code_files:
-                selected = None
-                for entry in code_files:
-                    if isinstance(entry, dict):
-                        path = str(entry.get("path") or "").lower()
-                        if path.endswith("main.py") or path.endswith(".py"):
-                            selected = entry
-                            break
-                if selected is None:
-                    selected = code_files[0] if isinstance(code_files[0], dict) else None
-                if isinstance(selected, dict):
-                    if isinstance(selected.get("content_lines"), list):
-                        args = dict(args)
-                        args["code_lines"] = selected.get("content_lines")
-                    elif isinstance(selected.get("content"), str):
-                        args = dict(args)
-                        args["code"] = selected.get("content")
-        args = _normalize_creation_payload_args(args)
-        if not args.get("name") and args.get("platform_name"):
-            args = dict(args)
-            args["name"] = args.get("platform_name")
-        if not args.get("name") and args.get("platform_key"):
-            args = dict(args)
-            args["name"] = args.get("platform_key")
-        raw_overwrite = args.get("overwrite", False)
-        overwrite = (
-            raw_overwrite.strip().lower() in {"1", "true", "yes", "on"}
-            if isinstance(raw_overwrite, str)
-            else bool(raw_overwrite)
-        )
-        return create_platform(
-            str(args.get("name") or ""),
-            args.get("code"),
-            code_lines=args.get("code_lines"),
-            overwrite=overwrite,
         )
     if func == "validate_platform":
         return validate_platform(
@@ -742,69 +455,6 @@ def run_meta_tool(
             limit=_to_int(args.get("limit") or 8, 8),
             min_score=_to_int(args.get("min_score") or 1, 1),
             origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
-        )
-    if func == "send_message":
-        return send_message(
-            message=args.get("message"),
-            content=args.get("content"),
-            title=args.get("title"),
-            platform=args.get("platform") or platform,
-            targets=args.get("targets"),
-            attachments=args.get("attachments"),
-            artifacts=args.get("artifacts"),
-            media=args.get("media"),
-            files=args.get("files"),
-            priority=args.get("priority"),
-            tags=args.get("tags"),
-            ttl_sec=args.get("ttl_sec"),
-            origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
-            channel_id=args.get("channel_id"),
-            channel=args.get("channel"),
-            guild_id=args.get("guild_id"),
-            room_id=args.get("room_id"),
-            room_alias=args.get("room_alias"),
-            device_service=args.get("device_service"),
-            persistent=args.get("persistent"),
-            api_notification=args.get("api_notification"),
-            chat_id=args.get("chat_id"),
-            blob_key=args.get("blob_key"),
-            file_id=args.get("file_id"),
-            path=args.get("path"),
-            url=args.get("url"),
-            name=args.get("name"),
-            mimetype=args.get("mimetype"),
-            media_type=args.get("type") or args.get("media_type"),
-            use_latest_media=args.get("use_latest_media") or args.get("use_recent_media"),
-            media_ref=args.get("media_ref") if isinstance(args.get("media_ref"), dict) else None,
-            media_refs=args.get("media_refs") if isinstance(args.get("media_refs"), list) else None,
-            image_ref=args.get("image_ref") if isinstance(args.get("image_ref"), dict) else None,
-        )
-    if func == "ai_tasks":
-        return ai_tasks(
-            message=args.get("message"),
-            content=args.get("content"),
-            task_prompt=args.get("task_prompt"),
-            title=args.get("title"),
-            platform=args.get("platform") or platform,
-            targets=args.get("targets"),
-            when_ts=args.get("when_ts"),
-            when=args.get("when"),
-            in_seconds=args.get("in_seconds"),
-            every_seconds=args.get("every_seconds"),
-            in_minutes=args.get("in_minutes"),
-            in_hours=args.get("in_hours"),
-            every_minutes=args.get("every_minutes"),
-            every_hours=args.get("every_hours"),
-            priority=args.get("priority"),
-            tags=args.get("tags"),
-            ttl_sec=args.get("ttl_sec"),
-            origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
-            channel_id=args.get("channel_id"),
-            channel=args.get("channel"),
-            guild_id=args.get("guild_id"),
-            room_id=args.get("room_id"),
-            device_service=args.get("device_service"),
-            chat_id=args.get("chat_id"),
         )
     if func == "truth_get_last":
         return truth_get_last(

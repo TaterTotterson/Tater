@@ -465,11 +465,6 @@ def parse_function_json(response_text: str):
             content = _extract_relaxed_string(text, "content")
             if path and content is not None:
                 return {"function": func, "arguments": {"path": path, "content": content}}
-        if func in {"create_plugin", "create_platform"}:
-            name = _extract_relaxed_scalar(text, "name")
-            code = _extract_relaxed_string(text, "code")
-            if name and code is not None:
-                return {"function": func, "arguments": {"name": name, "code": code}}
         return None
 
     relaxed = _relaxed_tool_call(s)

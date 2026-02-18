@@ -15,7 +15,6 @@ from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
 import plugin_registry as pr
-from agent_lab_registry import build_agent_registry
 from helpers import get_llm_client_from_env, build_llm_host_from_env
 
 load_dotenv()
@@ -258,10 +257,8 @@ async def call_tool(tool_name: str, payload: ToolCallRequest):
     if not func_name:
         raise HTTPException(status_code=400, detail="Missing tool_name")
 
-    merged_registry, merged_enabled, _collisions = build_agent_registry(
-        pr.get_registry_snapshot(),
-        _plugin_enabled,
-    )
+    merged_registry = dict(pr.get_registry_snapshot() or {})
+    merged_enabled = _plugin_enabled
     plugin = merged_registry.get(func_name)
     if not plugin:
         raise HTTPException(status_code=404, detail=f"Tool '{func_name}' not found")

@@ -78,7 +78,7 @@ def load_plugins_from_directory(
         declared_id = str(getattr(plugin, "name", "") or "").strip()
         pid = declared_id or name
         if id_from_filename:
-            # Agent Lab canonicalizes ids to filenames so edit/reload/validation
+            # Canonicalize ids to filenames so edit/reload/validation
             # operations consistently target <id>.py.
             pid = name
             if declared_id and declared_id != name:

@@ -40,11 +40,8 @@ from plugin_settings import (
 )
 from admin_gate import (
     REDIS_KEY as ADMIN_GATE_KEY,
-    CREATION_GATE_KEY,
     get_admin_only_plugins,
-    is_agent_lab_creation_admin_gated,
 )
-from agent_lab_registry import build_agent_registry
 from rss_store import get_all_feeds, set_feed, update_feed, delete_feed
 from kernel_tools import (
     AGENT_PLUGINS_DIR,
@@ -66,7 +63,6 @@ from cerberus import (
     DEFAULT_DOER_MAX_TOKENS,
     DEFAULT_TOOL_REPAIR_MAX_TOKENS,
     DEFAULT_OVERCLAR_REPAIR_MAX_TOKENS,
-    DEFAULT_SEND_REPAIR_MAX_TOKENS,
     DEFAULT_RECOVERY_MAX_TOKENS,
     DEFAULT_MAX_LEDGER_ITEMS,
     AGENT_MAX_ROUNDS_KEY,
@@ -77,7 +73,6 @@ from cerberus import (
     CERBERUS_DOER_MAX_TOKENS_KEY,
     CERBERUS_TOOL_REPAIR_MAX_TOKENS_KEY,
     CERBERUS_OVERCLAR_REPAIR_MAX_TOKENS_KEY,
-    CERBERUS_SEND_REPAIR_MAX_TOKENS_KEY,
     CERBERUS_RECOVERY_MAX_TOKENS_KEY,
     CERBERUS_MAX_LEDGER_ITEMS_KEY,
 )
@@ -2597,16 +2592,6 @@ def render_tater_settings():
     default_first = redis_client.get("tater:first_name") or first_name
     default_last = redis_client.get("tater:last_name") or last_name
     default_personality = redis_client.get("tater:personality") or ""
-    creation_explicit_env = os.getenv("TATER_CREATION_EXPLICIT_ONLY")
-    creation_explicit_env_forced = (
-        creation_explicit_env is not None and str(creation_explicit_env).strip() != ""
-    )
-    if creation_explicit_env_forced:
-        creation_explicit_default = str(creation_explicit_env).strip().lower() in ("1", "true", "yes", "on")
-    else:
-        creation_explicit_default = str(
-            redis_client.get("tater:agent_creation:explicit_only") or "true"
-        ).strip().lower() in ("1", "true", "yes", "on")
     first_input = st.text_input("First Name", value=default_first, key="tater_first_name")
     last_input = st.text_input("Last Name", value=default_last, key="tater_last_name")
 
@@ -2638,18 +2623,6 @@ def render_tater_settings():
     new_llm = st.number_input("Messages Sent to LLM", min_value=1, value=llm_count, key="tater_llm_limit")
     if new_store > 0 and new_llm > new_store:
         st.warning("⚠️ You're trying to send more messages to LLM than you’re storing. Consider increasing Max Stored Messages.")
-    creation_explicit_only = st.checkbox(
-        "Require explicit create wording for plugin/platform creation",
-        value=creation_explicit_default,
-        key="tater_creation_explicit_only",
-        disabled=creation_explicit_env_forced,
-        help=(
-            "When enabled, Agent Lab only switches into create mode when your request explicitly "
-            "asks to create/build/make a plugin or platform."
-        ),
-    )
-    if creation_explicit_env_forced:
-        st.caption("Creation explicit-only is currently locked by TATER_CREATION_EXPLICIT_ONLY.")
 
     if st.button("Save Tater Settings", key="save_tater_settings"):
         redis_client.set("tater:max_store", new_store)
@@ -2657,10 +2630,6 @@ def render_tater_settings():
         redis_client.set("tater:first_name", first_input)
         redis_client.set("tater:last_name", last_input)
         redis_client.set("tater:personality", personality_input)
-        redis_client.set(
-            "tater:agent_creation:explicit_only",
-            "true" if creation_explicit_only else "false",
-        )
         st.success("Tater settings updated.")
         st.rerun()
 
@@ -2697,7 +2666,6 @@ def render_cerberus_settings():
             CERBERUS_DOER_MAX_TOKENS_KEY: int(new_doer_max_tokens),
             CERBERUS_TOOL_REPAIR_MAX_TOKENS_KEY: int(new_tool_repair_max_tokens),
             CERBERUS_OVERCLAR_REPAIR_MAX_TOKENS_KEY: int(new_overclar_repair_max_tokens),
-            CERBERUS_SEND_REPAIR_MAX_TOKENS_KEY: int(new_send_repair_max_tokens),
             CERBERUS_RECOVERY_MAX_TOKENS_KEY: int(new_recovery_max_tokens),
             CERBERUS_MAX_LEDGER_ITEMS_KEY: int(new_max_ledger_items),
         }
@@ -2712,7 +2680,6 @@ def render_cerberus_settings():
             CERBERUS_DOER_MAX_TOKENS_KEY: int(DEFAULT_DOER_MAX_TOKENS),
             CERBERUS_TOOL_REPAIR_MAX_TOKENS_KEY: int(DEFAULT_TOOL_REPAIR_MAX_TOKENS),
             CERBERUS_OVERCLAR_REPAIR_MAX_TOKENS_KEY: int(DEFAULT_OVERCLAR_REPAIR_MAX_TOKENS),
-            CERBERUS_SEND_REPAIR_MAX_TOKENS_KEY: int(DEFAULT_SEND_REPAIR_MAX_TOKENS),
             CERBERUS_RECOVERY_MAX_TOKENS_KEY: int(DEFAULT_RECOVERY_MAX_TOKENS),
             CERBERUS_MAX_LEDGER_ITEMS_KEY: int(DEFAULT_MAX_LEDGER_ITEMS),
         }
@@ -2741,9 +2708,6 @@ def render_cerberus_settings():
         )
         st.session_state["cerberus_overclar_repair_max_tokens"] = int(
             values.get(CERBERUS_OVERCLAR_REPAIR_MAX_TOKENS_KEY, DEFAULT_OVERCLAR_REPAIR_MAX_TOKENS)
-        )
-        st.session_state["cerberus_send_repair_max_tokens"] = int(
-            values.get(CERBERUS_SEND_REPAIR_MAX_TOKENS_KEY, DEFAULT_SEND_REPAIR_MAX_TOKENS)
         )
         st.session_state["cerberus_recovery_max_tokens"] = int(
             values.get(CERBERUS_RECOVERY_MAX_TOKENS_KEY, DEFAULT_RECOVERY_MAX_TOKENS)
@@ -2780,10 +2744,6 @@ def render_cerberus_settings():
     overclar_repair_max_tokens = _read_positive_int_setting(
         CERBERUS_OVERCLAR_REPAIR_MAX_TOKENS_KEY,
         DEFAULT_OVERCLAR_REPAIR_MAX_TOKENS,
-    )
-    send_repair_max_tokens = _read_positive_int_setting(
-        CERBERUS_SEND_REPAIR_MAX_TOKENS_KEY,
-        DEFAULT_SEND_REPAIR_MAX_TOKENS,
     )
     recovery_max_tokens = _read_positive_int_setting(
         CERBERUS_RECOVERY_MAX_TOKENS_KEY,
@@ -2874,16 +2834,6 @@ def render_cerberus_settings():
             key="cerberus_overclar_repair_max_tokens",
         )
     )
-    new_send_repair_max_tokens = int(
-        st.number_input(
-            "Send-Message Repair Max Tokens",
-            min_value=1,
-            value=send_repair_max_tokens,
-            step=10,
-            format="%d",
-            key="cerberus_send_repair_max_tokens",
-        )
-    )
     new_recovery_max_tokens = int(
         st.number_input(
             "Recovery Max Tokens",
@@ -2937,13 +2887,8 @@ def render_admin_gating_settings():
     unknown_current = [p for p in current if p not in plugin_ids]
 
     using_default_plugin_list = redis_client.get(ADMIN_GATE_KEY) is None
-    using_default_creation_gate = redis_client.get(CREATION_GATE_KEY) is None
-    if using_default_plugin_list and using_default_creation_gate:
-        st.info("Currently using default admin-gating values. Save to customize.")
-    elif using_default_plugin_list:
+    if using_default_plugin_list:
         st.info("Currently using the default admin-only plugin list. Save to customize.")
-    elif using_default_creation_gate:
-        st.info("Agent Lab creation admin-gating is at default (off). Save to customize.")
 
     if unknown_current:
         st.warning(f"Unknown plugin IDs currently stored: {', '.join(unknown_current)}")
@@ -2955,22 +2900,13 @@ def render_admin_gating_settings():
         help="Selected plugins can only be run by the admin user on Discord/Telegram/Matrix/IRC.",
         key="admin_gate_plugins",
     )
-    creation_gate_enabled = st.checkbox(
-        "Require admin user for Agent Lab plugin/platform creation",
-        value=is_agent_lab_creation_admin_gated(redis_client),
-        key="admin_gate_agent_lab_creation",
-        help="When enabled, `create_plugin` and `create_platform` can only be run by the configured admin user.",
-    )
-
     col1, col2 = st.columns(2)
     if col1.button("Save Admin Tool Gating", key="save_admin_gating"):
         redis_client.set(ADMIN_GATE_KEY, json.dumps(selected))
-        redis_client.set(CREATION_GATE_KEY, "true" if creation_gate_enabled else "false")
         st.success("Admin tool gating saved.")
 
     if col2.button("Reset to Defaults", key="reset_admin_gating"):
         redis_client.delete(ADMIN_GATE_KEY)
-        redis_client.delete(CREATION_GATE_KEY)
         st.success("Admin tool gating reset to defaults.")
         st.rerun()
 
@@ -3072,7 +3008,6 @@ _CERBERUS_METRIC_NAMES = (
     "total_repairs",
     "validation_failures",
     "tool_failures",
-    "creation_contract_fixes",
 )
 _CERBERUS_METRIC_PLATFORMS = (
     "webui",
@@ -3293,8 +3228,6 @@ def render_cerberus_metrics_dashboard(*, key_prefix: str, allow_controls: bool):
                 "tool_result_summary": tool_summary,
                 "validation_reason": str(validation.get("reason") or ""),
                 "checker_action": str(item.get("checker_action") or ""),
-                "creation_contract_fix_used": bool(item.get("creation_contract_fix_used")),
-                "creation_contract_fix_count": int(item.get("creation_contract_fix_count") or 0),
                 "total_ms": int(item.get("total_ms") or 0),
             }
         )
@@ -3355,8 +3288,8 @@ def render_cerberus_ledger_settings():
 
 def render_settings_page():
     st.title("Settings")
-    tab_general, tab_integrations, tab_memory, tab_ai_tasks, tab_emoji, tab_cerberus, tab_advanced = st.tabs(
-        ["General", "Integrations", "Memory", "AI Tasks", "Emoji", "Cerberus", "Advanced"]
+    tab_general, tab_integrations, tab_memory, tab_emoji, tab_cerberus, tab_advanced = st.tabs(
+        ["General", "Integrations", "Memory", "Emoji", "Cerberus", "Advanced"]
     )
 
     with tab_general:
@@ -3373,9 +3306,6 @@ def render_settings_page():
 
     with tab_memory:
         render_memory_settings()
-
-    with tab_ai_tasks:
-        render_ai_tasks_page(embedded=True)
 
     with tab_emoji:
         render_emoji_responder_settings()
@@ -4105,10 +4035,8 @@ async def process_message(user_name, message_content, wait_callback=None):
     loop_messages = _enforce_user_assistant_alternation(loop_messages)
     messages_list = loop_messages
 
-    merged_registry, merged_enabled, _collisions = build_agent_registry(
-        get_registry(),
-        get_plugin_enabled,
-    )
+    merged_registry = dict(get_registry() or {})
+    merged_enabled = get_plugin_enabled
 
     session_scope_id = str(st.session_state.get("webui_session_id") or "").strip()
     if not session_scope_id:
@@ -4155,11 +4083,14 @@ async def process_message(user_name, message_content, wait_callback=None):
 
 
 # ------------------ NAVIGATION ------------------
-nav_options = ["Chat", "Plugins", "Auto Plugins", "Platforms", "Agent Lab", "Plugin Store", "Settings"]
+ai_tasks_enabled = str(redis_client.get("ai_task_platform_running") or "").strip().lower() == "true"
+nav_options = ["Chat", "Plugins", "Auto Plugins", "Platforms", "Plugin Store", "Settings"]
+if ai_tasks_enabled:
+    nav_options.insert(4, "AI Tasks")
 if "active_view" not in st.session_state:
     st.session_state.active_view = nav_options[0]
-elif st.session_state.active_view == "AI Tasks":
-    st.session_state.active_view = "Settings"
+elif st.session_state.active_view == "AI Tasks" and not ai_tasks_enabled:
+    st.session_state.active_view = "Platforms"
 elif st.session_state.active_view not in nav_options:
     st.session_state.active_view = nav_options[0]
 
@@ -4173,10 +4104,6 @@ active_view = st.session_state.active_view
 st.sidebar.markdown("---")
 
 # ------------------ PLATFORM MANAGEMENT ------------------
-# Always-on core background services (not user-toggleable platforms).
-if not _platform_thread_alive("ai_task_platform") and _should_autostart("ai_task_platform", exp=False):
-    _start_platform("ai_task_platform")
-
 auto_connected = []
 for platform in platform_registry:
     key = platform["key"]  # e.g. irc_platform
@@ -4462,8 +4389,8 @@ elif active_view == "Platforms":
     st.title("Platforms")
     render_platforms_panel(auto_connected)
 
-elif active_view == "Agent Lab":
-    render_agent_lab_page()
+elif active_view == "AI Tasks":
+    render_ai_tasks_page()
 
 elif active_view == "Plugin Store":
     render_plugin_store_page()

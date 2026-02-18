@@ -1,5 +1,6 @@
 # platform_registry.py
 from platforms.discord_platform import PLATFORM_SETTINGS as discord_settings
+from platforms.ai_task_platform import PLATFORM_SETTINGS as ai_task_settings
 from platforms.ha_automations_platform import PLATFORM_SETTINGS as automations_settings
 from platforms.homeassistant_platform import PLATFORM_SETTINGS as ha_settings
 from platforms.homekit_platform import PLATFORM_SETTINGS as homekit_settings
@@ -10,6 +11,11 @@ from platforms.telegram_platform import PLATFORM_SETTINGS as telegram_settings
 from platforms.xbmc_platform import PLATFORM_SETTINGS as xbmc_settings
 
 platform_registry = [
+    {
+        **ai_task_settings,
+        "key": "ai_task_platform",
+        "label": "AI Task Scheduler Settings",
+    },
     {
         **discord_settings,
         "key": "discord_platform",

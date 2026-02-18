@@ -31,17 +31,13 @@ TOOL_NAME_ALIASES = {
     "google_cse_search": "search_web",
     "inspect_page": "inspect_webpage",
     "inspect_website": "inspect_webpage",
-    "describe_image": "vision_describer",
-    "describe_latest_image": "vision_describer",
-    "vision_describe": "vision_describer",
-    "vision_describe_image": "vision_describer",
+    "describe_image": "image_describe",
+    "describe_latest_image": "image_describe",
 }
 
 _KERNEL_TOOL_PRIORITY = [
     "search_web",
     "inspect_webpage",
-    "send_message",
-    "ai_tasks",
     "read_url",
     "download_file",
     "read_file",
@@ -53,7 +49,6 @@ _KERNEL_TOOL_PRIORITY = [
     "memory_set",
     "memory_search",
     "list_workspace",
-    "vision_describer",
     "get_plugin_help",
 ]
 
@@ -68,19 +63,13 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
     "delete_file": "delete a local file",
     "read_url": "fetch and read webpage text",
     "inspect_webpage": "inspect webpage structure, links, and image candidates",
-    "send_message": "send cross-platform messages/media via notifier delivery",
-    "ai_tasks": "schedule one-off or recurring AI tasks/reminders (defaults to local timezone)",
     "download_file": "download files from URLs",
     "list_archive": "inspect archive entries",
-    "extract_archive": "extract archives to workspace",
+    "extract_archive": "extract archives to a target directory",
     "list_stable_plugins": "list stable built-in plugins",
     "list_stable_platforms": "list stable built-in platforms",
     "inspect_plugin": "inspect plugin metadata and methods",
-    "validate_plugin": "validate an Agent Lab plugin file",
     "test_plugin": "run plugin test harness",
-    "validate_platform": "validate an Agent Lab platform file",
-    "create_plugin": "create/update an Agent Lab plugin",
-    "create_platform": "create/update an Agent Lab platform",
     "write_workspace_note": "append a workspace note",
     "list_workspace": "list workspace notes",
     "memory_get": "read saved memory",
@@ -91,7 +80,6 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
     "memory_search": "search saved memory",
     "truth_get_last": "get latest truth snapshot",
     "truth_list": "list truth snapshots",
-    "vision_describer": "describe an image from explicit source",
 }
 
 ASCII_ONLY_PLATFORMS = {"irc", "homeassistant", "homekit", "xbmc"}
@@ -104,7 +92,6 @@ DEFAULT_CHECKER_MAX_TOKENS = 850
 DEFAULT_DOER_MAX_TOKENS = 900
 DEFAULT_TOOL_REPAIR_MAX_TOKENS = 750
 DEFAULT_OVERCLAR_REPAIR_MAX_TOKENS = 900
-DEFAULT_SEND_REPAIR_MAX_TOKENS = 600
 DEFAULT_RECOVERY_MAX_TOKENS = 350
 AGENT_MAX_ROUNDS_KEY = "tater:agent:max_rounds"
 AGENT_MAX_TOOL_CALLS_KEY = "tater:agent:max_tool_calls"
@@ -114,7 +101,6 @@ CERBERUS_CHECKER_MAX_TOKENS_KEY = "tater:cerberus:checker_max_tokens"
 CERBERUS_DOER_MAX_TOKENS_KEY = "tater:cerberus:doer_max_tokens"
 CERBERUS_TOOL_REPAIR_MAX_TOKENS_KEY = "tater:cerberus:tool_repair_max_tokens"
 CERBERUS_OVERCLAR_REPAIR_MAX_TOKENS_KEY = "tater:cerberus:overclar_repair_max_tokens"
-CERBERUS_SEND_REPAIR_MAX_TOKENS_KEY = "tater:cerberus:send_repair_max_tokens"
 CERBERUS_RECOVERY_MAX_TOKENS_KEY = "tater:cerberus:recovery_max_tokens"
 CERBERUS_MAX_LEDGER_ITEMS_KEY = "tater:cerberus:max_ledger_items"
 AGENT_STATE_PROMPT_MAX_CHARS = 800
@@ -123,16 +109,6 @@ AGENT_STATE_KEY_PREFIX = "tater:cerberus:state:"
 DEFAULT_AGENT_STATE_TTL_SECONDS = 7 * 24 * 60 * 60
 AGENT_STATE_TTL_SECONDS = DEFAULT_AGENT_STATE_TTL_SECONDS
 CERBERUS_LEDGER_SCHEMA_VERSION = "2"
-_SKILLS_ROOT = Path(__file__).resolve().parent / "skills" / "agent_lab"
-_PLUGIN_AUTHORING_SKILL_PATH = _SKILLS_ROOT / "plugin_authoring.md"
-_PLATFORM_AUTHORING_SKILL_PATH = _SKILLS_ROOT / "platform_authoring.md"
-_CREATION_SKILL_CONTEXT_MAX_CHARS = 7000
-_CREATION_SKILL_MAIN_CONTEXT_CHARS = 3600
-_CREATION_SKILL_REFERENCE_CONTEXT_CHARS = 1800
-_CREATION_SKILL_MAX_REFERENCE_HINTS = 12
-_SKILL_REFERENCE_RE = re.compile(
-    r"`(?:/app/|/)?skills/agent_lab/references/([A-Za-z0-9_.-]+\.md)`"
-)
 
 _PLATFORM_DISPLAY = {
     "webui": "WebUI",
@@ -228,15 +204,6 @@ _WORKSPACE_QUERY_STOPWORDS = {
     "that",
     "it",
 }
-
-
-def _creation_kind_from_tool_name(tool_name: Any) -> str:
-    tool_id = _canonical_tool_name(str(tool_name or "").strip())
-    if tool_id == "create_plugin":
-        return "plugin"
-    if tool_id == "create_platform":
-        return "platform"
-    return ""
 
 
 def _plugin_metadata_blob(plugin: Any) -> str:
@@ -374,41 +341,6 @@ def _plugin_tool_id_for_call(tool_call: Optional[Dict[str, Any]], registry: Dict
     return func
 
 
-def _creation_kind_from_user_text(text: str) -> str:
-    lowered = " ".join(str(text or "").strip().lower().split())
-    if not lowered:
-        return ""
-    plugin_explicit = re.search(
-        r"\b(create|make|build|write|generate)\s+(?:an?\s+)?plugin(?:s)?\b",
-        lowered,
-    )
-    platform_explicit = re.search(
-        r"\b(create|make|build|write|generate)\s+(?:an?\s+)?platform(?:s)?\b",
-        lowered,
-    )
-    if plugin_explicit and not platform_explicit:
-        return "plugin"
-    if platform_explicit and not plugin_explicit:
-        return "platform"
-    if plugin_explicit and platform_explicit:
-        if plugin_explicit.start() <= platform_explicit.start():
-            return "plugin"
-        return "platform"
-
-    plugin_hit = bool(re.search(r"\b(plugin|plugins)\b", lowered))
-    platform_hit = bool(re.search(r"\b(platform|platforms)\b", lowered))
-    if plugin_hit and platform_hit:
-        plugin_pos = lowered.find("plugin")
-        platform_pos = lowered.find("platform")
-        if plugin_pos != -1 and platform_pos != -1:
-            return "plugin" if plugin_pos <= platform_pos else "platform"
-    if plugin_hit and not platform_hit:
-        return "plugin"
-    if platform_hit and not plugin_hit:
-        return "platform"
-    return ""
-
-
 def _normalize_abs_path(value: Any) -> str:
     raw = str(value or "").strip()
     if not raw:
@@ -417,254 +349,6 @@ def _normalize_abs_path(value: Any) -> str:
         return str(Path(raw).expanduser().resolve())
     except Exception:
         return raw
-
-
-def _creation_skill_main_path(kind: str) -> str:
-    key = str(kind or "").strip().lower()
-    if key == "plugin":
-        return _normalize_abs_path(_PLUGIN_AUTHORING_SKILL_PATH)
-    if key == "platform":
-        return _normalize_abs_path(_PLATFORM_AUTHORING_SKILL_PATH)
-    return ""
-
-
-def _creation_skill_main_relpath(kind: Any) -> str:
-    key = str(kind or "").strip().lower()
-    if key == "plugin":
-        return "skills/agent_lab/plugin_authoring.md"
-    if key == "platform":
-        return "skills/agent_lab/platform_authoring.md"
-    return ""
-
-
-def _creation_workspace_subdir(kind: Any) -> str:
-    key = str(kind or "").strip().lower()
-    if key == "plugin":
-        return "agent_lab/plugins"
-    if key == "platform":
-        return "agent_lab/platforms"
-    return ""
-
-
-def _creation_kind_from_skill_path(path: Any) -> str:
-    normalized = _normalize_abs_path(path)
-    if not normalized:
-        return ""
-    compact = normalized.replace("\\", "/").strip().lower()
-    if compact.endswith("/skills/agent_lab/plugin_authoring.md"):
-        return "plugin"
-    if compact.endswith("/skills/agent_lab/platform_authoring.md"):
-        return "platform"
-    if normalized == _creation_skill_main_path("plugin"):
-        return "plugin"
-    if normalized == _creation_skill_main_path("platform"):
-        return "platform"
-    return ""
-
-
-def _is_creation_main_skill_path(kind: Any, path: Any) -> bool:
-    key = str(kind or "").strip().lower()
-    if key not in {"plugin", "platform"}:
-        return False
-    normalized = _normalize_abs_path(path)
-    if not normalized:
-        return False
-    canonical = _creation_skill_main_path(key)
-    if canonical and normalized == canonical:
-        return True
-    compact = normalized.replace("\\", "/").strip().lower()
-    if key == "plugin":
-        return compact.endswith("/skills/agent_lab/plugin_authoring.md")
-    return compact.endswith("/skills/agent_lab/platform_authoring.md")
-
-
-def _creation_reference_prefix(kind: Any) -> str:
-    key = str(kind or "").strip().lower()
-    if key == "plugin":
-        return "plugin_"
-    if key == "platform":
-        return "platform_"
-    return ""
-
-
-def _creation_references_dir_path() -> str:
-    return _normalize_abs_path((_SKILLS_ROOT / "references").resolve())
-
-
-def _is_allowed_creation_reference_path(kind: Any, path: Any) -> bool:
-    prefix = _creation_reference_prefix(kind)
-    if not prefix:
-        return False
-    normalized = _normalize_abs_path(path)
-    if not normalized:
-        return False
-    filename = Path(normalized).name.strip().lower()
-    if not filename.startswith(prefix):
-        return False
-    try:
-        ref_dir = Path(_creation_references_dir_path()).resolve()
-        ref_path = Path(normalized).resolve()
-        if ref_path.parent == ref_dir:
-            return True
-    except Exception:
-        pass
-    compact = normalized.replace("\\", "/").strip().lower()
-    return compact.endswith(f"/skills/agent_lab/references/{filename}")
-
-
-def _default_creation_reference_paths(kind: Any) -> List[str]:
-    prefix = _creation_reference_prefix(kind)
-    if not prefix:
-        return []
-    ref_dir = (_SKILLS_ROOT / "references").resolve()
-    out: List[str] = []
-    try:
-        for ref_path in sorted(ref_dir.glob(f"{prefix}*.md"), key=lambda p: p.name):
-            ref_text = _normalize_abs_path(ref_path)
-            if not ref_text:
-                continue
-            if ref_text not in out:
-                out.append(ref_text)
-            if len(out) >= _CREATION_SKILL_MAX_REFERENCE_HINTS:
-                break
-    except Exception:
-        return out
-    return out
-
-
-def _creation_reference_paths_from_content(kind: str, content: str) -> List[str]:
-    key = str(kind or "").strip().lower()
-    if key not in {"plugin", "platform"}:
-        return []
-    references_dir = (_SKILLS_ROOT / "references").resolve()
-    out: List[str] = []
-    seen: set[str] = set()
-    for match in _SKILL_REFERENCE_RE.finditer(str(content or "")):
-        filename = str(match.group(1) or "").strip()
-        if not filename:
-            continue
-        lowered = filename.lower()
-        if key == "plugin" and not lowered.startswith("plugin_"):
-            continue
-        if key == "platform" and not lowered.startswith("platform_"):
-            continue
-        try:
-            ref_path = (references_dir / filename).resolve()
-        except Exception:
-            continue
-        if references_dir != ref_path.parent:
-            continue
-        if not _is_allowed_creation_reference_path(key, ref_path):
-            continue
-        ref_text = str(ref_path)
-        if ref_text in seen:
-            continue
-        seen.add(ref_text)
-        out.append(ref_text)
-    if key == "plugin":
-        preferred_names = [
-            "plugin_waiting_prompt_template.md",
-            "plugin_multiplatform_handlers.md",
-            "plugin_result_contract.md",
-            "plugin_argument_schema.md",
-            "plugin_ai_generation.md",
-            "plugin_settings_and_secrets.md",
-            "plugin_http_resilience.md",
-        ]
-    else:
-        preferred_names = [
-            "platform_network_events.md",
-            "platform_pollers_workers.md",
-        ]
-    preferred_rank = {name: idx for idx, name in enumerate(preferred_names)}
-
-    def _ref_sort_key(path_text: str) -> tuple[int, str]:
-        name = Path(path_text).name
-        rank = preferred_rank.get(name, len(preferred_names) + 1)
-        return (rank, name)
-
-    ordered = sorted(out, key=_ref_sort_key)
-    return ordered[:_CREATION_SKILL_MAX_REFERENCE_HINTS]
-
-
-def _compact_creation_text_for_prompt(text: Any, *, max_chars: int) -> str:
-    compact_lines: List[str] = []
-    for line in str(text or "").splitlines():
-        item = line.strip()
-        if not item:
-            continue
-        if item.startswith("<!--"):
-            continue
-        compact_lines.append(item)
-    compact = "\n".join(compact_lines).strip()
-    if len(compact) > max_chars:
-        compact = compact[:max_chars].rstrip()
-    return compact
-
-
-def _creation_skill_prompt_for_turn(
-    *,
-    user_text: str,
-    tool_name_hint: str = "",
-    main_skill_path: str = "",
-    main_skill_loaded: bool = False,
-    reference_paths: Optional[List[str]] = None,
-    loaded_context: str = "",
-) -> str:
-    kind = _creation_kind_from_tool_name(tool_name_hint)
-    if not kind:
-        kind = _creation_kind_from_user_text(user_text)
-    if not kind:
-        return ""
-    target_tool = "create_plugin" if kind == "plugin" else "create_platform"
-    main_path = _normalize_abs_path(main_skill_path) or _creation_skill_main_path(kind)
-    main_rel_path = _creation_skill_main_relpath(kind)
-    lines: List[str] = [f"Agent Lab {kind} authoring workflow:"]
-    if main_path:
-        if main_skill_loaded:
-            lines.append(
-                f"- Main authoring skill is loaded from: {main_rel_path or main_path}"
-            )
-        else:
-            lines.append(
-                f"- Before `{target_tool}`, call `read_file` for: {main_rel_path or main_path}"
-            )
-    if main_rel_path:
-        lines.append(
-            "- Skills are under `skills/agent_lab/...` (not `agent_lab/skills/...`)."
-        )
-    lines.append("- Read reference files only when additional implementation detail is needed.")
-    refs = reference_paths if isinstance(reference_paths, list) else []
-    compact_refs: List[str] = []
-    for item in refs:
-        text = _normalize_abs_path(item)
-        if text and text not in compact_refs:
-            compact_refs.append(text)
-        if len(compact_refs) >= _CREATION_SKILL_MAX_REFERENCE_HINTS:
-            break
-    if compact_refs:
-        lines.append("- Candidate references:")
-        for path in compact_refs:
-            lines.append(f"  - {path}")
-    lines.append(
-        f"- `{target_tool}` must include `arguments.name` and full Python source in `arguments.code`."
-    )
-    workspace_hint = _creation_workspace_subdir(kind)
-    if workspace_hint:
-        lines.append(
-            f"- For editing/discovery, inspect existing files under `{workspace_hint}` using list_directory/search_files/read_file."
-        )
-        lines.append(
-            "- Never use shell/terminal tools for file discovery in Agent Lab creation flows."
-        )
-    context_text = _compact_creation_text_for_prompt(
-        loaded_context,
-        max_chars=_CREATION_SKILL_CONTEXT_MAX_CHARS,
-    )
-    if context_text:
-        lines.append("Loaded skill notes:")
-        lines.append(context_text)
-    return "\n".join(lines).strip()
 
 
 def _redis_config_non_negative_int(
@@ -747,14 +431,6 @@ def _configured_overclar_repair_max_tokens(redis_client: Any = None) -> int:
     return _redis_config_positive_int(
         CERBERUS_OVERCLAR_REPAIR_MAX_TOKENS_KEY,
         DEFAULT_OVERCLAR_REPAIR_MAX_TOKENS,
-        redis_client=redis_client,
-    )
-
-
-def _configured_send_repair_max_tokens(redis_client: Any = None) -> int:
-    return _redis_config_positive_int(
-        CERBERUS_SEND_REPAIR_MAX_TOKENS_KEY,
-        DEFAULT_SEND_REPAIR_MAX_TOKENS,
         redis_client=redis_client,
     )
 
@@ -1064,9 +740,7 @@ def _canonical_tool_name(name: str) -> str:
     alias = TOOL_NAME_ALIASES.get(lowered)
     if alias:
         return alias
-    if lowered in TOOL_NAME_ALIASES.values() or lowered in META_TOOLS or lowered in _KERNEL_TOOL_PRIORITY:
-        return lowered
-    return raw
+    return lowered
 
 
 def _looks_like_invalid_tool_call_text(text: str) -> bool:
@@ -1241,250 +915,6 @@ def _is_stop_only(text: str) -> bool:
         return True
     if lowered in {"no", "nope", "nah", "no thanks", "that's all", "thats all"}:
         return True
-    return False
-
-
-def _looks_like_send_message_intent(text: str) -> bool:
-    lowered = " ".join(str(text or "").strip().lower().split())
-    if not lowered:
-        return False
-    has_send_verb = bool(
-        re.search(
-            r"\b(send|post|share|upload|forward|deliver|broadcast|publish|attach|dm|message|tell)\b",
-            lowered,
-        )
-    )
-    if not has_send_verb:
-        return False
-
-    has_destination_hint = bool(
-        re.search(
-            r"\b("
-            r"to discord|to irc|to matrix|to telegram|to homeassistant|to home assistant|to homekit|to xbmc|to ntfy|to wordpress|"
-            r"here|this chat|this channel|this room|in this chat|in this channel|in this room|"
-            r"to this chat|to this channel|to this room|in channel|in room|in chat|"
-            r"to channel|to room|to chat"
-            r")\b",
-            lowered,
-        )
-    )
-
-    explicit_target_ref = bool(
-        re.search(
-            r"(?:<#\d+>|#[a-z0-9_.-]+|\b(channel|room|chat)\s*[:#]?\s*[a-z0-9_.-]{2,}\b)",
-            lowered,
-        )
-    )
-
-    has_deliverable = bool(_URL_RE.search(lowered)) or bool(
-        re.search(
-            r"\b(logo|image|photo|picture|file|video|audio|document|pdf|zip|link|url|attachment|attached|screenshot|clip)\b",
-            lowered,
-        )
-    )
-    short_reference_send = bool(
-        re.search(
-            r"\b(send|post|share|upload|forward|attach|dm|message|tell)\s+(it|this|that|them|those|the (image|file|link|logo|attachment))\b",
-            lowered,
-        )
-    )
-
-    if has_destination_hint or explicit_target_ref:
-        return True
-    if has_deliverable:
-        return True
-    if short_reference_send:
-        return True
-    return False
-
-
-def _send_message_has_concrete_destination(
-    *,
-    arguments: Any,
-    origin: Optional[Dict[str, Any]],
-    platform: str,
-    scope: str,
-) -> bool:
-    _ = origin
-    _ = platform
-    _ = scope
-    args = arguments if isinstance(arguments, dict) else {}
-    return _find_concrete_destination(args)
-
-
-_DESTINATION_FIELD_KEYS = {
-    "channel_id",
-    "thread_id",
-    "room_id",
-    "chat_id",
-    "user_id",
-    "dm_user_id",
-    "target",
-    "room",
-    "channel",
-    "chat",
-    "scope",
-    "destination",
-    "to",
-}
-_DESTINATION_CONTAINER_KEYS = {
-    "destination",
-    "to",
-    "targets",
-    "payload",
-    "message",
-    "meta",
-    "context",
-    "origin",
-}
-_DESTINATION_ROUTE_KEYS = {
-    "discord",
-    "irc",
-    "matrix",
-    "telegram",
-    "homeassistant",
-    "homekit",
-    "xbmc",
-    "ntfy",
-    "wordpress",
-    "webui",
-}
-_DESTINATION_EXCLUSION_KEYS = {
-    "message_id",
-    "task_id",
-    "request_id",
-    "conversation_id",
-    "session_id",
-    "turn_id",
-    "args_hash",
-    "tool_args_hash",
-    "sha256",
-    "digest",
-    "id",
-    "url",
-    "link",
-    "filename",
-}
-_DESTINATION_MAX_DEPTH = 6
-_DESTINATION_MAX_NODES = 80
-_HEXLIKE_RE = re.compile(r"^[0-9a-f]{24,}$", re.IGNORECASE)
-_HASH_PREFIX_RE = re.compile(r"^(?:sha1|sha224|sha256|sha384|sha512):", re.IGNORECASE)
-
-
-def _has_concrete_destination_value(value: Any, *, key_hint: str = "") -> bool:
-    key_norm = str(key_hint or "").strip().lower()
-    if key_norm in _DESTINATION_EXCLUSION_KEYS:
-        return False
-    if isinstance(value, (dict, list, tuple, set)):
-        return False
-    cleaned = _clean_scope_text(value)
-    if not cleaned:
-        return False
-    if len(cleaned) < 2:
-        return False
-    lowered = cleaned.lower()
-    if _HASH_PREFIX_RE.match(lowered):
-        return False
-    if lowered.startswith(("http://", "https://")):
-        return False
-    if _HEXLIKE_RE.fullmatch(cleaned) and key_norm not in _DESTINATION_FIELD_KEYS:
-        return False
-    return not _scope_is_generic(cleaned)
-
-
-def _find_concrete_destination(
-    arguments_dict: Any,
-    *,
-    _depth: int = 0,
-    _max_depth: int = _DESTINATION_MAX_DEPTH,
-    _max_nodes: int = _DESTINATION_MAX_NODES,
-) -> bool:
-    state = {"nodes": 0}
-
-    def _route_object_has_destination(node: Dict[str, Any]) -> bool:
-        platform_val = str(node.get("platform") or "").strip().lower()
-        type_val = str(node.get("type") or "").strip().lower()
-        has_route_hint = bool(platform_val in _DESTINATION_ROUTE_KEYS or type_val in {"channel", "thread", "room", "chat", "dm", "user", "target"})
-
-        for field_key in _DESTINATION_FIELD_KEYS:
-            if field_key not in node:
-                continue
-            if _has_concrete_destination_value(node.get(field_key), key_hint=field_key):
-                return True
-
-        # Allow id only in explicit routing objects (platform+type), never globally.
-        if has_route_hint and platform_val and type_val and _has_concrete_destination_value(node.get("id"), key_hint="channel_id"):
-            return True
-        return False
-
-    def _walk_list(values: List[Any], *, depth: int, in_destination_context: bool, parent_key: str) -> bool:
-        if depth > _max_depth:
-            return False
-        state["nodes"] += 1
-        if state["nodes"] > _max_nodes:
-            return False
-        for item in values:
-            if isinstance(item, dict):
-                if _walk_dict(item, depth=depth, in_destination_context=in_destination_context, parent_key=parent_key):
-                    return True
-                continue
-            if isinstance(item, list):
-                if _walk_list(item, depth=depth + 1, in_destination_context=in_destination_context, parent_key=parent_key):
-                    return True
-                continue
-            # Explicit route map support: {"targets":{"discord":["123","456"]}}
-            if in_destination_context and parent_key in _DESTINATION_ROUTE_KEYS:
-                if _has_concrete_destination_value(item, key_hint="channel_id"):
-                    return True
-        return False
-
-    def _walk_dict(node: Dict[str, Any], *, depth: int, in_destination_context: bool, parent_key: str = "") -> bool:
-        if depth > _max_depth:
-            return False
-        state["nodes"] += 1
-        if state["nodes"] > _max_nodes:
-            return False
-
-        if _route_object_has_destination(node):
-            return True
-
-        for key, value in node.items():
-            key_norm = str(key or "").strip().lower()
-            if not key_norm:
-                continue
-
-            if key_norm in _DESTINATION_EXCLUSION_KEYS:
-                continue
-
-            is_dest_key = key_norm in _DESTINATION_FIELD_KEYS
-            is_container_key = key_norm in _DESTINATION_CONTAINER_KEYS
-            is_route_key = key_norm in _DESTINATION_ROUTE_KEYS
-            child_context = bool(in_destination_context or is_container_key or is_route_key or is_dest_key)
-
-            if is_dest_key and _has_concrete_destination_value(value, key_hint=key_norm):
-                return True
-
-            if isinstance(value, dict):
-                if _walk_dict(value, depth=depth + 1, in_destination_context=child_context, parent_key=key_norm):
-                    return True
-                continue
-
-            if isinstance(value, list):
-                if _walk_list(value, depth=depth + 1, in_destination_context=child_context, parent_key=key_norm):
-                    return True
-                continue
-
-            # Explicit route map support: {"targets":{"discord":"123"}}
-            if child_context and key_norm in _DESTINATION_ROUTE_KEYS and parent_key in {"targets", "destination", "to"}:
-                if _has_concrete_destination_value(value, key_hint="channel_id"):
-                    return True
-
-        return False
-
-    if isinstance(arguments_dict, dict):
-        return _walk_dict(arguments_dict, depth=max(0, int(_depth)), in_destination_context=False, parent_key="")
-    if isinstance(arguments_dict, list):
-        return _walk_list(arguments_dict, depth=max(0, int(_depth)), in_destination_context=False, parent_key="")
     return False
 
 
@@ -1907,39 +1337,47 @@ def _looks_like_explicit_ai_task_request(text: str) -> bool:
     )
     has_action = bool(
         re.search(
-            r"\b(send|post|remind|reminder|notify|check|run|forecast|weather|task|tasks|timer|alarm)\b",
+            r"\b(send|post|remind|reminder|notify|check|run|forecast|weather|task|tasks|timer|alarm|schedule|scheduled|tell|say|give|joke|jokes|news|headline|headlines|quote|summary|update|updates)\b",
             lowered,
         )
     )
     return bool((has_recurrence or has_time) and has_action)
 
 
-def _ai_tasks_creation_status(
+def _ai_tasks_schedule_status(
     *,
     payload: Optional[Dict[str, Any]],
     checker_result: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     src = payload if isinstance(payload, dict) else {}
     ok = bool(src.get("ok"))
-    reminder_id = _short_text(src.get("reminder_id"), limit=96)
+    payload_data = src.get("data") if isinstance(src.get("data"), dict) else {}
+    reminder_id = _short_text(
+        src.get("reminder_id") or payload_data.get("reminder_id"),
+        limit=96,
+    )
 
     next_run_text = ""
     try:
-        next_run_ts = float(src.get("next_run_ts"))
+        next_run_ts = float(src.get("next_run_ts") or payload_data.get("next_run_ts"))
         if next_run_ts > 0:
             next_run_text = datetime.fromtimestamp(next_run_ts).strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         next_run_text = ""
 
-    result_line = _short_text(src.get("result"), limit=260)
+    result_line = _short_text(
+        src.get("result") or src.get("summary_for_user") or payload_data.get("result"),
+        limit=260,
+    )
     if not result_line or _is_low_information_text(result_line):
         result_line = "Scheduled task created."
 
-    if ok and reminder_id:
+    if ok:
         parts: List[str] = [result_line.rstrip(".") + "."]
         if next_run_text and "next" not in result_line.lower() and "scheduled for" not in result_line.lower():
             parts.append(f"Next run: {next_run_text}.")
-        parts.append(f"Task ID: {reminder_id}.")
+        if reminder_id:
+            parts.append(f"Task ID: {reminder_id}.")
         return {
             "created": True,
             "code": "",
@@ -2060,22 +1498,18 @@ def _planner_system_prompt(platform: str) -> str:
         "- Use only tool ids from the enabled tool index.\n"
         "- Use argument keys exactly as listed for that tool in the enabled tool index; do not invent argument keys.\n"
         "- If plugin arguments are unclear, call get_plugin_help first, then issue the plugin tool call.\n"
-        "- For create_plugin/create_platform requests, do not use get_plugin_help; use read_file on skills/agent_lab/plugin_authoring.md or skills/agent_lab/platform_authoring.md and skills/agent_lab/references/*, and use search_files to locate existing code.\n"
-        "- For create_plugin/create_platform requests, never use run_shell/shell/terminal tools; inspect agent_lab/plugins or agent_lab/platforms with list_directory/search_files/read_file.\n"
         "- For local file/code/workspace tasks in general, use search_files to locate targets and read_file to inspect them before acting; do not guess paths or filenames.\n"
-        "- Prefer workspace-relative paths (agent_lab/... and skills/...) over absolute /app/... paths.\n"
+        "- File tools are rooted at workspace '/'; use /downloads and /documents for normal files.\n"
         "- Never output multiple tool calls or markdown fences around tool JSON.\n"
         "- Prefer action over clarification; ask only when a required value is truly missing and cannot be safely assumed.\n"
         "- Never ask what platform this chat is on; it is already known.\n"
-        "- Use send_message only for explicit delivery intent (send/post/share/upload/forward) or clear 'here/this chat/channel' delivery requests; do not use it for normal chat replies.\n"
-        "- Do not ask destination platform/room when user says 'here' unless they explicitly ask for a different destination.\n"
         "- For scheduling requests, assume local time/timezone and parse common formats (6am, 18:00, at 6); ask timezone only when the user explicitly asks for a different one.\n"
         "- For ai_tasks calls, include arguments.title as a short human-friendly schedule name (for example: Daily Weather Forecast).\n"
+        "- For ai_tasks calls, put runnable instructions in arguments.task_prompt and do not pre-generate the final task output now.\n"
         "- If a plugin explicitly requires the full/exact user request text in a specific argument, include that full text verbatim in that argument.\n"
         "- For weather requests without an explicit location, use the configured default weather location and do not ask city/coordinates first.\n"
         "- For memory operations about 'me/my', default to scope='user'; use scope='global' only when user clearly asks for everyone/all chats.\n"
         "- For requests asking what a website/page is about, prefer inspect_webpage over read_url.\n"
-        "- For plugin/platform creation requests, default to the current platform unless the user explicitly asks for another.\n"
         "- Never mention internal orchestration roles/codenames in user-facing replies.\n"
         f"{plain_text_rule}"
     ).strip()
@@ -2180,54 +1614,8 @@ def _parse_strict_tool_json(response_text: str) -> Optional[Dict[str, Any]]:
     return parsed
 
 
-def _nonempty_text(value: Any) -> str:
-    return str(value or "").strip()
-
-
-def _has_creation_name(func: str, args: Dict[str, Any]) -> bool:
-    if not isinstance(args, dict):
-        return False
-    name_keys = ("name", "plugin_id", "plugin_name") if func == "create_plugin" else ("name", "platform_key", "platform_name")
-    for key in name_keys:
-        if _nonempty_text(args.get(key)):
-            return True
-    manifest = args.get("manifest")
-    if isinstance(manifest, dict):
-        for key in ("id", "name", "plugin_id", "plugin_name", "platform_key", "platform_name"):
-            if _nonempty_text(manifest.get(key)):
-                return True
-    return False
-
-
-def _has_creation_code_payload(args: Dict[str, Any]) -> bool:
-    if not isinstance(args, dict):
-        return False
-    if _nonempty_text(args.get("code")):
-        return True
-    code_lines = args.get("code_lines")
-    if isinstance(code_lines, list):
-        if any(_nonempty_text(line) for line in code_lines):
-            return True
-    code_files = args.get("code_files")
-    if isinstance(code_files, list):
-        for item in code_files:
-            if not isinstance(item, dict):
-                continue
-            if _nonempty_text(item.get("content")):
-                return True
-            content_lines = item.get("content_lines")
-            if isinstance(content_lines, list) and any(_nonempty_text(line) for line in content_lines):
-                return True
-    return False
-
-
 def _meta_tool_args_reason(func: str, args: Dict[str, Any]) -> str:
-    tool_id = _canonical_tool_name(func)
-    if tool_id in {"create_plugin", "create_platform"}:
-        if not _has_creation_name(tool_id, args):
-            return "bad_args:missing_name"
-        if not _has_creation_code_payload(args):
-            return "bad_args:missing_code"
+    del func, args
     return ""
 
 
@@ -2295,27 +1683,11 @@ async def _repair_tool_call_text(
     platform_preamble: str = "",
     max_tokens: Optional[int] = None,
 ) -> str:
-    reason_text = str(reason or "").strip().lower()
-    creation_hint = ""
-    if reason_text.startswith("bad_args:missing_code"):
-        creation_hint = (
-            "For create_plugin/create_platform, include full Python source in arguments.code "
-            "(or arguments.code_lines / arguments.code_files).\n"
-        )
-    elif reason_text.startswith("bad_args:missing_name"):
-        creation_hint = (
-            "For create_plugin/create_platform, include a valid id in arguments.name "
-            "(or plugin_id/platform_key).\n"
-        )
-    creation_skill_prompt = _creation_skill_prompt_for_turn(
-        user_text=user_text,
-        tool_name_hint=tool_name_hint,
-    )
+    del user_text, tool_name_hint
     prompt = (
         f"{TOOL_MARKUP_REPAIR_PROMPT}\n"
         "Repair the invalid planner output.\n"
         f"Current platform: {platform}\n"
-        f"{creation_hint}"
         "Return only one of:\n"
         "- strict JSON tool call: {\"function\":\"tool_id\",\"arguments\":{...}}\n"
         "- NO_TOOL\n"
@@ -2324,7 +1696,6 @@ async def _repair_tool_call_text(
     user_payload = (
         f"Reason: {reason}\n"
         f"Enabled tool index:\n{tool_index}\n\n"
-        + (f"{creation_skill_prompt}\n\n" if creation_skill_prompt else "")
         + f"Original planner output:\n{original_text}"
     )
     try:
@@ -2381,39 +1752,6 @@ async def _repair_over_clarification_text(
             ], platform_preamble=platform_preamble),
             max_tokens=max(1, token_limit),
             temperature=0.1,
-        )
-        return _coerce_text((response.get("message", {}) or {}).get("content", "")).strip()
-    except Exception:
-        return ""
-
-
-async def _repair_send_message_misfire_text(
-    *,
-    llm_client: Any,
-    platform: str,
-    user_text: str,
-    platform_preamble: str = "",
-    max_tokens: Optional[int] = None,
-) -> str:
-    prompt = (
-        "You are correcting a planner mistake.\n"
-        "The planner selected send_message, but the user did not clearly ask to deliver/post content.\n"
-        f"Current platform: {platform}\n"
-        "Reply directly to the user in this chat.\n"
-        "Do not call tools.\n"
-        "Do not ask destination platform/room unless the user explicitly asks to send/post elsewhere.\n"
-        "Never mention internal orchestration roles/codenames.\n"
-        "Return only the final assistant response text."
-    )
-    try:
-        token_limit = int(max_tokens) if max_tokens is not None else _configured_send_repair_max_tokens()
-        response = await llm_client.chat(
-            messages=_with_platform_preamble([
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": str(user_text or "").strip()},
-            ], platform_preamble=platform_preamble),
-            max_tokens=max(1, token_limit),
-            temperature=0.2,
         )
         return _coerce_text((response.get("message", {}) or {}).get("content", "")).strip()
     except Exception:
@@ -2582,136 +1920,6 @@ async def _validate_tool_contract(
     }
 
 
-def _has_implicit_here_destination_request(user_text: str) -> bool:
-    lowered = " ".join(str(user_text or "").strip().lower().split())
-    if not lowered:
-        return False
-    return bool(
-        re.search(
-            r"\b(here|this chat|this channel|this room|in this chat|in this channel|in this room|to this chat|to this channel|to this room)\b",
-            lowered,
-        )
-    )
-
-
-def _origin_has_current_destination(origin: Optional[Dict[str, Any]], platform: str) -> bool:
-    src = origin if isinstance(origin, dict) else {}
-    p = normalize_platform(platform)
-    if p == "discord":
-        return bool(_clean_scope_text(src.get("channel_id")) or _clean_scope_text(src.get("dm_user_id")) or _clean_scope_text(src.get("chat_id")))
-    if p == "irc":
-        target = _clean_scope_text(src.get("target") or src.get("channel") or src.get("room"))
-        return bool(target)
-    if p == "matrix":
-        return bool(_clean_scope_text(src.get("room_id")))
-    if p == "telegram":
-        return bool(_clean_scope_text(src.get("chat_id")))
-    if p == "webui":
-        return bool(_clean_scope_text(src.get("session_id")) or _clean_scope_text(src.get("user_id")) or _clean_scope_text(src.get("user")))
-    if p == "homeassistant":
-        return bool(
-            _clean_scope_text(src.get("device_id"))
-            or _clean_scope_text(src.get("area_id"))
-            or _clean_scope_text(src.get("session_id"))
-            or _clean_scope_text(src.get("request_id"))
-        )
-    if p in {"homekit", "xbmc"}:
-        return bool(_clean_scope_text(src.get("session_id")) or _clean_scope_text(src.get("device_id")) or _clean_scope_text(src.get("user_id")))
-    return False
-
-
-def _tool_args_have_deliverable_payload(tool_call: Optional[Dict[str, Any]]) -> bool:
-    call = tool_call if isinstance(tool_call, dict) else {}
-    args = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
-    if not isinstance(args, dict):
-        return False
-    text_keys = ("message", "text", "body", "content", "caption", "title", "url", "link", "file", "file_path", "blob_key")
-    for key in text_keys:
-        value = args.get(key)
-        if isinstance(value, str) and _clean_scope_text(value):
-            if _scope_is_generic(_clean_scope_text(value)):
-                continue
-            return True
-    nested = args.get("payload")
-    if isinstance(nested, dict):
-        for key in text_keys:
-            value = nested.get(key)
-            if isinstance(value, str) and _clean_scope_text(value):
-                if _scope_is_generic(_clean_scope_text(value)):
-                    continue
-                return True
-    attachments = args.get("attachments")
-    if isinstance(attachments, list) and any(isinstance(item, dict) for item in attachments):
-        return True
-    return False
-
-
-def send_message_allowed(
-    *,
-    user_text: str,
-    tool_args: Any,
-    origin: Optional[Dict[str, Any]],
-    platform: str,
-    history_messages: Optional[List[Dict[str, Any]]] = None,
-    context: Optional[Dict[str, Any]] = None,
-) -> tuple[bool, str]:
-    _ = history_messages
-    _ = context
-    tool_call = {"function": "send_message", "arguments": tool_args if isinstance(tool_args, dict) else {}}
-    has_destination = _send_message_has_concrete_destination(
-        arguments=tool_call.get("arguments"),
-        origin=origin,
-        platform=platform,
-        scope=_clean_scope_text((tool_call.get("arguments") or {}).get("scope")),
-    )
-    has_deliverable = _tool_args_have_deliverable_payload(tool_call)
-    if has_destination:
-        if not has_deliverable:
-            return False, "no_deliverable_payload"
-        return True, "explicit_destination"
-
-    send_intent = _looks_like_send_message_intent(user_text)
-    if not send_intent:
-        return False, "no_delivery_intent"
-
-    if _has_implicit_here_destination_request(user_text):
-        if not _origin_has_current_destination(origin, platform):
-            return False, "missing_destination"
-        if not has_deliverable:
-            return False, "no_deliverable_payload"
-        return True, "implicit_here_destination"
-
-    if not has_deliverable:
-        return False, "no_deliverable_payload"
-    return False, "missing_destination"
-
-
-def _send_message_allowed_for_turn(
-    *,
-    tool_call: Optional[Dict[str, Any]],
-    user_text: str,
-    origin: Optional[Dict[str, Any]],
-    platform: str,
-    scope: str,
-    history_messages: Optional[List[Dict[str, Any]]] = None,
-    context: Optional[Dict[str, Any]] = None,
-) -> tuple[bool, str]:
-    call = tool_call if isinstance(tool_call, dict) else {}
-    func = _canonical_tool_name(call.get("function"))
-    if func != "send_message":
-        return True, "not_send_message"
-    allowed, reason = send_message_allowed(
-        user_text=user_text,
-        tool_args=call.get("arguments"),
-        origin=origin,
-        platform=platform,
-        history_messages=history_messages,
-        context=context,
-    )
-    _ = scope
-    return allowed, reason
-
-
 async def _validate_or_recover_tool_call(
     *,
     llm_client: Any,
@@ -2728,7 +1936,6 @@ async def _validate_or_recover_tool_call(
     platform_preamble: str = "",
     repair_max_tokens: Optional[int] = None,
     recovery_max_tokens: Optional[int] = None,
-    send_repair_max_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
     raw = str(text or "").strip()
     if not _is_tool_candidate(raw):
@@ -2740,7 +1947,6 @@ async def _validate_or_recover_tool_call(
             "recovery_text_if_blocked": None,
             "attempted_tool": None,
             "validation_status": None,
-            "send_reason": "",
         }
 
     validation_status = await _validate_tool_contract(
@@ -2758,31 +1964,6 @@ async def _validate_or_recover_tool_call(
     attempted_tool = str((tool_call or {}).get("function") or "").strip() or None
     if not validation_status.get("ok"):
         reason = str(validation_status.get("reason") or "invalid_tool_call")
-        shell_redirect = _redirect_shell_like_tool_for_creation(
-            tool_call=tool_call,
-            user_text=user_text,
-        )
-        if reason == "unknown_tool" and isinstance(shell_redirect, dict):
-            redirected_validation = dict(validation_status) if isinstance(validation_status, dict) else {}
-            redirected_validation.update(
-                {
-                    "ok": True,
-                    "reason": "creation_shell_redirect",
-                    "repair_used": True,
-                    "tool_call": shell_redirect,
-                    "platform_supported": True,
-                }
-            )
-            return {
-                "ok": True,
-                "tool_call": shell_redirect,
-                "repair_used": True,
-                "reason": "creation_shell_redirect",
-                "recovery_text_if_blocked": None,
-                "attempted_tool": str(shell_redirect.get("function") or "").strip() or attempted_tool,
-                "validation_status": redirected_validation,
-                "send_reason": "",
-            }
         workspace_redirect = _redirect_unknown_tool_to_search_files(
             reason=reason,
             user_text=user_text,
@@ -2807,44 +1988,7 @@ async def _validate_or_recover_tool_call(
                 "recovery_text_if_blocked": None,
                 "attempted_tool": str(workspace_redirect.get("function") or "").strip() or attempted_tool,
                 "validation_status": redirected_validation,
-                "send_reason": "",
             }
-        creation_target = _creation_target_tool_for_recovery(
-            user_text=user_text,
-            attempted_tool=attempted_tool or str((tool_call or {}).get("function") or ""),
-        )
-        if creation_target and _is_creation_recovery_reason(reason):
-            creation_recovered = await _recover_creation_tool_call(
-                llm_client=llm_client,
-                platform=platform,
-                registry=registry,
-                enabled_predicate=enabled_predicate,
-                tool_index=tool_index,
-                user_text=user_text,
-                target_tool=creation_target,
-                platform_preamble=platform_preamble,
-                max_tokens=repair_max_tokens,
-            )
-            if bool(creation_recovered.get("ok")) and isinstance(creation_recovered.get("tool_call"), dict):
-                recovered_tool = creation_recovered.get("tool_call")
-                recovered_attempted = str((recovered_tool or {}).get("function") or "").strip() or attempted_tool
-                recovered_validation = {
-                    "ok": True,
-                    "reason": "creation_recovered",
-                    "repair_used": True,
-                    "tool_call": recovered_tool,
-                    "platform_supported": True,
-                }
-                return {
-                    "ok": True,
-                    "tool_call": recovered_tool,
-                    "repair_used": True,
-                    "reason": "creation_recovered",
-                    "recovery_text_if_blocked": None,
-                    "attempted_tool": recovered_attempted,
-                    "validation_status": recovered_validation,
-                    "send_reason": "",
-                }
         recovery_text = await _generate_recovery_text(
             llm_client=llm_client,
             platform=platform,
@@ -2863,7 +2007,6 @@ async def _validate_or_recover_tool_call(
             "recovery_text_if_blocked": recovery_text,
             "attempted_tool": attempted_tool,
             "validation_status": validation_status,
-            "send_reason": "",
         }
 
     if not isinstance(tool_call, dict):
@@ -2886,7 +2029,6 @@ async def _validate_or_recover_tool_call(
             "recovery_text_if_blocked": recovery_text,
             "attempted_tool": attempted_tool,
             "validation_status": validation_status,
-            "send_reason": "",
         }
 
     tool_call = _normalize_tool_call_for_user_request(
@@ -2894,99 +2036,18 @@ async def _validate_or_recover_tool_call(
         registry=registry,
         user_text=user_text,
     )
-    creation_redirect = _redirect_get_plugin_help_for_creation(
-        tool_call=tool_call,
-        user_text=user_text,
-    )
-    if isinstance(creation_redirect, dict):
-        redirected_validation = dict(validation_status) if isinstance(validation_status, dict) else {}
-        redirected_validation.update(
-            {
-                "ok": True,
-                "reason": "creation_help_redirect",
-                "repair_used": True,
-                "tool_call": creation_redirect,
-                "platform_supported": True,
-            }
-        )
-        return {
-            "ok": True,
-            "tool_call": creation_redirect,
-            "repair_used": True,
-            "reason": "creation_help_redirect",
-            "recovery_text_if_blocked": None,
-            "attempted_tool": str(creation_redirect.get("function") or "").strip() or attempted_tool,
-            "validation_status": redirected_validation,
-            "send_reason": "",
-        }
     if isinstance(validation_status, dict):
         validation_status["tool_call"] = tool_call
 
-    send_allowed, send_reason = _send_message_allowed_for_turn(
-        tool_call=tool_call,
-        user_text=user_text,
-        origin=origin,
-        platform=platform,
-        scope=scope,
-        history_messages=history_messages,
-        context=context,
-    )
-    if send_allowed:
-        return {
-            "ok": True,
-            "tool_call": tool_call,
-            "repair_used": bool(validation_status.get("repair_used")),
-            "reason": str(validation_status.get("reason") or "ok"),
-            "recovery_text_if_blocked": None,
-            "attempted_tool": attempted_tool,
-            "validation_status": validation_status,
-            "send_reason": send_reason,
-        }
-
-    misfire_reply = await _repair_send_message_misfire_text(
-        llm_client=llm_client,
-        platform=platform,
-        user_text=user_text,
-        platform_preamble=platform_preamble,
-        max_tokens=send_repair_max_tokens,
-    )
-    if misfire_reply and not _is_tool_candidate(misfire_reply):
-        recovery_text = misfire_reply
-    else:
-        recovery_text = await _generate_recovery_text(
-            llm_client=llm_client,
-            platform=platform,
-            user_text=user_text,
-            error_kind="send_message_misfire",
-            reason=send_reason,
-            fallback="How can I help?",
-            platform_preamble=platform_preamble,
-            max_tokens=recovery_max_tokens,
-        )
     return {
-        "ok": False,
+        "ok": True,
         "tool_call": tool_call,
         "repair_used": bool(validation_status.get("repair_used")),
-        "reason": "send_message_misfire",
-        "recovery_text_if_blocked": recovery_text,
+        "reason": str(validation_status.get("reason") or "ok"),
+        "recovery_text_if_blocked": None,
         "attempted_tool": attempted_tool,
         "validation_status": validation_status,
-        "send_reason": send_reason,
     }
-
-
-def _creation_target_tool_for_recovery(*, user_text: str, attempted_tool: str) -> str:
-    by_tool = _creation_kind_from_tool_name(attempted_tool)
-    if by_tool == "plugin":
-        return "create_plugin"
-    if by_tool == "platform":
-        return "create_platform"
-    by_text = _creation_kind_from_user_text(user_text)
-    if by_text == "plugin":
-        return "create_plugin"
-    if by_text == "platform":
-        return "create_platform"
-    return ""
 
 
 def _looks_like_shell_tool_name(value: Any) -> bool:
@@ -3006,33 +2067,6 @@ def _looks_like_shell_tool_name(value: Any) -> bool:
     if func in shell_like:
         return True
     return ("shell" in func) or ("terminal" in func)
-
-
-def _redirect_shell_like_tool_for_creation(
-    *,
-    tool_call: Optional[Dict[str, Any]],
-    user_text: str,
-) -> Optional[Dict[str, Any]]:
-    call = tool_call if isinstance(tool_call, dict) else {}
-    func = _canonical_tool_name(call.get("function"))
-    if not func:
-        return None
-    if not _looks_like_shell_tool_name(func):
-        return None
-
-    creation_target = _creation_target_tool_for_recovery(
-        user_text=user_text,
-        attempted_tool="",
-    )
-    creation_kind = _creation_kind_from_tool_name(creation_target)
-    if creation_kind not in {"plugin", "platform"}:
-        return None
-
-    workspace_path = _creation_workspace_subdir(creation_kind)
-    if not workspace_path:
-        return None
-
-    return {"function": "list_directory", "arguments": {"path": workspace_path}}
 
 
 def _workspace_discovery_query(user_text: str) -> str:
@@ -3079,198 +2113,10 @@ def _redirect_unknown_tool_to_search_files(
         "path": ".",
         "max_results": 20,
     }
-    if "plugin" in lowered:
-        args["path"] = "agent_lab/plugins"
-        args["file_glob"] = "*.py"
-    elif "platform" in lowered:
-        args["path"] = "agent_lab/platforms"
-        args["file_glob"] = "*.py"
-    elif "skill" in lowered or "reference" in lowered:
-        args["path"] = "skills/agent_lab"
-        args["file_glob"] = "*.md"
-    elif "readme" in lowered:
+    if "readme" in lowered:
         args["path"] = "."
         args["file_glob"] = "README*.md"
     return {"function": "search_files", "arguments": args}
-
-
-def _redirect_get_plugin_help_for_creation(
-    *,
-    tool_call: Optional[Dict[str, Any]],
-    user_text: str,
-) -> Optional[Dict[str, Any]]:
-    call = tool_call if isinstance(tool_call, dict) else {}
-    func = _canonical_tool_name(call.get("function"))
-    if func != "get_plugin_help":
-        return None
-    creation_target = _creation_target_tool_for_recovery(
-        user_text=user_text,
-        attempted_tool="",
-    )
-    creation_kind = _creation_kind_from_tool_name(creation_target)
-    if creation_kind not in {"plugin", "platform"}:
-        return None
-    skill_path = _creation_skill_main_relpath(creation_kind) or _creation_skill_main_path(creation_kind)
-    if skill_path:
-        return {"function": "read_file", "arguments": {"path": skill_path}}
-    ref_prefix = _creation_reference_prefix(creation_kind)
-    ref_glob = f"{ref_prefix}*.md" if ref_prefix else "*.md"
-    return {
-        "function": "search_files",
-        "arguments": {
-            "query": ref_prefix or "references",
-            "path": "skills/agent_lab/references",
-            "file_glob": ref_glob,
-            "max_results": 20,
-        },
-    }
-
-
-def _normalize_creation_skill_path_alias(path_value: Any) -> Any:
-    raw = str(path_value or "").strip()
-    if not raw:
-        return path_value
-    normalized = raw.replace("\\", "/")
-    lowered = normalized.lower()
-    has_agent_lab_skills = (
-        "/agent_lab/skills/" in lowered
-        or lowered.startswith("agent_lab/skills/")
-        or "/agent_labs/skills/" in lowered
-        or lowered.startswith("agent_labs/skills/")
-    )
-    if has_agent_lab_skills:
-        if lowered.startswith("/app/agent_lab/skills/"):
-            suffix = normalized[len("/app/agent_lab/skills/") :].lstrip("/")
-            return f"/app/skills/agent_lab/{suffix}" if suffix else "skills/agent_lab"
-        if lowered.startswith("/app/agent_labs/skills/"):
-            suffix = normalized[len("/app/agent_labs/skills/") :].lstrip("/")
-            return f"/app/skills/agent_lab/{suffix}" if suffix else "skills/agent_lab"
-        if lowered.startswith("/agent_lab/skills/"):
-            suffix = normalized[len("/agent_lab/skills/") :].lstrip("/")
-            return f"skills/agent_lab/{suffix}" if suffix else "skills/agent_lab"
-        if lowered.startswith("/agent_labs/skills/"):
-            suffix = normalized[len("/agent_labs/skills/") :].lstrip("/")
-            return f"skills/agent_lab/{suffix}" if suffix else "skills/agent_lab"
-        if lowered.startswith("agent_lab/skills/"):
-            suffix = normalized[len("agent_lab/skills/") :].lstrip("/")
-            return f"skills/agent_lab/{suffix}" if suffix else "skills/agent_lab"
-        if lowered.startswith("agent_labs/skills/"):
-            suffix = normalized[len("agent_labs/skills/") :].lstrip("/")
-            return f"skills/agent_lab/{suffix}" if suffix else "skills/agent_lab"
-    return path_value
-
-
-def _normalize_creation_skill_tool_call(tool_call: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    call = tool_call if isinstance(tool_call, dict) else None
-    if not isinstance(call, dict):
-        return call
-    func = _canonical_tool_name(call.get("function"))
-    if func not in {"read_file", "search_files", "list_directory"}:
-        return call
-    args = call.get("arguments")
-    if not isinstance(args, dict):
-        return call
-    out_args = dict(args)
-    if "path" in out_args:
-        out_args["path"] = _normalize_creation_skill_path_alias(out_args.get("path"))
-    return {"function": str(call.get("function") or "").strip(), "arguments": out_args}
-
-
-def _is_creation_recovery_reason(reason: str) -> bool:
-    code = str(reason or "").strip().lower()
-    return code in {
-        "invalid_json",
-        "non_strict_json",
-        "invalid_after_repair",
-        "repair_returned_no_tool",
-        "missing_function",
-        "not_object",
-        "arguments_not_object",
-        "creation_shell_redirect",
-        "creation_help_redirect",
-        "workspace_discovery_redirect",
-        "bad_args:missing_name",
-        "bad_args:missing_code",
-    }
-
-
-async def _recover_creation_tool_call(
-    *,
-    llm_client: Any,
-    platform: str,
-    registry: Dict[str, Any],
-    enabled_predicate: Optional[Callable[[str], bool]],
-    tool_index: str,
-    user_text: str,
-    target_tool: str,
-    platform_preamble: str = "",
-    max_tokens: Optional[int] = None,
-    main_skill_path: str = "",
-    main_skill_loaded: bool = False,
-    reference_paths: Optional[List[str]] = None,
-    loaded_context: str = "",
-) -> Dict[str, Any]:
-    tool_id = _canonical_tool_name(target_tool)
-    if tool_id not in {"create_plugin", "create_platform"}:
-        return {"ok": False, "reason": "not_creation_tool"}
-    creation_context = _creation_skill_prompt_for_turn(
-        user_text=user_text,
-        tool_name_hint=tool_id,
-        main_skill_path=main_skill_path,
-        main_skill_loaded=main_skill_loaded,
-        reference_paths=reference_paths,
-        loaded_context=loaded_context,
-    )
-    prompt = (
-        f"Current platform: {platform}\n"
-        "Produce exactly one strict JSON tool call object.\n"
-        f"Required function: {tool_id}\n"
-        "Output format must be exactly:\n"
-        "{\"function\":\"tool_id\",\"arguments\":{...}}\n"
-        "Rules:\n"
-        "- No markdown fences.\n"
-        "- arguments must be a JSON object.\n"
-        "- For creation tools include a safe id in arguments.name and full Python code in "
-        "arguments.code or arguments.code_lines.\n"
-    )
-    user_payload = (
-        f"{creation_context}\n\n"
-        f"Enabled tool index:\n{tool_index}\n\n"
-        f"User request:\n{str(user_text or '').strip()}"
-    ).strip()
-    try:
-        token_limit = int(max_tokens) if max_tokens is not None else _configured_tool_repair_max_tokens()
-        response = await llm_client.chat(
-            messages=_with_platform_preamble([
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": user_payload},
-            ], platform_preamble=platform_preamble),
-            max_tokens=max(1, token_limit),
-            temperature=0.1,
-        )
-        text = _coerce_text((response.get("message", {}) or {}).get("content", "")).strip()
-    except Exception:
-        return {"ok": False, "reason": "creation_recovery_failed"}
-
-    parsed = _parse_strict_tool_json(text)
-    if not isinstance(parsed, dict):
-        parsed = parse_function_json(text)
-    if not isinstance(parsed, dict):
-        return {"ok": False, "reason": "invalid_json"}
-
-    args = parsed.get("arguments") if isinstance(parsed.get("arguments"), dict) else {}
-    candidate = {"function": tool_id, "arguments": dict(args)}
-    validation = _validate_tool_call_dict(
-        parsed=candidate,
-        platform=platform,
-        registry=registry,
-        enabled_predicate=enabled_predicate,
-    )
-    if not validation.get("ok"):
-        return {"ok": False, "reason": str(validation.get("reason") or "invalid_tool_call")}
-    if not validation.get("platform_supported", True):
-        return {"ok": False, "reason": "unsupported_platform"}
-    return {"ok": True, "tool_call": validation.get("tool_call"), "reason": "creation_recovered"}
 
 
 def _validation_failure_text(reason: str, platform: str) -> str:
@@ -3416,14 +2262,18 @@ async def _execute_tool_call(
     )
 
     if func_id == "ai_tasks":
-        prompt_keys = ("task_prompt", "message", "content", "text")
-        has_prompt = any(str(args.get(key) or "").strip() for key in prompt_keys)
+        has_prompt = bool(str(args.get("task_prompt") or "").strip())
         if not has_prompt and str(user_text or "").strip():
             seed = str(user_text).strip()
             args["task_prompt"] = seed
-            args.setdefault("message", seed)
+            has_prompt = True
+        if has_prompt:
+            # Legacy aliases can cause the model to pre-generate final content too early.
+            args.pop("message", None)
+            args.pop("content", None)
+            args.pop("text", None)
         if not str(args.get("title") or "").strip():
-            title_seed = str(args.get("task_prompt") or args.get("message") or user_text or "").strip()
+            title_seed = str(args.get("task_prompt") or user_text or "").strip()
             args["title"] = _ai_task_title_from_text(title_seed)
 
     if admin_guard:
@@ -3965,7 +2815,7 @@ def _contains_new_domain_reset_keywords(text: str) -> bool:
         return False
     return bool(
         re.search(
-            r"\b(weather|download|summarize|summary|create plugin|build plugin|create platform|reminder|task|search web|inspect webpage|memory|upload|send message)\b",
+            r"\b(weather|download|summarize|summary|reminder|task|search web|inspect webpage|memory|upload|send message)\b",
             lowered,
         )
     )
@@ -4432,207 +3282,8 @@ def _build_overwrite_retry_tool_call(
     payload: Optional[Dict[str, Any]],
     user_text: str,
 ) -> Optional[Dict[str, Any]]:
-    call = tool_call if isinstance(tool_call, dict) else {}
-    func = _canonical_tool_name(call.get("function"))
-    if func not in {"create_plugin", "create_platform"}:
-        return None
-
-    src = payload if isinstance(payload, dict) else {}
-    if bool(src.get("ok")):
-        return None
-
-    error_code = str(src.get("error_code") or "").strip().lower()
-    overwrite_required = bool(src.get("overwrite_required"))
-    if not overwrite_required and error_code != "already_exists":
-        return None
-
-    args = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
-    if bool(args.get("overwrite")):
-        return None
-    if _user_disallows_overwrite(user_text):
-        return None
-
-    retry_args = dict(args)
-    retry_args["overwrite"] = True
-    return {"function": func, "arguments": retry_args}
-
-
-_DEFAULT_WAITING_PROMPT_TEMPLATE = (
-    "Write a friendly, casual message telling {mention} you are working on it now. Only output that message."
-)
-
-_CREATION_SYNTAX_ERROR_MARKERS = (
-    "syntax error",
-    "invalid syntax",
-    "was never closed",
-    "never closed",
-    "unterminated",
-    "eol while scanning string",
-)
-
-
-def _creation_missing_fields(payload: Optional[Dict[str, Any]]) -> set[str]:
-    src = payload if isinstance(payload, dict) else {}
-    out: set[str] = set()
-    missing = src.get("missing_fields")
-    if isinstance(missing, list):
-        for item in missing:
-            key = str(item or "").strip().lower()
-            if key:
-                out.add(key)
-    return out
-
-
-def _creation_error_text(payload: Optional[Dict[str, Any]]) -> str:
-    src = payload if isinstance(payload, dict) else {}
-    text_parts: List[str] = []
-    for key in ("error", "summary", "summary_for_user", "message"):
-        value = src.get(key)
-        if isinstance(value, str) and value.strip():
-            text_parts.append(value.strip())
-    errors = src.get("errors")
-    if isinstance(errors, list):
-        for item in errors:
-            if isinstance(item, str) and item.strip():
-                text_parts.append(item.strip())
-    return " | ".join(text_parts).strip().lower()
-
-
-def _looks_like_creation_syntax_error(error_text: Any) -> bool:
-    text = str(error_text or "").strip().lower()
-    if not text:
-        return False
-    return any(marker in text for marker in _CREATION_SYNTAX_ERROR_MARKERS)
-
-
-def _close_unterminated_square_brackets(code: str) -> str:
-    src = str(code or "")
-    if not src:
-        return src
-    opens = src.count("[")
-    closes = src.count("]")
-    missing = opens - closes
-    if missing <= 0:
-        return src
-    suffix = "\n".join("]" for _ in range(missing))
-    return src.rstrip() + "\n" + suffix + "\n"
-
-
-def _inject_waiting_prompt_template_into_code(code: str) -> str:
-    src = str(code or "")
-    if "waiting_prompt_template" in src:
-        return src
-    class_match = re.search(r"^class\s+[A-Za-z_][A-Za-z0-9_]*\s*\([^)]*ToolPlugin[^)]*\)\s*:\s*$", src, flags=re.MULTILINE)
-    if not class_match:
-        return src
-    insert_at = class_match.end()
-    insertion = f"\n    waiting_prompt_template = {json.dumps(_DEFAULT_WAITING_PROMPT_TEMPLATE)}\n"
-    return src[:insert_at] + insertion + src[insert_at:]
-
-
-def _repair_generated_plugin_code(code: str, *, payload: Optional[Dict[str, Any]] = None) -> str:
-    src = str(code or "")
-    if not src:
-        return src
-    fixed = src
-
-    # Normalize common wrong import patterns to the required runtime import.
-    fixed = re.sub(
-        r"^\s*from\s+tool_plugin\s+import\s+ToolPlugin\s*$",
-        "from plugin_base import ToolPlugin",
-        fixed,
-        flags=re.MULTILINE,
-    )
-    fixed = re.sub(
-        r"^\s*from\s+plugins?\s+import\s+ToolPlugin\s*$",
-        "from plugin_base import ToolPlugin",
-        fixed,
-        flags=re.MULTILINE,
-    )
-    if "from plugin_base import ToolPlugin" not in fixed:
-        fixed = "from plugin_base import ToolPlugin\n" + fixed.lstrip("\n")
-
-    missing_fields = _creation_missing_fields(payload)
-    error_text = _creation_error_text(payload)
-    if "waiting_prompt_template" in missing_fields or "waiting_prompt_template" in error_text:
-        fixed = _inject_waiting_prompt_template_into_code(fixed)
-    if _looks_like_creation_syntax_error(error_text):
-        fixed = _close_unterminated_square_brackets(fixed)
-
-    # Ensure module-level plugin export exists.
-    if not re.search(r"(?m)^\s*plugin\s*=\s*[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\)\s*$", fixed):
-        class_match = re.search(
-            r"^class\s+([A-Za-z_][A-Za-z0-9_]*)\s*\([^)]*ToolPlugin[^)]*\)\s*:\s*$",
-            fixed,
-            flags=re.MULTILINE,
-        )
-        if class_match:
-            class_name = class_match.group(1)
-            fixed = fixed.rstrip() + f"\n\nplugin = {class_name}()\n"
-
-    return fixed
-
-
-def _build_creation_contract_retry_tool_call(
-    *,
-    tool_call: Optional[Dict[str, Any]],
-    payload: Optional[Dict[str, Any]],
-) -> Optional[Dict[str, Any]]:
-    call = tool_call if isinstance(tool_call, dict) else {}
-    func = _canonical_tool_name(call.get("function"))
-    if func != "create_plugin":
-        return None
-
-    src = payload if isinstance(payload, dict) else {}
-    if bool(src.get("ok")):
-        return None
-
-    args = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
-    if not isinstance(args, dict):
-        return None
-
-    raw_code = ""
-    if isinstance(args.get("code"), str) and args.get("code").strip():
-        raw_code = str(args.get("code"))
-    elif isinstance(args.get("code_lines"), list):
-        raw_code = "\n".join(str(line) for line in args.get("code_lines"))
-    if not raw_code.strip():
-        return None
-
-    missing_fields = _creation_missing_fields(src)
-    error_text = _creation_error_text(src)
-    syntax_failure = _looks_like_creation_syntax_error(error_text)
-    must_repair = bool(
-        missing_fields.intersection(
-            {
-                "waiting_prompt_template",
-                "toolplugin_import",
-                "toolplugin_subclass",
-                "plugin_export",
-                "plugin_instance",
-            }
-        )
-        or "waiting_prompt_template" in error_text
-        or "import failed" in error_text
-        or syntax_failure
-    )
-    if not must_repair:
-        return None
-
-    repaired_code = _repair_generated_plugin_code(raw_code, payload=src)
-    if syntax_failure:
-        try:
-            compile(repaired_code, "<creation_retry>", "exec")
-        except Exception:
-            return None
-    if repaired_code.strip() == raw_code.strip():
-        return None
-
-    retry_args = dict(args)
-    retry_args["code"] = repaired_code
-    retry_args.pop("code_lines", None)
-    retry_args["overwrite"] = True
-    return {"function": func, "arguments": retry_args}
+    del tool_call, payload, user_text
+    return None
 
 
 def _hash_tool_args(args: Any) -> str:
@@ -4811,7 +3462,6 @@ def _write_cerberus_metrics(
     total_repairs: int,
     validation_failures: int,
     tool_failures: int,
-    creation_contract_fixes: int = 0,
 ) -> None:
     if redis_client is None:
         return
@@ -4822,7 +3472,6 @@ def _write_cerberus_metrics(
         "total_repairs": max(0, int(total_repairs or 0)),
         "validation_failures": max(0, int(validation_failures or 0)),
         "tool_failures": max(0, int(tool_failures or 0)),
-        "creation_contract_fixes": max(0, int(creation_contract_fixes or 0)),
     }
     for name, amount in counters.items():
         if amount <= 0:
@@ -4866,7 +3515,6 @@ def _write_cerberus_ledger(
     agent_state: Optional[Dict[str, Any]] = None,
     origin_preview: Optional[Dict[str, Any]] = None,
     attempted_tool: str = "",
-    creation_contract_fix_count: int = 0,
 ) -> None:
     if redis_client is None:
         return
@@ -4877,7 +3525,7 @@ def _write_cerberus_ledger(
         planned_tool=planned_tool,
     )
     planner_kind_value = str(planner_kind or "").strip().lower()
-    if planner_kind_value not in {"tool", "answer", "repaired_tool", "repaired_answer", "send_message_fix"}:
+    if planner_kind_value not in {"tool", "answer", "repaired_tool", "repaired_answer"}:
         planner_kind_value = "answer"
     entry = {
         "schema_version": CERBERUS_LEDGER_SCHEMA_VERSION,
@@ -4905,8 +3553,6 @@ def _write_cerberus_ledger(
         "retry_count": 1 if int(retry_count or 0) > 0 else 0,
         "rounds_used": max(0, int(rounds_used or 0)),
         "tool_calls_used": max(0, int(tool_calls_used or 0)),
-        "creation_contract_fix_count": max(0, int(creation_contract_fix_count or 0)),
-        "creation_contract_fix_used": bool(int(creation_contract_fix_count or 0) > 0),
     }
     if compact_planned_tool and compact_planned_tool.get("args_hash"):
         entry["tool_args_hash"] = compact_planned_tool.get("args_hash")
@@ -5020,7 +3666,6 @@ async def run_cerberus_turn(
     doer_max_tokens = _configured_doer_max_tokens(r)
     tool_repair_max_tokens = _configured_tool_repair_max_tokens(r)
     overclar_repair_max_tokens = _configured_overclar_repair_max_tokens(r)
-    send_repair_max_tokens = _configured_send_repair_max_tokens(r)
     recovery_max_tokens = _configured_recovery_max_tokens(r)
     turn_started_at = time.perf_counter()
     planner_ms_total = 0.0
@@ -5029,7 +3674,6 @@ async def run_cerberus_turn(
     repairs_used_count = 0
     validation_failures_count = 0
     tool_failures_count = 0
-    creation_contract_fix_count = 0
     turn_id = str(uuid.uuid4())
     llm_label = _llm_backend_label(llm_client)
 
@@ -5060,11 +3704,11 @@ async def run_cerberus_turn(
     resolved_user_text = effective_user_text or user_text
     current_user_turn_text = _strip_user_sender_prefix(user_text).strip() or str(user_text or "").strip()
     scheduled_execution_scope = str(scope or "").strip().lower().startswith("ai_task:")
-    schedule_creation_required = (
+    schedule_task_required = (
         not scheduled_execution_scope
         and _looks_like_explicit_ai_task_request(current_user_turn_text or resolved_user_text)
     )
-    schedule_creation_confirmed = False
+    schedule_task_confirmed = False
     schedule_failure_text = ""
     tool_index = _enabled_tool_mini_index(
         platform=platform,
@@ -5083,14 +3727,6 @@ async def run_cerberus_turn(
     )
     queued_tool_call: Optional[Dict[str, Any]] = None
     queued_retry_tool_for_ledger: Optional[Dict[str, Any]] = None
-    creation_kind = _creation_kind_from_user_text(resolved_user_text or user_text)
-    creation_main_path = _creation_skill_main_path(creation_kind)
-    creation_main_read_attempted = False
-    creation_main_read_ok = False
-    creation_reference_paths: List[str] = []
-    creation_read_attempted_paths: set[str] = set()
-    creation_notes: List[str] = []
-    creation_last_generated_path = ""
     plugin_help_attempted: set[str] = set()
     plugin_help_prefetch_target = ""
     bad_args_help_retry_signatures: set[str] = set()
@@ -5101,95 +3737,6 @@ async def run_cerberus_turn(
         rounds_left = effective_max_rounds == 0 or rounds_used < effective_max_rounds
         tools_left = effective_max_tool_calls == 0 or tool_calls_used < effective_max_tool_calls
         return rounds_left and tools_left
-
-    def _activate_creation_kind(kind_hint: Any) -> None:
-        nonlocal creation_kind, creation_main_path
-        nonlocal creation_reference_paths
-        candidate = str(kind_hint or "").strip().lower()
-        if candidate not in {"plugin", "platform"}:
-            return
-        if creation_kind and creation_kind != candidate:
-            return
-        creation_kind = candidate
-        creation_main_path = _creation_skill_main_path(candidate)
-        for ref_path in _default_creation_reference_paths(candidate):
-            normalized = _normalize_abs_path(ref_path)
-            if not normalized:
-                continue
-            if normalized not in creation_reference_paths:
-                creation_reference_paths.append(normalized)
-
-    def _record_creation_note(label: str, text: Any, *, max_chars: int) -> None:
-        compact = _compact_creation_text_for_prompt(text, max_chars=max_chars)
-        if not compact:
-            return
-        entry = f"{label}\n{compact}".strip()
-        if not entry or entry in creation_notes:
-            return
-        creation_notes.append(entry)
-        while len("\n\n".join(creation_notes)) > _CREATION_SKILL_CONTEXT_MAX_CHARS and len(creation_notes) > 1:
-            creation_notes.pop(0)
-
-    def _creation_loaded_context() -> str:
-        if not creation_notes:
-            return ""
-        joined = "\n\n".join(creation_notes).strip()
-        if len(joined) > _CREATION_SKILL_CONTEXT_MAX_CHARS:
-            joined = joined[-_CREATION_SKILL_CONTEXT_MAX_CHARS :].lstrip()
-        return joined
-
-    def _next_creation_reference_path() -> str:
-        for path in creation_reference_paths:
-            normalized = _normalize_abs_path(path)
-            if not normalized:
-                continue
-            if not _is_allowed_creation_reference_path(creation_kind, normalized):
-                continue
-            if normalized in creation_read_attempted_paths:
-                continue
-            return normalized
-        return ""
-
-    def _queue_creation_skill_read(path: Any, *, repaired: bool) -> bool:
-        nonlocal queued_tool_call
-        nonlocal queued_retry_tool_for_ledger
-        nonlocal attempted_tool_for_ledger
-        nonlocal planner_text_is_tool_candidate
-        nonlocal validation_status
-        nonlocal creation_main_read_attempted
-        normalized = _normalize_abs_path(path)
-        if not normalized:
-            return False
-        if creation_kind in {"plugin", "platform"}:
-            opposite_kind = "platform" if creation_kind == "plugin" else "plugin"
-            if normalized == _creation_skill_main_path(opposite_kind):
-                return False
-            ref_dir = _creation_references_dir_path()
-            try:
-                ref_dir_path = Path(ref_dir).resolve()
-                path_obj = Path(normalized).resolve()
-                if path_obj.parent == ref_dir_path and not _is_allowed_creation_reference_path(creation_kind, normalized):
-                    return False
-            except Exception:
-                pass
-        if normalized in creation_read_attempted_paths:
-            return False
-        creation_read_attempted_paths.add(normalized)
-        if normalized == creation_main_path:
-            creation_main_read_attempted = True
-        queued_tool_call = {"function": "read_file", "arguments": {"path": normalized}}
-        queued_retry_tool_for_ledger = queued_tool_call
-        attempted_tool_for_ledger = "read_file"
-        planner_text_is_tool_candidate = True
-        validation_status = {
-            "status": "ok",
-            "repair_used": bool(repaired),
-            "reason": "ok",
-            "attempts": 2 if repaired else 1,
-            "ok": True,
-            "tool_call": queued_tool_call,
-        }
-        return True
 
     def _finish(
         *,
@@ -5209,7 +3756,7 @@ async def run_cerberus_turn(
         final_checker_reason = str(checker_reason_value or "").strip()
         final_text_raw = str(text or "").strip()
 
-        if schedule_creation_required and not schedule_creation_confirmed:
+        if schedule_task_required and not schedule_task_confirmed:
             final_status = "blocked"
             final_checker_action = "NEED_USER_INFO"
             if not final_checker_reason:
@@ -5258,7 +3805,6 @@ async def run_cerberus_turn(
             agent_state=agent_state,
             origin_preview=origin_preview,
             attempted_tool=attempted_tool_override if attempted_tool_override is not None else attempted_tool_for_ledger,
-            creation_contract_fix_count=creation_contract_fix_count,
         )
         _write_cerberus_metrics(
             redis_client=r,
@@ -5267,7 +3813,6 @@ async def run_cerberus_turn(
             total_repairs=repairs_used_count,
             validation_failures=validation_failures_count,
             tool_failures=tool_failures_count,
-            creation_contract_fixes=creation_contract_fix_count,
         )
         return {
             "text": final_text,
@@ -5287,11 +3832,8 @@ async def run_cerberus_turn(
         planner_text = ""
         round_planner_kind = "answer"
 
-        if queued_tool_call is None and creation_kind and creation_main_path and not creation_main_read_attempted:
-            _queue_creation_skill_read(creation_main_path, repaired=False)
-
         if isinstance(queued_tool_call, dict):
-            planned_tool = _normalize_creation_skill_tool_call(dict(queued_tool_call))
+            planned_tool = dict(queued_tool_call)
             attempted_tool_for_ledger = str((planned_tool or {}).get("function") or attempted_tool_for_ledger or "")
             planner_text_is_tool_candidate = True
             validation_status = {
@@ -5306,22 +3848,11 @@ async def run_cerberus_turn(
             queued_tool_call = None
         else:
             planner_text_repaired = False
-            send_message_fix_applied = False
             state_message = _agent_state_prompt_message(agent_state, fallback_goal=resolved_user_text or user_text)
-            creation_skill_prompt = _creation_skill_prompt_for_turn(
-                user_text=resolved_user_text or user_text,
-                tool_name_hint=f"create_{creation_kind}" if creation_kind else "",
-                main_skill_path=creation_main_path,
-                main_skill_loaded=creation_main_read_ok,
-                reference_paths=creation_reference_paths,
-                loaded_context=_creation_loaded_context(),
-            )
             planner_messages: List[Dict[str, Any]] = [
                 {"role": "system", "content": _planner_system_prompt(platform)},
                 {"role": "system", "content": "Enabled tools on this platform:\n" + tool_index},
             ]
-            if creation_skill_prompt:
-                planner_messages.append({"role": "system", "content": creation_skill_prompt})
             planner_messages.extend([
                 {
                     "role": "system",
@@ -5385,8 +3916,6 @@ async def run_cerberus_turn(
 
             if _is_tool_candidate(planner_text):
                 round_planner_kind = "tool"
-            elif send_message_fix_applied:
-                round_planner_kind = "send_message_fix"
             elif planner_text_repaired:
                 round_planner_kind = "repaired_answer"
             else:
@@ -5406,46 +3935,6 @@ async def run_cerberus_turn(
                     planner_text_repaired = True
                     round_planner_kind = "repaired_tool"
                     repairs_used_count += 1
-            if not planner_text_is_tool_candidate:
-                creation_target = _creation_target_tool_for_recovery(
-                    user_text=resolved_user_text or user_text,
-                    attempted_tool="",
-                )
-                if creation_target:
-                    _activate_creation_kind(_creation_kind_from_tool_name(creation_target))
-                    if creation_kind and creation_main_path and not creation_main_read_attempted:
-                        if _queue_creation_skill_read(creation_main_path, repaired=True):
-                            planner_text_is_tool_candidate = True
-                            planner_text_repaired = True
-                            round_planner_kind = "repaired_tool"
-                            repairs_used_count += 1
-                            continue
-                    creation_recovered = await _recover_creation_tool_call(
-                        llm_client=llm_client,
-                        platform=platform,
-                        registry=registry,
-                        enabled_predicate=enabled_predicate,
-                        tool_index=tool_index,
-                        user_text=resolved_user_text or user_text,
-                        target_tool=creation_target,
-                        platform_preamble=platform_preamble,
-                        max_tokens=tool_repair_max_tokens,
-                        main_skill_path=creation_main_path,
-                        main_skill_loaded=creation_main_read_ok,
-                        reference_paths=creation_reference_paths,
-                        loaded_context=_creation_loaded_context(),
-                    )
-                    recovered_tool_call = creation_recovered.get("tool_call")
-                    if bool(creation_recovered.get("ok")) and isinstance(recovered_tool_call, dict):
-                        planner_text = json.dumps(
-                            recovered_tool_call,
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        )
-                        planner_text_is_tool_candidate = True
-                        planner_text_repaired = True
-                        round_planner_kind = "repaired_tool"
-                        repairs_used_count += 1
 
             if not _is_tool_candidate(planner_text):
                 planner_kind = round_planner_kind
@@ -5523,7 +4012,6 @@ async def run_cerberus_turn(
                         platform_preamble=platform_preamble,
                         repair_max_tokens=tool_repair_max_tokens,
                         recovery_max_tokens=recovery_max_tokens,
-                        send_repair_max_tokens=send_repair_max_tokens,
                     )
                     retry_validation = (
                         retry_eval.get("validation_status")
@@ -5538,18 +4026,6 @@ async def run_cerberus_turn(
                         failed_retry_tool = retry_eval.get("tool_call")
                         if not isinstance(failed_retry_tool, dict):
                             failed_retry_tool = {"function": "invalid_tool_call", "arguments": {}}
-                        if reason == "send_message_misfire":
-                            checker_reason = f"send_message_misfire:{str(retry_eval.get('send_reason') or 'unknown')}"
-                            return _finish(
-                                text=str(retry_eval.get("recovery_text_if_blocked") or "How can I help?").strip(),
-                                status="done",
-                                checker_action_value="FINAL_ANSWER",
-                                checker_reason_value=checker_reason,
-                                planned_tool_override=failed_retry_tool,
-                                validation_status_override=retry_validation,
-                                planner_kind_value="send_message_fix",
-                                attempted_tool_override=str(retry_eval.get("attempted_tool") or ""),
-                            )
                         validation_failures_count += 1
                         checker_reason = f"validation_failed:{reason}"
                         return _finish(
@@ -5572,6 +4048,41 @@ async def run_cerberus_turn(
                             checker_reason_value=checker_reason,
                             planned_tool_override={"function": "invalid_tool_call", "arguments": {}},
                             validation_status_override=retry_validation,
+                        )
+                    retry_plugin_id = _plugin_tool_id_for_call(queued, registry)
+                    if retry_plugin_id and retry_plugin_id not in plugin_help_attempted:
+                        help_retry_call = {"function": "get_plugin_help", "arguments": {"plugin_id": retry_plugin_id}}
+                        if _retry_allowed_within_limits():
+                            plugin_help_attempted.add(retry_plugin_id)
+                            bad_args_help_pending = {
+                                "plugin_id": retry_plugin_id,
+                                "failed_tool_call": queued,
+                                "reason": "retry_tool_help_lookup",
+                            }
+                            queued_tool_call = help_retry_call
+                            queued_retry_tool_for_ledger = help_retry_call
+                            attempted_tool_for_ledger = "get_plugin_help"
+                            validation_status = {
+                                "status": "ok",
+                                "repair_used": True,
+                                "reason": "retry_tool_help_lookup",
+                                "attempts": 2,
+                                "ok": True,
+                                "tool_call": help_retry_call,
+                            }
+                            critic_continue_count += 1
+                            repairs_used_count += 1
+                            checker_reason = "continue_after_retry_tool_help_lookup"
+                            planner_text_is_tool_candidate = True
+                            continue
+                        checker_reason = "retry_tool_help_budget_exhausted"
+                        return _finish(
+                            text="I need one more tool call to fetch that plugin's argument schema before retrying.",
+                            status="blocked",
+                            checker_action_value="NEED_USER_INFO",
+                            checker_reason_value=checker_reason,
+                            retry_tool=help_retry_call,
+                            attempted_tool_override=retry_plugin_id or attempted_tool_for_ledger,
                         )
                     queued_tool_call = queued
                     queued_retry_tool_for_ledger = queued
@@ -5604,7 +4115,6 @@ async def run_cerberus_turn(
                 platform_preamble=platform_preamble,
                 repair_max_tokens=tool_repair_max_tokens,
                 recovery_max_tokens=recovery_max_tokens,
-                send_repair_max_tokens=send_repair_max_tokens,
             )
             validation_status = (
                 tool_eval.get("validation_status")
@@ -5626,67 +4136,6 @@ async def run_cerberus_turn(
                 failed_planned_tool = tool_eval.get("tool_call")
                 if not isinstance(failed_planned_tool, dict):
                     failed_planned_tool = {"function": "invalid_tool_call", "arguments": {}}
-                failed_creation_kind = _creation_kind_from_tool_name((failed_planned_tool or {}).get("function"))
-                if failed_creation_kind:
-                    _activate_creation_kind(failed_creation_kind)
-
-                if reason == "send_message_misfire":
-                    send_message_fix_applied = True
-                    planner_kind = "send_message_fix"
-                    send_reason = str(tool_eval.get("send_reason") or "unknown")
-                    checker_reason = f"send_message_misfire:{send_reason}"
-                    return _finish(
-                        text=recovery_text,
-                        status="done",
-                        checker_action_value="FINAL_ANSWER",
-                        checker_reason_value=checker_reason,
-                        planned_tool_override=failed_planned_tool,
-                        validation_status_override=validation_status,
-                        planner_kind_value="send_message_fix",
-                        attempted_tool_override=str(tool_eval.get("attempted_tool") or ""),
-                    )
-
-                if creation_kind and _is_creation_recovery_reason(reason) and _retry_allowed_within_limits():
-                    next_ref_path = _next_creation_reference_path()
-                    if next_ref_path and _queue_creation_skill_read(next_ref_path, repaired=True):
-                        repairs_used_count += 1
-                        planner_kind = "repaired_tool"
-                        checker_reason = "continue_after_creation_reference_read"
-                        continue
-                    creation_target = "create_plugin" if creation_kind == "plugin" else "create_platform"
-                    creation_recovered = await _recover_creation_tool_call(
-                        llm_client=llm_client,
-                        platform=platform,
-                        registry=registry,
-                        enabled_predicate=enabled_predicate,
-                        tool_index=tool_index,
-                        user_text=resolved_user_text or user_text,
-                        target_tool=creation_target,
-                        platform_preamble=platform_preamble,
-                        max_tokens=tool_repair_max_tokens,
-                        main_skill_path=creation_main_path,
-                        main_skill_loaded=creation_main_read_ok,
-                        reference_paths=creation_reference_paths,
-                        loaded_context=_creation_loaded_context(),
-                    )
-                    recovered_tool = creation_recovered.get("tool_call")
-                    if bool(creation_recovered.get("ok")) and isinstance(recovered_tool, dict):
-                        queued_tool_call = recovered_tool
-                        queued_retry_tool_for_ledger = recovered_tool
-                        attempted_tool_for_ledger = str(recovered_tool.get("function") or attempted_tool_for_ledger or "")
-                        validation_status = {
-                            "status": "ok",
-                            "repair_used": True,
-                            "reason": str(creation_recovered.get("reason") or "creation_recovered"),
-                            "attempts": 2,
-                            "ok": True,
-                            "tool_call": recovered_tool,
-                        }
-                        repairs_used_count += 1
-                        planner_kind = "repaired_tool"
-                        checker_reason = "continue_after_creation_recovery"
-                        planner_text_is_tool_candidate = True
-                        continue
 
                 validation_failures_count += 1
                 planner_kind = round_planner_kind
@@ -5702,7 +4151,6 @@ async def run_cerberus_turn(
                 )
 
             planned_tool = tool_eval.get("tool_call") if isinstance(tool_eval.get("tool_call"), dict) else None
-            planned_tool = _normalize_creation_skill_tool_call(planned_tool)
             planner_text_is_tool_candidate = True
             if not planned_tool:
                 validation_failures_count += 1
@@ -5731,23 +4179,6 @@ async def run_cerberus_turn(
                 planned_tool_override={"function": "invalid_tool_call", "arguments": {}},
                 validation_status_override=validation_status,
             )
-
-        planned_creation_kind = _creation_kind_from_tool_name((planned_tool or {}).get("function"))
-        if planned_creation_kind:
-            _activate_creation_kind(planned_creation_kind)
-            if creation_main_path and not creation_main_read_attempted and _retry_allowed_within_limits():
-                if _queue_creation_skill_read(creation_main_path, repaired=True):
-                    repairs_used_count += 1
-                    planner_kind = "repaired_tool"
-                    checker_reason = "creation_main_skill_read_required"
-                    continue
-            if _retry_allowed_within_limits():
-                next_ref_path = _next_creation_reference_path()
-                if next_ref_path and _queue_creation_skill_read(next_ref_path, repaired=True):
-                    repairs_used_count += 1
-                    planner_kind = "repaired_tool"
-                    checker_reason = "creation_reference_read_required"
-                    continue
 
         planned_plugin_tool = _plugin_tool_id_for_call(planned_tool, registry)
         has_spare_tool_budget_for_prefetch = (
@@ -5782,56 +4213,6 @@ async def run_cerberus_turn(
             checker_reason = "continue_after_plugin_help_prefetch"
             planner_text_is_tool_candidate = True
             continue
-
-        send_allowed, send_reason = _send_message_allowed_for_turn(
-            tool_call=planned_tool,
-            user_text=resolved_user_text,
-            origin=origin_payload,
-            platform=platform,
-            scope=scope,
-            history_messages=history,
-            context=context if isinstance(context, dict) else {},
-        )
-        if not send_allowed:
-            repairs_used_count += 1
-            planner_kind = "send_message_fix"
-            checker_reason = f"send_message_misfire:{send_reason or 'unknown'}"
-            repaired_text = await _repair_send_message_misfire_text(
-                llm_client=llm_client,
-                platform=platform,
-                user_text=user_text,
-                platform_preamble=platform_preamble,
-                max_tokens=send_repair_max_tokens,
-            )
-            if repaired_text and not _is_tool_candidate(repaired_text):
-                return _finish(
-                    text=repaired_text,
-                    status="done",
-                    checker_action_value="FINAL_ANSWER",
-                    checker_reason_value=checker_reason,
-                    planner_kind_value="send_message_fix",
-                    planned_tool_override=planned_tool,
-                    attempted_tool_override=str((planned_tool or {}).get("function") or ""),
-                )
-            fallback_text = await _generate_recovery_text(
-                llm_client=llm_client,
-                platform=platform,
-                user_text=user_text,
-                error_kind="send_message_misfire",
-                reason=send_reason or "send_message_not_requested",
-                fallback="How can I help?",
-                platform_preamble=platform_preamble,
-                max_tokens=recovery_max_tokens,
-            )
-            return _finish(
-                text=fallback_text,
-                status="done",
-                checker_action_value="FINAL_ANSWER",
-                checker_reason_value=checker_reason,
-                planner_kind_value="send_message_fix",
-                planned_tool_override=planned_tool,
-                attempted_tool_override=str((planned_tool or {}).get("function") or ""),
-            )
 
         tool_used = True
         tool_started = time.perf_counter()
@@ -5938,68 +4319,6 @@ async def run_cerberus_turn(
             if plugin_help_prefetch_target and helped_plugin_id and helped_plugin_id == plugin_help_prefetch_target:
                 plugin_help_prefetch_target = ""
 
-        if tool_func == "read_file":
-            payload_obj = raw_tool_payload_out if isinstance(raw_tool_payload_out, dict) else {}
-            args_obj = (planned_tool or {}).get("arguments") if isinstance((planned_tool or {}).get("arguments"), dict) else {}
-            read_ok = bool(payload_obj.get("ok"))
-            read_path = _normalize_abs_path(payload_obj.get("path") or args_obj.get("path"))
-            derived_kind = _creation_kind_from_skill_path(read_path)
-            if derived_kind:
-                _activate_creation_kind(derived_kind)
-            if creation_kind and read_path:
-                if _is_creation_main_skill_path(creation_kind, read_path):
-                    creation_main_read_attempted = True
-                    if read_ok:
-                        creation_main_read_ok = True
-                        content_text = _coerce_text(payload_obj.get("content"))
-                        _record_creation_note(
-                            "Primary authoring skill:",
-                            content_text,
-                            max_chars=_CREATION_SKILL_MAIN_CONTEXT_CHARS,
-                        )
-                        candidate_refs = _creation_reference_paths_from_content(creation_kind, content_text)
-                        fallback_refs = _default_creation_reference_paths(creation_kind)
-                        for fallback_path in fallback_refs:
-                            if fallback_path not in candidate_refs:
-                                candidate_refs.append(fallback_path)
-                        for ref_path in candidate_refs:
-                            normalized_ref = _normalize_abs_path(ref_path)
-                            if not normalized_ref:
-                                continue
-                            if normalized_ref not in creation_reference_paths:
-                                creation_reference_paths.append(normalized_ref)
-                    else:
-                        creation_main_read_ok = False
-                elif _is_allowed_creation_reference_path(creation_kind, read_path) and read_ok:
-                    content_text = _coerce_text(payload_obj.get("content"))
-                    _record_creation_note(
-                        f"Reference ({Path(read_path).name}):",
-                        content_text,
-                        max_chars=_CREATION_SKILL_REFERENCE_CONTEXT_CHARS,
-                    )
-                elif creation_last_generated_path and read_path == creation_last_generated_path and read_ok:
-                    content_text = _coerce_text(payload_obj.get("content"))
-                    _record_creation_note(
-                        "Last generated source (failed validation/import):",
-                        content_text,
-                        max_chars=_CREATION_SKILL_REFERENCE_CONTEXT_CHARS,
-                    )
-                if read_ok and _retry_allowed_within_limits():
-                    next_ref_path = _next_creation_reference_path()
-                    if next_ref_path and _queue_creation_skill_read(next_ref_path, repaired=True):
-                        repairs_used_count += 1
-                        checker_reason = "continue_after_creation_reference_prefetch"
-                        continue
-                if read_ok and (
-                    _is_creation_main_skill_path(creation_kind, read_path)
-                    or _is_allowed_creation_reference_path(creation_kind, read_path)
-                ):
-                    checker_reason = "continue_after_skill_read"
-                    continue
-                if read_ok and creation_last_generated_path and read_path == creation_last_generated_path:
-                    checker_reason = "continue_after_skill_read"
-                    continue
-
         if tool_func == "search_files":
             payload_obj = raw_tool_payload_out if isinstance(raw_tool_payload_out, dict) else {}
             search_ok = bool(payload_obj.get("ok"))
@@ -6041,28 +4360,26 @@ async def run_cerberus_turn(
                     continue
 
         if tool_func == "ai_tasks":
-            task_status = _ai_tasks_creation_status(
+            task_status = _ai_tasks_schedule_status(
                 payload=raw_tool_payload_out,
                 checker_result=normalized_checker_result_out,
             )
             if bool(task_status.get("created")):
-                schedule_creation_confirmed = True
+                schedule_task_confirmed = True
                 if task_status.get("success_text"):
                     draft_response = str(task_status.get("success_text") or "").strip()
-            else:
-                schedule_failure_text = str(task_status.get("failure_text") or "").strip()
+                checker_reason = "schedule_created"
+                return _finish(
+                    text=str(task_status.get("success_text") or draft_response or "Scheduled task created.").strip(),
+                    status="done",
+                    checker_action_value="FINAL_ANSWER",
+                    checker_reason_value=checker_reason,
+                )
 
-            if schedule_creation_required:
-                if bool(task_status.get("created")):
-                    checker_reason = "schedule_created"
-                    return _finish(
-                        text=str(task_status.get("success_text") or draft_response or "Scheduled task created.").strip(),
-                        status="done",
-                        checker_action_value="FINAL_ANSWER",
-                        checker_reason_value=checker_reason,
-                    )
+            schedule_failure_text = str(task_status.get("failure_text") or "").strip()
+            if schedule_task_required or not scheduled_execution_scope:
                 code = str(task_status.get("code") or "task_not_created").strip().lower() or "task_not_created"
-                checker_reason = f"schedule_creation_failed:{code}"
+                checker_reason = f"schedule_task_failed:{code}"
                 return _finish(
                     text=schedule_failure_text or "I couldn't create that scheduled task.",
                     status="blocked",
@@ -6136,47 +4453,6 @@ async def run_cerberus_turn(
                 checker_reason_value=checker_reason,
                 retry_tool=overwrite_retry_call,
             )
-
-        creation_contract_retry_call = _build_creation_contract_retry_tool_call(
-            tool_call=planned_tool,
-            payload=raw_tool_payload_out,
-        )
-        if isinstance(creation_contract_retry_call, dict):
-            if _retry_allowed_within_limits():
-                queued_tool_call = creation_contract_retry_call
-                queued_retry_tool_for_ledger = creation_contract_retry_call
-                repairs_used_count += 1
-                creation_contract_fix_count += 1
-                checker_reason = "continue_after_creation_contract_fix"
-                continue
-            checker_reason = "creation_contract_fix_budget_exhausted"
-            return _finish(
-                text="I generated plugin code that needs one contract fix, but I hit this turn's tool-call limit.",
-                status="blocked",
-                checker_action_value="NEED_USER_INFO",
-                checker_reason_value=checker_reason,
-                retry_tool=creation_contract_retry_call,
-            )
-
-        if (
-            tool_func in {"create_plugin", "create_platform"}
-            and creation_kind
-            and not bool((tool_result_for_checker or {}).get("ok"))
-            and _retry_allowed_within_limits()
-        ):
-            payload_obj = raw_tool_payload_out if isinstance(raw_tool_payload_out, dict) else {}
-            generated_path = _normalize_abs_path(payload_obj.get("path"))
-            if generated_path:
-                creation_last_generated_path = generated_path
-                if _queue_creation_skill_read(generated_path, repaired=True):
-                    repairs_used_count += 1
-                    checker_reason = "continue_after_creation_source_read"
-                    continue
-            next_ref_path = _next_creation_reference_path()
-            if next_ref_path and _queue_creation_skill_read(next_ref_path, repaired=True):
-                repairs_used_count += 1
-                checker_reason = "continue_after_creation_reference_read"
-                continue
 
         agent_state = await _run_doer_state_update(
             llm_client=llm_client,
@@ -6279,7 +4555,6 @@ async def run_cerberus_turn(
                 platform_preamble=platform_preamble,
                 repair_max_tokens=tool_repair_max_tokens,
                 recovery_max_tokens=recovery_max_tokens,
-                send_repair_max_tokens=send_repair_max_tokens,
             )
             retry_validation = (
                 retry_eval.get("validation_status")
@@ -6294,18 +4569,6 @@ async def run_cerberus_turn(
                 failed_retry_tool = retry_eval.get("tool_call")
                 if not isinstance(failed_retry_tool, dict):
                     failed_retry_tool = {"function": "invalid_tool_call", "arguments": {}}
-                if reason == "send_message_misfire":
-                    checker_reason = f"send_message_misfire:{str(retry_eval.get('send_reason') or 'unknown')}"
-                    return _finish(
-                        text=str(retry_eval.get("recovery_text_if_blocked") or "How can I help?").strip(),
-                        status="done",
-                        checker_action_value="FINAL_ANSWER",
-                        checker_reason_value=checker_reason,
-                        planned_tool_override=failed_retry_tool,
-                        validation_status_override=retry_validation,
-                        planner_kind_value="send_message_fix",
-                        attempted_tool_override=str(retry_eval.get("attempted_tool") or ""),
-                    )
                 validation_failures_count += 1
                 checker_reason = f"validation_failed:{reason}"
                 return _finish(
@@ -6328,6 +4591,41 @@ async def run_cerberus_turn(
                     checker_reason_value=checker_reason,
                     planned_tool_override={"function": "invalid_tool_call", "arguments": {}},
                     validation_status_override=retry_validation,
+                )
+            retry_plugin_id = _plugin_tool_id_for_call(queued, registry)
+            if retry_plugin_id and retry_plugin_id not in plugin_help_attempted:
+                help_retry_call = {"function": "get_plugin_help", "arguments": {"plugin_id": retry_plugin_id}}
+                if _retry_allowed_within_limits():
+                    plugin_help_attempted.add(retry_plugin_id)
+                    bad_args_help_pending = {
+                        "plugin_id": retry_plugin_id,
+                        "failed_tool_call": queued,
+                        "reason": "retry_tool_help_lookup",
+                    }
+                    queued_tool_call = help_retry_call
+                    queued_retry_tool_for_ledger = help_retry_call
+                    attempted_tool_for_ledger = "get_plugin_help"
+                    validation_status = {
+                        "status": "ok",
+                        "repair_used": True,
+                        "reason": "retry_tool_help_lookup",
+                        "attempts": 2,
+                        "ok": True,
+                        "tool_call": help_retry_call,
+                    }
+                    critic_continue_count += 1
+                    repairs_used_count += 1
+                    checker_reason = "continue_after_retry_tool_help_lookup"
+                    planner_text_is_tool_candidate = True
+                    continue
+                checker_reason = "retry_tool_help_budget_exhausted"
+                return _finish(
+                    text="I need one more tool call to fetch that plugin's argument schema before retrying.",
+                    status="blocked",
+                    checker_action_value="NEED_USER_INFO",
+                    checker_reason_value=checker_reason,
+                    retry_tool=help_retry_call,
+                    attempted_tool_override=retry_plugin_id or attempted_tool_for_ledger,
                 )
             queued_tool_call = queued
             queued_retry_tool_for_ledger = queued
