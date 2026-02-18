@@ -8,13 +8,15 @@
 
 ## Cerberus Orchestration
 
-Tater now uses **Cerberus**, a closed-loop **Planner -> Doer -> Checker** architecture for tool execution quality:
+Tater now runs on Cerberus — a closed-loop Planner → Doer → Checker architecture designed for reliable tool execution.
 
-- **Planner** chooses one next action (normal response or exactly one tool JSON call).
-- **Doer** validates and executes tools deterministically with runtime platform gating.
-- **Checker** verifies the outcome, then either finalizes, retries one tool call, or asks one short clarification question.
+• Planner selects the next step: either a direct reply or a single tool JSON call.
+• Doer validates and executes that tool deterministically, with strict runtime and platform gating.
+• Checker reviews the result and either finalizes the response, schedules one follow-up tool step (starting the next round), or asks a short clarification question.
 
-This loop is now the default orchestration path across Tater platform handlers so tool behavior stays consistent everywhere.
+Over multiple rounds, Cerberus can use multiple tools — but never more than one per round — keeping behavior structured, predictable, and recoverable.
+
+This loop is now the default orchestration path across all Tater platform handlers, ensuring consistent tool behavior everywhere.
 
 ### Cerberus Runtime Config (WebUI)
 
