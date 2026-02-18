@@ -7,7 +7,6 @@
 ---
 
 ## Cerberus: Tater’s Orchestration Brain
-
 Tater now runs on Cerberus — a closed-loop Planner → Doer → Checker architecture designed for reliable tool execution.
 
 • Planner selects the next step: either a direct reply or a single tool JSON call.
