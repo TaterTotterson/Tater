@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://github.com/user-attachments/assets/47c60b47-e10c-44d6-bdc5-1f9da2479980" alt="Tater AI Assistant" width="300"/>
+  <img src="https://github.com/user-attachments/assets/d15d39af-51fe-40a7-aefe-df6fb9a62e37" alt="Tater AI Assistant" width="300"/>
 </div>
 
 **Tater** is an AI assistant that connects to any OpenAI-compatible LLM, giving you a powerful set of AI-driven tools. It includes a WebUI for setup and private chats, and works across **Discord**, **Telegram**, **IRC**, **Matrix**, **Home Assistant**, **HomeKit**, and even the **OG Xbox via XBMC4Xbox**
