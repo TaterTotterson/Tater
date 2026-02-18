@@ -30,7 +30,6 @@ Available settings:
 - `Doer max tokens`
 - `Tool-repair max tokens`
 - `Over-clarification repair max tokens`
-- `Send-message repair max tokens`
 - `Recovery max tokens`
 - `Max ledger items`
 
