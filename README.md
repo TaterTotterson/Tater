@@ -90,8 +90,8 @@ From the WebUI you can:
 
 When Tater starts:
 
-> Any plugin that was **enabled** in Redis but missing on disk  
-> is automatically re-downloaded from the store.
+- Any plugin that was **enabled** in Redis but missing on disk  
+- is automatically re-downloaded from the store.
 
 No config loss. No manual installs. No volume mapping required.
 
@@ -101,6 +101,8 @@ No config loss. No manual installs. No volume mapping required.
 ---
 
 # Installation
+> **Note**:
+> - Tater currently recommends using qwen3-coder-next, qwen3-next-80b, gpt-oss-120b, qwen3-coder-30b or Gemma3-27b
 
 <img width="100" height="44" alt="unraid_logo_black-339076895" src="https://github.com/user-attachments/assets/87351bed-3321-4a43-924f-fecf2e4e700f" />
 
