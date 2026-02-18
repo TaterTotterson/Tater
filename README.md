@@ -115,8 +115,8 @@ You can install both:
 directly from the Unraid App Store with a one-click template.
 
 Important for Docker/Unraid persistence:
-- Add a path mapping for Agent Lab data: `/app/agent_lab` (container) -> `/mnt/user/appdata/tater/agent_labs` (host example).
-- Without this mapping, Agent Lab plugins/platforms/artifacts can be lost on container rebuilds/updates.
+- Add a path mapping for `/app/agent_lab` (container) -> `/mnt/user/appdata/tater/agent_lab` (host example).
+- Without this mapping, data in `/agent_lab` (logs/downloads/documents/workspace) can be lost on container rebuilds/updates.
 
 ## 🏠 Home Assistant
 
@@ -200,19 +200,19 @@ git clone https://github.com/TaterTotterson/Tater.git
 cd Tater
 ```
 
-### Persist Agent Lab data in `/agent_labs` (recommended)
+### Persist `/agent_lab` data on host storage (recommended)
 
-If you want Agent Lab data to survive repo rebuilds/reinstalls, use a dedicated path and symlink:
+If you want `/agent_lab` data to survive repo rebuilds/reinstalls, use a dedicated path and symlink:
 
 ```bash
-sudo mkdir -p /agent_labs/{plugins,platforms,artifacts,documents,downloads,workspace,logs}
-cp -a agent_lab/. /agent_labs/ 2>/dev/null || true
+sudo mkdir -p /agent_lab/{documents,downloads,workspace,logs}
+cp -a agent_lab/. /agent_lab/ 2>/dev/null || true
 rm -rf agent_lab
-ln -s /agent_labs agent_lab
+ln -s /agent_lab agent_lab
 ```
 
-Note for Agent Lab:
-- If you plan to use Agent Lab, run Tater inside a Python virtual environment so Agent Lab dependencies stay isolated and easy to manage (recommended).
+Note:
+- Run Tater inside a Python virtual environment so dependencies stay isolated and easy to manage (recommended).
   Quickstart:
   ```bash
   python -m venv .venv
@@ -296,7 +296,7 @@ docker run -d --name tater_webui \
   -e LLM_MODEL=gemma3-27b-abliterated \
   -e REDIS_HOST=127.0.0.1 \
   -e REDIS_PORT=6379 \
-  -v /agent_labs:/app/agent_lab \
+  -v /agent_lab:/app/agent_lab \
   ghcr.io/tatertotterson/tater:latest
 ```
 ---
@@ -318,16 +318,16 @@ docker run -d --name tater_webui \
   -e LLM_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxx \
   -e REDIS_HOST=127.0.0.1 \
   -e REDIS_PORT=6379 \
-  -v /agent_labs:/app/agent_lab \
+  -v /agent_lab:/app/agent_lab \
   ghcr.io/tatertotterson/tater:latest
 ```
 Note: When using ChatGPT, leave LLM_PORT blank.  
 Tater will automatically connect using HTTPS without appending a port number.
 
-Tip: The Agent Lab data lives in `/app/agent_lab` inside the container.  
-If you don’t mount it to the host, Agent Lab plugins/platforms/artifacts will be lost when the container is rebuilt or updated.
+Tip: The runtime data lives in `/app/agent_lab` inside the container.  
+If you don’t mount it to the host, `/agent_lab` data can be lost when the container is rebuilt or updated.
 
-Unraid note: add a container path mapping for `/app/agent_lab` to a persistent share (e.g., `/mnt/user/appdata/tater/agent_labs`) so you don’t lose Agent Lab data during container updates.
+Unraid note: add a container path mapping for `/app/agent_lab` to a persistent share (e.g., `/mnt/user/appdata/tater/agent_lab`) so you don’t lose Agent Lab data during container updates.
 Unraid note: also set `TZ` and map `/etc/localtime` + `/etc/timezone` if you want local time inside the container.
 
 ### 3. Access the Web UI

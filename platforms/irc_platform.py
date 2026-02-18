@@ -16,11 +16,8 @@ from helpers import (
 )
 from admin_gate import (
     is_admin_only_plugin,
-    is_agent_lab_creation_tool,
-    is_agent_lab_creation_admin_gated,
     normalize_admin_list,
 )
-from agent_lab_registry import build_agent_registry
 from plugin_result import action_failure
 from plugin_kernel import plugin_supports_platform
 from cerberus import run_cerberus_turn, resolve_agent_limits
@@ -458,10 +455,8 @@ async def on_message(self, mask, event, target, data):
     history = load_irc_history(channel=target)
     messages = history
     platform_preamble = build_system_prompt()
-    merged_registry, merged_enabled, _collisions = build_agent_registry(
-        pr.get_registry_snapshot(),
-        get_plugin_enabled,
-    )
+    merged_registry = dict(pr.get_registry_snapshot() or {})
+    merged_enabled = get_plugin_enabled
 
     try:
         scope_value = f"chan:{target}" if str(target or "").startswith(("#", "&")) else f"pm:{target}"
@@ -501,26 +496,15 @@ async def on_message(self, mask, event, target, data):
 
         def _admin_guard(func_name):
             needs_admin = False
-            creation_guard = False
             if is_admin_only_plugin(func_name):
                 needs_admin = True
-            elif is_agent_lab_creation_tool(func_name) and is_agent_lab_creation_admin_gated(redis_client):
-                needs_admin = True
-                creation_guard = True
 
             if needs_admin and not _irc_admin_allowed(mask.nick):
-                if creation_guard:
-                    msg = (
-                        "Agent Lab plugin/platform creation is restricted to the configured admin user on IRC."
-                        if (_load_irc_settings().get("admin_nick") or "").strip()
-                        else "Agent Lab creation is disabled because no IRC admin user is configured."
-                    )
-                else:
-                    msg = (
-                        "This tool is restricted to the configured admin user on IRC."
-                        if (_load_irc_settings().get("admin_nick") or "").strip()
-                        else "This tool is disabled because no IRC admin user is configured."
-                    )
+                msg = (
+                    "This tool is restricted to the configured admin user on IRC."
+                    if (_load_irc_settings().get("admin_nick") or "").strip()
+                    else "This tool is disabled because no IRC admin user is configured."
+                )
                 return action_failure(
                     code="admin_only",
                     message=msg,

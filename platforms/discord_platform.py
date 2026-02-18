@@ -25,10 +25,7 @@ from helpers import (
 )
 from admin_gate import (
     is_admin_only_plugin,
-    is_agent_lab_creation_tool,
-    is_agent_lab_creation_admin_gated,
 )
-from agent_lab_registry import build_agent_registry
 from plugin_result import action_failure
 from plugin_kernel import plugin_supports_platform, plugin_display_name
 from cerberus import run_cerberus_turn, resolve_agent_limits
@@ -620,10 +617,8 @@ class discord_platform(commands.Bot):
         history = await self.load_history(message.channel.id)
         messages_list = history
         platform_preamble = self.build_system_prompt()
-        merged_registry, merged_enabled, _collisions = build_agent_registry(
-            pr.get_registry_snapshot(),
-            get_plugin_enabled,
-        )
+        merged_registry = dict(pr.get_registry_snapshot() or {})
+        merged_enabled = get_plugin_enabled
 
         async with safe_typing(message.channel):
             try:
@@ -670,28 +665,17 @@ class discord_platform(commands.Bot):
 
                 def _admin_guard(func_name):
                     needs_admin = False
-                    creation_guard = False
                     if is_admin_only_plugin(func_name):
                         needs_admin = True
-                    elif is_agent_lab_creation_tool(func_name) and is_agent_lab_creation_admin_gated(redis_client):
-                        needs_admin = True
-                        creation_guard = True
 
                     if needs_admin and not self._admin_allowed(getattr(message.author, "id", None)):
                         plugin_obj = merged_registry.get(func_name)
                         pretty = plugin_display_name(plugin_obj) if plugin_obj else func_name
-                        if creation_guard:
-                            msg = (
-                                "Agent Lab plugin/platform creation is restricted to the configured admin user on Discord."
-                                if self.admin_user_id
-                                else "Agent Lab creation is disabled because no Discord admin user is configured."
-                            )
-                        else:
-                            msg = (
-                                "This tool is restricted to the configured admin user on Discord."
-                                if self.admin_user_id
-                                else "This tool is disabled because no Discord admin user is configured."
-                            )
+                        msg = (
+                            "This tool is restricted to the configured admin user on Discord."
+                            if self.admin_user_id
+                            else "This tool is disabled because no Discord admin user is configured."
+                        )
                         return action_failure(
                             code="admin_only",
                             message=f"{pretty}: {msg}",

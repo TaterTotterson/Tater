@@ -12,7 +12,6 @@ import redis
 import plugin_registry as pr
 from plugin_base import ToolPlugin
 from plugin_kernel import plugin_supports_platform
-from agent_lab_registry import build_agent_registry
 from helpers import (
     get_llm_client_from_env,
 )
@@ -24,6 +23,11 @@ load_dotenv()
 
 logger = logging.getLogger("ai_task_platform")
 logger.setLevel(logging.INFO)
+
+PLATFORM_SETTINGS = {
+    "category": "AI Task Scheduler Settings",
+    "required": {},
+}
 
 redis_client = redis.Redis(
     host=os.getenv("REDIS_HOST", "127.0.0.1"),
@@ -422,10 +426,8 @@ async def _render_scheduled_message(
         {"role": "user", "content": user_prompt},
     ]
 
-    merged_registry, merged_enabled, _collisions = build_agent_registry(
-        pr.get_registry_snapshot(),
-        get_plugin_enabled,
-    )
+    merged_registry = dict(pr.get_registry_snapshot() or {})
+    merged_enabled = get_plugin_enabled
 
     def _enabled(name: str) -> bool:
         plugin = merged_registry.get(name)

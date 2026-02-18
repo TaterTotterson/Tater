@@ -1,5 +1,6 @@
 # telegram_platform.py
 import asyncio
+import html
 import json
 import logging
 import os
@@ -24,10 +25,7 @@ from helpers import (
 )
 from admin_gate import (
     is_admin_only_plugin,
-    is_agent_lab_creation_tool,
-    is_agent_lab_creation_admin_gated,
 )
-from agent_lab_registry import build_agent_registry
 from plugin_result import action_failure
 from plugin_kernel import plugin_supports_platform
 from cerberus import run_cerberus_turn, resolve_agent_limits
@@ -58,6 +56,9 @@ TELEGRAM_TEXT_LIMIT = 4096
 TELEGRAM_TYPING_PULSE_SECONDS = 4.0
 TELEGRAM_CHAT_LOOKUP_HASH = "tater:telegram:chat_lookup"
 TELEGRAM_BLOB_PREFIX = "tater:blob:telegram"
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
+_MD_FENCED_CODE_RE = re.compile(r"```(?:[A-Za-z0-9_+\-]+)?\n?([\s\S]*?)```")
+_MD_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
 
 PLATFORM_SETTINGS = {
     "category": "Telegram Settings",
@@ -329,6 +330,91 @@ def _message_text(message: Dict[str, Any]) -> str:
     return ""
 
 
+def _telegram_plain_text(text: Any) -> str:
+    out = str(text or "")
+    if not out:
+        return ""
+
+    out = out.replace("\r\n", "\n").replace("\r", "\n")
+
+    # Code fences / inline code -> raw text
+    out = re.sub(r"```(?:[A-Za-z0-9_+\-]+)?\n?([\s\S]*?)```", lambda m: str(m.group(1) or "").strip(), out)
+    out = re.sub(r"`([^`\n]+)`", r"\1", out)
+
+    # Markdown links -> label (url)
+    out = _MD_LINK_RE.sub(lambda m: f"{m.group(1)} ({m.group(2)})", out)
+
+    # Common markdown emphasis markers
+    out = re.sub(r"\*\*([^*\n]+)\*\*", r"\1", out)
+    out = re.sub(r"__([^_\n]+)__", r"\1", out)
+    out = re.sub(r"~~([^~\n]+)~~", r"\1", out)
+    out = re.sub(r"\|\|([^|\n]+)\|\|", r"\1", out)
+    out = re.sub(r"(?<![\w*])\*([^*\n]+)\*(?![\w*])", r"\1", out)
+    out = re.sub(r"(?<![\w_])_([^_\n]+)_(?![\w_])", r"\1", out)
+
+    # Headings/quotes are plain text on Telegram in this integration.
+    out = re.sub(r"(?m)^\s{0,3}#{1,6}\s+", "", out)
+    out = re.sub(r"(?m)^\s*>\s?", "", out)
+
+    out = re.sub(r"[ \t]+\n", "\n", out)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
+
+
+def _telegram_html_text(text: Any) -> str:
+    raw = str(text or "")
+    if not raw.strip():
+        return ""
+    raw = raw.replace("\r\n", "\n").replace("\r", "\n")
+
+    tokens: Dict[str, str] = {}
+    token_idx = 0
+
+    def _token(value: str) -> str:
+        nonlocal token_idx
+        key = f"TGFMTTOKEN{token_idx}TOKEN"
+        token_idx += 1
+        tokens[key] = value
+        return key
+
+    def _code_block_repl(match: re.Match[str]) -> str:
+        code = str(match.group(1) or "").strip("\n")
+        return _token(f"<pre>{html.escape(code)}</pre>")
+
+    raw = _MD_FENCED_CODE_RE.sub(_code_block_repl, raw)
+
+    def _inline_code_repl(match: re.Match[str]) -> str:
+        return _token(f"<code>{html.escape(str(match.group(1) or ''))}</code>")
+
+    raw = _MD_INLINE_CODE_RE.sub(_inline_code_repl, raw)
+
+    def _link_repl(match: re.Match[str]) -> str:
+        label = html.escape(str(match.group(1) or "").strip())
+        url = html.escape(str(match.group(2) or "").strip(), quote=True)
+        if not label or not url:
+            return match.group(0)
+        return _token(f'<a href="{url}">{label}</a>')
+
+    raw = _MD_LINK_RE.sub(_link_repl, raw)
+    out = html.escape(raw)
+
+    # Convert common markdown markers into Telegram HTML tags.
+    out = re.sub(r"\*\*([^\n*][^*\n]*?)\*\*", r"<b>\1</b>", out)
+    out = re.sub(r"__([^_\n]+)__", r"<u>\1</u>", out)
+    out = re.sub(r"~~([^~\n]+)~~", r"<s>\1</s>", out)
+    out = re.sub(r"\|\|([^|\n]+)\|\|", r"<tg-spoiler>\1</tg-spoiler>", out)
+    out = re.sub(r"(?<![\w*])\*([^*\n]+)\*(?![\w*])", r"<i>\1</i>", out)
+    out = re.sub(r"(?<![\w_])_([^_\n]+)_(?![\w_])", r"<i>\1</i>", out)
+    out = re.sub(r"(?m)^\s{0,3}#{1,6}\s+(.+)$", r"<b>\1</b>", out)
+
+    for key, value in tokens.items():
+        out = out.replace(key, value)
+
+    out = re.sub(r"[ \t]+\n", "\n", out)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
+
+
 class _TelegramMessageAdapter:
     class _NoopTyping:
         async def __aenter__(self):
@@ -565,13 +651,27 @@ class TelegramPlatform:
         if not content:
             return
         for idx in range(0, len(content), TELEGRAM_TEXT_LIMIT):
-            chunk = content[idx : idx + TELEGRAM_TEXT_LIMIT]
-            await asyncio.to_thread(
-                self._api_json,
-                "sendMessage",
-                {"chat_id": chat_id, "text": chunk, "disable_web_page_preview": False},
-                20,
-            )
+            raw_chunk = content[idx : idx + TELEGRAM_TEXT_LIMIT]
+            html_chunk = _telegram_html_text(raw_chunk)
+            payload = {
+                "chat_id": chat_id,
+                "text": html_chunk or _telegram_plain_text(raw_chunk),
+                "disable_web_page_preview": False,
+            }
+            if html_chunk:
+                payload["parse_mode"] = "HTML"
+            try:
+                await asyncio.to_thread(self._api_json, "sendMessage", payload, 20)
+            except Exception:
+                fallback = _telegram_plain_text(raw_chunk)
+                if not fallback:
+                    continue
+                await asyncio.to_thread(
+                    self._api_json,
+                    "sendMessage",
+                    {"chat_id": chat_id, "text": fallback, "disable_web_page_preview": False},
+                    20,
+                )
 
     async def _set_message_reaction(self, chat_id: str, message_id: int, emoji: str) -> bool:
         clean_emoji = str(emoji or "").strip()
@@ -656,19 +756,36 @@ class TelegramPlatform:
 
         payload: Dict[str, Any] = {"chat_id": chat_id}
         if caption:
-            payload["caption"] = caption[:1024]
+            caption_html = _telegram_html_text(caption)
+            if caption_html:
+                payload["caption"] = caption_html[:1024]
+                payload["parse_mode"] = "HTML"
+            else:
+                payload["caption"] = _telegram_plain_text(caption)[:1024]
 
         files = {field: (filename, binary, mimetype or "application/octet-stream")}
         try:
             await asyncio.to_thread(self._api_multipart, endpoint, payload, files, 30)
             return True
         except Exception:
+            if payload.get("parse_mode"):
+                fallback_payload = dict(payload)
+                fallback_payload.pop("parse_mode", None)
+                fallback_payload["caption"] = _telegram_plain_text(caption)[:1024]
+                try:
+                    await asyncio.to_thread(self._api_multipart, endpoint, fallback_payload, files, 30)
+                    return True
+                except Exception:
+                    pass
             if endpoint == "sendDocument":
                 return False
 
+        fallback_payload: Dict[str, Any] = {"chat_id": chat_id}
+        if caption:
+            fallback_payload["caption"] = _telegram_plain_text(caption)[:1024]
         files = {"document": (filename, binary, mimetype or "application/octet-stream")}
         try:
-            await asyncio.to_thread(self._api_multipart, "sendDocument", payload, files, 30)
+            await asyncio.to_thread(self._api_multipart, "sendDocument", fallback_payload, files, 30)
             return True
         except Exception:
             return False
@@ -747,6 +864,7 @@ class TelegramPlatform:
         return (
             "You are a Telegram-savvy AI assistant.\n"
             "Keep replies concise and natural for chat.\n"
+            "Telegram supports rich formatting; markdown-style emphasis, links, and code are allowed when helpful.\n"
         )
 
     def _chat_allowed(self, chat_id: str) -> bool:
@@ -934,10 +1052,8 @@ class TelegramPlatform:
         system_prompt = self.build_system_prompt()
         history = self._load_history(chat_id)
         messages = history
-        merged_registry, merged_enabled, _collisions = build_agent_registry(
-            pr.get_registry_snapshot(),
-            _get_plugin_enabled,
-        )
+        merged_registry = dict(pr.get_registry_snapshot() or {})
+        merged_enabled = _get_plugin_enabled
 
         try:
             origin = {
@@ -978,26 +1094,15 @@ class TelegramPlatform:
 
             def _admin_guard(func_name):
                 needs_admin = False
-                creation_guard = False
                 if is_admin_only_plugin(func_name):
                     needs_admin = True
-                elif is_agent_lab_creation_tool(func_name) and is_agent_lab_creation_admin_gated(redis_client):
-                    needs_admin = True
-                    creation_guard = True
 
                 if needs_admin and not self._admin_user_allowed(sender):
-                    if creation_guard:
-                        msg = (
-                            "Agent Lab plugin/platform creation is restricted to the configured admin user on Telegram."
-                            if self.allowed_dm_users
-                            else "Agent Lab creation is disabled because no Telegram admin user is configured."
-                        )
-                    else:
-                        msg = (
-                            "This tool is restricted to the configured admin user on Telegram."
-                            if self.allowed_dm_users
-                            else "This tool is disabled because no Telegram admin user is configured."
-                        )
+                    msg = (
+                        "This tool is restricted to the configured admin user on Telegram."
+                        if self.allowed_dm_users
+                        else "This tool is disabled because no Telegram admin user is configured."
+                    )
                     return action_failure(
                         code="admin_only",
                         message=msg,

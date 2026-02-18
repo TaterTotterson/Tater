@@ -19,7 +19,6 @@ from helpers import (
     get_llm_client_from_env,
 )
 import plugin_registry as pr
-from agent_lab_registry import build_agent_registry
 from cerberus import run_cerberus_turn, resolve_agent_limits
 
 from dotenv import load_dotenv
@@ -987,10 +986,8 @@ async def handle_message(payload: HARequest):
 
     logger.debug(f"[HA Bridge] LLM last role = {messages_list[-1]['role']} (conv_key={conv_key})")
 
-    merged_registry, merged_enabled, _collisions = build_agent_registry(
-        pr.get_registry_snapshot(),
-        get_plugin_enabled,
-    )
+    merged_registry = dict(pr.get_registry_snapshot() or {})
+    merged_enabled = get_plugin_enabled
 
     try:
         origin = {

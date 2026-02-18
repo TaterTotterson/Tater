@@ -1,5 +1,4 @@
 import ast
-import base64
 import codecs
 import csv
 import fnmatch
@@ -32,16 +31,19 @@ from plugin_loader import load_plugins_from_directory
 from plugin_base import ToolPlugin
 from plugin_registry import reload_plugins
 from plugin_settings import get_plugin_enabled
-from vision_settings import get_vision_settings as get_shared_vision_settings
-from notify import dispatch_notification_sync, notifier_supports_attachments
-from notify.queue import ALLOWED_PLATFORMS as NOTIFY_ALLOWED_PLATFORMS
 from notify.queue import normalize_platform as normalize_notify_platform
-from notify.queue import load_default_targets, normalize_origin, resolve_targets
 from conversation_media_refs import load_recent_media_refs, save_media_ref
 
 
 BASE_DIR = Path(__file__).resolve().parent
-AGENT_LAB_DIR = BASE_DIR / "agent_lab"
+_agent_root_env = str(os.getenv("TATER_AGENT_ROOT", "") or "").strip()
+if _agent_root_env:
+    _agent_root_path = Path(_agent_root_env).expanduser()
+    if not _agent_root_path.is_absolute():
+        _agent_root_path = BASE_DIR / _agent_root_path
+else:
+    _agent_root_path = BASE_DIR / "agent_lab"
+AGENT_LAB_DIR = _agent_root_path.resolve()
 AGENT_PLUGINS_DIR = AGENT_LAB_DIR / "plugins"
 AGENT_PLATFORMS_DIR = AGENT_LAB_DIR / "platforms"
 AGENT_ARTIFACTS_DIR = AGENT_LAB_DIR / "artifacts"
@@ -49,8 +51,6 @@ AGENT_DOCUMENTS_DIR = AGENT_LAB_DIR / "documents"
 AGENT_DOWNLOADS_DIR = AGENT_LAB_DIR / "downloads"
 AGENT_WORKSPACE_DIR = AGENT_LAB_DIR / "workspace"
 AGENT_LOGS_DIR = AGENT_LAB_DIR / "logs"
-SKILLS_DIR = BASE_DIR / "skills"
-AGENT_SKILLS_DIR = SKILLS_DIR / "agent_lab"
 AGENT_REQUIREMENTS = AGENT_LAB_DIR / "requirements.txt"
 
 STABLE_PLUGINS_DIR = BASE_DIR / os.getenv("TATER_PLUGIN_DIR", "plugins")
@@ -58,15 +58,6 @@ STABLE_PLATFORMS_DIR = BASE_DIR / "platforms"
 
 _SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
 _SAFE_DEP_RE = re.compile(r"^[A-Za-z0-9_.\\-\\[\\]==<>!~]+$")
-_AGENT_LAB_SHORTCUT_DIRS = {
-    "plugins",
-    "platforms",
-    "documents",
-    "downloads",
-    "workspace",
-    "artifacts",
-    "logs",
-}
 _READ_FILE_MAX_CHARS = int(os.getenv("TATER_READ_FILE_MAX_CHARS", "400000"))
 _READ_PDF_MAX_PAGES = int(os.getenv("TATER_READ_PDF_MAX_PAGES", "120"))
 _READ_DOCX_MAX_TABLE_ROWS = int(os.getenv("TATER_READ_DOCX_MAX_TABLE_ROWS", "300"))
@@ -81,24 +72,6 @@ _SEARCH_MAX_FILE_CHARS = int(os.getenv("TATER_SEARCH_MAX_FILE_CHARS", "200000"))
 _ARCHIVE_LIST_MAX_ENTRIES = int(os.getenv("TATER_ARCHIVE_LIST_MAX_ENTRIES", "1000"))
 _ARCHIVE_EXTRACT_MAX_FILES = int(os.getenv("TATER_ARCHIVE_EXTRACT_MAX_FILES", "1000"))
 _ARCHIVE_EXTRACT_MAX_TOTAL_BYTES = int(os.getenv("TATER_ARCHIVE_EXTRACT_MAX_TOTAL_BYTES", "100000000"))
-_VISION_WEBUI_BLOB_PREFIX = "webui:file:"
-_VISION_MAX_SCAN_LIMIT = int(os.getenv("TATER_VISION_MAX_SCAN_LIMIT", "400"))
-_VISION_MAX_IMAGE_BYTES = int(os.getenv("TATER_VISION_MAX_IMAGE_BYTES", str(12 * 1024 * 1024)))
-_VISION_ALLOWED_MIMETYPES = {
-    "image/png",
-    "image/jpeg",
-    "image/jpg",
-    "image/webp",
-    "image/gif",
-    "image/bmp",
-    "image/tiff",
-}
-_VISION_DEFAULT_PROMPT = (
-    "Describe this image clearly and concisely. Mention important objects, people, actions, "
-    "and any visible text."
-)
-
-_VISION_BLOB_REDIS: Any = None
 
 WEB_SEARCH_API_KEY_REDIS_KEY = "tater:web_search:google_api_key"
 WEB_SEARCH_CX_REDIS_KEY = "tater:web_search:google_cx"
@@ -108,18 +81,12 @@ WEB_SEARCH_MAX_RESULTS = int(os.getenv("TATER_WEB_SEARCH_MAX_RESULTS", "10"))
 WEB_SEARCH_MAX_RESPONSE_BYTES = int(os.getenv("TATER_WEB_SEARCH_MAX_RESPONSE_BYTES", "2000000"))
 WEB_SEARCH_MAX_SNIPPET_CHARS = int(os.getenv("TATER_WEB_SEARCH_MAX_SNIPPET_CHARS", "600"))
 
-SEND_MESSAGE_SETTINGS_KEYS = (
-    "plugin_settings:Send Message",
-    "plugin_settings: Send Message",
-)
-SEND_MESSAGE_HA_API_DEFAULT_KEY = "ENABLE_HA_API_NOTIFICATION"
-SEND_MESSAGE_RECENT_MEDIA_MAX_AGE_SEC = int(
+MEDIA_REF_RECENT_MAX_AGE_SEC = int(
     os.getenv(
         "TATER_SEND_MESSAGE_RECENT_MEDIA_MAX_AGE_SEC",
         os.getenv("TATER_SEND_MESSAGE_LATEST_IMAGE_MAX_AGE_SEC", "300"),
     )
 )
-SEND_MESSAGE_AUTO_MEDIA_MAX_ITEMS = int(os.getenv("TATER_SEND_MESSAGE_AUTO_MEDIA_MAX_ITEMS", "3"))
 
 AI_TASKS_KEY_PREFIX = "reminders:"
 AI_TASKS_DUE_ZSET = "reminders:due"
@@ -214,8 +181,6 @@ def _ensure_dirs() -> None:
         AGENT_DOWNLOADS_DIR,
         AGENT_WORKSPACE_DIR,
         AGENT_LOGS_DIR,
-        AGENT_SKILLS_DIR,
-        SKILLS_DIR,
     ):
         path.mkdir(parents=True, exist_ok=True)
     if not AGENT_REQUIREMENTS.exists():
@@ -242,27 +207,35 @@ def _resolve_safe_path(path: str, allowed_roots: List[Path]) -> Optional[Path]:
     while normalized.startswith("./"):
         normalized = normalized[2:]
 
-    if normalized.startswith("/app/"):
-        app_rel = normalized[len("/app/") :]
-        raw = str(BASE_DIR / app_rel)
+    # Virtual workspace root aliases (agent sees root as /).
+    if normalized in {"download", "downloads"}:
+        normalized = "downloads"
+    elif normalized.startswith("download/"):
+        normalized = "downloads/" + normalized[len("download/") :]
+    elif normalized in {"document", "documents"}:
+        normalized = "documents"
+    elif normalized.startswith("document/"):
+        normalized = "documents/" + normalized[len("document/") :]
+    elif normalized in {"/download", "/downloads"}:
+        normalized = "/downloads"
+    elif normalized.startswith("/download/"):
+        normalized = "/downloads/" + normalized[len("/download/") :]
+    elif normalized in {"/document", "/documents"}:
+        normalized = "/documents"
+    elif normalized.startswith("/document/"):
+        normalized = "/documents/" + normalized[len("/document/") :]
+
+    if normalized in {"/", "/."}:
+        raw = str(AGENT_LAB_DIR)
     elif normalized == "/agent_lab":
         raw = str(AGENT_LAB_DIR)
     elif normalized.startswith("/agent_lab/"):
         suffix = normalized[len("/agent_lab/") :]
         raw = str(AGENT_LAB_DIR / suffix)
     elif normalized.startswith("/"):
-        # Treat absolute shortcut paths like /plugins/... or /documents/...
-        # as agent_lab-relative for Agent Mode ergonomics.
-        abs_rel = normalized[1:]
-        parts = abs_rel.split("/", 1)
-        head = parts[0] if parts else ""
-        if head in _AGENT_LAB_SHORTCUT_DIRS:
-            raw = str(AGENT_LAB_DIR / abs_rel)
+        raw = str(AGENT_LAB_DIR / normalized.lstrip("/"))
     else:
-        parts = normalized.split("/", 1)
-        head = parts[0] if parts else ""
-        if head in _AGENT_LAB_SHORTCUT_DIRS:
-            raw = str(AGENT_LAB_DIR / normalized)
+        raw = str(AGENT_LAB_DIR / normalized)
 
     p = Path(raw)
     if not p.is_absolute():
@@ -278,6 +251,23 @@ def _resolve_safe_path(path: str, allowed_roots: List[Path]) -> Optional[Path]:
         if p == root_resolved or root_resolved in p.parents:
             return p
     return None
+
+
+def _display_workspace_path(path: Any) -> str:
+    raw = str(path or "").strip()
+    if not raw:
+        return ""
+    try:
+        root = AGENT_LAB_DIR.resolve()
+        resolved = Path(raw).resolve()
+        if resolved == root:
+            return "/"
+        if root in resolved.parents:
+            rel = resolved.relative_to(root).as_posix()
+            return f"/{rel}" if rel else "/"
+    except Exception:
+        pass
+    return raw
 
 
 def _coerce_int(value: Any, default: int, min_value: int = 0, max_value: Optional[int] = None) -> int:
@@ -857,20 +847,7 @@ def search_web(
     }
 
 
-def _send_message_boolish(value: Any, default: bool = False) -> bool:
-    if value is None:
-        return bool(default)
-    if isinstance(value, bool):
-        return value
-    text = str(value).strip().lower()
-    if text in {"1", "true", "yes", "y", "on", "enabled"}:
-        return True
-    if text in {"0", "false", "no", "n", "off", "disabled"}:
-        return False
-    return bool(default)
-
-
-def _send_message_normalize_platform(value: Any) -> str:
+def _normalize_media_ref_platform(value: Any) -> str:
     raw = str(value or "").strip().lower()
     if not raw:
         return ""
@@ -882,140 +859,7 @@ def _send_message_normalize_platform(value: Any) -> str:
     return normalize_notify_platform(raw)
 
 
-def _send_message_load_settings() -> Dict[str, Any]:
-    for key in SEND_MESSAGE_SETTINGS_KEYS:
-        try:
-            data = redis_client.hgetall(key) or {}
-        except Exception:
-            data = {}
-        if isinstance(data, dict) and data:
-            return data
-    return {}
-
-
-def _send_message_extract_target_hint(raw: Any) -> str:
-    text = str(raw or "").strip()
-    if not text:
-        return ""
-    for pattern in (r"![^\s]+", r"#[A-Za-z0-9][A-Za-z0-9._:-]*", r"@[A-Za-z0-9_]+"):
-        match = re.search(pattern, text)
-        if match:
-            return match.group(0)
-    text = re.sub(r"^(?:room|channel|chat)\s+", "", text, flags=re.IGNORECASE)
-    text = re.sub(
-        r"\s+(?:in|on)\s+(?:discord|irc|matrix|telegram|home\s*assistant|homeassistant|ntfy|wordpress)\b.*$",
-        "",
-        text,
-        flags=re.IGNORECASE,
-    )
-    return text.strip(" .")
-
-
-def _send_message_coerce_targets(payload: Any) -> Dict[str, Any]:
-    if isinstance(payload, dict):
-        return dict(payload)
-    if isinstance(payload, str):
-        hint = _send_message_extract_target_hint(payload)
-        if hint:
-            return {"channel": hint}
-    return {}
-
-
-def _send_message_clean_attachment_payload(payload: Any) -> List[Dict[str, Any]]:
-    if not isinstance(payload, list):
-        return []
-    out: List[Dict[str, Any]] = []
-    for item in payload:
-        if isinstance(item, dict):
-            out.append(dict(item))
-    return out
-
-
-def _send_message_blob_candidates(*, blob_key: Any, file_id: Any) -> List[str]:
-    candidates: List[str] = []
-    blob = str(blob_key or "").strip()
-    if blob:
-        candidates.append(blob)
-    fid = str(file_id or "").strip()
-    if fid:
-        if fid.startswith(_VISION_WEBUI_BLOB_PREFIX) or fid.startswith("tater:blob:") or fid.startswith("tater:matrix:"):
-            candidates.append(fid)
-        else:
-            candidates.append(f"{_VISION_WEBUI_BLOB_PREFIX}{fid}")
-            candidates.append(fid)
-    unique: List[str] = []
-    seen = set()
-    for key in candidates:
-        if key and key not in seen:
-            seen.add(key)
-            unique.append(key)
-    return unique
-
-
-def _send_message_resolve_blob_key(*, blob_key: Any, file_id: Any) -> str:
-    candidates = _send_message_blob_candidates(blob_key=blob_key, file_id=file_id)
-    if not candidates:
-        return ""
-    client = _get_blob_redis_client()
-    for key in candidates:
-        try:
-            found = client.get(key)
-        except Exception:
-            found = None
-        if found is not None:
-            return key
-    return ""
-
-
-def _send_message_attachment_from_ref(ref: Any, *, default_type: str = "image") -> Optional[Dict[str, Any]]:
-    if not isinstance(ref, dict):
-        return None
-    out: Dict[str, Any] = {}
-    media_type = str(ref.get("type") or default_type).strip().lower()
-    if media_type not in {"image", "audio", "video", "file"}:
-        media_type = default_type if default_type in {"image", "audio", "video", "file"} else "file"
-    out["type"] = media_type
-
-    name = str(ref.get("name") or "").strip()
-    if name:
-        out["name"] = name
-    mimetype = str(ref.get("mimetype") or "").strip()
-    if mimetype:
-        out["mimetype"] = mimetype
-
-    resolved_blob = _send_message_resolve_blob_key(blob_key=ref.get("blob_key"), file_id=ref.get("file_id"))
-    if resolved_blob:
-        out["blob_key"] = resolved_blob
-        return out
-
-    path = str(ref.get("path") or "").strip()
-    if path:
-        out["path"] = path
-        return out
-
-    url = str(ref.get("url") or "").strip()
-    if url:
-        out["url"] = url
-        return out
-    return None
-
-
-def _send_message_build_needs(error_text: str) -> List[str]:
-    text = str(error_text or "").strip().lower()
-    if "missing destination platform" in text:
-        return ["Which platform should I send to? (discord, irc, matrix, telegram, homeassistant, ntfy, wordpress)"]
-    if "missing target channel/room" in text:
-        return ["What room/channel/chat should I send this to?"]
-    if "missing message" in text:
-        return ["What message should I send? You can also include attachments/media."]
-    if "missing ntfy topic" in text:
-        return ["What ntfy topic should I send this to? You can pass targets.topic or targets.channel."]
-    if "missing wordpress settings" in text:
-        return ["WordPress is not configured. Provide wordpress site URL, username, and app password settings."]
-    return []
-
-
-def _send_message_media_ref_is_fresh(ref: Optional[Dict[str, Any]]) -> bool:
+def _media_ref_is_fresh(ref: Optional[Dict[str, Any]]) -> bool:
     if not isinstance(ref, dict):
         return False
     raw_ts = ref.get("updated_at")
@@ -1028,63 +872,10 @@ def _send_message_media_ref_is_fresh(ref: Optional[Dict[str, Any]]) -> bool:
         return True
     if ts <= 0:
         return False
-    max_age = max(0, int(SEND_MESSAGE_RECENT_MEDIA_MAX_AGE_SEC))
+    max_age = max(0, int(MEDIA_REF_RECENT_MAX_AGE_SEC))
     if max_age <= 0:
         return True
     return (time.time() - ts) <= float(max_age)
-
-
-def _send_message_text_refs_recent_media(text: Any) -> bool:
-    s = str(text or "").strip().lower()
-    if not s:
-        return False
-    # Must reference prior context somehow.
-    if not bool(
-        re.search(
-            r"\b(this|that|it|them|those|these|latest|same|above|previous|earlier|here|here's|there|from before)\b",
-            s,
-        )
-    ):
-        return False
-
-    # Must also mention sending/attaching media or use media nouns.
-    return bool(
-        re.search(
-            r"\b(attach|post|send|add|share|upload|include|drop|image|photo|picture|pic|screenshot|logo|attachment|attachments|media|video|audio|music|song|file|files|document|pdf|zip|archive)\b",
-            s,
-        )
-    )
-
-
-def _send_message_requested_media_count(text: Any, *, max_available: int) -> int:
-    if max_available <= 0:
-        return 0
-    s = str(text or "").strip().lower()
-    if not s:
-        return 1
-    if re.search(r"\b(all|everything|all of them|all attachments|all files)\b", s):
-        return min(max_available, max(1, SEND_MESSAGE_AUTO_MEDIA_MAX_ITEMS))
-    if re.search(r"\b(both|two|2)\b", s):
-        return min(max_available, 2)
-    if re.search(r"\b(three|3)\b", s):
-        return min(max_available, 3)
-    return 1
-
-
-def _send_message_media_types_from_text(text: Any) -> List[str]:
-    s = str(text or "").strip().lower()
-    if not s:
-        return []
-    media_types: List[str] = []
-    if re.search(r"\b(image|photo|picture|pic|screenshot|logo)\b", s):
-        media_types.append("image")
-    if re.search(r"\b(video|clip|movie)\b", s):
-        media_types.append("video")
-    if re.search(r"\b(audio|music|song|voice|mp3|wav|flac)\b", s):
-        media_types.append("audio")
-    if re.search(r"\b(file|files|document|documents|pdf|zip|archive|attachment|attachments)\b", s):
-        media_types.append("file")
-    return media_types
 
 
 def _download_file_detect_media(path: Path, content_type: str) -> Tuple[str, str]:
@@ -1110,14 +901,14 @@ def _download_file_detect_media(path: Path, content_type: str) -> Tuple[str, str
     return media_type, mime
 
 
-def _send_message_context_platform_scope(
+def _media_ref_context_platform_scope(
     *,
     platform: Optional[str],
     origin: Optional[Dict[str, Any]],
 ) -> Tuple[str, str]:
     origin_map = dict(origin) if isinstance(origin, dict) else {}
     raw_platform = _as_text(origin_map.get("platform") or platform).strip().lower()
-    ref_platform = _send_message_normalize_platform(raw_platform)
+    ref_platform = _normalize_media_ref_platform(raw_platform)
     if not ref_platform and raw_platform:
         ref_platform = re.sub(r"[^a-z0-9_.:\-]+", "_", raw_platform).strip("_")
     ref_scope = str(
@@ -1137,7 +928,7 @@ def _save_media_ref_for_context(
     platform: Optional[str],
     origin: Optional[Dict[str, Any]],
 ) -> None:
-    ref_platform, ref_scope = _send_message_context_platform_scope(platform=platform, origin=origin)
+    ref_platform, ref_scope = _media_ref_context_platform_scope(platform=platform, origin=origin)
     if not ref_platform or not ref_scope:
         return
     try:
@@ -1158,7 +949,7 @@ def _load_recent_media_refs_for_context(
     limit: int = 8,
     media_types: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
-    ref_platform, ref_scope = _send_message_context_platform_scope(platform=platform, origin=origin)
+    ref_platform, ref_scope = _media_ref_context_platform_scope(platform=platform, origin=origin)
     if not ref_platform or not ref_scope:
         return []
     try:
@@ -1168,41 +959,11 @@ def _load_recent_media_refs_for_context(
             scope=ref_scope,
             limit=max(1, limit),
             media_types=media_types or None,
-            fresh_within_sec=SEND_MESSAGE_RECENT_MEDIA_MAX_AGE_SEC,
+            fresh_within_sec=MEDIA_REF_RECENT_MAX_AGE_SEC,
         )
     except Exception:
         refs = []
-    return [item for item in refs if _send_message_media_ref_is_fresh(item)]
-
-
-def _send_message_select_recent_refs(
-    *,
-    refs: List[Dict[str, Any]],
-    text: str,
-    explicit_use_latest: Optional[bool],
-) -> List[Dict[str, Any]]:
-    if not refs:
-        return []
-
-    requested_types = _send_message_media_types_from_text(text)
-    candidates = refs
-    if requested_types:
-        type_set = set(requested_types)
-        typed = [item for item in refs if str(item.get("type") or "").strip().lower() in type_set]
-        if typed:
-            candidates = typed
-
-    if explicit_use_latest is False:
-        return []
-    if explicit_use_latest is True:
-        count = _send_message_requested_media_count(text, max_available=len(candidates))
-        return candidates[: max(1, count)]
-
-    if text and _send_message_text_refs_recent_media(text):
-        count = _send_message_requested_media_count(text, max_available=len(candidates))
-        return candidates[: max(1, count)]
-
-    return []
+    return [item for item in refs if _media_ref_is_fresh(item)]
 
 
 def _ai_tasks_normalize_channel_targets(dest: str, targets: Dict[str, Any]) -> Dict[str, Any]:
@@ -1532,407 +1293,6 @@ def _ai_tasks_default_title(task_prompt: str, recurrence: Dict[str, Any], interv
     if cadence_prefix:
         return f"{cadence_prefix} AI task"
     return "Scheduled AI task"
-
-
-def ai_tasks(
-    *,
-    message: Any = None,
-    content: Any = None,
-    task_prompt: Any = None,
-    title: Any = None,
-    platform: Any = None,
-    targets: Any = None,
-    when_ts: Any = None,
-    when: Any = None,
-    in_seconds: Any = None,
-    every_seconds: Any = None,
-    in_minutes: Any = None,
-    in_hours: Any = None,
-    every_minutes: Any = None,
-    every_hours: Any = None,
-    priority: Any = None,
-    tags: Any = None,
-    ttl_sec: Any = None,
-    origin: Optional[Dict[str, Any]] = None,
-    channel_id: Any = None,
-    channel: Any = None,
-    guild_id: Any = None,
-    room_id: Any = None,
-    device_service: Any = None,
-    chat_id: Any = None,
-) -> Dict[str, Any]:
-    text = str(message if message is not None else content or "").strip()
-    task_text_raw = str(task_prompt if task_prompt is not None else text or "").strip()
-    task_text = _ai_tasks_clean_task_prompt(task_text_raw)
-    if not task_text:
-        return {"tool": "ai_tasks", "ok": False, "error": "Cannot queue: missing task prompt"}
-    if not text:
-        text = task_text
-
-    destination = _send_message_normalize_platform(platform)
-    origin_map = dict(origin) if isinstance(origin, dict) else {}
-    if not destination:
-        origin_platform = _send_message_normalize_platform(origin_map.get("platform"))
-        if origin_platform in NOTIFY_ALLOWED_PLATFORMS:
-            destination = origin_platform
-    if destination not in NOTIFY_ALLOWED_PLATFORMS:
-        return {
-            "tool": "ai_tasks",
-            "ok": False,
-            "error": "Cannot queue: missing destination platform",
-            "supported_platforms": list(NOTIFY_ALLOWED_PLATFORMS),
-        }
-
-    target_map = _send_message_coerce_targets(targets)
-    for key, value in (
-        ("channel_id", channel_id),
-        ("channel", channel),
-        ("guild_id", guild_id),
-        ("room_id", room_id),
-        ("device_service", device_service),
-        ("chat_id", chat_id),
-    ):
-        if value is not None and key not in target_map:
-            target_map[key] = value
-
-    in_seconds_val = in_seconds
-    if in_seconds_val is None and in_minutes is not None:
-        try:
-            in_seconds_val = float(in_minutes) * 60.0
-        except Exception:
-            in_seconds_val = None
-    if in_seconds_val is None and in_hours is not None:
-        try:
-            in_seconds_val = float(in_hours) * 3600.0
-        except Exception:
-            in_seconds_val = None
-
-    every_seconds_val = every_seconds
-    if every_seconds_val is None and every_minutes is not None:
-        try:
-            every_seconds_val = float(every_minutes) * 60.0
-        except Exception:
-            every_seconds_val = None
-    if every_seconds_val is None and every_hours is not None:
-        try:
-            every_seconds_val = float(every_hours) * 3600.0
-        except Exception:
-            every_seconds_val = None
-
-    try:
-        interval = float(every_seconds_val) if every_seconds_val is not None else 0.0
-    except Exception:
-        interval = 0.0
-    if interval < 0:
-        interval = 0.0
-    timing_seed_text = str(when if when is not None else "").strip() or task_text_raw
-    if interval <= 0:
-        interval = _ai_tasks_infer_interval_from_text(timing_seed_text)
-
-    now = time.time()
-    next_run = _ai_tasks_parse_when(when_ts, when, in_seconds_val)
-    if next_run is None and interval > 0:
-        next_run = _ai_tasks_parse_when(None, timing_seed_text, None)
-    if next_run is None and interval > 0:
-        next_run = now + max(1.0, interval)
-    if next_run is None:
-        return {"tool": "ai_tasks", "ok": False, "error": "Cannot schedule: missing or invalid time"}
-    if next_run < now:
-        next_run = now
-
-    normalized_targets = _ai_tasks_normalize_channel_targets(destination, target_map)
-    defaults = load_default_targets(destination, redis_client)
-    resolved_targets, err = resolve_targets(destination, normalized_targets, origin_map, defaults)
-    if err:
-        return {"tool": "ai_tasks", "ok": False, "error": str(err)}
-
-    recurrence = _ai_tasks_derive_recurrence(
-        when_txt=when,
-        interval=float(interval),
-        next_run_ts=float(next_run),
-        fallback_text=task_text_raw or task_text,
-    )
-    resolved_title = str(title or "").strip() or _ai_tasks_default_title(task_text, recurrence, float(interval))
-
-    reminder_id = str(uuid.uuid4())
-    schedule: Dict[str, Any] = {
-        "next_run_ts": float(next_run),
-        "interval_sec": float(interval),
-        "anchor_ts": float(next_run),
-    }
-    if recurrence:
-        schedule["recurrence"] = recurrence
-
-    reminder = {
-        "id": reminder_id,
-        "created_at": float(now),
-        "platform": destination,
-        "title": resolved_title or None,
-        "message": task_text,
-        "task_prompt": task_text,
-        "targets": resolved_targets or {},
-        "origin": normalize_origin(origin_map),
-        "meta": {
-            "priority": priority,
-            "tags": tags,
-            "ttl_sec": ttl_sec,
-            "source_request": text,
-        },
-        "schedule": schedule,
-    }
-
-    redis_client.set(f"{AI_TASKS_KEY_PREFIX}{reminder_id}", json.dumps(reminder))
-    redis_client.zadd(AI_TASKS_DUE_ZSET, {reminder_id: float(next_run)})
-
-    human = datetime.fromtimestamp(float(next_run)).strftime("%Y-%m-%d %H:%M:%S")
-    recurrence_kind = str((recurrence or {}).get("kind") or "").strip().lower()
-    if interval > 0:
-        if recurrence_kind == "daily_local_time":
-            result_text = f"Recurring AI task scheduled daily (next at {human})."
-        elif recurrence_kind == "weekly_local_time":
-            result_text = f"Recurring AI task scheduled weekly (next at {human})."
-        else:
-            result_text = f"Recurring AI task scheduled every {int(interval)}s (next at {human})."
-    else:
-        result_text = f"AI task scheduled for {human}."
-
-    return {
-        "tool": "ai_tasks",
-        "ok": True,
-        "result": result_text,
-        "platform": destination,
-        "reminder_id": reminder_id,
-        "next_run_ts": float(next_run),
-        "interval_sec": float(interval),
-        "recurrence": recurrence or None,
-        "targets": resolved_targets or {},
-    }
-
-
-def send_message(
-    *,
-    message: Any = None,
-    content: Any = None,
-    title: Any = None,
-    platform: Any = None,
-    targets: Any = None,
-    attachments: Any = None,
-    artifacts: Any = None,
-    media: Any = None,
-    files: Any = None,
-    priority: Any = None,
-    tags: Any = None,
-    ttl_sec: Any = None,
-    origin: Optional[Dict[str, Any]] = None,
-    channel_id: Any = None,
-    channel: Any = None,
-    guild_id: Any = None,
-    room_id: Any = None,
-    room_alias: Any = None,
-    device_service: Any = None,
-    persistent: Any = None,
-    api_notification: Any = None,
-    chat_id: Any = None,
-    blob_key: Any = None,
-    file_id: Any = None,
-    path: Any = None,
-    url: Any = None,
-    name: Any = None,
-    mimetype: Any = None,
-    media_type: Any = None,
-    use_latest_media: Any = None,
-    use_recent_media: Any = None,
-    media_ref: Optional[Dict[str, Any]] = None,
-    media_refs: Any = None,
-    image_ref: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    text = str(message if message is not None else content or "").strip()
-    destination = _send_message_normalize_platform(platform)
-    origin_map = dict(origin) if isinstance(origin, dict) else {}
-
-    if not destination and isinstance(origin_map, dict):
-        origin_platform = _send_message_normalize_platform(origin_map.get("platform"))
-        if origin_platform in NOTIFY_ALLOWED_PLATFORMS:
-            destination = origin_platform
-
-    if destination not in NOTIFY_ALLOWED_PLATFORMS:
-        error = "Cannot queue: missing destination platform"
-        return {
-            "tool": "send_message",
-            "ok": False,
-            "error": error,
-            "needs": _send_message_build_needs(error),
-            "supported_platforms": list(NOTIFY_ALLOWED_PLATFORMS),
-        }
-
-    target_map = _send_message_coerce_targets(targets)
-    for key, value in (
-        ("channel_id", channel_id),
-        ("channel", channel),
-        ("guild_id", guild_id),
-        ("room_id", room_id),
-        ("room_alias", room_alias),
-        ("device_service", device_service),
-        ("persistent", persistent),
-        ("api_notification", api_notification),
-        ("chat_id", chat_id),
-    ):
-        if value is not None and key not in target_map:
-            target_map[key] = value
-
-    payload_attachments: List[Dict[str, Any]] = []
-    for raw in (attachments, artifacts, media, files):
-        payload_attachments.extend(_send_message_clean_attachment_payload(raw))
-
-    single_attachment = _send_message_attachment_from_ref(
-        {
-            "type": media_type,
-            "name": name,
-            "mimetype": mimetype,
-            "blob_key": blob_key,
-            "file_id": file_id,
-            "path": path,
-            "url": url,
-        },
-        default_type="file",
-    )
-    if single_attachment:
-        payload_attachments.append(single_attachment)
-
-    image_ref_attachment = _send_message_attachment_from_ref(image_ref, default_type="image")
-    if image_ref_attachment:
-        payload_attachments.append(image_ref_attachment)
-
-    media_ref_attachment = _send_message_attachment_from_ref(media_ref, default_type="file")
-    if media_ref_attachment:
-        payload_attachments.append(media_ref_attachment)
-    if isinstance(media_refs, list):
-        for item in media_refs:
-            if not isinstance(item, dict):
-                continue
-            item_attachment = _send_message_attachment_from_ref(item, default_type="file")
-            if item_attachment:
-                payload_attachments.append(item_attachment)
-
-    recent_refs_from_origin = origin_map.get("media_refs") if isinstance(origin_map.get("media_refs"), list) else []
-    recent_refs: List[Dict[str, Any]] = [
-        item
-        for item in recent_refs_from_origin
-        if isinstance(item, dict) and _send_message_media_ref_is_fresh(item)
-    ]
-    recent_refs.extend(
-        _load_recent_media_refs_for_context(
-            platform=destination,
-            origin=origin_map,
-            limit=max(6, SEND_MESSAGE_AUTO_MEDIA_MAX_ITEMS * 3),
-        )
-    )
-
-    explicit_use_latest: Optional[bool] = None
-    if use_latest_media is not None:
-        explicit_use_latest = _send_message_boolish(use_latest_media, False)
-    elif use_recent_media is not None:
-        explicit_use_latest = _send_message_boolish(use_recent_media, False)
-
-    if not payload_attachments:
-        selected_refs = _send_message_select_recent_refs(
-            refs=recent_refs,
-            text=text,
-            explicit_use_latest=explicit_use_latest,
-        )
-        if (
-            not selected_refs
-            and explicit_use_latest is not False
-            and not text
-        ):
-            selected_refs = recent_refs[:1]
-        for selected_ref in selected_refs:
-            selected_attachment = _send_message_attachment_from_ref(selected_ref, default_type="file")
-            if selected_attachment:
-                payload_attachments.append(selected_attachment)
-
-    if destination == "homeassistant" and "api_notification" not in target_map:
-        settings = _send_message_load_settings()
-        target_map["api_notification"] = _send_message_boolish(
-            settings.get(SEND_MESSAGE_HA_API_DEFAULT_KEY),
-            True,
-        )
-
-    meta: Dict[str, Any] = {
-        "priority": priority,
-        "tags": tags,
-        "ttl_sec": ttl_sec,
-    }
-
-    if not text and payload_attachments:
-        text = "Attachment"
-    if not text and not payload_attachments:
-        error = "Cannot queue: missing message"
-        return {
-            "tool": "send_message",
-            "ok": False,
-            "error": error,
-            "needs": _send_message_build_needs(error),
-            "platform": destination,
-        }
-
-    try:
-        result_text = dispatch_notification_sync(
-            platform=destination,
-            title=str(title or "").strip() or None,
-            content=text,
-            targets=target_map,
-            origin=origin_map,
-            meta=meta,
-            attachments=payload_attachments,
-        )
-    except Exception as e:
-        return {
-            "tool": "send_message",
-            "ok": False,
-            "error": f"Send failed: {e}",
-            "platform": destination,
-        }
-
-    ok = str(result_text or "").strip().lower().startswith("queued notification for")
-    out: Dict[str, Any] = {
-        "tool": "send_message",
-        "ok": ok,
-        "platform": destination,
-        "result": str(result_text or "").strip(),
-        "targets": target_map,
-        "attachment_count": len(payload_attachments),
-    }
-    if ok and payload_attachments:
-        for item in payload_attachments:
-            if not isinstance(item, dict):
-                continue
-            ref = {
-                "type": _as_text(item.get("type")).strip().lower() or "file",
-                "blob_key": _as_text(item.get("blob_key")).strip() or None,
-                "file_id": _as_text(item.get("file_id")).strip() or None,
-                "path": _as_text(item.get("path")).strip() or None,
-                "url": _as_text(item.get("url")).strip() or None,
-                "name": _as_text(item.get("name")).strip() or "attachment.bin",
-                "mimetype": _as_text(item.get("mimetype")).strip().lower() or "application/octet-stream",
-                "source": "send_message",
-                "updated_at": time.time(),
-            }
-            _save_media_ref_for_context(
-                ref=ref,
-                platform=destination,
-                origin=origin_map,
-            )
-    if payload_attachments and not notifier_supports_attachments(destination):
-        out["attachment_warning"] = (
-            f"{destination} notifications currently ignore attachments; text was sent instead."
-        )
-    if not ok:
-        out["error"] = out["result"] or "Send failed."
-        needs = _send_message_build_needs(out["error"])
-        if needs:
-            out["needs"] = needs
-    return out
 
 
 def read_url(
@@ -2306,7 +1666,7 @@ def download_file(
     if err:
         return {"tool": "download_file", "ok": False, "error": err}
 
-    # Resolve target directory inside agent_lab (default: downloads)
+    # Resolve target directory inside workspace root (default: downloads)
     target_dir = AGENT_LAB_DIR / (subdir or "downloads")
     try:
         target_dir = target_dir.resolve()
@@ -2330,7 +1690,7 @@ def download_file(
     size = 0
     content_type = ""
     try:
-        req = urllib.request.Request(normalized_url, headers={"User-Agent": "Tater-AgentLab/1.0"})
+        req = urllib.request.Request(normalized_url, headers={"User-Agent": "Tater/1.0"})
         with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
             content_type = resp.headers.get("Content-Type", "") or ""
             final_url = resp.geturl() or normalized_url
@@ -2377,7 +1737,7 @@ def download_file(
         "tool": "download_file",
         "ok": True,
         "url": final_url,
-        "path": str(dest),
+        "path": _display_workspace_path(dest),
         "bytes": size,
         "sha256": hasher.hexdigest(),
         "content_type": content_type,
@@ -2386,7 +1746,7 @@ def download_file(
     media_type, detected_mime = _download_file_detect_media(dest, content_type)
     media_ref = {
         "type": media_type,
-        "path": str(dest),
+        "path": _display_workspace_path(dest),
         "name": dest.name,
         "mimetype": detected_mime,
         "source": "download_file",
@@ -2405,7 +1765,7 @@ def download_file(
 
 def read_file(path: str, start: int = 0, max_chars: Optional[int] = None) -> Dict[str, Any]:
     _ensure_dirs()
-    allowed = [AGENT_LAB_DIR, STABLE_PLUGINS_DIR, STABLE_PLATFORMS_DIR, SKILLS_DIR]
+    allowed = [AGENT_LAB_DIR]
     resolved = _resolve_safe_path(path, allowed)
     if not resolved:
         return {"tool": "read_file", "ok": False, "error": "Path not allowed."}
@@ -2418,7 +1778,7 @@ def read_file(path: str, start: int = 0, max_chars: Optional[int] = None) -> Dic
         return {
             "tool": "read_file",
             "ok": True,
-            "path": str(resolved),
+            "path": _display_workspace_path(resolved),
             "content": chunk,
             "source_truncated": source_truncated,
             "truncated": bool(source_truncated or window.get("has_more")),
@@ -2474,7 +1834,7 @@ def search_files(
         return {"tool": "search_files", "ok": False, "error": "query is required."}
 
     max_results_i = _coerce_int(max_results, default=_SEARCH_DEFAULT_MAX_RESULTS, min_value=1, max_value=2000)
-    allow_roots = [AGENT_LAB_DIR, STABLE_PLUGINS_DIR, STABLE_PLATFORMS_DIR, SKILLS_DIR]
+    allow_roots = [AGENT_LAB_DIR]
 
     try:
         targets: List[Path] = []
@@ -2486,7 +1846,7 @@ def search_files(
                 return {"tool": "search_files", "ok": False, "error": "Path not found."}
             targets = [resolved]
         else:
-            targets = [AGENT_DOCUMENTS_DIR, AGENT_WORKSPACE_DIR]
+            targets = [AGENT_DOCUMENTS_DIR, AGENT_DOWNLOADS_DIR, AGENT_WORKSPACE_DIR]
 
         scanned_files = 0
         skipped_files = 0
@@ -2538,7 +1898,7 @@ def search_files(
                 for hit in hits:
                     results.append(
                         {
-                            "path": str(file_path),
+                            "path": _display_workspace_path(file_path),
                             "line": hit["line"],
                             "snippet": hit["snippet"],
                         }
@@ -2559,7 +1919,7 @@ def search_files(
             "scanned_files": scanned_files,
             "matched_files": matched_files,
             "skipped_files": skipped_files,
-            "paths": [str(p) for p in targets],
+            "paths": [_display_workspace_path(p) for p in targets],
             "max_results": max_results_i,
         }
     except Exception as e:
@@ -2590,12 +1950,12 @@ def write_file(
                 return {
                     "tool": "write_file",
                     "ok": False,
-                    "error": "Use create_plugin/create_platform for Agent Lab plugins/platforms.",
+                    "error": "Direct python writes are disabled for plugins/platforms.",
                 }
             return {
                 "tool": "write_file",
                 "ok": False,
-                "error": "Python files are not allowed via write_file. Use create_plugin/create_platform.",
+                "error": "Python files are not allowed via write_file.",
             }
         resolved.parent.mkdir(parents=True, exist_ok=True)
         if content_b64:
@@ -2610,14 +1970,14 @@ def write_file(
             data = content if content is not None else ""
         resolved.write_text(data, encoding="utf-8")
         _log_write("write_file", resolved, len(data.encode("utf-8")))
-        return {"tool": "write_file", "ok": True, "path": str(resolved), "bytes": len(data)}
+        return {"tool": "write_file", "ok": True, "path": _display_workspace_path(resolved), "bytes": len(data)}
     except Exception as e:
         return {"tool": "write_file", "ok": False, "error": str(e)}
 
 
 def list_directory(path: str) -> Dict[str, Any]:
     _ensure_dirs()
-    allowed = [AGENT_LAB_DIR, STABLE_PLUGINS_DIR, STABLE_PLATFORMS_DIR]
+    allowed = [AGENT_LAB_DIR]
     resolved = _resolve_safe_path(path, allowed)
     if not resolved:
         return {"tool": "list_directory", "ok": False, "error": "Path not allowed."}
@@ -2631,7 +1991,7 @@ def list_directory(path: str) -> Dict[str, Any]:
                 dirs.append(item.name)
             else:
                 files.append(item.name)
-        return {"tool": "list_directory", "ok": True, "path": str(resolved), "files": files, "directories": dirs}
+        return {"tool": "list_directory", "ok": True, "path": _display_workspace_path(resolved), "files": files, "directories": dirs}
     except Exception as e:
         return {"tool": "list_directory", "ok": False, "error": str(e)}
 
@@ -2696,7 +2056,7 @@ def list_archive(path: str, max_entries: int = _ARCHIVE_LIST_MAX_ENTRIES) -> Dic
             return {
                 "tool": "list_archive",
                 "ok": True,
-                "path": str(archive_path),
+                "path": _display_workspace_path(archive_path),
                 "format": "7z",
                 "entries": entries,
                 "count": len(entries),
@@ -2725,7 +2085,7 @@ def list_archive(path: str, max_entries: int = _ARCHIVE_LIST_MAX_ENTRIES) -> Dic
             return {
                 "tool": "list_archive",
                 "ok": True,
-                "path": str(archive_path),
+                "path": _display_workspace_path(archive_path),
                 "format": "rar",
                 "entries": entries,
                 "count": len(entries),
@@ -2749,7 +2109,7 @@ def list_archive(path: str, max_entries: int = _ARCHIVE_LIST_MAX_ENTRIES) -> Dic
             return {
                 "tool": "list_archive",
                 "ok": True,
-                "path": str(archive_path),
+                "path": _display_workspace_path(archive_path),
                 "format": "zip",
                 "entries": entries,
                 "count": len(entries),
@@ -2773,7 +2133,7 @@ def list_archive(path: str, max_entries: int = _ARCHIVE_LIST_MAX_ENTRIES) -> Dic
             return {
                 "tool": "list_archive",
                 "ok": True,
-                "path": str(archive_path),
+                "path": _display_workspace_path(archive_path),
                 "format": "tar",
                 "entries": entries,
                 "count": len(entries),
@@ -2884,7 +2244,7 @@ def extract_archive(
                     selected_sizes.append(size)
                     extracted_count += 1
                     total_bytes += size
-                    extracted.append(str(target))
+                    extracted.append(_display_workspace_path(target))
                 if selected_names:
                     zf.extract(path=str(dest_path), targets=selected_names)
                     for target, size in zip(selected_targets, selected_sizes):
@@ -2893,9 +2253,9 @@ def extract_archive(
             return {
                 "tool": "extract_archive",
                 "ok": True,
-                "path": str(archive_path),
+                "path": _display_workspace_path(archive_path),
                 "format": "7z",
-                "destination": str(dest_path),
+                "destination": _display_workspace_path(dest_path),
                 "extracted_count": extracted_count,
                 "extracted": extracted,
                 "skipped_count": len(skipped),
@@ -2942,15 +2302,15 @@ def extract_archive(
                         shutil.copyfileobj(src, dst)
                     total_bytes += size
                     extracted_count += 1
-                    extracted.append(str(target))
+                    extracted.append(_display_workspace_path(target))
                     _log_write("extract_archive", target, size)
 
             return {
                 "tool": "extract_archive",
                 "ok": True,
-                "path": str(archive_path),
+                "path": _display_workspace_path(archive_path),
                 "format": "rar",
-                "destination": str(dest_path),
+                "destination": _display_workspace_path(dest_path),
                 "extracted_count": extracted_count,
                 "extracted": extracted,
                 "skipped_count": len(skipped),
@@ -2988,15 +2348,15 @@ def extract_archive(
                         shutil.copyfileobj(src, dst)
                     total_bytes += int(info.file_size)
                     extracted_count += 1
-                    extracted.append(str(target))
+                    extracted.append(_display_workspace_path(target))
                     _log_write("extract_archive", target, int(info.file_size))
 
             return {
                 "tool": "extract_archive",
                 "ok": True,
-                "path": str(archive_path),
+                "path": _display_workspace_path(archive_path),
                 "format": "zip",
-                "destination": str(dest_path),
+                "destination": _display_workspace_path(dest_path),
                 "extracted_count": extracted_count,
                 "extracted": extracted,
                 "skipped_count": len(skipped),
@@ -3039,15 +2399,15 @@ def extract_archive(
                         shutil.copyfileobj(src, dst)
                     total_bytes += size
                     extracted_count += 1
-                    extracted.append(str(target))
+                    extracted.append(_display_workspace_path(target))
                     _log_write("extract_archive", target, size)
 
             return {
                 "tool": "extract_archive",
                 "ok": True,
-                "path": str(archive_path),
+                "path": _display_workspace_path(archive_path),
                 "format": "tar",
-                "destination": str(dest_path),
+                "destination": _display_workspace_path(dest_path),
                 "extracted_count": extracted_count,
                 "extracted": extracted,
                 "skipped_count": len(skipped),
@@ -3089,7 +2449,7 @@ def delete_file(path: str) -> Dict[str, Any]:
     try:
         resolved.unlink()
         _log_write("delete_file", resolved, 0)
-        return {"tool": "delete_file", "ok": True, "path": str(resolved), "deleted": True}
+        return {"tool": "delete_file", "ok": True, "path": _display_workspace_path(resolved), "deleted": True}
     except Exception as e:
         return {"tool": "delete_file", "ok": False, "error": str(e)}
 
@@ -3160,77 +2520,6 @@ def _extract_declared_dependencies(path: Path) -> List[str]:
                             if isinstance(item, ast.Constant) and isinstance(item.value, str):
                                 deps.append(item.value.strip())
     return [d for d in deps if d]
-
-
-def _validate_platform_source(source: str) -> Tuple[bool, str]:
-    if not source or not str(source).strip():
-        return False, "Missing code for platform."
-    try:
-        tree = ast.parse(source)
-    except Exception as e:
-        return False, f"Syntax error: {e}"
-
-    has_platform = False
-    has_run = False
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == "PLATFORM":
-                    has_platform = True
-        if isinstance(node, ast.FunctionDef) and node.name == "run":
-            has_run = True
-
-    if not has_platform:
-        return False, "Missing PLATFORM dict."
-    if not has_run:
-        return False, "Missing run() function."
-    return True, ""
-
-
-def _validate_plugin_source(source: str) -> Tuple[bool, str]:
-    if not source or not str(source).strip():
-        return False, "Missing code for plugin."
-    try:
-        tree = ast.parse(source)
-    except Exception as e:
-        return False, f"Syntax error: {e}"
-
-    has_plugin_assignment = False
-    plugin_is_dict = False
-    has_toolplugin_class = False
-    has_toolplugin_import = False
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom):
-            if node.module == "plugin_base":
-                for alias in node.names:
-                    if alias.name == "ToolPlugin":
-                        has_toolplugin_import = True
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == "plugin":
-                    has_plugin_assignment = True
-                    if isinstance(node.value, ast.Dict):
-                        plugin_is_dict = True
-        if isinstance(node, ast.ClassDef):
-            for base in node.bases:
-                if isinstance(base, ast.Name) and base.id == "ToolPlugin":
-                    has_toolplugin_class = True
-                elif isinstance(base, ast.Attribute) and base.attr == "ToolPlugin":
-                    has_toolplugin_class = True
-
-    if not has_plugin_assignment:
-        return False, "Missing module-level `plugin` instance."
-    if plugin_is_dict:
-        return False, "`plugin` must be a ToolPlugin instance (not a dict)."
-    if not has_toolplugin_class:
-        return False, "Missing ToolPlugin subclass."
-    if not has_toolplugin_import:
-        return False, "Import ToolPlugin from plugin_base."
-    action_failure_issues = _action_failure_call_issues(tree)
-    if action_failure_issues:
-        return False, "; ".join(action_failure_issues)
-    return True, ""
 
 
 def _action_failure_call_issues(tree: ast.AST) -> List[str]:
@@ -3497,7 +2786,7 @@ def validate_plugin(name: str, auto_install: bool = True) -> Dict[str, Any]:
             "tool": "validate_plugin",
             "ok": False,
             "error": f"Syntax error: {e}",
-            "path": str(path),
+            "path": _display_workspace_path(path),
         }
         _store_validation("plugin", name, report)
         return report
@@ -3508,7 +2797,7 @@ def validate_plugin(name: str, auto_install: bool = True) -> Dict[str, Any]:
             "tool": "validate_plugin",
             "ok": False,
             "error": "; ".join(action_failure_issues),
-            "path": str(path),
+            "path": _display_workspace_path(path),
             "missing_fields": ["action_failure_signature"],
             "warnings": action_failure_issues,
         }
@@ -3530,7 +2819,7 @@ def validate_plugin(name: str, auto_install: bool = True) -> Dict[str, Any]:
             "tool": "validate_plugin",
             "ok": False,
             "error": "Import failed.",
-            "path": str(path),
+            "path": _display_workspace_path(path),
             "missing_dependencies": missing_deps,
             "installed_dependencies": installed_deps,
             "install_errors": install_errors,
@@ -3568,7 +2857,7 @@ def validate_plugin(name: str, auto_install: bool = True) -> Dict[str, Any]:
             if declared_name != name:
                 missing.append("name")
                 warnings.append(
-                    f"name must match filename id '{name}' to load reliably in Agent Lab."
+                    f"name must match filename id '{name}' to load reliably."
                 )
         explicit_wait_prompt = None
         try:
@@ -3610,7 +2899,7 @@ def validate_plugin(name: str, auto_install: bool = True) -> Dict[str, Any]:
         "tool": "validate_plugin",
         "ok": ok,
         "name": name,
-        "path": str(path),
+        "path": _display_workspace_path(path),
         "missing_fields": sorted(set(missing)),
         "declared_dependencies": declared_deps,
         "missing_dependencies": missing_deps,
@@ -3638,7 +2927,7 @@ def test_plugin(name: str, platform: Optional[str] = None, auto_install: bool = 
     path: Optional[Path] = None
     validation: Optional[Dict[str, Any]] = None
     if agent_path.exists():
-        source_kind = "agent_lab"
+        source_kind = "workspace"
         path = agent_path
         validation = validate_plugin(name, auto_install=auto_install)
         if not validation.get("ok"):
@@ -3647,7 +2936,7 @@ def test_plugin(name: str, platform: Optional[str] = None, auto_install: bool = 
                 "ok": False,
                 "name": name,
                 "source": source_kind,
-                "path": str(path),
+                "path": _display_workspace_path(path),
                 "static_tested": True,
                 "live_tested": False,
                 "error": "Validation failed.",
@@ -3667,7 +2956,7 @@ def test_plugin(name: str, platform: Optional[str] = None, auto_install: bool = 
             "ok": False,
             "name": name,
             "source": source_kind,
-            "path": str(path),
+            "path": _display_workspace_path(path),
             "static_tested": True,
             "live_tested": False,
             "error": "Import failed.",
@@ -3681,7 +2970,7 @@ def test_plugin(name: str, platform: Optional[str] = None, auto_install: bool = 
             "ok": False,
             "name": name,
             "source": source_kind,
-            "path": str(path),
+            "path": _display_workspace_path(path),
             "static_tested": True,
             "live_tested": False,
             "error": "Missing module-level ToolPlugin instance `plugin`.",
@@ -3705,7 +2994,7 @@ def test_plugin(name: str, platform: Optional[str] = None, auto_install: bool = 
             "ok": False,
             "name": name,
             "source": source_kind,
-            "path": str(path),
+            "path": _display_workspace_path(path),
             "static_tested": True,
             "live_tested": False,
             "error": "Plugin does not declare any supported platforms.",
@@ -3762,7 +3051,7 @@ def test_plugin(name: str, platform: Optional[str] = None, auto_install: bool = 
         "ok": ok,
         "name": name,
         "source": source_kind,
-        "path": str(path),
+        "path": _display_workspace_path(path),
         "platform_tested": requested_platform,
         "supported_platforms": supported_platforms,
         "handler_name": handler_name,
@@ -3783,55 +3072,6 @@ def test_plugin(name: str, platform: Optional[str] = None, auto_install: bool = 
     }
 
 
-def create_plugin(
-    name: str,
-    code: Optional[str] = None,
-    *,
-    code_lines: Optional[List[str]] = None,
-    overwrite: bool = False,
-) -> Dict[str, Any]:
-    _ensure_dirs()
-    if not _SAFE_NAME_RE.fullmatch(name or ""):
-        return {"tool": "create_plugin", "ok": False, "error": "Invalid plugin name."}
-    path = _exp_plugin_path(name)
-    if path.exists() and not _coerce_bool(overwrite, default=False):
-        return {
-            "tool": "create_plugin",
-            "ok": False,
-            "error": f"Plugin '{name}' already exists.",
-            "error_code": "already_exists",
-            "name": name,
-            "path": str(path),
-            "overwrite_required": True,
-            "needs": [f"Plugin `{name}` already exists. Overwrite it? (yes/no)"],
-        }
-    try:
-        if isinstance(code_lines, list):
-            for idx, line in enumerate(code_lines):
-                if isinstance(line, str) and ("\n" in line or "\r" in line):
-                    return {
-                        "tool": "create_plugin",
-                        "ok": False,
-                        "error": "code_lines entries must be single-line strings (no embedded newlines).",
-                    }
-            payload = "\n".join(str(x) for x in code_lines)
-        else:
-            payload = code or ""
-
-        ok, err = _validate_plugin_source(payload)
-        if not ok:
-            return {"tool": "create_plugin", "ok": False, "error": err}
-
-        path.write_text(payload, encoding="utf-8")
-        _log_write("create_plugin", path, len(payload.encode("utf-8")))
-    except Exception as e:
-        return {"tool": "create_plugin", "ok": False, "error": str(e)}
-
-    report = validate_plugin(name)
-    report["tool"] = "create_plugin"
-    return report
-
-
 def promote_plugin(name: str, confirm: Optional[bool] = None, delete_source: bool = False) -> Dict[str, Any]:
     _ensure_dirs()
     if not confirm:
@@ -3845,7 +3085,7 @@ def promote_plugin(name: str, confirm: Optional[bool] = None, delete_source: boo
         return {"tool": "promote_plugin", "ok": False, "error": "Invalid plugin name."}
     src = _exp_plugin_path(name)
     if not src.exists():
-        return {"tool": "promote_plugin", "ok": False, "error": "Agent Lab plugin not found."}
+        return {"tool": "promote_plugin", "ok": False, "error": "Plugin not found."}
     dest = STABLE_PLUGINS_DIR / f"{name}.py"
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -3854,7 +3094,7 @@ def promote_plugin(name: str, confirm: Optional[bool] = None, delete_source: boo
         _log_write("promote_plugin", dest, dest.stat().st_size if dest.exists() else 0)
         if delete_source:
             src.unlink()
-        return {"tool": "promote_plugin", "ok": True, "path": str(dest)}
+        return {"tool": "promote_plugin", "ok": True, "path": _display_workspace_path(dest)}
     except Exception as e:
         return {"tool": "promote_plugin", "ok": False, "error": str(e)}
 
@@ -3879,7 +3119,7 @@ def validate_platform(name: str, auto_install: bool = True) -> Dict[str, Any]:
             "tool": "validate_platform",
             "ok": False,
             "error": f"Syntax error: {e}",
-            "path": str(path),
+            "path": _display_workspace_path(path),
         }
         _store_validation("platform", name, report)
         return report
@@ -3899,7 +3139,7 @@ def validate_platform(name: str, auto_install: bool = True) -> Dict[str, Any]:
             "tool": "validate_platform",
             "ok": False,
             "error": "Import failed.",
-            "path": str(path),
+            "path": _display_workspace_path(path),
             "missing_dependencies": missing_deps,
             "installed_dependencies": installed_deps,
             "install_errors": install_errors,
@@ -3920,7 +3160,7 @@ def validate_platform(name: str, auto_install: bool = True) -> Dict[str, Any]:
         "tool": "validate_platform",
         "ok": ok,
         "name": name,
-        "path": str(path),
+        "path": _display_workspace_path(path),
         "missing_fields": missing,
         "declared_dependencies": declared_deps,
         "missing_dependencies": missing_deps,
@@ -3928,55 +3168,6 @@ def validate_platform(name: str, auto_install: bool = True) -> Dict[str, Any]:
         "install_errors": install_errors,
     }
     _store_validation("platform", name, report)
-    return report
-
-
-def create_platform(
-    name: str,
-    code: Optional[str] = None,
-    *,
-    code_lines: Optional[List[str]] = None,
-    overwrite: bool = False,
-) -> Dict[str, Any]:
-    _ensure_dirs()
-    if not _SAFE_NAME_RE.fullmatch(name or ""):
-        return {"tool": "create_platform", "ok": False, "error": "Invalid platform name."}
-    path = _exp_platform_path(name)
-    if path.exists() and not _coerce_bool(overwrite, default=False):
-        return {
-            "tool": "create_platform",
-            "ok": False,
-            "error": f"Platform '{name}' already exists.",
-            "error_code": "already_exists",
-            "name": name,
-            "path": str(path),
-            "overwrite_required": True,
-            "needs": [f"Platform `{name}` already exists. Overwrite it? (yes/no)"],
-        }
-    try:
-        if isinstance(code_lines, list):
-            for idx, line in enumerate(code_lines):
-                if isinstance(line, str) and ("\n" in line or "\r" in line):
-                    return {
-                        "tool": "create_platform",
-                        "ok": False,
-                        "error": "code_lines entries must be single-line strings (no embedded newlines).",
-                    }
-            payload = "\n".join(str(x) for x in code_lines)
-        else:
-            payload = code or ""
-
-        ok, err = _validate_platform_source(payload)
-        if not ok:
-            return {"tool": "create_platform", "ok": False, "error": err}
-
-        path.write_text(payload, encoding="utf-8")
-        _log_write("create_platform", path, len(payload.encode("utf-8")))
-    except Exception as e:
-        return {"tool": "create_platform", "ok": False, "error": str(e)}
-
-    report = validate_platform(name)
-    report["tool"] = "create_platform"
     return report
 
 
@@ -4002,548 +3193,6 @@ def _origin_value(origin: Optional[Dict[str, Any]], *keys: str) -> str:
         if text:
             return text
     return ""
-
-
-def _get_blob_redis_client():
-    global _VISION_BLOB_REDIS
-    if _VISION_BLOB_REDIS is None:
-        host = os.getenv("REDIS_HOST", "127.0.0.1")
-        port = _coerce_int(os.getenv("REDIS_PORT", "6379"), default=6379, min_value=1, max_value=65535)
-        _VISION_BLOB_REDIS = redis.Redis(host=host, port=port, db=0, decode_responses=False)
-    return _VISION_BLOB_REDIS
-
-
-def _vision_decode_base64(data: str) -> Optional[bytes]:
-    text = _as_text(data).strip()
-    if not text:
-        return None
-    if text.startswith("data:") and "," in text:
-        text = text.split(",", 1)[1]
-    padding = len(text) % 4
-    if padding:
-        text += "=" * (4 - padding)
-    try:
-        decoded = base64.b64decode(text)
-    except Exception:
-        return None
-    return bytes(decoded) if decoded else None
-
-
-def _vision_mimetype_allowed(value: Any) -> bool:
-    mimetype = _as_text(value).strip().lower()
-    if not mimetype:
-        return False
-    return mimetype in _VISION_ALLOWED_MIMETYPES
-
-
-def _vision_ext_from_mime(value: Any) -> str:
-    mimetype = _as_text(value).strip().lower()
-    if mimetype in {"image/jpeg", "image/jpg"}:
-        return "jpg"
-    if mimetype == "image/webp":
-        return "webp"
-    if mimetype == "image/gif":
-        return "gif"
-    if mimetype == "image/bmp":
-        return "bmp"
-    if mimetype == "image/tiff":
-        return "tiff"
-    return "png"
-
-
-def _vision_to_data_url(image_bytes: bytes, filename: str) -> str:
-    mime = mimetypes.guess_type(filename or "")[0] or "image/png"
-    b64 = base64.b64encode(image_bytes).decode("utf-8")
-    return f"data:{mime};base64,{b64}"
-
-
-def _vision_normalize_name(name: Any, mimetype: Any) -> str:
-    cleaned = _as_text(name).strip()
-    if cleaned:
-        return cleaned
-    if mimetype:
-        return f"image.{_vision_ext_from_mime(mimetype)}"
-    return "image.png"
-
-
-def _vision_blob_candidates(*, blob_key: Any, file_id: Any) -> List[str]:
-    candidates: List[str] = []
-    blob = _as_text(blob_key).strip()
-    if blob:
-        candidates.append(blob)
-    fid = _as_text(file_id).strip()
-    if fid:
-        if fid.startswith(_VISION_WEBUI_BLOB_PREFIX) or fid.startswith("tater:blob:") or fid.startswith("tater:matrix:"):
-            candidates.append(fid)
-        else:
-            candidates.append(f"{_VISION_WEBUI_BLOB_PREFIX}{fid}")
-            candidates.append(fid)
-    unique: List[str] = []
-    seen = set()
-    for key in candidates:
-        if key and key not in seen:
-            unique.append(key)
-            seen.add(key)
-    return unique
-
-
-def _vision_load_blob_bytes(*, blob_key: Any = None, file_id: Any = None) -> Optional[bytes]:
-    keys = _vision_blob_candidates(blob_key=blob_key, file_id=file_id)
-    if not keys:
-        return None
-    client = _get_blob_redis_client()
-    for key in keys:
-        try:
-            raw = client.get(key)
-        except Exception:
-            raw = None
-        if raw is None:
-            continue
-        if isinstance(raw, (bytes, bytearray)):
-            return bytes(raw)
-        if isinstance(raw, str):
-            return raw.encode("utf-8", errors="replace")
-    return None
-
-
-def _vision_extract_image_from_payload(payload: Any) -> Tuple[Optional[bytes], Optional[str], Optional[str]]:
-    if payload is None:
-        return None, None, None
-
-    if isinstance(payload, dict) and payload.get("marker") == "plugin_response":
-        return _vision_extract_image_from_payload(payload.get("content"))
-
-    if isinstance(payload, list):
-        for item in payload:
-            image_bytes, name, mimetype = _vision_extract_image_from_payload(item)
-            if image_bytes:
-                return image_bytes, name, mimetype
-        return None, None, None
-
-    if not isinstance(payload, dict):
-        return None, None, None
-
-    media_type = _as_text(payload.get("type")).strip().lower()
-    mimetype = _as_text(payload.get("mimetype")).strip().lower()
-    if not mimetype:
-        guess_name = _as_text(payload.get("name")).strip()
-        mimetype = _as_text(mimetypes.guess_type(guess_name)[0]).strip().lower()
-
-    if media_type in {"image", "file"}:
-        if media_type == "file" and (not mimetype or not mimetype.startswith("image/")):
-            return None, None, None
-        if mimetype and not _vision_mimetype_allowed(mimetype):
-            return None, None, None
-
-        name = _vision_normalize_name(payload.get("name"), mimetype)
-        raw: Optional[bytes] = None
-
-        if isinstance(payload.get("bytes"), (bytes, bytearray)):
-            raw = bytes(payload["bytes"])
-        elif isinstance(payload.get("data"), (bytes, bytearray)):
-            raw = bytes(payload["data"])
-        elif isinstance(payload.get("data"), str):
-            raw = _vision_decode_base64(payload.get("data") or "")
-
-        if raw is None:
-            raw = _vision_load_blob_bytes(blob_key=payload.get("blob_key"), file_id=payload.get("id"))
-
-        if raw:
-            return raw, name, mimetype or _as_text(mimetypes.guess_type(name)[0]).strip().lower() or "image/png"
-        return None, None, None
-
-    if payload.get("blob_key") or payload.get("id"):
-        raw = _vision_load_blob_bytes(blob_key=payload.get("blob_key"), file_id=payload.get("id"))
-        if raw:
-            name = _vision_normalize_name(payload.get("name"), mimetype)
-            mm = mimetype or _as_text(mimetypes.guess_type(name)[0]).strip().lower() or "image/png"
-            if mm.startswith("image/"):
-                return raw, name, mm
-    return None, None, None
-
-
-def _vision_read_local_image(path: Any) -> Tuple[Optional[bytes], Optional[str], Optional[str], Optional[str]]:
-    raw_path = _as_text(path).strip()
-    if not raw_path:
-        return None, None, None, "Local image path is empty."
-
-    allowed_roots = [
-        BASE_DIR,
-        AGENT_LAB_DIR,
-        AGENT_DOWNLOADS_DIR,
-        AGENT_WORKSPACE_DIR,
-    ]
-    resolved = _resolve_safe_path(raw_path, allowed_roots)
-    if resolved is None:
-        return None, None, None, "Path is outside allowed workspace roots."
-    if not resolved.exists() or not resolved.is_file():
-        return None, None, None, f"Local image path does not exist: {resolved}"
-
-    try:
-        data = resolved.read_bytes()
-    except Exception as e:
-        return None, None, None, f"Failed to read local image: {e}"
-    if not data:
-        return None, None, None, "Local image file is empty."
-    if len(data) > _VISION_MAX_IMAGE_BYTES:
-        return (
-            None,
-            None,
-            None,
-            f"Local image is too large ({len(data)} bytes). Max supported size is {_VISION_MAX_IMAGE_BYTES} bytes.",
-        )
-
-    name = resolved.name or "image.png"
-    mimetype = _as_text(mimetypes.guess_type(name)[0]).strip().lower() or "image/png"
-    return data, name, mimetype, None
-
-
-def _vision_read_remote_image(url: Any) -> Tuple[Optional[bytes], Optional[str], Optional[str], Optional[str]]:
-    raw_url = _normalize_url_input(url)
-    if not raw_url:
-        return None, None, None, "Image URL is empty."
-    blocked = _validate_url(raw_url)
-    if blocked:
-        return None, None, None, blocked
-    try:
-        req = urllib.request.Request(raw_url, headers={"User-Agent": "Tater/1.0"})
-        with urllib.request.urlopen(req, timeout=30) as response:
-            content_type = _as_text(response.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-            data = response.read(_VISION_MAX_IMAGE_BYTES + 1)
-            final_url = response.geturl() or raw_url
-    except urllib.error.HTTPError as e:
-        return None, None, None, f"Image URL request failed with HTTP {e.code}."
-    except Exception as e:
-        return None, None, None, f"Image URL request failed: {e}"
-
-    if not data:
-        return None, None, None, "Image URL returned no data."
-    if len(data) > _VISION_MAX_IMAGE_BYTES:
-        return (
-            None,
-            None,
-            None,
-            f"Image URL payload is too large ({len(data)} bytes). Max supported size is {_VISION_MAX_IMAGE_BYTES} bytes.",
-        )
-
-    parsed = urllib.parse.urlparse(final_url)
-    guessed_name = Path(parsed.path).name if parsed.path else ""
-    if not guessed_name:
-        guessed_name = "image.png"
-    guessed_mime = _as_text(mimetypes.guess_type(guessed_name)[0]).strip().lower()
-    mimetype = content_type or guessed_mime or "image/png"
-    if content_type and not content_type.startswith("image/"):
-        return None, None, None, "URL did not return an image content type. Use inspect_webpage first."
-    if not content_type and (not guessed_mime or not guessed_mime.startswith("image/")):
-        return None, None, None, "URL does not look like a direct image. Use inspect_webpage first."
-    if mimetype and mimetype.startswith("image/") and not _vision_mimetype_allowed(mimetype):
-        return None, None, None, f"Unsupported image MIME type from URL: {mimetype}"
-    return data, guessed_name, mimetype, None
-
-
-def _vision_load_explicit_ref(
-    *,
-    path: Any,
-    url: Any,
-    blob_key: Any,
-    file_id: Any,
-    media_ref: Optional[Dict[str, Any]],
-    media_refs: Optional[List[Dict[str, Any]]],
-    image_ref: Optional[Dict[str, Any]],
-    platform: Optional[str],
-    origin: Optional[Dict[str, Any]],
-    request_text: str = "",
-) -> Tuple[Optional[bytes], Optional[str], Optional[str], Optional[str], Optional[str]]:
-    def _from_ref(ref: Dict[str, Any], source_name: str):
-        ref_type = _as_text(ref.get("type")).strip().lower()
-        ref_path = _as_text(ref.get("path")).strip()
-        ref_url = _as_text(ref.get("url")).strip()
-        ref_blob = _as_text(ref.get("blob_key")).strip()
-        ref_file = _as_text(ref.get("file_id")).strip()
-        ref_name = _as_text(ref.get("name")).strip()
-        ref_mimetype = _as_text(ref.get("mimetype")).strip().lower()
-
-        if ref_type and ref_type != "image" and not ref_mimetype.startswith("image/"):
-            return None, None, None, source_name, "Reference is not an image."
-
-        if ref_path:
-            data, name, mimetype, err = _vision_read_local_image(ref_path)
-            if err:
-                return None, None, None, source_name, err
-            return data, (ref_name or name), (ref_mimetype or mimetype), source_name, None
-        if ref_url:
-            data, name, mimetype, err = _vision_read_remote_image(ref_url)
-            if err:
-                return None, None, None, source_name, err
-            return data, (ref_name or name), (ref_mimetype or mimetype), source_name, None
-        if ref_blob or ref_file:
-            data = _vision_load_blob_bytes(blob_key=ref_blob, file_id=ref_file)
-            if not data:
-                return None, None, None, source_name, "Image blob could not be loaded from Redis."
-            name = ref_name or _vision_normalize_name("", ref_mimetype)
-            mimetype = ref_mimetype or _as_text(mimetypes.guess_type(name)[0]).strip().lower() or "image/png"
-            if mimetype and mimetype.startswith("image/") and not _vision_mimetype_allowed(mimetype):
-                return None, None, None, source_name, f"Unsupported image MIME type: {mimetype}"
-            return data, name, mimetype, source_name, None
-        return None, None, None, source_name, "Image reference is missing path/url/blob_key/file_id."
-
-    explicit_path = _as_text(path).strip()
-    if explicit_path:
-        data, name, mimetype, err = _vision_read_local_image(explicit_path)
-        return data, name, mimetype, "path", err
-
-    explicit_url = _as_text(url).strip()
-    if explicit_url:
-        data, name, mimetype, err = _vision_read_remote_image(explicit_url)
-        return data, name, mimetype, "url", err
-
-    explicit_blob = _as_text(blob_key).strip()
-    explicit_file_id = _as_text(file_id).strip()
-    if explicit_blob or explicit_file_id:
-        data = _vision_load_blob_bytes(blob_key=explicit_blob, file_id=explicit_file_id)
-        if not data:
-            return None, None, None, "blob", "Image blob could not be loaded from Redis."
-        name = _vision_normalize_name("", "")
-        mimetype = "image/png"
-        return data, name, mimetype, "blob", None
-
-    if isinstance(image_ref, dict):
-        data, name, mimetype, source_name, err = _from_ref(image_ref, "image_ref")
-        if data or err:
-            return data, name, mimetype, source_name, err
-
-    if isinstance(media_ref, dict):
-        data, name, mimetype, source_name, err = _from_ref(media_ref, "media_ref")
-        if data:
-            return data, name, mimetype, source_name, None
-
-    request_lower = _as_text(request_text).strip().lower()
-    preferred_index = 0
-    if re.search(r"\b(3|third|3rd)\b", request_lower):
-        preferred_index = 2
-    elif re.search(r"\b(2|second|2nd)\b", request_lower):
-        preferred_index = 1
-
-    candidate_refs: List[Tuple[str, Dict[str, Any]]] = []
-
-    if isinstance(media_refs, list):
-        for idx, item in enumerate(media_refs):
-            if isinstance(item, dict):
-                candidate_refs.append((f"media_refs[{idx}]", item))
-
-    if isinstance(origin, dict):
-        for idx, item in enumerate(origin.get("media_refs") or []):
-            if isinstance(item, dict):
-                candidate_refs.append((f"origin.media_refs[{idx}]", item))
-
-    recent_refs = _load_recent_media_refs_for_context(
-        platform=platform,
-        origin=origin,
-        limit=8,
-        media_types=["image"],
-    )
-    for idx, item in enumerate(recent_refs):
-        if isinstance(item, dict):
-            candidate_refs.append((f"recent_media_refs[{idx}]", item))
-
-    image_candidates: List[Tuple[str, Dict[str, Any]]] = []
-    for source_name, ref in candidate_refs:
-        ref_type = _as_text(ref.get("type")).strip().lower()
-        ref_mimetype = _as_text(ref.get("mimetype")).strip().lower()
-        if ref_type == "image" or ref_mimetype.startswith("image/"):
-            image_candidates.append((source_name, ref))
-
-    if image_candidates:
-        chosen_idx = min(max(preferred_index, 0), len(image_candidates) - 1)
-        chosen_source, chosen_ref = image_candidates[chosen_idx]
-        data, name, mimetype, source_name, err = _from_ref(chosen_ref, chosen_source)
-        if data or err:
-            return data, name, mimetype, source_name, err
-
-    return None, None, None, None, None
-
-
-def _vision_extract_text(content: Any) -> str:
-    if isinstance(content, str):
-        return content.strip()
-    if isinstance(content, list):
-        chunks: List[str] = []
-        for item in content:
-            if isinstance(item, str) and item.strip():
-                chunks.append(item.strip())
-            elif isinstance(item, dict):
-                if item.get("type") == "text" and _as_text(item.get("text")).strip():
-                    chunks.append(_as_text(item.get("text")).strip())
-                elif _as_text(item.get("content")).strip():
-                    chunks.append(_as_text(item.get("content")).strip())
-        return "\n".join(chunks).strip()
-    if isinstance(content, dict):
-        for key in ("text", "content", "value"):
-            value = content.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-    return _as_text(content).strip()
-
-
-def _vision_call_openai_compatible(
-    *,
-    api_base: str,
-    model: str,
-    api_key: Optional[str],
-    image_bytes: bytes,
-    filename: str,
-    prompt: str,
-) -> Tuple[Optional[str], Optional[str]]:
-    url = f"{_as_text(api_base).strip().rstrip('/')}/v1/chat/completions"
-    payload = {
-        "model": _as_text(model).strip(),
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": _as_text(prompt).strip() or _VISION_DEFAULT_PROMPT},
-                    {"type": "image_url", "image_url": {"url": _vision_to_data_url(image_bytes, filename)}},
-                ],
-            }
-        ],
-        "temperature": 0.2,
-    }
-    headers = {"Content-Type": "application/json"}
-    if _as_text(api_key).strip():
-        headers["Authorization"] = f"Bearer {_as_text(api_key).strip()}"
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=90) as response:
-            raw = response.read(2_000_000)
-    except urllib.error.HTTPError as e:
-        detail = ""
-        try:
-            detail = _as_text(e.read(400)).strip()
-        except Exception:
-            detail = ""
-        if detail:
-            return None, f"Vision API request failed with HTTP {e.code}: {detail}"
-        return None, f"Vision API request failed with HTTP {e.code}."
-    except Exception as e:
-        return None, f"Vision API request failed: {e}"
-    try:
-        parsed = json.loads(_as_text(raw))
-    except Exception:
-        return None, "Vision API returned non-JSON output."
-    choices = parsed.get("choices")
-    if not isinstance(choices, list) or not choices:
-        return None, "Vision API response did not include choices."
-    message = choices[0].get("message") if isinstance(choices[0], dict) else None
-    content = message.get("content") if isinstance(message, dict) else None
-    text = _vision_extract_text(content)
-    if not text:
-        return None, "Vision API returned an empty description."
-    return text, None
-
-
-def vision_describer(
-    prompt: str = "",
-    path: Optional[str] = None,
-    url: Optional[str] = None,
-    blob_key: Optional[str] = None,
-    file_id: Optional[str] = None,
-    media_ref: Optional[Dict[str, Any]] = None,
-    media_refs: Optional[List[Dict[str, Any]]] = None,
-    image_ref: Optional[Dict[str, Any]] = None,
-    history_key: Optional[str] = None,
-    platform: Optional[str] = None,
-    origin: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    image_bytes, filename, mimetype, source_name, resolve_err = _vision_load_explicit_ref(
-        path=path,
-        url=url,
-        blob_key=blob_key,
-        file_id=file_id,
-        media_ref=media_ref,
-        media_refs=media_refs,
-        image_ref=image_ref,
-        platform=platform,
-        origin=origin,
-        request_text=(
-            _as_text(origin.get("request_text"))
-            if isinstance(origin, dict) and _as_text(origin.get("request_text")).strip()
-            else _as_text(prompt)
-        ),
-    )
-    if resolve_err:
-        return {
-            "tool": "vision_describer",
-            "ok": False,
-            "error": resolve_err,
-            "needs": [
-                "Provide one explicit image source: `path`, `url`, `blob_key`, `file_id`, `media_ref`, `image_ref`, or attach/upload an image in this chat."
-            ],
-        }
-    if not image_bytes:
-        return {
-            "tool": "vision_describer",
-            "ok": False,
-            "error": "No image source was provided.",
-            "needs": [
-                "Provide one explicit image source: `path`, `url`, `blob_key`, `file_id`, `media_ref`, `image_ref`, or attach/upload an image in this chat."
-            ],
-        }
-
-    if len(image_bytes) > _VISION_MAX_IMAGE_BYTES:
-        return {
-            "tool": "vision_describer",
-            "ok": False,
-            "error": (
-                f"Latest image is too large ({len(image_bytes)} bytes). "
-                f"Max supported size is {_VISION_MAX_IMAGE_BYTES} bytes."
-            ),
-            "filename": filename or "image.png",
-        }
-
-    settings = get_shared_vision_settings()
-    api_base = _as_text(settings.get("api_base")).strip().rstrip("/")
-    model = _as_text(settings.get("model")).strip()
-    api_key = _as_text(settings.get("api_key")).strip()
-    if not api_base or not model:
-        return {
-            "tool": "vision_describer",
-            "ok": False,
-            "error": "Vision settings are incomplete. Configure Vision API base and model in Settings.",
-            "needs": ["Set Vision API base URL and model in Settings."],
-        }
-
-    final_prompt = _as_text(prompt).strip() or _VISION_DEFAULT_PROMPT
-    image_name = _vision_normalize_name(filename, mimetype)
-    description, err = _vision_call_openai_compatible(
-        api_base=api_base,
-        model=model,
-        api_key=api_key,
-        image_bytes=image_bytes,
-        filename=image_name,
-        prompt=final_prompt,
-    )
-    if err:
-        return {
-            "tool": "vision_describer",
-            "ok": False,
-            "error": err,
-            "filename": image_name,
-            "model": model,
-            "source": source_name or "unknown",
-        }
-
-    return {
-        "tool": "vision_describer",
-        "ok": True,
-        "description": description or "",
-        "text": description or "",
-        "filename": image_name,
-        "mimetype": mimetype or _as_text(mimetypes.guess_type(image_name)[0]).strip() or "image/png",
-        "model": model,
-        "source": source_name or "unknown",
-        "history_key_ignored": _as_text(history_key).strip() or None,
-    }
 
 
 def _normalize_key_segment(value: Any, *, default: str) -> str:
@@ -5433,7 +4082,7 @@ def write_workspace_note(content: str) -> Dict[str, Any]:
         data = content or ""
         path.write_text(data, encoding="utf-8")
         _log_write("write_workspace_note", path, len(data.encode("utf-8")))
-        return {"tool": "write_workspace_note", "ok": True, "path": str(path)}
+        return {"tool": "write_workspace_note", "ok": True, "path": _display_workspace_path(path)}
     except Exception as e:
         return {"tool": "write_workspace_note", "ok": False, "error": str(e)}
 

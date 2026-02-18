@@ -20,16 +20,13 @@ TOOL_NAME_ALIASES = {
     "google_cse_search": "search_web",
     "inspect_page": "inspect_webpage",
     "inspect_website": "inspect_webpage",
-    "describe_image": "vision_describer",
-    "describe_latest_image": "vision_describer",
-    "vision_describe": "vision_describer",
-    "vision_describe_image": "vision_describer",
+    "describe_image": "image_describe",
+    "describe_latest_image": "image_describe",
 }
 
 _KERNEL_TOOL_PRIORITY = [
     "search_web",
     "inspect_webpage",
-    "send_message",
     "read_url",
     "download_file",
     "read_file",
@@ -41,7 +38,6 @@ _KERNEL_TOOL_PRIORITY = [
     "memory_set",
     "memory_search",
     "list_workspace",
-    "vision_describer",
     "get_plugin_help",
 ]
 
@@ -56,18 +52,15 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
     "delete_file": "delete a local file",
     "read_url": "fetch and read webpage text",
     "inspect_webpage": "inspect webpage structure, links, and image candidates",
-    "send_message": "send cross-platform messages/media via notifier delivery",
     "download_file": "download files from URLs",
     "list_archive": "inspect archive entries",
-    "extract_archive": "extract archives to workspace",
+    "extract_archive": "extract archives to a target directory",
     "list_stable_plugins": "list stable built-in plugins",
     "list_stable_platforms": "list stable built-in platforms",
     "inspect_plugin": "inspect plugin metadata and methods",
-    "validate_plugin": "validate an Agent Lab plugin file",
+    "validate_plugin": "validate a plugin file",
     "test_plugin": "run plugin test harness",
-    "validate_platform": "validate an Agent Lab platform file",
-    "create_plugin": "create/update an Agent Lab plugin",
-    "create_platform": "create/update an Agent Lab platform",
+    "validate_platform": "validate a platform file",
     "write_workspace_note": "append a workspace note",
     "list_workspace": "list workspace notes",
     "memory_get": "read saved memory",
@@ -78,10 +71,7 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
     "memory_search": "search saved memory",
     "truth_get_last": "get latest truth snapshot",
     "truth_list": "list truth snapshots",
-    "vision_describer": "describe an image from explicit source",
 }
-
-CREATION_MAX_FAILURES = 2
 
 
 def _canonical_tool_name(name: str) -> str:
@@ -101,32 +91,6 @@ def _looks_like_invalid_tool_call_text(text: str) -> bool:
     if s.startswith("{") and ("function" in lower or "tool" in lower):
         return True
     return False
-
-
-def _normalize_creation_payload_args(func: str, args: Dict[str, Any]) -> Dict[str, Any]:
-    out = dict(args or {})
-    if str(func or "").strip() not in {"create_plugin", "create_platform"}:
-        return out
-
-    if isinstance(out.get("code_lines"), list):
-        normalized_lines: List[str] = []
-        for line in (out.get("code_lines") or []):
-            text = str(line)
-            if "\r" in text:
-                text = text.replace("\r", "")
-            if "\n" in text:
-                normalized_lines.extend(text.split("\n"))
-            else:
-                normalized_lines.append(text)
-        out["code_lines"] = normalized_lines
-        out.pop("code", None)
-        return out
-
-    if out.get("code") is not None:
-        text = str(out.get("code") or "")
-        out["code_lines"] = text.splitlines()
-        out.pop("code", None)
-    return out
 
 
 def _tool_purpose(plugin: Any) -> str:
@@ -232,11 +196,11 @@ def build_compact_system_prompt(platform: str, extra_instructions: str = "") -> 
         f"Current platform: {platform}.\n"
         "Use only tool ids from the tool index message.\n"
         "Prefer kernel tools first for generic tasks (web/file/download/search/memory/workspace).\n"
-        "Use plugin tools for platform/service actions (devices and service APIs). `send_message` is a kernel tool.\n"
+        "Use plugin tools for platform/service actions (devices and service APIs).\n"
         "If both can solve the request, choose the kernel tool.\n"
         "If a tool matches user intent, call it directly.\n"
         "If args are unclear, call get_plugin_help(plugin_id) once.\n"
-        "For create_plugin/create_platform requests, do not use get_plugin_help; read /app/skills/agent_lab/plugin_authoring.md or /app/skills/agent_lab/platform_authoring.md and /app/skills/agent_lab/references/*, and use search_files to locate code.\n"
+        "File tools are rooted at workspace '/'; use /downloads and /documents for normal files.\n"
         "Tool call format must be strict JSON only:\n"
         "{\"function\":\"tool_id\",\"arguments\":{...}}\n"
         "No markdown fences or extra commentary around tool calls.\n"
@@ -291,7 +255,6 @@ async def run_tool_loop(
     last_tool_result: Optional[Dict[str, Any]] = None
     tool_calls: List[Dict[str, Any]] = []
     format_fix_used = False
-    creation_failures = 0
 
     for _ in range(max_steps):
         _upsert_tool_index_message(
@@ -345,8 +308,6 @@ async def run_tool_loop(
         args = parsed.get("arguments", {}) or {}
         if not func:
             return {"text": text, "tool_calls": tool_calls, "last_tool_result": last_tool_result}
-        if func in {"create_plugin", "create_platform"}:
-            args = _normalize_creation_payload_args(func, args)
 
         tool_calls.append({"function": func, "arguments": args})
 
@@ -363,27 +324,6 @@ async def run_tool_loop(
             messages.append(_tool_call_message(func, args))
             messages.append(_tool_result_message(func, meta_payload))
             last_tool_result = {"function": func, "result": meta_payload}
-            if func in {"create_plugin", "create_platform"} and isinstance(meta_payload, dict):
-                if bool(meta_payload.get("ok")):
-                    creation_failures = 0
-                else:
-                    creation_failures += 1
-                    if creation_failures >= CREATION_MAX_FAILURES:
-                        needs = meta_payload.get("needs") if isinstance(meta_payload, dict) else None
-                        prompt = ""
-                        if isinstance(needs, list):
-                            prompt = "\n".join(str(x).strip() for x in needs if str(x).strip())
-                        if not prompt:
-                            kind = "plugin" if func == "create_plugin" else "platform"
-                            prompt = (
-                                f"Creation kept failing for {kind}. "
-                                "Tell me exactly what it should do, required inputs/outputs, and target platform(s)."
-                            )
-                        return {
-                            "text": prompt,
-                            "tool_calls": tool_calls,
-                            "last_tool_result": last_tool_result,
-                        }
             continue
 
         plugin_exec = await execute_plugin_call(

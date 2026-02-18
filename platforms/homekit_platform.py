@@ -11,7 +11,6 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Header
 from dotenv import load_dotenv
 import plugin_registry as pr
-from agent_lab_registry import build_agent_registry
 from helpers import (
     get_llm_client_from_env,
     build_llm_host_from_env,
@@ -256,10 +255,8 @@ async def handle_message(payload: Dict[str, Any], x_tater_token: Optional[str] =
 
     await _save_message(session_id, "user", text_in, history_max, session_ttl)
 
-    merged_registry, merged_enabled, _collisions = build_agent_registry(
-        pr.get_registry_snapshot(),
-        _get_plugin_enabled,
-    )
+    merged_registry = dict(pr.get_registry_snapshot() or {})
+    merged_enabled = _get_plugin_enabled
 
     try:
         origin = {

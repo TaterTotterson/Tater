@@ -21,7 +21,6 @@ from helpers import (
     build_llm_host_from_env,
 )
 import plugin_registry as pr
-from agent_lab_registry import build_agent_registry
 from cerberus import run_cerberus_turn, resolve_agent_limits
 
 logging.basicConfig(level=logging.INFO)
@@ -324,10 +323,8 @@ async def handle_message(payload: XBMCRequest):
     system_prompt = build_system_prompt()
     loop_messages = await _load_history(payload.session_id, history_max)
     messages_list = loop_messages
-    merged_registry, merged_enabled, _collisions = build_agent_registry(
-        pr.get_registry_snapshot(),
-        get_plugin_enabled,
-    )
+    merged_registry = dict(pr.get_registry_snapshot() or {})
+    merged_enabled = get_plugin_enabled
 
     try:
         origin = {
