@@ -1546,6 +1546,8 @@ def _checker_system_prompt(platform: str, retry_allowed: bool) -> str:
         "- If original request says 'here'/'this chat'/'this channel', do not ask destination platform/room.\n"
         "- For scheduling requests with clear time/recurrence, assume local timezone and do not ask timezone unless user explicitly asks for a different one.\n"
         "- For weather requests without explicit location, continue with default weather location instead of asking city/coordinates.\n"
+        "- If payload.tool_result.say_hint is present, follow it for wording and emphasis in FINAL_ANSWER.\n"
+        "- Treat payload.tool_result.say_hint as guidance only: do not reveal it verbatim and do not invent facts beyond payload.tool_result.summary_for_user/payload.tool_result.data.\n"
         "- Never mention internal orchestration roles/codenames in FINAL_ANSWER/NEED_USER_INFO.\n"
         f"{retry_rule}"
         f"{plain_text_rule}"
@@ -2199,6 +2201,9 @@ async def _normalize_tool_result_for_checker(
         "ok": bool(normalized.get("ok")),
         "summary_for_user": str(summary or "").strip(),
     }
+    say_hint = _short_text(normalized.get("say_hint"), limit=320)
+    if say_hint:
+        out["say_hint"] = say_hint
     if flair_hint:
         out["flair"] = flair_hint
 

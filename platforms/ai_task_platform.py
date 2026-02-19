@@ -3,7 +3,7 @@ import json
 import logging
 import os
 import time
-import math
+from bisect import bisect_left
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -211,14 +211,6 @@ def _as_int(value: Any, default: int = 0) -> int:
     except Exception:
         return int(default)
 
-
-def _as_float(value: Any, default: float = 0.0) -> float:
-    try:
-        return float(value)
-    except Exception:
-        return float(default)
-
-
 def _normalize_weekdays(raw: Any) -> List[int]:
     if not isinstance(raw, list):
         return []
@@ -227,6 +219,19 @@ def _normalize_weekdays(raw: Any) -> List[int]:
         day = _as_int(item, -1)
         if 0 <= day <= 6:
             out.append(day)
+    if not out:
+        return []
+    return sorted(set(out))
+
+
+def _normalize_clock_values(raw: Any, *, minimum: int, maximum: int) -> List[int]:
+    if not isinstance(raw, list):
+        return []
+    out: List[int] = []
+    for item in raw:
+        value = _as_int(item, -1)
+        if minimum <= value <= maximum:
+            out.append(value)
     if not out:
         return []
     return sorted(set(out))
@@ -258,18 +263,65 @@ def _next_local_time_occurrence(
     return candidate.timestamp()
 
 
-def _next_run_for_schedule(schedule: Dict[str, Any], now_ts: float) -> float:
-    interval = _as_float(schedule.get("interval_sec"), 0.0)
-    if interval <= 0:
+def _next_cron_occurrence(
+    *,
+    now_ts: float,
+    hours: Any,
+    minutes: Any,
+    seconds: Any,
+    weekdays: Any = None,
+) -> float:
+    valid_hours = _normalize_clock_values(hours, minimum=0, maximum=23)
+    valid_minutes = _normalize_clock_values(minutes, minimum=0, maximum=59)
+    valid_seconds = _normalize_clock_values(seconds, minimum=0, maximum=59)
+    valid_weekdays = _normalize_weekdays(weekdays or [])
+    if not valid_hours or not valid_minutes or not valid_seconds:
         return 0.0
 
+    base = datetime.fromtimestamp(float(now_ts)).astimezone().replace(microsecond=0) + timedelta(seconds=1)
+    day_start = base.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    for day_offset in range(0, 370):
+        day = day_start + timedelta(days=day_offset)
+        if valid_weekdays and day.weekday() not in valid_weekdays:
+            continue
+
+        h_start = base.hour if day_offset == 0 else 0
+        h_idx = bisect_left(valid_hours, h_start)
+        while h_idx < len(valid_hours):
+            hour = valid_hours[h_idx]
+            m_start = base.minute if (day_offset == 0 and hour == base.hour) else 0
+            m_idx = bisect_left(valid_minutes, m_start)
+            while m_idx < len(valid_minutes):
+                minute = valid_minutes[m_idx]
+                s_start = base.second if (day_offset == 0 and hour == base.hour and minute == base.minute) else 0
+                s_idx = bisect_left(valid_seconds, s_start)
+                if s_idx < len(valid_seconds):
+                    second = valid_seconds[s_idx]
+                    candidate = day.replace(hour=hour, minute=minute, second=second, microsecond=0)
+                    if candidate.timestamp() > now_ts:
+                        return candidate.timestamp()
+                m_idx += 1
+            h_idx += 1
+    return 0.0
+
+
+def _next_run_for_schedule(schedule: Dict[str, Any], now_ts: float) -> float:
     recurrence = schedule.get("recurrence") if isinstance(schedule.get("recurrence"), dict) else {}
     recurrence_kind = str(recurrence.get("kind") or "").strip().lower()
+    if recurrence_kind == "cron_simple":
+        return _next_cron_occurrence(
+            now_ts=now_ts,
+            hours=recurrence.get("hours"),
+            minutes=recurrence.get("minutes"),
+            seconds=recurrence.get("seconds"),
+            weekdays=recurrence.get("weekdays"),
+        )
     if recurrence_kind in {"daily_local_time", "weekly_local_time"}:
         hour = _as_int(recurrence.get("hour"), 0)
         minute = _as_int(recurrence.get("minute"), 0)
         second = _as_int(recurrence.get("second"), 0)
-        weekdays = recurrence.get("weekdays") if recurrence_kind == "weekly_local_time" else recurrence.get("weekdays")
+        weekdays = recurrence.get("weekdays") if recurrence_kind == "weekly_local_time" else None
         return _next_local_time_occurrence(
             now_ts=now_ts,
             hour=hour,
@@ -277,20 +329,7 @@ def _next_run_for_schedule(schedule: Dict[str, Any], now_ts: float) -> float:
             second=second,
             weekdays=weekdays if isinstance(weekdays, list) else None,
         )
-
-    # Fallback recurring schedule: preserve phase and avoid restart drift.
-    # Example: if due at 06:00 daily and process restarts at 21:00, next remains 06:00 next day.
-    prev_next = _as_float(schedule.get("next_run_ts"), 0.0)
-    anchor = _as_float(schedule.get("anchor_ts"), 0.0)
-    base = prev_next if prev_next > 0 else anchor
-    if base <= 0:
-        base = now_ts
-
-    if now_ts < base:
-        return base
-
-    steps = int(math.floor((now_ts - base) / interval)) + 1
-    return base + (interval * float(max(1, steps)))
+    return 0.0
 
 
 def _is_media_dict(item: Any) -> bool:
@@ -568,30 +607,12 @@ def run(stop_event: Optional[object] = None):
             except Exception as e:
                 logger.error(f"[AI Tasks] Failed to enqueue reminder {reminder_id}: {e}")
 
-            interval = 0.0
-            try:
-                interval = float(schedule.get("interval_sec") or 0.0)
-            except Exception:
-                interval = 0.0
-
-            if interval > 0:
-                now_ts = time.time()
-                old_next = _as_float(schedule.get("next_run_ts"), 0.0)
-                old_anchor = _as_float(schedule.get("anchor_ts"), 0.0)
-                next_run = _next_run_for_schedule(schedule, now_ts)
-                if next_run <= now_ts:
-                    next_run = now_ts + max(1.0, interval)
-
-                schedule["next_run_ts"] = next_run
-                if old_anchor > 0:
-                    schedule["anchor_ts"] = old_anchor
-                elif old_next > 0:
-                    schedule["anchor_ts"] = old_next
-                else:
-                    schedule["anchor_ts"] = float(due_ts)
+            next_run = _next_run_for_schedule(schedule, time.time())
+            if next_run > 0:
+                schedule["next_run_ts"] = float(next_run)
                 reminder["schedule"] = schedule
                 _save_reminder(reminder_id, reminder)
-                redis_client.zadd(REMINDER_DUE_ZSET, {reminder_id: next_run})
+                redis_client.zadd(REMINDER_DUE_ZSET, {reminder_id: float(next_run)})
             else:
                 _delete_reminder(reminder_id)
 

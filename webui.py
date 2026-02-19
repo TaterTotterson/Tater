@@ -3419,8 +3419,29 @@ def render_ai_tasks_page(*, embedded: bool = False):
             if valid_days:
                 return f"Weekly ({', '.join(valid_days)}) at {time_part}"
             return f"Weekly at {time_part}"
+        if kind == "cron_simple":
+            hours = recurrence.get("hours") if isinstance(recurrence.get("hours"), list) else []
+            minutes = recurrence.get("minutes") if isinstance(recurrence.get("minutes"), list) else []
+            seconds = recurrence.get("seconds") if isinstance(recurrence.get("seconds"), list) else []
+            if len(hours) == 24 and len(minutes) == 60 and len(seconds) == 60 and not valid_days:
+                return "Every second"
+            if len(hours) == 24 and len(minutes) == 60 and seconds == [0] and not valid_days:
+                return "Every minute"
+            if len(hours) == 24 and minutes == [0] and seconds == [0] and not valid_days:
+                return "Every hour"
+            if len(hours) == 1 and len(minutes) == 1 and len(seconds) == 1:
+                one_time = f"{int(hours[0]):02d}:{int(minutes[0]):02d}" + (
+                    f":{int(seconds[0]):02d}" if int(seconds[0]) else ""
+                )
+                if valid_days:
+                    return f"Weekly ({', '.join(valid_days)}) at {one_time}"
+                return f"Daily at {one_time}"
+            cron_text = str(recurrence.get("cron") or "").strip()
+            if cron_text:
+                return f"Cron ({cron_text})"
+            return "Cron schedule"
         if interval > 0:
-            return f"Every {int(interval)}s"
+            return f"Legacy interval ({int(interval)}s)"
         return "One-shot"
 
     for row in sorted(schedules, key=_sort_key):
