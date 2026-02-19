@@ -84,8 +84,8 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
 
 ASCII_ONLY_PLATFORMS = {"irc", "homeassistant", "homekit", "xbmc"}
 DEFAULT_CLARIFICATION = "Could you clarify exactly what you want me to do next?"
-DEFAULT_MAX_ROUNDS = 1
-DEFAULT_MAX_TOOL_CALLS = 1
+DEFAULT_MAX_ROUNDS = 6
+DEFAULT_MAX_TOOL_CALLS = 6
 DEFAULT_MAX_LEDGER_ITEMS = 500
 DEFAULT_PLANNER_MAX_TOKENS = 1100
 DEFAULT_CHECKER_MAX_TOKENS = 850
@@ -109,6 +109,8 @@ AGENT_STATE_KEY_PREFIX = "tater:cerberus:state:"
 DEFAULT_AGENT_STATE_TTL_SECONDS = 7 * 24 * 60 * 60
 AGENT_STATE_TTL_SECONDS = DEFAULT_AGENT_STATE_TTL_SECONDS
 CERBERUS_LEDGER_SCHEMA_VERSION = "2"
+MULTI_ACTION_MIN_BUDGET = 4
+MULTI_ACTION_MAX_BUDGET = 12
 
 _PLATFORM_DISPLAY = {
     "webui": "WebUI",
@@ -730,6 +732,54 @@ def resolve_agent_limits(
         else _coerce_non_negative_int(max_tool_calls, stored_tool_calls)
     )
     return effective_rounds, effective_tool_calls
+
+
+def _estimated_requested_action_count(text: str) -> int:
+    normalized = " ".join(str(text or "").replace("&", " and ").strip().lower().split())
+    if not normalized:
+        return 1
+    connector_hits = len(
+        re.findall(
+            r"\b(?:and then|and also|as well as|plus|also|then|along with|in addition to)\b",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+    )
+    connector_hits += len(
+        re.findall(
+            r"\band\s+(?:turn|set|tell|show|get|give|send|play|open|search|check|list|run|create|add|remove|delete|summarize|draw|post|message|dm|notify|remind|schedule|start|stop|restart|reboot|fetch|find|read|write|update)\b",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+    )
+    comma_hits = len(re.findall(r",\s*(?:and|then|also)\b", normalized, flags=re.IGNORECASE))
+    clause_hits = len([part for part in re.split(r"\s*[;]\s*", normalized) if part.strip()])
+    estimated = 1 + connector_hits + comma_hits
+    if clause_hits > 1:
+        estimated = max(estimated, clause_hits)
+    return max(1, min(MULTI_ACTION_MAX_BUDGET, estimated))
+
+
+def _expand_limits_for_compound_request(
+    *,
+    max_rounds: int,
+    max_tool_calls: int,
+    request_text: str,
+) -> tuple[int, int]:
+    estimated_actions = _estimated_requested_action_count(request_text)
+    if estimated_actions <= 1:
+        return max_rounds, max_tool_calls
+    target_budget = min(
+        MULTI_ACTION_MAX_BUDGET,
+        max(MULTI_ACTION_MIN_BUDGET, estimated_actions + 1),
+    )
+    expanded_rounds = max_rounds
+    expanded_tool_calls = max_tool_calls
+    if expanded_rounds > 0:
+        expanded_rounds = max(expanded_rounds, target_budget)
+    if expanded_tool_calls > 0:
+        expanded_tool_calls = max(expanded_tool_calls, target_budget)
+    return expanded_rounds, expanded_tool_calls
 
 
 def _canonical_tool_name(name: str) -> str:
@@ -1394,18 +1444,20 @@ def _planner_system_prompt(platform: str) -> str:
         f"You are {first} {last}, a {_platform_label(platform)}-savvy AI assistant.\n"
         f"{personality_block}"
         f"Current platform: {platform}\n"
-        "Choose exactly one next action for this turn.\n"
+        "Choose exactly one next action for this planning step.\n"
         "Output either:\n"
         "1) A normal assistant response (no tool call), OR\n"
         "2) Exactly ONE strict JSON object: {\"function\":\"tool_id\",\"arguments\":{...}}\n"
         "Rules:\n"
         "- The latest user message is authoritative; use earlier history only for explicit references.\n"
+        "- For compound requests with multiple actionable parts, complete all requested parts in this same turn by chaining one tool call per round.\n"
+        "- Do not stop after one successful tool call if explicit requested actions remain unfinished.\n"
         "- Use only tool ids from the enabled tool index.\n"
         "- Use argument keys exactly as listed for that tool in the enabled tool index; do not invent argument keys.\n"
         "- If plugin arguments are unclear, call get_plugin_help first, then issue the plugin tool call.\n"
         "- For local file/code/workspace tasks in general, use search_files to locate targets and read_file to inspect them before acting; do not guess paths or filenames.\n"
         "- File tools are rooted at workspace '/'; use /downloads and /documents for normal files.\n"
-        "- Never output multiple tool calls or markdown fences around tool JSON.\n"
+        "- Never output multiple tool calls in a single response, and never use markdown fences around tool JSON.\n"
         "- Prefer action over clarification; ask only when a required value is truly missing and cannot be safely assumed.\n"
         "- Never ask what platform this chat is on; it is already known.\n"
         "- If a plugin explicitly requires the full/exact user request text in a specific argument, include that full text verbatim in that argument.\n"
@@ -1434,7 +1486,10 @@ def _checker_system_prompt(platform: str, retry_allowed: bool) -> str:
         "NEED_USER_INFO: <one short question>\n"
         "Rules:\n"
         "- Use payload.agent_state as primary context.\n"
+        "- Consider every explicit actionable part in payload.current_user_message/payload.resolved_request_for_this_turn.\n"
+        "- Mark complete only when all requested actions are satisfied or clearly impossible right now.\n"
         "- If goal is complete, return FINAL_ANSWER.\n"
+        "- If any requested action remains unfinished and RETRY_TOOL is allowed, return RETRY_TOOL.\n"
         "- If more tool work is needed, return RETRY_TOOL with one next tool call.\n"
         "- If blocked by missing required user data, return NEED_USER_INFO.\n"
         "- Never output more than one tool call.\n"
@@ -2502,7 +2557,7 @@ def _normalize_agent_state(state: Optional[Dict[str, Any]], *, fallback_goal: st
         goal = _short_text(" ".join(str(fallback_goal or "").split()), limit=180) or "Fulfill the user request."
     out = {
         "goal": goal,
-        "plan": _state_list(source.get("plan"), max_items=3, item_limit=120),
+        "plan": _state_list(source.get("plan"), max_items=8, item_limit=140),
         "facts": _state_list(source.get("facts"), max_items=8, item_limit=140),
         "open_questions": _state_list(source.get("open_questions"), max_items=4, item_limit=160),
         "next_step": _state_next_step(source.get("next_step")),
@@ -2846,6 +2901,9 @@ async def _run_doer_state_update(
         "goal, plan, facts, open_questions, next_step, tool_history\n"
         "Rules:\n"
         "- Use short plain text snippets.\n"
+        "- Keep plan as the remaining checklist of explicit user-requested actions.\n"
+        "- If multiple actions were requested, keep unfinished items in plan and set next_step to the next unfinished action.\n"
+        "- Remove plan items that are already completed.\n"
         "- Keep facts stable and deterministic.\n"
         "- Keep open_questions only for real blockers.\n"
         "- next_step is a short tool sketch or empty.\n"
@@ -3590,6 +3648,12 @@ async def run_cerberus_turn(
     effective_user_text = _effective_user_text(user_text, history)
     resolved_user_text = effective_user_text or user_text
     current_user_turn_text = _strip_user_sender_prefix(user_text).strip() or str(user_text or "").strip()
+    request_for_limit_eval = current_user_turn_text or str(resolved_user_text or "")
+    effective_max_rounds, effective_max_tool_calls = _expand_limits_for_compound_request(
+        max_rounds=effective_max_rounds,
+        max_tool_calls=effective_max_tool_calls,
+        request_text=request_for_limit_eval,
+    )
     scheduled_execution_scope = str(scope or "").strip().lower().startswith("ai_task:")
     schedule_task_required = (
         not scheduled_execution_scope
