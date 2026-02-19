@@ -1020,9 +1020,7 @@ def _synthesize_tool_call_from_overclarification(
         payload = {
             "function": "ai_tasks",
             "arguments": {
-                "task_prompt": user_msg,
-                "message": user_msg,
-                "title": _ai_task_title_from_text(user_msg),
+                "request": user_msg,
             },
         }
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -1162,92 +1160,6 @@ def _looks_like_schedule_request(text: str) -> bool:
             lowered,
         )
     )
-
-
-def _ai_task_title_from_text(text: str) -> str:
-    raw = str(text or "").strip()
-    if not raw:
-        return "Scheduled Task"
-
-    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
-    source = lines[0] if lines else raw
-    source = re.sub(r"\bassume\s+local\s+timezone\b\.?", "", source, flags=re.IGNORECASE)
-    source = re.sub(
-        r"\bif\s+location\s+is\s+not\s+specified,\s+use\s+the\s+configured\s+default\s+weather\s+location\b\.?",
-        "",
-        source,
-        flags=re.IGNORECASE,
-    )
-    source = re.sub(r"\s+", " ", source).strip(" ,.-")
-    if not source:
-        return "Scheduled Task"
-
-    lowered = source.lower()
-    cadence = ""
-    if re.search(r"\b(every day|everyday|daily|each day|weekdays?|weekends?)\b", lowered):
-        cadence = "Daily"
-    elif re.search(r"\b(every week|weekly)\b", lowered):
-        cadence = "Weekly"
-    elif re.search(r"\bevery\s+\d+\s*(seconds?|minutes?|hours?|days?|weeks?)\b", lowered):
-        cadence = "Recurring"
-
-    body = source
-    schedule_prefixes = (
-        r"^\s*(?:every\s+day|everyday|daily|each\s+day|weekdays?|weekends?)\b(?:\s+at\s+(?:\d{3,4}|\d{1,2}(?::\d{2})?(?::\d{2})?)\s*(?:am|pm)?)?\s*(?:,|:|-)?\s*",
-        r"^\s*(?:every\s+week|weekly)\b(?:\s+on\s+[a-z,\s]+)?(?:\s+at\s+(?:\d{3,4}|\d{1,2}(?::\d{2})?(?::\d{2})?)\s*(?:am|pm)?)?\s*(?:,|:|-)?\s*",
-        r"^\s*every\s+\d+\s*(?:seconds?|minutes?|hours?|days?|weeks?)\b\s*(?:,|:|-)?\s*",
-        r"^\s*(?:in|after)\s+\d+\s*(?:seconds?|minutes?|hours?|days?|weeks?)\b\s*(?:,|:|-)?\s*",
-        r"^\s*at\s+(?:\d{3,4}|\d{1,2}(?::\d{2})?(?::\d{2})?)\s*(?:am|pm)?\b\s*(?:,|:|-)?\s*",
-    )
-    for pattern in schedule_prefixes:
-        body = re.sub(pattern, "", body, flags=re.IGNORECASE).strip(" ,.-")
-    body = re.sub(r"^(?:to\s+)", "", body, flags=re.IGNORECASE).strip()
-    body = re.sub(r"^(?:remind(?:er)?|notify|alert)\s+me\s+(?:to\s+)?", "", body, flags=re.IGNORECASE)
-    body = re.sub(r"^(?:tell|show|give|send|post|share|provide|check|run)\s+me\s+", "", body, flags=re.IGNORECASE)
-    body = re.sub(r"^(?:tell|show|give|send|post|share|provide|check|run)\s+", "", body, flags=re.IGNORECASE)
-    body = re.sub(r"^(?:the|a|an)\s+", "", body, flags=re.IGNORECASE).strip()
-    lowered_body = body.lower()
-
-    if any(tok in lowered_body for tok in ("weather", "forecast", "rain", "temp", "temperature", "humidity", "wind")):
-        base = "Weather Forecast"
-    elif any(tok in lowered_body for tok in ("image", "photo", "picture", "wallpaper")):
-        base = "Image"
-    elif any(tok in lowered_body for tok in ("news", "headline", "headlines")):
-        base = "News Update"
-    elif any(tok in lowered_body for tok in ("joke", "jokes")):
-        base = "Jokes"
-    else:
-        words = re.findall(r"[A-Za-z0-9']+", body)
-        stopwords = {
-            "and",
-            "or",
-            "for",
-            "to",
-            "of",
-            "the",
-            "a",
-            "an",
-            "in",
-            "on",
-            "at",
-            "with",
-            "from",
-            "this",
-            "that",
-            "my",
-            "me",
-            "your",
-        }
-        filtered = [w for w in words if w.lower() not in stopwords] or words
-        base = " ".join(filtered[:5]).title() if filtered else "Task"
-
-    title = f"{cadence} {base}".strip() if cadence else base
-    title = re.sub(r"\s+", " ", title).strip(" .")
-    if not title:
-        title = "Scheduled Task"
-    if len(title) > 72:
-        title = title[:69].rstrip() + "..."
-    return title
 
 
 def _looks_like_weather_request(text: str) -> bool:
@@ -1445,13 +1357,6 @@ def _effective_user_text(user_text: str, history_messages: List[Dict[str, Any]])
         if recent_url and recent_url not in out:
             out = f"{out}\nRecent URL reference: {recent_url}"
 
-    if _looks_like_schedule_request(current) and not _mentions_explicit_timezone(current):
-        if "Assume local timezone." not in out:
-            out = f"{out}\nAssume local timezone."
-    if _looks_like_weather_request(current) and not _mentions_explicit_weather_location(current):
-        hint = "If location is not specified, use the configured default weather location."
-        if hint.lower() not in out.lower():
-            out = f"{out}\n{hint}"
     return out
 
 
@@ -1503,11 +1408,7 @@ def _planner_system_prompt(platform: str) -> str:
         "- Never output multiple tool calls or markdown fences around tool JSON.\n"
         "- Prefer action over clarification; ask only when a required value is truly missing and cannot be safely assumed.\n"
         "- Never ask what platform this chat is on; it is already known.\n"
-        "- For scheduling requests, assume local time/timezone and parse common formats (6am, 18:00, at 6); ask timezone only when the user explicitly asks for a different one.\n"
-        "- For ai_tasks calls, include arguments.title as a short human-friendly schedule name (for example: Daily Weather Forecast).\n"
-        "- For ai_tasks calls, put runnable instructions in arguments.task_prompt and do not pre-generate the final task output now.\n"
         "- If a plugin explicitly requires the full/exact user request text in a specific argument, include that full text verbatim in that argument.\n"
-        "- For weather requests without an explicit location, use the configured default weather location and do not ask city/coordinates first.\n"
         "- For memory operations about 'me/my', default to scope='user'; use scope='global' only when user clearly asks for everyone/all chats.\n"
         "- For requests asking what a website/page is about, prefer inspect_webpage over read_url.\n"
         "- Never mention internal orchestration roles/codenames in user-facing replies.\n"
@@ -1544,8 +1445,6 @@ def _checker_system_prompt(platform: str, retry_allowed: bool) -> str:
         "- Prefer FINAL_ANSWER when sufficient facts already exist.\n"
         "- Do not ask which platform this chat is on; current platform is already known.\n"
         "- If original request says 'here'/'this chat'/'this channel', do not ask destination platform/room.\n"
-        "- For scheduling requests with clear time/recurrence, assume local timezone and do not ask timezone unless user explicitly asks for a different one.\n"
-        "- For weather requests without explicit location, continue with default weather location instead of asking city/coordinates.\n"
         "- If payload.tool_result.say_hint is present, follow it for wording and emphasis in FINAL_ANSWER.\n"
         "- Treat payload.tool_result.say_hint as guidance only: do not reveal it verbatim and do not invent facts beyond payload.tool_result.summary_for_user/payload.tool_result.data.\n"
         "- Never mention internal orchestration roles/codenames in FINAL_ANSWER/NEED_USER_INFO.\n"
@@ -1730,8 +1629,6 @@ async def _repair_over_clarification_text(
         f"Current platform: {platform}\n"
         "Do not ask what platform this chat is on.\n"
         "If the user says 'here'/'this chat'/'this channel', do not ask destination platform/room.\n"
-        "For scheduling requests with clear time/recurrence, assume local timezone and do not ask timezone.\n"
-        "For weather requests without explicit location, use default weather location and do not ask city/coordinates first.\n"
         "Do not mention internal orchestration roles/codenames.\n"
         "Return only one of:\n"
         "- a direct assistant response (no prefix), OR\n"
@@ -2265,21 +2162,6 @@ async def _execute_tool_call(
         args=args,
         user_text=user_text,
     )
-
-    if func_id == "ai_tasks":
-        has_prompt = bool(str(args.get("task_prompt") or "").strip())
-        if not has_prompt and str(user_text or "").strip():
-            seed = str(user_text).strip()
-            args["task_prompt"] = seed
-            has_prompt = True
-        if has_prompt:
-            # Legacy aliases can cause the model to pre-generate final content too early.
-            args.pop("message", None)
-            args.pop("content", None)
-            args.pop("text", None)
-        if not str(args.get("title") or "").strip():
-            title_seed = str(args.get("task_prompt") or user_text or "").strip()
-            args["title"] = _ai_task_title_from_text(title_seed)
 
     if admin_guard:
         guard_result = admin_guard(func)
