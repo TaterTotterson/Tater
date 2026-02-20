@@ -2241,6 +2241,42 @@ async def _execute_tool_call(
     if str(user_text or "").strip():
         runtime_context.setdefault("request_text", str(user_text).strip())
 
+    origin_context = args.get("origin") if isinstance(args.get("origin"), dict) else {}
+    if isinstance(origin_context, dict) and origin_context:
+        runtime_context.setdefault("origin", origin_context)
+
+    if platform == "irc":
+        channel_value = str(
+            runtime_context.get("channel")
+            or origin_context.get("channel")
+            or origin_context.get("target")
+            or ""
+        ).strip()
+        if channel_value:
+            runtime_context.setdefault("channel", channel_value)
+
+        user_value = str(
+            runtime_context.get("user")
+            or origin_context.get("user")
+            or origin_context.get("user_id")
+            or ""
+        ).strip()
+        if user_value:
+            runtime_context.setdefault("user", user_value)
+
+        raw_value = str(
+            runtime_context.get("raw_message")
+            or runtime_context.get("raw")
+            or user_text
+            or ""
+        ).strip()
+        if raw_value:
+            runtime_context.setdefault("raw_message", raw_value)
+            runtime_context.setdefault("raw", raw_value)
+
+        # Some IRC plugins require a bot argument in the handler signature even if unused.
+        runtime_context.setdefault("bot", runtime_context.get("irc_bot"))
+
     if is_meta_tool(func):
         payload = run_meta_tool(
             func=func,
