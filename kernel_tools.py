@@ -152,23 +152,11 @@ AI_TASKS_SCHEDULE_PREFIX_PATTERNS = (
 )
 
 MEMORY_HASH_PREFIX = "tater:memory"
-MEMORY_EXPLICIT_ONLY_REDIS_KEY = "tater:memory:explicit_only"
 MEMORY_DEFAULT_TTL_REDIS_KEY = "tater:memory:default_ttl_sec"
 MEMORY_MAX_LIST_LIMIT = int(os.getenv("TATER_MEMORY_MAX_LIST_LIMIT", "200"))
 MEMORY_MAX_VALUE_CHARS = int(os.getenv("TATER_MEMORY_MAX_VALUE_CHARS", "4000"))
 MEMORY_SEARCH_MAX_RESULTS = int(os.getenv("TATER_MEMORY_SEARCH_MAX_RESULTS", "50"))
 MEMORY_KEY_RE = re.compile(r"^[A-Za-z0-9_.:\-]{1,120}$")
-MEMORY_EXPLICIT_PHRASES = (
-    "remember",
-    "make that the default",
-    "set that as default",
-    "use this by default",
-    "always use",
-    "yes save that",
-    "save that",
-    "save this preference",
-    "store this preference",
-)
 MEMORY_VOLATILE_PREFIXES = (
     "volatile.",
     "temp.",
@@ -3372,23 +3360,9 @@ def _memory_platform_room_scope_id(
     return explicit.strip()
 
 
-def _memory_explicit_only_enabled() -> bool:
-    raw = redis_client.get(MEMORY_EXPLICIT_ONLY_REDIS_KEY)
-    if raw in (None, ""):
-        return True
-    return _coerce_bool(raw, default=True)
-
-
 def _memory_default_ttl() -> int:
     raw = redis_client.get(MEMORY_DEFAULT_TTL_REDIS_KEY)
     return _coerce_int(raw, default=0, min_value=0, max_value=31_536_000)
-
-
-def _memory_has_explicit_intent(text: Any) -> bool:
-    lowered = _as_text(text).strip().lower()
-    if not lowered:
-        return False
-    return any(phrase in lowered for phrase in MEMORY_EXPLICIT_PHRASES)
 
 
 def _json_safe(value: Any) -> Any:
@@ -3606,17 +3580,6 @@ def memory_set(
     )
     if err or not target:
         return {"tool": "memory_set", "ok": False, "error": err or "Invalid memory target."}
-
-    if _memory_explicit_only_enabled() and not _coerce_bool(confirmed, default=False):
-        if not _memory_has_explicit_intent(request_text):
-            return {
-                "tool": "memory_set",
-                "ok": False,
-                "error": "Memory write blocked until user explicitly asks to remember this.",
-                "needs": [
-                    "Ask the user to confirm memory write (for example: 'remember this' or 'make this the default')."
-                ],
-            }
 
     default_ttl = _memory_default_ttl()
     ttl = _coerce_int(ttl_sec if ttl_sec is not None else default_ttl, default=default_ttl, min_value=0, max_value=31_536_000)

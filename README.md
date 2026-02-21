@@ -207,17 +207,6 @@ git clone https://github.com/TaterTotterson/Tater.git
 cd Tater
 ```
 
-### Persist `/agent_lab` data on host storage (recommended)
-
-If you want `/agent_lab` data to survive repo rebuilds/reinstalls, use a dedicated path and symlink:
-
-```bash
-sudo mkdir -p /agent_lab/{documents,downloads,workspace,logs}
-cp -a agent_lab/. /agent_lab/ 2>/dev/null || true
-rm -rf agent_lab
-ln -s /agent_lab agent_lab
-```
-
 Note:
 - Run Tater inside a Python virtual environment so dependencies stay isolated and easy to manage (recommended).
   Quickstart:
