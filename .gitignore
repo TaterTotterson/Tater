@@ -9,3 +9,6 @@ tests/
 # Plugin source now lives in the plugin store; keep local plugin files out of this repo.
 plugins/*
 !plugins/__init__.py
+
+# Local diagnostics scratch helper (not part of runtime)
+plugin_diagnostics.py
