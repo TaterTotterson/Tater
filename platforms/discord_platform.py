@@ -44,6 +44,7 @@ logger = logging.getLogger("discord")
 redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
 NOTIFY_QUEUE_KEY = "notifyq:discord"
 NOTIFY_POLL_INTERVAL = 0.5
+ROOM_LABEL_PREFIX = "tater:room_label"
 
 PLATFORM_SETTINGS = {
     "category": "Discord Settings",
@@ -116,6 +117,51 @@ def _load_recent_channel_media_refs(channel_id: str, limit: int = 8) -> list[Dic
         scope=str(channel_id),
         limit=limit,
     )
+
+
+def _room_label_key(platform: str, room_id: Any) -> str:
+    platform_name = str(platform or "").strip().lower() or "unknown"
+    scope_id = str(room_id or "").strip()
+    if not scope_id:
+        return ""
+    return f"{ROOM_LABEL_PREFIX}:{platform_name}:{scope_id}"
+
+
+def _save_room_label(platform: str, room_id: Any, label: Any) -> None:
+    key = _room_label_key(platform, room_id)
+    label_text = str(label or "").strip()
+    if not key or not label_text:
+        return
+    try:
+        redis_client.set(key, label_text)
+    except Exception:
+        pass
+
+
+def _discord_channel_label(channel: Any) -> str:
+    if channel is None:
+        return ""
+    try:
+        if isinstance(channel, discord.DMChannel):
+            recipients = list(getattr(channel, "recipients", []) or [])
+            if recipients:
+                who = str(
+                    getattr(recipients[0], "display_name", None)
+                    or getattr(recipients[0], "name", None)
+                    or ""
+                ).strip()
+                if who:
+                    return f"DM: {who}"
+            return "DM"
+    except Exception:
+        pass
+
+    name = str(getattr(channel, "name", "") or "").strip()
+    if not name:
+        return ""
+    if name.startswith("#"):
+        return name
+    return f"#{name}"
 
 
 # ---- LM template helpers ----
@@ -419,6 +465,8 @@ class discord_platform(commands.Bot):
                     logger.warning("[notifyq] Discord channel not found; dropping item.")
                     continue
 
+                _save_room_label("discord", getattr(channel, "id", ""), _discord_channel_label(channel))
+
                 message = (item.get("message") or "").strip()
                 title = item.get("title")
                 if not message and not attachments:
@@ -467,6 +515,12 @@ class discord_platform(commands.Bot):
             name=first.lower(), state=last, type=discord.ActivityType.custom
         )
         await self.change_presence(activity=activity)
+        try:
+            for guild in list(self.guilds or []):
+                for channel in list(getattr(guild, "text_channels", []) or []):
+                    _save_room_label("discord", getattr(channel, "id", ""), _discord_channel_label(channel))
+        except Exception:
+            pass
         logger.info(
             f"Bot is ready. Admin: {self.admin_user_id}, Response Channel: {self.response_channel_id}"
         )
@@ -548,6 +602,8 @@ class discord_platform(commands.Bot):
     async def on_message(self, message: discord.Message):
         if message.author == self.user:
             return
+
+        _save_room_label("discord", message.channel.id, _discord_channel_label(message.channel))
 
         recent_media_refs = _load_recent_channel_media_refs(message.channel.id, limit=8)
 

@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from bisect import bisect_left
 from datetime import datetime, timedelta
@@ -434,6 +435,21 @@ def _normalize_runtime_task_prompt(task_prompt: str) -> str:
     return text
 
 
+def _sanitize_scheduled_output_text(text: str) -> str:
+    out = str(text or "").strip()
+    if not out:
+        return ""
+
+    patterns = [
+        r"^\s*since\s+no\s+existing\s+[^:\n]{0,260}?\s+was\s+found,\s*here(?:'|’)s\s+(?:an?\s+)?(?:original\s+)?[^:\n]{0,120}:\s*",
+        r"^\s*i\s+(?:couldn't|could not)\s+find\s+[^:\n]{0,260}?\s*,\s*here(?:'|’)s\s+[^:\n]{0,120}:\s*",
+        r"^\s*here(?:'|’)s\s+(?:an?\s+)?original\s+(?:one|joke)\s*(?:for\s+you)?\s*:\s*",
+    ]
+    for pattern in patterns:
+        out = re.sub(pattern, "", out, flags=re.IGNORECASE)
+    return out.strip()
+
+
 async def _render_scheduled_message(
     llm_client,
     reminder_id: str,
@@ -451,6 +467,10 @@ async def _render_scheduled_message(
         "Keep replies concise and task-focused.\n"
         "Do not use repo_browser.* tool syntax.\n"
         "Execute the task now; do not create, modify, or cancel schedules.\n"
+        "Return only the requested deliverable content.\n"
+        "Do not include process commentary or meta-prefaces such as "
+        "\"Since no existing ... was found\".\n"
+        "If the task asks for creative output (for example a joke), provide it directly.\n"
     )
 
     now_str = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -519,6 +539,7 @@ async def _render_scheduled_message(
         admin_guard=_scheduler_admin_guard,
     )
     text = str(result.get("text") or "").strip()
+    text = _sanitize_scheduled_output_text(text)
     attachments = result.get("artifacts") or []
     if not text and not attachments:
         text = "Scheduled task completed."

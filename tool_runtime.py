@@ -34,10 +34,19 @@ from kernel_tools import (
     memory_delete,
     memory_explain,
     memory_search,
-    truth_get_last,
-    truth_list,
 )
 from plugin_result import action_failure, normalize_plugin_result
+from helpers import redis_client as default_redis
+from memory_platform_store import (
+    forget_fact_keys,
+    load_doc as load_memory_doc,
+    resolve_user_doc_key as resolve_memory_user_doc_key,
+    room_doc_key,
+    save_doc as save_memory_doc,
+    summarize_doc,
+    user_doc_key,
+    value_to_text,
+)
 
 
 META_TOOLS = {
@@ -65,11 +74,8 @@ META_TOOLS = {
     "memory_get",
     "memory_set",
     "memory_list",
-    "memory_delete",
     "memory_explain",
     "memory_search",
-    "truth_get_last",
-    "truth_list",
 }
 
 _PLUGIN_ID_ALIASES = {
@@ -149,6 +155,277 @@ _MEMORY_SCOPE_ROOM_HINTS = (
     "for this channel",
     "for this chat",
 )
+
+
+def _memory_platform_key_list(args: Dict[str, Any]) -> list[str]:
+    key_value = args.get("key")
+    keys_value = args.get("keys")
+    raw_items: list[str] = []
+    if isinstance(keys_value, list):
+        for item in keys_value:
+            text = str(item or "").strip()
+            if text:
+                raw_items.append(text)
+    elif isinstance(keys_value, str):
+        for part in keys_value.split(","):
+            text = str(part or "").strip()
+            if text:
+                raw_items.append(text)
+    if isinstance(key_value, str) and key_value.strip():
+        raw_items.append(key_value.strip())
+
+    out: list[str] = []
+    seen = set()
+    for item in raw_items:
+        if item in seen:
+            continue
+        out.append(item)
+        seen.add(item)
+    return out
+
+
+def _memory_platform_user_id(args: Dict[str, Any], origin: Optional[Dict[str, Any]]) -> str:
+    explicit = str(args.get("user_id") or "").strip()
+    if explicit:
+        return explicit
+    merged = dict(origin or {})
+    if isinstance(args.get("origin"), dict):
+        merged.update(args.get("origin") or {})
+    return (
+        _origin_text(merged, "user_id", "user", "username", "sender")
+        or ""
+    ).strip()
+
+
+def _memory_platform_user_display_name(args: Dict[str, Any], origin: Optional[Dict[str, Any]]) -> str:
+    explicit = str(args.get("display_name") or "").strip()
+    if explicit:
+        return explicit
+    explicit_user = str(args.get("user_id") or "").strip()
+    if explicit_user:
+        return explicit_user
+    merged = dict(origin or {})
+    if isinstance(args.get("origin"), dict):
+        merged.update(args.get("origin") or {})
+    return (
+        _origin_text(merged, "username", "user", "sender", "display_name", "nick", "nickname")
+        or ""
+    ).strip()
+
+
+def _memory_platform_room_id(args: Dict[str, Any], origin: Optional[Dict[str, Any]]) -> str:
+    explicit = str(args.get("room_id") or args.get("scope") or "").strip()
+    if not explicit:
+        merged = dict(origin or {})
+        if isinstance(args.get("origin"), dict):
+            merged.update(args.get("origin") or {})
+        explicit = _origin_text(
+            merged,
+            "room_id",
+            "room",
+            "channel_id",
+            "channel",
+            "chat_id",
+            "scope",
+        )
+    explicit = str(explicit or "").strip()
+    if ":" in explicit:
+        prefix, _, suffix = explicit.partition(":")
+        if prefix.lower() in {"room", "channel", "chat", "session", "dm", "chan", "pm", "device", "area"} and suffix:
+            explicit = suffix
+    return explicit.strip()
+
+
+def _memory_show_user(args: Dict[str, Any], platform: str, origin: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    p = str(args.get("platform") or platform or "webui").strip().lower() or "webui"
+    user_id = _memory_platform_user_id(args, origin)
+    if not user_id:
+        return {"tool": "memory_show", "ok": False, "error": "user_id is required for memory_show."}
+
+    limit = _to_int(args.get("limit") or 20, 20)
+    try:
+        min_confidence = float(args.get("min_confidence") or 0.0)
+    except Exception:
+        min_confidence = 0.0
+    display_name = _memory_platform_user_display_name(args, origin) or user_id
+    redis_key = resolve_memory_user_doc_key(
+        default_redis,
+        p,
+        user_id,
+        create=False,
+        display_name=display_name,
+        auto_link_name=True,
+    ) or user_doc_key(p, user_id)
+    doc = load_memory_doc(default_redis, redis_key)
+    items = summarize_doc(doc, max_items=max(1, limit), min_confidence=max(0.0, min(1.0, min_confidence)))
+    return {
+        "tool": "memory_show",
+        "ok": True,
+        "platform": p,
+        "scope": "user",
+        "user_id": user_id,
+        "redis_key": redis_key,
+        "count": len(items),
+        "items": [
+            {
+                "key": item.get("key"),
+                "value": item.get("value"),
+                "confidence": item.get("confidence"),
+                "ttl_sec": item.get("ttl_sec"),
+                "evidence": item.get("evidence"),
+            }
+            for item in items
+        ],
+        "summary": "; ".join(
+            [
+                f"{str(item.get('key') or '')}={value_to_text(item.get('value'), max_chars=80)} ({float(item.get('confidence') or 0.0):.2f})"
+                for item in items
+            ]
+        ),
+    }
+
+
+def _memory_show_room(args: Dict[str, Any], platform: str, origin: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    p = str(args.get("platform") or platform or "webui").strip().lower() or "webui"
+    room_id = _memory_platform_room_id(args, origin)
+    explicit_room = str(args.get("room_id") or "").strip()
+    if p == "webui" and not explicit_room:
+        room_id = "chat"
+    if not room_id:
+        return {"tool": "memory_show_room", "ok": False, "error": "room_id is required for memory_show_room."}
+
+    limit = _to_int(args.get("limit") or 20, 20)
+    try:
+        min_confidence = float(args.get("min_confidence") or 0.0)
+    except Exception:
+        min_confidence = 0.0
+    redis_key = room_doc_key(p, room_id)
+    doc = load_memory_doc(default_redis, redis_key)
+    items = summarize_doc(doc, max_items=max(1, limit), min_confidence=max(0.0, min(1.0, min_confidence)))
+    return {
+        "tool": "memory_show_room",
+        "ok": True,
+        "platform": p,
+        "scope": "room",
+        "room_id": room_id,
+        "redis_key": redis_key,
+        "count": len(items),
+        "items": [
+            {
+                "key": item.get("key"),
+                "value": item.get("value"),
+                "confidence": item.get("confidence"),
+                "ttl_sec": item.get("ttl_sec"),
+                "evidence": item.get("evidence"),
+            }
+            for item in items
+        ],
+        "summary": "; ".join(
+            [
+                f"{str(item.get('key') or '')}={value_to_text(item.get('value'), max_chars=80)} ({float(item.get('confidence') or 0.0):.2f})"
+                for item in items
+            ]
+        ),
+    }
+
+
+def _memory_forget_key(args: Dict[str, Any], platform: str, origin: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    scope = str(args.get("scope") or "user").strip().lower() or "user"
+    p = str(args.get("platform") or platform or "webui").strip().lower() or "webui"
+    keys = _memory_platform_key_list(args)
+    if not keys:
+        return {"tool": "memory_forget_key", "ok": False, "error": "key or keys is required."}
+
+    if scope == "room":
+        room_id = _memory_platform_room_id(args, origin)
+        explicit_room = str(args.get("room_id") or "").strip()
+        if p == "webui" and not explicit_room:
+            room_id = "chat"
+        if not room_id:
+            return {"tool": "memory_forget_key", "ok": False, "error": "room_id is required for room scope."}
+        redis_key = room_doc_key(p, room_id)
+        identity: Dict[str, Any] = {"room_id": room_id}
+    else:
+        scope = "user"
+        user_id = _memory_platform_user_id(args, origin)
+        if not user_id:
+            return {"tool": "memory_forget_key", "ok": False, "error": "user_id is required for user scope."}
+        display_name = _memory_platform_user_display_name(args, origin) or user_id
+        redis_key = resolve_memory_user_doc_key(
+            default_redis,
+            p,
+            user_id,
+            create=False,
+            display_name=display_name,
+            auto_link_name=True,
+        ) or user_doc_key(p, user_id)
+        identity = {"user_id": user_id}
+
+    doc = load_memory_doc(default_redis, redis_key)
+    deleted = forget_fact_keys(doc, keys)
+    if deleted > 0:
+        save_memory_doc(default_redis, redis_key, doc)
+    return {
+        "tool": "memory_forget_key",
+        "ok": True,
+        "scope": scope,
+        "platform": p,
+        "redis_key": redis_key,
+        "deleted": deleted,
+        **identity,
+    }
+
+
+def _memory_forget_all(args: Dict[str, Any], platform: str, origin: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    scope = str(args.get("scope") or "user").strip().lower() or "user"
+    p = str(args.get("platform") or platform or "webui").strip().lower() or "webui"
+
+    if scope == "room":
+        room_id = _memory_platform_room_id(args, origin)
+        explicit_room = str(args.get("room_id") or "").strip()
+        if p == "webui" and not explicit_room:
+            room_id = "chat"
+        if not room_id:
+            return {"tool": "memory_forget_all", "ok": False, "error": "room_id is required for room scope."}
+        redis_key = room_doc_key(p, room_id)
+        identity: Dict[str, Any] = {"room_id": room_id}
+    else:
+        scope = "user"
+        user_id = _memory_platform_user_id(args, origin)
+        if not user_id:
+            return {"tool": "memory_forget_all", "ok": False, "error": "user_id is required for user scope."}
+        display_name = _memory_platform_user_display_name(args, origin) or user_id
+        redis_key = resolve_memory_user_doc_key(
+            default_redis,
+            p,
+            user_id,
+            create=False,
+            display_name=display_name,
+            auto_link_name=True,
+        ) or user_doc_key(p, user_id)
+        identity = {"user_id": user_id}
+
+    deleted = 0
+    try:
+        deleted = int(default_redis.delete(redis_key) or 0)
+    except Exception:
+        deleted = 0
+
+    if deleted <= 0:
+        try:
+            save_memory_doc(default_redis, redis_key, {"schema_version": 1, "last_updated": 0, "facts": {}})
+        except Exception:
+            pass
+
+    return {
+        "tool": "memory_forget_all",
+        "ok": True,
+        "scope": scope,
+        "platform": p,
+        "redis_key": redis_key,
+        "deleted": deleted,
+        **identity,
+    }
 
 
 def _origin_text(origin: Any, *keys: str) -> str:
@@ -363,6 +640,10 @@ def run_meta_tool(
             if isinstance(raw_include, str)
             else bool(raw_include)
         )
+        try:
+            min_confidence = float(args.get("min_confidence") or 0.0)
+        except Exception:
+            min_confidence = 0.0
         scope_value = _resolve_memory_scope(args, origin)
         return memory_get(
             keys=args.get("keys"),
@@ -371,7 +652,9 @@ def run_meta_tool(
             user_id=args.get("user_id"),
             room_id=args.get("room_id"),
             platform=args.get("platform") or platform,
+            store=args.get("store") or "auto",
             limit=_to_int(args.get("limit") or 50, 50),
+            min_confidence=min_confidence,
             include_meta=include_meta,
             origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
         )
@@ -439,39 +722,24 @@ def run_meta_tool(
             origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
         )
     if func == "memory_search":
-        raw_include_truth = args.get("include_truth", True)
-        include_truth = (
-            raw_include_truth.strip().lower() in {"1", "true", "yes", "on"}
-            if isinstance(raw_include_truth, str)
-            else bool(raw_include_truth)
-        )
         return memory_search(
             str(args.get("query") or ""),
             scope=str(args.get("scope") or "auto"),
             user_id=args.get("user_id"),
             room_id=args.get("room_id"),
             platform=args.get("platform") or platform,
-            include_truth=include_truth,
             limit=_to_int(args.get("limit") or 8, 8),
             min_score=_to_int(args.get("min_score") or 1, 1),
             origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
         )
-    if func == "truth_get_last":
-        return truth_get_last(
-            platform=args.get("platform") or platform,
-            scope=args.get("scope"),
-            plugin_id=args.get("plugin_id"),
-            scan_limit=_to_int(args.get("scan_limit") or 200, 200),
-            origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
-        )
-    if func == "truth_list":
-        return truth_list(
-            platform=args.get("platform") or platform,
-            scope=args.get("scope"),
-            plugin_id=args.get("plugin_id"),
-            limit=_to_int(args.get("limit") or 10, 10),
-            origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
-        )
+    if func == "memory_show":
+        return _memory_show_user(args, platform, origin)
+    if func == "memory_show_room":
+        return _memory_show_room(args, platform, origin)
+    if func == "memory_forget_key":
+        return _memory_forget_key(args, platform, origin)
+    if func == "memory_forget_all":
+        return _memory_forget_all(args, platform, origin)
 
     return {"ok": False, "error": {"code": "unknown_meta_tool", "message": f"Unknown meta tool: {func}"}}
 

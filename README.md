@@ -9,9 +9,15 @@
 ## Cerberus: Tater’s Brain
 Tater now runs on Cerberus — a closed-loop Planner → Doer → Checker architecture designed for reliable tool execution.
 
-- Planner selects the next step: either a direct reply or a single tool JSON call.
+- Planner selects the next step by reasoning about intent: either a direct reply or a single tool JSON call.
 - Doer validates and executes that tool deterministically, with strict runtime and platform gating.
-- Checker reviews the result and either finalizes the response, schedules one follow-up tool step (starting the next round), or asks a short clarification question.
+- Checker verifies whether the request is actually satisfied, then finalizes, schedules one follow-up tool step, or asks a short clarification question.
+
+Cerberus tool-use policy is intent-first:
+- Tool calls are for real actions or external state changes.
+- Conversational, explanatory, hypothetical, and brainstorming requests stay conversational.
+- If intent is ambiguous between action and information, Cerberus asks a brief clarifying question.
+- Cerberus never claims an action completed unless a tool call executed successfully.
 
 Over multiple rounds, Cerberus can use multiple tools — but never more than one per round — keeping behavior structured, predictable, and recoverable.
 

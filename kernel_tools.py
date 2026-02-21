@@ -33,6 +33,14 @@ from plugin_registry import reload_plugins
 from plugin_settings import get_plugin_enabled
 from notify.queue import normalize_platform as normalize_notify_platform
 from conversation_media_refs import load_recent_media_refs, save_media_ref
+from memory_platform_store import (
+    load_doc as load_memory_platform_doc,
+    resolve_user_doc_key as resolve_memory_platform_user_doc_key,
+    room_doc_key as memory_platform_room_doc_key,
+    summarize_doc as summarize_memory_platform_doc,
+    user_doc_key as memory_platform_user_doc_key,
+    value_to_text as memory_platform_value_to_text,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -3203,6 +3211,62 @@ def _normalize_key_segment(value: Any, *, default: str) -> str:
     return cleaned or default
 
 
+def _legacy_memory_preferred_user_id(
+    *,
+    user_id: Optional[str],
+    origin: Optional[Dict[str, Any]],
+) -> str:
+    explicit = _as_text(user_id).strip()
+    if explicit:
+        return explicit
+
+    placeholder_names = {
+        "assistant",
+        "bot",
+        "unknown",
+        "unknown_user",
+        "telegram_user",
+        "discord_user",
+        "matrix_user",
+        "irc_user",
+        "webui_user",
+        "user",
+    }
+
+    def _clean_name(raw_value: Any) -> str:
+        text = _as_text(raw_value).strip()
+        if not text:
+            return ""
+        if text.startswith("@"):
+            text = text[1:].strip()
+        # Matrix-style IDs like "@name:server.tld" -> "name"
+        if ":" in text and re.fullmatch(r"[A-Za-z0-9._\-]+:[A-Za-z0-9._\-]+", text):
+            local, _, _ = text.partition(":")
+            text = local.strip() or text
+        lowered = text.lower()
+        if lowered in placeholder_names:
+            return ""
+        return text
+
+    name_candidates: List[str] = []
+    if isinstance(origin, dict):
+        for key in ("user", "username", "sender", "user_handle", "display_name", "nick", "nickname"):
+            cleaned = _clean_name(origin.get(key))
+            if cleaned:
+                name_candidates.append(cleaned)
+
+    for candidate in name_candidates:
+        if not re.fullmatch(r"-?\d+", candidate):
+            return candidate
+    if name_candidates:
+        return name_candidates[0]
+
+    fallback = _as_text(
+        _origin_value(origin, "user_id", "user", "username", "sender")
+    ).strip()
+    return fallback
+
+
 def _memory_scope_target(
     *,
     scope: Optional[str],
@@ -3229,10 +3293,10 @@ def _memory_scope_target(
         }, None
 
     if scope_name == "user":
-        uid_raw = _as_text(
-            user_id
-            or _origin_value(origin, "user_id", "user", "username", "sender")
-        ).strip()
+        uid_raw = _legacy_memory_preferred_user_id(
+            user_id=user_id,
+            origin=origin,
+        )
         if not uid_raw:
             return None, "user_id is required for scope='user'."
         uid = _normalize_key_segment(uid_raw, default="")
@@ -3259,6 +3323,53 @@ def _memory_scope_target(
         "room_id": room_raw,
         "redis_key": f"{MEMORY_HASH_PREFIX}:room:{platform_name}:{room_name}",
     }, None
+
+
+def _memory_platform_user_scope_id(
+    *,
+    user_id: Optional[str],
+    origin: Optional[Dict[str, Any]],
+) -> str:
+    return _as_text(
+        user_id
+        or _origin_value(origin, "user_id", "user", "username", "sender")
+    ).strip()
+
+
+def _memory_platform_user_display_name(
+    *,
+    user_id: Optional[str],
+    origin: Optional[Dict[str, Any]],
+) -> str:
+    explicit = _as_text(user_id).strip()
+    if explicit:
+        return explicit
+    return _as_text(
+        _origin_value(origin, "username", "user", "sender", "display_name", "nick", "nickname")
+        or _origin_value(origin, "user_id")
+    ).strip()
+
+
+def _memory_platform_room_scope_id(
+    *,
+    room_id: Optional[str],
+    platform_name: str,
+    origin: Optional[Dict[str, Any]],
+) -> str:
+    explicit = _as_text(
+        room_id
+        or _origin_value(origin, "room_id", "room", "channel_id", "channel", "chat_id", "scope")
+    ).strip()
+    if platform_name == "webui" and not explicit:
+        explicit = "chat"
+    if ":" in explicit:
+        prefix, _, suffix = explicit.partition(":")
+        if (
+            prefix.lower() in {"room", "channel", "chat", "session", "dm", "chan", "pm", "device", "area"}
+            and suffix
+        ):
+            explicit = suffix
+    return explicit.strip()
 
 
 def _memory_explicit_only_enabled() -> bool:
@@ -3423,26 +3534,6 @@ def _score_memory_text(query: str, tokens: List[str], *, key: str, value_text: s
     return score
 
 
-def _score_truth_text(query: str, tokens: List[str], *, plugin_id: str, truth_text: str) -> int:
-    if not tokens:
-        return 0
-    pid_l = plugin_id.lower()
-    truth_l = truth_text.lower()
-    joined = f"{pid_l}\n{truth_l}"
-    phrase = _as_text(query).strip().lower()
-
-    score = 0
-    if phrase and len(phrase) >= 3 and phrase in joined:
-        score += 5
-
-    for token in tokens:
-        if token in pid_l:
-            score += 4
-        if token in truth_l:
-            score += 2
-    return score
-
-
 def _memory_targets_for_search(
     *,
     scope: Optional[str],
@@ -3591,17 +3682,17 @@ def memory_set(
     }
 
 
-def memory_get(
-    keys: Optional[Any] = None,
+def _memory_get_legacy_payload(
     *,
-    prefix: Optional[str] = None,
-    scope: str = "global",
-    user_id: Optional[str] = None,
-    room_id: Optional[str] = None,
-    platform: Optional[str] = None,
-    limit: int = 50,
-    include_meta: bool = True,
-    origin: Optional[Dict[str, Any]] = None,
+    key_list: List[str],
+    prefix_text: str,
+    scope: str,
+    user_id: Optional[str],
+    room_id: Optional[str],
+    platform: Optional[str],
+    max_items: int,
+    include_meta: bool,
+    origin: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     target, err = _memory_scope_target(
         scope=scope,
@@ -3614,9 +3705,6 @@ def memory_get(
         return {"tool": "memory_get", "ok": False, "error": err or "Invalid memory target."}
 
     store = _memory_load_scope(target["redis_key"], prune_expired=True)
-    key_list = _normalize_keys(keys)
-    prefix_text = _as_text(prefix).strip()
-    max_items = _coerce_int(limit, default=50, min_value=1, max_value=MEMORY_MAX_LIST_LIMIT)
 
     selected: List[str] = []
     missing: List[str] = []
@@ -3647,16 +3735,339 @@ def memory_get(
     payload: Dict[str, Any] = {
         "tool": "memory_get",
         "ok": True,
+        "store": "legacy",
         "scope": target["scope"],
         "platform": target.get("platform"),
         "user_id": target.get("user_id"),
         "room_id": target.get("room_id"),
+        "redis_key": target.get("redis_key"),
         "values": values,
         "count": len(values),
         "missing": missing,
+        "summary": "; ".join(
+            [
+                f"{key}={memory_platform_value_to_text(values.get(key), max_chars=80)}"
+                for key in selected
+            ]
+        ),
     }
     if include_meta:
         payload["items"] = items
+    return payload
+
+
+def _memory_get_durable_payload(
+    *,
+    key_list: List[str],
+    prefix_text: str,
+    scope: str,
+    user_id: Optional[str],
+    room_id: Optional[str],
+    platform: Optional[str],
+    max_items: int,
+    min_confidence: float,
+    include_meta: bool,
+    origin: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    platform_name = _normalize_key_segment(
+        platform or _origin_value(origin, "platform"),
+        default="webui",
+    )
+    scope_name = _as_text(scope or "user").strip().lower() or "user"
+    if scope_name not in {"user", "room"}:
+        return {
+            "tool": "memory_get",
+            "ok": False,
+            "error": "durable store supports scope='user' or scope='room'.",
+        }
+
+    if scope_name == "user":
+        user_scope_id = _memory_platform_user_scope_id(user_id=user_id, origin=origin)
+        if not user_scope_id:
+            return {
+                "tool": "memory_get",
+                "ok": False,
+                "error": "user_id is required for durable scope='user'.",
+            }
+        display_name = _memory_platform_user_display_name(user_id=user_id, origin=origin) or user_scope_id
+        redis_key = resolve_memory_platform_user_doc_key(
+            redis_client,
+            platform_name,
+            user_scope_id,
+            create=False,
+            display_name=display_name,
+            auto_link_name=True,
+        ) or memory_platform_user_doc_key(platform_name, user_scope_id)
+        scope_identity: Dict[str, Any] = {
+            "scope": "user",
+            "platform": platform_name,
+            "user_id": user_scope_id,
+            "room_id": None,
+        }
+    else:
+        room_scope_id = _memory_platform_room_scope_id(
+            room_id=room_id,
+            platform_name=platform_name,
+            origin=origin,
+        )
+        if not room_scope_id:
+            return {
+                "tool": "memory_get",
+                "ok": False,
+                "error": "room_id is required for durable scope='room'.",
+            }
+        redis_key = memory_platform_room_doc_key(platform_name, room_scope_id)
+        scope_identity = {
+            "scope": "room",
+            "platform": platform_name,
+            "user_id": None,
+            "room_id": room_scope_id,
+        }
+
+    min_conf = max(0.0, min(1.0, float(min_confidence or 0.0)))
+    doc = load_memory_platform_doc(redis_client, redis_key)
+    summary_items = summarize_memory_platform_doc(
+        doc,
+        max_items=max_items,
+        min_confidence=min_conf,
+    )
+
+    keyed_items: Dict[str, Dict[str, Any]] = {}
+    for item in summary_items:
+        key = _as_text(item.get("key")).strip()
+        if not key or key in keyed_items:
+            continue
+        keyed_items[key] = item
+
+    selected_keys: List[str] = []
+    missing: List[str] = []
+    if key_list:
+        for key in key_list:
+            if key in keyed_items:
+                selected_keys.append(key)
+            else:
+                missing.append(key)
+    else:
+        for key in keyed_items.keys():
+            if prefix_text and not key.startswith(prefix_text):
+                continue
+            selected_keys.append(key)
+            if len(selected_keys) >= max_items:
+                break
+
+    values: Dict[str, Any] = {}
+    items: List[Dict[str, Any]] = []
+    for key in selected_keys:
+        entry = keyed_items.get(key)
+        if not isinstance(entry, dict):
+            continue
+        values[key] = entry.get("value")
+        if include_meta:
+            items.append(
+                {
+                    "key": key,
+                    "value": entry.get("value"),
+                    "confidence": entry.get("confidence"),
+                    "ttl_sec": entry.get("ttl_sec"),
+                    "evidence": entry.get("evidence"),
+                    "updated_at": entry.get("updated_at"),
+                }
+            )
+
+    payload: Dict[str, Any] = {
+        "tool": "memory_get",
+        "ok": True,
+        "store": "durable",
+        "redis_key": redis_key,
+        **scope_identity,
+        "values": values,
+        "count": len(values),
+        "missing": missing,
+        "summary": "; ".join(
+            [
+                f"{key}={memory_platform_value_to_text(values.get(key), max_chars=80)}"
+                for key in selected_keys
+            ]
+        ),
+    }
+    if include_meta:
+        payload["items"] = items
+    return payload
+
+
+def memory_get(
+    keys: Optional[Any] = None,
+    *,
+    prefix: Optional[str] = None,
+    scope: str = "global",
+    user_id: Optional[str] = None,
+    room_id: Optional[str] = None,
+    platform: Optional[str] = None,
+    store: str = "auto",
+    limit: int = 50,
+    min_confidence: float = 0.0,
+    include_meta: bool = True,
+    origin: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    store_name = _as_text(store or "auto").strip().lower() or "auto"
+    key_list = _normalize_keys(keys)
+    prefix_text = _as_text(prefix).strip()
+    max_items = _coerce_int(limit, default=50, min_value=1, max_value=MEMORY_MAX_LIST_LIMIT)
+    try:
+        min_conf = float(min_confidence or 0.0)
+    except Exception:
+        min_conf = 0.0
+    min_conf = max(0.0, min(1.0, min_conf))
+
+    if store_name in {"legacy", "kv", "classic"}:
+        return _memory_get_legacy_payload(
+            key_list=key_list,
+            prefix_text=prefix_text,
+            scope=scope,
+            user_id=user_id,
+            room_id=room_id,
+            platform=platform,
+            max_items=max_items,
+            include_meta=include_meta,
+            origin=origin,
+        )
+
+    if store_name in {"durable", "memory_platform", "profile"}:
+        return _memory_get_durable_payload(
+            key_list=key_list,
+            prefix_text=prefix_text,
+            scope=scope,
+            user_id=user_id,
+            room_id=room_id,
+            platform=platform,
+            max_items=max_items,
+            min_confidence=min_conf,
+            include_meta=include_meta,
+            origin=origin,
+        )
+
+    if store_name not in {"auto", "both", "all", ""}:
+        return {
+            "tool": "memory_get",
+            "ok": False,
+            "error": "store must be one of: auto, legacy, durable.",
+        }
+
+    legacy_payload = _memory_get_legacy_payload(
+        key_list=key_list,
+        prefix_text=prefix_text,
+        scope=scope,
+        user_id=user_id,
+        room_id=room_id,
+        platform=platform,
+        max_items=max_items,
+        include_meta=include_meta,
+        origin=origin,
+    )
+    if not bool(legacy_payload.get("ok")):
+        return legacy_payload
+
+    scope_name = _as_text(scope or "global").strip().lower() or "global"
+    durable_payload: Optional[Dict[str, Any]] = None
+    durable_error: Optional[str] = None
+    checked_stores: List[str] = ["legacy"]
+    if scope_name in {"user", "room"}:
+        checked_stores.append("durable")
+        durable_attempt = _memory_get_durable_payload(
+            key_list=key_list,
+            prefix_text=prefix_text,
+            scope=scope_name,
+            user_id=user_id,
+            room_id=room_id,
+            platform=platform,
+            max_items=max_items,
+            min_confidence=min_conf,
+            include_meta=include_meta,
+            origin=origin,
+        )
+        if bool(durable_attempt.get("ok")):
+            durable_payload = durable_attempt
+        else:
+            durable_error = _as_text(durable_attempt.get("error")).strip() or "durable store unavailable."
+
+    merged_values: Dict[str, Any] = {}
+    merged_item_map: Dict[str, Dict[str, Any]] = {}
+    source_map: Dict[str, List[str]] = {}
+    conflicts: List[str] = []
+
+    def merge_store(payload: Dict[str, Any], label: str) -> None:
+        values_obj = payload.get("values")
+        if not isinstance(values_obj, dict):
+            return
+
+        item_map: Dict[str, Dict[str, Any]] = {}
+        if include_meta and isinstance(payload.get("items"), list):
+            for raw_item in payload["items"]:
+                if not isinstance(raw_item, dict):
+                    continue
+                item_key = _as_text(raw_item.get("key")).strip()
+                if item_key and item_key not in item_map:
+                    item_map[item_key] = raw_item
+
+        for key, value in values_obj.items():
+            key_text = _as_text(key).strip()
+            if not key_text:
+                continue
+            if key_text in merged_values and merged_values[key_text] != value and key_text not in conflicts:
+                conflicts.append(key_text)
+            merged_values[key_text] = value
+            source_map.setdefault(key_text, [])
+            if label not in source_map[key_text]:
+                source_map[key_text].append(label)
+            if include_meta:
+                merged_item = dict(item_map.get(key_text) or {"key": key_text, "value": value})
+                merged_item["store"] = label
+                merged_item_map[key_text] = merged_item
+
+    merge_store(legacy_payload, "legacy")
+    if durable_payload:
+        merge_store(durable_payload, "durable")
+
+    merged_missing: List[str] = []
+    if key_list:
+        for key in key_list:
+            if key not in merged_values:
+                merged_missing.append(key)
+
+    summary_keys = list(merged_values.keys())[:max_items]
+    payload: Dict[str, Any] = {
+        "tool": "memory_get",
+        "ok": True,
+        "store": "auto",
+        "checked_stores": checked_stores,
+        "scope": _as_text(legacy_payload.get("scope") or scope_name),
+        "platform": durable_payload.get("platform") if durable_payload else legacy_payload.get("platform"),
+        "user_id": durable_payload.get("user_id") if durable_payload else legacy_payload.get("user_id"),
+        "room_id": durable_payload.get("room_id") if durable_payload else legacy_payload.get("room_id"),
+        "values": merged_values,
+        "count": len(merged_values),
+        "missing": merged_missing,
+        "sources": source_map,
+        "conflicts": conflicts,
+        "summary": "; ".join(
+            [
+                f"{key}={memory_platform_value_to_text(merged_values.get(key), max_chars=80)}"
+                for key in summary_keys
+            ]
+        ),
+        "stores": {
+            "legacy": {k: v for k, v in legacy_payload.items() if k not in {"tool", "ok"}},
+            "durable": (
+                {k: v for k, v in durable_payload.items() if k not in {"tool", "ok"}}
+                if durable_payload
+                else None
+            ),
+        },
+    }
+    if include_meta:
+        payload["items"] = [merged_item_map[key] for key in summary_keys if key in merged_item_map]
+    if durable_error:
+        payload["warnings"] = [f"durable memory lookup skipped: {durable_error}"]
     return payload
 
 
@@ -3851,7 +4262,6 @@ def memory_search(
     user_id: Optional[str] = None,
     room_id: Optional[str] = None,
     platform: Optional[str] = None,
-    include_truth: bool = True,
     limit: int = 8,
     min_score: int = 1,
     origin: Optional[Dict[str, Any]] = None,
@@ -3865,7 +4275,6 @@ def memory_search(
 
     max_items = _coerce_int(limit, default=8, min_value=1, max_value=MEMORY_SEARCH_MAX_RESULTS)
     min_score_i = _coerce_int(min_score, default=1, min_value=1, max_value=1000)
-    include_truth_b = _coerce_bool(include_truth, default=True)
     targets, err = _memory_targets_for_search(
         scope=scope,
         user_id=user_id,
@@ -3901,32 +4310,6 @@ def memory_search(
                 }
             )
 
-    truth_scanned = 0
-    if include_truth_b:
-        truth_target = _truth_target(platform=platform, scope=room_id, origin=origin)
-        rows = redis_client.lrange(truth_target["list_key"], -300, -1) or []
-        truth_scanned = len(rows)
-        for raw in reversed(rows):
-            entry = _truth_entry(raw)
-            if not entry:
-                continue
-            plugin_id_text = _as_text(entry.get("plugin_id") or "").strip()
-            truth_text = _value_text(entry.get("truth"))
-            score = _score_truth_text(q, tokens, plugin_id=plugin_id_text, truth_text=truth_text)
-            if score < min_score_i:
-                continue
-            hits.append(
-                {
-                    "kind": "truth",
-                    "scope": entry.get("scope"),
-                    "platform": entry.get("platform"),
-                    "plugin_id": plugin_id_text,
-                    "ts": entry.get("ts"),
-                    "truth": entry.get("truth"),
-                    "score": score,
-                }
-            )
-
     hits.sort(
         key=lambda item: (
             -_coerce_int(item.get("score"), 0, min_value=0),
@@ -3940,135 +4323,11 @@ def memory_search(
         "ok": True,
         "query": q,
         "scope": _as_text(scope or "auto").strip().lower() or "auto",
-        "include_truth": include_truth_b,
         "count": len(trimmed),
         "total_matches": len(hits),
         "has_more": len(hits) > len(trimmed),
         "memory_scopes": [t.get("scope") for t in targets],
-        "truth_scanned": truth_scanned,
         "results": trimmed,
-    }
-
-
-def _truth_target(
-    *,
-    platform: Optional[str],
-    scope: Optional[str],
-    origin: Optional[Dict[str, Any]],
-) -> Dict[str, str]:
-    platform_name = _as_text(platform or _origin_value(origin, "platform") or "webui").strip().lower() or "webui"
-    scope_name = _as_text(
-        scope or _origin_value(origin, "scope", "channel_id", "channel", "room_id", "room", "chat_id") or "chat"
-    ).strip() or "chat"
-    return {
-        "platform": platform_name,
-        "scope": scope_name,
-        "list_key": f"tater:truth:{platform_name}:{scope_name}",
-        "latest_key": f"tater:truth:last:{platform_name}:{scope_name}",
-    }
-
-
-def _truth_entry(raw: Any) -> Optional[Dict[str, Any]]:
-    text = _as_text(raw)
-    if not text:
-        return None
-    try:
-        parsed = json.loads(text)
-    except Exception:
-        return None
-    if not isinstance(parsed, dict):
-        return None
-    return {
-        "ts": parsed.get("ts"),
-        "platform": parsed.get("platform"),
-        "scope": parsed.get("scope"),
-        "plugin_id": parsed.get("plugin_id"),
-        "truth": parsed.get("truth"),
-    }
-
-
-def truth_get_last(
-    *,
-    platform: Optional[str] = None,
-    scope: Optional[str] = None,
-    plugin_id: Optional[str] = None,
-    scan_limit: int = 200,
-    origin: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    target = _truth_target(platform=platform, scope=scope, origin=origin)
-    plugin_filter = _as_text(plugin_id).strip()
-    max_scan = _coerce_int(scan_limit, default=200, min_value=1, max_value=1000)
-
-    latest = _truth_entry(redis_client.get(target["latest_key"]))
-    if latest and (not plugin_filter or _as_text(latest.get("plugin_id")) == plugin_filter):
-        return {
-            "tool": "truth_get_last",
-            "ok": True,
-            "platform": target["platform"],
-            "scope": target["scope"],
-            "entry": latest,
-        }
-
-    rows = redis_client.lrange(target["list_key"], -max_scan, -1) or []
-    for raw in reversed(rows):
-        entry = _truth_entry(raw)
-        if not entry:
-            continue
-        if plugin_filter and _as_text(entry.get("plugin_id")) != plugin_filter:
-            continue
-        return {
-            "tool": "truth_get_last",
-            "ok": True,
-            "platform": target["platform"],
-            "scope": target["scope"],
-            "entry": entry,
-        }
-
-    return {
-        "tool": "truth_get_last",
-        "ok": False,
-        "platform": target["platform"],
-        "scope": target["scope"],
-        "error": "No matching truth snapshot found.",
-    }
-
-
-def truth_list(
-    *,
-    platform: Optional[str] = None,
-    scope: Optional[str] = None,
-    plugin_id: Optional[str] = None,
-    limit: int = 10,
-    origin: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    target = _truth_target(platform=platform, scope=scope, origin=origin)
-    plugin_filter = _as_text(plugin_id).strip()
-    max_items = _coerce_int(limit, default=10, min_value=1, max_value=100)
-    scan = min(1000, max(max_items * 6, max_items))
-
-    rows = redis_client.lrange(target["list_key"], -scan, -1) or []
-    items: List[Dict[str, Any]] = []
-    total_matches = 0
-    for raw in reversed(rows):
-        entry = _truth_entry(raw)
-        if not entry:
-            continue
-        if plugin_filter and _as_text(entry.get("plugin_id")) != plugin_filter:
-            continue
-        total_matches += 1
-        if len(items) < max_items:
-            items.append(entry)
-
-    return {
-        "tool": "truth_list",
-        "ok": True,
-        "platform": target["platform"],
-        "scope": target["scope"],
-        "plugin_id": plugin_filter or None,
-        "count": len(items),
-        "total_count": total_matches,
-        "has_more": total_matches > len(items),
-        "entries": items,
     }
 
 

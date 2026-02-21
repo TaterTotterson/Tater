@@ -347,6 +347,27 @@ def _tool_result_summary(result: Dict[str, Any]) -> str:
             lines.append(f"Likely main image: {best_image}")
         return "\n".join(lines[:3]).strip()
 
+    if tool == "search_web":
+        rows = result.get("results") if isinstance(result.get("results"), list) else []
+        if rows:
+            lines = []
+            for row in rows[:3]:
+                if not isinstance(row, dict):
+                    continue
+                title = _trim_text(row.get("title"), max_chars=110)
+                url = _trim_text(row.get("url"), max_chars=180)
+                snippet = _trim_text(row.get("snippet"), max_chars=180)
+                if title and url:
+                    lines.append(f"{title} ({url})")
+                elif url:
+                    lines.append(url)
+                if snippet:
+                    lines.append(snippet)
+                if len(lines) >= 5:
+                    break
+            if lines:
+                return "\n".join(lines[:5]).strip()
+
     if tool == "read_url":
         raw_content = str(result.get("content") or "")
         ctype = str(result.get("content_type") or "")
@@ -475,37 +496,3 @@ async def narrate_result(
     if needs:
         msg += " " + " ".join(needs[:3])
     return _safe_text(msg)
-
-
-def redis_truth_payload(result: Dict[str, Any]) -> Dict[str, Any]:
-    if not isinstance(result, dict):
-        result = normalize_plugin_result(result)
-
-    if not result.get("ok"):
-        return {
-            "ok": False,
-            "error": result.get("error", {}),
-            "needs": result_needs_questions(result),
-            "diagnosis": result.get("diagnosis", {}),
-        }
-
-    if is_research_result(result):
-        return {
-            "ok": True,
-            "result_type": "research",
-            "answer": str(result.get("answer") or ""),
-            "sources": [
-                {
-                    "title": (s.get("title") if isinstance(s, dict) else None),
-                    "url": (s.get("url") if isinstance(s, dict) else None),
-                }
-                for s in (result.get("sources") or [])[:3]
-            ],
-        }
-
-    return {
-        "ok": True,
-        "result_type": "action",
-        "data": result.get("data", {}) if isinstance(result.get("data"), dict) else {},
-        "facts": result.get("facts", {}) if isinstance(result.get("facts"), dict) else {},
-    }
