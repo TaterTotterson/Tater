@@ -56,6 +56,7 @@ TELEGRAM_TEXT_LIMIT = 4096
 TELEGRAM_TYPING_PULSE_SECONDS = 4.0
 TELEGRAM_CHAT_LOOKUP_HASH = "tater:telegram:chat_lookup"
 TELEGRAM_BLOB_PREFIX = "tater:blob:telegram"
+ROOM_LABEL_PREFIX = "tater:room_label"
 _MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
 _MD_FENCED_CODE_RE = re.compile(r"```(?:[A-Za-z0-9_+\-]+)?\n?([\s\S]*?)```")
 _MD_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
@@ -142,6 +143,51 @@ def _normalize_chat_id(value: Any) -> str:
     return raw
 
 
+def _room_label_key(platform: str, room_id: Any) -> str:
+    platform_name = str(platform or "").strip().lower() or "unknown"
+    scope_id = str(room_id or "").strip()
+    if not scope_id:
+        return ""
+    return f"{ROOM_LABEL_PREFIX}:{platform_name}:{scope_id}"
+
+
+def _save_room_label(platform: str, room_id: Any, label: Any) -> None:
+    key = _room_label_key(platform, room_id)
+    label_text = str(label or "").strip()
+    if not key or not label_text:
+        return
+    try:
+        redis_client.set(key, label_text)
+    except Exception:
+        pass
+
+
+def _telegram_room_label(chat: Dict[str, Any], sender: Dict[str, Any]) -> str:
+    chat_type = str((chat or {}).get("type") or "").strip().lower()
+    title = str((chat or {}).get("title") or "").strip()
+    username = str((chat or {}).get("username") or "").strip()
+    if username and not username.startswith("@"):
+        username = f"@{username}"
+
+    if chat_type == "private":
+        sender_username = str((sender or {}).get("username") or "").strip()
+        first = str((sender or {}).get("first_name") or "").strip()
+        last = str((sender or {}).get("last_name") or "").strip()
+        full_name = " ".join([part for part in (first, last) if part]).strip()
+        if sender_username:
+            return f"@{sender_username}" if not sender_username.startswith("@") else sender_username
+        if full_name:
+            return full_name
+        user_id = str((sender or {}).get("id") or "").strip()
+        return f"tg_{user_id}" if user_id else "DM"
+
+    if title:
+        return f"#{title}" if not title.startswith("#") else title
+    if username:
+        return username
+    return ""
+
+
 def _chat_lookup_key(value: Any) -> str:
     raw = str(value or "").strip().lower()
     if raw.startswith("#") or raw.startswith("@"):
@@ -177,6 +223,10 @@ def _remember_chat_lookup(chat: Dict[str, Any], sender: Dict[str, Any]) -> None:
                 redis_client.hset(TELEGRAM_CHAT_LOOKUP_HASH, key, chat_id)
             except Exception:
                 pass
+
+    label = _telegram_room_label(chat, sender)
+    if label:
+        _save_room_label("telegram", chat_id, label)
 
 
 def _resolve_chat_target(value: Any) -> str:
@@ -220,6 +270,49 @@ def _normalize_user_ref(value: Any) -> str:
     if raw.startswith("@"):
         raw = raw[1:].strip()
     return raw.lower()
+
+
+def _telegram_sender_identity(message: Dict[str, Any]) -> Dict[str, str]:
+    sender = message.get("from") or {}
+    sender_chat = message.get("sender_chat") or {}
+
+    username = str(sender.get("username") or "").strip()
+    first = str(sender.get("first_name") or "").strip()
+    last = str(sender.get("last_name") or "").strip()
+    full_name = " ".join([part for part in (first, last) if part]).strip()
+
+    sender_chat_title = str(sender_chat.get("title") or "").strip()
+    sender_chat_username = str(sender_chat.get("username") or "").strip()
+
+    user_id = str(
+        sender.get("id")
+        or sender_chat.get("id")
+        or ""
+    ).strip()
+
+    user_handle = ""
+    if username:
+        user_handle = username
+    elif sender_chat_username:
+        user_handle = sender_chat_username
+    if user_handle and not user_handle.startswith("@"):
+        user_handle = f"@{user_handle}"
+
+    display_name = (
+        username
+        or full_name
+        or sender_chat_title
+        or sender_chat_username
+        or "telegram_user"
+    )
+    if display_name == "telegram_user" and user_id:
+        display_name = f"telegram_user_{user_id}"
+
+    return {
+        "display_name": str(display_name or "telegram_user").strip() or "telegram_user",
+        "user_id": user_id,
+        "user_handle": user_handle,
+    }
 
 
 def _get_plugin_enabled(plugin_name: str) -> bool:
@@ -817,18 +910,32 @@ class TelegramPlatform:
         if not sent:
             await self._send_text(chat_id, f"[{kind.capitalize()}: {filename}]")
 
-    def _save_message(self, chat_id: str, role: str, username: str, content: Any):
+    def _save_message(
+        self,
+        chat_id: str,
+        role: str,
+        username: str,
+        content: Any,
+        *,
+        user_id: str = "",
+        user_handle: str = "",
+    ):
         key = _history_key(chat_id)
         max_store = int(redis_client.get("tater:max_store") or 20)
+        payload: Dict[str, Any] = {
+            "role": role,
+            "username": username,
+            "content": content,
+        }
+        user_id_text = str(user_id or "").strip()
+        user_handle_text = str(user_handle or "").strip()
+        if user_id_text:
+            payload["user_id"] = user_id_text
+        if user_handle_text:
+            payload["user_handle"] = user_handle_text
         redis_client.rpush(
             key,
-            json.dumps(
-                {
-                    "role": role,
-                    "username": username,
-                    "content": content,
-                }
-            ),
+            json.dumps(payload),
         )
         if max_store > 0:
             redis_client.ltrim(key, -max_store, -1)
@@ -1036,18 +1143,24 @@ class TelegramPlatform:
 
         _remember_chat_lookup(chat, sender)
 
-        username = (
-            str(sender.get("username") or "").strip()
-            or str(sender.get("first_name") or "").strip()
-            or "telegram_user"
-        )
+        identity = _telegram_sender_identity(message)
+        username = str(identity.get("display_name") or "telegram_user").strip() or "telegram_user"
+        sender_user_id = str(identity.get("user_id") or "").strip()
+        sender_user_handle = str(identity.get("user_handle") or "").strip()
         message_text = _message_text(message)
         if not message_text:
             return
 
         captured_media = await asyncio.to_thread(self._capture_incoming_media_refs_sync, message, chat_id)
         recent_media_refs = captured_media.get("media_refs") if isinstance(captured_media, dict) else None
-        self._save_message(chat_id, "user", username, message_text)
+        self._save_message(
+            chat_id,
+            "user",
+            username,
+            message_text,
+            user_id=sender_user_id,
+            user_handle=sender_user_handle,
+        )
 
         system_prompt = self.build_system_prompt()
         history = self._load_history(chat_id)
@@ -1062,6 +1175,7 @@ class TelegramPlatform:
                 "chat_type": str(chat.get("type") or "").strip(),
                 "channel": chat.get("title"),
                 "user": username,
+                "user_id": sender_user_id,
                 "request_id": str(message.get("message_id") or f"{chat_id}:{time.time():.3f}"),
             }
             if isinstance(recent_media_refs, list) and recent_media_refs:
