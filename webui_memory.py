@@ -128,7 +128,6 @@ _LEGACY_MEMORY_HASH_PREFIX = "tater:memory"
 _LEGACY_MEMORY_GLOBAL_KEY = f"{_LEGACY_MEMORY_HASH_PREFIX}:global"
 _LEGACY_MEMORY_USER_PREFIX = f"{_LEGACY_MEMORY_HASH_PREFIX}:user:"
 _LEGACY_MEMORY_ROOM_PREFIX = f"{_LEGACY_MEMORY_HASH_PREFIX}:room:"
-_LEGACY_MEMORY_EXPLICIT_ONLY_KEY = "tater:memory:explicit_only"
 _LEGACY_MEMORY_DEFAULT_TTL_KEY = "tater:memory:default_ttl_sec"
 
 
@@ -1447,7 +1446,7 @@ def _legacy_memory_discovery() -> Dict[str, Any]:
         redis_key = str(raw_key or "").strip()
         if not redis_key:
             continue
-        if redis_key in {_LEGACY_MEMORY_EXPLICIT_ONLY_KEY, _LEGACY_MEMORY_DEFAULT_TTL_KEY}:
+        if redis_key == _LEGACY_MEMORY_DEFAULT_TTL_KEY:
             continue
 
         scope_meta = _legacy_memory_parse_scope_key(redis_key)
@@ -1569,9 +1568,49 @@ def render_memory_page():
                 if not isinstance(frame, pd.DataFrame) or frame.empty:
                     return
                 table_df = frame.reset_index()
-                if "key" not in table_df.columns and "index" in table_df.columns:
-                    table_df = table_df.rename(columns={"index": "key"})
-                table_df = table_df.rename(columns={"count": count_label})
+                if "key" not in table_df.columns:
+                    if "index" in table_df.columns:
+                        table_df = table_df.rename(columns={"index": "key"})
+                    else:
+                        first_col = str(table_df.columns[0]) if len(table_df.columns) > 0 else ""
+                        if first_col:
+                            table_df = table_df.rename(columns={first_col: "key"})
+
+                if count_label not in table_df.columns:
+                    if "count" in table_df.columns:
+                        table_df = table_df.rename(columns={"count": count_label})
+                    elif "facts" in table_df.columns and count_label != "facts":
+                        table_df = table_df.rename(columns={"facts": count_label})
+                    elif "updates" in table_df.columns and count_label != "updates":
+                        table_df = table_df.rename(columns={"updates": count_label})
+                    else:
+                        candidate_cols: List[str] = []
+                        for col in list(table_df.columns):
+                            col_name = str(col)
+                            if col_name in {"key", "Rank"}:
+                                continue
+                            try:
+                                if pd.api.types.is_numeric_dtype(table_df[col]):
+                                    candidate_cols.append(col_name)
+                            except Exception:
+                                continue
+                        if not candidate_cols:
+                            for col in list(table_df.columns):
+                                col_name = str(col)
+                                if col_name not in {"key", "Rank"}:
+                                    candidate_cols.append(col_name)
+                        if candidate_cols:
+                            table_df = table_df.rename(columns={candidate_cols[0]: count_label})
+                        else:
+                            table_df[count_label] = 0
+
+                if count_label not in table_df.columns:
+                    table_df[count_label] = 0
+                try:
+                    table_df[count_label] = pd.to_numeric(table_df[count_label], errors="coerce").fillna(0).astype(int)
+                except Exception:
+                    pass
+
                 table_df.insert(0, "Rank", list(range(1, len(table_df) + 1)))
                 ordered_cols = [col for col in ("Rank", "key", count_label) if col in table_df.columns]
                 if ordered_cols:
@@ -1581,7 +1620,7 @@ def render_memory_page():
                 if "Rank" in table_df.columns:
                     column_config["Rank"] = st.column_config.NumberColumn("Rank", width="small", format="%d")
                 if "key" in table_df.columns:
-                    column_config["key"] = st.column_config.TextColumn("key", width="large")
+                    column_config["key"] = st.column_config.TextColumn("key", width="medium")
                 if count_label in table_df.columns:
                     column_config[count_label] = st.column_config.NumberColumn(count_label, width="small", format="%d")
                 try:
@@ -1599,13 +1638,11 @@ def render_memory_page():
                 st.caption("Facts by platform")
                 st.bar_chart(platform_df, width="stretch")
 
-            insight_cols = st.columns(2)
-            with insight_cols[0]:
-                top_user_df = insights.get("top_user_df")
-                _render_key_table("Top user fact keys", top_user_df, count_label="facts")
-            with insight_cols[1]:
-                top_room_df = insights.get("top_room_df")
-                _render_key_table("Top room fact keys", top_room_df, count_label="facts")
+            top_user_df = insights.get("top_user_df")
+            _render_key_table("Top user fact keys", top_user_df, count_label="facts")
+
+            top_room_df = insights.get("top_room_df")
+            _render_key_table("Top room fact keys", top_room_df, count_label="facts")
 
             recent_key_df = insights.get("recent_key_df")
             _render_key_table("Most updated keys (last 7 days)", recent_key_df, count_label="updates")
@@ -1847,13 +1884,7 @@ def render_memory_page():
         legacy_discovery = _legacy_memory_discovery()
         legacy_rows = list(legacy_discovery.get("scopes") or [])
 
-        explicit_raw = str(redis_client.get(_LEGACY_MEMORY_EXPLICIT_ONLY_KEY) or "").strip().lower()
-        if not explicit_raw:
-            explicit_text = "true (default)"
-        elif explicit_raw in {"1", "true", "yes", "on"}:
-            explicit_text = "true"
-        else:
-            explicit_text = "false"
+        explicit_text = "false (always)"
 
         default_ttl_raw = str(redis_client.get(_LEGACY_MEMORY_DEFAULT_TTL_KEY) or "").strip()
         default_ttl_text = default_ttl_raw or "0"
