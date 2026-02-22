@@ -3,6 +3,7 @@ import os
 import json
 import asyncio
 import logging
+import re
 from contextlib import asynccontextmanager, suppress
 import redis
 import discord
@@ -14,7 +15,7 @@ import threading
 import time
 from io import BytesIO
 import uuid
-from typing import Any, Dict
+from typing import Any, Dict, Iterable
 from notify.queue import is_expired
 from notify.media import load_queue_attachments
 
@@ -61,11 +62,11 @@ PLATFORM_SETTINGS = {
             "default": "",
             "description": "User ID allowed to DM the bot",
         },
-        "response_channel_id": {
-            "label": "Response Channel ID",
+        "response_channel_ids": {
+            "label": "Response Channel IDs",
             "type": "string",
             "default": "",
-            "description": "Channel where the assistant replies",
+            "description": "Comma-separated channel IDs where the assistant replies without pinging.",
         },
     },
 }
@@ -162,6 +163,56 @@ def _discord_channel_label(channel: Any) -> str:
     if name.startswith("#"):
         return name
     return f"#{name}"
+
+
+def parse_response_channel_ids(raw: Any) -> set[int]:
+    if raw is None:
+        return set()
+    if isinstance(raw, (list, tuple, set)):
+        parts = [str(item or "").strip() for item in raw]
+    else:
+        text = str(raw or "").strip()
+        if not text:
+            return set()
+        parts = [token.strip() for token in re.split(r"[,\s]+", text) if token.strip()]
+
+    out: set[int] = set()
+    for token in parts:
+        token = str(token or "").strip()
+        if not token:
+            continue
+        token = token.strip("<>#")
+        if token.startswith("!"):
+            token = token[1:]
+        if not token:
+            continue
+        try:
+            parsed = int(token)
+        except Exception:
+            continue
+        if parsed > 0:
+            out.add(parsed)
+    return out
+
+
+def parse_response_channel_settings(settings: Dict[str, Any] | None) -> set[int]:
+    data = settings if isinstance(settings, dict) else {}
+    out = set()
+    out.update(parse_response_channel_ids(data.get("response_channel_ids")))
+    out.update(parse_response_channel_ids(data.get("response_channel_id")))
+    return out
+
+
+def serialize_response_channel_ids(channel_ids: Iterable[int]) -> str:
+    cleaned: set[int] = set()
+    for item in channel_ids or []:
+        try:
+            parsed = int(item)
+        except Exception:
+            continue
+        if parsed > 0:
+            cleaned.add(parsed)
+    return ",".join(str(item) for item in sorted(cleaned))
 
 
 # ---- LM template helpers ----
@@ -362,12 +413,40 @@ async def safe_typing(channel):
 
 
 class discord_platform(commands.Bot):
-    def __init__(self, llm_client, admin_user_id, response_channel_id, *args, **kwargs):
+    def __init__(self, llm_client, admin_user_id, response_channel_ids=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.llm = llm_client
         self.admin_user_id = admin_user_id
-        self.response_channel_id = response_channel_id
+        self.response_channel_ids: set[int] = set()
+        self.response_channel_id = 0
+        self.set_response_channels(response_channel_ids)
         self.max_response_length = max_response_length
+
+    def set_response_channels(self, channel_ids: Any) -> set[int]:
+        normalized: set[int] = set()
+        if isinstance(channel_ids, str):
+            normalized = parse_response_channel_ids(channel_ids)
+        elif isinstance(channel_ids, (list, tuple, set)):
+            normalized = parse_response_channel_ids(channel_ids)
+        elif isinstance(channel_ids, dict):
+            normalized = parse_response_channel_settings(channel_ids)
+        elif channel_ids is not None:
+            try:
+                parsed = int(channel_ids)
+                if parsed > 0:
+                    normalized = {parsed}
+            except Exception:
+                normalized = set()
+        self.response_channel_ids = normalized
+        self.response_channel_id = sorted(normalized)[0] if normalized else 0
+        return set(self.response_channel_ids)
+
+    def is_response_channel(self, channel_id: Any) -> bool:
+        try:
+            parsed = int(channel_id)
+        except Exception:
+            return False
+        return parsed in self.response_channel_ids
 
     def _admin_allowed(self, user_id: int | None) -> bool:
         if not self.admin_user_id:
@@ -521,8 +600,13 @@ class discord_platform(commands.Bot):
                     _save_room_label("discord", getattr(channel, "id", ""), _discord_channel_label(channel))
         except Exception:
             pass
+        response_desc = (
+            ", ".join(str(cid) for cid in sorted(self.response_channel_ids))
+            if self.response_channel_ids
+            else "mention-only"
+        )
         logger.info(
-            f"Bot is ready. Admin: {self.admin_user_id}, Response Channel: {self.response_channel_id}"
+            f"Bot is ready. Admin: {self.admin_user_id}, Response Channels: {response_desc}"
         )
 
     async def generate_error_message(self, prompt: str, fallback: str, message: discord.Message):
@@ -667,7 +751,7 @@ class discord_platform(commands.Bot):
             if message.author.id != self.admin_user_id:
                 return
         else:
-            if message.channel.id != self.response_channel_id and not self.user.mentioned_in(message):
+            if not self.is_response_channel(message.channel.id) and not self.user.mentioned_in(message):
                 return
 
         history = await self.load_history(message.channel.id)
@@ -870,19 +954,33 @@ async def setup_commands(client: commands.Bot):
 def run(stop_event=None):
     token = redis_client.hget("discord_platform_settings", "discord_token")
     admin_id = redis_client.hget("discord_platform_settings", "admin_user_id")
-    channel_id = redis_client.hget("discord_platform_settings", "response_channel_id")
+    response_channel_ids_raw = redis_client.hget("discord_platform_settings", "response_channel_ids")
+    response_channel_id_legacy = redis_client.hget("discord_platform_settings", "response_channel_id")
 
     llm_client = get_llm_client_from_env()
     logger.info(f"[Discord] LLM client → {build_llm_host_from_env()}")
 
-    if not (token and admin_id and channel_id):
+    if not (token and admin_id):
         print("⚠️ Missing Discord settings in Redis. Bot not started.")
         return
 
+    try:
+        admin_user_id = int(str(admin_id).strip())
+    except Exception:
+        print("⚠️ Invalid Discord admin_user_id in Redis. Bot not started.")
+        return
+
+    response_channel_ids = parse_response_channel_settings(
+        {
+            "response_channel_ids": response_channel_ids_raw,
+            "response_channel_id": response_channel_id_legacy,
+        }
+    )
+
     client = discord_platform(
         llm_client=llm_client,
-        admin_user_id=int(admin_id),
-        response_channel_id=int(channel_id),
+        admin_user_id=admin_user_id,
+        response_channel_ids=response_channel_ids,
         command_prefix="!",
         intents=discord.Intents.all(),
     )
