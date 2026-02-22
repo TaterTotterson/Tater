@@ -10,6 +10,7 @@ REDIS_KEY = "tater:admin_only_plugins"
 DEFAULT_ADMIN_ONLY_PLUGINS = {
     "ai_tasks",
     "broadcast",
+    "discord_admin",
     "events_query",
     "find_my_phone",
     "get_notifications",
