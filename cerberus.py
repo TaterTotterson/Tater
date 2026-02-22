@@ -161,6 +161,10 @@ _OVER_CLARIFICATION_MARKERS = (
     "which city should i use",
     "what location should i use",
     "which location should i use",
+    "which categories, channels, and roles",
+    "what categories, channels, and roles",
+    "which categories and channels",
+    "which channels and roles",
 )
 
 _URL_RE = re.compile(r"https?://[^\s<>)\]\"']+", flags=re.IGNORECASE)
@@ -1300,6 +1304,14 @@ def _looks_like_over_clarification(text: str, *, user_text: str = "") -> bool:
 
     if re.search(r"\b(what would you like me to do|what would you like to do)\b", lowered):
         return _contains_action_intent(user_lowered)
+
+    if re.search(r"\b(which|what)\b.{0,90}\b(categories?|channels?|roles?)\b", lowered):
+        return bool(
+            re.search(
+                r"\b(discord|server|setup|set up|configure|build|hq|for us|however\s+you\s+think)\b",
+                user_lowered,
+            )
+        )
 
     if re.search(r"\b(could you clarify|what do you mean|what specific issue)\b", lowered):
         tokens = [tok for tok in re.split(r"\s+", user_lowered) if tok]
