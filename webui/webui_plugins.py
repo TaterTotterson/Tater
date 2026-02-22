@@ -14,7 +14,7 @@ from plugin_settings import (
     get_plugin_settings,
     save_plugin_settings,
 )
-from webui_platforms import (
+from .webui_platforms import (
     exp_get_plugin_enabled,
     exp_set_plugin_enabled,
     _load_exp_validation,
@@ -22,7 +22,7 @@ from webui_platforms import (
     _dependency_lines,
     render_exp_plugin_settings_form,
 )
-from webui_plugin_store import (
+from .webui_plugin_store import (
     _safe_plugin_file_path,
     uninstall_plugin_file,
     clear_plugin_redis_data,

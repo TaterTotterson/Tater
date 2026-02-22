@@ -45,27 +45,27 @@ from vision_settings import (
 )
 from conversation_media_refs import load_recent_media_refs, save_media_ref
 from emoji_responder import get_emoji_settings as get_core_emoji_settings, save_emoji_settings as save_core_emoji_settings
-from webui_cerberus import (
+from webui.webui_cerberus import (
     render_cerberus_settings,
     render_cerberus_metrics_dashboard,
     render_cerberus_ledger_settings,
 )
-from webui_platforms import (
+from webui.webui_platforms import (
     render_platforms_panel,
 )
-from webui_plugins import (
+from webui.webui_plugins import (
     _sort_plugins_for_display,
     render_plugin_list,
 )
-from webui_ai_tasks import render_ai_tasks_page
-from webui_memory import render_memory_page, wipe_memory_platform_data
-from webui_plugin_store import (
+from webui.webui_ai_tasks import render_ai_tasks_page
+from webui.webui_memory import render_memory_page, wipe_memory_platform_data
+from webui.webui_plugin_store import (
     _enabled_missing_plugin_ids,
     ensure_plugins_ready,
     render_plugin_store_page,
 )
-from webui_settings import render_settings_page
-from webui_chat import (
+from webui.webui_settings import render_settings_page
+from webui.webui_chat import (
     configure_chat_helpers,
     save_message,
     _media_type_from_mimetype,
