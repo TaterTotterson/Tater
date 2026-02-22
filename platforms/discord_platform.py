@@ -46,6 +46,9 @@ redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_respon
 NOTIFY_QUEUE_KEY = "notifyq:discord"
 NOTIFY_POLL_INTERVAL = 0.5
 ROOM_LABEL_PREFIX = "tater:room_label"
+DISCORD_SETTINGS_KEY = "discord_platform_settings"
+RESPONSE_CHANNEL_MAP_FIELD = "response_channel_ids_by_guild"
+RESPONSE_CHANNEL_REFRESH_INTERVAL_SEC = 2.0
 
 PLATFORM_SETTINGS = {
     "category": "Discord Settings",
@@ -456,12 +459,15 @@ class discord_platform(commands.Bot):
         self.llm = llm_client
         self.admin_user_id = admin_user_id
         self.response_channel_ids_by_guild: dict[int, set[int]] = {}
+        self._response_channel_map_raw_cache = serialize_response_channel_map(response_channel_ids_by_guild or {})
+        self._response_channel_last_refresh = 0.0
         self.set_response_channel_map(response_channel_ids_by_guild)
         self.max_response_length = max_response_length
 
     def set_response_channel_map(self, channel_map: Any) -> dict[int, set[int]]:
         parsed = parse_response_channel_map(channel_map)
         self.response_channel_ids_by_guild = {int(k): set(v) for k, v in parsed.items()}
+        self._response_channel_map_raw_cache = serialize_response_channel_map(self.response_channel_ids_by_guild)
         return {int(k): set(v) for k, v in self.response_channel_ids_by_guild.items()}
 
     def set_guild_response_channels(self, guild_id: Any, channel_ids: Any) -> set[int]:
@@ -473,6 +479,7 @@ class discord_platform(commands.Bot):
             return set()
         normalized = parse_response_channel_ids(channel_ids)
         self.response_channel_ids_by_guild[gid] = set(normalized)
+        self._response_channel_map_raw_cache = serialize_response_channel_map(self.response_channel_ids_by_guild)
         return set(normalized)
 
     def get_response_channels_for_guild(self, guild_id: Any) -> set[int]:
@@ -491,6 +498,49 @@ class discord_platform(commands.Bot):
             return False
         allowed_channels = self.get_response_channels_for_guild(guild_id)
         return parsed in allowed_channels
+
+    def _refresh_response_channel_map_from_redis(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and (now - float(self._response_channel_last_refresh or 0.0)) < RESPONSE_CHANNEL_REFRESH_INTERVAL_SEC:
+            return
+        self._response_channel_last_refresh = now
+
+        try:
+            raw = redis_client.hget(DISCORD_SETTINGS_KEY, RESPONSE_CHANNEL_MAP_FIELD)
+        except Exception:
+            return
+        raw_text = str(raw or "").strip()
+        incoming = raw_text if raw_text else "{}"
+        if incoming == self._response_channel_map_raw_cache:
+            return
+
+        parsed = parse_response_channel_map(incoming)
+        if parsed == {} and raw_text and raw_text not in {"{}", "null"}:
+            logger.warning("[discord] response_channel_ids_by_guild is invalid JSON; keeping current runtime map.")
+            return
+        self.response_channel_ids_by_guild = {int(k): set(v) for k, v in parsed.items()}
+        self._response_channel_map_raw_cache = serialize_response_channel_map(self.response_channel_ids_by_guild)
+
+    def _message_matches_response_channel(self, message: discord.Message, *, guild_id: Any) -> bool:
+        channel = getattr(message, "channel", None)
+        candidate_ids: set[int] = set()
+        try:
+            cid = int(getattr(channel, "id", 0) or 0)
+            if cid > 0:
+                candidate_ids.add(cid)
+        except Exception:
+            pass
+        parent = getattr(channel, "parent", None)
+        try:
+            pid = int(getattr(parent, "id", 0) or 0)
+            if pid > 0:
+                candidate_ids.add(pid)
+        except Exception:
+            pass
+        for cid in candidate_ids:
+            if self.is_response_channel(cid, guild_id=guild_id):
+                return True
+        return False
 
     def _admin_allowed(self, user_id: int | None) -> bool:
         if not self.admin_user_id:
@@ -792,8 +842,9 @@ class discord_platform(commands.Bot):
             if message.author.id != self.admin_user_id:
                 return
         else:
+            self._refresh_response_channel_map_from_redis()
             guild_id = getattr(getattr(message, "guild", None), "id", None)
-            if not self.is_response_channel(message.channel.id, guild_id=guild_id) and not self.user.mentioned_in(message):
+            if not self._message_matches_response_channel(message, guild_id=guild_id) and not self.user.mentioned_in(message):
                 return
 
         history = await self.load_history(message.channel.id)
@@ -994,10 +1045,10 @@ async def setup_commands(client: commands.Bot):
 
 
 def run(stop_event=None):
-    token = redis_client.hget("discord_platform_settings", "discord_token")
-    admin_id = redis_client.hget("discord_platform_settings", "admin_user_id")
+    token = redis_client.hget(DISCORD_SETTINGS_KEY, "discord_token")
+    admin_id = redis_client.hget(DISCORD_SETTINGS_KEY, "admin_user_id")
     response_channel_ids_by_guild_raw = redis_client.hget(
-        "discord_platform_settings", "response_channel_ids_by_guild"
+        DISCORD_SETTINGS_KEY, RESPONSE_CHANNEL_MAP_FIELD
     )
 
     llm_client = get_llm_client_from_env()
