@@ -62,11 +62,11 @@ PLATFORM_SETTINGS = {
             "default": "",
             "description": "User ID allowed to DM the bot",
         },
-        "response_channel_ids": {
-            "label": "Response Channel IDs",
+        "response_channel_ids_by_guild": {
+            "label": "Response Channel IDs By Guild",
             "type": "string",
-            "default": "",
-            "description": "Comma-separated channel IDs where the assistant replies without pinging.",
+            "default": "{}",
+            "description": "JSON map of guild_id to comma-separated channel IDs where replies are allowed without pinging.",
         },
     },
 }
@@ -195,14 +195,6 @@ def parse_response_channel_ids(raw: Any) -> set[int]:
     return out
 
 
-def parse_response_channel_settings(settings: Dict[str, Any] | None) -> set[int]:
-    data = settings if isinstance(settings, dict) else {}
-    out = set()
-    out.update(parse_response_channel_ids(data.get("response_channel_ids")))
-    out.update(parse_response_channel_ids(data.get("response_channel_id")))
-    return out
-
-
 def serialize_response_channel_ids(channel_ids: Iterable[int]) -> str:
     cleaned: set[int] = set()
     for item in channel_ids or []:
@@ -213,6 +205,45 @@ def serialize_response_channel_ids(channel_ids: Iterable[int]) -> str:
         if parsed > 0:
             cleaned.add(parsed)
     return ",".join(str(item) for item in sorted(cleaned))
+
+
+def parse_response_channel_map(raw: Any) -> dict[int, set[int]]:
+    payload = raw
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return {}
+        try:
+            payload = json.loads(text)
+        except Exception:
+            return {}
+    if not isinstance(payload, dict):
+        return {}
+
+    out: dict[int, set[int]] = {}
+    for key, value in payload.items():
+        try:
+            guild_id = int(str(key).strip())
+        except Exception:
+            continue
+        if guild_id <= 0:
+            continue
+        out[guild_id] = parse_response_channel_ids(value)
+    return out
+
+
+def serialize_response_channel_map(channel_map: Dict[Any, Iterable[int]] | None) -> str:
+    out: dict[str, str] = {}
+    if isinstance(channel_map, dict):
+        for key, value in channel_map.items():
+            try:
+                guild_id = int(str(key).strip())
+            except Exception:
+                continue
+            if guild_id <= 0:
+                continue
+            out[str(guild_id)] = serialize_response_channel_ids(value or [])
+    return json.dumps(out, sort_keys=True, separators=(",", ":"))
 
 
 # ---- LM template helpers ----
@@ -413,40 +444,53 @@ async def safe_typing(channel):
 
 
 class discord_platform(commands.Bot):
-    def __init__(self, llm_client, admin_user_id, response_channel_ids=None, *args, **kwargs):
+    def __init__(
+        self,
+        llm_client,
+        admin_user_id,
+        response_channel_ids_by_guild=None,
+        *args,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.llm = llm_client
         self.admin_user_id = admin_user_id
-        self.response_channel_ids: set[int] = set()
-        self.response_channel_id = 0
-        self.set_response_channels(response_channel_ids)
+        self.response_channel_ids_by_guild: dict[int, set[int]] = {}
+        self.set_response_channel_map(response_channel_ids_by_guild)
         self.max_response_length = max_response_length
 
-    def set_response_channels(self, channel_ids: Any) -> set[int]:
-        normalized: set[int] = set()
-        if isinstance(channel_ids, str):
-            normalized = parse_response_channel_ids(channel_ids)
-        elif isinstance(channel_ids, (list, tuple, set)):
-            normalized = parse_response_channel_ids(channel_ids)
-        elif isinstance(channel_ids, dict):
-            normalized = parse_response_channel_settings(channel_ids)
-        elif channel_ids is not None:
-            try:
-                parsed = int(channel_ids)
-                if parsed > 0:
-                    normalized = {parsed}
-            except Exception:
-                normalized = set()
-        self.response_channel_ids = normalized
-        self.response_channel_id = sorted(normalized)[0] if normalized else 0
-        return set(self.response_channel_ids)
+    def set_response_channel_map(self, channel_map: Any) -> dict[int, set[int]]:
+        parsed = parse_response_channel_map(channel_map)
+        self.response_channel_ids_by_guild = {int(k): set(v) for k, v in parsed.items()}
+        return {int(k): set(v) for k, v in self.response_channel_ids_by_guild.items()}
 
-    def is_response_channel(self, channel_id: Any) -> bool:
+    def set_guild_response_channels(self, guild_id: Any, channel_ids: Any) -> set[int]:
+        try:
+            gid = int(guild_id)
+        except Exception:
+            return set()
+        if gid <= 0:
+            return set()
+        normalized = parse_response_channel_ids(channel_ids)
+        self.response_channel_ids_by_guild[gid] = set(normalized)
+        return set(normalized)
+
+    def get_response_channels_for_guild(self, guild_id: Any) -> set[int]:
+        try:
+            gid = int(guild_id)
+        except Exception:
+            gid = 0
+        if gid <= 0:
+            return set()
+        return set(self.response_channel_ids_by_guild.get(gid) or set())
+
+    def is_response_channel(self, channel_id: Any, *, guild_id: Any = None) -> bool:
         try:
             parsed = int(channel_id)
         except Exception:
             return False
-        return parsed in self.response_channel_ids
+        allowed_channels = self.get_response_channels_for_guild(guild_id)
+        return parsed in allowed_channels
 
     def _admin_allowed(self, user_id: int | None) -> bool:
         if not self.admin_user_id:
@@ -600,13 +644,10 @@ class discord_platform(commands.Bot):
                     _save_room_label("discord", getattr(channel, "id", ""), _discord_channel_label(channel))
         except Exception:
             pass
-        response_desc = (
-            ", ".join(str(cid) for cid in sorted(self.response_channel_ids))
-            if self.response_channel_ids
-            else "mention-only"
-        )
+        guild_override_count = len(self.response_channel_ids_by_guild)
         logger.info(
-            f"Bot is ready. Admin: {self.admin_user_id}, Response Channels: {response_desc}"
+            f"Bot is ready. Admin: {self.admin_user_id}, "
+            f"Guild-specific response configs: {guild_override_count}"
         )
 
     async def generate_error_message(self, prompt: str, fallback: str, message: discord.Message):
@@ -751,7 +792,8 @@ class discord_platform(commands.Bot):
             if message.author.id != self.admin_user_id:
                 return
         else:
-            if not self.is_response_channel(message.channel.id) and not self.user.mentioned_in(message):
+            guild_id = getattr(getattr(message, "guild", None), "id", None)
+            if not self.is_response_channel(message.channel.id, guild_id=guild_id) and not self.user.mentioned_in(message):
                 return
 
         history = await self.load_history(message.channel.id)
@@ -954,8 +996,9 @@ async def setup_commands(client: commands.Bot):
 def run(stop_event=None):
     token = redis_client.hget("discord_platform_settings", "discord_token")
     admin_id = redis_client.hget("discord_platform_settings", "admin_user_id")
-    response_channel_ids_raw = redis_client.hget("discord_platform_settings", "response_channel_ids")
-    response_channel_id_legacy = redis_client.hget("discord_platform_settings", "response_channel_id")
+    response_channel_ids_by_guild_raw = redis_client.hget(
+        "discord_platform_settings", "response_channel_ids_by_guild"
+    )
 
     llm_client = get_llm_client_from_env()
     logger.info(f"[Discord] LLM client → {build_llm_host_from_env()}")
@@ -970,17 +1013,12 @@ def run(stop_event=None):
         print("⚠️ Invalid Discord admin_user_id in Redis. Bot not started.")
         return
 
-    response_channel_ids = parse_response_channel_settings(
-        {
-            "response_channel_ids": response_channel_ids_raw,
-            "response_channel_id": response_channel_id_legacy,
-        }
-    )
+    response_channel_ids_by_guild = parse_response_channel_map(response_channel_ids_by_guild_raw)
 
     client = discord_platform(
         llm_client=llm_client,
         admin_user_id=admin_user_id,
-        response_channel_ids=response_channel_ids,
+        response_channel_ids_by_guild=response_channel_ids_by_guild,
         command_prefix="!",
         intents=discord.Intents.all(),
     )
