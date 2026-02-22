@@ -4359,5 +4359,3 @@ def list_agent_platforms() -> Dict[str, Any]:
             continue
         items.append({"key": name, "label": platform_dict.get("label") or name})
     return {"tool": "list_agent_platforms", "ok": True, "platforms": items, "errors": errors}
-
-_ensure_dirs()
