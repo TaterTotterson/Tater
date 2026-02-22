@@ -6,49 +6,8 @@
 
 ---
 
-## Cerberus: Tater’s Brain
-Tater now runs on Cerberus — a closed-loop Planner → Doer → Checker architecture designed for reliable tool execution.
-
-- Planner selects the next step by reasoning about intent: either a direct reply or a single tool JSON call.
-- Doer validates and executes that tool deterministically, with strict runtime and platform gating.
-- Checker verifies whether the request is actually satisfied, then finalizes, schedules one follow-up tool step, or asks a short clarification question.
-
-Cerberus tool-use policy is intent-first:
-- Tool calls are for real actions or external state changes.
-- Conversational, explanatory, hypothetical, and brainstorming requests stay conversational.
-- If intent is ambiguous between action and information, Cerberus asks a brief clarifying question.
-- Cerberus never claims an action completed unless a tool call executed successfully.
-
-Over multiple rounds, Cerberus can use multiple tools — but never more than one per round — keeping behavior structured, predictable, and recoverable.
-
-This loop is now the default orchestration path across all Tater platform handlers, ensuring consistent tool behavior everywhere.
-
-### Cerberus Runtime Config (WebUI)
-
-Cerberus runtime config is managed in **WebUI -> Settings -> Cerberus** (Redis-backed).
-
-Available settings:
-
-- `Max rounds` (`0` = unlimited)
-- `Max tool calls` (`0` = unlimited)
-- `Agent state TTL seconds` (`0` disables TTL)
-- `Planner max tokens`
-- `Checker max tokens`
-- `Doer max tokens`
-- `Tool-repair max tokens`
-- `Over-clarification repair max tokens`
-- `Recovery max tokens`
-- `Max ledger items`
-
-You can also use the **Set Default Values** button in the Cerberus settings tab to restore built-in defaults.
-
-### Cerberus Scope + Ledger
-
-- Scope is resolved per conversation container (`channel`, `room`, `chat`, `device`, `session`) so state does not bleed across rooms/devices.
-- Ledger entries are written to:
-  - `tater:cerberus:ledger`
-  - `tater:cerberus:ledger:<platform>`
-- Each entry includes validation details, planner classification, compact tool result, outcome/reason, and timing fields for debugging.
+## Cerberus
+Tater runs on Cerberus — a closed-loop Planner → Doer → Checker architecture designed for reliable tool execution.
 
 ---
 
