@@ -214,11 +214,8 @@ def build_help_constrained_retry_tool_call(
     failed_tool_call: Optional[Dict[str, Any]],
     help_payload: Optional[Dict[str, Any]],
     registry: Dict[str, Any],
-    default_user_text: str,
     plugin_tool_id_for_call_fn: Callable[[Optional[Dict[str, Any]], Dict[str, Any]], str],
     constrain_args_from_plugin_help_fn: Callable[[Optional[Dict[str, Any]], Optional[Dict[str, Any]]], Dict[str, Any]],
-    tool_call_effective_user_text_fn: Callable[[Optional[Dict[str, Any]], str], str],
-    apply_full_user_request_requirement_fn: Callable[[Any, Dict[str, Any], str], Dict[str, Any]],
     tool_call_route_metadata_fn: Callable[[Optional[Dict[str, Any]]], Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
     plugin_id = plugin_tool_id_for_call_fn(failed_tool_call, registry)
@@ -230,13 +227,6 @@ def build_help_constrained_retry_tool_call(
         else {}
     )
     constrained_args = constrain_args_from_plugin_help_fn(source_args, help_payload)
-    plugin_obj = registry.get(plugin_id)
-    effective_user_text = tool_call_effective_user_text_fn(failed_tool_call, default_user_text)
-    normalized_args = apply_full_user_request_requirement_fn(
-        plugin_obj,
-        constrained_args,
-        effective_user_text,
-    )
-    retry_call: Dict[str, Any] = {"function": plugin_id, "arguments": normalized_args}
+    retry_call: Dict[str, Any] = {"function": plugin_id, "arguments": constrained_args}
     retry_call.update(tool_call_route_metadata_fn(failed_tool_call))
     return retry_call

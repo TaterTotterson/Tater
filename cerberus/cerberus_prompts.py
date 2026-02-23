@@ -65,7 +65,7 @@ def planner_system_prompt(
         "- For website/page summary requests prefer inspect_webpage over read_url.\n"
         "- For observational scene questions, try available camera/snapshot/vision tools before limitation answers.\n"
         "- Do not claim inability to check cameras when relevant camera tools are available.\n"
-        "- If a plugin requires the full/exact user request text in a specific argument, include it verbatim.\n"
+        "- For natural-language text arguments, pass the user's requested intent clearly and directly.\n"
         "- Never ask what platform this chat is on.\n"
         "- Never mention internal orchestration roles/codenames in user-facing replies.\n"
         f"{plain_text_rule}"

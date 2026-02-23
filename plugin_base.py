@@ -16,12 +16,6 @@ class ToolPlugin:
     missing_info_prompts = []
     settings_category = None
     required_settings = {}
-    # Argument contract for Cerberus:
-    # - "structured": planner supplies structured fields
-    # - "raw_user_request": Cerberus injects the user's exact message into raw_user_arg
-    argument_mode = "structured"
-    raw_user_arg = ""
-    raw_user_policy = "verbatim"
     routing_keywords = []
 
     # Default waiting message prompt for LLM

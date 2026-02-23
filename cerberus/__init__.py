@@ -230,14 +230,6 @@ _WEB_RESEARCH_MIN_PREVIEW_CHARS = 260
 _WEB_RESEARCH_MIN_PREVIEW_WORDS = 45
 
 
-def _plugin_argument_mode(plugin: Any) -> str:
-    return contracts.plugin_argument_mode(plugin)
-
-
-def _plugin_raw_user_arg_key(plugin: Any) -> str:
-    return contracts.plugin_raw_user_arg_key(plugin)
-
-
 def _plugin_routing_keywords(plugin: Any) -> List[str]:
     return contracts.plugin_routing_keywords(plugin)
 
@@ -307,35 +299,16 @@ def _plugin_required_argument_keys(plugin: Any) -> List[str]:
     return toolcall_utils.plugin_required_argument_keys(plugin)
 
 
-def _apply_full_user_request_requirement(
-    *,
-    plugin_obj: Any,
-    args: Dict[str, Any],
-    user_text: str,
-) -> Dict[str, Any]:
-    return contracts.apply_full_user_request_requirement(
-        plugin_obj=plugin_obj,
-        args=args,
-        user_text=user_text,
-    )
-
-
 def _normalize_tool_call_for_user_request(
     *,
     tool_call: Dict[str, Any],
     registry: Dict[str, Any],
     user_text: str,
 ) -> Dict[str, Any]:
+    del registry, user_text
     return toolcall_utils.normalize_tool_call_for_user_request(
         tool_call=tool_call,
-        registry=registry,
-        user_text=user_text,
         canonical_tool_name_fn=_canonical_tool_name,
-        apply_full_user_request_requirement_fn=lambda plugin_obj, args, text: _apply_full_user_request_requirement(
-            plugin_obj=plugin_obj,
-            args=args,
-            user_text=text,
-        ),
         tool_call_route_metadata_fn=_tool_call_route_metadata,
     )
 
@@ -764,8 +737,6 @@ def _plugin_arg_hint(plugin: Any) -> str:
     return tool_index_helpers.plugin_arg_hint(
         plugin,
         plugin_usage_argument_keys_fn=_plugin_usage_argument_keys,
-        plugin_argument_mode_fn=_plugin_argument_mode,
-        plugin_raw_user_arg_key_fn=_plugin_raw_user_arg_key,
     )
 
 
@@ -1465,7 +1436,6 @@ async def _execute_tool_call(
         admin_guard=admin_guard,
         canonical_tool_name_fn=_canonical_tool_name,
         attach_origin_fn=_attach_origin,
-        apply_full_user_request_requirement_fn=_apply_full_user_request_requirement,
         normalize_plugin_result_fn=normalize_plugin_result,
         normalize_tool_result_for_checker_fn=_normalize_tool_result_for_checker,
         action_failure_fn=action_failure,
@@ -1938,23 +1908,15 @@ def _build_help_constrained_retry_tool_call(
     failed_tool_call: Optional[Dict[str, Any]],
     help_payload: Optional[Dict[str, Any]],
     registry: Dict[str, Any],
-    default_user_text: str,
 ) -> Optional[Dict[str, Any]]:
     return retry_helpers.build_help_constrained_retry_tool_call(
         failed_tool_call=failed_tool_call,
         help_payload=help_payload,
         registry=registry,
-        default_user_text=default_user_text,
         plugin_tool_id_for_call_fn=_plugin_tool_id_for_call,
         constrain_args_from_plugin_help_fn=lambda args, payload: _constrain_args_from_plugin_help(
             args=args,
             help_payload=payload,
-        ),
-        tool_call_effective_user_text_fn=_tool_call_effective_user_text,
-        apply_full_user_request_requirement_fn=lambda plugin_obj, args, user_text: _apply_full_user_request_requirement(
-            plugin_obj=plugin_obj,
-            args=args,
-            user_text=user_text,
         ),
         tool_call_route_metadata_fn=_tool_call_route_metadata,
     )
@@ -2256,16 +2218,6 @@ async def run_cerberus_turn(
             if plugin_obj is None:
                 route_build_failed = True
                 break
-            if _plugin_argument_mode(plugin_obj) == "raw_user_request":
-                built_routed_calls.append(
-                    {
-                        "function": plugin_id,
-                        "arguments": {},
-                        _MULTI_INTENT_ROUTE_USER_TEXT_KEY: slice_text,
-                        _MULTI_INTENT_ROUTE_FLAG_KEY: True,
-                    }
-                )
-                continue
 
             route_started = time.perf_counter()
             structured_call = await _build_structured_routed_tool_call(
@@ -2799,7 +2751,6 @@ async def run_cerberus_turn(
                     failed_tool_call=bad_args_help_pending.get("failed_tool_call"),
                     help_payload=payload_obj,
                     registry=registry,
-                    default_user_text=resolved_user_text or user_text,
                 )
                 bad_args_help_pending = None
                 if isinstance(retry_call, dict):

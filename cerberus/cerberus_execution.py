@@ -71,7 +71,6 @@ async def execute_tool_call(
     admin_guard: Optional[Callable[[str], Optional[Dict[str, Any]]]],
     canonical_tool_name_fn: Callable[[str], str],
     attach_origin_fn: Callable[..., Dict[str, Any]],
-    apply_full_user_request_requirement_fn: Callable[..., Dict[str, Any]],
     normalize_plugin_result_fn: Callable[[Any], Dict[str, Any]],
     normalize_tool_result_for_checker_fn: Callable[..., Any],
     action_failure_fn: Callable[..., Dict[str, Any]],
@@ -92,11 +91,6 @@ async def execute_tool_call(
         platform=platform,
         scope=scope,
         request_text=user_text,
-    )
-    args = apply_full_user_request_requirement_fn(
-        plugin_obj=plugin_obj,
-        args=args,
-        user_text=user_text,
     )
 
     if admin_guard:

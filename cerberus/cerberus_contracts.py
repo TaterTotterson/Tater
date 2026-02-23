@@ -51,17 +51,6 @@ _MULTI_INTENT_CLAUSE_SPLIT_RE = re.compile(
 )
 
 
-def plugin_argument_mode(plugin: Any) -> str:
-    mode = str(getattr(plugin, "argument_mode", "structured") or "structured").strip().lower()
-    if mode not in {"structured", "raw_user_request"}:
-        return "structured"
-    return mode
-
-
-def plugin_raw_user_arg_key(plugin: Any) -> str:
-    return str(getattr(plugin, "raw_user_arg", "") or "").strip()
-
-
 def plugin_routing_keywords(plugin: Any) -> List[str]:
     raw = getattr(plugin, "routing_keywords", [])
     if raw is None:
@@ -242,22 +231,3 @@ def build_multi_intent_routed_actions(
             continue
         out.append({"plugin_id": plugin_id, "user_text": snippet})
     return out if len(out) >= 2 else []
-
-
-def apply_full_user_request_requirement(
-    *,
-    plugin_obj: Any,
-    args: Dict[str, Any],
-    user_text: str,
-) -> Dict[str, Any]:
-    out = dict(args or {})
-    text = str(user_text or "").strip()
-    if not text or plugin_obj is None:
-        return out
-    if plugin_argument_mode(plugin_obj) != "raw_user_request":
-        return out
-    target_key = plugin_raw_user_arg_key(plugin_obj)
-    if not target_key:
-        return out
-    out[target_key] = text
-    return out
