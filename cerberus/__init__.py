@@ -1840,6 +1840,33 @@ def _tool_failure_checker_reason(tool_result: Optional[Dict[str, Any]]) -> str:
     return "tool_failed"
 
 
+def _select_final_answer_text(
+    *,
+    checker_decision: Optional[Dict[str, Any]],
+    draft_response: str,
+    user_text: str,
+    tool_result: Optional[Dict[str, Any]],
+) -> str:
+    checker_text = str(((checker_decision or {}).get("text")) or "").strip()
+    draft = str(draft_response or "").strip()
+    candidate = checker_text or draft or DEFAULT_CLARIFICATION
+
+    if (
+        checker_text
+        and draft
+        and isinstance(tool_result, dict)
+        and bool(tool_result.get("ok"))
+        and not _is_low_information_text(draft)
+    ):
+        if checker_text == DEFAULT_CLARIFICATION or _looks_like_over_clarification(
+            checker_text,
+            user_text=user_text,
+        ):
+            return draft
+
+    return candidate
+
+
 _BAD_ARGS_FAILURE_CODES = retry_helpers.BAD_ARGS_FAILURE_CODES
 
 _BAD_ARGS_FAILURE_TEXT_MARKERS = retry_helpers.BAD_ARGS_FAILURE_TEXT_MARKERS
@@ -2573,7 +2600,12 @@ async def run_cerberus_turn(
                     planner_text_is_tool_candidate = True
                     continue
 
-                final_text_candidate = str(checker_decision.get("text") or draft_response or DEFAULT_CLARIFICATION).strip()
+                final_text_candidate = _select_final_answer_text(
+                    checker_decision=checker_decision,
+                    draft_response=draft_response,
+                    user_text=resolved_user_text or user_text,
+                    tool_result=tool_result_for_checker,
+                )
                 if _should_continue_after_incomplete_final_answer(
                     user_text=resolved_user_text or user_text,
                     final_text=final_text_candidate,
@@ -3074,7 +3106,12 @@ async def run_cerberus_turn(
         checker_action = str(checker_decision.get("kind") or "FINAL_ANSWER")
 
         if checker_action == "FINAL_ANSWER":
-            final_text_candidate = str(checker_decision.get("text") or draft_response or DEFAULT_CLARIFICATION).strip()
+            final_text_candidate = _select_final_answer_text(
+                checker_decision=checker_decision,
+                draft_response=draft_response,
+                user_text=resolved_user_text or user_text,
+                tool_result=tool_result_for_checker,
+            )
             if _should_continue_after_incomplete_final_answer(
                 user_text=resolved_user_text or user_text,
                 final_text=final_text_candidate,
@@ -3300,7 +3337,12 @@ async def run_cerberus_turn(
 
     checker_reason = _tool_failure_checker_reason(tool_result_for_checker) or checker_reason or "complete"
     return _finish(
-        text=str(checker_decision.get("text") or best_effort or DEFAULT_CLARIFICATION).strip(),
+        text=_select_final_answer_text(
+            checker_decision=checker_decision,
+            draft_response=best_effort,
+            user_text=resolved_user_text or user_text,
+            tool_result=tool_result_for_checker,
+        ),
         status="done",
         checker_action_value="FINAL_ANSWER",
         checker_reason_value=checker_reason,
