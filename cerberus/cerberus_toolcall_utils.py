@@ -54,10 +54,7 @@ def plugin_required_argument_keys(plugin: Any) -> List[str]:
 def normalize_tool_call_for_user_request(
     *,
     tool_call: Dict[str, Any],
-    registry: Dict[str, Any],
-    user_text: str,
     canonical_tool_name_fn: Callable[[str], str],
-    apply_full_user_request_requirement_fn: Callable[[Any, Dict[str, Any], str], Dict[str, Any]],
     tool_call_route_metadata_fn: Callable[[Optional[Dict[str, Any]]], Dict[str, Any]],
 ) -> Dict[str, Any]:
     call = tool_call if isinstance(tool_call, dict) else {}
@@ -65,13 +62,7 @@ def normalize_tool_call_for_user_request(
     args = call.get("arguments")
     if not isinstance(args, dict):
         args = {}
-    plugin_obj = registry.get(func)
-    normalized_args = apply_full_user_request_requirement_fn(
-        plugin_obj,
-        dict(args),
-        user_text,
-    )
-    normalized_call: Dict[str, Any] = {"function": func, "arguments": normalized_args}
+    normalized_call: Dict[str, Any] = {"function": func, "arguments": dict(args)}
     normalized_call.update(tool_call_route_metadata_fn(call))
     return normalized_call
 

@@ -37,21 +37,8 @@ def plugin_arg_hint(
     plugin: Any,
     *,
     plugin_usage_argument_keys_fn: Callable[[Any], List[str]],
-    plugin_argument_mode_fn: Callable[[Any], str],
-    plugin_raw_user_arg_key_fn: Callable[[Any], str],
 ) -> str:
     keys = [str(k).strip() for k in plugin_usage_argument_keys_fn(plugin) if str(k).strip()]
-    mode = plugin_argument_mode_fn(plugin)
-    raw_key = plugin_raw_user_arg_key_fn(plugin)
-
-    if mode == "raw_user_request" and raw_key:
-        if keys:
-            shown = keys[:6]
-            suffix = ", ..." if len(keys) > 6 else ""
-            key_text = ", ".join(shown) + suffix
-            return f"args: {key_text}; {raw_key}=FULL_USER_REQUEST_VERBATIM"
-        return f"args: {raw_key}=FULL_USER_REQUEST_VERBATIM"
-
     if not keys:
         return ""
     shown = keys[:6]
