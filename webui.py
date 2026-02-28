@@ -48,7 +48,7 @@ from emoji_responder import get_emoji_settings as get_core_emoji_settings, save_
 from webui.webui_cerberus import (
     render_cerberus_settings,
     render_cerberus_metrics_dashboard,
-    render_cerberus_ledger_settings,
+    render_cerberus_data_tools,
 )
 from webui.webui_platforms import (
     render_platforms_panel,
@@ -638,14 +638,18 @@ async def process_message(user_name, message_content, wait_callback=None):
 # ------------------ NAVIGATION ------------------
 ai_tasks_enabled = str(redis_client.get("ai_task_platform_running") or "").strip().lower() == "true"
 memory_platform_enabled = str(redis_client.get("memory_platform_running") or "").strip().lower() == "true"
-nav_options = ["Chat", "Plugins", "Auto Plugins", "Platforms", "Plugin Store", "Settings"]
+nav_options = ["Chat", "Platforms", "Verba Plugins", "Automation Plugins", "Plugin Manager", "Settings"]
 if ai_tasks_enabled:
-    nav_options.insert(4, "AI Tasks")
+    nav_options.insert(1, "AI Tasks")
 if memory_platform_enabled:
-    insert_idx = nav_options.index("Plugin Store") if "Plugin Store" in nav_options else nav_options.index("Settings")
+    insert_idx = nav_options.index("Platforms") if "Platforms" in nav_options else 1
     nav_options.insert(insert_idx, "Memory")
 if "active_view" not in st.session_state:
     st.session_state.active_view = nav_options[0]
+elif st.session_state.active_view == "Plugins":
+    st.session_state.active_view = "Verba Plugins"
+elif st.session_state.active_view == "Auto Plugins":
+    st.session_state.active_view = "Automation Plugins"
 elif st.session_state.active_view == "AI Tasks" and not ai_tasks_enabled:
     st.session_state.active_view = "Platforms"
 elif st.session_state.active_view == "Memory" and not memory_platform_enabled:
@@ -934,12 +938,12 @@ if active_view == "Chat":
             except Exception:
                 pass
 
-elif active_view == "Plugins":
-    st.title("Plugins")
+elif active_view == "Verba Plugins":
+    st.title("Verba Plugins")
     st.write("Browse available plugins. Automation-only tools are listed separately.")
     render_plugin_list(regular_plugins, "No plugins available.")
 
-elif active_view == "Auto Plugins":
+elif active_view == "Automation Plugins":
     st.title("Automation Plugins")
     st.write("These plugins are available to the automation platform.")
     render_plugin_list(automation_plugins, "No plugins available.")
@@ -961,7 +965,7 @@ elif active_view == "AI Tasks":
 elif active_view == "Memory":
     render_memory_page()
 
-elif active_view == "Plugin Store":
+elif active_view == "Plugin Manager":
     render_plugin_store_page()
 
 elif active_view == "Settings":
@@ -989,5 +993,5 @@ elif active_view == "Settings":
         file_blob_key_prefix=FILE_BLOB_KEY_PREFIX,
         render_cerberus_settings_fn=render_cerberus_settings,
         render_cerberus_metrics_dashboard_fn=render_cerberus_metrics_dashboard,
-        render_cerberus_ledger_settings_fn=render_cerberus_ledger_settings,
+        render_cerberus_data_tools_fn=render_cerberus_data_tools,
     )

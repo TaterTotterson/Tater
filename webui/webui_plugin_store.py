@@ -1,14 +1,16 @@
 import hashlib
+import json
 import logging
 import os
 import re as _re
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import redis
 import requests
 import streamlit as st
 
 import plugin_registry as plugin_registry_mod
+from plugin_kernel import expand_plugin_platforms
 from plugin_settings import set_plugin_enabled
 
 PLUGIN_DIR = os.getenv("TATER_PLUGIN_DIR", "plugins")
@@ -16,6 +18,9 @@ SHOP_MANIFEST_URL_DEFAULT = os.getenv(
     "TATER_SHOP_MANIFEST_URL",
     "https://raw.githubusercontent.com/TaterTotterson/Tater_Shop/main/manifest.json",
 )
+SHOP_MANIFEST_URLS_KEY = "tater:shop_manifest_urls"
+LEGACY_SHOP_MANIFEST_URL_KEY = "tater:shop_manifest_url"
+DEFAULT_SHOP_LABEL = "Tater Shop"
 RETIRED_PLUGIN_IDS = {
     "web_search",
     "send_message",
@@ -77,16 +82,200 @@ def _enabled_missing_plugin_ids() -> list[str]:
     return missing
 
 
+def _normalize_manifest_url(url: str | None) -> str:
+    return str(url or "").strip()
+
+
+def _normalize_manifest_name(name: str | None) -> str:
+    return str(name or "").strip()
+
+
+def _default_shop_manifest_repo() -> dict[str, str]:
+    return {"name": DEFAULT_SHOP_LABEL, "url": SHOP_MANIFEST_URL_DEFAULT}
+
+
 def _safe_plugin_file_path(plugin_id: str) -> str:
     if not _re.fullmatch(r"[a-zA-Z0-9_\-]+", plugin_id or ""):
         raise ValueError("Invalid plugin id")
     return os.path.join(PLUGIN_DIR, f"{plugin_id}.py")
 
 
+def _normalize_manifest_repo_entry(raw) -> dict[str, str] | None:
+    if isinstance(raw, str):
+        url = _normalize_manifest_url(raw)
+        name = ""
+    elif isinstance(raw, dict):
+        url = _normalize_manifest_url(raw.get("url") or raw.get("manifest_url"))
+        name = _normalize_manifest_name(raw.get("name") or raw.get("label"))
+    else:
+        return None
+
+    if not url:
+        return None
+
+    return {"name": name, "url": url}
+
+
+def _dedupe_manifest_repos(
+    repos,
+    *,
+    include_default: bool = False,
+    exclude_default: bool = False,
+) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    by_url: dict[str, dict[str, str]] = {}
+
+    if include_default:
+        default_repo = _default_shop_manifest_repo()
+        out.append(default_repo)
+        by_url[default_repo["url"]] = default_repo
+
+    for raw in repos or []:
+        entry = _normalize_manifest_repo_entry(raw)
+        if not entry:
+            continue
+
+        url = entry["url"]
+        if exclude_default and url == SHOP_MANIFEST_URL_DEFAULT:
+            continue
+
+        existing = by_url.get(url)
+        if existing:
+            if entry["name"] and not existing.get("name"):
+                existing["name"] = entry["name"]
+            continue
+
+        normalized = {"name": entry["name"], "url": url}
+        out.append(normalized)
+        by_url[url] = normalized
+
+    return out
+
+
+def _load_legacy_manifest_url() -> str:
+    legacy_url = _normalize_manifest_url(redis_client.get(LEGACY_SHOP_MANIFEST_URL_KEY))
+    if legacy_url and legacy_url != SHOP_MANIFEST_URL_DEFAULT:
+        return legacy_url
+    return ""
+
+
+def get_additional_shop_manifest_repos() -> list[dict[str, str]]:
+    raw = redis_client.get(SHOP_MANIFEST_URLS_KEY)
+    repos = []
+
+    if raw:
+        try:
+            data = json.loads(raw)
+            if isinstance(data, list):
+                repos = data
+            elif isinstance(data, dict):
+                repos = [data]
+            elif isinstance(data, str):
+                repos = [data.strip()]
+        except Exception:
+            repos = [line.strip() for line in str(raw).splitlines()]
+    else:
+        legacy_url = _load_legacy_manifest_url()
+        if legacy_url:
+            repos = [{"name": "", "url": legacy_url}]
+
+    return _dedupe_manifest_repos(repos, exclude_default=True)
+
+
+def get_additional_shop_manifest_urls() -> list[str]:
+    return [repo["url"] for repo in get_additional_shop_manifest_repos()]
+
+
+def get_configured_shop_manifest_repos() -> list[dict[str, str]]:
+    return [_default_shop_manifest_repo(), *get_additional_shop_manifest_repos()]
+
+
+def get_configured_shop_manifest_urls() -> list[str]:
+    return [repo["url"] for repo in get_configured_shop_manifest_repos()]
+
+
+def save_additional_shop_manifest_repos(repos) -> None:
+    extras = _dedupe_manifest_repos(repos, exclude_default=True)
+    redis_client.set(
+        SHOP_MANIFEST_URLS_KEY,
+        json.dumps([{"name": repo["name"], "url": repo["url"]} for repo in extras]),
+    )
+
+
+def save_additional_shop_manifest_urls(urls: list[str]) -> None:
+    save_additional_shop_manifest_repos([{"name": "", "url": url} for url in urls])
+
+
 def fetch_shop_manifest(url: str) -> dict:
     r = requests.get(url, timeout=15)
     r.raise_for_status()
     return r.json()
+
+
+def _manifest_items(manifest: dict) -> list[dict]:
+    items = manifest.get("plugins") or manifest.get("items") or manifest.get("data") or []
+    if not isinstance(items, list):
+        raise ValueError("Manifest format unexpected (expected list under plugins/items/data).")
+    return [item for item in items if isinstance(item, dict)]
+
+
+def _manifest_source_label(url: str, manifest: dict | None = None, configured_name: str | None = None) -> str:
+    if url == SHOP_MANIFEST_URL_DEFAULT:
+        return DEFAULT_SHOP_LABEL
+
+    configured_name = _normalize_manifest_name(configured_name)
+    if configured_name:
+        return configured_name
+
+    if isinstance(manifest, dict):
+        for key in ("name", "title", "shop_name", "repo_name"):
+            value = str(manifest.get(key) or "").strip()
+            if value:
+                return value
+
+    parsed = urlparse(url)
+    if parsed.netloc:
+        path_parts = [part for part in parsed.path.split("/") if part]
+        if len(path_parts) >= 2:
+            return f"{parsed.netloc}/{path_parts[-2]}"
+        return parsed.netloc
+
+    return url
+
+
+def load_shop_catalog(manifest_sources=None) -> tuple[list[dict], list[str]]:
+    repo_entries = (
+        get_configured_shop_manifest_repos()
+        if manifest_sources is None
+        else _dedupe_manifest_repos(manifest_sources)
+    )
+    merged_items: list[dict] = []
+    errors: list[str] = []
+    seen_ids = set()
+
+    for repo in repo_entries:
+        url = repo["url"]
+        configured_name = repo.get("name") or ""
+        try:
+            manifest = fetch_shop_manifest(url)
+            source_label = _manifest_source_label(url, manifest, configured_name=configured_name)
+            items = _manifest_items(manifest)
+        except Exception as e:
+            errors.append(f"{_manifest_source_label(url, configured_name=configured_name)}: {e}")
+            continue
+
+        for raw_item in items:
+            plugin_id = str(raw_item.get("id") or "").strip()
+            if not plugin_id or plugin_id in seen_ids:
+                continue
+
+            item = dict(raw_item)
+            item["_source_manifest_url"] = url
+            item["_source_label"] = source_label
+            seen_ids.add(plugin_id)
+            merged_items.append(item)
+
+    return merged_items, errors
 
 
 def is_plugin_installed(plugin_id: str) -> bool:
@@ -102,7 +291,7 @@ def _sha256_bytes(data: bytes) -> str:
     return h.hexdigest()
 
 
-def install_plugin_from_shop_item(item: dict, manifest_url: str) -> tuple[bool, str]:
+def install_plugin_from_shop_item(item: dict, manifest_url: str | None = None) -> tuple[bool, str]:
     """
     Downloads a plugin .py from the shop manifest entry, verifies sha256 if provided,
     and writes it to PLUGIN_DIR as <id>.py.
@@ -112,15 +301,18 @@ def install_plugin_from_shop_item(item: dict, manifest_url: str) -> tuple[bool, 
         plugin_id = (item.get("id") or "").strip()
         entry = (item.get("entry") or "").strip()
         expected_sha = (item.get("sha256") or "").strip().lower()
+        source_manifest_url = _normalize_manifest_url(manifest_url or item.get("_source_manifest_url"))
 
         if not plugin_id:
             return False, "Manifest item missing 'id'."
         if not entry:
             return False, f"{plugin_id}: manifest item missing 'entry'."
+        if not source_manifest_url:
+            return False, f"{plugin_id}: manifest source URL is missing."
 
-        # Resolve relative paths against the manifest URL
-        entry = entry.lstrip("/")  # urljoin breaks raw GitHub paths if entry starts with /
-        full_url = urljoin(manifest_url, entry)
+        # Resolve relative paths against the manifest URL.
+        entry = entry.lstrip("/")
+        full_url = urljoin(source_manifest_url, entry)
 
         path = _safe_plugin_file_path(plugin_id)
         os.makedirs(PLUGIN_DIR, exist_ok=True)
@@ -204,16 +396,168 @@ def _refresh_plugins_after_fs_change():
     plugin_registry_mod.reload_plugins()
 
 
-def auto_restore_missing_plugins(manifest_url: str, progress_cb=None) -> tuple[bool, list[str], list[str]]:
+def _semver_tuple(v: str) -> tuple[int, int, int]:
+    if not v:
+        return (0, 0, 0)
+
+    v = str(v).strip().lower()
+    if v.startswith("v"):
+        v = v[1:].strip()
+
+    match = _re.match(r"^([0-9]+(\.[0-9]+){0,2})", v)
+    core = match.group(1) if match else "0.0.0"
+    parts = (core.split(".") + ["0", "0", "0"])[:3]
+
+    try:
+        return (int(parts[0]), int(parts[1]), int(parts[2]))
+    except Exception:
+        return (0, 0, 0)
+
+
+def _get_installed_version(plugin_id: str) -> str:
+    if not plugin_id:
+        return "0.0.0"
+
+    loaded = get_registry().get(plugin_id)
+    if not loaded:
+        return "0.0.0"
+
+    version = (
+        getattr(loaded, "version", None)
+        or getattr(loaded, "__version__", None)
+        or getattr(loaded, "plugin_version", None)
+    )
+    version = str(version).strip() if version is not None else ""
+    return version or "0.0.0"
+
+
+def _normalize_platform_alias(platform_name: str) -> str:
+    normalized = str(platform_name or "").strip().lower()
+    alias_map = {
+        "automations": "automation",
+        "ha_automation": "automation",
+        "ha_automations": "automation",
+    }
+    return alias_map.get(normalized, normalized)
+
+
+def _platform_display_label(platform_name: str) -> str:
+    labels = {
+        "webui": "WebUI",
+        "homeassistant": "Home Assistant",
+        "homekit": "HomeKit",
+        "xbmc": "XBMC",
+        "automation": "Automations",
+    }
+    normalized = _normalize_platform_alias(platform_name)
+    return labels.get(normalized, normalized.title())
+
+
+def _normalize_plats(plats) -> list[str]:
+    if not plats:
+        return []
+
+    raw_items: list[str] = []
+
+    def _collect(raw_value):
+        if not raw_value:
+            return
+        if isinstance(raw_value, str):
+            for part in _re.split(r"[\s,]+", raw_value.strip()):
+                normalized = str(part).strip().lower()
+                if normalized:
+                    raw_items.append(normalized)
+            return
+        if isinstance(raw_value, (list, tuple, set)):
+            for part in raw_value:
+                _collect(part)
+            return
+
+        normalized = str(raw_value).strip().lower()
+        if normalized:
+            raw_items.append(normalized)
+
+    _collect(plats)
+
+    seen = set()
+    out: list[str] = []
+    for platform_name in expand_plugin_platforms(raw_items):
+        normalized = _normalize_platform_alias(platform_name)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            out.append(normalized)
+    return out
+
+
+def _get_item_platforms(item):
+    pid = (item.get("id") or "").strip()
+    if pid and is_plugin_installed(pid):
+        loaded = get_registry().get(pid)
+        if loaded:
+            loaded_platforms = getattr(loaded, "platforms", []) or []
+            normalized = _normalize_plats(loaded_platforms)
+            if normalized:
+                return normalized
+
+    return _normalize_plats(item.get("platforms") or item.get("platform") or [])
+
+
+def _get_item_display_platforms(item) -> str:
+    platforms = _get_item_platforms(item)
+    return ", ".join(_platform_display_label(platform) for platform in platforms) if platforms else "(not provided)"
+
+
+def _get_loaded_plugin_display_name(plugin, fallback_id: str) -> str:
+    if not plugin:
+        return fallback_id
+    return (
+        getattr(plugin, "plugin_name", None)
+        or getattr(plugin, "pretty_name", None)
+        or getattr(plugin, "name", None)
+        or fallback_id
+    )
+
+
+def _get_loaded_plugin_description(plugin) -> str:
+    if not plugin:
+        return ""
+    return getattr(plugin, "plugin_dec", None) or getattr(plugin, "description", "") or ""
+
+
+def _installed_plugin_ids() -> list[str]:
+    installed_ids = set()
+
+    if os.path.isdir(PLUGIN_DIR):
+        for filename in os.listdir(PLUGIN_DIR):
+            if not filename.endswith(".py") or filename == "__init__.py":
+                continue
+            installed_ids.add(filename[:-3])
+
+    installed_ids.update(str(plugin_id).strip() for plugin_id in get_registry().keys() if str(plugin_id).strip())
+
+    return sorted(installed_ids)
+
+
+def auto_restore_missing_plugins(
+    manifest_urls: list[str] | str | None = None,
+    progress_cb=None,
+) -> tuple[bool, list[str], list[str]]:
     """
     Restore any plugins that are ENABLED in Redis but missing on disk.
-    Uses the shop manifest as the source of install URLs.
+    Uses the configured manifests as the source of install URLs.
 
     progress_cb (optional): callable(progress_float_0_to_1, status_text)
     """
     enabled_missing: list[str] = []
     restored: list[str] = []
     changed = False
+
+    if manifest_urls is None:
+        manifest_url_list = get_configured_shop_manifest_urls()
+    elif isinstance(manifest_urls, str):
+        manifest_url_list = [manifest_urls]
+    else:
+        manifest_url_list = manifest_urls
 
     try:
         enabled_states = redis_client.hgetall("plugin_enabled") or {}
@@ -236,47 +580,44 @@ def auto_restore_missing_plugins(manifest_url: str, progress_cb=None) -> tuple[b
         except Exception:
             pass
 
-    try:
-        manifest = fetch_shop_manifest(manifest_url)
-    except Exception as e:
-        logging.error(f"[restore] Failed to load manifest: {e}")
-        if progress_cb:
-            try:
-                progress_cb(0.0, f"Failed to load manifest: {e}")
-            except Exception:
-                pass
-        return changed, restored, enabled_missing
+    catalog_items, catalog_errors = load_shop_catalog(manifest_url_list)
+    by_id = {
+        str(item.get("id") or "").strip(): item
+        for item in catalog_items
+        if str(item.get("id") or "").strip()
+    }
 
-    items = manifest.get("plugins") or manifest.get("items") or manifest.get("data") or []
-    if not isinstance(items, list):
-        logging.error("[restore] Manifest format unexpected.")
-        if progress_cb:
-            try:
-                progress_cb(0.0, "Manifest format unexpected (expected list under plugins/items/data).")
-            except Exception:
-                pass
-        return changed, restored, enabled_missing
+    if catalog_errors:
+        logging.warning(f"[restore] Failed to load some plugin repos: {catalog_errors}")
 
-    by_id: dict[str, dict] = {}
-    for item in items:
-        pid = (item.get("id") or "").strip()
-        if pid:
-            by_id[pid] = item
-
-    for idx, pid in enumerate(enabled_missing, start=1):
-        item = by_id.get(pid)
+    for idx, plugin_id in enumerate(enabled_missing, start=1):
+        item = by_id.get(plugin_id)
         if not item:
-            logging.error(f"[restore] {pid} enabled but not found in manifest")
+            if catalog_errors:
+                logging.warning(
+                    f"[restore] {plugin_id} enabled but not found in loaded manifests; preserving enable state because some repos failed"
+                )
+                if progress_cb:
+                    try:
+                        progress_cb(
+                            (idx - 1) / max(1, total),
+                            f"{plugin_id} not found in loaded repos; keeping enable state because some repos failed ({idx}/{total})",
+                        )
+                    except Exception:
+                        pass
+                continue
+
+            logging.error(f"[restore] {plugin_id} enabled but not found in manifest")
             try:
-                redis_client.hdel("plugin_enabled", pid)
-                logging.info(f"[restore] Removed stale plugin_enabled key for {pid}")
+                redis_client.hdel("plugin_enabled", plugin_id)
+                logging.info(f"[restore] Removed stale plugin_enabled key for {plugin_id}")
             except Exception as e:
-                logging.error(f"[restore] Failed to remove stale plugin_enabled key for {pid}: {e}")
+                logging.error(f"[restore] Failed to remove stale plugin_enabled key for {plugin_id}: {e}")
             if progress_cb:
                 try:
                     progress_cb(
                         (idx - 1) / max(1, total),
-                        f"{pid} missing and not in manifest; removed stale enable key ({idx}/{total})",
+                        f"{plugin_id} missing and not in manifests; removed stale enable key ({idx}/{total})",
                     )
                 except Exception:
                     pass
@@ -284,21 +625,21 @@ def auto_restore_missing_plugins(manifest_url: str, progress_cb=None) -> tuple[b
 
         if progress_cb:
             try:
-                progress_cb((idx - 1) / max(1, total), f"Downloading {pid}... ({idx}/{total})")
+                progress_cb((idx - 1) / max(1, total), f"Downloading {plugin_id}... ({idx}/{total})")
             except Exception:
                 pass
 
-        ok, msg = install_plugin_from_shop_item(item, manifest_url)
+        ok, msg = install_plugin_from_shop_item(item)
         if ok:
-            restored.append(pid)
+            restored.append(plugin_id)
             changed = True
-            logging.info(f"[restore] {pid}: {msg}")
+            logging.info(f"[restore] {plugin_id}: {msg}")
         else:
-            logging.error(f"[restore] {pid}: {msg}")
+            logging.error(f"[restore] {plugin_id}: {msg}")
 
         if progress_cb:
             try:
-                progress_cb(idx / max(1, total), f"Finished {pid} ({idx}/{total})")
+                progress_cb(idx / max(1, total), f"Finished {plugin_id} ({idx}/{total})")
             except Exception:
                 pass
 
@@ -313,13 +654,11 @@ def ensure_plugins_ready(progress_cb=None):
     """
     os.makedirs(PLUGIN_DIR, exist_ok=True)
 
-    shop_url = (redis_client.get("tater:shop_manifest_url") or SHOP_MANIFEST_URL_DEFAULT)
-    shop_url = (shop_url or "").strip()
-
-    if not shop_url:
+    shop_urls = get_configured_shop_manifest_urls()
+    if not shop_urls:
         if progress_cb:
             try:
-                progress_cb(1.0, "Plugin shop manifest URL is not configured.")
+                progress_cb(1.0, "Plugin shop manifest URLs are not configured.")
             except Exception:
                 pass
         return
@@ -335,12 +674,12 @@ def ensure_plugins_ready(progress_cb=None):
 
     if progress_cb:
         try:
-            progress_cb(0.0, f"Restoring {len(missing)} missing plugin(s)...")
+            progress_cb(0.0, f"Restoring {len(missing)} missing plugin(s) from {len(shop_urls)} repo(s)...")
         except Exception:
             pass
 
     changed, restored, enabled_missing = auto_restore_missing_plugins(
-        shop_url,
+        shop_urls,
         progress_cb=progress_cb,
     )
 
@@ -352,173 +691,39 @@ def ensure_plugins_ready(progress_cb=None):
                 pass
         _refresh_plugins_after_fs_change()
 
-    if progress_cb:
+    if progress_cb and not restored and enabled_missing:
+        try:
+            progress_cb(1.0, "Missing plugins could not be restored from the configured repos.")
+        except Exception:
+            pass
+    elif progress_cb:
         try:
             progress_cb(1.0, "")
         except Exception:
             pass
 
 
-def render_plugin_store_page():
-    st.title("Plugin Store")
-    st.caption("Browse and install plugins from the Tater Shop manifest.")
-
-    url = st.text_input(
-        "Shop manifest URL",
-        value=(redis_client.get("tater:shop_manifest_url") or SHOP_MANIFEST_URL_DEFAULT),
-        key="shop_manifest_url",
-    )
-
-    try:
-        manifest = fetch_shop_manifest(url.strip())
-    except Exception as e:
-        st.error(f"Failed to load manifest: {e}")
+def _render_catalog_warnings(catalog_errors: list[str]):
+    if not catalog_errors:
         return
 
-    plugins = manifest.get("plugins") or manifest.get("items") or manifest.get("data") or []
-    if not isinstance(plugins, list):
-        st.error("Manifest format unexpected (expected a list under 'plugins').")
-        return
+    st.warning("Some plugin repos could not be loaded.")
+    for error in catalog_errors:
+        st.caption(error)
 
-    def _semver_tuple(v: str):
-        if not v:
-            return (0, 0, 0)
 
-        v = str(v).strip().lower()
-        if v.startswith("v"):
-            v = v[1:].strip()
+def _render_plugin_store_tab(catalog_items: list[dict], catalog_errors: list[str], manifest_repos: list[dict[str, str]]):
+    _render_catalog_warnings(catalog_errors)
 
-        m = _re.match(r"^([0-9]+(\.[0-9]+){0,2})", v)
-        core = m.group(1) if m else "0.0.0"
-
-        parts = core.split(".")
-        parts = (parts + ["0", "0", "0"])[:3]
-        try:
-            return (int(parts[0]), int(parts[1]), int(parts[2]))
-        except Exception:
-            return (0, 0, 0)
-
-    def _get_installed_version(plugin_id: str) -> str:
-        if not plugin_id:
-            return "0.0.0"
-        loaded = get_registry().get(plugin_id)
-        if not loaded:
-            return "0.0.0"
-
-        v = (
-            getattr(loaded, "version", None)
-            or getattr(loaded, "__version__", None)
-            or getattr(loaded, "plugin_version", None)
-        )
-        v = str(v).strip() if v is not None else ""
-        return v or "0.0.0"
-
-    def _normalize_plats(plats):
-        if not plats:
-            return []
-        if isinstance(plats, str):
-            plats = [plats]
-        if not isinstance(plats, list):
-            return []
-        out = []
-        for p in plats:
-            if not p:
-                continue
-            out.append(str(p).strip().lower())
-        seen = set()
-        uniq = []
-        for p in out:
-            if p not in seen:
-                seen.add(p)
-                uniq.append(p)
-        return uniq
-
-    def _get_item_platforms(item):
-        pid = (item.get("id") or "").strip()
-        if pid and is_plugin_installed(pid):
-            loaded = get_registry().get(pid)
-            if loaded:
-                lp = getattr(loaded, "platforms", []) or []
-                norm = _normalize_plats(lp)
-                if norm:
-                    return norm
-        return _normalize_plats(item.get("platforms") or item.get("platform") or [])
-
-    def _get_item_display_platforms(item):
-        plats = _get_item_platforms(item)
-        return ", ".join(p.title() for p in plats) if plats else "(not provided)"
-
-    def _is_update_available(item: dict) -> tuple[bool, str, str]:
-        pid = (item.get("id") or "").strip()
-        store_ver = (item.get("version") or "0.0.0").strip()
-        if not pid:
-            return (False, "0.0.0", store_ver)
-
-        if not is_plugin_installed(pid):
-            return (False, "0.0.0", store_ver)
-
-        installed_ver = _get_installed_version(pid)
-        return (_semver_tuple(store_ver) > _semver_tuple(installed_ver), installed_ver, store_ver)
-
-    updatable = []
-    for it in plugins:
-        pid = (it.get("id") or "").strip()
-        if not pid:
-            continue
-        ok, inst_v, store_v = _is_update_available(it)
-        if ok:
-            updatable.append((it, inst_v, store_v))
-
-    bar1, bar2, bar3, bar4 = st.columns([1, 1, 1, 3])
-
-    with bar1:
-        if st.button("Save URL", key="shop_save_url"):
-            redis_client.set("tater:shop_manifest_url", url.strip())
-            st.success("Saved.")
-            st.rerun()
-
-    with bar2:
-        if st.button("Refresh", key="shop_refresh"):
-            st.rerun()
-
-    with bar3:
-        if st.button("Update All", disabled=(len(updatable) == 0), key="shop_update_all"):
-            updated = []
-            failed = []
-
-            prog = st.progress(0)
-            total = max(1, len(updatable))
-
-            for idx, (it, inst_v, store_v) in enumerate(updatable, start=1):
-                pid = (it.get("id") or "").strip()
-                ok, msg = install_plugin_from_shop_item(it, url.strip())
-                if ok:
-                    updated.append(f"{pid} ({inst_v} -> {store_v})")
-                else:
-                    failed.append(f"{pid}: {msg}")
-
-                prog.progress(min(1.0, idx / total))
-
-            if updated:
-                st.success("Updated:\n" + "\n".join(updated))
-            if failed:
-                st.error("Failed:\n" + "\n".join(failed))
-
-            _refresh_plugins_after_fs_change()
-            st.rerun()
-
-    with bar4:
-        if updatable:
-            st.caption(f"Updates available: {len(updatable)}")
-        else:
-            st.caption("No updates available.")
-
-    st.markdown("---")
+    available_items = [
+        item for item in catalog_items
+        if not is_plugin_installed((item.get("id") or "").strip())
+    ]
 
     all_platforms = set()
-    for it in plugins:
-        for p in _get_item_platforms(it):
-            all_platforms.add(p)
+    for item in available_items:
+        for platform_name in _get_item_platforms(item):
+            all_platforms.add(platform_name)
 
     common_order = [
         "discord",
@@ -532,113 +737,269 @@ def render_plugin_store_page():
         "xbmc",
         "automation",
     ]
-    ordered = [p for p in common_order if p in all_platforms]
-    ordered += sorted([p for p in all_platforms if p not in set(common_order)])
-
-    filter_options = ["All"] + [p.title() for p in ordered]
-    selected_platform_label = st.selectbox(
-        "Filter by platform",
-        options=filter_options,
-        index=0,
-        key="shop_platform_filter",
-    )
+    ordered = [platform_name for platform_name in common_order if platform_name in all_platforms]
+    ordered += sorted(platform_name for platform_name in all_platforms if platform_name not in set(common_order))
 
     search_q = st.text_input(
-        "Search",
+        "Search available plugins",
         value="",
         placeholder="Search name, id, description...",
-        key="shop_search",
+        key="plugin_manager_store_search",
     ).strip().lower()
 
-    selected_platform = None
-    if selected_platform_label != "All":
-        selected_platform = selected_platform_label.strip().lower()
-
-    filtered = []
-    for item in plugins:
-        pid = (item.get("id") or "").strip()
-        name = (item.get("name") or pid).strip()
-        desc = (item.get("description") or "").strip()
-
-        if selected_platform:
-            plats = _get_item_platforms(item)
-            if selected_platform not in plats:
-                continue
+    search_filtered_items = []
+    for item in available_items:
+        plugin_id = (item.get("id") or "").strip()
+        name = (item.get("name") or plugin_id).strip()
+        description = (item.get("description") or "").strip()
 
         if search_q:
-            hay = f"{pid}\n{name}\n{desc}".lower()
-            if search_q not in hay:
+            haystack = f"{plugin_id}\n{name}\n{description}".lower()
+            if search_q not in haystack:
                 continue
 
-        filtered.append(item)
+        search_filtered_items.append(item)
 
-    st.caption(f"Showing {len(filtered)} of {len(plugins)} plugin(s).")
+    if not search_filtered_items:
+        st.caption(
+            f"Showing 0 of {len(available_items)} available plugin(s) across {len(manifest_repos)} repo(s)."
+        )
+        st.info("No downloadable plugins match the current filters.")
+        return
 
-    for item in filtered:
-        pid = (item.get("id") or "").strip()
-        name = (item.get("name") or pid).strip()
-        desc = (item.get("description") or "").strip()
-        min_ver = (item.get("min_tater_version") or "0.0.0").strip()
-        store_ver = (item.get("version") or "0.0.0").strip()
+    tab_labels = ["All", *[_platform_display_label(platform_name) for platform_name in ordered]]
+    tab_views = st.tabs(tab_labels)
 
-        installed = is_plugin_installed(pid)
-        platforms_str = _get_item_display_platforms(item)
+    for idx, tab in enumerate(tab_views):
+        selected_platform = None if idx == 0 else ordered[idx - 1]
+        if selected_platform is None:
+            filtered_items = search_filtered_items
+        else:
+            filtered_items = [
+                item for item in search_filtered_items
+                if selected_platform in _get_item_platforms(item)
+            ]
 
-        installed_ver = _get_installed_version(pid) if installed else "0.0.0"
-        update_available = installed and (_semver_tuple(store_ver) > _semver_tuple(installed_ver))
+        with tab:
+            platform_label = "all platforms" if selected_platform is None else _platform_display_label(selected_platform)
+            st.caption(
+                f"Showing {len(filtered_items)} of {len(available_items)} available plugin(s) across {len(manifest_repos)} repo(s) for {platform_label}."
+            )
 
-        with st.container(border=True):
-            st.subheader(name)
+            if not filtered_items:
+                st.info("No downloadable plugins match this platform.")
+                continue
 
-            if installed:
-                if update_available:
+            for item in filtered_items:
+                plugin_id = (item.get("id") or "").strip()
+                name = (item.get("name") or plugin_id).strip()
+                description = (item.get("description") or "").strip()
+                min_ver = (item.get("min_tater_version") or "0.0.0").strip()
+                store_ver = (item.get("version") or "0.0.0").strip()
+                source_label = (item.get("_source_label") or "Custom Repo").strip()
+                platforms_str = _get_item_display_platforms(item)
+
+                with st.container(border=True):
+                    st.subheader(name)
                     st.caption(
-                        f"ID: {pid} | installed: {installed_ver} | store: {store_ver} | min tater: {min_ver}  update available"
+                        f"ID: {plugin_id} | version: {store_ver} | min tater: {min_ver} | source: {source_label}"
                     )
-                else:
-                    st.caption(
-                        f"ID: {pid} | installed: {installed_ver} | store: {store_ver} | min tater: {min_ver}"
-                    )
-            else:
-                st.caption(f"ID: {pid} | version: {store_ver} | min tater: {min_ver}")
 
-            if desc:
-                st.write(desc)
+                    if description:
+                        st.write(description)
 
-            st.caption(f"Platforms: {platforms_str}")
+                    st.caption(f"Platforms: {platforms_str}")
 
-            cols = st.columns([1, 1, 3])
-
-            purge_store = cols[2].checkbox("Delete Data?", value=False, key=f"store_purge_{pid}")
-
-            if installed:
-                if update_available:
-                    cols[0].warning("Update available")
-                    if cols[1].button("Update", key=f"store_update_{pid}"):
-                        ok, msg = install_plugin_from_shop_item(item, url.strip())
+                    if st.button("Install", key=f"plugin_manager_install_{selected_platform or 'all'}_{plugin_id}"):
+                        ok, msg = install_plugin_from_shop_item(item)
                         if ok:
-                            st.success(f"{msg} (updated {installed_ver} -> {store_ver})")
-
-                            plugin_registry_mod.reload_plugins()
-                            st.session_state.pop("shop_platform_filter", None)
-                            st.session_state.pop("shop_search", None)
-
+                            st.success(msg)
+                            _refresh_plugins_after_fs_change()
                             st.rerun()
                         else:
                             st.error(msg)
+
+
+def _render_installed_plugins_tab(catalog_items: list[dict], catalog_errors: list[str]):
+    _render_catalog_warnings(catalog_errors)
+
+    catalog_by_id = {
+        str(item.get("id") or "").strip(): item
+        for item in catalog_items
+        if str(item.get("id") or "").strip()
+    }
+
+    installed_ids = _installed_plugin_ids()
+    installed_entries = []
+    for plugin_id in installed_ids:
+        loaded = get_registry().get(plugin_id)
+        catalog_item = catalog_by_id.get(plugin_id)
+        display_name = _get_loaded_plugin_display_name(
+            loaded,
+            (catalog_item.get("name") if catalog_item else None) or plugin_id,
+        )
+        installed_entries.append(
+            {
+                "id": plugin_id,
+                "loaded": loaded,
+                "catalog_item": catalog_item,
+                "display_name": display_name,
+                "description": _get_loaded_plugin_description(loaded) or (
+                    (catalog_item.get("description") or "").strip() if catalog_item else ""
+                ),
+            }
+        )
+
+    installed_entries.sort(key=lambda item: item["display_name"].lower())
+
+    all_platforms = set()
+    for entry in installed_entries:
+        if entry["loaded"]:
+            all_platforms.update(_normalize_plats(getattr(entry["loaded"], "platforms", []) or []))
+        elif entry["catalog_item"]:
+            all_platforms.update(_get_item_platforms(entry["catalog_item"]))
+
+    common_order = [
+        "discord",
+        "webui",
+        "homeassistant",
+        "homekit",
+        "irc",
+        "matrix",
+        "telegram",
+        "wordpress",
+        "xbmc",
+        "automation",
+    ]
+    ordered = [platform_name for platform_name in common_order if platform_name in all_platforms]
+    ordered += sorted(platform_name for platform_name in all_platforms if platform_name not in set(common_order))
+
+    search_q = st.text_input(
+        "Search installed plugins",
+        value="",
+        placeholder="Search name, id, description...",
+        key="plugin_manager_installed_search",
+    ).strip().lower()
+
+    search_filtered_entries = []
+    for entry in installed_entries:
+        plugin_id = entry["id"]
+        display_name = entry["display_name"]
+        description = entry["description"]
+
+        if search_q:
+            haystack = f"{plugin_id}\n{display_name}\n{description}".lower()
+            if search_q not in haystack:
+                continue
+
+        search_filtered_entries.append(entry)
+
+    if not search_filtered_entries:
+        st.caption(f"Showing 0 of {len(installed_entries)} installed plugin(s).")
+        st.info("No installed plugins match the current filters.")
+        return
+
+    tab_labels = ["All", *[_platform_display_label(platform_name) for platform_name in ordered]]
+    tab_views = st.tabs(tab_labels)
+
+    for idx, tab in enumerate(tab_views):
+        selected_platform = None if idx == 0 else ordered[idx - 1]
+        if selected_platform is None:
+            filtered_entries = search_filtered_entries
+        else:
+            filtered_entries = []
+            for entry in search_filtered_entries:
+                loaded = entry["loaded"]
+                catalog_item = entry["catalog_item"]
+
+                platforms = []
+                if loaded:
+                    platforms = _normalize_plats(getattr(loaded, "platforms", []) or [])
+                elif catalog_item:
+                    platforms = _get_item_platforms(catalog_item)
+
+                if selected_platform in platforms:
+                    filtered_entries.append(entry)
+
+        with tab:
+            platform_label = "all platforms" if selected_platform is None else _platform_display_label(selected_platform)
+            st.caption(
+                f"Showing {len(filtered_entries)} of {len(installed_entries)} installed plugin(s) for {platform_label}."
+            )
+
+            if not filtered_entries:
+                st.info("No installed plugins match this platform.")
+                continue
+
+            for entry in filtered_entries:
+                plugin_id = entry["id"]
+                loaded = entry["loaded"]
+                catalog_item = entry["catalog_item"]
+                display_name = entry["display_name"]
+                description = entry["description"]
+
+                installed_ver = _get_installed_version(plugin_id)
+                store_ver = (catalog_item.get("version") or "").strip() if catalog_item else ""
+                source_label = (catalog_item.get("_source_label") or "Local plugin").strip() if catalog_item else "Local plugin"
+                update_available = bool(catalog_item and _semver_tuple(store_ver) > _semver_tuple(installed_ver))
+
+                if loaded:
+                    platforms_str = ", ".join(
+                        _platform_display_label(platform_name)
+                        for platform_name in _normalize_plats(getattr(loaded, "platforms", []) or [])
+                    ) or _get_item_display_platforms(catalog_item or {})
                 else:
-                    cols[0].success("Installed")
-                    if cols[1].button("Remove", key=f"store_remove_{pid}"):
-                        ok, msg = uninstall_plugin_file(pid)
+                    platforms_str = _get_item_display_platforms(catalog_item or {})
+
+                tab_token = selected_platform or "all"
+                purge_key = f"plugin_manager_purge_{tab_token}_{plugin_id}"
+
+                with st.container(border=True):
+                    st.subheader(display_name)
+
+                    meta_parts = [f"ID: {plugin_id}", f"installed: {installed_ver or '0.0.0'}"]
+                    if store_ver:
+                        meta_parts.append(f"store: {store_ver}")
+                    meta_parts.append(f"source: {source_label}")
+                    st.caption(" | ".join(meta_parts))
+
+                    if description:
+                        st.write(description)
+
+                    st.caption(f"Platforms: {platforms_str}")
+
+                    if not loaded:
+                        st.caption("Status: file exists on disk but the plugin is not currently loaded in the registry.")
+
+                    controls = st.columns([1, 1, 3])
+                    if update_available:
+                        if controls[0].button("Update", key=f"plugin_manager_update_{tab_token}_{plugin_id}"):
+                            ok, msg = install_plugin_from_shop_item(catalog_item)
+                            if ok:
+                                st.success(f"{msg} (updated {installed_ver} -> {store_ver})")
+                                _refresh_plugins_after_fs_change()
+                                st.rerun()
+                            else:
+                                st.error(msg)
+                    else:
+                        controls[0].button("Up to date", disabled=True, key=f"plugin_manager_uptodate_{tab_token}_{plugin_id}")
+
+                    purge_redis = controls[2].checkbox("Delete Data?", value=False, key=purge_key)
+
+                    if controls[1].button("Remove", key=f"plugin_manager_remove_{tab_token}_{plugin_id}"):
+                        category_hint = getattr(loaded, "settings_category", None) if loaded else None
+
+                        ok, msg = uninstall_plugin_file(plugin_id)
                         if ok:
                             st.success(msg)
+
                             try:
-                                set_plugin_enabled(pid, False)
+                                set_plugin_enabled(plugin_id, False)
                             except Exception:
                                 pass
 
-                            if purge_store:
-                                ok2, msg2 = clear_plugin_redis_data(pid)
+                            if purge_redis:
+                                ok2, msg2 = clear_plugin_redis_data(plugin_id, category_hint=category_hint)
                                 if ok2:
                                     st.success(f"Redis cleanup: {msg2}")
                                 else:
@@ -648,17 +1009,119 @@ def render_plugin_store_page():
                             st.rerun()
                         else:
                             st.error(msg)
-            else:
-                cols[0].warning("Not installed")
-                if cols[1].button("Install", key=f"store_install_{pid}"):
-                    ok, msg = install_plugin_from_shop_item(item, url.strip())
-                    if ok:
-                        st.success(msg)
 
-                        plugin_registry_mod.reload_plugins()
-                        st.session_state.pop("shop_platform_filter", None)
-                        st.session_state.pop("shop_search", None)
 
-                        st.rerun()
-                    else:
-                        st.error(msg)
+def _render_settings_tab(catalog_errors: list[str], manifest_repos: list[dict[str, str]]):
+    st.caption("The default Tater Shop is always enabled. Add optional names for extra repos to control the source label shown in the store.")
+
+    default_name_col, default_url_col = st.columns([1, 2])
+    with default_name_col:
+        st.text_input(
+            "Default repo name",
+            value=DEFAULT_SHOP_LABEL,
+            disabled=True,
+            key="plugin_manager_default_repo_name",
+        )
+    with default_url_col:
+        st.text_input(
+            "Default manifest URL",
+            value=SHOP_MANIFEST_URL_DEFAULT,
+            disabled=True,
+            key="plugin_manager_default_manifest_url",
+        )
+
+    extra_repos = get_additional_shop_manifest_repos()
+    if "plugin_manager_repo_form_count" not in st.session_state:
+        st.session_state["plugin_manager_repo_form_count"] = max(1, len(extra_repos))
+        for idx, repo in enumerate(extra_repos):
+            st.session_state[f"plugin_manager_repo_name_{idx}"] = repo.get("name", "")
+            st.session_state[f"plugin_manager_repo_url_{idx}"] = repo.get("url", "")
+
+    st.caption("Additional repos")
+    for idx in range(max(1, int(st.session_state.get("plugin_manager_repo_form_count", 1)))):
+        name_key = f"plugin_manager_repo_name_{idx}"
+        url_key = f"plugin_manager_repo_url_{idx}"
+        cols = st.columns([1, 2])
+        with cols[0]:
+            st.text_input(
+                f"Repo {idx + 1} name",
+                key=name_key,
+                placeholder="Optional display name",
+            )
+        with cols[1]:
+            st.text_input(
+                f"Repo {idx + 1} manifest URL",
+                key=url_key,
+                placeholder="https://example.com/manifest.json",
+            )
+
+    add_col, remove_col, save_col, refresh_col = st.columns([1, 1, 1, 1])
+
+    if add_col.button("Add Repo", key="plugin_manager_add_repo"):
+        next_idx = int(st.session_state.get("plugin_manager_repo_form_count", 1))
+        st.session_state["plugin_manager_repo_form_count"] = next_idx + 1
+        st.session_state[f"plugin_manager_repo_name_{next_idx}"] = ""
+        st.session_state[f"plugin_manager_repo_url_{next_idx}"] = ""
+        st.rerun()
+
+    if remove_col.button("Remove Last", key="plugin_manager_remove_repo"):
+        count = max(1, int(st.session_state.get("plugin_manager_repo_form_count", 1)))
+        if count > 1:
+            last_idx = count - 1
+            st.session_state.pop(f"plugin_manager_repo_name_{last_idx}", None)
+            st.session_state.pop(f"plugin_manager_repo_url_{last_idx}", None)
+            st.session_state["plugin_manager_repo_form_count"] = count - 1
+        else:
+            st.session_state["plugin_manager_repo_name_0"] = ""
+            st.session_state["plugin_manager_repo_url_0"] = ""
+        st.rerun()
+
+    if save_col.button("Save Repos", key="plugin_manager_save_repos"):
+        parsed_repos = []
+        row_count = max(1, int(st.session_state.get("plugin_manager_repo_form_count", 1)))
+        for idx in range(row_count):
+            name = _normalize_manifest_name(st.session_state.get(f"plugin_manager_repo_name_{idx}"))
+            url = _normalize_manifest_url(st.session_state.get(f"plugin_manager_repo_url_{idx}"))
+
+            if not name and not url:
+                continue
+            if not url:
+                st.error(f"Repo {idx + 1} is missing a manifest URL.")
+                return
+
+            parsed_repos.append({"name": name, "url": url})
+
+        save_additional_shop_manifest_repos(parsed_repos)
+        st.success("Plugin repos saved.")
+        st.rerun()
+
+    if refresh_col.button("Refresh Catalog", key="plugin_manager_refresh_catalog"):
+        st.rerun()
+
+    st.caption(
+        "Catalog merge order is fixed: the default Tater Shop loads first, then your additional repos. "
+        "If two repos publish the same plugin id, the first one wins."
+    )
+    st.caption("Leave the repo name blank if you want Tater to fall back to the manifest name or URL.")
+    st.caption(f"Configured repos: {len(manifest_repos)}")
+
+    _render_catalog_warnings(catalog_errors)
+
+
+def render_plugin_store_page():
+    st.title("Verba Plugin Manager")
+    st.caption("Install plugins from configured repos, manage installed plugins, and edit plugin repo settings.")
+
+    manifest_repos = get_configured_shop_manifest_repos()
+    catalog_items, catalog_errors = load_shop_catalog(manifest_repos)
+
+    store_tab, installed_tab, settings_tab = st.tabs(["Plugin Store", "Installed Plugins", "Settings"])
+
+    with store_tab:
+        _render_plugin_store_tab(catalog_items, catalog_errors, manifest_repos)
+
+    with installed_tab:
+        _render_installed_plugins_tab(catalog_items, catalog_errors)
+
+    with settings_tab:
+        _render_settings_tab(catalog_errors, manifest_repos)
