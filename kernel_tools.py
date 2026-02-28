@@ -1,9 +1,11 @@
+import base64
 import ast
 import codecs
 import csv
 import fnmatch
 import io
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -26,13 +28,22 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import requests
+
 from helpers import redis_client
 from plugin_loader import load_plugins_from_directory
 from plugin_base import ToolPlugin
 from plugin_registry import reload_plugins
+from plugin_result import action_failure, action_success
 from plugin_settings import get_plugin_enabled
-from notify.queue import normalize_platform as normalize_notify_platform
+from notify import dispatch_notification_sync
+from notify.queue import ALLOWED_PLATFORMS, normalize_platform as normalize_notify_platform
 from conversation_media_refs import load_recent_media_refs, save_media_ref
+from vision_settings import (
+    DEFAULT_VISION_API_BASE,
+    DEFAULT_VISION_MODEL,
+    get_vision_settings,
+)
 from memory_platform_store import (
     load_doc as load_memory_platform_doc,
     resolve_user_doc_key as resolve_memory_platform_user_doc_key,
@@ -88,12 +99,30 @@ WEB_SEARCH_TIMEOUT_SEC = int(os.getenv("TATER_WEB_SEARCH_TIMEOUT_SEC", "15"))
 WEB_SEARCH_MAX_RESULTS = int(os.getenv("TATER_WEB_SEARCH_MAX_RESULTS", "10"))
 WEB_SEARCH_MAX_RESPONSE_BYTES = int(os.getenv("TATER_WEB_SEARCH_MAX_RESPONSE_BYTES", "2000000"))
 WEB_SEARCH_MAX_SNIPPET_CHARS = int(os.getenv("TATER_WEB_SEARCH_MAX_SNIPPET_CHARS", "600"))
+VISION_MAX_IMAGE_BYTES = int(os.getenv("TATER_VISION_MAX_IMAGE_BYTES", str(12 * 1024 * 1024)))
+VISION_ALLOWED_MIMETYPES = {
+    "image/png",
+    "image/jpeg",
+    "image/jpg",
+    "image/webp",
+    "image/gif",
+    "image/bmp",
+    "image/tiff",
+}
+VISION_DEFAULT_PROMPT = (
+    "Describe this image clearly and concisely. Mention important objects, people, actions, "
+    "and any visible text."
+)
+WEBUI_FILE_BLOB_KEY_PREFIX = "webui:file:"
 
 MEDIA_REF_RECENT_MAX_AGE_SEC = int(
     os.getenv(
         "TATER_SEND_MESSAGE_RECENT_MEDIA_MAX_AGE_SEC",
         os.getenv("TATER_SEND_MESSAGE_LATEST_IMAGE_MAX_AGE_SEC", "300"),
     )
+)
+SEND_MESSAGE_RECENT_ATTACHMENTS_LIMIT = int(
+    os.getenv("TATER_SEND_MESSAGE_RECENT_ATTACHMENTS_LIMIT", "4")
 )
 
 AI_TASKS_KEY_PREFIX = "reminders:"
@@ -165,6 +194,8 @@ MEMORY_VOLATILE_PREFIXES = (
     "cache.",
     "session.",
 )
+
+logger = logging.getLogger("kernel_tools")
 
 
 def _ensure_dirs() -> None:
@@ -960,6 +991,792 @@ def _load_recent_media_refs_for_context(
     except Exception:
         refs = []
     return [item for item in refs if _media_ref_is_fresh(item)]
+
+
+def _send_message_boolish(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on", "enabled"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "disabled"}:
+        return False
+    return bool(default)
+
+
+def _send_message_load_settings() -> Dict[str, str]:
+    return (
+        redis_client.hgetall("plugin_settings:Send Message")
+        or redis_client.hgetall("plugin_settings: Send Message")
+        or {}
+    )
+
+
+def _send_message_normalize_matrix_room_ref(room_ref: Any) -> str:
+    ref = str(room_ref or "").strip()
+    if not ref:
+        return ""
+    if ref.startswith("!") or ref.startswith("#"):
+        return ref
+    if ":" in ref:
+        return f"#{ref}"
+    return ref
+
+
+def _send_message_extract_target_hint(raw: Any) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    for pattern in (r"![^\s]+", r"#[A-Za-z0-9][A-Za-z0-9._:-]*", r"@[A-Za-z0-9_]+"):
+        match = re.search(pattern, text)
+        if match:
+            return match.group(0)
+    text = re.sub(r"^(?:room|channel|chat)\s+", "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"\s+(?:in|on)\s+(?:discord|irc|matrix|telegram|home\s*assistant|homeassistant|ntfy)\b.*$",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return text.strip(" .")
+
+
+def _send_message_coerce_targets(payload: Any) -> Dict[str, Any]:
+    if isinstance(payload, dict):
+        return dict(payload)
+    if isinstance(payload, str):
+        hint = _send_message_extract_target_hint(payload)
+        if hint:
+            return {"channel": hint}
+    return {}
+
+
+def _send_message_clean_attachment_payload(payload: Any) -> List[Dict[str, Any]]:
+    if not isinstance(payload, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for item in payload:
+        if isinstance(item, dict):
+            out.append(dict(item))
+    return out
+
+
+def _send_message_attachment_kind(mimetype: Any, fallback_type: Any = None) -> str:
+    raw_type = str(fallback_type or "").strip().lower()
+    if raw_type in {"image", "audio", "video", "file"}:
+        return raw_type
+    mime = str(mimetype or "").strip().lower()
+    if mime.startswith("image/"):
+        return "image"
+    if mime.startswith("audio/"):
+        return "audio"
+    if mime.startswith("video/"):
+        return "video"
+    return "file"
+
+
+def _send_message_recent_attachments(
+    *,
+    platform: Optional[str],
+    origin: Optional[Dict[str, Any]],
+    limit: int = SEND_MESSAGE_RECENT_ATTACHMENTS_LIMIT,
+) -> List[Dict[str, Any]]:
+    refs = _load_recent_media_refs_for_context(
+        platform=platform,
+        origin=origin,
+        limit=max(1, limit),
+        media_types=["image", "audio", "video", "file"],
+    )
+    if not refs:
+        return []
+
+    blob_client = _image_describe_blob_client()
+    out: List[Dict[str, Any]] = []
+    seen: set[tuple[str, int, str]] = set()
+    for ref in refs:
+        try:
+            binary, filename, mimetype = _image_describe_extract_from_payload(blob_client, ref)
+        except Exception:
+            continue
+        if not binary:
+            continue
+        final_mime = str(mimetype or "").strip().lower() or "application/octet-stream"
+        final_name = _image_describe_normalize_filename(filename, final_mime)
+        sig = (final_name, len(binary), final_mime)
+        if sig in seen:
+            continue
+        seen.add(sig)
+        out.append(
+            {
+                "type": _send_message_attachment_kind(final_mime, ref.get("type") if isinstance(ref, dict) else None),
+                "name": final_name,
+                "mimetype": final_mime,
+                "bytes": binary,
+                "size": len(binary),
+            }
+        )
+        if len(out) >= max(1, limit):
+            break
+    return out
+
+
+def send_message(
+    *,
+    message: Any = None,
+    content: Any = None,
+    title: Any = None,
+    platform: Any = None,
+    targets: Any = None,
+    attachments: Any = None,
+    priority: Any = None,
+    tags: Any = None,
+    ttl_sec: Any = None,
+    origin: Optional[Dict[str, Any]] = None,
+    channel_id: Any = None,
+    channel: Any = None,
+    guild_id: Any = None,
+    room_id: Any = None,
+    room_alias: Any = None,
+    device_service: Any = None,
+    persistent: Any = None,
+    api_notification: Any = None,
+    chat_id: Any = None,
+) -> Dict[str, Any]:
+    text_message = str(message or content or "").strip()
+    destination = normalize_notify_platform(platform)
+    target_map = _send_message_coerce_targets(targets)
+    for key, value in (
+        ("channel_id", channel_id),
+        ("channel", channel),
+        ("guild_id", guild_id),
+        ("room_id", room_id),
+        ("room_alias", room_alias),
+        ("device_service", device_service),
+        ("persistent", persistent),
+        ("api_notification", api_notification),
+        ("chat_id", chat_id),
+    ):
+        if value not in (None, "") and key not in target_map:
+            target_map[key] = value
+
+    attachment_items = _send_message_clean_attachment_payload(attachments)
+    if not attachment_items:
+        attachment_items = _send_message_recent_attachments(platform=platform, origin=origin)
+
+    if not text_message and not attachment_items:
+        return action_failure(
+            code="missing_message",
+            message="Cannot queue: missing message",
+            needs=["Provide a message or include attachments to send."],
+            say_hint="Ask for message content or an attachment to send.",
+        )
+    if not text_message and attachment_items:
+        text_message = "Attachment"
+
+    if not destination and isinstance(origin, dict):
+        origin_platform = normalize_notify_platform(origin.get("platform"))
+        if origin_platform in ALLOWED_PLATFORMS:
+            destination = origin_platform
+
+    if destination not in ALLOWED_PLATFORMS:
+        return action_failure(
+            code="missing_destination_platform",
+            message="Cannot queue: missing destination platform",
+            needs=["Specify a destination platform such as discord, matrix, telegram, homeassistant, ntfy, or irc."],
+            say_hint="Explain that a destination platform is required.",
+        )
+
+    if destination == "matrix":
+        if not target_map.get("room_id"):
+            alias = target_map.get("room_alias") or target_map.get("channel")
+            if alias:
+                target_map["room_id"] = alias
+        if target_map.get("room_id"):
+            target_map["room_id"] = _send_message_normalize_matrix_room_ref(target_map.get("room_id"))
+    elif destination == "homeassistant":
+        if "api_notification" not in target_map:
+            settings = _send_message_load_settings()
+            target_map["api_notification"] = _send_message_boolish(settings.get("ENABLE_HA_API_NOTIFICATION"), True)
+
+    meta = {
+        "priority": priority,
+        "tags": tags,
+        "ttl_sec": ttl_sec,
+    }
+
+    result = dispatch_notification_sync(
+        platform=destination,
+        title=str(title or "").strip() or None,
+        content=text_message,
+        targets=target_map,
+        origin=origin,
+        meta=meta,
+        attachments=attachment_items,
+    )
+    if str(result or "").strip().lower().startswith("cannot queue"):
+        return action_failure(
+            code="send_message_failed",
+            message=str(result or "").strip() or "Failed to queue notification.",
+            say_hint="Explain why the notification could not be queued.",
+        )
+    return action_success(
+        facts={
+            "platform": destination,
+            "target_count": len([value for value in target_map.values() if value not in (None, "", False)]),
+            "attachment_count": len(attachment_items),
+        },
+        data={
+            "result": str(result or "").strip(),
+            "platform": destination,
+            "targets": target_map,
+            "attachment_count": len(attachment_items),
+        },
+        summary_for_user=str(result or "").strip(),
+        say_hint="Confirm the queued notification destination and keep it brief.",
+    )
+
+
+def _image_describe_blob_client() -> redis.Redis:
+    host = os.getenv("REDIS_HOST", "127.0.0.1")
+    port = int(os.getenv("REDIS_PORT", "6379"))
+    return redis.Redis(host=host, port=port, db=0, decode_responses=False)
+
+
+def _image_describe_blob_key_candidates(*, blob_key: Any = None, file_id: Any = None) -> List[str]:
+    out: List[str] = []
+    blob = _as_text(blob_key).strip()
+    if blob:
+        out.append(blob)
+
+    fid = _as_text(file_id).strip()
+    if fid:
+        if fid.startswith((WEBUI_FILE_BLOB_KEY_PREFIX, "tater:blob:", "tater:matrix:")):
+            out.append(fid)
+        else:
+            out.append(f"{WEBUI_FILE_BLOB_KEY_PREFIX}{fid}")
+            out.append(fid)
+
+    unique: List[str] = []
+    seen = set()
+    for key in out:
+        if key and key not in seen:
+            unique.append(key)
+            seen.add(key)
+    return unique
+
+
+def _image_describe_load_blob_bytes(
+    blob_client: redis.Redis,
+    *,
+    blob_key: Any = None,
+    file_id: Any = None,
+) -> Optional[bytes]:
+    for key in _image_describe_blob_key_candidates(blob_key=blob_key, file_id=file_id):
+        try:
+            data = blob_client.get(key)
+        except Exception:
+            data = None
+        if data is None:
+            continue
+        if isinstance(data, (bytes, bytearray)):
+            return bytes(data)
+        if isinstance(data, str):
+            return data.encode("utf-8", errors="replace")
+    return None
+
+
+def _image_describe_decode_base64_payload(data: Any) -> Optional[bytes]:
+    text = _as_text(data).strip()
+    if not text:
+        return None
+    if text.startswith("data:") and "," in text:
+        text = text.split(",", 1)[1]
+    pad = len(text) % 4
+    if pad:
+        text += "=" * (4 - pad)
+    try:
+        decoded = base64.b64decode(text)
+    except Exception:
+        return None
+    return bytes(decoded) if decoded else None
+
+
+def _image_describe_mime_allowed(mimetype: Any) -> bool:
+    mime = _as_text(mimetype).strip().lower()
+    if not mime:
+        return False
+    return mime in VISION_ALLOWED_MIMETYPES
+
+
+def _image_describe_looks_like_http_url(value: Any) -> bool:
+    text = _as_text(value).strip()
+    if not text:
+        return False
+    parsed = urllib.parse.urlparse(text)
+    return parsed.scheme.lower() in {"http", "https"} and bool(parsed.netloc)
+
+
+def _image_describe_normalize_filename(name: Any, mimetype: Any = "") -> str:
+    text = _as_text(name).strip()
+    if text:
+        return text
+    mime = _as_text(mimetype).strip().lower()
+    if mime in {"image/jpeg", "image/jpg"}:
+        return "image.jpg"
+    if mime == "image/webp":
+        return "image.webp"
+    if mime == "image/gif":
+        return "image.gif"
+    if mime == "image/bmp":
+        return "image.bmp"
+    if mime == "image/tiff":
+        return "image.tiff"
+    return "image.png"
+
+
+def _image_describe_to_data_url(image_bytes: bytes, filename: str) -> str:
+    mime = mimetypes.guess_type(filename or "")[0] or "image/png"
+    b64 = base64.b64encode(image_bytes).decode("utf-8")
+    return f"data:{mime};base64,{b64}"
+
+
+def _image_describe_download_image_url(
+    value: Any,
+) -> Tuple[Optional[bytes], Optional[str], Optional[str], Optional[str]]:
+    raw_url = _as_text(value).strip()
+    if not raw_url:
+        return None, None, None, "url_empty"
+    if not _image_describe_looks_like_http_url(raw_url):
+        return None, None, None, "url_invalid"
+
+    try:
+        with requests.get(
+            raw_url,
+            timeout=30,
+            stream=True,
+            allow_redirects=True,
+            headers={"User-Agent": "Tater/1.0"},
+        ) as response:
+            if response.status_code >= 300:
+                return None, None, None, "url_http_error"
+
+            content_type = _as_text(response.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+            chunks: List[bytes] = []
+            total = 0
+            for chunk in response.iter_content(chunk_size=65536):
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > VISION_MAX_IMAGE_BYTES:
+                    return None, None, None, "url_too_large"
+                chunks.append(chunk)
+            data = b"".join(chunks)
+            final_url = _as_text(response.url).strip() or raw_url
+    except requests.RequestException:
+        return None, None, None, "url_request_failed"
+    except Exception:
+        return None, None, None, "url_request_failed"
+
+    if not data:
+        return None, None, None, "url_empty_response"
+
+    parsed = urllib.parse.urlparse(final_url)
+    guessed_name = Path(parsed.path).name if parsed.path else ""
+    filename = _image_describe_normalize_filename(guessed_name, content_type)
+    guessed_mime = _as_text(mimetypes.guess_type(filename)[0]).strip().lower()
+    mimetype = content_type or guessed_mime or "image/png"
+
+    if content_type and not content_type.startswith("image/"):
+        return None, None, None, "url_not_image"
+    if not content_type and (not guessed_mime or not guessed_mime.startswith("image/")):
+        return None, None, None, "url_not_image"
+    if mimetype.startswith("image/") and not _image_describe_mime_allowed(mimetype):
+        return None, None, None, "url_unsupported_type"
+
+    return data, filename, mimetype, None
+
+
+def _image_describe_extract_from_payload(
+    blob_client: redis.Redis,
+    payload: Any,
+) -> Tuple[Optional[bytes], Optional[str], Optional[str]]:
+    if payload is None:
+        return None, None, None
+
+    if isinstance(payload, dict) and payload.get("marker") == "plugin_response":
+        return _image_describe_extract_from_payload(blob_client, payload.get("content"))
+
+    if isinstance(payload, list):
+        for item in payload:
+            raw, name, mime = _image_describe_extract_from_payload(blob_client, item)
+            if raw:
+                return raw, name, mime
+        return None, None, None
+
+    if not isinstance(payload, dict):
+        return None, None, None
+
+    media_type = _as_text(payload.get("type")).strip().lower()
+    mimetype = _as_text(payload.get("mimetype")).strip().lower()
+    if not mimetype:
+        guessed_name = _as_text(payload.get("name")).strip()
+        mimetype = _as_text(mimetypes.guess_type(guessed_name)[0]).strip().lower()
+
+    if media_type in {"image", "file"}:
+        if media_type == "file" and (not mimetype or not mimetype.startswith("image/")):
+            return None, None, None
+        if mimetype and not _image_describe_mime_allowed(mimetype):
+            return None, None, None
+
+        filename = _image_describe_normalize_filename(payload.get("name"), mimetype)
+
+        if isinstance(payload.get("bytes"), (bytes, bytearray)):
+            return bytes(payload["bytes"]), filename, mimetype or "image/png"
+        if isinstance(payload.get("data"), (bytes, bytearray)):
+            return bytes(payload["data"]), filename, mimetype or "image/png"
+
+        decoded = _image_describe_decode_base64_payload(payload.get("data"))
+        if decoded:
+            return decoded, filename, mimetype or "image/png"
+
+        blob = _image_describe_load_blob_bytes(
+            blob_client,
+            blob_key=payload.get("blob_key"),
+            file_id=payload.get("id") or payload.get("file_id"),
+        )
+        if blob:
+            mm = mimetype or _as_text(mimetypes.guess_type(filename)[0]).strip().lower() or "image/png"
+            return blob, filename, mm
+
+        ref_url = payload.get("url")
+        if _image_describe_looks_like_http_url(ref_url):
+            raw, remote_name, remote_mime, err = _image_describe_download_image_url(ref_url)
+            if raw and not err:
+                final_name = _image_describe_normalize_filename(payload.get("name") or remote_name, mimetype or remote_mime)
+                final_mime = (
+                    mimetype
+                    or remote_mime
+                    or _as_text(mimetypes.guess_type(final_name)[0]).strip().lower()
+                    or "image/png"
+                )
+                return raw, final_name, final_mime
+
+        return None, None, None
+
+    if payload.get("blob_key") or payload.get("file_id") or payload.get("id"):
+        blob = _image_describe_load_blob_bytes(
+            blob_client,
+            blob_key=payload.get("blob_key"),
+            file_id=payload.get("file_id") or payload.get("id"),
+        )
+        if blob:
+            filename = _image_describe_normalize_filename(payload.get("name"), payload.get("mimetype"))
+            mimetype = (
+                _as_text(payload.get("mimetype")).strip().lower()
+                or _as_text(mimetypes.guess_type(filename)[0]).strip().lower()
+            )
+            if not mimetype:
+                mimetype = "image/png"
+            if mimetype.startswith("image/"):
+                return blob, filename, mimetype
+
+    if _image_describe_looks_like_http_url(payload.get("url")):
+        raw, filename, mimetype, err = _image_describe_download_image_url(payload.get("url"))
+        if raw and not err:
+            return raw, filename, mimetype
+
+    return None, None, None
+
+
+def _image_describe_resolve_explicit_image(
+    *,
+    prompt: Any = None,
+    query: Any = None,
+    request: Any = None,
+    url: Any = None,
+    path: Any = None,
+    blob_key: Any = None,
+    file_id: Any = None,
+    image_ref: Any = None,
+    media_ref: Any = None,
+    media_refs: Any = None,
+    source: Any = None,
+    file: Any = None,
+    name: Any = None,
+    mimetype: Any = None,
+) -> Tuple[Optional[bytes], Optional[str], Optional[str], Optional[str], str]:
+    del prompt, query, request
+    blob_client = _image_describe_blob_client()
+
+    for ref in (image_ref, media_ref):
+        if isinstance(ref, dict):
+            image_bytes, filename, mime = _image_describe_extract_from_payload(blob_client, ref)
+            if image_bytes:
+                return image_bytes, filename, mime, "explicit_ref", ""
+
+    if isinstance(media_refs, list):
+        for idx, item in enumerate(media_refs):
+            if not isinstance(item, dict):
+                continue
+            image_bytes, filename, mime = _image_describe_extract_from_payload(blob_client, item)
+            if image_bytes:
+                return image_bytes, filename, mime, f"media_refs[{idx}]", ""
+
+    explicit_url = _as_text(url).strip()
+    if explicit_url:
+        if not _image_describe_looks_like_http_url(explicit_url):
+            return None, None, None, "url_invalid", "Image URL must be a valid http/https URL."
+    else:
+        source_hint = source or file
+        if _image_describe_looks_like_http_url(source_hint):
+            explicit_url = _as_text(source_hint).strip()
+
+    if explicit_url:
+        data, filename, mime, err = _image_describe_download_image_url(explicit_url)
+        if err:
+            msg_map = {
+                "url_empty": "Image URL is empty.",
+                "url_invalid": "Image URL must be a valid http/https URL.",
+                "url_request_failed": "Failed to download the image URL.",
+                "url_http_error": "Image URL request returned an HTTP error.",
+                "url_empty_response": "Image URL returned no data.",
+                "url_not_image": "URL did not resolve to an image.",
+                "url_unsupported_type": "Image URL returned an unsupported image type.",
+                "url_too_large": f"Image URL payload is too large. Max size is {VISION_MAX_IMAGE_BYTES} bytes.",
+            }
+            return None, None, None, err, msg_map.get(err, "Invalid image URL.")
+        if data:
+            return data, filename, mime, "url", ""
+
+    image_path = path
+    if not _as_text(image_path).strip():
+        source_hint = source or file
+        if not _image_describe_looks_like_http_url(source_hint):
+            image_path = source_hint
+    if _as_text(image_path).strip():
+        resolved = _resolve_safe_path(_as_text(image_path), [AGENT_LAB_DIR])
+        if resolved is None:
+            return None, None, None, "path_outside_workspace", "Image path is outside the allowed workspace root."
+        if not resolved.exists() or not resolved.is_file():
+            return None, None, None, "path_missing", "Image path does not exist."
+        try:
+            data = resolved.read_bytes()
+        except Exception:
+            return None, None, None, "path_read_failed", "Failed to read image from the provided path."
+        if not data:
+            return None, None, None, "path_empty", "The provided image file is empty."
+        filename = resolved.name or "image.png"
+        mime = _as_text(mimetypes.guess_type(filename)[0]).strip().lower() or "image/png"
+        if mime and not mime.startswith("image/"):
+            return None, None, None, "path_not_image", "The provided path is not an image file."
+        return data, filename, mime, "path", ""
+
+    blob = _image_describe_load_blob_bytes(
+        blob_client,
+        blob_key=blob_key,
+        file_id=file_id,
+    )
+    if blob:
+        filename = _image_describe_normalize_filename(name, mimetype)
+        mime = (
+            _as_text(mimetype).strip().lower()
+            or _as_text(mimetypes.guess_type(filename)[0]).strip().lower()
+            or "image/png"
+        )
+        if mime and not mime.startswith("image/"):
+            return None, None, None, "blob_not_image", "The provided blob/file reference is not an image."
+        return blob, filename, mime, "blob", ""
+
+    return None, None, None, "", ""
+
+
+def _image_describe_call_vision_api(
+    *,
+    image_bytes: bytes,
+    filename: str,
+    prompt: str,
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    settings = get_vision_settings(
+        default_api_base=DEFAULT_VISION_API_BASE,
+        default_model=DEFAULT_VISION_MODEL,
+    )
+    api_base = _as_text(settings.get("api_base")).strip().rstrip("/")
+    model = _as_text(settings.get("model")).strip()
+    api_key = _as_text(settings.get("api_key")).strip()
+
+    if not api_base or not model:
+        return None, None, "Vision settings are incomplete. Configure API base and model in Settings."
+
+    url = f"{api_base}/v1/chat/completions"
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": _as_text(prompt).strip() or VISION_DEFAULT_PROMPT},
+                    {"type": "image_url", "image_url": {"url": _image_describe_to_data_url(image_bytes, filename)}},
+                ],
+            }
+        ],
+        "temperature": 0.2,
+    }
+
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=90)
+    except Exception as exc:
+        return None, model, f"Vision API request failed: {exc}"
+
+    if response.status_code >= 300:
+        detail = _as_text(response.text).strip()
+        if detail:
+            detail = detail[:400]
+            return None, model, f"Vision API request failed with HTTP {response.status_code}: {detail}"
+        return None, model, f"Vision API request failed with HTTP {response.status_code}."
+
+    try:
+        parsed = response.json()
+    except Exception:
+        return None, model, "Vision API returned non-JSON output."
+
+    try:
+        content = parsed["choices"][0]["message"]["content"]
+    except Exception:
+        return None, model, "Vision API response did not include a valid assistant message."
+
+    description = ""
+    if isinstance(content, str):
+        description = content.strip()
+    elif isinstance(content, list):
+        chunks: List[str] = []
+        for item in content:
+            if isinstance(item, str) and item.strip():
+                chunks.append(item.strip())
+            elif isinstance(item, dict) and _as_text(item.get("text")).strip():
+                chunks.append(_as_text(item.get("text")).strip())
+        description = "\n".join(chunks).strip()
+
+    if not description:
+        return None, model, "Vision API returned an empty description."
+
+    return description, model, None
+
+
+def image_describe(
+    *,
+    request: Any = None,
+    query: Any = None,
+    prompt: Any = None,
+    url: Any = None,
+    path: Any = None,
+    blob_key: Any = None,
+    file_id: Any = None,
+    image_ref: Any = None,
+    media_ref: Any = None,
+    media_refs: Any = None,
+    source: Any = None,
+    file: Any = None,
+    name: Any = None,
+    mimetype: Any = None,
+    platform: Optional[str] = None,
+    origin: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    prompt_text = _as_text(prompt or query or request).strip() or VISION_DEFAULT_PROMPT
+
+    image_bytes, filename, mime, resolution_source, error_message = _image_describe_resolve_explicit_image(
+        prompt=prompt,
+        query=query,
+        request=request,
+        url=url,
+        path=path,
+        blob_key=blob_key,
+        file_id=file_id,
+        image_ref=image_ref,
+        media_ref=media_ref,
+        media_refs=media_refs,
+        source=source,
+        file=file,
+        name=name,
+        mimetype=mimetype,
+    )
+
+    if image_bytes is None and error_message:
+        return action_failure(
+            code="invalid_image_source",
+            message=error_message,
+            needs=[
+                "Use a recent image from this chat, provide an image URL, or provide /downloads/... or /documents/... path."
+            ],
+            say_hint="Ask for a valid image source and keep guidance brief.",
+        )
+
+    if image_bytes is None:
+        blob_client = _image_describe_blob_client()
+        refs = _load_recent_media_refs_for_context(
+            platform=platform,
+            origin=origin,
+            limit=8,
+            media_types=["image", "file"],
+        )
+        for ref in refs:
+            image_bytes, filename, mime = _image_describe_extract_from_payload(blob_client, ref)
+            if image_bytes:
+                resolution_source = "recent_media"
+                break
+
+    if image_bytes is None:
+        return action_failure(
+            code="no_image_found",
+            message="No image was found. Upload an image first, provide an image URL, or provide a path in /downloads or /documents.",
+            needs=["Please provide an image source to describe."],
+            say_hint="Ask for an image upload, URL, or a path in /downloads or /documents.",
+        )
+
+    if len(image_bytes) > VISION_MAX_IMAGE_BYTES:
+        return action_failure(
+            code="image_too_large",
+            message=f"Image is too large ({len(image_bytes)} bytes). Max supported size is {VISION_MAX_IMAGE_BYTES} bytes.",
+            needs=["Use a smaller image file."],
+            say_hint="Explain the size limit and ask for a smaller image.",
+        )
+
+    filename = _image_describe_normalize_filename(filename, mime)
+    description, model, error = _image_describe_call_vision_api(
+        image_bytes=image_bytes,
+        filename=filename,
+        prompt=prompt_text,
+    )
+    if error:
+        return action_failure(
+            code="vision_request_failed",
+            message=error,
+            say_hint="Explain the vision request failure and ask whether to retry.",
+        )
+
+    text = _as_text(description).strip()
+    return action_success(
+        facts={
+            "tool": "image_describe",
+            "source": resolution_source or "unknown",
+            "filename": filename,
+        },
+        data={
+            "description": text,
+            "text": text,
+            "filename": filename,
+            "mimetype": mime or _as_text(mimetypes.guess_type(filename)[0]).strip() or "image/png",
+            "model": model or "",
+            "source": resolution_source or "unknown",
+        },
+        summary_for_user=text,
+        say_hint="Return the image description directly and do not invent extra visual details.",
+    )
 
 
 def _ai_tasks_normalize_channel_targets(dest: str, targets: Dict[str, Any]) -> Dict[str, Any]:
@@ -3221,6 +4038,11 @@ def _legacy_memory_preferred_user_id(
         "user",
     }
 
+    # Prefer stable numeric/platform user IDs from origin before display names.
+    origin_user_id = _as_text(_origin_value(origin, "user_id", "dm_user_id")).strip()
+    if origin_user_id and origin_user_id.lower() not in placeholder_names:
+        return origin_user_id
+
     def _clean_name(raw_value: Any) -> str:
         text = _as_text(raw_value).strip()
         if not text:
@@ -3250,7 +4072,7 @@ def _legacy_memory_preferred_user_id(
         return name_candidates[0]
 
     fallback = _as_text(
-        _origin_value(origin, "user_id", "user", "username", "sender")
+        _origin_value(origin, "dm_user_id", "user", "username", "sender")
     ).strip()
     return fallback
 
@@ -3320,7 +4142,7 @@ def _memory_platform_user_scope_id(
 ) -> str:
     return _as_text(
         user_id
-        or _origin_value(origin, "user_id", "user", "username", "sender")
+        or _origin_value(origin, "user_id", "dm_user_id", "user", "username", "sender")
     ).strip()
 
 
@@ -3363,6 +4185,16 @@ def _memory_platform_room_scope_id(
 def _memory_default_ttl() -> int:
     raw = redis_client.get(MEMORY_DEFAULT_TTL_REDIS_KEY)
     return _coerce_int(raw, default=0, min_value=0, max_value=31_536_000)
+
+
+def _memory_auto_link_identities_default_off() -> bool:
+    try:
+        settings = redis_client.hgetall("memory_platform_settings") or {}
+    except Exception:
+        settings = {}
+    if not isinstance(settings, dict):
+        settings = {}
+    return _coerce_bool(settings.get("auto_link_identities"), False)
 
 
 def _json_safe(value: Any) -> Any:
@@ -3753,14 +4585,18 @@ def _memory_get_durable_payload(
                 "error": "user_id is required for durable scope='user'.",
             }
         display_name = _memory_platform_user_display_name(user_id=user_id, origin=origin) or user_scope_id
-        redis_key = resolve_memory_platform_user_doc_key(
-            redis_client,
-            platform_name,
-            user_scope_id,
-            create=False,
-            display_name=display_name,
-            auto_link_name=True,
-        ) or memory_platform_user_doc_key(platform_name, user_scope_id)
+        auto_link_identities = _memory_auto_link_identities_default_off()
+        if auto_link_identities:
+            redis_key = resolve_memory_platform_user_doc_key(
+                redis_client,
+                platform_name,
+                user_scope_id,
+                create=False,
+                display_name=display_name,
+                auto_link_name=True,
+            ) or memory_platform_user_doc_key(platform_name, user_scope_id)
+        else:
+            redis_key = memory_platform_user_doc_key(platform_name, user_scope_id)
         scope_identity: Dict[str, Any] = {
             "scope": "user",
             "platform": platform_name,

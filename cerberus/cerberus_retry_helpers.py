@@ -1,10 +1,11 @@
-import hashlib
 from typing import Any, Callable, Dict, List, Optional
 
 
 BAD_ARGS_FAILURE_CODES = {
     "bad_args",
+    "bad_action",
     "invalid_args",
+    "invalid_action",
     "invalid_argument",
     "invalid_arguments",
     "missing_args",
@@ -22,10 +23,13 @@ BAD_ARGS_FAILURE_CODES = {
     "validation_error",
     "schema_error",
     "type_error",
+    "unknown_action",
+    "unknown_operation",
 }
 
 
 BAD_ARGS_FAILURE_TEXT_MARKERS = (
+    "bad action",
     "missing required",
     "missing field",
     "required field",
@@ -35,8 +39,11 @@ BAD_ARGS_FAILURE_TEXT_MARKERS = (
     "missing argument",
     "invalid argument",
     "invalid args",
+    "invalid action",
     "unknown field",
+    "unknown action",
     "unknown argument",
+    "unknown operation",
     "unexpected keyword",
     "unexpected argument",
     "validation error",
@@ -139,16 +146,6 @@ def help_arg_names(
         seen.add(lowered)
         out.append(key)
 
-    for field in ("required_args", "optional_args"):
-        items = src.get(field)
-        if not isinstance(items, list):
-            continue
-        for item in items:
-            if isinstance(item, dict):
-                _add(item.get("name"))
-            else:
-                _add(item)
-
     usage_example = str(src.get("usage_example") or "").strip()
     usage_parsed = parse_function_json_fn(usage_example)
     usage_args = usage_parsed.get("arguments") if isinstance(usage_parsed, dict) else None
@@ -187,8 +184,6 @@ def tool_call_signature(
     *,
     canonical_tool_name_fn: Callable[[Any], str],
     hash_tool_args_fn: Callable[[Any], str],
-    tool_call_route_metadata_fn: Callable[[Optional[Dict[str, Any]]], Dict[str, Any]],
-    route_user_text_key: str,
 ) -> str:
     if not isinstance(tool_call, dict):
         return ""
@@ -197,16 +192,7 @@ def tool_call_signature(
         return ""
     args = tool_call.get("arguments") if isinstance(tool_call.get("arguments"), dict) else {}
     args_hash = hash_tool_args_fn(args)
-    route_meta = tool_call_route_metadata_fn(tool_call)
-    route_text = str(route_meta.get(route_user_text_key) or "").strip()
-    route_hash = ""
-    if route_text:
-        digest = hashlib.sha256(route_text.encode("utf-8", errors="ignore")).hexdigest()
-        route_hash = f"route:{digest}"
-    base = f"{func}:{args_hash}" if args_hash else func
-    if route_hash:
-        return f"{base}:{route_hash}"
-    return base
+    return f"{func}:{args_hash}" if args_hash else func
 
 
 def build_help_constrained_retry_tool_call(
@@ -216,7 +202,6 @@ def build_help_constrained_retry_tool_call(
     registry: Dict[str, Any],
     plugin_tool_id_for_call_fn: Callable[[Optional[Dict[str, Any]], Dict[str, Any]], str],
     constrain_args_from_plugin_help_fn: Callable[[Optional[Dict[str, Any]], Optional[Dict[str, Any]]], Dict[str, Any]],
-    tool_call_route_metadata_fn: Callable[[Optional[Dict[str, Any]]], Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
     plugin_id = plugin_tool_id_for_call_fn(failed_tool_call, registry)
     if not plugin_id:
@@ -227,6 +212,4 @@ def build_help_constrained_retry_tool_call(
         else {}
     )
     constrained_args = constrain_args_from_plugin_help_fn(source_args, help_payload)
-    retry_call: Dict[str, Any] = {"function": plugin_id, "arguments": constrained_args}
-    retry_call.update(tool_call_route_metadata_fn(failed_tool_call))
-    return retry_call
+    return {"function": plugin_id, "arguments": constrained_args}

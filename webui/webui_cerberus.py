@@ -15,7 +15,6 @@ from cerberus import (
     DEFAULT_CHECKER_MAX_TOKENS,
     DEFAULT_DOER_MAX_TOKENS,
     DEFAULT_TOOL_REPAIR_MAX_TOKENS,
-    DEFAULT_OVERCLAR_REPAIR_MAX_TOKENS,
     DEFAULT_RECOVERY_MAX_TOKENS,
     DEFAULT_MAX_LEDGER_ITEMS,
     AGENT_MAX_ROUNDS_KEY,
@@ -25,7 +24,6 @@ from cerberus import (
     CERBERUS_CHECKER_MAX_TOKENS_KEY,
     CERBERUS_DOER_MAX_TOKENS_KEY,
     CERBERUS_TOOL_REPAIR_MAX_TOKENS_KEY,
-    CERBERUS_OVERCLAR_REPAIR_MAX_TOKENS_KEY,
     CERBERUS_RECOVERY_MAX_TOKENS_KEY,
     CERBERUS_MAX_LEDGER_ITEMS_KEY,
 )
@@ -69,7 +67,6 @@ def render_cerberus_settings():
             CERBERUS_CHECKER_MAX_TOKENS_KEY: int(new_checker_max_tokens),
             CERBERUS_DOER_MAX_TOKENS_KEY: int(new_doer_max_tokens),
             CERBERUS_TOOL_REPAIR_MAX_TOKENS_KEY: int(new_tool_repair_max_tokens),
-            CERBERUS_OVERCLAR_REPAIR_MAX_TOKENS_KEY: int(new_overclar_repair_max_tokens),
             CERBERUS_RECOVERY_MAX_TOKENS_KEY: int(new_recovery_max_tokens),
             CERBERUS_MAX_LEDGER_ITEMS_KEY: int(new_max_ledger_items),
         }
@@ -83,7 +80,6 @@ def render_cerberus_settings():
             CERBERUS_CHECKER_MAX_TOKENS_KEY: int(DEFAULT_CHECKER_MAX_TOKENS),
             CERBERUS_DOER_MAX_TOKENS_KEY: int(DEFAULT_DOER_MAX_TOKENS),
             CERBERUS_TOOL_REPAIR_MAX_TOKENS_KEY: int(DEFAULT_TOOL_REPAIR_MAX_TOKENS),
-            CERBERUS_OVERCLAR_REPAIR_MAX_TOKENS_KEY: int(DEFAULT_OVERCLAR_REPAIR_MAX_TOKENS),
             CERBERUS_RECOVERY_MAX_TOKENS_KEY: int(DEFAULT_RECOVERY_MAX_TOKENS),
             CERBERUS_MAX_LEDGER_ITEMS_KEY: int(DEFAULT_MAX_LEDGER_ITEMS),
         }
@@ -109,9 +105,6 @@ def render_cerberus_settings():
         )
         st.session_state["cerberus_tool_repair_max_tokens"] = int(
             values.get(CERBERUS_TOOL_REPAIR_MAX_TOKENS_KEY, DEFAULT_TOOL_REPAIR_MAX_TOKENS)
-        )
-        st.session_state["cerberus_overclar_repair_max_tokens"] = int(
-            values.get(CERBERUS_OVERCLAR_REPAIR_MAX_TOKENS_KEY, DEFAULT_OVERCLAR_REPAIR_MAX_TOKENS)
         )
         st.session_state["cerberus_recovery_max_tokens"] = int(
             values.get(CERBERUS_RECOVERY_MAX_TOKENS_KEY, DEFAULT_RECOVERY_MAX_TOKENS)
@@ -144,10 +137,6 @@ def render_cerberus_settings():
     tool_repair_max_tokens = _read_positive_int_setting(
         CERBERUS_TOOL_REPAIR_MAX_TOKENS_KEY,
         DEFAULT_TOOL_REPAIR_MAX_TOKENS,
-    )
-    overclar_repair_max_tokens = _read_positive_int_setting(
-        CERBERUS_OVERCLAR_REPAIR_MAX_TOKENS_KEY,
-        DEFAULT_OVERCLAR_REPAIR_MAX_TOKENS,
     )
     recovery_max_tokens = _read_positive_int_setting(
         CERBERUS_RECOVERY_MAX_TOKENS_KEY,
@@ -226,16 +215,6 @@ def render_cerberus_settings():
             step=10,
             format="%d",
             key="cerberus_tool_repair_max_tokens",
-        )
-    )
-    new_overclar_repair_max_tokens = int(
-        st.number_input(
-            "Over-Clarification Repair Max Tokens",
-            min_value=1,
-            value=overclar_repair_max_tokens,
-            step=10,
-            format="%d",
-            key="cerberus_overclar_repair_max_tokens",
         )
     )
     new_recovery_max_tokens = int(
@@ -651,4 +630,3 @@ def render_cerberus_metrics_dashboard(*, key_prefix: str, allow_controls: bool):
 
 def render_cerberus_ledger_settings():
     render_cerberus_metrics_dashboard(key_prefix="cerberus_advanced_dashboard", allow_controls=True)
-

@@ -20,7 +20,6 @@ async def validate_or_recover_tool_call(
     is_tool_candidate_fn: Callable[[str], bool],
     validate_tool_contract_fn: Callable[..., Awaitable[Dict[str, Any]]],
     short_text_fn: Callable[..., str],
-    redirect_unknown_tool_to_search_files_fn: Callable[..., Optional[Dict[str, Any]]],
     generate_recovery_text_fn: Callable[..., Awaitable[str]],
     validation_failure_text_fn: Callable[[str, str], str],
     normalize_tool_call_for_user_request_fn: Callable[..., Dict[str, Any]],
@@ -54,31 +53,6 @@ async def validate_or_recover_tool_call(
     if not validation_status.get("ok"):
         reason = str(validation_status.get("reason") or "invalid_tool_call")
         assistant_text = short_text_fn(validation_status.get("assistant_text"), limit=320)
-        workspace_redirect = redirect_unknown_tool_to_search_files_fn(
-            reason=reason,
-            user_text=user_text,
-            tool_call=tool_call,
-        )
-        if isinstance(workspace_redirect, dict):
-            redirected_validation = dict(validation_status) if isinstance(validation_status, dict) else {}
-            redirected_validation.update(
-                {
-                    "ok": True,
-                    "reason": "workspace_discovery_redirect",
-                    "repair_used": True,
-                    "tool_call": workspace_redirect,
-                    "platform_supported": True,
-                }
-            )
-            return {
-                "ok": True,
-                "tool_call": workspace_redirect,
-                "repair_used": True,
-                "reason": "workspace_discovery_redirect",
-                "recovery_text_if_blocked": None,
-                "attempted_tool": str(workspace_redirect.get("function") or "").strip() or attempted_tool,
-                "validation_status": redirected_validation,
-            }
         recovery_text = assistant_text
         if not recovery_text:
             recovery_text = await generate_recovery_text_fn(

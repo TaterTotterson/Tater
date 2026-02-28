@@ -4,6 +4,7 @@ from typing import Any, Callable, Dict, Optional
 from plugin_kernel import (
     get_plugin_help,
     list_platforms_for_plugin,
+    normalize_platform,
     plugin_display_name,
     plugin_supports_platform,
     infer_needs_from_plugin,
@@ -34,6 +35,8 @@ from kernel_tools import (
     memory_delete,
     memory_explain,
     memory_search,
+    image_describe,
+    send_message,
 )
 from plugin_result import action_failure, normalize_plugin_result
 from helpers import redis_client as default_redis
@@ -50,6 +53,7 @@ from memory_platform_store import (
 
 
 META_TOOLS = {
+    "list_tools",
     "get_plugin_help",
     "list_platforms_for_plugin",
     "read_file",
@@ -76,13 +80,41 @@ META_TOOLS = {
     "memory_list",
     "memory_explain",
     "memory_search",
+    "image_describe",
+    "send_message",
 }
 
-_PLUGIN_ID_ALIASES = {
-    "describe_image": "image_describe",
-    "describe_latest_image": "image_describe",
+_KERNEL_TOOL_PURPOSE_HINTS = {
+    "list_tools": "list kernel and enabled plugin tools for current platform",
+    "get_plugin_help": "show plugin usage example and guidance",
+    "list_platforms_for_plugin": "list platforms supported by a plugin",
+    "read_file": "read local file contents",
+    "search_web": "web search for current information",
+    "search_files": "search text across local files",
+    "write_file": "write content to a local file",
+    "list_directory": "list files and folders",
+    "delete_file": "delete a local file",
+    "read_url": "fetch and read webpage text",
+    "inspect_webpage": "inspect webpage structure, links, and image candidates",
+    "download_file": "download files from URLs",
+    "list_archive": "inspect archive entries",
+    "extract_archive": "extract archives to a target directory",
+    "list_stable_plugins": "list stable built-in plugins",
+    "list_stable_platforms": "list stable built-in platforms",
+    "inspect_plugin": "inspect plugin metadata and methods",
+    "test_plugin": "run plugin test harness",
+    "validate_plugin": "validate plugin metadata and surface install hints",
+    "validate_platform": "validate platform metadata and surface install hints",
+    "write_workspace_note": "append a workspace note",
+    "list_workspace": "list workspace notes",
+    "memory_get": "read saved memory",
+    "memory_set": "save memory entries",
+    "memory_list": "list saved memory keys",
+    "memory_explain": "explain memory value/source",
+    "memory_search": "search saved memory",
+    "image_describe": "describe a recent or explicit image with the vision model",
+    "send_message": "queue a structured cross-platform notification or message",
 }
-
 
 def _to_int(value: Any, default: int) -> int:
     try:
@@ -155,6 +187,32 @@ _MEMORY_SCOPE_ROOM_HINTS = (
     "for this channel",
     "for this chat",
 )
+
+
+def _plugin_enabled_from_settings(plugin_id: str) -> bool:
+    pid = str(plugin_id or "").strip()
+    if not pid:
+        return False
+    try:
+        raw = default_redis.hget("plugin_enabled", pid) if default_redis is not None else None
+    except Exception:
+        raw = None
+    value = str(raw or "").strip().lower()
+    if not value:
+        return True
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return True
+
+
+def _effective_enabled_predicate(
+    enabled_predicate: Optional[Callable[[str], bool]],
+) -> Callable[[str], bool]:
+    if callable(enabled_predicate):
+        return enabled_predicate
+    return _plugin_enabled_from_settings
 
 
 def _memory_platform_key_list(args: Dict[str, Any]) -> list[str]:
@@ -478,6 +536,50 @@ def is_meta_tool(name: Optional[str]) -> bool:
     return (name or "").strip() in META_TOOLS
 
 
+def list_tools(
+    *,
+    platform: str,
+    registry: Dict[str, Any],
+    enabled_predicate: Optional[Callable[[str], bool]] = None,
+) -> Dict[str, Any]:
+    normalized_platform = normalize_platform(platform) or str(platform or "").strip().lower() or "webui"
+
+    kernel_tools: list[str] = []
+    for tool_id in sorted(META_TOOLS):
+        token = str(tool_id or "").strip()
+        if token:
+            kernel_tools.append(token)
+
+    enabled_check = _effective_enabled_predicate(enabled_predicate)
+    plugin_tools: list[Dict[str, str]] = []
+    for plugin_id, plugin in sorted((registry or {}).items(), key=lambda item: str(item[0] or "").lower()):
+        pid = str(plugin_id or "").strip()
+        if not pid or plugin is None:
+            continue
+        if not enabled_check(pid):
+            continue
+        if not plugin_supports_platform(plugin, normalized_platform):
+            continue
+        description = str(getattr(plugin, "description", "") or getattr(plugin, "plugin_dec", "") or "").strip()
+        if len(description) > 260:
+            description = description[:257].rstrip() + "..."
+        plugin_tools.append(
+            {
+                "id": pid,
+                "description": description,
+            }
+        )
+
+    return {
+        "tool": "list_tools",
+        "ok": True,
+        "platform": normalized_platform,
+        "kernel_tools": kernel_tools,
+        "plugin_tools": plugin_tools,
+        "summary_for_user": f"Found {len(kernel_tools)} kernel tools and {len(plugin_tools)} enabled plugin tools on {normalized_platform}.",
+    }
+
+
 def run_meta_tool(
     *,
     func: str,
@@ -487,9 +589,15 @@ def run_meta_tool(
     enabled_predicate: Optional[Callable[[str], bool]] = None,
     origin: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    if func == "list_tools":
+        return list_tools(
+            platform=args.get("platform") or platform,
+            registry=registry,
+            enabled_predicate=enabled_predicate,
+        )
+
     if func == "get_plugin_help":
         plugin_id = str(args.get("plugin_id") or "").strip()
-        plugin_id = _PLUGIN_ID_ALIASES.get(plugin_id, plugin_id)
         return get_plugin_help(
             plugin_id=plugin_id,
             platform=args.get("platform") or platform,
@@ -498,10 +606,7 @@ def run_meta_tool(
 
     if func == "list_platforms_for_plugin":
         return list_platforms_for_plugin(
-            plugin_id=_PLUGIN_ID_ALIASES.get(
-                str(args.get("plugin_id") or "").strip(),
-                str(args.get("plugin_id") or "").strip(),
-            ),
+            plugin_id=str(args.get("plugin_id") or "").strip(),
             registry=registry,
         )
 
@@ -633,6 +738,47 @@ def run_meta_tool(
         return write_workspace_note(str(args.get("content") or ""))
     if func == "list_workspace":
         return list_workspace()
+    if func == "image_describe":
+        return image_describe(
+            request=args.get("request"),
+            query=args.get("query"),
+            prompt=args.get("prompt"),
+            url=args.get("url"),
+            path=args.get("path"),
+            blob_key=args.get("blob_key"),
+            file_id=args.get("file_id"),
+            image_ref=args.get("image_ref"),
+            media_ref=args.get("media_ref"),
+            media_refs=args.get("media_refs"),
+            source=args.get("source"),
+            file=args.get("file"),
+            name=args.get("name"),
+            mimetype=args.get("mimetype"),
+            platform=platform,
+            origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
+        )
+    if func == "send_message":
+        return send_message(
+            message=args.get("message"),
+            content=args.get("content"),
+            title=args.get("title"),
+            platform=args.get("platform"),
+            targets=args.get("targets"),
+            attachments=args.get("attachments"),
+            priority=args.get("priority"),
+            tags=args.get("tags"),
+            ttl_sec=args.get("ttl_sec"),
+            origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
+            channel_id=args.get("channel_id"),
+            channel=args.get("channel"),
+            guild_id=args.get("guild_id"),
+            room_id=args.get("room_id"),
+            room_alias=args.get("room_alias"),
+            device_service=args.get("device_service"),
+            persistent=args.get("persistent"),
+            api_notification=args.get("api_notification"),
+            chat_id=args.get("chat_id"),
+        )
     if func == "memory_get":
         raw_include = args.get("include_meta", True)
         include_meta = (
@@ -827,53 +973,6 @@ def _needs_request_arg(needs: Any) -> bool:
     return False
 
 
-def _required_arg_names(plugin: Any) -> list[str]:
-    raw = getattr(plugin, "required_args", None)
-    if not isinstance(raw, list):
-        return []
-    out: list[str] = []
-    for item in raw:
-        text = str(item or "").strip().lower()
-        if text:
-            out.append(text)
-    return out
-
-
-def _has_non_empty_arg(args: Dict[str, Any], key: str) -> bool:
-    if key not in args:
-        return False
-    value = args.get(key)
-    if isinstance(value, str):
-        return bool(value.strip())
-    if value is None:
-        return False
-    return True
-
-
-def _autofill_textual_required_args(plugin: Any, args: Dict[str, Any], context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    If planner omitted required text-like args (query/prompt/etc), copy the user's
-    request text from context so execution can proceed instead of looping on
-    clarification.
-    """
-    request_text = _extract_request_text(context).strip()
-    if not request_text:
-        return args
-
-    required = _required_arg_names(plugin)
-    if not required:
-        return args
-
-    text_keys = {"query", "request", "prompt", "text", "content", "message"}
-    for key in required:
-        if key not in text_keys:
-            continue
-        if _has_non_empty_arg(args, key):
-            continue
-        args[key] = request_text
-    return args
-
-
 def _autofill_request_arg(plugin: Any, args: Dict[str, Any], context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     try:
         needs = infer_needs_from_plugin(plugin)
@@ -964,9 +1063,9 @@ async def execute_plugin_call(
 
     args = dict(args or {})
     args = _autofill_request_arg(plugin, args, context)
-    args = _autofill_textual_required_args(plugin, args, context)
 
-    if enabled_predicate and not enabled_predicate(func):
+    enabled_check = _effective_enabled_predicate(enabled_predicate)
+    if not enabled_check(func):
         return {
             "plugin_id": func,
             "plugin_name": plugin_display_name(plugin),

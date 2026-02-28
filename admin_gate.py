@@ -17,7 +17,6 @@ DEFAULT_ADMIN_ONLY_PLUGINS = {
     "ha_control",
     "music_assistant",
     "overseerr_request",
-    "send_message",
     "unifi_network",
     "unifi_protect",
     "voicepe_remote_timer",
