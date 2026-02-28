@@ -1,6 +1,5 @@
 import asyncio
 import json
-import os
 import re
 
 import streamlit as st
@@ -21,12 +20,6 @@ from .webui_platforms import (
     _validation_status,
     _dependency_lines,
     render_exp_plugin_settings_form,
-)
-from .webui_plugin_store import (
-    _safe_plugin_file_path,
-    uninstall_plugin_file,
-    clear_plugin_redis_data,
-    _refresh_plugins_after_fs_change,
 )
 
 
@@ -201,19 +194,9 @@ def render_plugin_card(plugin):
     platforms = getattr(plugin, "platforms", []) or []
 
     registry_id = plugin.name
-    plugin_id = getattr(plugin, "id", None) or registry_id
-
-    removable = False
-    try:
-        removable = os.path.exists(_safe_plugin_file_path(plugin_id))
-    except Exception:
-        removable = False
-
-    purge_key = f"purge_plugin_redis_{plugin_id}"
-    purge_label = "Delete Data?"
 
     with st.container(border=True):
-        header_cols = st.columns([4, 1, 1])
+        header_cols = st.columns([5, 1])
 
         with header_cols[0]:
             st.subheader(display_name)
@@ -221,40 +204,6 @@ def render_plugin_card(plugin):
 
         with header_cols[1]:
             render_plugin_controls(registry_id, label="Enabled")
-
-        with header_cols[2]:
-            if removable:
-                purge_redis = st.checkbox(purge_label, value=False, key=purge_key)
-
-                if st.button("Remove", key=f"uninstall_{plugin_id}"):
-                    loaded = get_registry().get(registry_id)
-                    category_hint = getattr(loaded, "settings_category", None) if loaded else None
-
-                    ok, msg = uninstall_plugin_file(plugin_id)
-                    if ok:
-                        st.success(msg)
-
-                        try:
-                            set_plugin_enabled(registry_id, False)
-                        except Exception:
-                            pass
-
-                        if purge_redis:
-                            try:
-                                ok2, msg2 = clear_plugin_redis_data(plugin_id, category_hint=category_hint)
-                                if ok2:
-                                    st.success(f"Redis cleanup: {msg2}")
-                                else:
-                                    st.error(msg2)
-                            except Exception as e:
-                                st.error(f"Redis cleanup failed: {e}")
-
-                        _refresh_plugins_after_fs_change()
-                        st.rerun()
-                    else:
-                        st.error(msg)
-            else:
-                st.button("Remove", disabled=True, key=f"uninstall_disabled_{plugin_id}")
 
         if description:
             st.write(description)

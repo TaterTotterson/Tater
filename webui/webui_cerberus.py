@@ -412,6 +412,12 @@ def _reset_cerberus_metrics(platform: str) -> int:
     return deleted
 
 
+def _clear_cerberus_data(platform: str) -> tuple[int, int]:
+    metrics_removed = _reset_cerberus_metrics(platform)
+    ledger_removed = _clear_cerberus_ledger(platform)
+    return metrics_removed, ledger_removed
+
+
 def _safe_rate(numerator: int, denominator: int) -> float:
     denom = max(1, int(denominator or 0))
     return float(numerator or 0) / float(denom)
@@ -441,57 +447,44 @@ def _load_cerberus_platform_metric_rows() -> List[Dict[str, Any]]:
     return rows
 
 
-def render_cerberus_metrics_dashboard(*, key_prefix: str, allow_controls: bool):
-    st.subheader("Cerberus Metrics")
-    st.caption("Planner/Doer/Critic counters and recent ledger rows.")
+def _cerberus_platform_display_label(platform: str) -> str:
+    labels = {
+        "all": "All",
+        "webui": "WebUI",
+        "homeassistant": "Home Assistant",
+        "homekit": "HomeKit",
+        "xbmc": "XBMC",
+        "automation": "Automations",
+    }
+    normalized = str(platform or "").strip().lower()
+    return labels.get(normalized, normalized.title())
 
-    platforms = ["all", *list(_CERBERUS_METRIC_PLATFORMS)]
-    selected_platform = st.selectbox(
-        "Platform",
-        options=platforms,
-        index=1,
-        key=f"{key_prefix}_platform",
-    )
-    limit = int(
-        st.slider(
-            "Ledger entries",
-            min_value=10,
-            max_value=300,
-            value=50,
-            step=10,
-            key=f"{key_prefix}_ledger_limit",
-        )
-    )
 
+def _render_cerberus_metrics_platform_view(
+    *,
+    selected_platform: str,
+    limit: int,
+    key_prefix: str,
+    allow_controls: bool,
+):
     metric_platform, global_metrics, platform_metrics = _load_cerberus_metrics(selected_platform)
+    selected_token = str(selected_platform or "all").strip().lower() or "all"
 
-    st.markdown("**Global Counters**")
-    global_cols = st.columns(len(_CERBERUS_METRIC_NAMES))
+    st.markdown(f"**Selected Platform Counters ({_cerberus_platform_display_label(metric_platform)})**")
+    platform_cols = st.columns(len(_CERBERUS_METRIC_NAMES))
     for idx, name in enumerate(_CERBERUS_METRIC_NAMES):
-        global_cols[idx].metric(name.replace("_", " ").title(), global_metrics.get(name, 0))
-
-    st.markdown("**Global Rates**")
-    st.dataframe(_cerberus_rate_rows(global_metrics), width="stretch")
-
-    if selected_platform != "all":
-        st.markdown(f"**Selected Platform Counters ({metric_platform})**")
-        platform_cols = st.columns(len(_CERBERUS_METRIC_NAMES))
-        for idx, name in enumerate(_CERBERUS_METRIC_NAMES):
-            platform_cols[idx].metric(name.replace("_", " ").title(), platform_metrics.get(name, 0))
-        st.markdown(f"**Selected Platform Rates ({metric_platform})**")
-        st.dataframe(_cerberus_rate_rows(platform_metrics), width="stretch")
-
-    st.markdown("**Per-Platform Totals**")
-    st.dataframe(_load_cerberus_platform_metric_rows(), width="stretch")
+        platform_cols[idx].metric(name.replace("_", " ").title(), platform_metrics.get(name, 0))
+    st.markdown(f"**Selected Platform Rates ({_cerberus_platform_display_label(metric_platform)})**")
+    st.dataframe(_cerberus_rate_rows(platform_metrics), width="stretch")
 
     if allow_controls:
         st.caption("Advanced controls")
         control_cols = st.columns(2)
-        if control_cols[0].button("Reset Metrics", key=f"{key_prefix}_reset_metrics"):
+        if control_cols[0].button("Reset Metrics", key=f"{key_prefix}_{selected_token}_reset_metrics"):
             removed = _reset_cerberus_metrics(selected_platform)
             st.success(f"Removed {removed} metric key(s).")
             st.rerun()
-        if control_cols[1].button("Clear Ledger", key=f"{key_prefix}_clear_ledger"):
+        if control_cols[1].button("Clear Ledger", key=f"{key_prefix}_{selected_token}_clear_ledger"):
             removed = _clear_cerberus_ledger(selected_platform)
             st.success(f"Deleted {removed} ledger list(s).")
             st.rerun()
@@ -505,12 +498,12 @@ def render_cerberus_metrics_dashboard(*, key_prefix: str, allow_controls: bool):
         "Outcome Filter",
         options=["all", "done", "blocked", "failed"],
         index=0,
-        key=f"{key_prefix}_outcome_filter",
+        key=f"{key_prefix}_{selected_token}_outcome_filter",
     )
     show_only_tool_turns = st.checkbox(
         "Show Only Tool Turns",
         value=False,
-        key=f"{key_prefix}_tool_turns_only",
+        key=f"{key_prefix}_{selected_token}_tool_turns_only",
     )
     tool_options = ["all"] + sorted(
         {
@@ -524,7 +517,7 @@ def render_cerberus_metrics_dashboard(*, key_prefix: str, allow_controls: bool):
         "Tool Filter",
         options=tool_options,
         index=0,
-        key=f"{key_prefix}_tool_filter",
+        key=f"{key_prefix}_{selected_token}_tool_filter",
     )
 
     filtered_rows: List[Dict[str, Any]] = []
@@ -628,5 +621,93 @@ def render_cerberus_metrics_dashboard(*, key_prefix: str, allow_controls: bool):
             st.code(json.dumps(item, indent=2, ensure_ascii=False), language="json")
 
 
-def render_cerberus_ledger_settings():
-    render_cerberus_metrics_dashboard(key_prefix="cerberus_advanced_dashboard", allow_controls=True)
+def render_cerberus_metrics_dashboard(*, key_prefix: str, allow_controls: bool):
+    st.subheader("Cerberus Metrics")
+    st.caption("Planner/Doer/Critic counters and recent ledger rows.")
+
+    limit = int(
+        st.slider(
+            "Ledger entries",
+            min_value=10,
+            max_value=300,
+            value=50,
+            step=10,
+            key=f"{key_prefix}_ledger_limit",
+        )
+    )
+
+    _, global_metrics, _ = _load_cerberus_metrics("all")
+
+    st.markdown("**Global Counters**")
+    global_cols = st.columns(len(_CERBERUS_METRIC_NAMES))
+    for idx, name in enumerate(_CERBERUS_METRIC_NAMES):
+        global_cols[idx].metric(name.replace("_", " ").title(), global_metrics.get(name, 0))
+
+    st.markdown("**Global Rates**")
+    st.dataframe(_cerberus_rate_rows(global_metrics), width="stretch")
+
+    st.markdown("**Per-Platform Totals**")
+    st.dataframe(_load_cerberus_platform_metric_rows(), width="stretch")
+
+    platforms = list(_CERBERUS_METRIC_PLATFORMS)
+    tab_labels = [_cerberus_platform_display_label(platform) for platform in platforms]
+    tab_views = st.tabs(tab_labels)
+
+    for idx, tab in enumerate(tab_views):
+        with tab:
+            _render_cerberus_metrics_platform_view(
+                selected_platform=platforms[idx],
+                limit=limit,
+                key_prefix=key_prefix,
+                allow_controls=allow_controls,
+            )
+
+
+def render_cerberus_data_tools(*, key_prefix: str):
+    st.subheader("Cerberus Data")
+    st.caption("Clear Cerberus metrics and ledger data globally or for a specific platform.")
+
+    with st.container(border=True):
+        st.markdown("**All Platforms**")
+        st.caption("Delete all Cerberus metrics and all Cerberus ledger data.")
+        if st.button("Clear All Cerberus Data", key=f"{key_prefix}_clear_all_data"):
+            metrics_removed, ledger_removed = _clear_cerberus_data("all")
+            st.success(
+                f"Cleared Cerberus data across all platforms. "
+                f"Metrics removed: {metrics_removed}. Ledger lists removed: {ledger_removed}."
+            )
+            st.rerun()
+
+    with st.container(border=True):
+        st.markdown("**Per-Platform Data**")
+        platform_options = list(_CERBERUS_METRIC_PLATFORMS)
+        selected_platform = st.selectbox(
+            "Platform",
+            options=platform_options,
+            index=0,
+            format_func=_cerberus_platform_display_label,
+            key=f"{key_prefix}_platform",
+        )
+
+        clear_cols = st.columns(3)
+        if clear_cols[0].button("Clear Platform Data", key=f"{key_prefix}_clear_platform_data"):
+            metrics_removed, ledger_removed = _clear_cerberus_data(selected_platform)
+            st.success(
+                f"Cleared Cerberus data for {_cerberus_platform_display_label(selected_platform)}. "
+                f"Metrics removed: {metrics_removed}. Ledger lists removed: {ledger_removed}."
+            )
+            st.rerun()
+
+        if clear_cols[1].button("Reset Metrics Only", key=f"{key_prefix}_reset_platform_metrics"):
+            removed = _reset_cerberus_metrics(selected_platform)
+            st.success(
+                f"Removed {removed} Cerberus metric key(s) for {_cerberus_platform_display_label(selected_platform)}."
+            )
+            st.rerun()
+
+        if clear_cols[2].button("Clear Ledger Only", key=f"{key_prefix}_clear_platform_ledger"):
+            removed = _clear_cerberus_ledger(selected_platform)
+            st.success(
+                f"Deleted {removed} Cerberus ledger list(s) for {_cerberus_platform_display_label(selected_platform)}."
+            )
+            st.rerun()

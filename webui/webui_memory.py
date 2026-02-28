@@ -363,8 +363,10 @@ def _memory_platform_export_lines(
     stats: Dict[str, Any],
     user_rows: List[Dict[str, Any]],
     room_rows: List[Dict[str, Any]],
+    insights: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
     lines: List[str] = []
+    insights = insights if isinstance(insights, dict) else _memory_platform_insight_frames(user_rows, room_rows)
     now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     lines.append("Tater Memory Report")
     lines.append(f"Generated: {now_text}")
@@ -379,6 +381,24 @@ def _memory_platform_export_lines(
     lines.append(f"Scanned scopes (last run): {int(stats.get('scanned_scopes') or 0)}")
     lines.append(f"Enabled platforms (last run): {int(stats.get('enabled_platform_count') or 0)}")
     lines.append(f"Last run: {str(stats.get('last_run_text') or '').strip() or 'n/a'}")
+    lines.append("")
+
+    trending_user_df = insights.get("trending_user_df") if isinstance(insights, dict) else None
+    trending_has_data = bool((insights or {}).get("trending_user_has_data"))
+    lines.append("Trending Shared User Facts")
+    if isinstance(trending_user_df, pd.DataFrame) and not trending_user_df.empty:
+        table_df = trending_user_df.reset_index()
+        if "trend" not in table_df.columns and "index" in table_df.columns:
+            table_df = table_df.rename(columns={"index": "trend"})
+        for _, trend_row in table_df.iterrows():
+            trend_label = str(trend_row.get("trend") or "").strip() or "No trending yet"
+            user_count = int(trend_row.get("users") or 0)
+            lines.append(f"- {trend_label} ({user_count} users)")
+        if not trending_has_data:
+            lines.append("  No trending shared user facts yet.")
+    else:
+        lines.append("- No trending yet (0 users)")
+        lines.append("  No trending shared user facts yet.")
     lines.append("")
 
     lines.append("User Memory")
@@ -443,8 +463,10 @@ def _memory_platform_export_styled_rows(
     stats: Dict[str, Any],
     user_rows: List[Dict[str, Any]],
     room_rows: List[Dict[str, Any]],
+    insights: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
+    insights = insights if isinstance(insights, dict) else _memory_platform_insight_frames(user_rows, room_rows)
 
     def _add(style: str, text: Any = "", **extra: Any) -> None:
         row: Dict[str, Any] = {"style": str(style or "body"), "text": text}
@@ -467,6 +489,26 @@ def _memory_platform_export_styled_rows(
     _add("body", f"Scanned scopes (last run): {int(stats.get('scanned_scopes') or 0)}")
     _add("body", f"Enabled platforms (last run): {int(stats.get('enabled_platform_count') or 0)}")
     _add("body", f"Last run: {str(stats.get('last_run_text') or '').strip() or 'n/a'}")
+    _add("spacer", "")
+
+    trending_user_df = insights.get("trending_user_df") if isinstance(insights, dict) else None
+    trending_has_data = bool((insights or {}).get("trending_user_has_data"))
+    _add("section", "Trending Shared User Facts")
+    if isinstance(trending_user_df, pd.DataFrame) and not trending_user_df.empty:
+        table_df = trending_user_df.reset_index()
+        if "trend" not in table_df.columns and "index" in table_df.columns:
+            table_df = table_df.rename(columns={"index": "trend"})
+        _add("table_header", cells=["Shared Fact", "Users"])
+        for _, trend_row in table_df.iterrows():
+            trend_label = str(trend_row.get("trend") or "").strip() or "No trending yet"
+            user_count = str(int(trend_row.get("users") or 0))
+            _add("table_row", cells=[trend_label, user_count])
+        if not trending_has_data:
+            _add("meta", "No trending shared user facts yet.")
+    else:
+        _add("table_header", cells=["Shared Fact", "Users"])
+        _add("table_row", cells=["No trending yet", "0"])
+        _add("meta", "No trending shared user facts yet.")
     _add("spacer", "")
 
     def _render_scope(scope_title: str, source_rows: List[Dict[str, Any]], id_key: str) -> None:
@@ -548,15 +590,25 @@ def _build_styled_pdf_from_rows(rows: List[Dict[str, Any]], *, title: str = "Mem
 
     page_streams: List[List[str]] = [[]]
     page_y: List[float] = [top_y]
-    table_col_weights: List[float] = [0.22, 0.44, 0.09, 0.07, 0.18]
     table_total_width = page_width - margin_left - margin_right
-    table_col_widths: List[float] = [table_total_width * weight for weight in table_col_weights]
-    table_col_x: List[float] = [margin_left]
-    for width in table_col_widths:
-        table_col_x.append(table_col_x[-1] + width)
     table_cell_pad_x = 3.5
     table_cell_pad_y = 3.0
     last_table_header_cells: Optional[List[str]] = None
+
+    def _table_layout(cells: List[str]) -> tuple[List[float], List[float]]:
+        cell_count = max(1, len(cells))
+        if cell_count == 5:
+            weights = [0.22, 0.44, 0.09, 0.07, 0.18]
+        elif cell_count == 2:
+            weights = [0.78, 0.22]
+        else:
+            weights = [1.0 / float(cell_count)] * cell_count
+
+        widths: List[float] = [table_total_width * weight for weight in weights]
+        x_positions: List[float] = [margin_left]
+        for width in widths:
+            x_positions.append(x_positions[-1] + width)
+        return widths, x_positions
 
     def _new_page() -> int:
         page_streams.append([])
@@ -595,9 +647,7 @@ def _build_styled_pdf_from_rows(rows: List[Dict[str, Any]], *, title: str = "Mem
                 cells = [part.strip() for part in text.split("|")]
             else:
                 cells = [text]
-        if len(cells) < len(table_col_widths):
-            cells.extend([""] * (len(table_col_widths) - len(cells)))
-        return cells[: len(table_col_widths)]
+        return cells or [""]
 
     def _wrap_table_cell(text: str, *, width: float, font_size: float) -> List[str]:
         raw = str(text or "").strip()
@@ -623,6 +673,7 @@ def _build_styled_pdf_from_rows(rows: List[Dict[str, Any]], *, title: str = "Mem
         font = str(style.get("font") or "F1")
         size = float(style.get("size") or 8.5)
         leading = float(style.get("leading") or (size + 2.0))
+        table_col_widths, table_col_x = _table_layout(cells)
 
         wrapped_cells: List[List[str]] = []
         max_lines = 1
@@ -901,15 +952,22 @@ def _memory_platform_export_pdf(
     user_rows: List[Dict[str, Any]],
     room_rows: List[Dict[str, Any]],
 ) -> bytes:
+    insights = _memory_platform_insight_frames(user_rows, room_rows)
     try:
         styled_rows = _memory_platform_export_styled_rows(
             stats=stats,
             user_rows=user_rows,
             room_rows=room_rows,
+            insights=insights,
         )
         return _build_styled_pdf_from_rows(styled_rows, title="Tater Memory Report")
     except Exception:
-        lines = _memory_platform_export_lines(stats=stats, user_rows=user_rows, room_rows=room_rows)
+        lines = _memory_platform_export_lines(
+            stats=stats,
+            user_rows=user_rows,
+            room_rows=room_rows,
+            insights=insights,
+        )
         return _build_simple_pdf_from_lines(lines, title="Tater Memory Report")
 
 
@@ -1270,7 +1328,9 @@ def _memory_platform_collect_fact_entries(
                     {
                         "scope": scope,
                         "platform": platform_name,
+                        "scope_id": str(row.get("user_id") or row.get("room_id") or "").strip(),
                         "key": str(key or "").strip(),
+                        "value": memory_platform_value_to_text(fact.get("value"), max_chars=240),
                         "confidence": confidence,
                         "updated_at": updated_at,
                     }
@@ -1293,6 +1353,8 @@ def _memory_platform_insight_frames(
     user_key_counts: Dict[str, int] = {}
     room_key_counts: Dict[str, int] = {}
     recent_key_counts: Dict[str, int] = {}
+    shared_user_fact_sets: Dict[tuple[str, str], set[str]] = {}
+    shared_user_fact_labels: Dict[tuple[str, str], str] = {}
     now_ts = time.time()
     recent_threshold = now_ts - (7 * 24 * 60 * 60)
 
@@ -1300,6 +1362,7 @@ def _memory_platform_insight_frames(
         platform_name = str(entry.get("platform") or "unknown")
         scope = str(entry.get("scope") or "")
         key = str(entry.get("key") or "")
+        value_text = " ".join(str(entry.get("value") or "").split()).strip()
         updated_at = float(entry.get("updated_at") or 0.0)
 
         platform_bucket = by_platform.setdefault(
@@ -1312,6 +1375,18 @@ def _memory_platform_insight_frames(
         elif scope == "room":
             platform_bucket["room_facts"] += 1
             room_key_counts[key] = int(room_key_counts.get(key) or 0) + 1
+
+        if scope == "user" and key and value_text:
+            norm_value = value_text.casefold()
+            if norm_value not in {"unknown", "n/a", "na", "none", "null", "unspecified"}:
+                subject_id = str(entry.get("scope_id") or "").strip()
+                subject_token = f"{platform_name}:{subject_id or 'unknown'}"
+                trend_key = (key, norm_value)
+                shared_user_fact_sets.setdefault(trend_key, set()).add(subject_token)
+                shared_user_fact_labels.setdefault(
+                    trend_key,
+                    textwrap.shorten(f"{key.replace('_', ' ')}: {value_text}", width=56, placeholder="..."),
+                )
 
         if key and updated_at >= recent_threshold:
             recent_key_counts[key] = int(recent_key_counts.get(key) or 0) + 1
@@ -1364,12 +1439,35 @@ def _memory_platform_insight_frames(
     if not updates_df.empty:
         updates_df = updates_df.set_index("date")[["updates"]]
 
+    trending_rows = [
+        {
+            "trend": shared_user_fact_labels.get((key, norm_value)) or textwrap.shorten(
+                f"{key.replace('_', ' ')}: {norm_value}",
+                width=56,
+                placeholder="...",
+            ),
+            "users": len(subjects),
+        }
+        for (key, norm_value), subjects in shared_user_fact_sets.items()
+        if key and len(subjects) >= 2
+    ]
+    trending_rows = sorted(trending_rows, key=lambda row: (-int(row.get("users") or 0), str(row.get("trend") or "")))[:10]
+    trending_user_has_data = bool(trending_rows)
+    if not trending_rows:
+        trending_rows = [{"trend": "No trending yet", "users": 0}]
+
+    trending_user_df = pd.DataFrame(trending_rows)
+    if not trending_user_df.empty:
+        trending_user_df = trending_user_df.set_index("trend")[["users"]]
+
     return {
         "platform_df": platform_df,
         "top_user_df": top_user_df,
         "top_room_df": top_room_df,
         "recent_key_df": recent_key_df,
         "updates_df": updates_df,
+        "trending_user_df": trending_user_df,
+        "trending_user_has_data": trending_user_has_data,
     }
 
 
@@ -1564,7 +1662,13 @@ def render_memory_page():
         if not insights:
             st.info("No fact data available for graphs yet.")
         else:
-            def _render_key_table(title: str, frame: Any, *, count_label: str = "count") -> None:
+            def _render_key_table(
+                title: str,
+                frame: Any,
+                *,
+                count_label: str = "count",
+                key_label: str = "key",
+            ) -> None:
                 if not isinstance(frame, pd.DataFrame) or frame.empty:
                     return
                 table_df = frame.reset_index()
@@ -1620,7 +1724,7 @@ def render_memory_page():
                 if "Rank" in table_df.columns:
                     column_config["Rank"] = st.column_config.NumberColumn("Rank", width="small", format="%d")
                 if "key" in table_df.columns:
-                    column_config["key"] = st.column_config.TextColumn("key", width="medium")
+                    column_config["key"] = st.column_config.TextColumn(key_label, width="medium")
                 if count_label in table_df.columns:
                     column_config[count_label] = st.column_config.NumberColumn(count_label, width="small", format="%d")
                 try:
@@ -1638,11 +1742,26 @@ def render_memory_page():
                 st.caption("Facts by platform")
                 st.bar_chart(platform_df, width="stretch")
 
-            top_user_df = insights.get("top_user_df")
-            _render_key_table("Top user fact keys", top_user_df, count_label="facts")
+            trending_user_df = insights.get("trending_user_df")
+            if isinstance(trending_user_df, pd.DataFrame) and not trending_user_df.empty:
+                _render_key_table(
+                    "Trending shared user facts",
+                    trending_user_df,
+                    count_label="users",
+                    key_label="shared fact",
+                )
+                if not bool(insights.get("trending_user_has_data")):
+                    st.caption("No trending shared user facts yet.")
+                else:
+                    st.caption("Counts show how many users share the same fact key and value.")
 
+            top_user_df = insights.get("top_user_df")
             top_room_df = insights.get("top_room_df")
-            _render_key_table("Top room fact keys", top_room_df, count_label="facts")
+            top_key_cols = st.columns(2)
+            with top_key_cols[0]:
+                _render_key_table("Top user fact keys", top_user_df, count_label="facts")
+            with top_key_cols[1]:
+                _render_key_table("Top room fact keys", top_room_df, count_label="facts")
 
             recent_key_df = insights.get("recent_key_df")
             _render_key_table("Most updated keys (last 7 days)", recent_key_df, count_label="updates")
