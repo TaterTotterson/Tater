@@ -767,10 +767,14 @@ class discord_platform(commands.Bot):
 
         return _enforce_user_assistant_alternation(loop_messages)
 
-    async def save_message(self, channel_id, role, username, content):
+    async def save_message(self, channel_id, role, username, content, *, user_id: str = ""):
         key = f"tater:channel:{channel_id}:history"
         max_store = int(redis_client.get("tater:max_store") or 20)
-        redis_client.rpush(key, json.dumps({"role": role, "username": username, "content": content}))
+        payload: Dict[str, Any] = {"role": role, "username": username, "content": content}
+        user_id_text = str(user_id or "").strip()
+        if user_id_text:
+            payload["user_id"] = user_id_text
+        redis_client.rpush(key, json.dumps(payload))
         if max_store > 0:
             redis_client.ltrim(key, -max_store, -1)
 
@@ -812,7 +816,13 @@ class discord_platform(commands.Bot):
                         "size": len(file_bytes),
                     }
 
-                    await self.save_message(message.channel.id, "user", message.author.name, file_obj)
+                    await self.save_message(
+                        message.channel.id,
+                        "user",
+                        message.author.name,
+                        file_obj,
+                        user_id=str(message.author.id),
+                    )
                     media_ref = {
                         "type": file_type,
                         "blob_key": blob_key,
@@ -832,7 +842,11 @@ class discord_platform(commands.Bot):
                     logger.warning(f"Failed to store attachment ({attachment.filename}): {e}")
         else:
             await self.save_message(
-                message.channel.id, "user", message.author.display_name, message.content
+                message.channel.id,
+                "user",
+                message.author.display_name,
+                message.content,
+                user_id=str(message.author.id),
             )
 
         # -------------------------

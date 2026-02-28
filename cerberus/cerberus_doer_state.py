@@ -1,5 +1,4 @@
 import json
-import re
 from typing import Any, Callable, Dict, List, Optional
 
 
@@ -101,6 +100,13 @@ async def run_doer_state_update(
     state_list_fn: Callable[[Any, int, int], List[str]],
 ) -> Dict[str, Any]:
     previous = normalize_agent_state_fn(prior_state, fallback_goal=user_request)
+
+    def _merge_lines(existing: List[str], incoming: Any, *, max_items: int, item_limit: int) -> List[str]:
+        merged_lines = list(existing or [])
+        for line in state_list_fn(incoming, max_items=max_items, item_limit=item_limit):
+            merged_lines = state_add_line_fn(merged_lines, line, max_items)
+        return merged_lines
+
     payload = {
         "platform": platform,
         "user_request": str(user_request or ""),
@@ -120,10 +126,17 @@ async def run_doer_state_update(
         "goal, plan, facts, open_questions, next_step, tool_history\n"
         "Rules:\n"
         "- Use short plain text snippets.\n"
+        "- Do not invent facts; use only explicit evidence from payload.tool_result or prior_state.\n"
+        "- Preserve prior successful facts and tool_history; do not drop earlier completed steps.\n"
         "- Keep plan as the remaining checklist of explicit user-requested actions.\n"
+        "- For compound requests, plan must contain one item per explicit requested action.\n"
         "- If multiple actions were requested, keep unfinished items in plan and set next_step to the next unfinished action.\n"
         "- Remove plan items that are already completed.\n"
+        "- A plan item is completed only when payload.tool_result provides direct evidence for that specific item.\n"
+        "- Generic summaries (for example: 'Completed', 'Done', 'Completed N of N actions') are not enough to close information-seeking items.\n"
+        "- For information requests, keep the item unfinished unless the concrete requested value is present in summary_for_user or data_preview.\n"
         "- Keep facts stable and deterministic.\n"
+        "- When tool_result.ok is true, include one short fact describing what this specific step accomplished. Use payload.user_request when needed.\n"
         "- Record completion facts only when tool_result.ok is true; for failures, keep blocker details in open_questions.\n"
         "- Keep open_questions only for real blockers.\n"
         "- next_step is a short tool sketch or empty.\n"
@@ -143,10 +156,29 @@ async def run_doer_state_update(
         text = coerce_text_fn((response.get("message", {}) or {}).get("content", "")).strip()
         patch_state = first_json_object_fn(text)
         if isinstance(patch_state, dict):
-            merged = normalize_agent_state_fn(
+            patch = normalize_agent_state_fn(
                 patch_state,
                 fallback_goal=previous.get("goal") or user_request,
             )
+            merged = dict(previous)
+            merged["goal"] = patch.get("goal") or previous.get("goal") or str(user_request or "")
+            merged["plan"] = list(patch.get("plan") or previous.get("plan") or [])
+            merged["next_step"] = patch.get("next_step") or previous.get("next_step") or ""
+            merged["open_questions"] = list(patch.get("open_questions") or previous.get("open_questions") or [])
+            merged["facts"] = _merge_lines(
+                list(previous.get("facts") or []),
+                patch.get("facts"),
+                max_items=8,
+                item_limit=140,
+            )
+            merged["tool_history"] = _merge_lines(
+                list(previous.get("tool_history") or []),
+                patch.get("tool_history"),
+                max_items=8,
+                item_limit=150,
+            )
+            if isinstance(previous.get("plan_steps"), list):
+                merged["plan_steps"] = list(previous.get("plan_steps") or [])
     except Exception:
         merged = dict(previous)
 
@@ -157,8 +189,12 @@ async def run_doer_state_update(
     )
 
     summary = short_text_fn((tool_result or {}).get("summary_for_user"), limit=150)
-    if summary and not is_low_information_text_fn(summary):
+    if bool((tool_result or {}).get("ok")) and summary and not is_low_information_text_fn(summary):
         merged["facts"] = state_add_line_fn(list(merged.get("facts") or []), summary, 8)
+    elif bool((tool_result or {}).get("ok")):
+        completed_step = short_text_fn(f"Completed: {user_request}", limit=150)
+        if completed_step:
+            merged["facts"] = state_add_line_fn(list(merged.get("facts") or []), completed_step, 8)
 
     if not bool((tool_result or {}).get("ok")):
         errors = (tool_result or {}).get("errors")
@@ -168,8 +204,8 @@ async def run_doer_state_update(
                 short_text_fn(errors[0], limit=150),
                 4,
             )
-    elif merged.get("open_questions"):
-        merged["open_questions"] = state_list_fn(merged.get("open_questions"), 4, 140)
+    else:
+        merged["open_questions"] = []
 
     return normalize_agent_state_fn(merged, fallback_goal=previous.get("goal") or user_request)
 
@@ -211,40 +247,3 @@ def state_best_effort_answer(
     if summary and not is_low_information_text_fn(summary):
         return summary
     return "Completed."
-
-
-def response_indicates_unfinished_work(text: str) -> bool:
-    lowered = " ".join(str(text or "").strip().lower().split())
-    if not lowered:
-        return False
-    return bool(
-        re.search(
-            r"\b(i(?:'ll| will)\s+need\s+to|i(?:'m| am)\s+still\s+need(?:ing)?\s+to|still\s+need\s+to|not yet\b|need to (?:retrieve|fetch|get|look up|check)|haven't yet)\b",
-            lowered,
-        )
-    )
-
-
-def should_continue_after_incomplete_final_answer(
-    *,
-    user_text: str,
-    final_text: str,
-    retry_allowed: bool,
-    contains_action_intent_fn: Callable[[str], bool],
-    looks_like_weather_request_fn: Callable[[str], bool],
-    looks_like_schedule_request_fn: Callable[[str], bool],
-    looks_like_send_message_intent_fn: Callable[[str], bool],
-    response_indicates_unfinished_work_fn: Callable[[str], bool] = response_indicates_unfinished_work,
-) -> bool:
-    if not retry_allowed:
-        return False
-    user_lowered = " ".join(str(user_text or "").strip().lower().split())
-    actionable = bool(
-        contains_action_intent_fn(user_lowered)
-        or looks_like_weather_request_fn(user_lowered)
-        or looks_like_schedule_request_fn(user_lowered)
-        or looks_like_send_message_intent_fn(user_lowered)
-    )
-    if not actionable:
-        return False
-    return response_indicates_unfinished_work_fn(final_text)

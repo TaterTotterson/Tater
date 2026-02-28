@@ -20,7 +20,7 @@ def compact_agent_state_json(
     if len(payload) <= limit:
         return payload
 
-    for key in ("tool_history", "facts", "plan", "open_questions"):
+    for key in ("tool_history", "facts", "plan", "open_questions", "plan_steps"):
         while len(payload) > limit and isinstance(compact.get(key), list) and len(compact.get(key) or []) > 1:
             compact[key] = (compact.get(key) or [])[1:]
             payload = _dump()
@@ -32,6 +32,18 @@ def compact_agent_state_json(
     for key in ("facts", "tool_history", "plan", "open_questions"):
         lines = compact.get(key) if isinstance(compact.get(key), list) else []
         compact[key] = [short_text_fn(line, limit=80) for line in lines[:3]]
+    plan_steps = compact.get("plan_steps") if isinstance(compact.get("plan_steps"), list) else []
+    compact["plan_steps"] = []
+    for step in plan_steps[:3]:
+        if not isinstance(step, dict):
+            continue
+        compact["plan_steps"].append(
+            {
+                "id": short_text_fn(step.get("id"), limit=16),
+                "tool": short_text_fn(step.get("tool"), limit=40),
+                "nl": short_text_fn(step.get("nl"), limit=80),
+            }
+        )
     payload = _dump()
     if len(payload) <= limit:
         return payload
@@ -40,6 +52,7 @@ def compact_agent_state_json(
     compact["tool_history"] = compact.get("tool_history", [])[:2]
     compact["plan"] = compact.get("plan", [])[:2]
     compact["open_questions"] = compact.get("open_questions", [])[:1]
+    compact["plan_steps"] = compact.get("plan_steps", [])[:1]
     payload = _dump()
     if len(payload) <= limit:
         return payload

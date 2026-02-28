@@ -1,5 +1,5 @@
 import re
-from typing import Callable, Pattern, Sequence
+from typing import Callable, Pattern
 
 
 def contains_action_intent(
@@ -14,7 +14,7 @@ def contains_action_intent(
         return True
     return bool(
         re.search(
-            r"\b(can|could|would|please|make|build|create|do|turn|set|check|find|search|summarize|download|upload|send|post|add|share|inspect|read|run|open|explain|help)\b",
+            r"\b(can|could|would|will|please|make|build|create|turn|set|check|find|search|summarize|download|upload|send|post|add|share|inspect|read|run|open|explain|help)\b",
             lowered,
         )
     )
@@ -100,94 +100,4 @@ def is_casual_greeting_only(
         return True
     if re.fullmatch(r"(?:how are you|what'?s up|whats up)(?:\s+\w+){0,3}", normalized):
         return True
-    return False
-
-
-def looks_like_over_clarification(
-    text: str,
-    *,
-    user_text: str,
-    over_clarification_markers: Sequence[str],
-    looks_like_weather_request_fn: Callable[[str], bool],
-    looks_like_schedule_request_fn: Callable[[str], bool],
-    contains_action_intent_fn: Callable[[str], bool],
-) -> bool:
-    lowered = str(text or "").strip().lower()
-    if not lowered:
-        return False
-    if "?" not in lowered:
-        return False
-    marker_hit = any(marker in lowered for marker in over_clarification_markers)
-    generic_clarifier_hit = bool(
-        re.search(
-            r"\b(platform|environment|room|channel|chat|time\s*zone|timezone|time format|12-hour|24-hour|am or pm|city|location|coordinates?|zip|postal)\b",
-            lowered,
-        )
-    )
-    if not marker_hit and not generic_clarifier_hit:
-        return False
-
-    user_lowered = " ".join(str(user_text or "").strip().lower().split())
-    if not user_lowered:
-        return False
-
-    if re.search(r"\b(platform|environment)\b", lowered):
-        return bool(
-            re.search(
-                r"\b(discord|irc|matrix|telegram|homeassistant|home assistant|homekit|xbmc|webui|here|this chat|this channel|this room)\b",
-                user_lowered,
-            )
-        )
-
-    if re.search(r"\b(room|channel|chat|where should i send|which .* send)\b", lowered):
-        return bool(
-            re.search(
-                r"\b(here|this chat|this channel|this room|in this|to discord|to irc|to matrix|to telegram|to homeassistant|to home assistant|to homekit|to xbmc|channel|room|chat|dm)\b",
-                user_lowered,
-            )
-        )
-
-    if re.search(r"\b(time format|12-hour|24-hour|am or pm|a\.m\.|p\.m\.)\b", lowered):
-        return bool(
-            re.search(
-                r"\b(\d{1,2}(?::\d{2})?\s*(am|pm)?|every day|everyday|daily|weekly|tomorrow|today|at\s+\d{1,2})\b",
-                user_lowered,
-            )
-        )
-
-    if re.search(r"\b(timezone|time zone|iana|utc|gmt)\b", lowered):
-        has_time = bool(
-            re.search(
-                r"\b(\d{1,2}(?::\d{2})?\s*(am|pm)?|at\s+\d{1,2}(?::\d{2})?\s*(am|pm)?|morning|afternoon|evening|night)\b",
-                user_lowered,
-            )
-        )
-        has_schedule = bool(
-            re.search(
-                r"\b(remind|reminder|schedule|scheduled|task|timer|alarm|forecast|every day|everyday|daily|weekly|weekdays?|weekends?)\b",
-                user_lowered,
-            )
-        )
-        return bool(has_time and has_schedule)
-
-    if re.search(r"\b(city|coordinates?|location|zip|postal)\b", lowered):
-        return bool(looks_like_weather_request_fn(user_lowered) or looks_like_schedule_request_fn(user_lowered))
-
-    if re.search(r"\b(what would you like me to do|what would you like to do)\b", lowered):
-        return contains_action_intent_fn(user_lowered)
-
-    if re.search(r"\b(which|what)\b.{0,90}\b(categories?|channels?|roles?)\b", lowered):
-        return bool(
-            re.search(
-                r"\b(discord|server|setup|set up|configure|build|hq|for us|however\s+you\s+think)\b",
-                user_lowered,
-            )
-        )
-
-    if re.search(r"\b(could you clarify|what do you mean|what specific issue)\b", lowered):
-        tokens = [tok for tok in re.split(r"\s+", user_lowered) if tok]
-        if len(tokens) <= 2 and not contains_action_intent_fn(user_lowered):
-            return False
-        return True
-
     return False

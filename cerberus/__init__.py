@@ -1,10 +1,10 @@
+import json
 import re
 import time
 import uuid
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
-from . import cerberus_contracts as contracts
 from . import cerberus_checker as checker
 from . import cerberus_doer_state as doer_state
 from . import cerberus_execution as execution
@@ -13,8 +13,6 @@ from . import cerberus_followup_intents as followup_intents
 from . import cerberus_ledger as ledger
 from . import cerberus_limits as limits_helpers
 from . import cerberus_memory_context as memory_context_helpers
-from . import cerberus_multi_intent_builder as multi_intent_builder
-from . import cerberus_overclar_repair as overclar_repair
 from . import cerberus_origin_attach as origin_attach_helpers
 from . import cerberus_preamble_utils as preamble_utils
 from . import cerberus_prompts as prompts
@@ -62,29 +60,11 @@ TOOL_NAME_ALIASES = {
     "google_cse_search": "search_web",
     "inspect_page": "inspect_webpage",
     "inspect_website": "inspect_webpage",
-    "describe_image": "image_describe",
-    "describe_latest_image": "image_describe",
 }
 
-_KERNEL_TOOL_PRIORITY = [
-    "search_web",
-    "inspect_webpage",
-    "read_url",
-    "download_file",
-    "read_file",
-    "search_files",
-    "list_directory",
-    "list_archive",
-    "extract_archive",
-    "memory_get",
-    "memory_set",
-    "memory_search",
-    "list_workspace",
-    "get_plugin_help",
-]
-
 _KERNEL_TOOL_PURPOSE_HINTS = {
-    "get_plugin_help": "show plugin schema and required args",
+    "list_tools": "list kernel and enabled plugin tools for current platform",
+    "get_plugin_help": "show plugin usage example and guidance",
     "list_platforms_for_plugin": "list platforms supported by a plugin",
     "read_file": "read local file contents",
     "search_web": "web search for current information",
@@ -108,19 +88,51 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
     "memory_list": "list saved memory keys",
     "memory_explain": "explain memory value/source",
     "memory_search": "search saved memory",
+    "image_describe": "describe a recent or explicit image with the vision model",
+    "send_message": "queue a structured cross-platform notification or message",
+}
+_KERNEL_TOOL_USAGE_HINTS = {
+    "list_tools": '{"function":"list_tools","arguments":{}}',
+    "get_plugin_help": '{"function":"get_plugin_help","arguments":{"plugin_id":"<plugin_id>"}}',
+    "list_platforms_for_plugin": '{"function":"list_platforms_for_plugin","arguments":{"plugin_id":"<plugin_id>"}}',
+    "read_file": '{"function":"read_file","arguments":{"path":"<path>"}}',
+    "search_web": '{"function":"search_web","arguments":{"query":"<query>"}}',
+    "search_files": '{"function":"search_files","arguments":{"query":"<query>","path":"/"}}',
+    "write_file": '{"function":"write_file","arguments":{"path":"<path>","content":"<content>"}}',
+    "list_directory": '{"function":"list_directory","arguments":{"path":"<path>"}}',
+    "delete_file": '{"function":"delete_file","arguments":{"path":"<path>"}}',
+    "read_url": '{"function":"read_url","arguments":{"url":"https://example.com"}}',
+    "inspect_webpage": '{"function":"inspect_webpage","arguments":{"url":"https://example.com"}}',
+    "download_file": '{"function":"download_file","arguments":{"url":"https://example.com/file"}}',
+    "list_archive": '{"function":"list_archive","arguments":{"path":"<archive_path>"}}',
+    "extract_archive": '{"function":"extract_archive","arguments":{"path":"<archive_path>","destination":"<dest_path>"}}',
+    "list_stable_plugins": '{"function":"list_stable_plugins","arguments":{}}',
+    "list_stable_platforms": '{"function":"list_stable_platforms","arguments":{}}',
+    "inspect_plugin": '{"function":"inspect_plugin","arguments":{"plugin_id":"<plugin_id>"}}',
+    "test_plugin": '{"function":"test_plugin","arguments":{"plugin_id":"<plugin_id>"}}',
+    "validate_plugin": '{"function":"validate_plugin","arguments":{"name":"<plugin_name>"}}',
+    "validate_platform": '{"function":"validate_platform","arguments":{"name":"<platform_name>"}}',
+    "write_workspace_note": '{"function":"write_workspace_note","arguments":{"content":"<note_text>"}}',
+    "list_workspace": '{"function":"list_workspace","arguments":{}}',
+    "memory_get": '{"function":"memory_get","arguments":{"keys":["<key>"]}}',
+    "memory_set": '{"function":"memory_set","arguments":{"entries":{"<key>":"<value>"}}}',
+    "memory_list": '{"function":"memory_list","arguments":{}}',
+    "memory_explain": '{"function":"memory_explain","arguments":{"key":"<key>"}}',
+    "memory_search": '{"function":"memory_search","arguments":{"query":"<query>"}}',
+    "image_describe": '{"function":"image_describe","arguments":{"query":"Describe this image."}}',
+    "send_message": '{"function":"send_message","arguments":{"message":"<message>","platform":"discord","targets":{"channel":"#channel"}}}',
 }
 
 ASCII_ONLY_PLATFORMS = {"irc", "homeassistant", "homekit", "xbmc"}
 DEFAULT_CLARIFICATION = "Could you clarify exactly what you want me to do next?"
-DEFAULT_MAX_ROUNDS = 6
-DEFAULT_MAX_TOOL_CALLS = 6
-DEFAULT_MAX_LEDGER_ITEMS = 500
-DEFAULT_PLANNER_MAX_TOKENS = 1100
-DEFAULT_CHECKER_MAX_TOKENS = 850
-DEFAULT_DOER_MAX_TOKENS = 900
-DEFAULT_TOOL_REPAIR_MAX_TOKENS = 750
-DEFAULT_OVERCLAR_REPAIR_MAX_TOKENS = 900
-DEFAULT_RECOVERY_MAX_TOKENS = 350
+DEFAULT_MAX_ROUNDS = 18
+DEFAULT_MAX_TOOL_CALLS = 18
+DEFAULT_MAX_LEDGER_ITEMS = 1500
+DEFAULT_PLANNER_MAX_TOKENS = 3300
+DEFAULT_CHECKER_MAX_TOKENS = 2550
+DEFAULT_DOER_MAX_TOKENS = 2700
+DEFAULT_TOOL_REPAIR_MAX_TOKENS = 2250
+DEFAULT_RECOVERY_MAX_TOKENS = 1050
 AGENT_MAX_ROUNDS_KEY = "tater:agent:max_rounds"
 AGENT_MAX_TOOL_CALLS_KEY = "tater:agent:max_tool_calls"
 CERBERUS_AGENT_STATE_TTL_SECONDS_KEY = "tater:cerberus:agent_state_ttl_seconds"
@@ -128,7 +140,6 @@ CERBERUS_PLANNER_MAX_TOKENS_KEY = "tater:cerberus:planner_max_tokens"
 CERBERUS_CHECKER_MAX_TOKENS_KEY = "tater:cerberus:checker_max_tokens"
 CERBERUS_DOER_MAX_TOKENS_KEY = "tater:cerberus:doer_max_tokens"
 CERBERUS_TOOL_REPAIR_MAX_TOKENS_KEY = "tater:cerberus:tool_repair_max_tokens"
-CERBERUS_OVERCLAR_REPAIR_MAX_TOKENS_KEY = "tater:cerberus:overclar_repair_max_tokens"
 CERBERUS_RECOVERY_MAX_TOKENS_KEY = "tater:cerberus:recovery_max_tokens"
 CERBERUS_MAX_LEDGER_ITEMS_KEY = "tater:cerberus:max_ledger_items"
 AGENT_STATE_PROMPT_MAX_CHARS = 800
@@ -137,10 +148,6 @@ AGENT_STATE_KEY_PREFIX = "tater:cerberus:state:"
 DEFAULT_AGENT_STATE_TTL_SECONDS = 7 * 24 * 60 * 60
 AGENT_STATE_TTL_SECONDS = DEFAULT_AGENT_STATE_TTL_SECONDS
 CERBERUS_LEDGER_SCHEMA_VERSION = "2"
-MULTI_ACTION_MIN_BUDGET = 4
-MULTI_ACTION_MAX_BUDGET = 12
-_MULTI_INTENT_ROUTE_USER_TEXT_KEY = contracts.MULTI_INTENT_ROUTE_USER_TEXT_KEY
-_MULTI_INTENT_ROUTE_FLAG_KEY = contracts.MULTI_INTENT_ROUTE_FLAG_KEY
 
 _PLATFORM_DISPLAY = {
     "webui": "WebUI",
@@ -154,73 +161,11 @@ _PLATFORM_DISPLAY = {
     "automation": "automation",
 }
 
-_OVER_CLARIFICATION_MARKERS = (
-    "could you clarify",
-    "what do you mean",
-    "what specific issue",
-    "what platform are you referring to",
-    "what platform or environment",
-    "which platform or environment",
-    "what would you like to do",
-    "what would you like me to do",
-    "which platform should i send to",
-    "what room/channel/chat should i send this to",
-    "which channel should i send this to",
-    "which room should i send this to",
-    "what time format should i use",
-    "should i use 12-hour or 24-hour",
-    "do you want 12-hour or 24-hour format",
-    "am or pm",
-    "what timezone",
-    "which timezone",
-    "what time zone",
-    "which time zone",
-    "timezone format",
-    "timezone should",
-    "utc or local",
-    "iana",
-    "what city or coordinates",
-    "which city or coordinates",
-    "what city should i use",
-    "which city should i use",
-    "what location should i use",
-    "which location should i use",
-    "which categories, channels, and roles",
-    "what categories, channels, and roles",
-    "which categories and channels",
-    "which channels and roles",
-)
-
 _URL_RE = re.compile(r"https?://[^\s<>)\]\"']+", flags=re.IGNORECASE)
 _CHECKER_DECISION_PREFIX_RE = re.compile(
     r"^\s*(FINAL[\s_-]*ANSWER|RETRY[\s_-]*TOOL|NEED[\s_-]*USER[\s_-]*INFO)\s*:\s*(.*)$",
     flags=re.IGNORECASE | re.DOTALL,
 )
-_WORKSPACE_DISCOVERY_HINT_RE = re.compile(
-    r"\b(plugin|platform|file|files|code|path|paths|folder|directory|workspace|skill|skills|reference|references|readme|edit|update|fix|create|build)\b",
-    flags=re.IGNORECASE,
-)
-_WORKSPACE_QUERY_STOPWORDS = {
-    "the",
-    "a",
-    "an",
-    "and",
-    "or",
-    "to",
-    "for",
-    "of",
-    "in",
-    "on",
-    "with",
-    "please",
-    "can",
-    "you",
-    "me",
-    "my",
-    "this",
-    "that",
-    "it",
-}
 _MEMORY_CONTEXT_DEFAULT_ITEMS = 12
 _MEMORY_CONTEXT_DEFAULT_VALUE_MAX_CHARS = 288
 _MEMORY_CONTEXT_DEFAULT_SUMMARY_MAX_CHARS = 2100
@@ -230,133 +175,18 @@ _WEB_RESEARCH_MIN_PREVIEW_CHARS = 260
 _WEB_RESEARCH_MIN_PREVIEW_WORDS = 45
 
 
-def _plugin_routing_keywords(plugin: Any) -> List[str]:
-    return contracts.plugin_routing_keywords(plugin)
-
-
-def _tool_call_route_metadata(tool_call: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    return contracts.tool_call_route_metadata(tool_call)
-
-
-def _tool_call_effective_user_text(tool_call: Optional[Dict[str, Any]], default_user_text: str) -> str:
-    return contracts.tool_call_effective_user_text(tool_call, default_user_text)
-
-
-def _compose_multi_intent_route_answer(summaries: List[str], fallback: str = "") -> str:
-    return contracts.compose_multi_intent_route_answer(summaries, fallback)
-
-
-def _is_routed_multi_intent_tool_call(tool_call: Optional[Dict[str, Any]]) -> bool:
-    return contracts.is_routed_multi_intent_tool_call(tool_call)
-
-
-def _split_multi_intent_action_clauses(text: str) -> List[str]:
-    return contracts.split_multi_intent_action_clauses(text)
-
-
-def _score_clause_for_plugin_keywords(clause_text: str, keywords: List[str]) -> tuple[int, int]:
-    return contracts.score_clause_for_plugin_keywords(clause_text, keywords)
-
-
-def _route_clause_to_plugin(
-    *,
-    clause_text: str,
-    platform: str,
-    registry: Dict[str, Any],
-    enabled_predicate: Optional[Callable[[str], bool]],
-) -> str:
-    return contracts.route_clause_to_plugin(
-        clause_text=clause_text,
-        platform=platform,
-        registry=registry,
-        enabled_predicate=enabled_predicate,
-    )
-
-
-def _build_multi_intent_routed_actions(
-    *,
-    request_text: str,
-    platform: str,
-    registry: Dict[str, Any],
-    enabled_predicate: Optional[Callable[[str], bool]],
-) -> List[Dict[str, str]]:
-    return contracts.build_multi_intent_routed_actions(
-        request_text=request_text,
-        platform=platform,
-        registry=registry,
-        enabled_predicate=enabled_predicate,
-    )
-
-
-def _plugin_usage_argument_keys(plugin: Any) -> List[str]:
-    return toolcall_utils.plugin_usage_argument_keys(
-        plugin,
-        parse_function_json_fn=parse_function_json,
-    )
-
-
-def _plugin_required_argument_keys(plugin: Any) -> List[str]:
-    return toolcall_utils.plugin_required_argument_keys(plugin)
-
-
 def _normalize_tool_call_for_user_request(
     *,
     tool_call: Dict[str, Any],
     registry: Dict[str, Any],
     user_text: str,
 ) -> Dict[str, Any]:
-    del registry, user_text
     return toolcall_utils.normalize_tool_call_for_user_request(
         tool_call=tool_call,
-        canonical_tool_name_fn=_canonical_tool_name,
-        tool_call_route_metadata_fn=_tool_call_route_metadata,
-    )
-
-
-async def _build_structured_routed_tool_call(
-    *,
-    llm_client: Any,
-    plugin_id: str,
-    plugin_obj: Any,
-    slice_text: str,
-    platform: str,
-    registry: Dict[str, Any],
-    enabled_predicate: Optional[Callable[[str], bool]],
-    tool_index: str,
-    origin: Optional[Dict[str, Any]],
-    scope: str,
-    history_messages: Optional[List[Dict[str, Any]]],
-    context: Optional[Dict[str, Any]],
-    platform_preamble: str,
-    repair_max_tokens: Optional[int],
-    recovery_max_tokens: Optional[int],
-) -> Optional[Dict[str, Any]]:
-    return await multi_intent_builder.build_structured_routed_tool_call(
-        llm_client=llm_client,
-        plugin_id=plugin_id,
-        plugin_obj=plugin_obj,
-        slice_text=slice_text,
-        platform=platform,
         registry=registry,
-        enabled_predicate=enabled_predicate,
-        tool_index=tool_index,
-        origin=origin,
-        scope=scope,
-        history_messages=history_messages,
-        context=context,
-        platform_preamble=platform_preamble,
-        repair_max_tokens=repair_max_tokens,
-        recovery_max_tokens=recovery_max_tokens,
-        plugin_usage_argument_keys_fn=_plugin_usage_argument_keys,
-        plugin_required_argument_keys_fn=_plugin_required_argument_keys,
-        parse_function_json_fn=parse_function_json,
-        with_platform_preamble_fn=_with_platform_preamble,
-        default_tool_repair_max_tokens=DEFAULT_TOOL_REPAIR_MAX_TOKENS,
-        coerce_text_fn=_coerce_text,
-        validate_or_recover_tool_call_fn=_validate_or_recover_tool_call,
+        user_text=user_text,
         canonical_tool_name_fn=_canonical_tool_name,
-        multi_intent_route_user_text_key=_MULTI_INTENT_ROUTE_USER_TEXT_KEY,
-        multi_intent_route_flag_key=_MULTI_INTENT_ROUTE_FLAG_KEY,
+        parse_function_json_fn=parse_function_json,
     )
 
 
@@ -453,15 +283,6 @@ def _configured_tool_repair_max_tokens(redis_client: Any = None) -> int:
         redis_client=(redis_client or default_redis),
         key=CERBERUS_TOOL_REPAIR_MAX_TOKENS_KEY,
         default=DEFAULT_TOOL_REPAIR_MAX_TOKENS,
-        redis_config_positive_int_fn=_redis_config_positive_int,
-    )
-
-
-def _configured_overclar_repair_max_tokens(redis_client: Any = None) -> int:
-    return runtime_config.configured_positive_int(
-        redis_client=(redis_client or default_redis),
-        key=CERBERUS_OVERCLAR_REPAIR_MAX_TOKENS_KEY,
-        default=DEFAULT_OVERCLAR_REPAIR_MAX_TOKENS,
         redis_config_positive_int_fn=_redis_config_positive_int,
     )
 
@@ -692,29 +513,6 @@ def resolve_agent_limits(
     )
 
 
-def _estimated_requested_action_count(text: str) -> int:
-    return limits_helpers.estimated_requested_action_count(
-        text,
-        max_budget=MULTI_ACTION_MAX_BUDGET,
-    )
-
-
-def _expand_limits_for_compound_request(
-    *,
-    max_rounds: int,
-    max_tool_calls: int,
-    request_text: str,
-) -> tuple[int, int]:
-    return limits_helpers.expand_limits_for_compound_request(
-        max_rounds=max_rounds,
-        max_tool_calls=max_tool_calls,
-        request_text=request_text,
-        estimated_requested_action_count_fn=_estimated_requested_action_count,
-        min_budget=MULTI_ACTION_MIN_BUDGET,
-        max_budget=MULTI_ACTION_MAX_BUDGET,
-    )
-
-
 def _canonical_tool_name(name: str) -> str:
     return toolcall_utils.canonical_tool_name(
         name,
@@ -733,11 +531,14 @@ def _tool_purpose(plugin: Any) -> str:
     )
 
 
-def _plugin_arg_hint(plugin: Any) -> str:
-    return tool_index_helpers.plugin_arg_hint(
-        plugin,
-        plugin_usage_argument_keys_fn=_plugin_usage_argument_keys,
-    )
+def _plugin_usage_text(plugin: Any) -> str:
+    usage = str(getattr(plugin, "usage", "") or "").strip()
+    if usage:
+        return " ".join(usage.split())
+    plugin_id = str(getattr(plugin, "name", "") or "").strip()
+    if plugin_id:
+        return f'{{"function":"{plugin_id}","arguments":{{}}}}'
+    return '{"function":"","arguments":{}}'
 
 
 def _kernel_tool_purpose(tool_id: str) -> str:
@@ -747,9 +548,18 @@ def _kernel_tool_purpose(tool_id: str) -> str:
     )
 
 
+def _kernel_tool_usage(tool_id: str) -> str:
+    key = str(tool_id or "").strip()
+    usage = str(_KERNEL_TOOL_USAGE_HINTS.get(key) or "").strip()
+    if usage:
+        return usage
+    if key:
+        return f'{{"function":"{key}","arguments":{{}}}}'
+    return '{"function":"","arguments":{}}'
+
+
 def _ordered_kernel_tool_ids() -> List[str]:
     return tool_index_helpers.ordered_kernel_tool_ids(
-        kernel_tool_priority=_KERNEL_TOOL_PRIORITY,
         meta_tools=META_TOOLS,
     )
 
@@ -766,10 +576,28 @@ def _enabled_tool_mini_index(
         enabled_predicate=enabled_predicate,
         ordered_kernel_tool_ids_fn=_ordered_kernel_tool_ids,
         kernel_tool_purpose_fn=_kernel_tool_purpose,
+        kernel_tool_usage_fn=_kernel_tool_usage,
         plugin_supports_platform_fn=plugin_supports_platform,
-        plugin_arg_hint_fn=_plugin_arg_hint,
+        plugin_usage_text_fn=_plugin_usage_text,
         tool_purpose_fn=_tool_purpose,
     )
+
+
+def _enabled_tool_ids(
+    *,
+    platform: str,
+    registry: Dict[str, Any],
+    enabled_predicate: Optional[Callable[[str], bool]],
+) -> List[str]:
+    enabled_check = enabled_predicate or (lambda _name: True)
+    tool_ids: List[str] = list(_ordered_kernel_tool_ids())
+    for plugin_id, plugin in sorted(registry.items(), key=lambda kv: str(kv[0]).lower()):
+        if not enabled_check(plugin_id):
+            continue
+        if not plugin_supports_platform(plugin, platform):
+            continue
+        tool_ids.append(str(plugin_id))
+    return tool_ids
 
 
 def _compact_history(history_messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -793,39 +621,9 @@ def _contains_action_intent(text: str) -> bool:
     )
 
 
-def _is_acknowledgement_only(text: str) -> bool:
-    return turn_classifiers.is_acknowledgement_only(
-        text,
-        contains_action_intent_fn=_contains_action_intent,
-    )
-
-
 def _is_stop_only(text: str) -> bool:
     return turn_classifiers.is_stop_only(
         text,
-        contains_action_intent_fn=_contains_action_intent,
-    )
-
-
-def _is_casual_greeting_only(text: str) -> bool:
-    return turn_classifiers.is_casual_greeting_only(
-        text,
-        contains_action_intent_fn=_contains_action_intent,
-        url_re=_URL_RE,
-        references_previous_work_fn=_references_previous_work,
-        looks_like_schedule_request_fn=_looks_like_schedule_request,
-        looks_like_weather_request_fn=_looks_like_weather_request,
-        looks_like_send_message_intent_fn=_looks_like_send_message_intent,
-    )
-
-
-def _looks_like_over_clarification(text: str, *, user_text: str = "") -> bool:
-    return turn_classifiers.looks_like_over_clarification(
-        text,
-        user_text=user_text,
-        over_clarification_markers=_OVER_CLARIFICATION_MARKERS,
-        looks_like_weather_request_fn=_looks_like_weather_request,
-        looks_like_schedule_request_fn=_looks_like_schedule_request,
         contains_action_intent_fn=_contains_action_intent,
     )
 
@@ -834,35 +632,11 @@ def _strip_user_sender_prefix(text: str) -> str:
     return common_helpers.strip_user_sender_prefix(text)
 
 
-def _latest_user_text(history_messages: List[Dict[str, Any]]) -> str:
-    return common_helpers.latest_user_text(
-        history_messages,
-        strip_user_sender_prefix_fn=_strip_user_sender_prefix,
-        coerce_text_fn=_coerce_text,
-    )
-
-
 def _looks_like_standalone_request(text: str) -> bool:
     return followup_intents.looks_like_standalone_request(
         text,
-        is_acknowledgement_only_fn=_is_acknowledgement_only,
+        is_acknowledgement_only_fn=lambda _text: False,
         is_stop_only_fn=_is_stop_only,
-        url_re=_URL_RE,
-    )
-
-
-def _looks_like_short_followup(text: str) -> bool:
-    return followup_intents.looks_like_short_followup(
-        text,
-        is_acknowledgement_only_fn=_is_acknowledgement_only,
-        is_stop_only_fn=_is_stop_only,
-        looks_like_standalone_request_fn=_looks_like_standalone_request,
-    )
-
-
-def _looks_like_download_followup(text: str) -> bool:
-    return followup_intents.looks_like_download_followup(
-        text,
         url_re=_URL_RE,
     )
 
@@ -1012,26 +786,6 @@ def _find_concrete_destination(payload: Any, *, _in_destination_context: bool = 
     return _looks_like_destination_scalar(payload, key_hint=_key_hint, in_destination_context=_in_destination_context)
 
 
-def send_message_allowed(
-    *,
-    user_text: str,
-    tool_args: Optional[Dict[str, Any]],
-    origin: Optional[Dict[str, Any]],
-    platform: str,
-    history_messages: Optional[List[Dict[str, Any]]],
-    context: Optional[Dict[str, Any]],
-) -> tuple[bool, str]:
-    return common_helpers.send_message_allowed(
-        user_text=user_text,
-        tool_args=tool_args,
-        origin=origin,
-        platform=platform,
-        history_messages=history_messages,
-        context=context,
-        looks_like_send_message_intent_fn=_looks_like_send_message_intent,
-    )
-
-
 def _looks_like_schedule_request(text: str) -> bool:
     return common_helpers.looks_like_schedule_request(
         text,
@@ -1056,49 +810,24 @@ def _mentions_explicit_timezone(text: str) -> bool:
     )
 
 
-def _looks_like_explicit_ai_task_request(text: str) -> bool:
-    return common_helpers.looks_like_explicit_ai_task_request(
-        text,
-        looks_like_schedule_request_fn=_looks_like_schedule_request,
-    )
-
-
-def _ai_tasks_schedule_status(
-    *,
-    payload: Optional[Dict[str, Any]],
-    checker_result: Optional[Dict[str, Any]],
-) -> Dict[str, Any]:
-    return common_helpers.ai_tasks_schedule_status(
-        payload=payload,
-        checker_result=checker_result,
-        short_text_fn=_short_text,
-        is_low_information_text_fn=_is_low_information_text,
-    )
-
-
-def _latest_url_from_history(history_messages: List[Dict[str, Any]]) -> str:
-    return common_helpers.latest_url_from_history(
-        history_messages,
-        coerce_text_fn=_coerce_text,
-        url_re=_URL_RE,
-    )
-
-
-def _effective_user_text(user_text: str, history_messages: List[Dict[str, Any]]) -> str:
-    return common_helpers.effective_user_text(
-        user_text,
-        history_messages,
-        looks_like_short_followup_fn=_looks_like_short_followup,
-        latest_user_text_fn=_latest_user_text,
-        looks_like_download_followup_fn=_looks_like_download_followup,
-        latest_url_from_history_fn=_latest_url_from_history,
-    )
-
-
 def _planner_focus_prompt(*, current_user_text: str, resolved_user_text: str) -> str:
     return prompts.planner_focus_prompt(
         current_user_text=current_user_text,
         resolved_user_text=resolved_user_text,
+    )
+
+
+def _planner_round_mode_prompt(*, round_index: int, current_user_text: str) -> str:
+    return prompts.planner_round_mode_prompt(
+        round_index=round_index,
+        current_user_text=current_user_text,
+    )
+
+
+def _planner_execution_step_prompt(*, tool: str, nl: str) -> str:
+    return prompts.planner_execution_step_prompt(
+        tool=tool,
+        nl=nl,
     )
 
 
@@ -1119,6 +848,23 @@ def _checker_system_prompt(platform: str, retry_allowed: bool) -> str:
     return prompts.checker_system_prompt(
         platform=platform,
         retry_allowed=retry_allowed,
+        ascii_only_platforms=ASCII_ONLY_PLATFORMS,
+    ).strip()
+
+
+def _plan_builder_system_prompt(platform: str) -> str:
+    return prompts.plan_builder_system_prompt(platform=platform)
+
+
+def _chat_fallback_system_prompt(platform: str) -> str:
+    first, last = get_tater_name()
+    return prompts.chat_fallback_system_prompt(
+        platform=platform,
+        platform_label=_platform_label(platform),
+        now_text=datetime.now().strftime("%A, %B %d, %Y at %I:%M %p"),
+        first_name=first,
+        last_name=last,
+        personality=(get_tater_personality() or "").strip(),
         ascii_only_platforms=ASCII_ONLY_PLATFORMS,
     ).strip()
 
@@ -1199,57 +945,6 @@ async def _repair_tool_call_text(
     )
 
 
-async def _repair_over_clarification_text(
-    *,
-    llm_client: Any,
-    platform: str,
-    user_text: str,
-    planner_text: str,
-    tool_index: str,
-    platform_preamble: str = "",
-    max_tokens: Optional[int] = None,
-) -> str:
-    return await overclar_repair.repair_over_clarification_text(
-        llm_client=llm_client,
-        platform=platform,
-        user_text=user_text,
-        planner_text=planner_text,
-        tool_index=tool_index,
-        platform_preamble=platform_preamble,
-        max_tokens=max_tokens,
-        configured_overclar_repair_max_tokens_fn=_configured_overclar_repair_max_tokens,
-        with_platform_preamble_fn=_with_platform_preamble,
-        coerce_text_fn=_coerce_text,
-    )
-
-
-async def _repair_need_user_info_if_overclar(
-    *,
-    llm_client: Any,
-    platform: str,
-    user_text: str,
-    question_text: str,
-    tool_index: str,
-    platform_preamble: str = "",
-    max_tokens: Optional[int] = None,
-) -> Dict[str, Any]:
-    return await overclar_repair.repair_need_user_info_if_overclar(
-        llm_client=llm_client,
-        platform=platform,
-        user_text=user_text,
-        question_text=question_text,
-        tool_index=tool_index,
-        platform_preamble=platform_preamble,
-        max_tokens=max_tokens,
-        looks_like_over_clarification_fn=lambda text: _looks_like_over_clarification(
-            text,
-            user_text=user_text,
-        ),
-        repair_over_clarification_text_fn=_repair_over_clarification_text,
-        is_tool_candidate_fn=_is_tool_candidate,
-    )
-
-
 async def _validate_tool_contract(
     *,
     llm_client: Any,
@@ -1318,40 +1013,9 @@ async def _validate_or_recover_tool_call(
         is_tool_candidate_fn=_is_tool_candidate,
         validate_tool_contract_fn=_validate_tool_contract,
         short_text_fn=_short_text,
-        redirect_unknown_tool_to_search_files_fn=_redirect_unknown_tool_to_search_files,
         generate_recovery_text_fn=_generate_recovery_text,
         validation_failure_text_fn=_validation_failure_text,
         normalize_tool_call_for_user_request_fn=_normalize_tool_call_for_user_request,
-    )
-
-
-def _looks_like_shell_tool_name(value: Any) -> bool:
-    return validation.looks_like_shell_tool_name(
-        value,
-        canonical_tool_name_fn=_canonical_tool_name,
-    )
-
-
-def _workspace_discovery_query(user_text: str) -> str:
-    return validation.workspace_discovery_query(
-        user_text,
-        stopwords=_WORKSPACE_QUERY_STOPWORDS,
-    )
-
-
-def _redirect_unknown_tool_to_search_files(
-    *,
-    reason: str,
-    user_text: str,
-    tool_call: Optional[Dict[str, Any]] = None,
-) -> Optional[Dict[str, Any]]:
-    return validation.redirect_unknown_tool_to_search_files(
-        reason=reason,
-        user_text=user_text,
-        tool_call=tool_call,
-        canonical_tool_name_fn=_canonical_tool_name,
-        workspace_discovery_hint_re=_WORKSPACE_DISCOVERY_HINT_RE,
-        workspace_query_stopwords=_WORKSPACE_QUERY_STOPWORDS,
     )
 
 
@@ -1532,6 +1196,171 @@ def _first_json_object(text: str) -> Optional[Dict[str, Any]]:
     )
 
 
+def _render_plan_line(step: Dict[str, str]) -> str:
+    tool = _short_text(step.get("tool"), limit=64)
+    nl = _short_text(step.get("nl"), limit=160)
+    if tool and nl:
+        return f"{tool}: {nl}"
+    return tool or nl
+
+
+def _step_text_looks_compound(text: str) -> bool:
+    lowered = " ".join(str(text or "").strip().lower().split())
+    if not lowered:
+        return False
+    if "\n" in lowered or ";" in lowered:
+        return True
+    return bool(re.search(r"\b(and then|then|after that|also)\b", lowered))
+
+
+def _normalize_plan_step_candidate(
+    candidate: Any,
+    *,
+    index: int,
+    enabled_tool_ids: set[str],
+) -> Optional[Dict[str, str]]:
+    if not isinstance(candidate, dict):
+        return None
+    raw_tool = str(candidate.get("tool") or candidate.get("function") or "").strip()
+    tool = _canonical_tool_name(raw_tool)
+    if not tool:
+        return None
+    if enabled_tool_ids and tool not in enabled_tool_ids:
+        return None
+    raw_nl = (
+        candidate.get("nl")
+        or candidate.get("instruction")
+        or candidate.get("request")
+        or candidate.get("query")
+        or candidate.get("text")
+        or ""
+    )
+    nl = _short_text(" ".join(_coerce_text(raw_nl).split()), limit=220)
+    if not nl:
+        return None
+    if _step_text_looks_compound(nl):
+        return None
+    raw_id = str(candidate.get("id") or f"s{index + 1}").strip()
+    step_id = _short_text(raw_id, limit=24) or f"s{index + 1}"
+    return {"id": step_id, "tool": tool, "nl": nl}
+
+
+def _sync_agent_state_with_plan_queue(
+    *,
+    agent_state: Optional[Dict[str, Any]],
+    plan_queue: List[Dict[str, str]],
+    fallback_goal: str,
+) -> Dict[str, Any]:
+    merged = dict(agent_state) if isinstance(agent_state, dict) else {}
+    merged["plan_steps"] = [dict(step) for step in plan_queue if isinstance(step, dict)]
+    lines = [_render_plan_line(step) for step in plan_queue if _render_plan_line(step)]
+    merged["plan"] = lines
+    merged["next_step"] = lines[0] if lines else ""
+    return _normalize_agent_state(merged, fallback_goal=fallback_goal)
+
+
+def _generic_chat_fallback_text(text: str) -> str:
+    del text
+    return "I'm here and ready to talk or help."
+
+
+async def _build_structured_plan_decision(
+    *,
+    llm_client: Any,
+    platform: str,
+    current_user_text: str,
+    resolved_user_text: str,
+    tool_index: str,
+    enabled_tool_ids: List[str],
+    platform_preamble: str,
+    max_tokens: int,
+) -> Dict[str, Any]:
+    enabled_set = {str(item or "").strip() for item in enabled_tool_ids if str(item or "").strip()}
+    if not enabled_set:
+        return {"mode": "unknown", "steps": []}
+    payload = {
+        "current_user_message": str(current_user_text or ""),
+        "resolved_request_for_this_turn": str(resolved_user_text or current_user_text or ""),
+        "enabled_tool_ids": sorted(enabled_set),
+    }
+    messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": _plan_builder_system_prompt(platform)},
+        {
+            "role": "system",
+            "content": (
+                "Tool catalog for planning:\n"
+                f"{tool_index}\n\n"
+                "Use only tool ids listed above."
+            ),
+        },
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+    messages = _with_platform_preamble(messages, platform_preamble=platform_preamble)
+    try:
+        resp = await llm_client.chat(
+            messages=messages,
+            max_tokens=max(200, int(max_tokens or 900)),
+            temperature=0.1,
+        )
+    except Exception:
+        return {"mode": "unknown", "steps": []}
+    raw = _coerce_text((resp.get("message", {}) or {}).get("content", "")).strip()
+    obj = _first_json_object(raw)
+    if not isinstance(obj, dict):
+        return {"mode": "unknown", "steps": []}
+    mode = str(obj.get("mode") or "").strip().lower()
+    raw_steps = obj.get("steps")
+    if mode == "chat":
+        return {"mode": "chat", "steps": []}
+    if not isinstance(raw_steps, list):
+        return {"mode": "unknown", "steps": []}
+    out: List[Dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for idx, item in enumerate(raw_steps):
+        step = _normalize_plan_step_candidate(item, index=idx, enabled_tool_ids=enabled_set)
+        if not isinstance(step, dict):
+            continue
+        dedupe_key = (step.get("tool", ""), step.get("nl", ""))
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        out.append(step)
+        if len(out) >= 12:
+            break
+    if mode == "execute" and out:
+        return {"mode": "execute", "steps": out}
+    return {"mode": "unknown", "steps": []}
+
+
+async def _run_chat_fallback_reply(
+    *,
+    llm_client: Any,
+    platform: str,
+    user_text: str,
+    history: List[Dict[str, Any]],
+    memory_context_message: str,
+    platform_preamble: str,
+    max_tokens: int,
+) -> str:
+    messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": _chat_fallback_system_prompt(platform)},
+    ]
+    if memory_context_message:
+        messages.append({"role": "system", "content": memory_context_message})
+    messages = _with_platform_preamble(messages, platform_preamble=platform_preamble)
+    messages.extend(history)
+    messages.append({"role": "user", "content": str(user_text or "")})
+    try:
+        resp = await llm_client.chat(
+            messages=messages,
+            max_tokens=max(64, int(max_tokens or 220)),
+            temperature=0.4,
+        )
+    except Exception:
+        return ""
+    return _coerce_text((resp.get("message", {}) or {}).get("content", "")).strip()
+
+
 def _state_list(value: Any, *, max_items: int, item_limit: int) -> List[str]:
     return state_core_helpers.state_list(
         value,
@@ -1550,8 +1379,26 @@ def _state_next_step(value: Any) -> str:
     )
 
 
+def _state_plan_steps(value: Any, *, max_items: int = 12) -> List[Dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    out: List[Dict[str, str]] = []
+    for idx, item in enumerate(value):
+        if not isinstance(item, dict):
+            continue
+        tool = _short_text(item.get("tool"), limit=64)
+        nl = _short_text(item.get("nl"), limit=200)
+        if not tool or not nl:
+            continue
+        step_id = _short_text(item.get("id"), limit=24) or f"s{idx + 1}"
+        out.append({"id": step_id, "tool": tool, "nl": nl})
+        if len(out) >= max_items:
+            break
+    return out
+
+
 def _normalize_agent_state(state: Optional[Dict[str, Any]], *, fallback_goal: str) -> Dict[str, Any]:
-    return state_core_helpers.normalize_agent_state(
+    normalized = state_core_helpers.normalize_agent_state(
         state,
         fallback_goal=fallback_goal,
         coerce_text_fn=_coerce_text,
@@ -1563,6 +1410,15 @@ def _normalize_agent_state(state: Optional[Dict[str, Any]], *, fallback_goal: st
         ),
         state_next_step_fn=_state_next_step,
     )
+    source = state if isinstance(state, dict) else {}
+    plan_steps = _state_plan_steps(source.get("plan_steps"), max_items=12)
+    normalized["plan_steps"] = plan_steps
+    if plan_steps:
+        if not normalized.get("plan"):
+            normalized["plan"] = [_render_plan_line(step) for step in plan_steps if _render_plan_line(step)]
+        if not normalized.get("next_step"):
+            normalized["next_step"] = _render_plan_line(plan_steps[0])
+    return normalized
 
 
 def _compact_agent_state_json(state: Optional[Dict[str, Any]], *, fallback_goal: str, limit: int) -> str:
@@ -1800,8 +1656,13 @@ def _state_best_effort_answer(
     )
 
 
-def _response_indicates_unfinished_work(text: str) -> bool:
-    return doer_state.response_indicates_unfinished_work(text)
+def _agent_state_has_remaining_actions(state: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(state, dict):
+        return False
+    plan_items = _state_list(state.get("plan"), max_items=8, item_limit=140)
+    if any(str(item or "").strip() for item in plan_items):
+        return True
+    return bool(_state_next_step(state.get("next_step")))
 
 
 def _should_continue_after_incomplete_final_answer(
@@ -1811,17 +1672,8 @@ def _should_continue_after_incomplete_final_answer(
     agent_state: Optional[Dict[str, Any]],
     retry_allowed: bool,
 ) -> bool:
-    del agent_state
-    return doer_state.should_continue_after_incomplete_final_answer(
-        user_text=user_text,
-        final_text=final_text,
-        retry_allowed=retry_allowed,
-        contains_action_intent_fn=_contains_action_intent,
-        looks_like_weather_request_fn=_looks_like_weather_request,
-        looks_like_schedule_request_fn=_looks_like_schedule_request,
-        looks_like_send_message_intent_fn=_looks_like_send_message_intent,
-        response_indicates_unfinished_work_fn=_response_indicates_unfinished_work,
-    )
+    del user_text, final_text
+    return bool(retry_allowed and _agent_state_has_remaining_actions(agent_state))
 
 
 def _tool_failure_checker_reason(tool_result: Optional[Dict[str, Any]]) -> str:
@@ -1858,10 +1710,7 @@ def _select_final_answer_text(
         and bool(tool_result.get("ok"))
         and not _is_low_information_text(draft)
     ):
-        if checker_text == DEFAULT_CLARIFICATION or _looks_like_over_clarification(
-            checker_text,
-            user_text=user_text,
-        ):
+        if checker_text == DEFAULT_CLARIFICATION:
             return draft
 
     return candidate
@@ -1925,8 +1774,6 @@ def _tool_call_signature(tool_call: Optional[Dict[str, Any]]) -> str:
         tool_call,
         canonical_tool_name_fn=_canonical_tool_name,
         hash_tool_args_fn=_hash_tool_args,
-        tool_call_route_metadata_fn=_tool_call_route_metadata,
-        route_user_text_key=_MULTI_INTENT_ROUTE_USER_TEXT_KEY,
     )
 
 
@@ -1945,7 +1792,6 @@ def _build_help_constrained_retry_tool_call(
             args=args,
             help_payload=payload,
         ),
-        tool_call_route_metadata_fn=_tool_call_route_metadata,
     )
 
 
@@ -2094,7 +1940,7 @@ def _write_cerberus_ledger(
         configured_max_ledger_items_fn=_configured_max_ledger_items,
         schema_version=CERBERUS_LEDGER_SCHEMA_VERSION,
         agent_state_ledger_max_chars=AGENT_STATE_LEDGER_MAX_CHARS,
-        allowed_planner_kinds=("tool", "answer", "repaired_tool", "repaired_answer", "send_message_fix"),
+        allowed_planner_kinds=("tool", "answer", "repaired_tool", "repaired_answer"),
     )
 
 
@@ -2143,7 +1989,6 @@ async def run_cerberus_turn(
     checker_max_tokens = _configured_checker_max_tokens(r)
     doer_max_tokens = _configured_doer_max_tokens(r)
     tool_repair_max_tokens = _configured_tool_repair_max_tokens(r)
-    overclar_repair_max_tokens = _configured_overclar_repair_max_tokens(r)
     recovery_max_tokens = _configured_recovery_max_tokens(r)
     turn_started_at = time.perf_counter()
     planner_ms_total = 0.0
@@ -2178,17 +2023,14 @@ async def run_cerberus_turn(
     attempted_tool_for_ledger = ""
 
     history = _compact_history(history_messages)
-    effective_user_text = _effective_user_text(user_text, history)
-    resolved_user_text = effective_user_text or user_text
+    resolved_user_text = str(user_text or "")
     current_user_turn_text = _strip_user_sender_prefix(user_text).strip() or str(user_text or "").strip()
-    suppress_tools_for_turn = _is_casual_greeting_only(current_user_turn_text)
-    request_for_limit_eval = current_user_turn_text or str(resolved_user_text or "")
-    effective_max_rounds, effective_max_tool_calls = _expand_limits_for_compound_request(
-        max_rounds=effective_max_rounds,
-        max_tool_calls=effective_max_tool_calls,
-        request_text=request_for_limit_eval,
-    )
     tool_index = _enabled_tool_mini_index(
+        platform=platform,
+        registry=registry,
+        enabled_predicate=enabled_predicate,
+    )
+    enabled_tool_ids = _enabled_tool_ids(
         platform=platform,
         registry=registry,
         enabled_predicate=enabled_predicate,
@@ -2210,80 +2052,42 @@ async def run_cerberus_turn(
         origin=origin_payload,
     )
     memory_context_message = _memory_context_system_message(memory_context_payload)
-    queued_tool_call: Optional[Dict[str, Any]] = None
     queued_retry_tool_for_ledger: Optional[Dict[str, Any]] = None
-    plugin_help_attempted: set[str] = set()
-    plugin_help_prefetch_target = ""
-    bad_args_help_retry_signatures: set[str] = set()
-    bad_args_help_pending: Optional[Dict[str, Any]] = None
-    workspace_discovery_read_attempted_paths: set[str] = set()
-    web_research_candidates: List[Dict[str, str]] = []
-    web_research_seen_urls: set[str] = set()
-    web_research_attempts = 0
-    web_research_active = False
-    web_research_skip_deepening = _looks_like_link_list_request(resolved_user_text or user_text)
-    multi_intent_routed_queue: List[Dict[str, Any]] = []
-    multi_intent_routing_active = False
-    multi_intent_routed_summaries: List[str] = []
-
-    if not suppress_tools_for_turn:
-        routed_actions = _build_multi_intent_routed_actions(
-            request_text=current_user_turn_text or resolved_user_text,
+    repair_returned_no_tool_retries = 0
+    structured_plan_queue: List[Dict[str, str]] = []
+    plan_builder_mode = "unknown"
+    try:
+        plan_started = time.perf_counter()
+        plan_decision = await _build_structured_plan_decision(
+            llm_client=llm_client,
             platform=platform,
-            registry=registry,
-            enabled_predicate=enabled_predicate,
+            current_user_text=current_user_turn_text,
+            resolved_user_text=resolved_user_text,
+            tool_index=tool_index,
+            enabled_tool_ids=enabled_tool_ids,
+            platform_preamble=platform_preamble,
+            max_tokens=max(400, planner_max_tokens // 2),
         )
-        built_routed_calls: List[Dict[str, Any]] = []
-        route_build_failed = False
-        for action in routed_actions:
-            plugin_id = _canonical_tool_name(action.get("plugin_id"))
-            slice_text = str(action.get("user_text") or "").strip()
-            if not plugin_id or not slice_text:
-                route_build_failed = True
-                break
-            plugin_obj = registry.get(plugin_id)
-            if plugin_obj is None:
-                route_build_failed = True
-                break
-
-            route_started = time.perf_counter()
-            structured_call = await _build_structured_routed_tool_call(
-                llm_client=llm_client,
-                plugin_id=plugin_id,
-                plugin_obj=plugin_obj,
-                slice_text=slice_text,
-                platform=platform,
-                registry=registry,
-                enabled_predicate=enabled_predicate,
-                tool_index=tool_index,
-                origin=origin_payload,
-                scope=scope,
-                history_messages=history,
-                context=context if isinstance(context, dict) else {},
-                platform_preamble=platform_preamble,
-                repair_max_tokens=tool_repair_max_tokens,
-                recovery_max_tokens=recovery_max_tokens,
-            )
-            planner_ms_total += (time.perf_counter() - route_started) * 1000.0
-            if not isinstance(structured_call, dict):
-                route_build_failed = True
-                break
-            built_routed_calls.append(structured_call)
-
-        if not route_build_failed and len(built_routed_calls) >= 2:
-            multi_intent_routed_queue = built_routed_calls
-            multi_intent_routing_active = True
-            queued_tool_call = dict(multi_intent_routed_queue.pop(0))
-            queued_retry_tool_for_ledger = queued_tool_call
-            validation_status = {
-                "status": "ok",
-                "repair_used": False,
-                "reason": "multi_intent_route",
-                "attempts": 1,
-                "ok": True,
-                "tool_call": queued_tool_call,
-            }
-
+        planner_ms_total += (time.perf_counter() - plan_started) * 1000.0
+    except Exception:
+        plan_decision = {"mode": "unknown", "steps": []}
+    if isinstance(plan_decision, dict):
+        plan_builder_mode = str(plan_decision.get("mode") or "unknown").strip().lower() or "unknown"
+        raw_steps = plan_decision.get("steps")
+        if isinstance(raw_steps, list):
+            structured_plan_queue = [step for step in raw_steps if isinstance(step, dict)]
+    if structured_plan_queue:
+        agent_state = _sync_agent_state_with_plan_queue(
+            agent_state=agent_state,
+            plan_queue=structured_plan_queue,
+            fallback_goal=resolved_user_text or user_text,
+        )
+        _save_persistent_agent_state(
+            redis_client=r,
+            platform=platform,
+            scope=scope,
+            state=agent_state,
+        )
     def _retry_allowed_within_limits() -> bool:
         rounds_left = effective_max_rounds == 0 or rounds_used < effective_max_rounds
         tools_left = effective_max_tool_calls == 0 or tool_calls_used < effective_max_tool_calls
@@ -2302,6 +2106,7 @@ async def run_cerberus_turn(
         retry_tool: Optional[Dict[str, Any]] = None,
         attempted_tool_override: Optional[str] = None,
     ) -> Dict[str, Any]:
+        nonlocal agent_state
         final_status = str(status or "").strip() or "done"
         final_checker_action = str(checker_action_value or "").strip() or "FINAL_ANSWER"
         final_checker_reason = str(checker_reason_value or "").strip()
@@ -2310,6 +2115,7 @@ async def run_cerberus_turn(
         final_text = _sanitize_user_text(final_text_raw, platform=platform, tool_used=tool_used)
         outcome_value, outcome_reason_value = _normalize_outcome(final_status, final_checker_reason)
         total_ms = int(max(0.0, (time.perf_counter() - turn_started_at) * 1000.0))
+
         _save_persistent_agent_state(
             redis_client=r,
             platform=platform,
@@ -2365,6 +2171,28 @@ async def run_cerberus_turn(
             "normalized_checker_result": normalized_checker_result_out,
         }
 
+    if plan_builder_mode == "chat" and not structured_plan_queue:
+        chat_started = time.perf_counter()
+        chat_text = await _run_chat_fallback_reply(
+            llm_client=llm_client,
+            platform=platform,
+            user_text=current_user_turn_text,
+            history=history,
+            memory_context_message=memory_context_message,
+            platform_preamble=platform_preamble,
+            max_tokens=max(128, min(420, planner_max_tokens // 2)),
+        )
+        planner_ms_total += (time.perf_counter() - chat_started) * 1000.0
+        planner_kind = "answer"
+        planner_text_is_tool_candidate = False
+        checker_reason = "complete"
+        return _finish(
+            text=chat_text or _generic_chat_fallback_text(current_user_turn_text),
+            status="done",
+            checker_action_value="FINAL_ANSWER",
+            checker_reason_value=checker_reason,
+        )
+
     while (
         (effective_max_rounds == 0 or rounds_used < effective_max_rounds)
         and (effective_max_tool_calls == 0 or tool_calls_used < effective_max_tool_calls)
@@ -2373,339 +2201,313 @@ async def run_cerberus_turn(
         planned_tool = None
         planner_text = ""
         round_planner_kind = "answer"
+        current_plan_step = structured_plan_queue[0] if structured_plan_queue else None
+        round_request_text = (
+            str((current_plan_step or {}).get("nl") or "").strip()
+            if isinstance(current_plan_step, dict)
+            else ""
+        ) or resolved_user_text
 
-        if isinstance(queued_tool_call, dict):
-            planned_tool = dict(queued_tool_call)
-            attempted_tool_for_ledger = str((planned_tool or {}).get("function") or attempted_tool_for_ledger or "")
-            planner_text_is_tool_candidate = True
-            validation_status = {
-                "status": "ok",
-                "repair_used": bool(validation_status.get("repair_used")),
-                "reason": str(validation_status.get("reason") or "ok"),
-                "attempts": int(validation_status.get("attempts") or 1),
-                "ok": True,
-                "tool_call": planned_tool,
-            }
-            round_planner_kind = "repaired_tool" if bool(validation_status.get("repair_used")) else "tool"
-            queued_tool_call = None
-        else:
-            planner_text_repaired = False
-            state_message = _agent_state_prompt_message(agent_state, fallback_goal=resolved_user_text or user_text)
-            planner_messages: List[Dict[str, Any]] = [
-                {"role": "system", "content": _planner_system_prompt(platform)},
-                {"role": "system", "content": "Enabled tools on this platform:\n" + tool_index},
-            ]
-            planner_messages.extend([
+        state_message = _agent_state_prompt_message(agent_state, fallback_goal=resolved_user_text or user_text)
+        planner_messages: List[Dict[str, Any]] = [
+            {"role": "system", "content": _planner_system_prompt(platform)},
+            {
+                "role": "system",
+                "content": (
+                    "Tool catalog for this turn (kernel + enabled plugins on this platform):\n"
+                    f"{tool_index}\n\n"
+                    "Use this catalog directly for tool selection and argument shape."
+                ),
+            },
+        ]
+        planner_messages.extend([
+            {
+                "role": "system",
+                "content": _planner_focus_prompt(
+                    current_user_text=user_text,
+                    resolved_user_text=round_request_text,
+                ),
+            },
+            {
+                "role": "system",
+                "content": _planner_round_mode_prompt(
+                    round_index=rounds_used,
+                    current_user_text=current_user_turn_text,
+                ),
+            },
+            {"role": "system", "content": state_message},
+        ])
+        if isinstance(current_plan_step, dict):
+            planner_messages.append(
                 {
                     "role": "system",
-                    "content": _planner_focus_prompt(
-                        current_user_text=user_text,
-                        resolved_user_text=resolved_user_text,
+                    "content": _planner_execution_step_prompt(
+                        tool=str(current_plan_step.get("tool") or ""),
+                        nl=str(current_plan_step.get("nl") or ""),
                     ),
-                },
-                {"role": "system", "content": state_message},
-            ])
-            if memory_context_message:
-                planner_messages.append({"role": "system", "content": memory_context_message})
-            planner_messages = _with_platform_preamble(
-                planner_messages,
-                platform_preamble=platform_preamble,
+                }
             )
-            if not suppress_tools_for_turn:
-                planner_messages.extend(history)
-            planner_messages.append({"role": "user", "content": resolved_user_text})
+        if memory_context_message:
+            planner_messages.append({"role": "system", "content": memory_context_message})
+        planner_messages = _with_platform_preamble(
+            planner_messages,
+            platform_preamble=platform_preamble,
+        )
+        planner_messages.extend(history)
+        planner_messages.append({"role": "user", "content": round_request_text})
 
-            try:
-                planner_started = time.perf_counter()
-                planner_resp = await llm_client.chat(
-                    messages=planner_messages,
-                    max_tokens=max(1, int(planner_max_tokens)),
-                    temperature=0.2,
+        try:
+            planner_started = time.perf_counter()
+            planner_resp = await llm_client.chat(
+                messages=planner_messages,
+                max_tokens=max(1, int(planner_max_tokens)),
+                temperature=0.2,
+            )
+            planner_ms_total += (time.perf_counter() - planner_started) * 1000.0
+            planner_text = _coerce_text((planner_resp.get("message", {}) or {}).get("content", "")).strip()
+        except Exception:
+            planner_text = ""
+
+        if _is_tool_candidate(planner_text):
+            round_planner_kind = "tool"
+        else:
+            round_planner_kind = "answer"
+        planner_text_is_tool_candidate = _is_tool_candidate(planner_text)
+        if not _is_tool_candidate(planner_text):
+            planner_kind = round_planner_kind
+            draft_response = str(planner_text or "").strip()
+            checker_started = time.perf_counter()
+            checker_decision = await _run_checker(
+                llm_client=llm_client,
+                platform=platform,
+                current_user_text=user_text,
+                resolved_user_text=resolved_user_text,
+                agent_state=agent_state,
+                memory_context=memory_context_payload,
+                planned_tool=None,
+                tool_result=tool_result_for_checker,
+                draft_response=draft_response,
+                retry_allowed=_retry_allowed_within_limits(),
+                platform_preamble=platform_preamble,
+                max_tokens=checker_max_tokens,
+            )
+            checker_ms_total += (time.perf_counter() - checker_started) * 1000.0
+            checker_action = str(checker_decision.get("kind") or "FINAL_ANSWER")
+
+            if checker_action == "NEED_USER_INFO":
+                need_text = str(checker_decision.get("text") or DEFAULT_CLARIFICATION).strip()
+                checker_reason = "needs_user_input"
+                return _finish(
+                    text=need_text,
+                    status="blocked",
+                    checker_action_value="NEED_USER_INFO",
+                    checker_reason_value=checker_reason,
                 )
-                planner_ms_total += (time.perf_counter() - planner_started) * 1000.0
-                planner_text = _coerce_text((planner_resp.get("message", {}) or {}).get("content", "")).strip()
-            except Exception:
-                planner_text = ""
 
-            if planner_text and not _is_tool_candidate(planner_text) and _looks_like_over_clarification(
-                planner_text,
-                user_text=resolved_user_text or user_text,
-            ):
-                original_planner_text = planner_text
-                repaired_text = await _repair_over_clarification_text(
+            if checker_action == "RETRY_TOOL":
+                retry_text = str(checker_decision.get("text") or "").strip()
+                if not _retry_allowed_within_limits():
+                    queued_retry_tool_for_ledger = parse_function_json(retry_text)
+                    planner_text_is_tool_candidate = True
+                    checker_reason = "budget_exhausted"
+                    break
+                retry_eval = await _validate_or_recover_tool_call(
                     llm_client=llm_client,
+                    text=retry_text,
                     platform=platform,
-                    user_text=effective_user_text or user_text,
-                    planner_text=planner_text,
+                    registry=registry,
+                    enabled_predicate=enabled_predicate,
                     tool_index=tool_index,
+                    user_text=round_request_text,
+                    origin=origin_payload,
+                    scope=scope,
+                    history_messages=history,
+                    context=context if isinstance(context, dict) else {},
                     platform_preamble=platform_preamble,
-                    max_tokens=overclar_repair_max_tokens,
+                    repair_max_tokens=tool_repair_max_tokens,
+                    recovery_max_tokens=recovery_max_tokens,
                 )
-                if repaired_text:
-                    planner_text = repaired_text
-                    if planner_text.strip() != original_planner_text.strip():
-                        planner_text_repaired = True
-                        repairs_used_count += 1
-
-            if _is_tool_candidate(planner_text):
-                round_planner_kind = "tool"
-            elif planner_text_repaired:
-                round_planner_kind = "repaired_answer"
-            else:
-                round_planner_kind = "answer"
-            planner_text_is_tool_candidate = _is_tool_candidate(planner_text)
-            if suppress_tools_for_turn and planner_text_is_tool_candidate:
-                planner_text = "Hey. What would you like me to do?"
-                planner_text_is_tool_candidate = False
-                planner_text_repaired = True
-                round_planner_kind = "repaired_answer"
-
-            if not _is_tool_candidate(planner_text):
-                planner_kind = round_planner_kind
-                draft_response = str(planner_text or "").strip()
-                checker_started = time.perf_counter()
-                checker_decision = await _run_checker(
-                    llm_client=llm_client,
-                    platform=platform,
-                    current_user_text=user_text,
-                    resolved_user_text=resolved_user_text,
-                    agent_state=agent_state,
-                    memory_context=memory_context_payload,
-                    planned_tool=None,
-                    tool_result=tool_result_for_checker,
-                    draft_response=draft_response,
-                    retry_allowed=_retry_allowed_within_limits() and not suppress_tools_for_turn,
-                    platform_preamble=platform_preamble,
-                    max_tokens=checker_max_tokens,
+                retry_validation = (
+                    retry_eval.get("validation_status")
+                    if isinstance(retry_eval.get("validation_status"), dict)
+                    else {"status": "failed", "reason": str(retry_eval.get("reason") or "invalid_tool_call")}
                 )
-                checker_ms_total += (time.perf_counter() - checker_started) * 1000.0
-                checker_action = str(checker_decision.get("kind") or "FINAL_ANSWER")
-
-                if checker_action == "NEED_USER_INFO":
-                    need_text = str(checker_decision.get("text") or DEFAULT_CLARIFICATION).strip()
-                    repaired_need = await _repair_need_user_info_if_overclar(
-                        llm_client=llm_client,
-                        platform=platform,
-                        user_text=resolved_user_text or user_text,
-                        question_text=need_text,
-                        tool_index=tool_index,
-                        platform_preamble=platform_preamble,
-                        max_tokens=overclar_repair_max_tokens,
-                    )
-                    if bool(repaired_need.get("repaired")):
-                        repairs_used_count += 1
-                    repaired_kind = str(repaired_need.get("kind") or "NEED_USER_INFO").strip().upper()
-                    if repaired_kind == "RETRY_TOOL":
-                        checker_action = "RETRY_TOOL"
-                        checker_decision = {"kind": "RETRY_TOOL", "text": str(repaired_need.get("text") or "").strip()}
-                    elif repaired_kind == "FINAL_ANSWER":
-                        checker_reason = "overclar_repaired"
+                attempted_tool_for_ledger = str(retry_eval.get("attempted_tool") or attempted_tool_for_ledger or "")
+                if bool(retry_eval.get("repair_used")):
+                    repairs_used_count += 1
+                if not bool(retry_eval.get("ok")):
+                    reason = str(retry_eval.get("reason") or "invalid_tool_call")
+                    assistant_text = str(retry_eval.get("assistant_text") or "").strip()
+                    failed_retry_tool = retry_eval.get("tool_call")
+                    if not isinstance(failed_retry_tool, dict):
+                        failed_retry_tool = {"function": "invalid_tool_call", "arguments": {}}
+                    if reason == "repair_returned_answer" and assistant_text:
+                        planner_kind_value = "repaired_answer"
+                        checker_reason = "complete"
                         return _finish(
-                            text=str(repaired_need.get("text") or need_text or DEFAULT_CLARIFICATION).strip(),
+                            text=assistant_text,
                             status="done",
                             checker_action_value="FINAL_ANSWER",
                             checker_reason_value=checker_reason,
-                        )
-                    else:
-                        checker_reason = "needs_user_input"
-                        return _finish(
-                            text=need_text,
-                            status="blocked",
-                            checker_action_value="NEED_USER_INFO",
-                            checker_reason_value=checker_reason,
-                        )
-
-                if checker_action == "RETRY_TOOL":
-                    retry_text = str(checker_decision.get("text") or "").strip()
-                    if not _retry_allowed_within_limits():
-                        queued_retry_tool_for_ledger = parse_function_json(retry_text)
-                        planner_text_is_tool_candidate = True
-                        checker_reason = "budget_exhausted"
-                        break
-                    retry_eval = await _validate_or_recover_tool_call(
-                        llm_client=llm_client,
-                        text=retry_text,
-                        platform=platform,
-                        registry=registry,
-                        enabled_predicate=enabled_predicate,
-                        tool_index=tool_index,
-                        user_text=user_text,
-                        origin=origin_payload,
-                        scope=scope,
-                        history_messages=history,
-                        context=context if isinstance(context, dict) else {},
-                        platform_preamble=platform_preamble,
-                        repair_max_tokens=tool_repair_max_tokens,
-                        recovery_max_tokens=recovery_max_tokens,
-                    )
-                    retry_validation = (
-                        retry_eval.get("validation_status")
-                        if isinstance(retry_eval.get("validation_status"), dict)
-                        else {"status": "failed", "reason": str(retry_eval.get("reason") or "invalid_tool_call")}
-                    )
-                    attempted_tool_for_ledger = str(retry_eval.get("attempted_tool") or attempted_tool_for_ledger or "")
-                    if bool(retry_eval.get("repair_used")):
-                        repairs_used_count += 1
-                    if not bool(retry_eval.get("ok")):
-                        reason = str(retry_eval.get("reason") or "invalid_tool_call")
-                        assistant_text = str(retry_eval.get("assistant_text") or "").strip()
-                        failed_retry_tool = retry_eval.get("tool_call")
-                        if not isinstance(failed_retry_tool, dict):
-                            failed_retry_tool = {"function": "invalid_tool_call", "arguments": {}}
-                        if reason == "repair_returned_answer" and assistant_text:
-                            planner_kind_value = (
-                                "send_message_fix"
-                                if _canonical_tool_name((failed_retry_tool or {}).get("function")) == "send_message"
-                                else "repaired_answer"
-                            )
-                            checker_reason = "complete"
-                            return _finish(
-                                text=assistant_text,
-                                status="done",
-                                checker_action_value="FINAL_ANSWER",
-                                checker_reason_value=checker_reason,
-                                planner_kind_value=planner_kind_value,
-                                planned_tool_override=failed_retry_tool,
-                                validation_status_override=retry_validation,
-                                attempted_tool_override=str(retry_eval.get("attempted_tool") or ""),
-                            )
-                        validation_failures_count += 1
-                        checker_reason = f"validation_failed:{reason}"
-                        return _finish(
-                            text=str(retry_eval.get("recovery_text_if_blocked") or DEFAULT_CLARIFICATION).strip(),
-                            status="blocked",
-                            checker_action_value="NEED_USER_INFO",
-                            checker_reason_value=checker_reason,
+                            planner_kind_value=planner_kind_value,
                             planned_tool_override=failed_retry_tool,
                             validation_status_override=retry_validation,
                             attempted_tool_override=str(retry_eval.get("attempted_tool") or ""),
                         )
-                    queued = retry_eval.get("tool_call")
-                    if not isinstance(queued, dict):
-                        validation_failures_count += 1
-                        checker_reason = "validation_failed:invalid_tool_call"
-                        return _finish(
-                            text=DEFAULT_CLARIFICATION,
-                            status="blocked",
-                            checker_action_value="NEED_USER_INFO",
-                            checker_reason_value=checker_reason,
-                            planned_tool_override={"function": "invalid_tool_call", "arguments": {}},
-                            validation_status_override=retry_validation,
-                        )
-                    queued_tool_call = queued
-                    queued_retry_tool_for_ledger = queued
-                    validation_status = retry_validation
-                    critic_continue_count += 1
-                    checker_reason = "continue"
-                    planner_text_is_tool_candidate = True
-                    continue
+                    if (
+                        reason == "repair_returned_no_tool"
+                        and _retry_allowed_within_limits()
+                        and repair_returned_no_tool_retries < 2
+                    ):
+                        repair_returned_no_tool_retries += 1
+                        checker_reason = "continue_after_repair_returned_no_tool"
+                        critic_continue_count += 1
+                        continue
+                    validation_failures_count += 1
+                    checker_reason = f"validation_failed:{reason}"
+                    return _finish(
+                        text=str(retry_eval.get("recovery_text_if_blocked") or DEFAULT_CLARIFICATION).strip(),
+                        status="blocked",
+                        checker_action_value="NEED_USER_INFO",
+                        checker_reason_value=checker_reason,
+                        planned_tool_override=failed_retry_tool,
+                        validation_status_override=retry_validation,
+                        attempted_tool_override=str(retry_eval.get("attempted_tool") or ""),
+                    )
+                queued = retry_eval.get("tool_call")
+                if not isinstance(queued, dict):
+                    validation_failures_count += 1
+                    checker_reason = "validation_failed:invalid_tool_call"
+                    return _finish(
+                        text=DEFAULT_CLARIFICATION,
+                        status="blocked",
+                        checker_action_value="NEED_USER_INFO",
+                        checker_reason_value=checker_reason,
+                        planned_tool_override={"function": "invalid_tool_call", "arguments": {}},
+                        validation_status_override=retry_validation,
+                    )
+                queued_retry_tool_for_ledger = queued
+                validation_status = retry_validation
+                critic_continue_count += 1
+                checker_reason = "continue"
+                planner_text_is_tool_candidate = True
+                continue
 
-                final_text_candidate = _select_final_answer_text(
-                    checker_decision=checker_decision,
-                    draft_response=draft_response,
-                    user_text=resolved_user_text or user_text,
-                    tool_result=tool_result_for_checker,
-                )
-                if _should_continue_after_incomplete_final_answer(
-                    user_text=resolved_user_text or user_text,
-                    final_text=final_text_candidate,
-                    agent_state=agent_state,
-                    retry_allowed=_retry_allowed_within_limits() and not suppress_tools_for_turn,
-                ):
-                    checker_reason = "continue_after_incomplete_final_answer"
-                    critic_continue_count += 1
-                    continue
-                checker_reason = _tool_failure_checker_reason(tool_result_for_checker) or "complete"
+            final_text_candidate = _select_final_answer_text(
+                checker_decision=checker_decision,
+                draft_response=draft_response,
+                user_text=resolved_user_text or user_text,
+                tool_result=tool_result_for_checker,
+            )
+            if structured_plan_queue and _retry_allowed_within_limits():
+                checker_reason = "continue_plan_step"
+                critic_continue_count += 1
+                continue
+            if _should_continue_after_incomplete_final_answer(
+                user_text=resolved_user_text or user_text,
+                final_text=final_text_candidate,
+                agent_state=agent_state,
+                retry_allowed=_retry_allowed_within_limits(),
+            ):
+                checker_reason = "continue_after_incomplete_final_answer"
+                critic_continue_count += 1
+                continue
+            checker_reason = _tool_failure_checker_reason(tool_result_for_checker) or "complete"
+            return _finish(
+                text=final_text_candidate,
+                status="done",
+                checker_action_value="FINAL_ANSWER",
+                checker_reason_value=checker_reason,
+            )
+
+        tool_eval = await _validate_or_recover_tool_call(
+            llm_client=llm_client,
+            text=planner_text,
+            platform=platform,
+            registry=registry,
+            enabled_predicate=enabled_predicate,
+            tool_index=tool_index,
+            user_text=round_request_text,
+            origin=origin_payload,
+            scope=scope,
+            history_messages=history,
+            context=context if isinstance(context, dict) else {},
+            platform_preamble=platform_preamble,
+            repair_max_tokens=tool_repair_max_tokens,
+            recovery_max_tokens=recovery_max_tokens,
+        )
+        validation_status = (
+            tool_eval.get("validation_status")
+            if isinstance(tool_eval.get("validation_status"), dict)
+            else validation_status
+        )
+        attempted_tool_for_ledger = str(tool_eval.get("attempted_tool") or attempted_tool_for_ledger or "")
+        if bool(tool_eval.get("repair_used")):
+            repairs_used_count += 1
+        if bool(tool_eval.get("repair_used")):
+            round_planner_kind = "repaired_tool"
+        else:
+            round_planner_kind = "tool"
+
+        if not bool(tool_eval.get("ok")):
+            planner_text_is_tool_candidate = True
+            reason = str(tool_eval.get("reason") or "invalid_tool_call")
+            assistant_text = str(tool_eval.get("assistant_text") or "").strip()
+            recovery_text = str(tool_eval.get("recovery_text_if_blocked") or DEFAULT_CLARIFICATION).strip()
+            failed_planned_tool = tool_eval.get("tool_call")
+            if not isinstance(failed_planned_tool, dict):
+                failed_planned_tool = {"function": "invalid_tool_call", "arguments": {}}
+            if reason == "repair_returned_answer" and assistant_text:
+                planner_kind = "repaired_answer"
+                checker_reason = "complete"
                 return _finish(
-                    text=final_text_candidate,
+                    text=assistant_text,
                     status="done",
                     checker_action_value="FINAL_ANSWER",
                     checker_reason_value=checker_reason,
-                )
-
-            tool_eval = await _validate_or_recover_tool_call(
-                llm_client=llm_client,
-                text=planner_text,
-                platform=platform,
-                registry=registry,
-                enabled_predicate=enabled_predicate,
-                tool_index=tool_index,
-                user_text=user_text,
-                origin=origin_payload,
-                scope=scope,
-                history_messages=history,
-                context=context if isinstance(context, dict) else {},
-                platform_preamble=platform_preamble,
-                repair_max_tokens=tool_repair_max_tokens,
-                recovery_max_tokens=recovery_max_tokens,
-            )
-            validation_status = (
-                tool_eval.get("validation_status")
-                if isinstance(tool_eval.get("validation_status"), dict)
-                else validation_status
-            )
-            attempted_tool_for_ledger = str(tool_eval.get("attempted_tool") or attempted_tool_for_ledger or "")
-            if bool(tool_eval.get("repair_used")):
-                repairs_used_count += 1
-            if bool(tool_eval.get("repair_used")):
-                round_planner_kind = "repaired_tool"
-            else:
-                round_planner_kind = "tool"
-
-            if not bool(tool_eval.get("ok")):
-                planner_text_is_tool_candidate = True
-                reason = str(tool_eval.get("reason") or "invalid_tool_call")
-                assistant_text = str(tool_eval.get("assistant_text") or "").strip()
-                recovery_text = str(tool_eval.get("recovery_text_if_blocked") or DEFAULT_CLARIFICATION).strip()
-                failed_planned_tool = tool_eval.get("tool_call")
-                if not isinstance(failed_planned_tool, dict):
-                    failed_planned_tool = {"function": "invalid_tool_call", "arguments": {}}
-                if reason == "repair_returned_answer" and assistant_text:
-                    planner_kind = (
-                        "send_message_fix"
-                        if _canonical_tool_name((failed_planned_tool or {}).get("function")) == "send_message"
-                        else "repaired_answer"
-                    )
-                    checker_reason = "complete"
-                    return _finish(
-                        text=assistant_text,
-                        status="done",
-                        checker_action_value="FINAL_ANSWER",
-                        checker_reason_value=checker_reason,
-                        planner_kind_value=planner_kind,
-                        planned_tool_override=failed_planned_tool,
-                        validation_status_override=validation_status,
-                        attempted_tool_override=str(tool_eval.get("attempted_tool") or ""),
-                    )
-
-                validation_failures_count += 1
-                planner_kind = round_planner_kind
-                checker_reason = f"validation_failed:{reason}"
-                return _finish(
-                    text=recovery_text,
-                    status="blocked",
-                    checker_action_value="NEED_USER_INFO",
-                    checker_reason_value=checker_reason,
+                    planner_kind_value=planner_kind,
                     planned_tool_override=failed_planned_tool,
                     validation_status_override=validation_status,
                     attempted_tool_override=str(tool_eval.get("attempted_tool") or ""),
                 )
+            if (
+                reason == "repair_returned_no_tool"
+                and _retry_allowed_within_limits()
+                and repair_returned_no_tool_retries < 2
+            ):
+                repair_returned_no_tool_retries += 1
+                checker_reason = "continue_after_repair_returned_no_tool"
+                critic_continue_count += 1
+                continue
 
-            planned_tool = tool_eval.get("tool_call") if isinstance(tool_eval.get("tool_call"), dict) else None
-            planner_text_is_tool_candidate = True
-            if not planned_tool:
-                validation_failures_count += 1
-                checker_reason = "validation_failed:invalid_tool_call"
-                return _finish(
-                    text=DEFAULT_CLARIFICATION,
-                    status="blocked",
-                    checker_action_value="NEED_USER_INFO",
-                    checker_reason_value=checker_reason,
-                    planned_tool_override={"function": "invalid_tool_call", "arguments": {}},
-                    validation_status_override=validation_status,
-                )
-            attempted_tool_for_ledger = str((planned_tool or {}).get("function") or attempted_tool_for_ledger or "")
+            validation_failures_count += 1
             planner_kind = round_planner_kind
+            checker_reason = f"validation_failed:{reason}"
+            return _finish(
+                text=recovery_text,
+                status="blocked",
+                checker_action_value="NEED_USER_INFO",
+                checker_reason_value=checker_reason,
+                planned_tool_override=failed_planned_tool,
+                validation_status_override=validation_status,
+                attempted_tool_override=str(tool_eval.get("attempted_tool") or ""),
+            )
+
+        planned_tool = tool_eval.get("tool_call") if isinstance(tool_eval.get("tool_call"), dict) else None
+        planner_text_is_tool_candidate = True
+        if not planned_tool:
+            validation_failures_count += 1
+            checker_reason = "validation_failed:invalid_tool_call"
+            return _finish(
+                text=DEFAULT_CLARIFICATION,
+                status="blocked",
+                checker_action_value="NEED_USER_INFO",
+                checker_reason_value=checker_reason,
+                planned_tool_override={"function": "invalid_tool_call", "arguments": {}},
+                validation_status_override=validation_status,
+            )
+        attempted_tool_for_ledger = str((planned_tool or {}).get("function") or attempted_tool_for_ledger or "")
+        planner_kind = round_planner_kind
 
         planner_kind = round_planner_kind
         if not isinstance(planned_tool, dict):
@@ -2722,7 +2524,7 @@ async def run_cerberus_turn(
             )
 
         tool_used = True
-        tool_user_text = _tool_call_effective_user_text(planned_tool, resolved_user_text)
+        tool_user_text = round_request_text
         tool_started = time.perf_counter()
         doer_exec = await _execute_tool_call(
             llm_client=llm_client,
@@ -2757,270 +2559,6 @@ async def run_cerberus_turn(
                     break
         tool_calls_used += 1
 
-        tool_func = _canonical_tool_name((planned_tool or {}).get("function"))
-        if tool_func == "get_plugin_help":
-            payload_obj = raw_tool_payload_out if isinstance(raw_tool_payload_out, dict) else {}
-            args_obj = (planned_tool or {}).get("arguments") if isinstance((planned_tool or {}).get("arguments"), dict) else {}
-            helped_plugin_id = _canonical_tool_name(payload_obj.get("plugin_id") or args_obj.get("plugin_id"))
-            if helped_plugin_id:
-                plugin_help_attempted.add(helped_plugin_id)
-            if (
-                isinstance(bad_args_help_pending, dict)
-                and helped_plugin_id
-                and helped_plugin_id == _canonical_tool_name(bad_args_help_pending.get("plugin_id"))
-                and not bool(payload_obj.get("ok"))
-            ):
-                bad_args_help_pending = None
-            if (
-                bool(payload_obj.get("ok"))
-                and isinstance(bad_args_help_pending, dict)
-                and helped_plugin_id
-                and helped_plugin_id == _canonical_tool_name(bad_args_help_pending.get("plugin_id"))
-            ):
-                if helped_plugin_id == plugin_help_prefetch_target:
-                    plugin_help_prefetch_target = ""
-                retry_call = _build_help_constrained_retry_tool_call(
-                    failed_tool_call=bad_args_help_pending.get("failed_tool_call"),
-                    help_payload=payload_obj,
-                    registry=registry,
-                )
-                bad_args_help_pending = None
-                if isinstance(retry_call, dict):
-                    if _retry_allowed_within_limits():
-                        queued_tool_call = retry_call
-                        queued_retry_tool_for_ledger = retry_call
-                        attempted_tool_for_ledger = str(retry_call.get("function") or attempted_tool_for_ledger or "")
-                        validation_status = {
-                            "status": "ok",
-                            "repair_used": True,
-                            "reason": "bad_args_help_retry",
-                            "attempts": 2,
-                            "ok": True,
-                            "tool_call": retry_call,
-                        }
-                        retries_signature = _tool_call_signature(retry_call)
-                        if retries_signature:
-                            bad_args_help_retry_signatures.add(retries_signature)
-                        repairs_used_count += 1
-                        checker_reason = "continue_after_bad_args_help_retry"
-                        planner_kind = "repaired_tool"
-                        planner_text_is_tool_candidate = True
-                        continue
-                    checker_reason = "bad_args_help_retry_budget_exhausted"
-                    return _finish(
-                        text="I need one more tool call to retry with the plugin's required argument schema.",
-                        status="blocked",
-                        checker_action_value="NEED_USER_INFO",
-                        checker_reason_value=checker_reason,
-                        retry_tool=retry_call,
-                    )
-            if (
-                bool(payload_obj.get("ok"))
-                and plugin_help_prefetch_target
-                and helped_plugin_id
-                and helped_plugin_id == plugin_help_prefetch_target
-            ):
-                plugin_help_prefetch_target = ""
-                checker_reason = "continue_after_plugin_help_read"
-                continue
-            if plugin_help_prefetch_target and helped_plugin_id and helped_plugin_id == plugin_help_prefetch_target:
-                plugin_help_prefetch_target = ""
-
-        if tool_func == "search_files":
-            payload_obj = raw_tool_payload_out if isinstance(raw_tool_payload_out, dict) else {}
-            search_ok = bool(payload_obj.get("ok"))
-            if (
-                search_ok
-                and str(validation_status.get("reason") or "").strip().lower() == "workspace_discovery_redirect"
-                and _retry_allowed_within_limits()
-            ):
-                queued_workspace_read = False
-                results = payload_obj.get("results")
-                if isinstance(results, list):
-                    for item in results:
-                        if not isinstance(item, dict):
-                            continue
-                        candidate_path = _normalize_abs_path(item.get("path"))
-                        if not candidate_path:
-                            continue
-                        if candidate_path in workspace_discovery_read_attempted_paths:
-                            continue
-                        workspace_discovery_read_attempted_paths.add(candidate_path)
-                        queued_tool_call = {"function": "read_file", "arguments": {"path": candidate_path}}
-                        queued_retry_tool_for_ledger = queued_tool_call
-                        attempted_tool_for_ledger = "read_file"
-                        validation_status = {
-                            "status": "ok",
-                            "repair_used": True,
-                            "reason": "workspace_discovery_read",
-                            "attempts": 2,
-                            "ok": True,
-                            "tool_call": queued_tool_call,
-                        }
-                        repairs_used_count += 1
-                        checker_reason = "continue_after_workspace_discovery_read"
-                        planner_kind = "repaired_tool"
-                        planner_text_is_tool_candidate = True
-                        queued_workspace_read = True
-                        break
-                if queued_workspace_read:
-                    continue
-
-        if tool_func == "search_web":
-            payload_obj = raw_tool_payload_out if isinstance(raw_tool_payload_out, dict) else {}
-            web_research_candidates = _extract_web_search_candidates(
-                payload_obj,
-                max_candidates=_WEB_RESEARCH_MAX_CANDIDATES,
-            )
-            web_research_seen_urls = set()
-            web_research_attempts = 0
-            web_research_active = bool(payload_obj.get("ok")) and bool(web_research_candidates) and not web_research_skip_deepening
-            if web_research_active and _retry_allowed_within_limits() and web_research_attempts < _WEB_RESEARCH_MAX_LINK_TRIES:
-                followup_call = _next_web_research_tool_call(
-                    candidates=web_research_candidates,
-                    seen_urls=web_research_seen_urls,
-                )
-                if isinstance(followup_call, dict):
-                    web_research_attempts += 1
-                    queued_tool_call = followup_call
-                    queued_retry_tool_for_ledger = followup_call
-                    attempted_tool_for_ledger = "inspect_webpage"
-                    validation_status = {
-                        "status": "ok",
-                        "repair_used": True,
-                        "reason": "web_research_followup",
-                        "attempts": 2,
-                        "ok": True,
-                        "tool_call": followup_call,
-                    }
-                    repairs_used_count += 1
-                    checker_reason = "continue_after_search_web_followup"
-                    planner_kind = "repaired_tool"
-                    planner_text_is_tool_candidate = True
-                    continue
-                web_research_active = False
-
-        if tool_func in {"inspect_webpage", "read_url"} and web_research_active:
-            payload_obj = raw_tool_payload_out if isinstance(raw_tool_payload_out, dict) else {}
-            if _web_inspection_is_sufficient(payload_obj):
-                web_research_active = False
-                web_research_candidates = []
-                web_research_seen_urls = set()
-                web_research_attempts = 0
-            else:
-                followup_call = None
-                if _retry_allowed_within_limits() and web_research_attempts < _WEB_RESEARCH_MAX_LINK_TRIES:
-                    followup_call = _next_web_research_tool_call(
-                        candidates=web_research_candidates,
-                        seen_urls=web_research_seen_urls,
-                    )
-                if isinstance(followup_call, dict):
-                    web_research_attempts += 1
-                    queued_tool_call = followup_call
-                    queued_retry_tool_for_ledger = followup_call
-                    attempted_tool_for_ledger = "inspect_webpage"
-                    validation_status = {
-                        "status": "ok",
-                        "repair_used": True,
-                        "reason": "web_research_next_link",
-                        "attempts": 2,
-                        "ok": True,
-                        "tool_call": followup_call,
-                    }
-                    repairs_used_count += 1
-                    checker_reason = "continue_after_web_research_next_link"
-                    planner_kind = "repaired_tool"
-                    planner_text_is_tool_candidate = True
-                    continue
-                web_research_active = False
-                web_research_candidates = []
-                web_research_seen_urls = set()
-                web_research_attempts = 0
-
-        if tool_func not in {"search_web", "inspect_webpage", "read_url"}:
-            web_research_active = False
-            web_research_candidates = []
-            web_research_seen_urls = set()
-            web_research_attempts = 0
-
-        if tool_func == "ai_tasks":
-            task_status = _ai_tasks_schedule_status(
-                payload=raw_tool_payload_out,
-                checker_result=normalized_checker_result_out,
-            )
-            if bool(task_status.get("created")):
-                if task_status.get("success_text"):
-                    draft_response = str(task_status.get("success_text") or "").strip()
-                else:
-                    draft_response = str(draft_response or "Scheduled task created.").strip()
-
-        bad_args_failure, bad_args_reason = _looks_like_bad_args_plugin_failure(
-            tool_call=planned_tool,
-            tool_result=tool_result_for_checker,
-            payload=raw_tool_payload_out,
-            registry=registry,
-        )
-        if bad_args_failure:
-            failed_signature = _tool_call_signature(planned_tool)
-            already_retried = bool(failed_signature and failed_signature in bad_args_help_retry_signatures)
-            if not already_retried:
-                retry_plugin_id = _plugin_tool_id_for_call(planned_tool, registry)
-                help_retry_call = {"function": "get_plugin_help", "arguments": {"plugin_id": retry_plugin_id}}
-                if _retry_allowed_within_limits() and retry_plugin_id:
-                    if failed_signature:
-                        bad_args_help_retry_signatures.add(failed_signature)
-                    bad_args_help_pending = {
-                        "plugin_id": retry_plugin_id,
-                        "failed_tool_call": planned_tool,
-                        "reason": bad_args_reason or "bad_args",
-                    }
-                    queued_tool_call = help_retry_call
-                    queued_retry_tool_for_ledger = help_retry_call
-                    attempted_tool_for_ledger = "get_plugin_help"
-                    validation_status = {
-                        "status": "ok",
-                        "repair_used": True,
-                        "reason": "bad_args_help_lookup",
-                        "attempts": 2,
-                        "ok": True,
-                        "tool_call": help_retry_call,
-                    }
-                    repairs_used_count += 1
-                    checker_reason = f"continue_after_bad_args_help:{bad_args_reason or 'bad_args'}"
-                    planner_kind = "repaired_tool"
-                    planner_text_is_tool_candidate = True
-                    continue
-                checker_reason = "bad_args_help_budget_exhausted"
-                return _finish(
-                    text="I need one more tool call to fetch that plugin's argument schema before retrying.",
-                    status="blocked",
-                    checker_action_value="NEED_USER_INFO",
-                    checker_reason_value=checker_reason,
-                    retry_tool=help_retry_call,
-                    attempted_tool_override=retry_plugin_id or tool_func,
-                )
-
-        overwrite_retry_call = _build_overwrite_retry_tool_call(
-            tool_call=planned_tool,
-            payload=raw_tool_payload_out,
-            user_text=tool_user_text or user_text,
-        )
-        if isinstance(overwrite_retry_call, dict):
-            if _retry_allowed_within_limits():
-                queued_tool_call = overwrite_retry_call
-                queued_retry_tool_for_ledger = overwrite_retry_call
-                repairs_used_count += 1
-                checker_reason = "continue_after_overwrite_retry"
-                continue
-            checker_reason = "overwrite_retry_budget_exhausted"
-            return _finish(
-                text="That plugin already exists and needs overwrite confirmation, but I hit this turn's tool-call limit.",
-                status="blocked",
-                checker_action_value="NEED_USER_INFO",
-                checker_reason_value=checker_reason,
-                retry_tool=overwrite_retry_call,
-            )
-
         agent_state = await _run_doer_state_update(
             llm_client=llm_client,
             platform=platform,
@@ -3030,6 +2568,14 @@ async def run_cerberus_turn(
             tool_result=tool_result_for_checker,
             max_tokens=doer_max_tokens,
         )
+        if structured_plan_queue:
+            if isinstance(tool_result_for_checker, dict) and bool(tool_result_for_checker.get("ok")):
+                structured_plan_queue = structured_plan_queue[1:]
+            agent_state = _sync_agent_state_with_plan_queue(
+                agent_state=agent_state,
+                plan_queue=structured_plan_queue,
+                fallback_goal=resolved_user_text or user_text,
+            )
         _save_persistent_agent_state(
             redis_client=r,
             platform=platform,
@@ -3037,55 +2583,10 @@ async def run_cerberus_turn(
             state=agent_state,
         )
 
-        routed_call = _is_routed_multi_intent_tool_call(planned_tool)
-        routed_ok = isinstance(tool_result_for_checker, dict) and bool(tool_result_for_checker.get("ok"))
-        if routed_call and routed_ok:
-            routed_summary = str((tool_result_for_checker or {}).get("summary_for_user") or "").strip()
-            if routed_summary:
-                multi_intent_routed_summaries.append(routed_summary)
-
-        if multi_intent_routed_queue and routed_call:
-            if routed_ok:
-                if _retry_allowed_within_limits():
-                    queued_tool_call = dict(multi_intent_routed_queue.pop(0))
-                    queued_retry_tool_for_ledger = queued_tool_call
-                    attempted_tool_for_ledger = str(queued_tool_call.get("function") or attempted_tool_for_ledger or "")
-                    validation_status = {
-                        "status": "ok",
-                        "repair_used": False,
-                        "reason": "multi_intent_route",
-                        "attempts": 1,
-                        "ok": True,
-                        "tool_call": queued_tool_call,
-                    }
-                    checker_reason = "continue_multi_intent_route"
-                    planner_kind = "tool"
-                    planner_text_is_tool_candidate = True
-                    continue
-                checker_reason = "multi_intent_route_budget_exhausted"
-                return _finish(
-                    text="I completed part of that multi-action request but hit this turn's tool-call limit before finishing the rest.",
-                    status="blocked",
-                    checker_action_value="NEED_USER_INFO",
-                    checker_reason_value=checker_reason,
-                    retry_tool=dict(multi_intent_routed_queue[0]) if multi_intent_routed_queue else None,
-                )
-            multi_intent_routing_active = False
-            multi_intent_routed_queue = []
-
-        if routed_call and routed_ok and multi_intent_routing_active and not multi_intent_routed_queue:
-            final_multi_intent_text = _compose_multi_intent_route_answer(
-                multi_intent_routed_summaries,
-                fallback=draft_response,
-            )
-            checker_reason = "complete_multi_intent_route"
-            return _finish(
-                text=final_multi_intent_text or draft_response or DEFAULT_CLARIFICATION,
-                status="done",
-                checker_action_value="FINAL_ANSWER",
-                checker_reason_value=checker_reason,
-                retry_tool=queued_retry_tool_for_ledger,
-            )
+        if structured_plan_queue and isinstance(tool_result_for_checker, dict) and bool(tool_result_for_checker.get("ok")):
+            checker_reason = "continue_plan_step"
+            critic_continue_count += 1
+            continue
 
         checker_started = time.perf_counter()
         checker_decision = await _run_checker(
@@ -3098,7 +2599,7 @@ async def run_cerberus_turn(
             planned_tool=planned_tool,
             tool_result=tool_result_for_checker,
             draft_response=draft_response,
-            retry_allowed=_retry_allowed_within_limits() and not suppress_tools_for_turn,
+            retry_allowed=_retry_allowed_within_limits(),
             platform_preamble=platform_preamble,
             max_tokens=checker_max_tokens,
         )
@@ -3116,7 +2617,7 @@ async def run_cerberus_turn(
                 user_text=resolved_user_text or user_text,
                 final_text=final_text_candidate,
                 agent_state=agent_state,
-                retry_allowed=_retry_allowed_within_limits() and not suppress_tools_for_turn,
+                retry_allowed=_retry_allowed_within_limits(),
             ):
                 checker_reason = "continue_after_incomplete_final_answer"
                 critic_continue_count += 1
@@ -3132,39 +2633,14 @@ async def run_cerberus_turn(
 
         if checker_action == "NEED_USER_INFO":
             need_text = str(checker_decision.get("text") or DEFAULT_CLARIFICATION).strip()
-            repaired_need = await _repair_need_user_info_if_overclar(
-                llm_client=llm_client,
-                platform=platform,
-                user_text=resolved_user_text or user_text,
-                question_text=need_text,
-                tool_index=tool_index,
-                platform_preamble=platform_preamble,
-                max_tokens=overclar_repair_max_tokens,
+            checker_reason = "needs_user_input"
+            return _finish(
+                text=need_text,
+                status="blocked",
+                checker_action_value="NEED_USER_INFO",
+                checker_reason_value=checker_reason,
+                retry_tool=queued_retry_tool_for_ledger,
             )
-            if bool(repaired_need.get("repaired")):
-                repairs_used_count += 1
-            repaired_kind = str(repaired_need.get("kind") or "NEED_USER_INFO").strip().upper()
-            if repaired_kind == "RETRY_TOOL":
-                checker_action = "RETRY_TOOL"
-                checker_decision = {"kind": "RETRY_TOOL", "text": str(repaired_need.get("text") or "").strip()}
-            elif repaired_kind == "FINAL_ANSWER":
-                checker_reason = "overclar_repaired"
-                return _finish(
-                    text=str(repaired_need.get("text") or need_text or DEFAULT_CLARIFICATION).strip(),
-                    status="done",
-                    checker_action_value="FINAL_ANSWER",
-                    checker_reason_value=checker_reason,
-                    retry_tool=queued_retry_tool_for_ledger,
-                )
-            else:
-                checker_reason = "needs_user_input"
-                return _finish(
-                    text=need_text,
-                    status="blocked",
-                    checker_action_value="NEED_USER_INFO",
-                    checker_reason_value=checker_reason,
-                    retry_tool=queued_retry_tool_for_ledger,
-                )
 
         if checker_action == "RETRY_TOOL":
             retry_text = str(checker_decision.get("text") or "").strip()
@@ -3180,7 +2656,7 @@ async def run_cerberus_turn(
                 registry=registry,
                 enabled_predicate=enabled_predicate,
                 tool_index=tool_index,
-                user_text=user_text,
+                user_text=round_request_text,
                 origin=origin_payload,
                 scope=scope,
                 history_messages=history,
@@ -3204,11 +2680,7 @@ async def run_cerberus_turn(
                 if not isinstance(failed_retry_tool, dict):
                     failed_retry_tool = {"function": "invalid_tool_call", "arguments": {}}
                 if reason == "repair_returned_answer" and assistant_text:
-                    planner_kind_value = (
-                        "send_message_fix"
-                        if _canonical_tool_name((failed_retry_tool or {}).get("function")) == "send_message"
-                        else "repaired_answer"
-                    )
+                    planner_kind_value = "repaired_answer"
                     checker_reason = "complete"
                     return _finish(
                         text=assistant_text,
@@ -3220,6 +2692,15 @@ async def run_cerberus_turn(
                         validation_status_override=retry_validation,
                         attempted_tool_override=str(retry_eval.get("attempted_tool") or ""),
                     )
+                if (
+                    reason == "repair_returned_no_tool"
+                    and _retry_allowed_within_limits()
+                    and repair_returned_no_tool_retries < 2
+                ):
+                    repair_returned_no_tool_retries += 1
+                    checker_reason = "continue_after_repair_returned_no_tool"
+                    critic_continue_count += 1
+                    continue
                 validation_failures_count += 1
                 checker_reason = f"validation_failed:{reason}"
                 return _finish(
@@ -3243,7 +2724,6 @@ async def run_cerberus_turn(
                     planned_tool_override={"function": "invalid_tool_call", "arguments": {}},
                     validation_status_override=retry_validation,
                 )
-            queued_tool_call = queued
             queued_retry_tool_for_ledger = queued
             validation_status = retry_validation
             critic_continue_count += 1
@@ -3278,7 +2758,7 @@ async def run_cerberus_turn(
         planned_tool=planned_tool,
         tool_result=tool_result_for_checker,
         draft_response=best_effort,
-        retry_allowed=_retry_allowed_within_limits() and not suppress_tools_for_turn,
+        retry_allowed=_retry_allowed_within_limits(),
         platform_preamble=platform_preamble,
         max_tokens=checker_max_tokens,
     )
@@ -3287,39 +2767,14 @@ async def run_cerberus_turn(
 
     if checker_action == "NEED_USER_INFO":
         need_text = str(checker_decision.get("text") or pending_question or DEFAULT_CLARIFICATION).strip()
-        repaired_need = await _repair_need_user_info_if_overclar(
-            llm_client=llm_client,
-            platform=platform,
-            user_text=resolved_user_text or user_text,
-            question_text=need_text,
-            tool_index=tool_index,
-            platform_preamble=platform_preamble,
-            max_tokens=overclar_repair_max_tokens,
+        checker_reason = "needs_user_input"
+        return _finish(
+            text=need_text,
+            status="blocked",
+            checker_action_value="NEED_USER_INFO",
+            checker_reason_value=checker_reason,
+            retry_tool=queued_retry_tool_for_ledger,
         )
-        if bool(repaired_need.get("repaired")):
-            repairs_used_count += 1
-        repaired_kind = str(repaired_need.get("kind") or "NEED_USER_INFO").strip().upper()
-        if repaired_kind == "RETRY_TOOL":
-            checker_action = "RETRY_TOOL"
-            checker_decision = {"kind": "RETRY_TOOL", "text": str(repaired_need.get("text") or "").strip()}
-        elif repaired_kind == "FINAL_ANSWER":
-            checker_reason = "overclar_repaired"
-            return _finish(
-                text=str(repaired_need.get("text") or need_text or DEFAULT_CLARIFICATION).strip(),
-                status="done",
-                checker_action_value="FINAL_ANSWER",
-                checker_reason_value=checker_reason,
-                retry_tool=queued_retry_tool_for_ledger,
-            )
-        else:
-            checker_reason = "needs_user_input"
-            return _finish(
-                text=need_text,
-                status="blocked",
-                checker_action_value="NEED_USER_INFO",
-                checker_reason_value=checker_reason,
-                retry_tool=queued_retry_tool_for_ledger,
-            )
 
     if checker_action == "RETRY_TOOL":
         retry_tool = parse_function_json(str(checker_decision.get("text") or ""))
@@ -3336,13 +2791,14 @@ async def run_cerberus_turn(
         )
 
     checker_reason = _tool_failure_checker_reason(tool_result_for_checker) or checker_reason or "complete"
+    final_text_candidate = _select_final_answer_text(
+        checker_decision=checker_decision,
+        draft_response=best_effort,
+        user_text=resolved_user_text or user_text,
+        tool_result=tool_result_for_checker,
+    )
     return _finish(
-        text=_select_final_answer_text(
-            checker_decision=checker_decision,
-            draft_response=best_effort,
-            user_text=resolved_user_text or user_text,
-            tool_result=tool_result_for_checker,
-        ),
+        text=final_text_candidate,
         status="done",
         checker_action_value="FINAL_ANSWER",
         checker_reason_value=checker_reason,

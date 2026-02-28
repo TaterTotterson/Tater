@@ -12,6 +12,21 @@ def memory_context_settings(redis_client: Any) -> Dict[str, Any]:
     return settings if isinstance(settings, dict) else {}
 
 
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
+
+
 def memory_context_min_confidence(
     redis_client: Any,
     *,
@@ -114,7 +129,7 @@ def memory_context_user_id(
     *,
     origin_value_fn: Callable[..., str],
 ) -> str:
-    return origin_value_fn(origin, "user_id", "user", "username", "sender", "dm_user_id")
+    return origin_value_fn(origin, "user_id", "dm_user_id", "user", "username", "sender")
 
 
 def memory_context_user_display_name(
@@ -215,19 +230,27 @@ def memory_context_payload(
     value_max_chars = memory_context_value_max_chars_fn(redis_client)
     summary_max_chars = memory_context_summary_max_chars_fn(redis_client)
     normalized_platform = normalize_platform_fn(platform)
+    settings = memory_context_settings(redis_client)
+    auto_link_identities = _as_bool(
+        settings.get("auto_link_identities") if isinstance(settings, dict) else None,
+        False,
+    )
     out: Dict[str, Any] = {}
 
     user_id = memory_context_user_id_fn(origin)
     if user_id:
         display_name = memory_context_user_display_name_fn(origin)
-        user_key = resolve_memory_user_doc_key_fn(
-            redis_client,
-            normalized_platform,
-            user_id,
-            create=False,
-            display_name=display_name or user_id,
-            auto_link_name=True,
-        ) or memory_user_doc_key_fn(normalized_platform, user_id)
+        if auto_link_identities:
+            user_key = resolve_memory_user_doc_key_fn(
+                redis_client,
+                normalized_platform,
+                user_id,
+                create=False,
+                display_name=display_name or user_id,
+                auto_link_name=True,
+            ) or memory_user_doc_key_fn(normalized_platform, user_id)
+        else:
+            user_key = memory_user_doc_key_fn(normalized_platform, user_id)
         try:
             user_doc = load_memory_platform_doc_fn(redis_client, user_key)
         except Exception:

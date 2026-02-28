@@ -160,7 +160,17 @@ async def execute_tool_call(
             enabled_predicate=enabled_predicate,
             origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
         )
-        normalized_payload = normalize_plugin_result_fn(payload)
+        normalize_source = payload
+        if func == "get_plugin_help" and isinstance(payload, dict) and "ok" not in payload:
+            normalize_source = dict(payload)
+            normalize_source["ok"] = not bool(payload.get("error"))
+            if not str(normalize_source.get("summary_for_user") or "").strip():
+                plugin_id = str(normalize_source.get("plugin_id") or "").strip()
+                if plugin_id:
+                    normalize_source["summary_for_user"] = (
+                        f"Loaded plugin help for {plugin_id}. Use usage_example for exact call shape."
+                    )
+        normalized_payload = normalize_plugin_result_fn(normalize_source)
     else:
         if plugin_obj and not plugin_supports_platform_fn(plugin_obj, platform):
             available_on = expand_plugin_platforms_fn(getattr(plugin_obj, "platforms", []) or [])

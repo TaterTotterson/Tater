@@ -314,8 +314,10 @@ def extract_json(text: str):
 
 TOOL_MARKUP_REPAIR_PROMPT = (
     "Formatting error: do not emit tool channel markup like <|channel|> or to=... . "
-    "If you need to call a tool, respond only with JSON: "
-    "{\"function\":\"name\",\"arguments\":{...}}. Otherwise respond normally."
+    "If you need to call a tool, respond with exactly ONE strict JSON object and nothing else: "
+    "{\"function\":\"name\",\"arguments\":{...}}. "
+    "Do not include extra prose, and do not output multiple tool calls. "
+    "Otherwise respond with NO_TOOL."
 )
 TOOL_MARKUP_FAILURE_TEXT = "Sorry, I had trouble formatting a tool call. Please try again."
 
@@ -330,6 +332,12 @@ def looks_like_tool_markup(text: str) -> bool:
     return False
 
 def parse_function_json(response_text: str):
+    _DECISION_PREFIX_RE = re.compile(
+        r"^\s*(FINAL[\s_-]*ANSWER|RETRY[\s_-]*TOOL|NEED[\s_-]*USER[\s_-]*INFO|ANSWER|NO_TOOL)\s*:\s*(.*)$",
+        re.IGNORECASE | re.DOTALL,
+    )
+    _NON_TOOL_PREFIXES = {"retry_tool", "final_answer", "need_user_info", "answer", "no_tool"}
+
     def _pick(obj):
         if isinstance(obj, dict):
             if "function" in obj and isinstance(obj["function"], str):
@@ -372,7 +380,25 @@ def parse_function_json(response_text: str):
     if s.endswith("```"):
         s = re.sub(r"\s*```$", "", s, flags=re.MULTILINE).strip()
 
-    # Accept shorthand ONLY when it's the whole message: ha_control{"query":"..."}
+    # Handle channel wrappers:
+    #   <|channel|>final ANSWER<|message|>RETRY_TOOL: {...}
+    if "<|message|>" in s:
+        s = s.rsplit("<|message|>", 1)[-1].strip()
+
+    # Handle checker decision wrappers:
+    #   RETRY_TOOL: {...}
+    #   FINAL_ANSWER: ...
+    decision_match = _DECISION_PREFIX_RE.match(s)
+    if decision_match:
+        decision_kind = str(decision_match.group(1) or "").strip().lower().replace(" ", "_").replace("-", "_")
+        decision_body = str(decision_match.group(2) or "").strip()
+        if decision_kind.startswith("retry"):
+            s = decision_body
+        else:
+            # FINAL_ANSWER / NEED_USER_INFO / NO_TOOL are not tool calls.
+            return None
+
+    # Accept shorthand ONLY when it's the whole message: plugin_id{"arg":"..."}
     m = re.match(r'^([a-zA-Z0-9_]+)\s*(\{.*\})\s*$', s, re.DOTALL)
     if m:
         func = m.group(1)
@@ -398,14 +424,24 @@ def parse_function_json(response_text: str):
 
         # Slightly stricter "possible func" match
         m2 = re.search(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\s*[:(]*\s*$', prefix)
-        if m2 and json_str:
-            possible_func = m2.group(1)
+        if json_str:
             try:
                 args = json.loads(json_str)
-                if isinstance(args, dict):
-                    return {"function": possible_func, "arguments": args}
+                picked = _pick(args)
+                if picked:
+                    return picked
             except Exception:
-                pass
+                args = None
+
+            if m2:
+                possible_func = str(m2.group(1) or "").strip()
+                if possible_func and possible_func.lower() not in _NON_TOOL_PREFIXES:
+                    try:
+                        args = json.loads(json_str)
+                        if isinstance(args, dict):
+                            return {"function": possible_func, "arguments": args}
+                    except Exception:
+                        pass
 
         if json_str:
             try:

@@ -93,7 +93,10 @@ PLATFORM_SETTINGS = {
             "label": "Write User Memory",
             "type": "checkbox",
             "default": True,
-            "description": "Enable writes to cross-platform identity docs (mem:user:identity:{identity_id}).",
+            "description": (
+                "Enable writes to durable user docs. With auto-link on: mem:user:identity:{identity_id}; "
+                "with auto-link off: mem:user:{platform}:{user_id}."
+            ),
         },
         "write_room_memory": {
             "label": "Write Room Memory",
@@ -104,7 +107,7 @@ PLATFORM_SETTINGS = {
         "auto_link_identities": {
             "label": "Auto-link Identity by Name",
             "type": "checkbox",
-            "default": True,
+            "default": False,
             "description": "Automatically map matching usernames across platforms to one shared identity profile.",
         },
     },
@@ -416,7 +419,7 @@ def _load_settings() -> Dict[str, Any]:
         "extraction_max_tokens": _as_int(settings.get("extraction_max_tokens"), 2700, min_value=200, max_value=4000),
         "write_user_memory": _as_bool(settings.get("write_user_memory"), True),
         "write_room_memory": _as_bool(settings.get("write_room_memory"), True),
-        "auto_link_identities": _as_bool(settings.get("auto_link_identities"), True),
+        "auto_link_identities": _as_bool(settings.get("auto_link_identities"), False),
     }
 
 
@@ -583,6 +586,9 @@ def _normalize_history_entry(
             username = preferred
     if role == "assistant":
         user_id = "assistant"
+    elif entry_user_id and entry_user_id.lower() not in {"assistant", "unknown_user"}:
+        # Prefer stable platform IDs when present; this avoids cross-user merges by display name.
+        user_id = entry_user_id
     elif username:
         user_id = username
     elif platform in {"homeassistant", "homekit", "xbmc"}:
@@ -651,14 +657,17 @@ def _existing_user_profile_snapshot(
             if isinstance(user_display_names, dict)
             else ""
         )
-        doc_key = resolve_user_doc_key(
-            redis_client,
-            platform,
-            user_id,
-            create=False,
-            display_name=display_name or user_id,
-            auto_link_name=bool(auto_link_identities),
-        ) or user_doc_key(platform, user_id)
+        if bool(auto_link_identities):
+            doc_key = resolve_user_doc_key(
+                redis_client,
+                platform,
+                user_id,
+                create=False,
+                display_name=display_name or user_id,
+                auto_link_name=True,
+            ) or user_doc_key(platform, user_id)
+        else:
+            doc_key = user_doc_key(platform, user_id)
         try:
             doc = load_doc(redis_client, doc_key, now=now_ts)
         except Exception:
@@ -951,7 +960,7 @@ def _process_scope(
     extraction_max_tokens = _as_int(settings.get("extraction_max_tokens"), 2700, min_value=200, max_value=4000)
     write_user_memory = _as_bool(settings.get("write_user_memory"), True)
     write_room_memory = _as_bool(settings.get("write_room_memory"), True)
-    auto_link_identities = _as_bool(settings.get("auto_link_identities"), True)
+    auto_link_identities = _as_bool(settings.get("auto_link_identities"), False)
 
     cursor_redis_key = cursor_key(platform, scope_id)
     raw_cursor = redis_client.get(cursor_redis_key)
@@ -1054,14 +1063,17 @@ def _process_scope(
         for user_id, rows in by_user.items():
             display_name = _as_text(user_display_names.get(user_id)).strip() or user_id
             legacy_key = user_doc_key(platform, user_id)
-            u_key = resolve_user_doc_key(
-                redis_client,
-                platform,
-                user_id,
-                create=True,
-                display_name=display_name,
-                auto_link_name=bool(auto_link_identities),
-            ) or legacy_key
+            if bool(auto_link_identities):
+                u_key = resolve_user_doc_key(
+                    redis_client,
+                    platform,
+                    user_id,
+                    create=True,
+                    display_name=display_name,
+                    auto_link_name=True,
+                ) or legacy_key
+            else:
+                u_key = legacy_key
             user_doc = load_doc(redis_client, u_key, now=ts_now)
             user_changed = False
             if u_key != legacy_key:

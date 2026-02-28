@@ -100,6 +100,13 @@ def plugin_when_to_use(plugin: Any) -> str:
     return first_sentence or desc
 
 
+def plugin_how_to_use(plugin: Any) -> str:
+    explicit = _coerce_attr_text(getattr(plugin, "how_to_use", None))
+    if explicit:
+        return explicit
+    return "Use usage_example for exact call shape."
+
+
 def _find_first_json_object(text: str) -> Optional[str]:
     if not text:
         return None
@@ -234,8 +241,6 @@ def plugin_arguments_help(plugin: Any) -> Dict[str, List[Dict[str, str]]]:
         return {"required": req_items, "optional": opt_items}
 
     usage_args = _extract_usage_arguments(plugin)
-    optional_names = set(getattr(plugin, "optional_args", []) or [])
-    required_names = set(getattr(plugin, "required_args", []) or [])
     req_items: List[Dict[str, str]] = []
     opt_items: List[Dict[str, str]] = []
 
@@ -244,17 +249,7 @@ def plugin_arguments_help(plugin: Any) -> Dict[str, List[Dict[str, str]]]:
         if name == "origin":
             continue
         item = {"name": name, "type": _infer_type(val), "description": ""}
-        if required_names:
-            if name in required_names:
-                req_items.append(item)
-            else:
-                opt_items.append(item)
-            continue
-
-        if name in optional_names:
-            opt_items.append(item)
-        else:
-            req_items.append(item)
+        req_items.append(item)
 
     return {"required": req_items, "optional": opt_items}
 
@@ -274,49 +269,18 @@ def get_plugin_help(
             "error": {"code": "unknown_plugin", "message": f"Plugin '{pid}' was not found."},
         }
 
-    expanded_platforms = expand_plugin_platforms(getattr(plugin, "platforms", []) or [])
-    arg_help = plugin_arguments_help(plugin)
     usage = _canonical_usage_example(plugin, pid)
     examples = getattr(plugin, "example_calls", None)
     if not isinstance(examples, list) or not examples:
         examples = [usage] if usage else []
-
-    raw_missing = getattr(plugin, "missing_info_prompts", []) or []
-    missing_info_prompts = [str(x).strip() for x in raw_missing if str(x).strip()][:5]
-
-    missing_prompts = getattr(plugin, "missing_info_prompts", None)
-    if not isinstance(missing_prompts, list):
-        missing_prompts = []
-        for item in arg_help["required"][:3]:
-            missing_prompts.append(f"What should I use for `{item['name']}`?")
+    how_to_use = plugin_how_to_use(plugin)
 
     payload: Dict[str, Any] = {
-        "tool": "get_plugin_help",
-        "ok": True,
         "plugin_id": pid,
-        "plugin_name": plugin_display_name(plugin),
-        "description": str(getattr(plugin, "description", "") or ""),
-        "when_to_use": str(plugin_when_to_use(plugin) or ""),
-        "common_needs": list(getattr(plugin, "common_needs", []) or []),
-        "missing_info_prompts": missing_info_prompts,
-        "supported_platforms": expanded_platforms,
-        "required_settings": _required_settings_summary(plugin),
+        "how_to_use": str(how_to_use or ""),
         "usage_example": usage,
-        "required_args": arg_help["required"],
-        "optional_args": arg_help["optional"],
-        "example_calls": [str(x).strip() for x in examples[:2] if str(x).strip()],
-        "platforms": expanded_platforms,
-        "common_missing_info_prompts": [str(x).strip() for x in missing_prompts if str(x).strip()][:5],
+        "example_calls": [str(x).strip() for x in examples if str(x).strip()],
     }
-
-    p = normalize_platform(platform)
-    if p:
-        payload["platform"] = p
-        payload["compatible"] = p in expanded_platforms
-        if p not in expanded_platforms:
-            payload["platform_behavior"] = (
-                f"Not available on {p}. Available on: {', '.join(expanded_platforms) or 'none'}."
-            )
     return payload
 
 

@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://github.com/user-attachments/assets/d15d39af-51fe-40a7-aefe-df6fb9a62e37" alt="Tater AI Assistant" width="300"/>
+  <img src="images/tater-new-logo.png" alt="Tater AI Assistant" width="300"/>
 </div>
 
 **Tater** is an AI assistant that connects to any OpenAI-compatible LLM, giving you a powerful set of AI-driven tools. It includes a WebUI for setup and private chats, and works across **Discord**, **Telegram**, **IRC**, **Matrix**, **Home Assistant**, **HomeKit**, and even the **OG Xbox via XBMC4Xbox**
@@ -15,33 +15,33 @@ Tater runs on Cerberus — a closed-loop Planner → Doer → Checker architectu
 
 | Platform          | Description |
 |-------------------|-------------|
-| `discord`         | Full-featured Discord bot that runs compatible plugins and supports rich interactions, media output, and background jobs. |
+| `discord`         | Full-featured Discord bot that runs compatible Verba Plugins and supports rich interactions, media output, and background jobs. |
 | `homeassistant`   | Native integration for [Home Assistant](https://github.com/TaterTotterson/Tater-HomeAssistant), allowing Tater to act as a voice-enabled AI assistant through the Assist pipeline and control smart devices directly. |
 | `ha_automations`  | Lightweight Home Assistant automation-only endpoint for direct tool execution. Designed for fast, reliable automations like camera events, doorbell alerts, weather summaries, and dashboard sensors. Intended to be used with the [Tater Automations](https://github.com/TaterTotterson/tater_automations) custom component, which provides a native “Call Tater automation tool” action in Home Assistant. |
 | `ai_task`         | Built-in scheduled task runner for timed and recurring AI jobs, with delivery routed through notifier platforms (Discord, Telegram, Matrix, IRC, Home Assistant, and more). |
 | `memory_platform` | Background memory extraction platform that incrementally scans chat history, builds structured user/room memory profiles in Redis, and injects compact memory context into Cerberus. |
-| `homekit`         | Siri / Apple Shortcuts integration for [HomeKit](https://github.com/TaterTotterson/Tater/wiki/How-to-Build-the-%E2%80%9CTater%E2%80%9D-Shortcut), enabling “Hey Siri, ask Tater…” voice commands, per-device conversation sessions, and plugin-backed actions. |
-| `irc`             | Lightweight IRC bot that responds to mentions and runs compatible plugins. |
-| `matrix`          | Modern Matrix client with end-to-end encryption support, Markdown rendering, and full plugin compatibility — bringing Tater to federated chat networks like Element and Cinny. |
-| `telegram`        | Telegram bot integration with chat allowlists, DM user restrictions, queued notifications, media delivery, and plugin-backed tool execution. |
-| `xbmc`            | OG Xbox integration for **XBMC4Xbox**, provided by the custom Cortana-powered skin and script at [skin.cortana.tater-xbmc](https://github.com/TaterTotterson/skin.cortana.tater-xbmc), enabling an on-console AI assistant with chat history, quick asks, and plugin-powered actions. |
-| `webui`           | Streamlit-based WebUI for chatting, configuring plugins, and managing settings. |
+| `homekit`         | Siri / Apple Shortcuts integration for [HomeKit](https://github.com/TaterTotterson/Tater/wiki/How-to-Build-the-%E2%80%9CTater%E2%80%9D-Shortcut), enabling “Hey Siri, ask Tater…” voice commands, per-device conversation sessions, and Verba Plugin-backed actions. |
+| `irc`             | Lightweight IRC bot that responds to mentions and runs compatible Verba Plugins. |
+| `matrix`          | Modern Matrix client with end-to-end encryption support, Markdown rendering, and full Verba Plugin compatibility — bringing Tater to federated chat networks like Element and Cinny. |
+| `telegram`        | Telegram bot integration with chat allowlists, DM user restrictions, queued notifications, media delivery, and Verba Plugin-backed tool execution. |
+| `xbmc`            | OG Xbox integration for **XBMC4Xbox**, provided by the custom Cortana-powered skin and script at [skin.cortana.tater-xbmc](https://github.com/TaterTotterson/skin.cortana.tater-xbmc), enabling an on-console AI assistant with chat history, quick asks, and Verba Plugin-powered actions. |
+| `webui`           | Streamlit-based WebUI for chatting, configuring Verba Plugins, and managing settings. |
 
 
-## 🧩 Tater Plugin Ecosystem
+## 🧩 Tater Verba Plugin Ecosystem
 
-Tater now uses a **remote plugin store**.  
-Plugins are no longer bundled with Tater — they are installed, updated, and restored automatically from the Tater Shop.
+Tater now uses a **remote Verba Plugin Store**.  
+Verba Plugins are no longer bundled with Tater — they are installed, updated, and restored automatically from the Tater Shop.
 
-### 🛒 Tater Plugin Store
+### 🛒 Tater Verba Plugin Store
 
-All plugins, versions, descriptions, and update history now live here:
+All Verba Plugins, versions, descriptions, and update history now live here:
 
 👉 **https://github.com/TaterTotterson/Tater_Shop**
 
 ---
 
-### 🔍 Browsing Plugins
+### 🔍 Browsing Verba Plugins
 
 From the WebUI you can:
 
@@ -57,7 +57,7 @@ From the WebUI you can:
 
 When Tater starts:
 
-- Any plugin that was **enabled** in Redis but missing on disk  
+- Any Verba Plugin that was **enabled** in Redis but missing on disk  
 - is automatically re-downloaded from the store.
 
 No config loss. No manual installs. No volume mapping required.
@@ -101,7 +101,7 @@ https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repositor
 
 Once added, the following add-ons will appear in the Home Assistant Add-on Store:
 
-- **Redis Stack** – required for Tater memory, plugins, and automations
+- **Redis Stack** – required for Tater memory, Verba Plugins, and automations
 - **Tater AI Assistant** – the main Tater service
 
 #### Install order
@@ -120,12 +120,12 @@ Tater AI supports deeper integration with Home Assistant through a couple of com
 ### 📍 Tater-HomeAssistant
 https://github.com/TaterTotterson/Tater-HomeAssistant
 
-A Home Assistant **custom integration** that allows Tater to function as a **Conversation Agent** inside Home Assistant’s Assist pipeline. This enables voice or text interactions from Home Assistant to be routed directly to your Tater backend, where plugins can be executed and contextual responses returned.
+A Home Assistant **custom integration** that allows Tater to function as a **Conversation Agent** inside Home Assistant’s Assist pipeline. This enables voice or text interactions from Home Assistant to be routed directly to your Tater backend, where Verba Plugins can be executed and contextual responses returned.
 
 Key benefits:
 - Use Tater as a native **voice and text assistant** within Home Assistant
 - Routes Assist queries directly to your running Tater AI backend
-- Supports plugins that implement `handle_homeassistant(...)`
+- Supports Verba Plugins that implement `handle_homeassistant(...)`
 - Maintains conversation context for more natural, multi-turn interactions
 
 This integration is required if you want Tater to participate directly in Home Assistant conversations or voice control.
