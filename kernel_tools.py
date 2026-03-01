@@ -38,7 +38,6 @@ from plugin_result import action_failure, action_success
 from plugin_settings import get_plugin_enabled
 from notify import dispatch_notification_sync
 from notify.queue import ALLOWED_PLATFORMS, normalize_platform as normalize_notify_platform
-from conversation_media_refs import load_recent_media_refs, save_media_ref
 from vision_settings import (
     DEFAULT_VISION_API_BASE,
     DEFAULT_VISION_MODEL,
@@ -114,16 +113,6 @@ VISION_DEFAULT_PROMPT = (
     "and any visible text."
 )
 WEBUI_FILE_BLOB_KEY_PREFIX = "webui:file:"
-
-MEDIA_REF_RECENT_MAX_AGE_SEC = int(
-    os.getenv(
-        "TATER_SEND_MESSAGE_RECENT_MEDIA_MAX_AGE_SEC",
-        os.getenv("TATER_SEND_MESSAGE_LATEST_IMAGE_MAX_AGE_SEC", "300"),
-    )
-)
-SEND_MESSAGE_RECENT_ATTACHMENTS_LIMIT = int(
-    os.getenv("TATER_SEND_MESSAGE_RECENT_ATTACHMENTS_LIMIT", "4")
-)
 
 AI_TASKS_KEY_PREFIX = "reminders:"
 AI_TASKS_DUE_ZSET = "reminders:due"
@@ -874,37 +863,6 @@ def search_web(
     }
 
 
-def _normalize_media_ref_platform(value: Any) -> str:
-    raw = str(value or "").strip().lower()
-    if not raw:
-        return ""
-    if raw in {"home assistant", "ha"}:
-        return "homeassistant"
-    compact = raw.replace(" ", "")
-    if compact == "homeassistant":
-        return "homeassistant"
-    return normalize_notify_platform(raw)
-
-
-def _media_ref_is_fresh(ref: Optional[Dict[str, Any]]) -> bool:
-    if not isinstance(ref, dict):
-        return False
-    raw_ts = ref.get("updated_at")
-    if raw_ts in (None, ""):
-        # Legacy refs may not include timestamps; treat as usable.
-        return True
-    try:
-        ts = float(raw_ts)
-    except Exception:
-        return True
-    if ts <= 0:
-        return False
-    max_age = max(0, int(MEDIA_REF_RECENT_MAX_AGE_SEC))
-    if max_age <= 0:
-        return True
-    return (time.time() - ts) <= float(max_age)
-
-
 def _download_file_detect_media(path: Path, content_type: str) -> Tuple[str, str]:
     mime = str(content_type or "").split(";", 1)[0].strip().lower()
     if not mime:
@@ -926,71 +884,6 @@ def _download_file_detect_media(path: Path, content_type: str) -> Tuple[str, str
         else:
             mime = "application/octet-stream"
     return media_type, mime
-
-
-def _media_ref_context_platform_scope(
-    *,
-    platform: Optional[str],
-    origin: Optional[Dict[str, Any]],
-) -> Tuple[str, str]:
-    origin_map = dict(origin) if isinstance(origin, dict) else {}
-    raw_platform = _as_text(origin_map.get("platform") or platform).strip().lower()
-    ref_platform = _normalize_media_ref_platform(raw_platform)
-    if not ref_platform and raw_platform:
-        ref_platform = re.sub(r"[^a-z0-9_.:\-]+", "_", raw_platform).strip("_")
-    ref_scope = str(
-        origin_map.get("scope")
-        or origin_map.get("channel_id")
-        or origin_map.get("room_id")
-        or origin_map.get("chat_id")
-        or origin_map.get("session_id")
-        or ""
-    ).strip()
-    return ref_platform, ref_scope
-
-
-def _save_media_ref_for_context(
-    *,
-    ref: Dict[str, Any],
-    platform: Optional[str],
-    origin: Optional[Dict[str, Any]],
-) -> None:
-    ref_platform, ref_scope = _media_ref_context_platform_scope(platform=platform, origin=origin)
-    if not ref_platform or not ref_scope:
-        return
-    try:
-        save_media_ref(
-            redis_client,
-            platform=ref_platform,
-            scope=ref_scope,
-            ref=ref,
-        )
-    except Exception:
-        return
-
-
-def _load_recent_media_refs_for_context(
-    *,
-    platform: Optional[str],
-    origin: Optional[Dict[str, Any]],
-    limit: int = 8,
-    media_types: Optional[List[str]] = None,
-) -> List[Dict[str, Any]]:
-    ref_platform, ref_scope = _media_ref_context_platform_scope(platform=platform, origin=origin)
-    if not ref_platform or not ref_scope:
-        return []
-    try:
-        refs = load_recent_media_refs(
-            redis_client,
-            platform=ref_platform,
-            scope=ref_scope,
-            limit=max(1, limit),
-            media_types=media_types or None,
-            fresh_within_sec=MEDIA_REF_RECENT_MAX_AGE_SEC,
-        )
-    except Exception:
-        refs = []
-    return [item for item in refs if _media_ref_is_fresh(item)]
 
 
 def _send_message_boolish(value: Any, default: bool = False) -> bool:
@@ -1077,49 +970,106 @@ def _send_message_attachment_kind(mimetype: Any, fallback_type: Any = None) -> s
     return "file"
 
 
-def _send_message_recent_attachments(
-    *,
-    platform: Optional[str],
-    origin: Optional[Dict[str, Any]],
-    limit: int = SEND_MESSAGE_RECENT_ATTACHMENTS_LIMIT,
-) -> List[Dict[str, Any]]:
-    refs = _load_recent_media_refs_for_context(
-        platform=platform,
-        origin=origin,
-        limit=max(1, limit),
-        media_types=["image", "audio", "video", "file"],
-    )
-    if not refs:
+def _artifact_name_from_path(path: Any) -> str:
+    raw = str(path or "").strip().replace("\\", "/")
+    if not raw:
+        return ""
+    return raw.rsplit("/", 1)[-1].strip()
+
+
+def _artifact_mimetype(name: Any, mimetype: Any = "") -> str:
+    mime = str(mimetype or "").strip().lower()
+    if mime:
+        return mime
+    guessed = str(mimetypes.guess_type(str(name or "").strip())[0] or "").strip().lower()
+    if guessed:
+        return guessed
+    return "application/octet-stream"
+
+
+def _artifact_type(name: Any, mimetype: Any = "", fallback_type: Any = None) -> str:
+    return _send_message_attachment_kind(_artifact_mimetype(name, mimetype), fallback_type)
+
+
+def _origin_available_artifacts(origin: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not isinstance(origin, dict):
         return []
+    raw = origin.get("available_artifacts")
+    if not isinstance(raw, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for item in raw:
+        if isinstance(item, dict):
+            out.append(dict(item))
+    return out
+
+
+def _find_available_artifact(
+    *,
+    origin: Optional[Dict[str, Any]],
+    artifact_id: Any,
+) -> Optional[Dict[str, Any]]:
+    target = str(artifact_id or "").strip()
+    if not target:
+        return None
+    for item in _origin_available_artifacts(origin):
+        if str(item.get("artifact_id") or "").strip() == target:
+            return item
+    return None
+
+
+def _read_artifact_bytes(
+    payload: Any,
+) -> Tuple[Optional[bytes], Optional[str], Optional[str], str]:
+    if not isinstance(payload, dict):
+        return None, None, None, "Artifact payload is invalid."
+
+    if isinstance(payload.get("bytes"), (bytes, bytearray)):
+        name = str(payload.get("name") or "file.bin").strip() or "file.bin"
+        mime = _artifact_mimetype(name, payload.get("mimetype"))
+        return bytes(payload.get("bytes")), name, mime, ""
+
+    if isinstance(payload.get("data"), (bytes, bytearray)):
+        name = str(payload.get("name") or "file.bin").strip() or "file.bin"
+        mime = _artifact_mimetype(name, payload.get("mimetype"))
+        return bytes(payload.get("data")), name, mime, ""
+
+    if isinstance(payload.get("data"), str):
+        decoded = _image_describe_decode_base64_payload(payload.get("data"))
+        if decoded:
+            name = str(payload.get("name") or "file.bin").strip() or "file.bin"
+            mime = _artifact_mimetype(name, payload.get("mimetype"))
+            return decoded, name, mime, ""
+
+    path_value = str(payload.get("path") or "").strip()
+    if path_value:
+        resolved = _resolve_safe_path(path_value, [AGENT_LAB_DIR])
+        if resolved is None:
+            return None, None, None, "File path is outside the allowed workspace root."
+        if not resolved.exists() or not resolved.is_file():
+            return None, None, None, "File path does not exist."
+        try:
+            raw = resolved.read_bytes()
+        except Exception:
+            return None, None, None, "Failed to read the file."
+        if not raw:
+            return None, None, None, "The file is empty."
+        name = str(payload.get("name") or resolved.name or "file.bin").strip() or "file.bin"
+        mime = _artifact_mimetype(name, payload.get("mimetype"))
+        return raw, name, mime, ""
 
     blob_client = _image_describe_blob_client()
-    out: List[Dict[str, Any]] = []
-    seen: set[tuple[str, int, str]] = set()
-    for ref in refs:
-        try:
-            binary, filename, mimetype = _image_describe_extract_from_payload(blob_client, ref)
-        except Exception:
-            continue
-        if not binary:
-            continue
-        final_mime = str(mimetype or "").strip().lower() or "application/octet-stream"
-        final_name = _image_describe_normalize_filename(filename, final_mime)
-        sig = (final_name, len(binary), final_mime)
-        if sig in seen:
-            continue
-        seen.add(sig)
-        out.append(
-            {
-                "type": _send_message_attachment_kind(final_mime, ref.get("type") if isinstance(ref, dict) else None),
-                "name": final_name,
-                "mimetype": final_mime,
-                "bytes": binary,
-                "size": len(binary),
-            }
-        )
-        if len(out) >= max(1, limit):
-            break
-    return out
+    blob = _image_describe_load_blob_bytes(
+        blob_client,
+        blob_key=payload.get("blob_key"),
+        file_id=payload.get("file_id") or payload.get("id"),
+    )
+    if blob:
+        name = str(payload.get("name") or "file.bin").strip() or "file.bin"
+        mime = _artifact_mimetype(name, payload.get("mimetype"))
+        return blob, name, mime, ""
+
+    return None, None, None, "Artifact bytes are unavailable."
 
 
 def send_message(
@@ -1162,8 +1112,6 @@ def send_message(
             target_map[key] = value
 
     attachment_items = _send_message_clean_attachment_payload(attachments)
-    if not attachment_items:
-        attachment_items = _send_message_recent_attachments(platform=platform, origin=origin)
 
     if not text_message and not attachment_items:
         return action_failure(
@@ -1235,6 +1183,76 @@ def send_message(
         },
         summary_for_user=str(result or "").strip(),
         say_hint="Confirm the queued notification destination and keep it brief.",
+    )
+
+
+def attach_file(
+    *,
+    artifact_id: Any = None,
+    path: Any = None,
+    origin: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    artifact_payload: Optional[Dict[str, Any]] = None
+    chosen_artifact_id = str(artifact_id or "").strip()
+    explicit_path = str(path or "").strip()
+
+    if chosen_artifact_id:
+        artifact_payload = _find_available_artifact(origin=origin, artifact_id=chosen_artifact_id)
+        if artifact_payload is None:
+            return action_failure(
+                code="artifact_not_found",
+                message=f"Artifact `{chosen_artifact_id}` was not found for this conversation.",
+                needs=["Use an artifact_id from the available conversation artifacts or provide a file path."],
+                say_hint="Explain that the requested artifact is unavailable in this conversation.",
+            )
+    elif explicit_path:
+        artifact_payload = {"path": explicit_path}
+    else:
+        return action_failure(
+            code="missing_artifact_reference",
+            message="attach_file requires an artifact_id or path.",
+            needs=["Provide an artifact_id from this conversation or a local file path to attach."],
+            say_hint="Ask for the exact file to attach.",
+        )
+
+    binary, filename, mimetype, error_message = _read_artifact_bytes(artifact_payload)
+    if binary is None:
+        return action_failure(
+            code="artifact_unavailable",
+            message=error_message or "The requested file could not be attached.",
+            needs=["Provide a valid artifact_id from this conversation or a readable local file path."],
+            say_hint="Explain briefly why the file could not be attached.",
+        )
+
+    final_name = str(filename or _artifact_name_from_path(explicit_path) or "file.bin").strip() or "file.bin"
+    final_mime = _artifact_mimetype(final_name, mimetype)
+    final_type = _artifact_type(final_name, final_mime, artifact_payload.get("type") if isinstance(artifact_payload, dict) else None)
+    artifact_out = {
+        "type": final_type,
+        "name": final_name,
+        "mimetype": final_mime,
+        "bytes": binary,
+        "size": len(binary),
+    }
+
+    if chosen_artifact_id:
+        artifact_out["artifact_id"] = chosen_artifact_id
+
+    return action_success(
+        facts={
+            "artifact_id": chosen_artifact_id,
+            "name": final_name,
+            "size": len(binary),
+        },
+        data={
+            "artifact_id": chosen_artifact_id,
+            "name": final_name,
+            "mimetype": final_mime,
+            "size": len(binary),
+        },
+        summary_for_user=f"Attached {final_name}.",
+        say_hint="Confirm the file attachment briefly.",
+        artifacts=[artifact_out],
     )
 
 
@@ -1495,34 +1513,42 @@ def _image_describe_resolve_explicit_image(
     prompt: Any = None,
     query: Any = None,
     request: Any = None,
+    artifact_id: Any = None,
     url: Any = None,
     path: Any = None,
     blob_key: Any = None,
     file_id: Any = None,
     image_ref: Any = None,
-    media_ref: Any = None,
-    media_refs: Any = None,
     source: Any = None,
     file: Any = None,
     name: Any = None,
     mimetype: Any = None,
+    origin: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Optional[bytes], Optional[str], Optional[str], Optional[str], str]:
     del prompt, query, request
     blob_client = _image_describe_blob_client()
 
-    for ref in (image_ref, media_ref):
+    artifact_token = _as_text(artifact_id).strip()
+    if artifact_token:
+        artifact_payload = _find_available_artifact(origin=origin, artifact_id=artifact_token)
+        if artifact_payload is None:
+            return None, None, None, "artifact_not_found", f"Artifact `{artifact_token}` was not found for this conversation."
+        raw, filename, mime, err = _read_artifact_bytes(artifact_payload)
+        if raw is None:
+            return None, None, None, "artifact_unavailable", err or "The requested artifact could not be read."
+        final_name = _image_describe_normalize_filename(filename or artifact_payload.get("name"), mime)
+        final_mime = _as_text(mime).strip().lower() or _artifact_mimetype(final_name, artifact_payload.get("mimetype"))
+        if not final_mime.startswith("image/"):
+            return None, None, None, "artifact_not_image", "The selected artifact is not an image."
+        if not _image_describe_mime_allowed(final_mime):
+            return None, None, None, "artifact_unsupported_type", "The selected image type is not supported."
+        return raw, final_name, final_mime, "artifact", ""
+
+    for ref in (image_ref,):
         if isinstance(ref, dict):
             image_bytes, filename, mime = _image_describe_extract_from_payload(blob_client, ref)
             if image_bytes:
                 return image_bytes, filename, mime, "explicit_ref", ""
-
-    if isinstance(media_refs, list):
-        for idx, item in enumerate(media_refs):
-            if not isinstance(item, dict):
-                continue
-            image_bytes, filename, mime = _image_describe_extract_from_payload(blob_client, item)
-            if image_bytes:
-                return image_bytes, filename, mime, f"media_refs[{idx}]", ""
 
     explicit_url = _as_text(url).strip()
     if explicit_url:
@@ -1673,13 +1699,12 @@ def image_describe(
     request: Any = None,
     query: Any = None,
     prompt: Any = None,
+    artifact_id: Any = None,
     url: Any = None,
     path: Any = None,
     blob_key: Any = None,
     file_id: Any = None,
     image_ref: Any = None,
-    media_ref: Any = None,
-    media_refs: Any = None,
     source: Any = None,
     file: Any = None,
     name: Any = None,
@@ -1693,17 +1718,17 @@ def image_describe(
         prompt=prompt,
         query=query,
         request=request,
+        artifact_id=artifact_id,
         url=url,
         path=path,
         blob_key=blob_key,
         file_id=file_id,
         image_ref=image_ref,
-        media_ref=media_ref,
-        media_refs=media_refs,
         source=source,
         file=file,
         name=name,
         mimetype=mimetype,
+        origin=origin,
     )
 
     if image_bytes is None and error_message:
@@ -1711,31 +1736,17 @@ def image_describe(
             code="invalid_image_source",
             message=error_message,
             needs=[
-                "Use a recent image from this chat, provide an image URL, or provide /downloads/... or /documents/... path."
+                "Use an artifact_id from this conversation, provide an image URL, or provide /downloads/... or /documents/... path."
             ],
             say_hint="Ask for a valid image source and keep guidance brief.",
         )
 
     if image_bytes is None:
-        blob_client = _image_describe_blob_client()
-        refs = _load_recent_media_refs_for_context(
-            platform=platform,
-            origin=origin,
-            limit=8,
-            media_types=["image", "file"],
-        )
-        for ref in refs:
-            image_bytes, filename, mime = _image_describe_extract_from_payload(blob_client, ref)
-            if image_bytes:
-                resolution_source = "recent_media"
-                break
-
-    if image_bytes is None:
         return action_failure(
             code="no_image_found",
-            message="No image was found. Upload an image first, provide an image URL, or provide a path in /downloads or /documents.",
+            message="No image was found. Use an artifact_id from this conversation, provide an image URL, or provide a path in /downloads or /documents.",
             needs=["Please provide an image source to describe."],
-            say_hint="Ask for an image upload, URL, or a path in /downloads or /documents.",
+            say_hint="Ask for an image artifact_id, URL, or a path in /downloads or /documents.",
         )
 
     if len(image_bytes) > VISION_MAX_IMAGE_BYTES:
@@ -2424,25 +2435,11 @@ def inspect_webpage(
         )
         best_image_url = _as_text(ranked[0][1].get("url")).strip()
 
-    media_ref = None
     if best_image_url:
         path_name = Path(urllib.parse.urlparse(best_image_url).path).name or "image.png"
         guessed_mime = _as_text(mimetypes.guess_type(path_name)[0]).strip().lower()
         if not guessed_mime.startswith("image/"):
             guessed_mime = "image/png"
-        media_ref = {
-            "type": "image",
-            "url": best_image_url,
-            "name": path_name,
-            "mimetype": guessed_mime,
-            "source": "inspect_webpage",
-            "updated_at": time.time(),
-        }
-        _save_media_ref_for_context(
-            ref=media_ref,
-            platform=platform,
-            origin=origin,
-        )
 
     return {
         "tool": "inspect_webpage",
@@ -2459,7 +2456,6 @@ def inspect_webpage(
         "images": unique_images,
         "image_count": len(unique_images),
         "best_image_url": best_image_url or None,
-        "media_ref": media_ref,
     }
 
 
@@ -2557,21 +2553,14 @@ def download_file(
     }
 
     media_type, detected_mime = _download_file_detect_media(dest, content_type)
-    media_ref = {
+    out["artifact"] = {
         "type": media_type,
         "path": _display_workspace_path(dest),
         "name": dest.name,
         "mimetype": detected_mime,
         "source": "download_file",
-        "updated_at": time.time(),
         "size": size,
     }
-    out["media_ref"] = media_ref
-    _save_media_ref_for_context(
-        ref=media_ref,
-        platform=platform,
-        origin=origin,
-    )
 
     return out
 

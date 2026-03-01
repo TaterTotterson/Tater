@@ -29,7 +29,6 @@ from admin_gate import (
 from plugin_result import action_failure
 from plugin_kernel import plugin_supports_platform
 from cerberus import run_cerberus_turn, resolve_agent_limits
-from conversation_media_refs import load_recent_media_refs, save_media_ref
 from emoji_responder import emoji_responder
 
 load_dotenv()
@@ -116,24 +115,6 @@ def _store_blob(binary: bytes, ttl_seconds: int = 60 * 60 * 24 * 7) -> str:
     if ttl_seconds and ttl_seconds > 0:
         blob_client.expire(key.encode("utf-8"), int(ttl_seconds))
     return key
-
-
-def _save_recent_chat_media_ref(chat_id: str, ref: Dict[str, Any]) -> None:
-    save_media_ref(
-        redis_client,
-        platform="telegram",
-        scope=chat_id,
-        ref=ref,
-    )
-
-
-def _load_recent_chat_media_refs(chat_id: str, limit: int = 8) -> List[Dict[str, Any]]:
-    return load_recent_media_refs(
-        redis_client,
-        platform="telegram",
-        scope=chat_id,
-        limit=limit,
-    )
 
 
 def _normalize_chat_id(value: Any) -> str:
@@ -671,7 +652,7 @@ class TelegramPlatform:
             raise RuntimeError("Telegram file download returned no data.")
         return bytes(data)
 
-    def _capture_incoming_media_refs_sync(self, message: Dict[str, Any], chat_id: str) -> Dict[str, Any]:
+    def _capture_incoming_artifacts_sync(self, message: Dict[str, Any], chat_id: str) -> Dict[str, Any]:
         candidates: List[Dict[str, str]] = []
 
         photos = message.get("photo")
@@ -728,16 +709,10 @@ class TelegramPlatform:
                 "name": str(candidate.get("name") or "telegram_file").strip() or "telegram_file",
                 "mimetype": str(candidate.get("mimetype") or "application/octet-stream").strip() or "application/octet-stream",
                 "source": "telegram_attachment",
-                "updated_at": time.time(),
                 "size": len(binary),
             }
             refs.append(ref)
-            try:
-                _save_recent_chat_media_ref(chat_id, ref)
-            except Exception:
-                pass
-        recent_media_refs = _load_recent_chat_media_refs(chat_id, limit=8)
-        return {"media_refs": recent_media_refs}
+        return {"input_artifacts": refs}
 
     async def _send_text(self, chat_id: str, text: str):
         content = str(text or "").strip()
@@ -1031,39 +1006,6 @@ class TelegramPlatform:
 
             if isinstance(item, dict) and item.get("type") in ("image", "audio", "video", "file"):
                 await self._send_attachment_dict(chat_id, item)
-                item_type = str(item.get("type") or "").strip().lower()
-                item_mime = str(item.get("mimetype") or "").strip().lower()
-                if item_type == "image" or item_mime.startswith("image/"):
-                    ref = {
-                        "blob_key": str(item.get("blob_key") or "").strip() or None,
-                        "name": str(item.get("name") or "image.png").strip() or "image.png",
-                        "mimetype": item_mime or "image/png",
-                        "source": "telegram_artifact",
-                        "updated_at": time.time(),
-                    }
-                    if not ref.get("blob_key") and isinstance(item.get("bytes"), (bytes, bytearray)):
-                        ref["blob_key"] = _store_blob(bytes(item.get("bytes")))
-                    if ref.get("blob_key"):
-                        try:
-                            _save_recent_chat_media_ref(chat_id, dict(ref, type="image", source="telegram_artifact"))
-                        except Exception:
-                            pass
-                else:
-                    generic_ref = {
-                        "type": item_type or "file",
-                        "blob_key": str(item.get("blob_key") or "").strip() or None,
-                        "name": str(item.get("name") or "output.bin").strip() or "output.bin",
-                        "mimetype": item_mime or "application/octet-stream",
-                        "source": "telegram_artifact",
-                        "updated_at": time.time(),
-                    }
-                    if not generic_ref.get("blob_key") and isinstance(item.get("bytes"), (bytes, bytearray)):
-                        generic_ref["blob_key"] = _store_blob(bytes(item.get("bytes")))
-                    if generic_ref.get("blob_key"):
-                        try:
-                            _save_recent_chat_media_ref(chat_id, generic_ref)
-                        except Exception:
-                            pass
                 self._save_message(
                     chat_id,
                     "assistant",
@@ -1151,8 +1093,8 @@ class TelegramPlatform:
         if not message_text:
             return
 
-        captured_media = await asyncio.to_thread(self._capture_incoming_media_refs_sync, message, chat_id)
-        recent_media_refs = captured_media.get("media_refs") if isinstance(captured_media, dict) else None
+        captured_media = await asyncio.to_thread(self._capture_incoming_artifacts_sync, message, chat_id)
+        input_artifacts = captured_media.get("input_artifacts") if isinstance(captured_media, dict) else None
         self._save_message(
             chat_id,
             "user",
@@ -1178,8 +1120,8 @@ class TelegramPlatform:
                 "user_id": sender_user_id,
                 "request_id": str(message.get("message_id") or f"{chat_id}:{time.time():.3f}"),
             }
-            if isinstance(recent_media_refs, list) and recent_media_refs:
-                origin["media_refs"] = recent_media_refs
+            if isinstance(input_artifacts, list) and input_artifacts:
+                origin["input_artifacts"] = [dict(item) for item in input_artifacts if isinstance(item, dict)]
             origin = {k: v for k, v in origin.items() if v not in (None, "")}
 
             async def _wait_callback(func_name, plugin_obj):

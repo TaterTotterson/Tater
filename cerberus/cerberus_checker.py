@@ -117,6 +117,7 @@ async def run_checker(
     resolved_user_text: str,
     agent_state: Optional[Dict[str, Any]],
     memory_context: Optional[Dict[str, Any]],
+    available_artifacts: Optional[list[Dict[str, Any]]],
     planned_tool: Optional[Dict[str, Any]],
     tool_result: Optional[Dict[str, Any]],
     draft_response: str,
@@ -142,6 +143,8 @@ async def run_checker(
         "tool_result": tool_result,
         "draft_response": draft_response,
     }
+    if isinstance(available_artifacts, list) and available_artifacts:
+        payload["available_artifacts"] = [dict(item) for item in available_artifacts if isinstance(item, dict)]
     if isinstance(memory_context, dict) and memory_context:
         user_ctx = memory_context.get("user") if isinstance(memory_context.get("user"), dict) else {}
         room_ctx = memory_context.get("room") if isinstance(memory_context.get("room"), dict) else {}

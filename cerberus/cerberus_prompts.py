@@ -88,6 +88,8 @@ def plan_builder_system_prompt(*, platform: str) -> str:
         "  Output: {\"mode\":\"execute\",\"steps\":[{\"id\":\"s1\",\"tool\":\"search_web\",\"nl\":\"search the web for the latest OpenAI pricing page\"},{\"id\":\"s2\",\"tool\":\"inspect_webpage\",\"nl\":\"inspect the official OpenAI pricing page from the search results\"},{\"id\":\"s3\",\"tool\":\"write_workspace_note\",\"nl\":\"write a workspace note with the key OpenAI pricing details\"}]}\n"
         "- User: find the docker compose file and read it\n"
         "  Output: {\"mode\":\"execute\",\"steps\":[{\"id\":\"s1\",\"tool\":\"search_files\",\"nl\":\"find the docker compose file in the workspace\"},{\"id\":\"s2\",\"tool\":\"read_file\",\"nl\":\"read the docker compose file found in the previous step\"}]}\n"
+        "- User: update /documents/note.txt to say hello and attach it here\n"
+        "  Output: {\"mode\":\"execute\",\"steps\":[{\"id\":\"s1\",\"tool\":\"write_file\",\"nl\":\"update /documents/note.txt so it says hello\"},{\"id\":\"s2\",\"tool\":\"attach_file\",\"nl\":\"attach /documents/note.txt to this conversation\"}]}\n"
         "- Do not include explanations, markdown, or extra keys.\n"
     ).strip()
 
@@ -169,6 +171,8 @@ def planner_system_prompt(
         "- Prefer best-effort execution when a relevant tool exists; ask ONE short question only if no tool applies.\n"
         "- Use exact tool ids + argument keys from the enabled tool index.\n"
         "- Never invent identifiers (id/ip/mac/etc); discover/list first if needed.\n"
+        "- If a system message lists Available artifacts for this conversation, use the exact artifact_id or exact path from that list when a tool needs a file or image.\n"
+        "- Never rely on unstated recent attachments; only use explicit artifact ids/paths that are provided in the artifact list.\n"
         "- For files: search_files → read_file before acting; do not guess paths.\n"
         "- Never claim completion without a successful tool result this turn.\n"
         "- For NL-first plugins: pass only a concise action phrase for ONE checklist item; rewrite, don’t quote; remove filler.\n"
@@ -225,6 +229,8 @@ def checker_system_prompt(
         "- Do not infer completion of step B from successful execution of step A.\n"
         "- Do not fabricate values or completion; require concrete evidence from payload.tool_result.\n"
         "- Never invent identifiers; discover/list first if needed.\n"
+        "- If payload.available_artifacts is present and a next step needs a file or image, use the exact artifact_id or exact path from that list.\n"
+        "- payload.available_artifacts may include current-turn files and saved conversation files; use only explicit artifact ids/paths from that list.\n"
         "- If missing required user input, return NEED_USER_INFO (one short question).\n"
         "- For behavior/mode/settings changes, require a successful tool_result this turn to claim done.\n"
         "- For scene questions, prefer RETRY_TOOL with camera/snapshot tools before limitation answers.\n"
