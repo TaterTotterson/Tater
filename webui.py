@@ -43,7 +43,6 @@ from vision_settings import (
     get_vision_settings as get_shared_vision_settings,
     save_vision_settings as save_shared_vision_settings,
 )
-from conversation_media_refs import load_recent_media_refs, save_media_ref
 from emoji_responder import get_emoji_settings as get_core_emoji_settings, save_emoji_settings as save_core_emoji_settings
 from webui.webui_cerberus import (
     render_cerberus_settings,
@@ -69,7 +68,6 @@ from webui.webui_chat import (
     configure_chat_helpers,
     save_message,
     _media_type_from_mimetype,
-    _save_recent_webui_media_refs,
     load_chat_history_tail,
     load_chat_history,
     clear_chat_history,
@@ -114,8 +112,6 @@ WEBUI_ATTACH_INDEX_MAX = int(os.getenv("WEBUI_ATTACH_INDEX_MAX", "500"))
 
 FILE_BLOB_KEY_PREFIX = "webui:file:"
 FILE_INDEX_KEY = "webui:file_index"
-WEBUI_IMAGE_SCOPE = "chat"
-
 # Redis configuration for the web UI (using a separate DB)
 redis_host = os.getenv('REDIS_HOST', '127.0.0.1')
 redis_port = int(os.getenv('REDIS_PORT', 6379))
@@ -138,8 +134,6 @@ redis_blob_client = redis.Redis(
 
 configure_chat_helpers(
     redis_client=redis_client,
-    save_media_ref_fn=save_media_ref,
-    webui_image_scope=WEBUI_IMAGE_SCOPE,
 )
 
 # ------------------ FILE BLOB HELPERS ------------------
@@ -572,7 +566,7 @@ def save_emoji_responder_settings(
 
 
 # ----------------- PROCESSING FUNCTIONS -----------------
-async def process_message(user_name, message_content, wait_callback=None):
+async def process_message(user_name, message_content, input_artifacts=None, wait_callback=None):
     max_llm = int(redis_client.get("tater:max_llm") or 8)
     history = load_chat_history_tail(max_llm)
 
@@ -602,14 +596,8 @@ async def process_message(user_name, message_content, wait_callback=None):
         "user_id": user_name,
         "session_id": session_scope_id,
     }
-    recent_media_refs = load_recent_media_refs(
-        redis_client,
-        platform="webui",
-        scope=WEBUI_IMAGE_SCOPE,
-        limit=8,
-    )
-    if recent_media_refs:
-        origin["media_refs"] = recent_media_refs
+    if isinstance(input_artifacts, list) and input_artifacts:
+        origin["input_artifacts"] = [dict(item) for item in input_artifacts if isinstance(item, dict)]
     agent_max_rounds, agent_max_tool_calls = resolve_agent_limits(redis_client)
     result = await run_cerberus_turn(
         llm_client=llm_client,
@@ -829,6 +817,7 @@ if active_view == "Chat":
 
     if user_text or files:
         uname = chat_settings["username"]
+        input_artifacts = []
 
         # Validate total size early
         total_bytes = 0
@@ -867,8 +856,17 @@ if active_view == "Chat":
                 "size": len(data),
             }
             save_message("user", uname, msg)
-            _save_recent_webui_media_refs(msg)
             st.session_state.chat_messages.append({"role": "user", "content": msg})
+            input_artifacts.append(
+                {
+                    "type": msg["type"],
+                    "file_id": file_id,
+                    "name": name,
+                    "mimetype": mimetype,
+                    "size": len(data),
+                    "source": "webui_attachment",
+                }
+            )
 
         # ---- Send to LLM (even if only files were uploaded) ----
         status_box = None
@@ -899,9 +897,13 @@ if active_view == "Chat":
         if status_box is None:
             spinner_label = f"{first_name} is thinking..."
             with st.spinner(spinner_label):
-                response_payload = run_async(process_message(uname, user_text, wait_callback=_wait_callback))
+                response_payload = run_async(
+                    process_message(uname, user_text, input_artifacts=input_artifacts, wait_callback=_wait_callback)
+                )
         else:
-            response_payload = run_async(process_message(uname, user_text, wait_callback=_wait_callback))
+            response_payload = run_async(
+                process_message(uname, user_text, input_artifacts=input_artifacts, wait_callback=_wait_callback)
+            )
 
         if status_box is not None:
             status_box.update(label=f"{first_name} finished.", state="complete")
@@ -914,7 +916,6 @@ if active_view == "Chat":
         for item in responses:
             st.session_state.chat_messages.append({"role": "assistant", "content": item})
             save_message("assistant", "assistant", item)
-            _save_recent_webui_media_refs(item)
 
         st.rerun()
 

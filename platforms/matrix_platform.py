@@ -32,7 +32,6 @@ from admin_gate import (
 from plugin_result import action_failure
 from plugin_kernel import plugin_supports_platform
 from cerberus import run_cerberus_turn, resolve_agent_limits
-from conversation_media_refs import load_recent_media_refs, save_media_ref
 from emoji_responder import emoji_responder
 
 # Matrix SDK
@@ -387,23 +386,6 @@ def save_matrix_message(room_id: str, role: str, username: str, content: Any):
     if max_store > 0:
         redis_client.ltrim(key, -max_store, -1)
 
-
-def _save_recent_room_media_ref(room_id: str, ref: Dict[str, Any]) -> None:
-    save_media_ref(
-        redis_client,
-        platform="matrix",
-        scope=room_id,
-        ref=ref,
-    )
-
-
-def _load_recent_room_media_refs(room_id: str, limit: int = 8) -> List[Dict[str, Any]]:
-    return load_recent_media_refs(
-        redis_client,
-        platform="matrix",
-        scope=room_id,
-        limit=limit,
-    )
 
 def _to_template_msg(role: str, content: Any, sender: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
@@ -1262,13 +1244,8 @@ class MatrixPlatform:
             "name": name,
             "mimetype": mimetype,
             "source": "matrix_attachment",
-            "updated_at": time.time(),
             "size": len(media_bytes),
         }
-        try:
-            _save_recent_room_media_ref(room.room_id, ref)
-        except Exception:
-            pass
         save_matrix_message(
             room.room_id,
             "user",
@@ -1371,9 +1348,6 @@ class MatrixPlatform:
                     "user": sender,
                     "request_id": str(time.time()),
                 }
-                recent_media_refs = _load_recent_room_media_refs(room.room_id, limit=8)
-                if recent_media_refs:
-                    origin["media_refs"] = recent_media_refs
                 origin = {k: v for k, v in origin.items() if v not in (None, "")}
 
                 async def _wait_callback(func_name, plugin_obj):
@@ -1448,23 +1422,6 @@ class MatrixPlatform:
                 for item in artifacts:
                     if isinstance(item, dict):
                         await self._send_media_item(room.room_id, item)
-                        item_type = str(item.get("type") or "").strip().lower()
-                        item_mime = str(item.get("mimetype") or "").strip().lower()
-                        ref = {
-                            "type": item_type or "file",
-                            "blob_key": str(item.get("blob_key") or "").strip() or None,
-                            "name": str(item.get("name") or "output.bin").strip() or "output.bin",
-                            "mimetype": item_mime or "application/octet-stream",
-                            "source": "matrix_artifact",
-                            "updated_at": time.time(),
-                        }
-                        if not ref.get("blob_key") and isinstance(item.get("bytes"), (bytes, bytearray)):
-                            ref["blob_key"] = store_blob(bytes(item.get("bytes")))
-                        if ref.get("blob_key"):
-                            try:
-                                _save_recent_room_media_ref(room.room_id, ref)
-                            except Exception:
-                                pass
 
                 if (final_text or artifacts) and event_id:
                     assistant_summary = final_text or "[Sent attachments]"

@@ -1,4 +1,5 @@
 import json
+import mimetypes
 import re
 import time
 import uuid
@@ -35,6 +36,10 @@ from helpers import (
     looks_like_tool_markup,
     parse_function_json,
     redis_client as default_redis,
+)
+from conversation_artifacts import (
+    load_conversation_artifacts,
+    save_conversation_artifacts,
 )
 from plugin_kernel import (
     expand_plugin_platforms,
@@ -88,7 +93,8 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
     "memory_list": "list saved memory keys",
     "memory_explain": "explain memory value/source",
     "memory_search": "search saved memory",
-    "image_describe": "describe a recent or explicit image with the vision model",
+    "image_describe": "describe an explicit image using an artifact_id, URL, blob, or local path",
+    "attach_file": "attach an available artifact or local file to the current conversation",
     "send_message": "queue a structured cross-platform notification or message",
 }
 _KERNEL_TOOL_USAGE_HINTS = {
@@ -119,7 +125,8 @@ _KERNEL_TOOL_USAGE_HINTS = {
     "memory_list": '{"function":"memory_list","arguments":{}}',
     "memory_explain": '{"function":"memory_explain","arguments":{"key":"<key>"}}',
     "memory_search": '{"function":"memory_search","arguments":{"query":"<query>"}}',
-    "image_describe": '{"function":"image_describe","arguments":{"query":"Describe this image."}}',
+    "image_describe": '{"function":"image_describe","arguments":{"artifact_id":"<artifact_id>","query":"Describe this image."}}',
+    "attach_file": '{"function":"attach_file","arguments":{"artifact_id":"<artifact_id>"}}',
     "send_message": '{"function":"send_message","arguments":{"message":"<message>","platform":"discord","targets":{"channel":"#channel"}}}',
 }
 
@@ -1130,6 +1137,7 @@ async def _run_checker(
     resolved_user_text: str,
     agent_state: Optional[Dict[str, Any]],
     memory_context: Optional[Dict[str, Any]],
+    available_artifacts: Optional[List[Dict[str, Any]]],
     planned_tool: Optional[Dict[str, Any]],
     tool_result: Optional[Dict[str, Any]],
     draft_response: str,
@@ -1144,6 +1152,7 @@ async def _run_checker(
         resolved_user_text=resolved_user_text,
         agent_state=agent_state,
         memory_context=memory_context,
+        available_artifacts=available_artifacts,
         planned_tool=planned_tool,
         tool_result=tool_result,
         draft_response=draft_response,
@@ -1748,6 +1757,196 @@ def _multi_step_turn_draft(
     return _short_text(prefix + body + ".", limit=520)
 
 
+def _artifact_name_from_path(path: Any) -> str:
+    raw = str(path or "").strip().replace("\\", "/")
+    if not raw:
+        return ""
+    return raw.rsplit("/", 1)[-1].strip()
+
+
+def _artifact_type_from_mimetype(mimetype: Any) -> str:
+    mime = str(mimetype or "").strip().lower()
+    if mime.startswith("image/"):
+        return "image"
+    if mime.startswith("audio/"):
+        return "audio"
+    if mime.startswith("video/"):
+        return "video"
+    return "file"
+
+
+def _normalize_turn_artifact(payload: Any, *, default_source: str = "") -> Optional[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return None
+
+    path = str(payload.get("path") or "").strip()
+    blob_key = str(payload.get("blob_key") or "").strip()
+    file_id = str(payload.get("file_id") or payload.get("id") or "").strip()
+    url = str(payload.get("url") or "").strip()
+    if not any((path, blob_key, file_id, url)):
+        return None
+
+    name = str(payload.get("name") or "").strip() or _artifact_name_from_path(path) or "file.bin"
+    mimetype_value = str(payload.get("mimetype") or "").strip().lower()
+    if not mimetype_value:
+        guessed = str(mimetypes.guess_type(name or path)[0] or "").strip().lower()
+        mimetype_value = guessed or "application/octet-stream"
+
+    artifact_type = str(payload.get("type") or "").strip().lower()
+    if artifact_type not in {"image", "audio", "video", "file"}:
+        artifact_type = _artifact_type_from_mimetype(mimetype_value)
+
+    out: Dict[str, Any] = {
+        "artifact_id": str(payload.get("artifact_id") or "").strip(),
+        "type": artifact_type,
+        "name": name,
+        "mimetype": mimetype_value,
+        "source": str(payload.get("source") or default_source or "artifact").strip() or "artifact",
+    }
+    for key, value in (("path", path), ("blob_key", blob_key), ("file_id", file_id), ("url", url)):
+        if value:
+            out[key] = value
+    try:
+        size_value = int(payload.get("size"))
+    except Exception:
+        size_value = -1
+    if size_value >= 0:
+        out["size"] = size_value
+    return out
+
+
+def _turn_artifact_key(item: Dict[str, Any]) -> tuple[str, str, str, str, str]:
+    return (
+        str(item.get("type") or "").strip().lower(),
+        str(item.get("path") or "").strip(),
+        str(item.get("blob_key") or "").strip(),
+        str(item.get("file_id") or "").strip(),
+        str(item.get("url") or "").strip(),
+    )
+
+
+def _merge_turn_artifacts(
+    existing: List[Dict[str, Any]],
+    incoming: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    seen = set()
+    used_ids = set()
+    next_index = 1
+
+    for raw_item in list(existing or []) + list(incoming or []):
+        item = _normalize_turn_artifact(raw_item)
+        if item is None:
+            continue
+        dedupe_key = _turn_artifact_key(item)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        artifact_id = str(item.get("artifact_id") or "").strip()
+        if artifact_id:
+            used_ids.add(artifact_id)
+        else:
+            while f"a{next_index}" in used_ids:
+                next_index += 1
+            artifact_id = f"a{next_index}"
+            used_ids.add(artifact_id)
+            next_index += 1
+        item["artifact_id"] = artifact_id
+        merged.append(item)
+    return merged[:16]
+
+
+def _turn_artifacts_from_tool_payload(payload: Any) -> List[Dict[str, Any]]:
+    if not isinstance(payload, dict) or not bool(payload.get("ok")):
+        return []
+
+    tool_name = str(payload.get("tool") or "").strip().lower()
+    out: List[Dict[str, Any]] = []
+
+    direct_artifact = payload.get("artifact")
+    if isinstance(direct_artifact, dict):
+        raw_direct_artifact = dict(direct_artifact)
+        raw_direct_artifact.setdefault("source", tool_name)
+        out.append(raw_direct_artifact)
+
+    raw_artifacts = payload.get("artifacts")
+    if isinstance(raw_artifacts, list):
+        for item in raw_artifacts:
+            if not isinstance(item, dict):
+                continue
+            raw_artifact = dict(item)
+            raw_artifact.setdefault("source", tool_name)
+            out.append(raw_artifact)
+
+    if tool_name in {"download_file", "write_file"}:
+        artifact = _normalize_turn_artifact(
+            {
+                "path": payload.get("path"),
+                "name": payload.get("name") or _artifact_name_from_path(payload.get("path")),
+                "mimetype": payload.get("content_type"),
+                "source": tool_name,
+                "size": payload.get("bytes"),
+            },
+            default_source=tool_name,
+        )
+        if artifact is not None:
+            out.append(artifact)
+
+    if tool_name == "extract_archive":
+        extracted = payload.get("extracted")
+        if isinstance(extracted, list):
+            for item in extracted:
+                artifact = _normalize_turn_artifact(
+                    {
+                        "path": item,
+                        "name": _artifact_name_from_path(item),
+                        "source": tool_name,
+                    },
+                    default_source=tool_name,
+                )
+                if artifact is not None:
+                    out.append(artifact)
+
+    return out
+
+
+def _available_artifacts_prompt(available_artifacts: List[Dict[str, Any]]) -> str:
+    if not available_artifacts:
+        return ""
+    lines = ["Available artifacts for this conversation (current turn + saved conversation files):"]
+    for item in available_artifacts[:12]:
+        artifact_id = str(item.get("artifact_id") or "").strip()
+        artifact_type = str(item.get("type") or "").strip() or "file"
+        name = _short_text(item.get("name"), limit=100) or "file"
+        source = _short_text(item.get("source"), limit=48)
+        path_value = _short_text(item.get("path"), limit=140)
+        parts = [artifact_id, artifact_type, name]
+        if source:
+            parts.append(f"source={source}")
+        if path_value:
+            parts.append(f"path={path_value}")
+        lines.append("- " + " | ".join([part for part in parts if part]))
+    lines.append("Use the exact artifact_id or exact path from this list when a tool needs a file or image. Never invent artifact ids.")
+    return "\n".join(lines)
+
+
+def _available_artifacts_payload(available_artifacts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for item in available_artifacts[:12]:
+        if not isinstance(item, dict):
+            continue
+        compact: Dict[str, Any] = {
+            "artifact_id": str(item.get("artifact_id") or "").strip(),
+            "type": str(item.get("type") or "").strip(),
+            "name": str(item.get("name") or "").strip(),
+        }
+        for key in ("mimetype", "source", "path", "size"):
+            if item.get(key) not in (None, ""):
+                compact[key] = item.get(key)
+        out.append(compact)
+    return out
+
+
 _BAD_ARGS_FAILURE_CODES = retry_helpers.BAD_ARGS_FAILURE_CODES
 
 _BAD_ARGS_FAILURE_TEXT_MARKERS = retry_helpers.BAD_ARGS_FAILURE_TEXT_MARKERS
@@ -2009,6 +2208,32 @@ async def run_cerberus_turn(
     platform = normalize_platform(platform)
     origin_payload = dict(origin) if isinstance(origin, dict) else {}
     scope = _resolve_cerberus_scope(platform, scope, origin_payload)
+    input_artifacts = origin_payload.get("input_artifacts") if isinstance(origin_payload.get("input_artifacts"), list) else []
+    if input_artifacts:
+        try:
+            save_conversation_artifacts(
+                r,
+                platform=platform,
+                scope=scope,
+                artifacts=input_artifacts,
+            )
+        except Exception:
+            pass
+    try:
+        stored_conversation_artifacts = load_conversation_artifacts(
+            r,
+            platform=platform,
+            scope=scope,
+            limit=16,
+        )
+    except Exception:
+        stored_conversation_artifacts = []
+    turn_available_artifacts = _merge_turn_artifacts(
+        stored_conversation_artifacts,
+        input_artifacts,
+    )
+    if turn_available_artifacts:
+        origin_payload["available_artifacts"] = [dict(item) for item in turn_available_artifacts]
     platform_preamble = _sanitize_platform_preamble(platform, platform_preamble)
     origin_preview = _origin_preview_for_ledger(origin_payload)
     user_text = str(user_text or "")
@@ -2270,6 +2495,9 @@ async def run_cerberus_turn(
             },
             {"role": "system", "content": state_message},
         ])
+        artifact_manifest_prompt = _available_artifacts_prompt(turn_available_artifacts)
+        if artifact_manifest_prompt:
+            planner_messages.append({"role": "system", "content": artifact_manifest_prompt})
         if isinstance(current_plan_step, dict):
             planner_messages.append(
                 {
@@ -2317,6 +2545,7 @@ async def run_cerberus_turn(
                 resolved_user_text=resolved_user_text,
                 agent_state=agent_state,
                 memory_context=memory_context_payload,
+                available_artifacts=_available_artifacts_payload(turn_available_artifacts),
                 planned_tool=None,
                 tool_result=tool_result_for_checker,
                 draft_response=draft_response,
@@ -2589,6 +2818,34 @@ async def run_cerberus_turn(
                     "summary": draft_response,
                 }
             )
+        new_turn_artifacts = _turn_artifacts_from_tool_payload(raw_payload)
+        if new_turn_artifacts:
+            try:
+                save_conversation_artifacts(
+                    r,
+                    platform=platform,
+                    scope=scope,
+                    artifacts=new_turn_artifacts,
+                )
+            except Exception:
+                pass
+        try:
+            stored_conversation_artifacts = load_conversation_artifacts(
+                r,
+                platform=platform,
+                scope=scope,
+                limit=16,
+            )
+        except Exception:
+            stored_conversation_artifacts = []
+        turn_available_artifacts = _merge_turn_artifacts(
+            stored_conversation_artifacts or turn_available_artifacts,
+            new_turn_artifacts,
+        )
+        if turn_available_artifacts:
+            origin_payload["available_artifacts"] = [dict(item) for item in turn_available_artifacts]
+        else:
+            origin_payload.pop("available_artifacts", None)
         artifacts = ((tool_result_for_checker or {}).get("artifacts") or [])
         if isinstance(artifacts, list):
             for item in artifacts:
@@ -2640,6 +2897,7 @@ async def run_cerberus_turn(
             resolved_user_text=resolved_user_text,
             agent_state=agent_state,
             memory_context=memory_context_payload,
+            available_artifacts=_available_artifacts_payload(turn_available_artifacts),
             planned_tool=planned_tool,
             tool_result=tool_result_for_checker,
             draft_response=turn_draft_response,
@@ -2802,6 +3060,7 @@ async def run_cerberus_turn(
         resolved_user_text=resolved_user_text,
         agent_state=agent_state,
         memory_context=memory_context_payload,
+        available_artifacts=_available_artifacts_payload(turn_available_artifacts),
         planned_tool=planned_tool,
         tool_result=tool_result_for_checker,
         draft_response=best_effort,

@@ -30,7 +30,6 @@ from admin_gate import (
 from plugin_result import action_failure
 from plugin_kernel import plugin_supports_platform, plugin_display_name
 from cerberus import run_cerberus_turn, resolve_agent_limits
-from conversation_media_refs import load_recent_media_refs, save_media_ref
 from emoji_responder import emoji_responder
 
 load_dotenv()
@@ -103,24 +102,6 @@ def store_blob(binary: bytes, ttl_seconds: int = 60 * 60 * 24 * 7) -> str:
 def load_blob(key: str) -> bytes | None:
     blob_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=False)
     return blob_client.get(key.encode("utf-8"))
-
-
-def _save_recent_channel_media_ref(channel_id: str, ref: Dict[str, Any]) -> None:
-    save_media_ref(
-        redis_client,
-        platform="discord",
-        scope=str(channel_id),
-        ref=ref,
-    )
-
-
-def _load_recent_channel_media_refs(channel_id: str, limit: int = 8) -> list[Dict[str, Any]]:
-    return load_recent_media_refs(
-        redis_client,
-        platform="discord",
-        scope=str(channel_id),
-        limit=limit,
-    )
 
 
 def _room_label_key(platform: str, room_id: Any) -> str:
@@ -783,8 +764,7 @@ class discord_platform(commands.Bot):
             return
 
         _save_room_label("discord", message.channel.id, _discord_channel_label(message.channel))
-
-        recent_media_refs = _load_recent_channel_media_refs(message.channel.id, limit=8)
+        input_artifacts: list[Dict[str, Any]] = []
 
         # -------------------------
         # Save user message + attachments (NO base64 in history)
@@ -823,21 +803,16 @@ class discord_platform(commands.Bot):
                         file_obj,
                         user_id=str(message.author.id),
                     )
-                    media_ref = {
-                        "type": file_type,
-                        "blob_key": blob_key,
-                        "name": attachment.filename or f"{file_type}.bin",
-                        "mimetype": attachment.content_type or "application/octet-stream",
-                        "source": "discord_attachment",
-                        "updated_at": time.time(),
-                        "size": len(file_bytes),
-                    }
-                    try:
-                        _save_recent_channel_media_ref(message.channel.id, media_ref)
-                        recent_media_refs = [media_ref] + [item for item in recent_media_refs if isinstance(item, dict)]
-                        recent_media_refs = recent_media_refs[:8]
-                    except Exception:
-                        pass
+                    input_artifacts.append(
+                        {
+                            "type": file_type,
+                            "blob_key": blob_key,
+                            "name": attachment.filename or f"{file_type}.bin",
+                            "mimetype": attachment.content_type or "application/octet-stream",
+                            "source": "discord_attachment",
+                            "size": len(file_bytes),
+                        }
+                    )
                 except Exception as e:
                     logger.warning(f"Failed to store attachment ({attachment.filename}): {e}")
         else:
@@ -882,8 +857,8 @@ class discord_platform(commands.Bot):
                     "dm_user_id": str(message.author.id) if is_dm else None,
                     "request_id": str(message.id),
                 }
-                if recent_media_refs:
-                    origin["media_refs"] = recent_media_refs
+                if input_artifacts:
+                    origin["input_artifacts"] = [dict(item) for item in input_artifacts]
                 origin = {k: v for k, v in origin.items() if v not in (None, "")}
 
                 async def _wait_callback(func_name, plugin_obj):
@@ -996,21 +971,6 @@ class discord_platform(commands.Bot):
                             "assistant",
                             {"marker": "plugin_response", "phase": "final", "content": content_obj},
                         )
-                        try:
-                            _save_recent_channel_media_ref(
-                                message.channel.id,
-                                {
-                                    "type": str(content_type or "file").strip().lower() or "file",
-                                    "blob_key": blob_key,
-                                    "name": filename or "output.bin",
-                                    "mimetype": mimetype or "application/octet-stream",
-                                    "source": "discord_artifact",
-                                    "updated_at": time.time(),
-                                    "size": len(binary),
-                                },
-                            )
-                        except Exception:
-                            pass
                     except Exception as e:
                         logger.warning(f"Failed to send artifact {content_type}: {e}")
 

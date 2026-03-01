@@ -1,21 +1,16 @@
 import base64
 import json
-import time
 from io import BytesIO
 
 import streamlit as st
 from PIL import Image
 
 _redis_client = None
-_save_media_ref_fn = None
-_webui_image_scope = "chat"
 
 
-def configure_chat_helpers(*, redis_client, save_media_ref_fn, webui_image_scope: str = "chat") -> None:
-    global _redis_client, _save_media_ref_fn, _webui_image_scope
+def configure_chat_helpers(*, redis_client) -> None:
+    global _redis_client
     _redis_client = redis_client
-    _save_media_ref_fn = save_media_ref_fn
-    _webui_image_scope = str(webui_image_scope or "chat")
 
 
 def _require_redis_client():
@@ -54,58 +49,6 @@ def _media_type_from_mimetype(mimetype: str) -> str:
     if mm.startswith("video/"):
         return "video"
     return "file"
-
-
-def _extract_media_refs(content):
-    if isinstance(content, dict) and content.get("marker") == "plugin_response":
-        return _extract_media_refs(content.get("content"))
-    if isinstance(content, list):
-        refs = []
-        for item in content:
-            refs.extend(_extract_media_refs(item))
-        return refs
-    if not isinstance(content, dict):
-        return []
-
-    media_type = str(content.get("type") or "").strip().lower()
-    mimetype = str(content.get("mimetype") or "").strip().lower()
-    inferred_type = media_type if media_type in {"image", "audio", "video", "file"} else _media_type_from_mimetype(mimetype)
-    if inferred_type not in {"image", "audio", "video", "file"}:
-        return []
-
-    ref = {
-        "type": inferred_type,
-        "file_id": str(content.get("id") or "").strip() or None,
-        "blob_key": str(content.get("blob_key") or "").strip() or None,
-        "name": str(content.get("name") or f"{inferred_type}.bin").strip() or f"{inferred_type}.bin",
-        "mimetype": mimetype or "application/octet-stream",
-        "source": "webui",
-        "updated_at": time.time(),
-    }
-    if not ref.get("file_id") and not ref.get("blob_key"):
-        return []
-    return [ref]
-
-
-def _save_recent_webui_media_refs(content):
-    redis_client = _require_redis_client()
-    refs = _extract_media_refs(content)
-    if not refs:
-        return
-
-    if not callable(_save_media_ref_fn):
-        return
-
-    for ref in refs:
-        try:
-            _save_media_ref_fn(
-                redis_client,
-                platform="webui",
-                scope=_webui_image_scope,
-                ref=ref,
-            )
-        except Exception:
-            continue
 
 
 def load_chat_history_tail(n: int):

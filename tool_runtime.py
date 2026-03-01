@@ -36,6 +36,7 @@ from kernel_tools import (
     memory_explain,
     memory_search,
     image_describe,
+    attach_file,
     send_message,
 )
 from plugin_result import action_failure, normalize_plugin_result
@@ -81,6 +82,7 @@ META_TOOLS = {
     "memory_explain",
     "memory_search",
     "image_describe",
+    "attach_file",
     "send_message",
 }
 
@@ -112,7 +114,8 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
     "memory_list": "list saved memory keys",
     "memory_explain": "explain memory value/source",
     "memory_search": "search saved memory",
-    "image_describe": "describe a recent or explicit image with the vision model",
+    "image_describe": "describe an explicit image using an artifact_id, URL, blob, or local path",
+    "attach_file": "attach an available artifact or local file to the current conversation",
     "send_message": "queue a structured cross-platform notification or message",
 }
 
@@ -743,18 +746,23 @@ def run_meta_tool(
             request=args.get("request"),
             query=args.get("query"),
             prompt=args.get("prompt"),
+            artifact_id=args.get("artifact_id"),
             url=args.get("url"),
             path=args.get("path"),
             blob_key=args.get("blob_key"),
             file_id=args.get("file_id"),
             image_ref=args.get("image_ref"),
-            media_ref=args.get("media_ref"),
-            media_refs=args.get("media_refs"),
             source=args.get("source"),
             file=args.get("file"),
             name=args.get("name"),
             mimetype=args.get("mimetype"),
             platform=platform,
+            origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
+        )
+    if func == "attach_file":
+        return attach_file(
+            artifact_id=args.get("artifact_id"),
+            path=args.get("path"),
             origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
         )
     if func == "send_message":
