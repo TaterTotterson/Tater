@@ -1705,6 +1705,49 @@ def _select_final_answer_text(
     return candidate
 
 
+def _turn_completion_fragment(*, request_text: str, summary_text: str) -> str:
+    request = _short_text(" ".join(str(request_text or "").split()), limit=140)
+    summary = _short_text(" ".join(str(summary_text or "").split()), limit=140)
+    if summary:
+        request_norm = request.rstrip(".!?").strip().lower()
+        summary_norm = summary.rstrip(".!?").strip().lower()
+        if request_norm and summary_norm and request_norm != summary_norm:
+            if request_norm not in summary_norm and summary_norm not in request_norm:
+                return f"{request} ({summary})" if request else summary
+        return summary
+    return request
+
+
+def _multi_step_turn_draft(
+    *,
+    completed_steps: List[Dict[str, str]],
+    fallback_draft: str,
+) -> str:
+    if len(completed_steps) <= 1:
+        return str(fallback_draft or "").strip()
+
+    fragments: List[str] = []
+    for step in completed_steps[:4]:
+        if not isinstance(step, dict):
+            continue
+        fragment = _turn_completion_fragment(
+            request_text=str(step.get("request") or ""),
+            summary_text=str(step.get("summary") or ""),
+        ).strip()
+        if not fragment:
+            continue
+        fragments.append(fragment.rstrip(".!?"))
+
+    if not fragments:
+        return str(fallback_draft or "").strip()
+
+    prefix = f"Done. Completed {len(completed_steps)} steps in order: "
+    body = "; ".join(fragments)
+    if len(completed_steps) > len(fragments):
+        body += f"; and {len(completed_steps) - len(fragments)} more"
+    return _short_text(prefix + body + ".", limit=520)
+
+
 _BAD_ARGS_FAILURE_CODES = retry_helpers.BAD_ARGS_FAILURE_CODES
 
 _BAD_ARGS_FAILURE_TEXT_MARKERS = retry_helpers.BAD_ARGS_FAILURE_TEXT_MARKERS
@@ -2045,6 +2088,7 @@ async def run_cerberus_turn(
     repair_returned_no_tool_retries = 0
     structured_plan_queue: List[Dict[str, str]] = []
     plan_builder_mode = "unknown"
+    completed_tool_steps: List[Dict[str, str]] = []
     try:
         plan_started = time.perf_counter()
         plan_decision = await _build_structured_plan_decision(
@@ -2538,6 +2582,13 @@ async def run_cerberus_turn(
         if isinstance(tool_result_for_checker, dict) and not bool(tool_result_for_checker.get("ok")):
             tool_failures_count += 1
         draft_response = str((tool_result_for_checker or {}).get("summary_for_user") or "").strip()
+        if isinstance(tool_result_for_checker, dict) and bool(tool_result_for_checker.get("ok")):
+            completed_tool_steps.append(
+                {
+                    "request": str(tool_user_text or round_request_text or "").strip(),
+                    "summary": draft_response,
+                }
+            )
         artifacts = ((tool_result_for_checker or {}).get("artifacts") or [])
         if isinstance(artifacts, list):
             for item in artifacts:
@@ -2578,6 +2629,10 @@ async def run_cerberus_turn(
             continue
 
         checker_started = time.perf_counter()
+        turn_draft_response = _multi_step_turn_draft(
+            completed_steps=completed_tool_steps,
+            fallback_draft=draft_response,
+        )
         checker_decision = await _run_checker(
             llm_client=llm_client,
             platform=platform,
@@ -2587,7 +2642,7 @@ async def run_cerberus_turn(
             memory_context=memory_context_payload,
             planned_tool=planned_tool,
             tool_result=tool_result_for_checker,
-            draft_response=draft_response,
+            draft_response=turn_draft_response,
             retry_allowed=_retry_allowed_within_limits(),
             platform_preamble=platform_preamble,
             max_tokens=checker_max_tokens,
@@ -2598,7 +2653,7 @@ async def run_cerberus_turn(
         if checker_action == "FINAL_ANSWER":
             final_text_candidate = _select_final_answer_text(
                 checker_decision=checker_decision,
-                draft_response=draft_response,
+                draft_response=turn_draft_response,
                 user_text=resolved_user_text or user_text,
                 tool_result=tool_result_for_checker,
             )
@@ -2733,7 +2788,10 @@ async def run_cerberus_turn(
 
     best_effort = _state_best_effort_answer(
         state=agent_state,
-        draft_response=draft_response,
+        draft_response=_multi_step_turn_draft(
+            completed_steps=completed_tool_steps,
+            fallback_draft=draft_response,
+        ),
         tool_result=tool_result_for_checker,
     )
     checker_started = time.perf_counter()
