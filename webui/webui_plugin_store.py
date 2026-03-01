@@ -32,6 +32,19 @@ RETIRED_PLUGIN_IDS = {
     "notify_telegram",
     "notify_wordpress",
 }
+COMMON_PLATFORM_ORDER = [
+    "discord",
+    "webui",
+    "homeassistant",
+    "homekit",
+    "irc",
+    "matrix",
+    "telegram",
+    "wordpress",
+    "xbmc",
+    "automation",
+]
+PLUGIN_MANAGER_FLASH_KEY = "plugin_manager_flash_messages"
 
 redis_host = os.getenv("REDIS_HOST", "127.0.0.1")
 redis_port = int(os.getenv("REDIS_PORT", 6379))
@@ -538,6 +551,143 @@ def _installed_plugin_ids() -> list[str]:
     return sorted(installed_ids)
 
 
+def _ordered_platforms(platform_names: set[str]) -> list[str]:
+    ordered = [platform_name for platform_name in COMMON_PLATFORM_ORDER if platform_name in platform_names]
+    ordered += sorted(platform_name for platform_name in platform_names if platform_name not in set(COMMON_PLATFORM_ORDER))
+    return ordered
+
+
+def _entry_platforms(entry: dict) -> list[str]:
+    loaded = entry.get("loaded")
+    catalog_item = entry.get("catalog_item")
+
+    platforms = []
+    if loaded:
+        platforms = _normalize_plats(getattr(loaded, "platforms", []) or [])
+    if not platforms and catalog_item:
+        platforms = _get_item_platforms(catalog_item)
+    return platforms
+
+
+def _build_installed_entries(catalog_items: list[dict]) -> list[dict]:
+    catalog_by_id = {
+        str(item.get("id") or "").strip(): item
+        for item in catalog_items
+        if str(item.get("id") or "").strip()
+    }
+
+    installed_entries = []
+    for plugin_id in _installed_plugin_ids():
+        loaded = get_registry().get(plugin_id)
+        catalog_item = catalog_by_id.get(plugin_id)
+        display_name = _get_loaded_plugin_display_name(
+            loaded,
+            (catalog_item.get("name") if catalog_item else None) or plugin_id,
+        )
+        description = _get_loaded_plugin_description(loaded) or (
+            (catalog_item.get("description") or "").strip() if catalog_item else ""
+        )
+        installed_ver = _get_installed_version(plugin_id)
+        store_ver = (catalog_item.get("version") or "").strip() if catalog_item else ""
+        source_label = (catalog_item.get("_source_label") or "Local plugin").strip() if catalog_item else "Local plugin"
+        update_available = bool(catalog_item and _semver_tuple(store_ver) > _semver_tuple(installed_ver))
+        platforms = _entry_platforms({"loaded": loaded, "catalog_item": catalog_item})
+        platforms_str = ", ".join(_platform_display_label(platform_name) for platform_name in platforms)
+        if not platforms_str:
+            platforms_str = _get_item_display_platforms(catalog_item or {})
+
+        installed_entries.append(
+            {
+                "id": plugin_id,
+                "loaded": loaded,
+                "catalog_item": catalog_item,
+                "display_name": display_name,
+                "description": description,
+                "installed_ver": installed_ver,
+                "store_ver": store_ver,
+                "source_label": source_label,
+                "update_available": update_available,
+                "platforms": platforms,
+                "platforms_str": platforms_str,
+            }
+        )
+
+    installed_entries.sort(key=lambda item: item["display_name"].lower())
+    return installed_entries
+
+
+def _queue_plugin_manager_messages(messages: list[dict]) -> None:
+    normalized = []
+    for item in messages or []:
+        if not isinstance(item, dict):
+            continue
+        level = str(item.get("level") or "info").strip().lower()
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        if level not in {"success", "error", "warning", "info"}:
+            level = "info"
+        normalized.append({"level": level, "text": text})
+    if normalized:
+        st.session_state[PLUGIN_MANAGER_FLASH_KEY] = normalized
+
+
+def _render_plugin_manager_messages() -> None:
+    messages = st.session_state.pop(PLUGIN_MANAGER_FLASH_KEY, None)
+    if not isinstance(messages, list):
+        return
+    for item in messages:
+        if not isinstance(item, dict):
+            continue
+        level = str(item.get("level") or "info").strip().lower()
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        if level == "success":
+            st.success(text)
+        elif level == "error":
+            st.error(text)
+        elif level == "warning":
+            st.warning(text)
+        else:
+            st.info(text)
+
+
+def _update_plugin_entry(entry: dict) -> tuple[bool, str]:
+    plugin_id = str(entry.get("id") or "").strip()
+    catalog_item = entry.get("catalog_item")
+    if not plugin_id:
+        return False, "Plugin id is missing."
+    if not isinstance(catalog_item, dict):
+        return False, f"{plugin_id}: no catalog update source is available."
+
+    ok, msg = install_plugin_from_shop_item(catalog_item)
+    if not ok:
+        return False, msg
+
+    installed_ver = str(entry.get("installed_ver") or "0.0.0").strip() or "0.0.0"
+    store_ver = str(entry.get("store_ver") or installed_ver).strip() or installed_ver
+    display_name = str(entry.get("display_name") or plugin_id).strip() or plugin_id
+    return True, f"{display_name} updated {installed_ver} -> {store_ver}"
+
+
+def _update_plugin_entries(entries: list[dict]) -> tuple[list[str], list[str]]:
+    updated: list[str] = []
+    failed: list[str] = []
+
+    for entry in entries:
+        ok, msg = _update_plugin_entry(entry)
+        if ok:
+            updated.append(str(entry.get("display_name") or entry.get("id") or "").strip() or msg)
+        else:
+            failed.append(msg)
+
+    if updated:
+        _refresh_plugins_after_fs_change()
+
+    return updated, failed
+
+
 def auto_restore_missing_plugins(
     manifest_urls: list[str] | str | None = None,
     progress_cb=None,
@@ -725,20 +875,7 @@ def _render_plugin_store_tab(catalog_items: list[dict], catalog_errors: list[str
         for platform_name in _get_item_platforms(item):
             all_platforms.add(platform_name)
 
-    common_order = [
-        "discord",
-        "webui",
-        "homeassistant",
-        "homekit",
-        "irc",
-        "matrix",
-        "telegram",
-        "wordpress",
-        "xbmc",
-        "automation",
-    ]
-    ordered = [platform_name for platform_name in common_order if platform_name in all_platforms]
-    ordered += sorted(platform_name for platform_name in all_platforms if platform_name not in set(common_order))
+    ordered = _ordered_platforms(all_platforms)
 
     search_q = st.text_input(
         "Search available plugins",
@@ -822,57 +959,12 @@ def _render_plugin_store_tab(catalog_items: list[dict], catalog_errors: list[str
 
 def _render_installed_plugins_tab(catalog_items: list[dict], catalog_errors: list[str]):
     _render_catalog_warnings(catalog_errors)
-
-    catalog_by_id = {
-        str(item.get("id") or "").strip(): item
-        for item in catalog_items
-        if str(item.get("id") or "").strip()
-    }
-
-    installed_ids = _installed_plugin_ids()
-    installed_entries = []
-    for plugin_id in installed_ids:
-        loaded = get_registry().get(plugin_id)
-        catalog_item = catalog_by_id.get(plugin_id)
-        display_name = _get_loaded_plugin_display_name(
-            loaded,
-            (catalog_item.get("name") if catalog_item else None) or plugin_id,
-        )
-        installed_entries.append(
-            {
-                "id": plugin_id,
-                "loaded": loaded,
-                "catalog_item": catalog_item,
-                "display_name": display_name,
-                "description": _get_loaded_plugin_description(loaded) or (
-                    (catalog_item.get("description") or "").strip() if catalog_item else ""
-                ),
-            }
-        )
-
-    installed_entries.sort(key=lambda item: item["display_name"].lower())
+    installed_entries = _build_installed_entries(catalog_items)
 
     all_platforms = set()
     for entry in installed_entries:
-        if entry["loaded"]:
-            all_platforms.update(_normalize_plats(getattr(entry["loaded"], "platforms", []) or []))
-        elif entry["catalog_item"]:
-            all_platforms.update(_get_item_platforms(entry["catalog_item"]))
-
-    common_order = [
-        "discord",
-        "webui",
-        "homeassistant",
-        "homekit",
-        "irc",
-        "matrix",
-        "telegram",
-        "wordpress",
-        "xbmc",
-        "automation",
-    ]
-    ordered = [platform_name for platform_name in common_order if platform_name in all_platforms]
-    ordered += sorted(platform_name for platform_name in all_platforms if platform_name not in set(common_order))
+        all_platforms.update(entry["platforms"])
+    ordered = _ordered_platforms(all_platforms)
 
     search_q = st.text_input(
         "Search installed plugins",
@@ -909,16 +1001,7 @@ def _render_installed_plugins_tab(catalog_items: list[dict], catalog_errors: lis
         else:
             filtered_entries = []
             for entry in search_filtered_entries:
-                loaded = entry["loaded"]
-                catalog_item = entry["catalog_item"]
-
-                platforms = []
-                if loaded:
-                    platforms = _normalize_plats(getattr(loaded, "platforms", []) or [])
-                elif catalog_item:
-                    platforms = _get_item_platforms(catalog_item)
-
-                if selected_platform in platforms:
+                if selected_platform in entry["platforms"]:
                     filtered_entries.append(entry)
 
         with tab:
@@ -938,18 +1021,11 @@ def _render_installed_plugins_tab(catalog_items: list[dict], catalog_errors: lis
                 display_name = entry["display_name"]
                 description = entry["description"]
 
-                installed_ver = _get_installed_version(plugin_id)
-                store_ver = (catalog_item.get("version") or "").strip() if catalog_item else ""
-                source_label = (catalog_item.get("_source_label") or "Local plugin").strip() if catalog_item else "Local plugin"
-                update_available = bool(catalog_item and _semver_tuple(store_ver) > _semver_tuple(installed_ver))
-
-                if loaded:
-                    platforms_str = ", ".join(
-                        _platform_display_label(platform_name)
-                        for platform_name in _normalize_plats(getattr(loaded, "platforms", []) or [])
-                    ) or _get_item_display_platforms(catalog_item or {})
-                else:
-                    platforms_str = _get_item_display_platforms(catalog_item or {})
+                installed_ver = entry["installed_ver"]
+                store_ver = entry["store_ver"]
+                source_label = entry["source_label"]
+                update_available = bool(entry["update_available"])
+                platforms_str = entry["platforms_str"]
 
                 tab_token = selected_platform or "all"
                 purge_key = f"plugin_manager_purge_{tab_token}_{plugin_id}"
@@ -974,10 +1050,10 @@ def _render_installed_plugins_tab(catalog_items: list[dict], catalog_errors: lis
                     controls = st.columns([1, 1, 3])
                     if update_available:
                         if controls[0].button("Update", key=f"plugin_manager_update_{tab_token}_{plugin_id}"):
-                            ok, msg = install_plugin_from_shop_item(catalog_item)
+                            ok, msg = _update_plugin_entry(entry)
                             if ok:
-                                st.success(f"{msg} (updated {installed_ver} -> {store_ver})")
                                 _refresh_plugins_after_fs_change()
+                                _queue_plugin_manager_messages([{"level": "success", "text": msg}])
                                 st.rerun()
                             else:
                                 st.error(msg)
@@ -1006,6 +1082,135 @@ def _render_installed_plugins_tab(catalog_items: list[dict], catalog_errors: lis
                                     st.error(msg2)
 
                             _refresh_plugins_after_fs_change()
+                            st.rerun()
+                        else:
+                            st.error(msg)
+
+
+def _render_updates_tab(catalog_items: list[dict], catalog_errors: list[str]):
+    _render_catalog_warnings(catalog_errors)
+
+    installed_entries = _build_installed_entries(catalog_items)
+    update_entries = [entry for entry in installed_entries if entry["update_available"]]
+    catalog_backed_entries = [entry for entry in installed_entries if entry["catalog_item"]]
+    local_only_entries = [entry for entry in installed_entries if not entry["catalog_item"]]
+    up_to_date_entries = [entry for entry in catalog_backed_entries if not entry["update_available"]]
+
+    summary_cols = st.columns(4)
+    summary_cols[0].metric("Updates Available", len(update_entries))
+    summary_cols[1].metric("Catalog-backed", len(catalog_backed_entries))
+    summary_cols[2].metric("Up to Date", len(up_to_date_entries))
+    summary_cols[3].metric("Local Only", len(local_only_entries))
+
+    action_col, text_col = st.columns([1, 3])
+    if action_col.button("Update All", key="plugin_manager_update_all", disabled=not update_entries):
+        with st.spinner(f"Updating {len(update_entries)} plugin(s)..."):
+            updated, failed = _update_plugin_entries(update_entries)
+        flash_messages = []
+        if updated:
+            updated_text = ", ".join(updated[:8])
+            if len(updated) > 8:
+                updated_text += f", and {len(updated) - 8} more"
+            flash_messages.append(
+                {"level": "success", "text": f"Updated {len(updated)} plugin(s): {updated_text}"}
+            )
+        if failed:
+            failed_text = "; ".join(failed[:4])
+            if len(failed) > 4:
+                failed_text += f"; and {len(failed) - 4} more"
+            flash_messages.append(
+                {"level": "error", "text": f"{len(failed)} plugin update(s) failed: {failed_text}"}
+            )
+        if not flash_messages:
+            flash_messages.append({"level": "info", "text": "No plugin updates were available."})
+        _queue_plugin_manager_messages(flash_messages)
+        st.rerun()
+
+    if update_entries:
+        text_col.caption("Only plugins with a newer catalog version are listed below. Update one at a time or update all in one pass.")
+    else:
+        text_col.caption("No catalog-backed plugin updates are currently available.")
+
+    if not update_entries:
+        if local_only_entries:
+            st.info("All catalog-backed plugins are up to date. Some installed plugins are local-only and do not have a catalog update source.")
+        else:
+            st.success("All installed catalog-backed plugins are up to date.")
+        return
+
+    all_platforms = set()
+    for entry in update_entries:
+        all_platforms.update(entry["platforms"])
+    ordered = _ordered_platforms(all_platforms)
+
+    search_q = st.text_input(
+        "Search updates",
+        value="",
+        placeholder="Search name, id, description...",
+        key="plugin_manager_updates_search",
+    ).strip().lower()
+
+    search_filtered_entries = []
+    for entry in update_entries:
+        haystack = f"{entry['id']}\n{entry['display_name']}\n{entry['description']}".lower()
+        if search_q and search_q not in haystack:
+            continue
+        search_filtered_entries.append(entry)
+
+    if not search_filtered_entries:
+        st.caption(f"Showing 0 of {len(update_entries)} plugin(s) with available updates.")
+        st.info("No plugin updates match the current filters.")
+        return
+
+    tab_labels = ["All", *[_platform_display_label(platform_name) for platform_name in ordered]]
+    tab_views = st.tabs(tab_labels)
+
+    for idx, tab in enumerate(tab_views):
+        selected_platform = None if idx == 0 else ordered[idx - 1]
+        if selected_platform is None:
+            filtered_entries = search_filtered_entries
+        else:
+            filtered_entries = [
+                entry for entry in search_filtered_entries if selected_platform in entry["platforms"]
+            ]
+
+        with tab:
+            platform_label = "all platforms" if selected_platform is None else _platform_display_label(selected_platform)
+            st.caption(
+                f"Showing {len(filtered_entries)} of {len(update_entries)} plugin(s) with available updates for {platform_label}."
+            )
+
+            if not filtered_entries:
+                st.info("No plugin updates match this platform.")
+                continue
+
+            for entry in filtered_entries:
+                plugin_id = entry["id"]
+                tab_token = selected_platform or "all"
+
+                with st.container(border=True):
+                    st.subheader(entry["display_name"])
+                    st.caption(
+                        " | ".join(
+                            [
+                                f"ID: {plugin_id}",
+                                f"installed: {entry['installed_ver'] or '0.0.0'}",
+                                f"store: {entry['store_ver'] or '0.0.0'}",
+                                f"source: {entry['source_label']}",
+                            ]
+                        )
+                    )
+
+                    if entry["description"]:
+                        st.write(entry["description"])
+
+                    st.caption(f"Platforms: {entry['platforms_str']}")
+
+                    if st.button("Update", key=f"plugin_manager_updates_update_{tab_token}_{plugin_id}"):
+                        ok, msg = _update_plugin_entry(entry)
+                        if ok:
+                            _refresh_plugins_after_fs_change()
+                            _queue_plugin_manager_messages([{"level": "success", "text": msg}])
                             st.rerun()
                         else:
                             st.error(msg)
@@ -1111,17 +1316,23 @@ def _render_settings_tab(catalog_errors: list[str], manifest_repos: list[dict[st
 def render_plugin_store_page():
     st.title("Verba Plugin Manager")
     st.caption("Install plugins from configured repos, manage installed plugins, and edit plugin repo settings.")
+    _render_plugin_manager_messages()
 
     manifest_repos = get_configured_shop_manifest_repos()
     catalog_items, catalog_errors = load_shop_catalog(manifest_repos)
 
-    store_tab, installed_tab, settings_tab = st.tabs(["Plugin Store", "Installed Plugins", "Settings"])
+    store_tab, installed_tab, updates_tab, settings_tab = st.tabs(
+        ["Plugin Store", "Installed Plugins", "Updates", "Settings"]
+    )
 
     with store_tab:
         _render_plugin_store_tab(catalog_items, catalog_errors, manifest_repos)
 
     with installed_tab:
         _render_installed_plugins_tab(catalog_items, catalog_errors)
+
+    with updates_tab:
+        _render_updates_tab(catalog_items, catalog_errors)
 
     with settings_tab:
         _render_settings_tab(catalog_errors, manifest_repos)
