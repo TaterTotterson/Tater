@@ -15,8 +15,6 @@ class ToolPlugin:
     missing_info_prompts = []
     settings_category = None
     required_settings = {}
-    routing_keywords = []
-
     # Default waiting message prompt for LLM
     waiting_prompt_template = (
         "Generate a message telling the user to please wait for a moment. "

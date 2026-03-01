@@ -1204,15 +1204,6 @@ def _render_plan_line(step: Dict[str, str]) -> str:
     return tool or nl
 
 
-def _step_text_looks_compound(text: str) -> bool:
-    lowered = " ".join(str(text or "").strip().lower().split())
-    if not lowered:
-        return False
-    if "\n" in lowered or ";" in lowered:
-        return True
-    return bool(re.search(r"\b(and then|then|after that|also)\b", lowered))
-
-
 def _normalize_plan_step_candidate(
     candidate: Any,
     *,
@@ -1237,8 +1228,6 @@ def _normalize_plan_step_candidate(
     )
     nl = _short_text(" ".join(_coerce_text(raw_nl).split()), limit=220)
     if not nl:
-        return None
-    if _step_text_looks_compound(nl):
         return None
     raw_id = str(candidate.get("id") or f"s{index + 1}").strip()
     step_id = _short_text(raw_id, limit=24) or f"s{index + 1}"
