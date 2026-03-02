@@ -4,6 +4,8 @@
 
 **Tater** is an AI assistant that connects to any OpenAI-compatible LLM, giving you a powerful set of AI-driven tools. It includes a WebUI for setup and private chats, and works across **Discord**, **Telegram**, **IRC**, **Matrix**, **Home Assistant**, **HomeKit**, and even the **OG Xbox via XBMC4Xbox**
 
+Main website: [taterassistant.com](https://taterassistant.com)
+
 ---
 
 ## Cerberus
