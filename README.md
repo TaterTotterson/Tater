@@ -24,66 +24,26 @@ Architecture flow:
 
 ---
 
-## 🧠 Tater Core Overview
+## 🛒 Tater Shop (Unified Catalog)
 
-| Core       | Description |
-|------------|-------------|
-| `ai_task`  | Built-in scheduled task runner for timed and recurring AI jobs, with delivery routed through notifier portals (Discord, Telegram, Matrix, IRC, Home Assistant, and more). |
-| `memory`   | Background memory extraction core that incrementally scans chat history, builds structured user/room memory profiles in Redis, and injects compact memory context into Cerberus. |
-| `rss`      | Background feed watcher that summarizes article content and dispatches updates through notifier portals. |
+Tater uses **Tater Shop** as the source of truth for:
 
-## 🌐 Tater Portal Overview
+- **Verba Plugins**
+- **Tater Portals**
+- **Tater Cores**
 
-| Portal            | Description |
-|-------------------|-------------|
-| `discord`         | Full-featured Discord bot that runs compatible Verba Plugins and supports rich interactions, media output, and background jobs. |
-| `ha_automations`  | Lightweight Home Assistant automation-only endpoint for direct tool execution. Designed for fast, reliable automations like camera events, doorbell alerts, weather summaries, and dashboard sensors. Intended to be used with the [Tater Automations](https://github.com/TaterTotterson/tater_automations) custom component, which provides a native “Call Tater automation tool” action in Home Assistant. |
-| `homeassistant`   | Native integration for [Home Assistant](https://github.com/TaterTotterson/Tater-HomeAssistant), allowing Tater to act as a voice-enabled AI assistant through the Assist pipeline and control smart devices directly. |
-| `homekit`         | Siri / Apple Shortcuts integration for [HomeKit](https://github.com/TaterTotterson/Tater/wiki/How-to-Build-the-%E2%80%9CTater%E2%80%9D-Shortcut), enabling “Hey Siri, ask Tater…” voice commands, per-device conversation sessions, and Verba Plugin-backed actions. |
-| `irc`             | Lightweight IRC bot that responds to mentions and runs compatible Verba Plugins. |
-| `macos`           | HTTP bridge for the [Tater-MacOS](https://github.com/TaterTotterson/Tater-MacOS) menu bar app, with Redis-backed per-device chat history, inline asset uploads, Cerberus chat turns, and direct quick-action plugin calls. |
-| `matrix`          | Modern Matrix client with end-to-end encryption support, Markdown rendering, and full Verba Plugin compatibility — bringing Tater to federated chat networks like Element and Cinny. |
-| `telegram`        | Telegram bot integration with chat allowlists, DM user restrictions, queued notifications, media delivery, and Verba Plugin-backed tool execution. |
-| `webui`           | Streamlit-based WebUI for chatting, configuring Verba Plugins, and managing settings. |
-| `xbmc`            | OG Xbox integration for **XBMC4Xbox**, provided by the custom Cortana-powered skin and script at [skin.cortana.tater-xbmc](https://github.com/TaterTotterson/skin.cortana.tater-xbmc), enabling an on-console AI assistant with chat history, quick asks, and Verba Plugin-powered actions. |
-
-
-## 🧩 Tater Verba Plugin Ecosystem
-
-Tater now uses a **remote Verba Plugin Store**.  
-Verba Plugins are no longer bundled with Tater — they are installed, updated, and restored automatically from the Tater Shop.
-
-### 🛒 Tater Verba Plugin Store
-
-All Verba Plugins, versions, descriptions, and update history now live here:
+This repository no longer keeps static lists of those modules in the README.
+Instead, catalogs, versions, metadata, and update paths are managed in:
 
 👉 **https://github.com/TaterTotterson/Tater_Shop**
 
----
+From the WebUI, use:
 
-### 🔍 Browsing Verba Plugins
+- **Plugin Manager**
+- **Portal Manager**
+- **Core Manager**
 
-From the WebUI you can:
-
-- Search by name or description  
-- Filter by portal (Discord, WebUI, Home Assistant, etc.)  
-- See installed vs store versions  
-- One-click install, update, remove  
-- Bulk “Update All”  
-
----
-
-### ♻️ Auto-Restore
-
-When Tater starts:
-
-- Any Verba Plugin that was **enabled** in Redis but missing on disk  
-- is automatically re-downloaded from the store.
-
-No config loss. No manual installs. No volume mapping required.
-
-**Note**:
-- Tater currently recommends using qwen3-coder-next, qwen3-next-80b, gpt-oss-120b, qwen3-coder-30b or Gemma3-27b
+Each manager supports browse/install/update/remove and startup restore for enabled items that are missing on disk.
 
 ---
 
