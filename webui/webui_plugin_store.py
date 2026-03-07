@@ -1374,15 +1374,15 @@ def _render_settings_tab(catalog_errors: list[str], manifest_repos: list[dict[st
 
 
 def render_plugin_store_page():
-    st.title("Verba Plugin Manager")
-    st.caption("Install plugins from configured repos, manage installed plugins, and edit plugin repo settings.")
+    st.title("Verba Manager")
+    st.caption("Install Verba's from configured repos, manage installed Verba's, and edit Verba repo settings.")
     _render_plugin_manager_messages()
 
     manifest_repos = get_configured_shop_manifest_repos()
     catalog_items, catalog_errors = load_shop_catalog(manifest_repos)
 
     installed_tab, store_tab, updates_tab, settings_tab = st.tabs(
-        ["Installed Plugins", "Plugin Store", "Updates", "Settings"]
+        ["Installed Verba's", "Verba Store", "Updates", "Settings"]
     )
 
     with installed_tab:
