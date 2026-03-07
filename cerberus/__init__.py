@@ -70,7 +70,6 @@ TOOL_NAME_ALIASES = {
 _KERNEL_TOOL_PURPOSE_HINTS = {
     "list_tools": "list kernel and enabled plugin tools for current platform",
     "get_plugin_help": "show plugin usage example and guidance",
-    "list_platforms_for_plugin": "list platforms supported by a plugin",
     "read_file": "read local file contents",
     "search_web": "web search for current information",
     "search_files": "search text across local files",
@@ -82,10 +81,6 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
     "download_file": "download files from URLs",
     "list_archive": "inspect archive entries",
     "extract_archive": "extract archives to a target directory",
-    "list_stable_plugins": "list stable built-in plugins",
-    "list_stable_platforms": "list stable built-in platforms",
-    "inspect_plugin": "inspect plugin metadata and methods",
-    "test_plugin": "run plugin test harness",
     "write_workspace_note": "append a workspace note",
     "list_workspace": "list workspace notes",
     "memory_get": "read saved memory (auto-checks legacy + durable profiles by default)",
@@ -100,7 +95,6 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
 _KERNEL_TOOL_USAGE_HINTS = {
     "list_tools": '{"function":"list_tools","arguments":{}}',
     "get_plugin_help": '{"function":"get_plugin_help","arguments":{"plugin_id":"<plugin_id>"}}',
-    "list_platforms_for_plugin": '{"function":"list_platforms_for_plugin","arguments":{"plugin_id":"<plugin_id>"}}',
     "read_file": '{"function":"read_file","arguments":{"path":"<path>"}}',
     "search_web": '{"function":"search_web","arguments":{"query":"<query>"}}',
     "search_files": '{"function":"search_files","arguments":{"query":"<query>","path":"/"}}',
@@ -112,12 +106,6 @@ _KERNEL_TOOL_USAGE_HINTS = {
     "download_file": '{"function":"download_file","arguments":{"url":"https://example.com/file"}}',
     "list_archive": '{"function":"list_archive","arguments":{"path":"<archive_path>"}}',
     "extract_archive": '{"function":"extract_archive","arguments":{"path":"<archive_path>","destination":"<dest_path>"}}',
-    "list_stable_plugins": '{"function":"list_stable_plugins","arguments":{}}',
-    "list_stable_platforms": '{"function":"list_stable_platforms","arguments":{}}',
-    "inspect_plugin": '{"function":"inspect_plugin","arguments":{"plugin_id":"<plugin_id>"}}',
-    "test_plugin": '{"function":"test_plugin","arguments":{"plugin_id":"<plugin_id>"}}',
-    "validate_plugin": '{"function":"validate_plugin","arguments":{"name":"<plugin_name>"}}',
-    "validate_platform": '{"function":"validate_platform","arguments":{"name":"<platform_name>"}}',
     "write_workspace_note": '{"function":"write_workspace_note","arguments":{"content":"<note_text>"}}',
     "list_workspace": '{"function":"list_workspace","arguments":{}}',
     "memory_get": '{"function":"memory_get","arguments":{"keys":["<key>"]}}',
@@ -158,6 +146,7 @@ CERBERUS_LEDGER_SCHEMA_VERSION = "2"
 
 _PLATFORM_DISPLAY = {
     "webui": "WebUI",
+    "macos": "macOS",
     "discord": "Discord",
     "irc": "IRC",
     "telegram": "Telegram",
@@ -648,19 +637,6 @@ def _looks_like_standalone_request(text: str) -> bool:
     )
 
 
-def _looks_like_send_message_intent(text: str) -> bool:
-    return followup_intents.looks_like_send_message_intent(
-        text,
-        url_re=_URL_RE,
-    )
-
-
-def _looks_like_link_list_request(text: str) -> bool:
-    return followup_intents.looks_like_link_list_request(
-        text,
-    )
-
-
 def _web_research_url_key(url: Any) -> str:
     return web_research_helpers.web_research_url_key(url)
 
@@ -791,30 +767,6 @@ def _find_concrete_destination(payload: Any, *, _in_destination_context: bool = 
         return False
 
     return _looks_like_destination_scalar(payload, key_hint=_key_hint, in_destination_context=_in_destination_context)
-
-
-def _looks_like_schedule_request(text: str) -> bool:
-    return common_helpers.looks_like_schedule_request(
-        text,
-    )
-
-
-def _looks_like_weather_request(text: str) -> bool:
-    return common_helpers.looks_like_weather_request(
-        text,
-    )
-
-
-def _mentions_explicit_weather_location(text: str) -> bool:
-    return common_helpers.mentions_explicit_weather_location(
-        text,
-    )
-
-
-def _mentions_explicit_timezone(text: str) -> bool:
-    return common_helpers.mentions_explicit_timezone(
-        text,
-    )
 
 
 def _planner_focus_prompt(*, current_user_text: str, resolved_user_text: str) -> str:
@@ -1357,6 +1309,73 @@ async def _run_chat_fallback_reply(
     except Exception:
         return ""
     return _coerce_text((resp.get("message", {}) or {}).get("content", "")).strip()
+
+
+async def _resolve_user_request_for_turn(
+    *,
+    llm_client: Any,
+    current_user_text: str,
+    history: List[Dict[str, Any]],
+    platform_preamble: str,
+    max_tokens: int,
+) -> str:
+    current = str(current_user_text or "").strip()
+    if not current:
+        return ""
+
+    recent_history: List[Dict[str, str]] = []
+    for msg in (history or [])[-8:]:
+        if not isinstance(msg, dict):
+            continue
+        role = str(msg.get("role") or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = _coerce_text(msg.get("content")).strip()
+        if not content:
+            continue
+        recent_history.append({"role": role, "content": _short_text(content, limit=240)})
+
+    payload = {
+        "current_user_message": current,
+        "recent_history": recent_history,
+    }
+    messages: List[Dict[str, Any]] = [
+        {
+            "role": "system",
+            "content": (
+                "You resolve the current user turn into a standalone request for planning.\n"
+                "Return exactly one strict JSON object: {\"resolved_request\":\"...\"}\n"
+                "Rules:\n"
+                "- Use the current user message as highest priority.\n"
+                "- Use recent history only to resolve references (it/that/this/what about/how about/time shifts).\n"
+                "- Short follow-up questions that shift location/time/subject are still explicit retrieval requests; keep intent from prior turn and update only what changed.\n"
+                "- Preserve requested time windows and area/entity constraints when the follow-up implies them.\n"
+                "- If the current message is standalone, keep it unchanged.\n"
+                "- Do not answer the request.\n"
+                "- Do not invent facts, entities, or outcomes.\n"
+                "- Keep wording concise and faithful to the user's intent.\n"
+            ),
+        },
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+    messages = _with_platform_preamble(messages, platform_preamble=platform_preamble)
+    try:
+        resp = await llm_client.chat(
+            messages=messages,
+            max_tokens=max(80, int(max_tokens or 180)),
+            temperature=0.0,
+        )
+    except Exception:
+        return current
+
+    raw = _coerce_text((resp.get("message", {}) or {}).get("content", "")).strip()
+    parsed = _first_json_object(raw)
+    if not isinstance(parsed, dict):
+        return current
+    resolved = str(parsed.get("resolved_request") or "").strip()
+    if not resolved:
+        return current
+    return _short_text(" ".join(resolved.split()), limit=420) or current
 
 
 def _state_list(value: Any, *, max_items: int, item_limit: int) -> List[str]:
@@ -2026,12 +2045,6 @@ def _build_help_constrained_retry_tool_call(
     )
 
 
-def _user_disallows_overwrite(text: str) -> bool:
-    return common_helpers.user_disallows_overwrite(
-        text,
-    )
-
-
 def _build_overwrite_retry_tool_call(
     *,
     tool_call: Optional[Dict[str, Any]],
@@ -2280,8 +2293,16 @@ async def run_cerberus_turn(
     attempted_tool_for_ledger = ""
 
     history = _compact_history(history_messages)
-    resolved_user_text = str(user_text or "")
     current_user_turn_text = _strip_user_sender_prefix(user_text).strip() or str(user_text or "").strip()
+    resolved_user_text = await _resolve_user_request_for_turn(
+        llm_client=llm_client,
+        current_user_text=current_user_turn_text,
+        history=history,
+        platform_preamble=platform_preamble,
+        max_tokens=max(120, planner_max_tokens // 6),
+    )
+    if not resolved_user_text:
+        resolved_user_text = current_user_turn_text or str(user_text or "").strip()
     tool_index = _enabled_tool_mini_index(
         platform=platform,
         registry=registry,
@@ -2482,7 +2503,7 @@ async def run_cerberus_turn(
             {
                 "role": "system",
                 "content": _planner_focus_prompt(
-                    current_user_text=user_text,
+                    current_user_text=current_user_turn_text,
                     resolved_user_text=round_request_text,
                 ),
             },
@@ -2541,7 +2562,7 @@ async def run_cerberus_turn(
             checker_decision = await _run_checker(
                 llm_client=llm_client,
                 platform=platform,
-                current_user_text=user_text,
+                current_user_text=current_user_turn_text,
                 resolved_user_text=resolved_user_text,
                 agent_state=agent_state,
                 memory_context=memory_context_payload,
@@ -2893,7 +2914,7 @@ async def run_cerberus_turn(
         checker_decision = await _run_checker(
             llm_client=llm_client,
             platform=platform,
-            current_user_text=user_text,
+            current_user_text=current_user_turn_text,
             resolved_user_text=resolved_user_text,
             agent_state=agent_state,
             memory_context=memory_context_payload,
@@ -3056,7 +3077,7 @@ async def run_cerberus_turn(
     checker_decision = await _run_checker(
         llm_client=llm_client,
         platform=platform,
-        current_user_text=user_text,
+        current_user_text=current_user_turn_text,
         resolved_user_text=resolved_user_text,
         agent_state=agent_state,
         memory_context=memory_context_payload,

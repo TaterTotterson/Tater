@@ -229,6 +229,8 @@ async def events_search(
         try:
             ev = json.loads(r)
             ev_dt = _parse_iso_naive(ev.get("ha_time"))
+            if (since_dt or until_dt) and ev_dt is None:
+                continue
             if ev_dt:
                 if since_dt and ev_dt < since_dt:
                     continue

@@ -1,9 +1,9 @@
 import inspect
 from typing import Any, Callable, Dict, Optional
 
+from plugin_base import ToolPlugin
 from plugin_kernel import (
     get_plugin_help,
-    list_platforms_for_plugin,
     normalize_platform,
     plugin_display_name,
     plugin_supports_platform,
@@ -21,12 +21,6 @@ from kernel_tools import (
     download_file,
     list_archive,
     extract_archive,
-    list_stable_plugins,
-    list_stable_platforms,
-    inspect_plugin,
-    validate_plugin,
-    test_plugin,
-    validate_platform,
     write_workspace_note,
     list_workspace,
     memory_get,
@@ -56,7 +50,6 @@ from memory_platform_store import (
 META_TOOLS = {
     "list_tools",
     "get_plugin_help",
-    "list_platforms_for_plugin",
     "read_file",
     "search_web",
     "search_files",
@@ -68,12 +61,6 @@ META_TOOLS = {
     "download_file",
     "list_archive",
     "extract_archive",
-    "list_stable_plugins",
-    "list_stable_platforms",
-    "inspect_plugin",
-    "validate_plugin",
-    "test_plugin",
-    "validate_platform",
     "write_workspace_note",
     "list_workspace",
     "memory_get",
@@ -89,7 +76,6 @@ META_TOOLS = {
 _KERNEL_TOOL_PURPOSE_HINTS = {
     "list_tools": "list kernel and enabled plugin tools for current platform",
     "get_plugin_help": "show plugin usage example and guidance",
-    "list_platforms_for_plugin": "list platforms supported by a plugin",
     "read_file": "read local file contents",
     "search_web": "web search for current information",
     "search_files": "search text across local files",
@@ -101,12 +87,6 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
     "download_file": "download files from URLs",
     "list_archive": "inspect archive entries",
     "extract_archive": "extract archives to a target directory",
-    "list_stable_plugins": "list stable built-in plugins",
-    "list_stable_platforms": "list stable built-in platforms",
-    "inspect_plugin": "inspect plugin metadata and methods",
-    "test_plugin": "run plugin test harness",
-    "validate_plugin": "validate plugin metadata and surface install hints",
-    "validate_platform": "validate platform metadata and surface install hints",
     "write_workspace_note": "append a workspace note",
     "list_workspace": "list workspace notes",
     "memory_get": "read saved memory",
@@ -607,12 +587,6 @@ def run_meta_tool(
             registry=registry,
         )
 
-    if func == "list_platforms_for_plugin":
-        return list_platforms_for_plugin(
-            plugin_id=str(args.get("plugin_id") or "").strip(),
-            registry=registry,
-        )
-
     if func == "read_file":
         return read_file(
             str(args.get("path") or ""),
@@ -714,29 +688,6 @@ def run_meta_tool(
             max_total_bytes=int(args.get("max_total_bytes") or 100000000),
         )
 
-    if func == "list_stable_plugins":
-        return list_stable_plugins()
-    if func == "list_stable_platforms":
-        return list_stable_platforms()
-    if func == "inspect_plugin":
-        return inspect_plugin(str(args.get("plugin_id") or ""))
-    if func == "test_plugin":
-        return test_plugin(
-            str(args.get("name") or args.get("plugin_id") or ""),
-            platform=args.get("platform"),
-            auto_install=bool(args.get("auto_install", False)),
-        )
-
-    if func == "validate_plugin":
-        return validate_plugin(
-            str(args.get("name") or ""),
-            bool(args.get("auto_install", True)),
-        )
-    if func == "validate_platform":
-        return validate_platform(
-            str(args.get("name") or ""),
-            bool(args.get("auto_install", True)),
-        )
     if func == "write_workspace_note":
         return write_workspace_note(str(args.get("content") or ""))
     if func == "list_workspace":
@@ -1024,6 +975,9 @@ async def _invoke_plugin_handler(
     call_kwargs: Dict[str, Any] = {}
     missing = []
     for name, param in sig.parameters.items():
+        if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+            # Variadic params are optional capture buckets, not required call context.
+            continue
         if name == "args":
             call_kwargs[name] = args
             continue
@@ -1044,6 +998,23 @@ async def _invoke_plugin_handler(
 
     result = handler(**call_kwargs)
     return await result if inspect.isawaitable(result) else result
+
+
+def _handler_name_candidates(platform: str) -> list[str]:
+    normalized = normalize_platform(platform)
+    if not normalized:
+        return []
+    return [f"handle_{normalized}"]
+
+
+def _plugin_has_handler(plugin: Any, handler_name: str) -> bool:
+    method = getattr(plugin.__class__, handler_name, None)
+    if not callable(method):
+        return False
+    base = getattr(ToolPlugin, handler_name, None)
+    if base is None:
+        return True
+    return method is not base
 
 
 async def execute_plugin_call(
@@ -1093,14 +1064,16 @@ async def execute_plugin_call(
             "raw": None,
         }
 
-    handler_name = f"handle_{platform}"
-    if not hasattr(plugin, handler_name):
+    handler_candidates = _handler_name_candidates(platform)
+    chosen_handler = next((name for name in handler_candidates if _plugin_has_handler(plugin, name)), "")
+    if not chosen_handler:
+        display_handlers = ", ".join(handler_candidates) if handler_candidates else f"handle_{platform}"
         return {
             "plugin_id": func,
             "plugin_name": plugin_display_name(plugin),
             "result": action_failure(
                 code="unsupported_platform",
-                message=f"`{plugin_display_name(plugin)}` does not expose `{handler_name}`.",
+                message=f"`{plugin_display_name(plugin)}` does not expose {display_handlers}.",
                 available_on=list(getattr(plugin, "platforms", []) or []),
                 say_hint="Explain this tool cannot run on the current platform and list supported platforms.",
             ),
@@ -1110,7 +1083,7 @@ async def execute_plugin_call(
     try:
         raw = await _invoke_plugin_handler(
             plugin=plugin,
-            handler_name=handler_name,
+            handler_name=chosen_handler,
             args=args,
             llm_client=llm_client,
             context=context,

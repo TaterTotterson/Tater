@@ -1,4 +1,5 @@
 import asyncio
+import calendar
 import json
 import logging
 import os
@@ -159,6 +160,14 @@ def _build_platform_context(
     if platform == "homeassistant":
         return {"context": origin or {}}
 
+    if platform == "macos":
+        return {
+            "context": origin or {},
+            "request_text": task_prompt,
+            "raw_message": task_prompt,
+            "raw": task_prompt,
+        }
+
     return {}
 
 
@@ -212,6 +221,19 @@ def _as_int(value: Any, default: int = 0) -> int:
     except Exception:
         return int(default)
 
+
+def _is_enabled(value: Any, default: bool = True) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on", "enabled"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "disabled"}:
+        return False
+    return bool(default)
+
 def _normalize_weekdays(raw: Any) -> List[int]:
     if not isinstance(raw, list):
         return []
@@ -219,6 +241,19 @@ def _normalize_weekdays(raw: Any) -> List[int]:
     for item in raw:
         day = _as_int(item, -1)
         if 0 <= day <= 6:
+            out.append(day)
+    if not out:
+        return []
+    return sorted(set(out))
+
+
+def _normalize_monthdays(raw: Any) -> List[int]:
+    if not isinstance(raw, list):
+        return []
+    out: List[int] = []
+    for item in raw:
+        day = _as_int(item, -1)
+        if 1 <= day <= 31:
             out.append(day)
     if not out:
         return []
@@ -246,7 +281,7 @@ def _next_local_time_occurrence(
     second: int,
     weekdays: Optional[List[int]] = None,
 ) -> float:
-    now_local = datetime.fromtimestamp(float(now_ts)).astimezone()
+    now_local = datetime.fromtimestamp(float(now_ts))
     h = min(23, max(0, int(hour)))
     m = min(59, max(0, int(minute)))
     s = min(59, max(0, int(second)))
@@ -264,6 +299,45 @@ def _next_local_time_occurrence(
     return candidate.timestamp()
 
 
+def _next_monthly_local_time_occurrence(
+    *,
+    now_ts: float,
+    hour: int,
+    minute: int,
+    second: int,
+    monthdays: Optional[List[int]] = None,
+) -> float:
+    now_local = datetime.fromtimestamp(float(now_ts))
+    h = min(23, max(0, int(hour)))
+    m = min(59, max(0, int(minute)))
+    s = min(59, max(0, int(second)))
+
+    day_filter = _normalize_monthdays(monthdays or [])
+    if not day_filter:
+        return 0.0
+
+    for month_offset in range(0, 61):
+        month_index = (now_local.month - 1) + month_offset
+        year = now_local.year + (month_index // 12)
+        month = (month_index % 12) + 1
+        last_day = calendar.monthrange(year, month)[1]
+        for day in day_filter:
+            if day > last_day:
+                continue
+            candidate = now_local.replace(
+                year=year,
+                month=month,
+                day=day,
+                hour=h,
+                minute=m,
+                second=s,
+                microsecond=0,
+            )
+            if candidate.timestamp() > now_ts:
+                return candidate.timestamp()
+    return 0.0
+
+
 def _next_cron_occurrence(
     *,
     now_ts: float,
@@ -279,7 +353,7 @@ def _next_cron_occurrence(
     if not valid_hours or not valid_minutes or not valid_seconds:
         return 0.0
 
-    base = datetime.fromtimestamp(float(now_ts)).astimezone().replace(microsecond=0) + timedelta(seconds=1)
+    base = datetime.fromtimestamp(float(now_ts)).replace(microsecond=0) + timedelta(seconds=1)
     day_start = base.replace(hour=0, minute=0, second=0, microsecond=0)
 
     for day_offset in range(0, 370):
@@ -329,6 +403,18 @@ def _next_run_for_schedule(schedule: Dict[str, Any], now_ts: float) -> float:
             minute=minute,
             second=second,
             weekdays=weekdays if isinstance(weekdays, list) else None,
+        )
+    if recurrence_kind == "monthly_local_time":
+        hour = _as_int(recurrence.get("hour"), 0)
+        minute = _as_int(recurrence.get("minute"), 0)
+        second = _as_int(recurrence.get("second"), 0)
+        monthdays = recurrence.get("monthdays")
+        return _next_monthly_local_time_occurrence(
+            now_ts=now_ts,
+            hour=hour,
+            minute=minute,
+            second=second,
+            monthdays=monthdays if isinstance(monthdays, list) else None,
         )
     return 0.0
 
@@ -573,6 +659,9 @@ def run(stop_event: Optional[object] = None):
             _pop_due(reminder_id)
             reminder = _load_reminder(reminder_id)
             if not reminder:
+                continue
+
+            if not _is_enabled(reminder.get("enabled"), True):
                 continue
 
             dest = str(reminder.get("platform") or "").strip().lower()

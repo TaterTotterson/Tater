@@ -1,15 +1,13 @@
-import asyncio
 import json
 import os
 import re
+import secrets
 import time
 from typing import Any, Dict, List, Optional
 
 import feedparser
 import redis
 import streamlit as st
-
-from helpers import run_async
 from rss_store import get_all_feeds, set_feed, update_feed, delete_feed
 
 
@@ -20,335 +18,35 @@ redis_client = redis.Redis(
     decode_responses=True,
 )
 
-def exp_get_plugin_enabled(plugin_name: str) -> bool:
-    raw = redis_client.hget("exp:plugin_enabled", plugin_name)
-    return str(raw or "").strip().lower() == "true"
+
+def _looks_like_token_setting(setting_key: str, label: str) -> bool:
+    key_text = str(setting_key or "").strip().lower()
+    label_text = str(label or "").strip().lower()
+    return "token" in key_text or "token" in label_text
 
 
-def exp_set_plugin_enabled(plugin_name: str, enabled: bool) -> None:
-    redis_client.hset("exp:plugin_enabled", plugin_name, "true" if enabled else "false")
-
-
-def exp_get_plugin_settings(category: str) -> dict:
-    return redis_client.hgetall(f"exp:plugin_settings:{category}") or {}
-
-
-def exp_save_plugin_settings(category: str, settings: dict) -> None:
-    redis_client.hset(f"exp:plugin_settings:{category}", mapping={k: str(v) for k, v in settings.items()})
-
-
-def exp_get_platform_settings(platform_key: str) -> dict:
-    return redis_client.hgetall(f"exp:platform_settings:{platform_key}") or {}
-
-
-def exp_save_platform_settings(platform_key: str, settings: dict) -> None:
-    redis_client.hset(f"exp:platform_settings:{platform_key}", mapping={k: str(v) for k, v in settings.items()})
-
-
-def _load_exp_validation(kind: str, name: str) -> dict | None:
-    key = f"exp:validation:{kind}:{name}"
-    raw = redis_client.get(key)
-    if not raw:
-        return None
-    try:
-        data = json.loads(raw)
-        return data if isinstance(data, dict) else None
-    except Exception:
-        return None
-
-
-def _validation_status(report: dict | None, fallback_error: str | None = None) -> tuple[str, str]:
-    if report:
-        if report.get("ok"):
-            return ("Valid", "")
-        missing_deps = report.get("missing_dependencies") or []
-        if missing_deps:
-            return ("Missing dependencies", ", ".join(map(str, missing_deps)))
-        err = report.get("error") or report.get("missing_fields") or "Invalid"
-        if isinstance(err, list):
-            err = ", ".join(map(str, err))
-        return ("Invalid", str(err))
-    if fallback_error:
-        return ("Load error", fallback_error)
-    return ("Not validated", "")
-
-
-def _dependency_lines(report: dict | None) -> list[str]:
-    if not report:
-        return []
-    lines: list[str] = []
-    declared = report.get("declared_dependencies") or []
-    missing = report.get("missing_dependencies") or []
-    installed = report.get("installed_dependencies") or []
-    install_errors = report.get("install_errors") or []
-    if declared:
-        lines.append(f"Declared deps: {', '.join(map(str, declared))}")
-    if missing:
-        lines.append(f"Missing deps: {', '.join(map(str, missing))}")
-    if installed:
-        lines.append(f"Installed deps: {', '.join(map(str, installed))}")
-    if install_errors:
-        lines.append(f"Install errors: {', '.join(map(str, install_errors))}")
-    return lines
-
-
-def render_exp_plugin_settings_form(plugin):
-    category = getattr(plugin, "settings_category", None)
-    settings = getattr(plugin, "required_settings", None)
-    if not category or not settings:
-        return
-    if not isinstance(settings, dict):
-        with st.expander("Settings", expanded=False):
-            st.warning("Settings schema invalid (expected a dictionary).")
-        return
-
-    with st.expander("Settings", expanded=False):
-        current_settings = exp_get_plugin_settings(category)
-        new_settings = {}
-        has_fields = False
-
-        for key, info in settings.items():
-            input_type = info.get("type", "text")
-            label = info.get("label", key)
-            desc = info.get("description", "")
-            default_value = current_settings.get(key, info.get("default", ""))
-
-            if input_type == "button":
-                if st.button(label, key=f"exp_{plugin.name}_{category}_{key}_button"):
-                    if hasattr(plugin, "handle_setting_button"):
-                        try:
-                            result = plugin.handle_setting_button(key)
-                            if asyncio.iscoroutine(result):
-                                result = run_async(result)
-                            if result:
-                                st.success(result)
-                        except Exception as e:
-                            st.error(f"Error running {label}: {e}")
-                if desc:
-                    st.caption(desc)
-                continue
-
-            has_fields = True
-
-            if input_type == "password":
-                new_value = st.text_input(
-                    label,
-                    value=str(default_value),
-                    help=desc,
-                    type="password",
-                    key=f"exp_{plugin.name}_{category}_{key}"
-                )
-            elif input_type == "file":
-                uploaded_file = st.file_uploader(
-                    label,
-                    type=["json"],
-                    key=f"exp_{plugin.name}_{category}_{key}"
-                )
-                if uploaded_file is not None:
-                    try:
-                        file_content = uploaded_file.read().decode("utf-8")
-                        json.loads(file_content)
-                        new_value = file_content
-                    except Exception as e:
-                        st.error(f"Error in uploaded file for {key}: {e}")
-                        new_value = default_value
-                else:
-                    new_value = default_value
-            elif input_type == "select":
-                options = info.get("options", []) or ["Option 1", "Option 2"]
-                current_index = options.index(default_value) if default_value in options else 0
-                new_value = st.selectbox(
-                    label,
-                    options,
-                    index=current_index,
-                    help=desc,
-                    key=f"exp_{plugin.name}_{category}_{key}"
-                )
-            elif input_type == "checkbox":
-                is_checked = (
-                    default_value if isinstance(default_value, bool)
-                    else str(default_value).lower() in ("true", "1", "yes")
-                )
-                new_value = st.checkbox(
-                    label,
-                    value=is_checked,
-                    help=desc,
-                    key=f"exp_{plugin.name}_{category}_{key}"
-                )
-            elif input_type == "number":
-                raw_value = str(default_value).strip()
-                is_int_like = bool(re.fullmatch(r"-?\d+", raw_value))
-
-                if is_int_like:
-                    try:
-                        current_num = int(raw_value)
-                    except Exception:
-                        current_num = 0
-                    new_value = st.number_input(
-                        label,
-                        value=current_num,
-                        step=1,
-                        format="%d",
-                        help=desc,
-                        key=f"exp_{plugin.name}_{category}_{key}"
-                    )
-                else:
-                    try:
-                        current_num = float(raw_value) if raw_value else 0.0
-                    except Exception:
-                        current_num = 0.0
-                    new_value = st.number_input(
-                        label,
-                        value=current_num,
-                        step=1.0,
-                        help=desc,
-                        key=f"exp_{plugin.name}_{category}_{key}"
-                    )
-            elif input_type in ("textarea", "multiline") or info.get("multiline") is True:
-                rows = int(info.get("rows") or 8)
-                height = int(info.get("height") or (rows * 24 + 40))
-                placeholder = info.get("placeholder", None)
-                new_value = st.text_area(
-                    label,
-                    value=str(default_value),
-                    help=desc,
-                    height=height,
-                    placeholder=placeholder,
-                    key=f"exp_{plugin.name}_{category}_{key}"
-                )
-            else:
-                new_value = st.text_input(
-                    label,
-                    value=str(default_value),
-                    help=desc,
-                    key=f"exp_{plugin.name}_{category}_{key}"
-                )
-
-            new_settings[key] = new_value
-
-        if has_fields and st.button(f"Save {category} Settings", key=f"exp_save_{plugin.name}_{category}"):
-            exp_save_plugin_settings(category, new_settings)
-            st.success(f"{category} settings saved.")
+def _token_text_input(
+    *,
+    label: str,
+    value: str,
+    help_text: str,
+    widget_key: str,
+) -> str:
+    input_col, button_col = st.columns([6, 1])
+    with input_col:
+        new_val = st.text_input(
+            label,
+            value=str(value),
+            help=help_text,
+            type="password",
+            key=widget_key,
+        )
+    with button_col:
+        st.write("")
+        if st.button("Generate", key=f"{widget_key}_generate"):
+            st.session_state[widget_key] = secrets.token_urlsafe(24)
             st.rerun()
-
-
-def render_exp_platform_settings_form(platform_key: str, required: dict):
-    if not required:
-        return
-
-    with st.expander("Settings", expanded=False):
-        current_settings = exp_get_platform_settings(platform_key)
-        new_settings = {}
-        has_fields = False
-
-        for key, info in required.items():
-            input_type = info.get("type", "text")
-            label = info.get("label", key)
-            desc = info.get("description", "")
-            default_value = current_settings.get(key, info.get("default", ""))
-
-            has_fields = True
-
-            if input_type == "password":
-                new_value = st.text_input(
-                    label,
-                    value=str(default_value),
-                    help=desc,
-                    type="password",
-                    key=f"exp_platform_{platform_key}_{key}"
-                )
-            elif input_type == "file":
-                uploaded_file = st.file_uploader(
-                    label,
-                    type=["json"],
-                    key=f"exp_platform_{platform_key}_{key}"
-                )
-                if uploaded_file is not None:
-                    try:
-                        file_content = uploaded_file.read().decode("utf-8")
-                        json.loads(file_content)
-                        new_value = file_content
-                    except Exception as e:
-                        st.error(f"Error in uploaded file for {key}: {e}")
-                        new_value = default_value
-                else:
-                    new_value = default_value
-            elif input_type == "select":
-                options = info.get("options", []) or ["Option 1", "Option 2"]
-                current_index = options.index(default_value) if default_value in options else 0
-                new_value = st.selectbox(
-                    label,
-                    options,
-                    index=current_index,
-                    help=desc,
-                    key=f"exp_platform_{platform_key}_{key}"
-                )
-            elif input_type in ("checkbox", "boolean", "bool"):
-                is_checked = (
-                    default_value if isinstance(default_value, bool)
-                    else str(default_value).lower() in ("true", "1", "yes")
-                )
-                new_value = st.checkbox(
-                    label,
-                    value=is_checked,
-                    help=desc,
-                    key=f"exp_platform_{platform_key}_{key}"
-                )
-            elif input_type == "number":
-                raw_value = str(default_value).strip()
-                is_int_like = bool(re.fullmatch(r"-?\d+", raw_value))
-
-                if is_int_like:
-                    try:
-                        current_num = int(raw_value)
-                    except Exception:
-                        current_num = 0
-                    new_value = st.number_input(
-                        label,
-                        value=current_num,
-                        step=1,
-                        format="%d",
-                        help=desc,
-                        key=f"exp_platform_{platform_key}_{key}"
-                    )
-                else:
-                    try:
-                        current_num = float(raw_value) if raw_value else 0.0
-                    except Exception:
-                        current_num = 0.0
-                    new_value = st.number_input(
-                        label,
-                        value=current_num,
-                        step=1.0,
-                        help=desc,
-                        key=f"exp_platform_{platform_key}_{key}"
-                    )
-            elif input_type in ("textarea", "multiline") or info.get("multiline") is True:
-                rows = int(info.get("rows") or 8)
-                height = int(info.get("height") or (rows * 24 + 40))
-                placeholder = info.get("placeholder", None)
-                new_value = st.text_area(
-                    label,
-                    value=str(default_value),
-                    help=desc,
-                    height=height,
-                    placeholder=placeholder,
-                    key=f"exp_platform_{platform_key}_{key}"
-                )
-            else:
-                new_value = st.text_input(
-                    label,
-                    value=str(default_value),
-                    help=desc,
-                    key=f"exp_platform_{platform_key}_{key}"
-                )
-
-            new_settings[key] = new_value
-
-        if has_fields and st.button(f"Save {platform_key} Settings", key=f"exp_save_platform_{platform_key}"):
-            exp_save_platform_settings(platform_key, new_settings)
-            st.success("Platform settings saved.")
-            st.rerun()
+    return new_val
 
 
 def render_platform_controls(
@@ -428,6 +126,8 @@ def render_platform_controls(
         desc        = setting.get("description", "")
         default_val = setting.get("default", "")
         current_val = current_settings.get(setting_key, default_val)
+        widget_key  = f"{category}_{setting_key}"
+        is_token_setting = _looks_like_token_setting(setting_key, label)
 
         # normalize bools from redis strings
         def _to_bool(v):
@@ -455,7 +155,7 @@ def render_platform_controls(
                     step=1,
                     format="%d",
                     help=desc,
-                    key=f"{category}_{setting_key}"
+                    key=widget_key
                 )
             else:
                 # treat everything else as float (including "8787.0", "0.5", "")
@@ -471,23 +171,31 @@ def render_platform_controls(
                     value=current_num,
                     step=1.0,
                     help=desc,
-                    key=f"{category}_{setting_key}"
+                    key=widget_key
                 )
 
             # store back (Redis expects strings later)
             new_settings[setting_key] = new_val
 
         elif input_type == "password":
-            new_val = st.text_input(
-                label, value=str(current_val), help=desc, type="password",
-                key=f"{category}_{setting_key}"
-            )
+            if is_token_setting:
+                new_val = _token_text_input(
+                    label=label,
+                    value=str(current_val),
+                    help_text=desc,
+                    widget_key=widget_key,
+                )
+            else:
+                new_val = st.text_input(
+                    label, value=str(current_val), help=desc, type="password",
+                    key=widget_key
+                )
             new_settings[setting_key] = new_val
 
         elif input_type == "checkbox":
             new_val = st.checkbox(
                 label, value=_to_bool(current_val), help=desc,
-                key=f"{category}_{setting_key}"
+                key=widget_key
             )
             new_settings[setting_key] = new_val
 
@@ -553,16 +261,24 @@ def render_platform_controls(
                 label, options,
                 index=(options.index(selected_value) if options else 0),
                 format_func=lambda value: option_labels.get(str(value), str(value)),
-                help=desc, key=f"{category}_{setting_key}"
+                help=desc, key=widget_key
             )
             new_settings[setting_key] = new_val
 
         else:
             # default: text
-            new_val = st.text_input(
-                label, value=str(current_val), help=desc,
-                key=f"{category}_{setting_key}"
-            )
+            if is_token_setting:
+                new_val = _token_text_input(
+                    label=label,
+                    value=str(current_val),
+                    help_text=desc,
+                    widget_key=widget_key,
+                )
+            else:
+                new_val = st.text_input(
+                    label, value=str(current_val), help=desc,
+                    key=widget_key
+                )
             new_settings[setting_key] = new_val
 
     if new_settings:

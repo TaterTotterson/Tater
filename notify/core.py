@@ -30,10 +30,11 @@ ALWAYS_ON_NOTIFIERS: Tuple[str, ...] = (
     "homeassistant",
     "ntfy",
     "telegram",
+    "macos",
     "wordpress",
 )
 
-_ATTACHMENT_PLATFORMS = {"discord", "matrix", "telegram"}
+_ATTACHMENT_PLATFORMS = {"discord", "matrix", "telegram", "macos"}
 
 _URL_PATTERN = re.compile(r"https?://\S+")
 _BARE_URL_PATTERN = re.compile(r"(?<!\()(?<!\])\bhttps?://\S+\b")
@@ -575,7 +576,7 @@ def dispatch_notification_sync(
     if dest not in ALWAYS_ON_NOTIFIERS:
         return "Cannot queue: missing destination platform"
 
-    if dest in ("discord", "irc", "matrix", "telegram"):
+    if dest in ("discord", "irc", "matrix", "telegram", "macos"):
         return _enqueue_queue_notification(dest, title, content, targets, origin, meta, attachments=attachments)
 
     if dest == "homeassistant":

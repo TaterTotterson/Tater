@@ -25,6 +25,7 @@ _IDENTITY_PLACEHOLDER_NAMES = {
     "matrix_user",
     "irc_user",
     "webui_user",
+    "macos_user",
 }
 
 

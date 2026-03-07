@@ -49,7 +49,7 @@ class ExamplePlugin(ToolPlugin):
     )
 
     # Platforms this plugin supports
-    platforms = ["discord", "webui", "irc", "homeassistant", "matrix", "homekit", "xbmc"]
+    platforms = ["discord", "webui", "macos", "irc", "homeassistant", "matrix", "homekit", "xbmc"]
     when_to_use = ""
     common_needs = []
     missing_info_prompts = []
@@ -149,6 +149,9 @@ class ExamplePlugin(ToolPlugin):
             return await inner()
         except RuntimeError:
             return asyncio.run(inner())
+
+    async def handle_macos(self, args, llm_client, context=None):
+        return await self.handle_webui(args, llm_client)
 
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         answer = await self._run_example(args, llm_client, user_context=raw_message)

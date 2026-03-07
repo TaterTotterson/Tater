@@ -3,7 +3,7 @@ import uuid
 import re
 from typing import Any, Dict, Optional, Tuple
 
-ALLOWED_PLATFORMS = ("discord", "irc", "matrix", "homeassistant", "ntfy", "telegram")
+ALLOWED_PLATFORMS = ("discord", "irc", "matrix", "homeassistant", "ntfy", "telegram", "macos")
 
 QUEUE_KEYS = {
     "discord": "notifyq:discord",
@@ -12,6 +12,7 @@ QUEUE_KEYS = {
     "homeassistant": "notifyq:homeassistant",
     "ntfy": "notifyq:ntfy",
     "telegram": "notifyq:telegram",
+    "macos": "notifyq:macos",
 }
 
 _DEFAULT_SETTINGS = {
@@ -42,8 +43,36 @@ _DEFAULT_SETTINGS = {
 }
 
 
+_PLATFORM_ALIASES = {
+    "home assistant": "homeassistant",
+    "home-assistant": "homeassistant",
+    "home_assistant": "homeassistant",
+    "ha": "homeassistant",
+    "mac os": "macos",
+    "mac-os": "macos",
+    "mac_os": "macos",
+    "macosx": "macos",
+    "osx": "macos",
+    "my mac": "macos",
+    "my macs": "macos",
+    "my macos": "macos",
+    "this mac": "macos",
+    "this macs": "macos",
+    "current mac": "macos",
+    "current macs": "macos",
+    "mac": "macos",
+    "macs": "macos",
+}
+
+
 def normalize_platform(platform: Optional[str]) -> str:
-    return (platform or "").strip().lower()
+    raw = str(platform or "").strip().lower().strip(" .,!?:;\"'")
+    if not raw:
+        return ""
+    if raw in _PLATFORM_ALIASES:
+        return _PLATFORM_ALIASES[raw]
+    squashed = " ".join(raw.replace("-", " ").replace("_", " ").split())
+    return _PLATFORM_ALIASES.get(squashed, squashed)
 
 
 def queue_key(platform: str) -> Optional[str]:
@@ -233,6 +262,18 @@ def resolve_targets(
 
         if not resolved.get("chat_id"):
             return None, "Cannot queue: missing target channel/room"
+
+    elif platform == "macos":
+        if not resolved.get("scope"):
+            if origin.get("platform") == "macos" and origin.get("scope"):
+                resolved["scope"] = origin.get("scope")
+
+        if not resolved.get("device_id"):
+            if origin.get("platform") == "macos" and origin.get("device_id"):
+                resolved["device_id"] = origin.get("device_id")
+
+        if not (resolved.get("scope") or resolved.get("device_id")):
+            return None, "Cannot queue: missing target device/scope"
 
     elif platform == "homeassistant":
         # No required target for persistent notifications
