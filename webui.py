@@ -1115,16 +1115,16 @@ async def process_message(
 # ------------------ NAVIGATION ------------------
 ai_tasks_enabled = str(redis_client.get("ai_task_core_running") or "").strip().lower() == "true"
 memory_core_enabled = str(redis_client.get("memory_core_running") or "").strip().lower() == "true"
-nav_options = ["Chat", "Plugin Manager", "Portal Manager", "Core Manager", "Settings"]
+nav_options = ["Chat", "Verba Manager", "Portal Manager", "Core Manager", "Settings"]
 if ai_tasks_enabled:
     nav_options.insert(1, "AI Tasks")
 if memory_core_enabled:
-    insert_idx = nav_options.index("Plugin Manager") if "Plugin Manager" in nav_options else 1
+    insert_idx = nav_options.index("Verba Manager") if "Verba Manager" in nav_options else 1
     nav_options.insert(insert_idx, "Memory")
 if "active_view" not in st.session_state:
     st.session_state.active_view = nav_options[0]
-elif st.session_state.active_view in {"Plugins", "Verba Plugins", "Auto Plugins", "Automation Plugins"}:
-    st.session_state.active_view = "Plugin Manager"
+elif st.session_state.active_view in {"Plugins", "Verba Plugins", "Verba's", "Plugin Manager", "Auto Plugins", "Automation Plugins"}:
+    st.session_state.active_view = "Verba Manager"
 elif st.session_state.active_view == "AI Tasks" and not ai_tasks_enabled:
     st.session_state.active_view = "Core Manager"
 elif st.session_state.active_view == "Memory" and not memory_core_enabled:
@@ -1426,7 +1426,7 @@ elif active_view == "AI Tasks":
 elif active_view == "Memory":
     render_memory_page()
 
-elif active_view == "Plugin Manager":
+elif active_view == "Verba Manager":
     render_plugin_store_page()
 
 elif active_view == "Portal Manager":
