@@ -13,24 +13,13 @@ Tater runs on Cerberus — a closed-loop Planner → Doer → Checker architectu
 
 ---
 
-## Branding Stack
-
-- **Cerberus AI Core**: reasoning and orchestration layer
-- **Verba Plugins**: capabilities, actions, and tools
-- **Tater Portals**: external communication bridges (Discord, Matrix, IRC, Telegram, WebUI, Home Assistant, macOS, and more)
-
-Architecture flow:
-`User -> Portal -> Cerberus AI Core -> Verba Plugin -> Portal -> User`
-
----
-
 ## 🛒 Tater Shop (Unified Catalog)
 
 Tater uses **Tater Shop** as the source of truth for:
 
-- **Verba Plugins**
-- **Tater Portals**
-- **Tater Cores**
+- **Verbas**
+- **Portals**
+- **Cores**
 
 This repository no longer keeps static lists of those modules in the README.
 Instead, catalogs, versions, metadata, and update paths are managed in:
@@ -39,7 +28,7 @@ Instead, catalogs, versions, metadata, and update paths are managed in:
 
 From the WebUI, use:
 
-- **Plugin Manager**
+- **Verba Manager**
 - **Portal Manager**
 - **Core Manager**
 
@@ -81,7 +70,7 @@ https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repositor
 
 Once added, the following add-ons will appear in the Home Assistant Add-on Store:
 
-- **Redis Stack** – required for Tater memory, Verba Plugins, and automations
+- **Redis Stack** – required for Tater memory, Verbas, and automations
 - **Tater AI Assistant** – the main Tater service
 
 #### Install order
@@ -100,12 +89,12 @@ Tater AI supports deeper integration with Home Assistant through a couple of com
 ### 📍 Tater-HomeAssistant
 https://github.com/TaterTotterson/Tater-HomeAssistant
 
-A Home Assistant **custom integration** that allows Tater to function as a **Conversation Agent** inside Home Assistant’s Assist pipeline. This enables voice or text interactions from Home Assistant to be routed directly to your Tater backend, where Verba Plugins can be executed and contextual responses returned.
+A Home Assistant **custom integration** that allows Tater to function as a **Conversation Agent** inside Home Assistant’s Assist pipeline. This enables voice or text interactions from Home Assistant to be routed directly to your Tater backend, where Verbas can be executed and contextual responses returned.
 
 Key benefits:
 - Use Tater as a native **voice and text assistant** within Home Assistant
 - Routes Assist queries directly to your running Tater AI backend
-- Supports Verba Plugins that implement `handle_homeassistant(...)`
+- Supports Verbas that implement `handle_homeassistant(...)`
 - Maintains conversation context for more natural, multi-turn interactions
 
 This integration is required if you want Tater to participate directly in Home Assistant conversations or voice control.
