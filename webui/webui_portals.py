@@ -49,18 +49,20 @@ def _token_text_input(
     return new_val
 
 
-def render_platform_controls(
-    platform,
+def render_portal_controls(
+    portal,
     redis_client,
     *,
-    start_platform_fn,
-    stop_platform_fn,
-    wipe_memory_platform_data_fn,
+    start_portal_fn,
+    stop_portal_fn,
+    wipe_memory_core_data_fn,
+    surface_kind: str = "portal",
 ):
-    category     = platform["label"]
-    key          = platform["key"]
-    required     = platform["required"]
+    category     = portal["label"]
+    key          = portal["key"]
+    required     = portal["required"]
     short_name   = category.replace(" Settings", "").strip()
+    surface_text = "core" if str(surface_kind or "").strip().lower() == "core" else "portal"
     state_key    = f"{key}_running"
     cooldown_key = f"tater:cooldown:{key}"
     cooldown_secs = 10
@@ -85,7 +87,6 @@ def render_platform_controls(
 
     new_toggle = st.toggle(
         f"{emoji} Enable {short_name}",
-        value=is_running,
         key=toggle_key,
     )
     is_enabled = new_toggle
@@ -102,14 +103,14 @@ def render_platform_controls(
             st.rerun()
 
         # actually start it
-        start_platform_fn(key)
+        start_portal_fn(key)
         redis_client.set(state_key, "true")
         st.success(f"{short_name} started.")
         st.rerun()
 
     # --- TURNING OFF ---
     elif not is_enabled and is_running:
-        stop_platform_fn(key)
+        stop_portal_fn(key)
         redis_client.set(state_key, "false")
         redis_client.set(cooldown_key, str(time.time()))
         st.success(f"{short_name} stopped.")
@@ -291,17 +292,17 @@ def render_platform_controls(
             redis_client.hset(redis_key, mapping=save_map)
             st.success(f"{short_name} settings saved.")
     else:
-        st.caption("No platform settings to configure.")
+        st.caption(f"No {surface_text} settings to configure.")
 
-    if key == "rss_platform":
+    if key == "rss_core":
         st.markdown("---")
         render_rss_feed_manager()
-    if key == "memory_platform":
+    if key == "memory_core":
         st.markdown("---")
         st.subheader("Danger Zone")
-        st.caption("Wipe all Memory Platform data (user docs, room docs, cursors, and runtime stats).")
+        st.caption(f"Wipe all Memory {surface_text.capitalize()} data (user docs, room docs, cursors, and runtime stats).")
         confirm_wipe = st.checkbox(
-            "Confirm wipe all memory platform data",
+            f"Confirm wipe all memory {surface_text} data",
             value=False,
             key=f"{key}_wipe_all_confirm",
         )
@@ -310,20 +311,21 @@ def render_platform_controls(
             key=f"{key}_wipe_all_button",
             disabled=not confirm_wipe,
         ):
-            wipe_result = wipe_memory_platform_data_fn()
+            wipe_result = wipe_memory_core_data_fn()
             if wipe_result.get("ok"):
                 deleted_total = int(wipe_result.get("deleted_total") or 0)
                 deleted_by_pattern = wipe_result.get("deleted_by_pattern") or {}
+                stats_key = "mem:stats:memory_core"
                 detail = (
                     f"user={int(deleted_by_pattern.get('mem:user:*') or 0)}, "
                     f"room={int(deleted_by_pattern.get('mem:room:*') or 0)}, "
                     f"cursor={int(deleted_by_pattern.get('mem:cursor:*') or 0)}, "
-                    f"stats={int(deleted_by_pattern.get('mem:stats:memory_platform') or 0)}"
+                    f"stats={int(deleted_by_pattern.get(stats_key) or 0)}"
                 )
-                st.success(f"Wiped memory platform data. Deleted {deleted_total} keys ({detail}).")
+                st.success(f"Wiped memory {surface_text} data. Deleted {deleted_total} keys ({detail}).")
                 st.rerun()
             else:
-                st.error(wipe_result.get("error") or "Failed to wipe memory platform data.")
+                st.error(wipe_result.get("error") or f"Failed to wipe memory {surface_text} data.")
 
 
 def render_rss_feed_manager():
@@ -349,7 +351,7 @@ def render_rss_feed_manager():
             st.error("Failed to parse that feed URL.")
             st.stop()
         # Set last_ts=0 so the poller posts only the newest item once.
-        set_feed(redis_client, feed_url, {"last_ts": 0.0, "enabled": True, "platforms": {}})
+        set_feed(redis_client, feed_url, {"last_ts": 0.0, "enabled": True, "portals": {}})
         st.success("Feed added.")
         st.rerun()
 
@@ -378,7 +380,7 @@ def render_rss_feed_manager():
             enabled_key = f"{exp_key}_enabled"
             enabled_val = st.checkbox("Enabled", value=cfg.get("enabled", True), key=enabled_key)
 
-            platforms = cfg.get("platforms") or {}
+            platforms = cfg.get("portals") or {}
 
             # Discord
             discord_override = platforms.get("discord") or {}
@@ -509,7 +511,7 @@ def render_rss_feed_manager():
                 if wp_enabled != default_cfg["send_wordpress"]:
                     new_platforms["wordpress"] = {"enabled": wp_enabled, "targets": {}}
 
-                update_feed(redis_client, feed_url, {"enabled": enabled_val, "platforms": new_platforms})
+                update_feed(redis_client, feed_url, {"enabled": enabled_val, "portals": new_platforms})
                 st.success("Feed settings saved.")
                 st.rerun()
 
@@ -519,27 +521,27 @@ def render_rss_feed_manager():
                 st.rerun()
 
 
-def _platform_sort_name(p):
+def _portal_sort_name(p):
     return (p.get("label") or p.get("category") or p.get("key") or "").lower()
 
 
-def render_platforms_panel(
+def render_portals_panel(
     *,
-    platform_registry,
+    portal_registry,
     redis_client,
-    start_platform_fn,
-    stop_platform_fn,
-    wipe_memory_platform_data_fn,
+    start_portal_fn,
+    stop_portal_fn,
+    wipe_memory_core_data_fn,
     auto_connected=None,
 ):
-    st.subheader("Platforms")
-    for platform in sorted(platform_registry, key=_platform_sort_name):
-        label = platform.get("label") or platform.get("category") or platform.get("key")
+    st.subheader("Portals")
+    for portal in sorted(portal_registry, key=_portal_sort_name):
+        label = portal.get("label") or portal.get("category") or portal.get("key")
         with st.expander(label, expanded=False):
-            render_platform_controls(
-                platform,
+            render_portal_controls(
+                portal,
                 redis_client,
-                start_platform_fn=start_platform_fn,
-                stop_platform_fn=stop_platform_fn,
-                wipe_memory_platform_data_fn=wipe_memory_platform_data_fn,
+                start_portal_fn=start_portal_fn,
+                stop_portal_fn=stop_portal_fn,
+                wipe_memory_core_data_fn=wipe_memory_core_data_fn,
             )

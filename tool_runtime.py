@@ -35,7 +35,7 @@ from kernel_tools import (
 )
 from plugin_result import action_failure, normalize_plugin_result
 from helpers import redis_client as default_redis
-from memory_platform_store import (
+from memory_core_store import (
     forget_fact_keys,
     load_doc as load_memory_doc,
     resolve_user_doc_key as resolve_memory_user_doc_key,
@@ -198,7 +198,7 @@ def _effective_enabled_predicate(
     return _plugin_enabled_from_settings
 
 
-def _memory_platform_key_list(args: Dict[str, Any]) -> list[str]:
+def _memory_core_key_list(args: Dict[str, Any]) -> list[str]:
     key_value = args.get("key")
     keys_value = args.get("keys")
     raw_items: list[str] = []
@@ -225,7 +225,7 @@ def _memory_platform_key_list(args: Dict[str, Any]) -> list[str]:
     return out
 
 
-def _memory_platform_user_id(args: Dict[str, Any], origin: Optional[Dict[str, Any]]) -> str:
+def _memory_core_user_id(args: Dict[str, Any], origin: Optional[Dict[str, Any]]) -> str:
     explicit = str(args.get("user_id") or "").strip()
     if explicit:
         return explicit
@@ -238,7 +238,7 @@ def _memory_platform_user_id(args: Dict[str, Any], origin: Optional[Dict[str, An
     ).strip()
 
 
-def _memory_platform_user_display_name(args: Dict[str, Any], origin: Optional[Dict[str, Any]]) -> str:
+def _memory_core_user_display_name(args: Dict[str, Any], origin: Optional[Dict[str, Any]]) -> str:
     explicit = str(args.get("display_name") or "").strip()
     if explicit:
         return explicit
@@ -254,7 +254,7 @@ def _memory_platform_user_display_name(args: Dict[str, Any], origin: Optional[Di
     ).strip()
 
 
-def _memory_platform_room_id(args: Dict[str, Any], origin: Optional[Dict[str, Any]]) -> str:
+def _memory_core_room_id(args: Dict[str, Any], origin: Optional[Dict[str, Any]]) -> str:
     explicit = str(args.get("room_id") or args.get("scope") or "").strip()
     if not explicit:
         merged = dict(origin or {})
@@ -279,7 +279,7 @@ def _memory_platform_room_id(args: Dict[str, Any], origin: Optional[Dict[str, An
 
 def _memory_show_user(args: Dict[str, Any], platform: str, origin: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     p = str(args.get("platform") or platform or "webui").strip().lower() or "webui"
-    user_id = _memory_platform_user_id(args, origin)
+    user_id = _memory_core_user_id(args, origin)
     if not user_id:
         return {"tool": "memory_show", "ok": False, "error": "user_id is required for memory_show."}
 
@@ -288,7 +288,7 @@ def _memory_show_user(args: Dict[str, Any], platform: str, origin: Optional[Dict
         min_confidence = float(args.get("min_confidence") or 0.0)
     except Exception:
         min_confidence = 0.0
-    display_name = _memory_platform_user_display_name(args, origin) or user_id
+    display_name = _memory_core_user_display_name(args, origin) or user_id
     redis_key = resolve_memory_user_doc_key(
         default_redis,
         p,
@@ -328,7 +328,7 @@ def _memory_show_user(args: Dict[str, Any], platform: str, origin: Optional[Dict
 
 def _memory_show_room(args: Dict[str, Any], platform: str, origin: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     p = str(args.get("platform") or platform or "webui").strip().lower() or "webui"
-    room_id = _memory_platform_room_id(args, origin)
+    room_id = _memory_core_room_id(args, origin)
     explicit_room = str(args.get("room_id") or "").strip()
     if p == "webui" and not explicit_room:
         room_id = "chat"
@@ -373,12 +373,12 @@ def _memory_show_room(args: Dict[str, Any], platform: str, origin: Optional[Dict
 def _memory_forget_key(args: Dict[str, Any], platform: str, origin: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     scope = str(args.get("scope") or "user").strip().lower() or "user"
     p = str(args.get("platform") or platform or "webui").strip().lower() or "webui"
-    keys = _memory_platform_key_list(args)
+    keys = _memory_core_key_list(args)
     if not keys:
         return {"tool": "memory_forget_key", "ok": False, "error": "key or keys is required."}
 
     if scope == "room":
-        room_id = _memory_platform_room_id(args, origin)
+        room_id = _memory_core_room_id(args, origin)
         explicit_room = str(args.get("room_id") or "").strip()
         if p == "webui" and not explicit_room:
             room_id = "chat"
@@ -388,10 +388,10 @@ def _memory_forget_key(args: Dict[str, Any], platform: str, origin: Optional[Dic
         identity: Dict[str, Any] = {"room_id": room_id}
     else:
         scope = "user"
-        user_id = _memory_platform_user_id(args, origin)
+        user_id = _memory_core_user_id(args, origin)
         if not user_id:
             return {"tool": "memory_forget_key", "ok": False, "error": "user_id is required for user scope."}
-        display_name = _memory_platform_user_display_name(args, origin) or user_id
+        display_name = _memory_core_user_display_name(args, origin) or user_id
         redis_key = resolve_memory_user_doc_key(
             default_redis,
             p,
@@ -422,7 +422,7 @@ def _memory_forget_all(args: Dict[str, Any], platform: str, origin: Optional[Dic
     p = str(args.get("platform") or platform or "webui").strip().lower() or "webui"
 
     if scope == "room":
-        room_id = _memory_platform_room_id(args, origin)
+        room_id = _memory_core_room_id(args, origin)
         explicit_room = str(args.get("room_id") or "").strip()
         if p == "webui" and not explicit_room:
             room_id = "chat"
@@ -432,10 +432,10 @@ def _memory_forget_all(args: Dict[str, Any], platform: str, origin: Optional[Dic
         identity: Dict[str, Any] = {"room_id": room_id}
     else:
         scope = "user"
-        user_id = _memory_platform_user_id(args, origin)
+        user_id = _memory_core_user_id(args, origin)
         if not user_id:
             return {"tool": "memory_forget_all", "ok": False, "error": "user_id is required for user scope."}
-        display_name = _memory_platform_user_display_name(args, origin) or user_id
+        display_name = _memory_core_user_display_name(args, origin) or user_id
         redis_key = resolve_memory_user_doc_key(
             default_redis,
             p,

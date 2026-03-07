@@ -42,7 +42,7 @@ def normalize_feed_config(raw: Any) -> Dict[str, Any]:
     Normalize legacy entries into a consistent structure.
 
     Returns:
-      {"last_ts": float, "enabled": bool, "platforms": {..}}
+      {"last_ts": float, "enabled": bool, "portals": {..}}
     """
     data: Dict[str, Any]
     if isinstance(raw, dict):
@@ -65,7 +65,7 @@ def normalize_feed_config(raw: Any) -> Dict[str, Any]:
                 return {
                     "last_ts": float(last_ts),
                     "enabled": True,
-                    "platforms": {},
+                    "portals": {},
                 }
     else:
         data = {}
@@ -77,12 +77,12 @@ def normalize_feed_config(raw: Any) -> Dict[str, Any]:
         last_ts = 0.0
 
     enabled = _parse_bool(data.get("enabled"), True)
-    platforms = _normalize_platforms(data.get("platforms"))
+    platforms = _normalize_platforms(data.get("portals"))
 
     return {
         "last_ts": float(last_ts),
         "enabled": enabled,
-        "platforms": platforms,
+        "portals": platforms,
     }
 
 
@@ -116,7 +116,7 @@ def update_feed(redis_client, feed_url: str, updates: Dict[str, Any]) -> Dict[st
     current = get_feed(redis_client, feed_url) or {
         "last_ts": 0.0,
         "enabled": True,
-        "platforms": {},
+        "portals": {},
     }
 
     next_cfg = dict(current)
@@ -124,8 +124,8 @@ def update_feed(redis_client, feed_url: str, updates: Dict[str, Any]) -> Dict[st
         if key in updates:
             next_cfg[key] = updates.get(key)
 
-    if "platforms" in updates:
-        next_cfg["platforms"] = updates.get("platforms") or {}
+    if "portals" in updates:
+        next_cfg["portals"] = updates.get("portals") or {}
 
     return set_feed(redis_client, feed_url, next_cfg)
 
@@ -149,6 +149,6 @@ def ensure_feed(redis_client, feed_url: str, last_ts: float | None) -> Dict[str,
         {
             "last_ts": float(last_ts_value),
             "enabled": True,
-            "platforms": {},
+            "portals": {},
         },
     )

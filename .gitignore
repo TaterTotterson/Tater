@@ -9,3 +9,11 @@ tests/
 # Plugin source now lives in the plugin store; keep local plugin files out of this repo.
 plugins/*
 !plugins/__init__.py
+
+# Portal source now lives in the portal store; keep local portal files out of this repo.
+portals/*
+!portals/__init__.py
+
+# Core source now lives in the core store; keep local core files out of this repo.
+cores/*
+!cores/__init__.py

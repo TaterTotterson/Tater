@@ -470,11 +470,11 @@ def _render_cerberus_metrics_platform_view(
     metric_platform, global_metrics, platform_metrics = _load_cerberus_metrics(selected_platform)
     selected_token = str(selected_platform or "all").strip().lower() or "all"
 
-    st.markdown(f"**Selected Platform Counters ({_cerberus_platform_display_label(metric_platform)})**")
+    st.markdown(f"**Selected Portal Counters ({_cerberus_platform_display_label(metric_platform)})**")
     platform_cols = st.columns(len(_CERBERUS_METRIC_NAMES))
     for idx, name in enumerate(_CERBERUS_METRIC_NAMES):
         platform_cols[idx].metric(name.replace("_", " ").title(), platform_metrics.get(name, 0))
-    st.markdown(f"**Selected Platform Rates ({_cerberus_platform_display_label(metric_platform)})**")
+    st.markdown(f"**Selected Portal Rates ({_cerberus_platform_display_label(metric_platform)})**")
     st.dataframe(_cerberus_rate_rows(platform_metrics), width="stretch")
 
     if allow_controls:
@@ -646,7 +646,7 @@ def render_cerberus_metrics_dashboard(*, key_prefix: str, allow_controls: bool):
     st.markdown("**Global Rates**")
     st.dataframe(_cerberus_rate_rows(global_metrics), width="stretch")
 
-    st.markdown("**Per-Platform Totals**")
+    st.markdown("**Per-Portal Totals**")
     st.dataframe(_load_cerberus_platform_metric_rows(), width="stretch")
 
     platforms = list(_CERBERUS_METRIC_PLATFORMS)
@@ -665,24 +665,24 @@ def render_cerberus_metrics_dashboard(*, key_prefix: str, allow_controls: bool):
 
 def render_cerberus_data_tools(*, key_prefix: str):
     st.subheader("Cerberus Data")
-    st.caption("Clear Cerberus metrics and ledger data globally or for a specific platform.")
+    st.caption("Clear Cerberus metrics and ledger data globally or for a specific portal.")
 
     with st.container(border=True):
-        st.markdown("**All Platforms**")
+        st.markdown("**All Portals**")
         st.caption("Delete all Cerberus metrics and all Cerberus ledger data.")
         if st.button("Clear All Cerberus Data", key=f"{key_prefix}_clear_all_data"):
             metrics_removed, ledger_removed = _clear_cerberus_data("all")
             st.success(
-                f"Cleared Cerberus data across all platforms. "
+                f"Cleared Cerberus data across all portals. "
                 f"Metrics removed: {metrics_removed}. Ledger lists removed: {ledger_removed}."
             )
             st.rerun()
 
     with st.container(border=True):
-        st.markdown("**Per-Platform Data**")
+        st.markdown("**Per-Portal Data**")
         platform_options = list(_CERBERUS_METRIC_PLATFORMS)
         selected_platform = st.selectbox(
-            "Platform",
+            "Portal",
             options=platform_options,
             index=0,
             format_func=_cerberus_platform_display_label,
@@ -690,7 +690,7 @@ def render_cerberus_data_tools(*, key_prefix: str):
         )
 
         clear_cols = st.columns(3)
-        if clear_cols[0].button("Clear Platform Data", key=f"{key_prefix}_clear_platform_data"):
+        if clear_cols[0].button("Clear Portal Data", key=f"{key_prefix}_clear_platform_data"):
             metrics_removed, ledger_removed = _clear_cerberus_data(selected_platform)
             st.success(
                 f"Cleared Cerberus data for {_cerberus_platform_display_label(selected_platform)}. "

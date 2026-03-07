@@ -335,7 +335,7 @@ def render_admin_gating_settings(
     st.subheader("Admin Tool Gating")
     st.caption(
         "Only the configured admin user can run these plugins on Discord, Telegram, Matrix, and IRC. "
-        "If a platform’s admin user setting is blank, these tools are disabled for everyone on that platform."
+        "If a portal’s admin user setting is blank, these tools are disabled for everyone on that portal."
     )
 
     registry = get_registry_fn() or {}

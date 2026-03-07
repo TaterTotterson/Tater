@@ -37,13 +37,13 @@ from vision_settings import (
     DEFAULT_VISION_MODEL,
     get_vision_settings,
 )
-from memory_platform_store import (
-    load_doc as load_memory_platform_doc,
-    resolve_user_doc_key as resolve_memory_platform_user_doc_key,
-    room_doc_key as memory_platform_room_doc_key,
-    summarize_doc as summarize_memory_platform_doc,
-    user_doc_key as memory_platform_user_doc_key,
-    value_to_text as memory_platform_value_to_text,
+from memory_core_store import (
+    load_doc as load_memory_core_doc,
+    resolve_user_doc_key as resolve_memory_core_user_doc_key,
+    room_doc_key as memory_core_room_doc_key,
+    summarize_doc as summarize_memory_core_doc,
+    user_doc_key as memory_core_user_doc_key,
+    value_to_text as memory_core_value_to_text,
 )
 
 
@@ -57,7 +57,7 @@ else:
     _agent_root_path = BASE_DIR / "agent_lab"
 AGENT_LAB_DIR = _agent_root_path.resolve()
 AGENT_PLUGINS_DIR = AGENT_LAB_DIR / "plugins"
-AGENT_PLATFORMS_DIR = AGENT_LAB_DIR / "platforms"
+AGENT_PORTALS_DIR = AGENT_LAB_DIR / "portals"
 AGENT_ARTIFACTS_DIR = AGENT_LAB_DIR / "artifacts"
 AGENT_DOCUMENTS_DIR = AGENT_LAB_DIR / "documents"
 AGENT_DOWNLOADS_DIR = AGENT_LAB_DIR / "downloads"
@@ -66,7 +66,7 @@ AGENT_LOGS_DIR = AGENT_LAB_DIR / "logs"
 AGENT_REQUIREMENTS = AGENT_LAB_DIR / "requirements.txt"
 
 STABLE_PLUGINS_DIR = BASE_DIR / os.getenv("TATER_PLUGIN_DIR", "plugins")
-STABLE_PLATFORMS_DIR = BASE_DIR / "platforms"
+STABLE_PORTALS_DIR = BASE_DIR / "portals"
 
 _SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
 _READ_FILE_MAX_CHARS = int(os.getenv("TATER_READ_FILE_MAX_CHARS", "400000"))
@@ -205,7 +205,7 @@ def _ensure_dirs() -> None:
     for path in (
         AGENT_LAB_DIR,
         AGENT_PLUGINS_DIR,
-        AGENT_PLATFORMS_DIR,
+        AGENT_PORTALS_DIR,
         AGENT_ARTIFACTS_DIR,
         AGENT_DOCUMENTS_DIR,
         AGENT_DOWNLOADS_DIR,
@@ -2798,11 +2798,11 @@ def write_file(
                 top = rel.parts[0] if rel.parts else ""
             except Exception:
                 top = ""
-            if top in {"plugins", "platforms"}:
+            if top in {"plugins", "portals"}:
                 return {
                     "tool": "write_file",
                     "ok": False,
-                    "error": "Direct python writes are disabled for plugins/platforms.",
+                    "error": "Direct python writes are disabled for plugins/portals.",
                 }
             return {
                 "tool": "write_file",
@@ -3487,7 +3487,7 @@ def _memory_scope_target(
     }, None
 
 
-def _memory_platform_user_scope_id(
+def _memory_core_user_scope_id(
     *,
     user_id: Optional[str],
     origin: Optional[Dict[str, Any]],
@@ -3498,7 +3498,7 @@ def _memory_platform_user_scope_id(
     ).strip()
 
 
-def _memory_platform_user_display_name(
+def _memory_core_user_display_name(
     *,
     user_id: Optional[str],
     origin: Optional[Dict[str, Any]],
@@ -3512,7 +3512,7 @@ def _memory_platform_user_display_name(
     ).strip()
 
 
-def _memory_platform_room_scope_id(
+def _memory_core_room_scope_id(
     *,
     room_id: Optional[str],
     platform_name: str,
@@ -3541,7 +3541,7 @@ def _memory_default_ttl() -> int:
 
 def _memory_auto_link_identities_default_off() -> bool:
     try:
-        settings = redis_client.hgetall("memory_platform_settings") or {}
+        settings = redis_client.hgetall("memory_core_settings") or {}
     except Exception:
         settings = {}
     if not isinstance(settings, dict):
@@ -3893,7 +3893,7 @@ def _memory_get_legacy_payload(
         "missing": missing,
         "summary": "; ".join(
             [
-                f"{key}={memory_platform_value_to_text(values.get(key), max_chars=80)}"
+                f"{key}={memory_core_value_to_text(values.get(key), max_chars=80)}"
                 for key in selected
             ]
         ),
@@ -3929,26 +3929,26 @@ def _memory_get_durable_payload(
         }
 
     if scope_name == "user":
-        user_scope_id = _memory_platform_user_scope_id(user_id=user_id, origin=origin)
+        user_scope_id = _memory_core_user_scope_id(user_id=user_id, origin=origin)
         if not user_scope_id:
             return {
                 "tool": "memory_get",
                 "ok": False,
                 "error": "user_id is required for durable scope='user'.",
             }
-        display_name = _memory_platform_user_display_name(user_id=user_id, origin=origin) or user_scope_id
+        display_name = _memory_core_user_display_name(user_id=user_id, origin=origin) or user_scope_id
         auto_link_identities = _memory_auto_link_identities_default_off()
         if auto_link_identities:
-            redis_key = resolve_memory_platform_user_doc_key(
+            redis_key = resolve_memory_core_user_doc_key(
                 redis_client,
                 platform_name,
                 user_scope_id,
                 create=False,
                 display_name=display_name,
                 auto_link_name=True,
-            ) or memory_platform_user_doc_key(platform_name, user_scope_id)
+            ) or memory_core_user_doc_key(platform_name, user_scope_id)
         else:
-            redis_key = memory_platform_user_doc_key(platform_name, user_scope_id)
+            redis_key = memory_core_user_doc_key(platform_name, user_scope_id)
         scope_identity: Dict[str, Any] = {
             "scope": "user",
             "platform": platform_name,
@@ -3956,7 +3956,7 @@ def _memory_get_durable_payload(
             "room_id": None,
         }
     else:
-        room_scope_id = _memory_platform_room_scope_id(
+        room_scope_id = _memory_core_room_scope_id(
             room_id=room_id,
             platform_name=platform_name,
             origin=origin,
@@ -3967,7 +3967,7 @@ def _memory_get_durable_payload(
                 "ok": False,
                 "error": "room_id is required for durable scope='room'.",
             }
-        redis_key = memory_platform_room_doc_key(platform_name, room_scope_id)
+        redis_key = memory_core_room_doc_key(platform_name, room_scope_id)
         scope_identity = {
             "scope": "room",
             "platform": platform_name,
@@ -3976,8 +3976,8 @@ def _memory_get_durable_payload(
         }
 
     min_conf = max(0.0, min(1.0, float(min_confidence or 0.0)))
-    doc = load_memory_platform_doc(redis_client, redis_key)
-    summary_items = summarize_memory_platform_doc(
+    doc = load_memory_core_doc(redis_client, redis_key)
+    summary_items = summarize_memory_core_doc(
         doc,
         max_items=max_items,
         min_confidence=min_conf,
@@ -4036,7 +4036,7 @@ def _memory_get_durable_payload(
         "missing": missing,
         "summary": "; ".join(
             [
-                f"{key}={memory_platform_value_to_text(values.get(key), max_chars=80)}"
+                f"{key}={memory_core_value_to_text(values.get(key), max_chars=80)}"
                 for key in selected_keys
             ]
         ),
@@ -4083,7 +4083,7 @@ def memory_get(
             origin=origin,
         )
 
-    if store_name in {"durable", "memory_platform", "profile"}:
+    if store_name in {"durable", "memory_core", "profile"}:
         return _memory_get_durable_payload(
             key_list=key_list,
             prefix_text=prefix_text,
@@ -4202,7 +4202,7 @@ def memory_get(
         "conflicts": conflicts,
         "summary": "; ".join(
             [
-                f"{key}={memory_platform_value_to_text(merged_values.get(key), max_chars=80)}"
+                f"{key}={memory_core_value_to_text(merged_values.get(key), max_chars=80)}"
                 for key in summary_keys
             ]
         ),

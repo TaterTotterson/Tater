@@ -116,7 +116,7 @@ def _recompute_next_run(schedule: Dict[str, Any], now_ts: Optional[float] = None
         return 0.0
     now = float(now_ts if now_ts is not None else time.time())
     try:
-        from platforms.ai_task_platform import _next_run_for_schedule
+        from cores.ai_task_core import _next_run_for_schedule
 
         next_run = float(_next_run_for_schedule(schedule, now) or 0.0)
         return next_run if next_run > 0 else 0.0
@@ -552,7 +552,7 @@ def render_ai_tasks_page(*, redis_client, embedded: bool = False):
                 value="",
                 help="Examples: weekdays at 8am, on the 10th of every month at 9:15am, every hour, or 0 0 6 * * *",
             )
-            add_platform = st.selectbox("Destination platform", options=platform_options, index=0)
+            add_platform = st.selectbox("Destination portal", options=platform_options, index=0)
             add_targets = st.text_area(
                 "Targets JSON (optional)",
                 value="{}",

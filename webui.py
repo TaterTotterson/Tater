@@ -13,11 +13,12 @@ import threading
 import sys
 import uuid
 import plugin_registry as plugin_registry_mod
+import core_registry as core_registry_module
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from PIL import Image
 from io import BytesIO
-from platform_registry import platform_registry
+import portal_registry as portal_registry_module
 from helpers import (
     set_main_loop,
     get_tater_name,
@@ -45,19 +46,22 @@ from webui.webui_cerberus import (
     render_cerberus_metrics_dashboard,
     render_cerberus_data_tools,
 )
-from webui.webui_platforms import (
-    render_platforms_panel,
-)
-from webui.webui_plugins import (
-    _sort_plugins_for_display,
-    render_plugin_list,
-)
 from webui.webui_ai_tasks import render_ai_tasks_page
-from webui.webui_memory import render_memory_page, wipe_memory_platform_data
+from webui.webui_memory import render_memory_page, wipe_memory_core_data
 from webui.webui_plugin_store import (
     _enabled_missing_plugin_ids,
     ensure_plugins_ready,
     render_plugin_store_page,
+)
+from webui.webui_core_store import (
+    _enabled_missing_core_ids,
+    ensure_cores_ready,
+    render_core_store_page,
+)
+from webui.webui_portal_store import (
+    _enabled_missing_portal_ids,
+    ensure_portals_ready,
+    render_portal_store_page,
 )
 from webui.webui_settings import render_settings_page
 from webui.webui_chat import (
@@ -222,8 +226,17 @@ def _get_media_blob_from_content(content: dict):
     return None
 
 @st.cache_resource
-def _platform_runtime():
+def _portal_runtime():
     # Shared across reruns/sessions within this Streamlit process.
+    return {
+        "lock": threading.RLock(),
+        "threads": {},
+        "stop_flags": {},
+    }
+
+
+@st.cache_resource
+def _core_runtime():
     return {
         "lock": threading.RLock(),
         "threads": {},
@@ -434,21 +447,22 @@ def _enqueue_chat_job(
 AUTO_START_COOLDOWN_SEC = 30
 
 
-def _platform_thread_alive(key: str) -> bool:
-    runtime = _platform_runtime()
+def _portal_thread_alive(key: str) -> bool:
+    runtime = _portal_runtime()
     with runtime["lock"]:
         thread = runtime["threads"].get(key)
         return bool(thread and thread.is_alive())
 
 
-def _should_autostart(key: str) -> bool:
-    token = f"platform:{key}"
+def _should_autostart(kind: str, key: str) -> bool:
+    kind_token = str(kind or "").strip().lower() or "portal"
+    token = f"{kind_token}:{key}"
     attempts = st.session_state.setdefault("autostart_attempts", set())
     if token in attempts:
         return False
 
     attempts.add(token)
-    redis_key = f"webui:autostart:platform:{key}"
+    redis_key = f"webui:autostart:{kind_token}:{key}"
     last = redis_client.get(redis_key)
     if last:
         try:
@@ -461,8 +475,20 @@ def _should_autostart(key: str) -> bool:
     return True
 
 
-def _start_platform(key: str):
-    runtime = _platform_runtime()
+def _import_portal_module(key: str):
+    module_key = str(key or "").strip()
+    if not module_key:
+        raise ImportError("Missing portal module key")
+    errors = []
+    try:
+        return importlib.import_module(f"portals.{module_key}")
+    except Exception as exc:
+        errors.append(f"portals.{module_key}: {exc}")
+    raise ImportError("; ".join(errors))
+
+
+def _start_portal(key: str):
+    runtime = _portal_runtime()
     with runtime["lock"]:
         thread = runtime["threads"].get(key)
         stop_flag = runtime["stop_flags"].get(key)
@@ -474,13 +500,13 @@ def _start_platform(key: str):
 
     def runner():
         try:
-            module = importlib.import_module(f"platforms.{key}")
+            module = _import_portal_module(key)
             if hasattr(module, "run"):
                 module.run(stop_event=stop_flag)
             else:
-                logging.getLogger("webui").warning(f"⚠️ No run(stop_event) in platforms.{key}")
+                logging.getLogger("webui").warning(f"⚠️ No run(stop_event) in module for {key}")
         except Exception as e:
-            logging.getLogger("webui").error(f"❌ Error in platform {key}: {e}", exc_info=True)
+            logging.getLogger("webui").error(f"❌ Error in portal {key}: {e}", exc_info=True)
         finally:
             # Clean stale references when a platform exits/crashes.
             with runtime["lock"]:
@@ -497,8 +523,9 @@ def _start_platform(key: str):
 
     return thread, stop_flag
 
-def _stop_platform(key: str):
-    runtime = _platform_runtime()
+
+def _stop_portal(key: str):
+    runtime = _portal_runtime()
     with runtime["lock"]:
         thread = runtime["threads"].get(key)
         stop_flag = runtime["stop_flags"].get(key)
@@ -515,11 +542,304 @@ def _stop_platform(key: str):
             runtime["stop_flags"].pop(key, None)
 
 
-missing = _enabled_missing_plugin_ids()
+def _core_thread_alive(key: str) -> bool:
+    runtime = _core_runtime()
+    with runtime["lock"]:
+        thread = runtime["threads"].get(key)
+        return bool(thread and thread.is_alive())
 
-if missing:
+
+def _import_core_module(key: str):
+    module_key = str(key or "").strip()
+    if not module_key:
+        raise ImportError("Missing core module key")
+    errors = []
+    try:
+        return importlib.import_module(f"cores.{module_key}")
+    except Exception as exc:
+        errors.append(f"cores.{module_key}: {exc}")
+    raise ImportError("; ".join(errors))
+
+
+def _start_core(key: str):
+    runtime = _core_runtime()
+    with runtime["lock"]:
+        thread = runtime["threads"].get(key)
+        stop_flag = runtime["stop_flags"].get(key)
+
+        if thread and thread.is_alive():
+            return thread, stop_flag
+
+        stop_flag = threading.Event()
+
+    def runner():
+        try:
+            module = _import_core_module(key)
+            if hasattr(module, "run"):
+                module.run(stop_event=stop_flag)
+            else:
+                logging.getLogger("webui").warning(f"⚠️ No run(stop_event) in module for {key}")
+        except Exception as e:
+            logging.getLogger("webui").error(f"❌ Error in core {key}: {e}", exc_info=True)
+        finally:
+            with runtime["lock"]:
+                current = runtime["threads"].get(key)
+                if current is threading.current_thread():
+                    runtime["threads"].pop(key, None)
+                    runtime["stop_flags"].pop(key, None)
+
+    thread = threading.Thread(target=runner, daemon=True)
+    with runtime["lock"]:
+        runtime["threads"][key] = thread
+        runtime["stop_flags"][key] = stop_flag
+    thread.start()
+
+    return thread, stop_flag
+
+
+def _stop_core(key: str):
+    runtime = _core_runtime()
+    with runtime["lock"]:
+        thread = runtime["threads"].get(key)
+        stop_flag = runtime["stop_flags"].get(key)
+
+    if stop_flag:
+        stop_flag.set()
+
+    if thread and thread.is_alive():
+        thread.join(timeout=0.5)
+
+    with runtime["lock"]:
+        if not thread or not thread.is_alive():
+            runtime["threads"].pop(key, None)
+            runtime["stop_flags"].pop(key, None)
+
+
+def _legacy_module_key_to_portal(module_key: str, *, ensure_suffix: bool = False) -> str:
+    token = str(module_key or "").strip()
+    if not token:
+        return ""
+    if token.endswith("_portal"):
+        return token
+    if token.endswith("_platform"):
+        return f"{token[:-len('_platform')]}_portal"
+    return f"{token}_portal" if ensure_suffix else token
+
+
+_PORTAL_TO_CORE_MODULE_KEY_MAP = {
+    "ai_task_portal": "ai_task_core",
+    "memory_portal": "memory_core",
+    "rss_portal": "rss_core",
+}
+
+
+def _migrate_legacy_string_key(
+    old_key: str,
+    new_key: str,
+    *,
+    summary: Dict[str, int],
+    prefer_true: bool = False,
+) -> None:
+    old_val = redis_client.get(old_key)
+    if old_val is None:
+        return
+
+    old_ttl = int(redis_client.ttl(old_key) or -1)
+    new_val = redis_client.get(new_key)
+
+    migrated = False
+    if new_val is None:
+        redis_client.set(new_key, old_val)
+        if old_ttl > 0:
+            redis_client.expire(new_key, old_ttl)
+        migrated = True
+    elif prefer_true:
+        old_is_true = str(old_val).strip().lower() == "true"
+        new_is_true = str(new_val).strip().lower() == "true"
+        if old_is_true and not new_is_true:
+            redis_client.set(new_key, "true")
+            migrated = True
+
+    deleted = int(redis_client.delete(old_key) or 0)
+    if migrated:
+        summary["string_keys_migrated"] += 1
+    if deleted:
+        summary["keys_deleted"] += deleted
+
+
+def _migrate_legacy_hash_key(old_key: str, new_key: str, *, summary: Dict[str, int]) -> None:
+    old_type = str(redis_client.type(old_key) or "none").strip().lower()
+    if old_type in {"none", ""}:
+        return
+
+    if old_type != "hash":
+        _migrate_legacy_string_key(old_key, new_key, summary=summary)
+        return
+
+    old_map = redis_client.hgetall(old_key) or {}
+    old_ttl = int(redis_client.ttl(old_key) or -1)
+    new_type = str(redis_client.type(new_key) or "none").strip().lower()
+
+    if new_type not in {"none", "hash"}:
+        return
+
+    new_map = redis_client.hgetall(new_key) if new_type == "hash" else {}
+    merged = dict(old_map)
+    merged.update(new_map)  # Keep existing portal values when both are present.
+
+    if merged:
+        redis_client.hset(new_key, mapping=merged)
+        if old_ttl > 0 and int(redis_client.ttl(new_key) or -1) < 0:
+            redis_client.expire(new_key, old_ttl)
+        summary["hash_keys_migrated"] += 1
+
+    deleted = int(redis_client.delete(old_key) or 0)
+    if deleted:
+        summary["keys_deleted"] += deleted
+
+
+def _migrate_legacy_surface_data() -> Dict[str, int]:
+    summary = {
+        "string_keys_migrated": 0,
+        "hash_keys_migrated": 0,
+        "keys_deleted": 0,
+    }
+
+    for raw_key in redis_client.scan_iter(match="*_platform_running", count=200):
+        old_key = str(raw_key or "").strip()
+        if not old_key.endswith("_platform_running"):
+            continue
+        old_module_key = old_key[:-len("_running")]
+        new_module_key = _legacy_module_key_to_portal(old_module_key)
+        if not new_module_key or new_module_key == old_module_key:
+            continue
+        _migrate_legacy_string_key(
+            old_key,
+            f"{new_module_key}_running",
+            summary=summary,
+            prefer_true=True,
+        )
+
+    for raw_key in redis_client.scan_iter(match="*_platform_settings", count=200):
+        old_key = str(raw_key or "").strip()
+        if not old_key.endswith("_platform_settings"):
+            continue
+        old_module_key = old_key[:-len("_settings")]
+        new_module_key = _legacy_module_key_to_portal(old_module_key)
+        if not new_module_key or new_module_key == old_module_key:
+            continue
+        _migrate_legacy_hash_key(old_key, f"{new_module_key}_settings", summary=summary)
+
+    for raw_key in redis_client.scan_iter(match="tater:cooldown:*_platform", count=200):
+        old_key = str(raw_key or "").strip()
+        prefix = "tater:cooldown:"
+        if not old_key.startswith(prefix):
+            continue
+        old_module_key = old_key[len(prefix):]
+        new_module_key = _legacy_module_key_to_portal(old_module_key)
+        if not new_module_key or new_module_key == old_module_key:
+            continue
+        _migrate_legacy_string_key(old_key, f"{prefix}{new_module_key}", summary=summary)
+
+    for raw_key in redis_client.scan_iter(match="webui:autostart:platform:*", count=200):
+        old_key = str(raw_key or "").strip()
+        prefix = "webui:autostart:platform:"
+        if not old_key.startswith(prefix):
+            continue
+        old_suffix = old_key[len(prefix):]
+        new_suffix = _legacy_module_key_to_portal(old_suffix, ensure_suffix=True)
+        if not new_suffix:
+            continue
+        _migrate_legacy_string_key(
+            old_key,
+            f"webui:autostart:portal:{new_suffix}",
+            summary=summary,
+        )
+
+    _migrate_legacy_hash_key("mem:stats:memory_platform", "mem:stats:memory_portal", summary=summary)
+    _migrate_legacy_string_key(
+        "tater:platform_shop_manifest_urls",
+        "tater:portal_shop_manifest_urls",
+        summary=summary,
+    )
+
+    legacy_single_shop_url = str(redis_client.get("tater:platform_shop_manifest_url") or "").strip()
+    if legacy_single_shop_url:
+        existing_portal_repo_key = str(redis_client.get("tater:portal_shop_manifest_urls") or "").strip()
+        if not existing_portal_repo_key:
+            redis_client.set(
+                "tater:portal_shop_manifest_urls",
+                json.dumps([{"name": "", "url": legacy_single_shop_url}]),
+            )
+            summary["string_keys_migrated"] += 1
+        deleted = int(redis_client.delete("tater:platform_shop_manifest_url") or 0)
+        if deleted:
+            summary["keys_deleted"] += deleted
+
+    for legacy_module_key, core_module_key in _PORTAL_TO_CORE_MODULE_KEY_MAP.items():
+        _migrate_legacy_string_key(
+            f"{legacy_module_key}_running",
+            f"{core_module_key}_running",
+            summary=summary,
+            prefer_true=True,
+        )
+        _migrate_legacy_hash_key(
+            f"{legacy_module_key}_settings",
+            f"{core_module_key}_settings",
+            summary=summary,
+        )
+        _migrate_legacy_string_key(
+            f"tater:cooldown:{legacy_module_key}",
+            f"tater:cooldown:{core_module_key}",
+            summary=summary,
+        )
+        _migrate_legacy_string_key(
+            f"webui:autostart:portal:{legacy_module_key}",
+            f"webui:autostart:core:{core_module_key}",
+            summary=summary,
+        )
+
+    _migrate_legacy_hash_key("memory_portal_settings", "memory_core_settings", summary=summary)
+    _migrate_legacy_hash_key("mem:stats:memory_portal", "mem:stats:memory_core", summary=summary)
+    _migrate_legacy_string_key(
+        "tater:memory_portal:cerberus_max_items",
+        "tater:memory_core:cerberus_max_items",
+        summary=summary,
+    )
+
+    legacy_portal_repo_payload = str(redis_client.get("tater:portal_shop_manifest_urls") or "").strip()
+    existing_core_repo_payload = str(redis_client.get("tater:core_shop_manifest_urls") or "").strip()
+    if legacy_portal_repo_payload and not existing_core_repo_payload:
+        redis_client.set("tater:core_shop_manifest_urls", legacy_portal_repo_payload)
+        summary["string_keys_migrated"] += 1
+
+    return summary
+
+
+try:
+    migration_summary = _migrate_legacy_surface_data()
+    migrated_total = (
+        int(migration_summary.get("string_keys_migrated") or 0)
+        + int(migration_summary.get("hash_keys_migrated") or 0)
+    )
+    if migrated_total or int(migration_summary.get("keys_deleted") or 0):
+        logging.getLogger("webui").info(
+            "[surface-migration] Migrated legacy platform/core/portal data: %s",
+            migration_summary,
+        )
+except Exception as exc:
+    logging.getLogger("webui").error(
+        "[surface-migration] Failed to migrate legacy platform/core/portal data: %s",
+        exc,
+        exc_info=True,
+    )
+
+
+missing_plugins = _enabled_missing_plugin_ids()
+
+if missing_plugins:
     # Only show UI when we truly need downloads
-    title = f"Restoring {len(missing)} missing plugin(s)…"
+    title = f"Restoring {len(missing_plugins)} missing plugin(s)…"
 
     # If your Streamlit supports st.modal, this feels like a real popup
     if hasattr(st, "modal"):
@@ -556,6 +876,87 @@ if missing:
         ensure_plugins_ready(progress_cb=progress_cb)
 else:
     ensure_plugins_ready()
+
+missing_cores = _enabled_missing_core_ids()
+
+if missing_cores:
+    title = f"Restoring {len(missing_cores)} missing core(s)…"
+
+    if hasattr(st, "modal"):
+        with st.modal(title):
+            status = st.empty()
+            bar = st.progress(0.0)
+
+            def progress_cb(p, txt):
+                try:
+                    bar.progress(max(0.0, min(1.0, float(p))))
+                except Exception:
+                    pass
+                try:
+                    status.write(txt)
+                except Exception:
+                    pass
+
+            ensure_cores_ready(progress_cb=progress_cb)
+    else:
+        status = st.empty()
+        bar = st.progress(0.0)
+
+        def progress_cb(p, txt):
+            try:
+                bar.progress(max(0.0, min(1.0, float(p))))
+            except Exception:
+                pass
+            try:
+                status.write(txt)
+            except Exception:
+                pass
+
+        ensure_cores_ready(progress_cb=progress_cb)
+else:
+    ensure_cores_ready()
+
+missing_portals = _enabled_missing_portal_ids()
+
+if missing_portals:
+    title = f"Restoring {len(missing_portals)} missing portal(s)…"
+
+    if hasattr(st, "modal"):
+        with st.modal(title):
+            status = st.empty()
+            bar = st.progress(0.0)
+
+            def progress_cb(p, txt):
+                try:
+                    bar.progress(max(0.0, min(1.0, float(p))))
+                except Exception:
+                    pass
+                try:
+                    status.write(txt)
+                except Exception:
+                    pass
+
+            ensure_portals_ready(progress_cb=progress_cb)
+    else:
+        status = st.empty()
+        bar = st.progress(0.0)
+
+        def progress_cb(p, txt):
+            try:
+                bar.progress(max(0.0, min(1.0, float(p))))
+            except Exception:
+                pass
+            try:
+                status.write(txt)
+            except Exception:
+                pass
+
+        ensure_portals_ready(progress_cb=progress_cb)
+else:
+    ensure_portals_ready()
+
+core_registry = core_registry_module.refresh_core_registry()
+portal_registry = portal_registry_module.refresh_portal_registry()
 
 llm_client = get_llm_client_from_env()
 logging.getLogger("webui").debug(f"LLM client → {build_llm_host_from_env()}")
@@ -712,24 +1113,22 @@ async def process_message(
 
 
 # ------------------ NAVIGATION ------------------
-ai_tasks_enabled = str(redis_client.get("ai_task_platform_running") or "").strip().lower() == "true"
-memory_platform_enabled = str(redis_client.get("memory_platform_running") or "").strip().lower() == "true"
-nav_options = ["Chat", "Platforms", "Verba Plugins", "Automation Plugins", "Plugin Manager", "Settings"]
+ai_tasks_enabled = str(redis_client.get("ai_task_core_running") or "").strip().lower() == "true"
+memory_core_enabled = str(redis_client.get("memory_core_running") or "").strip().lower() == "true"
+nav_options = ["Chat", "Plugin Manager", "Portal Manager", "Core Manager", "Settings"]
 if ai_tasks_enabled:
     nav_options.insert(1, "AI Tasks")
-if memory_platform_enabled:
-    insert_idx = nav_options.index("Platforms") if "Platforms" in nav_options else 1
+if memory_core_enabled:
+    insert_idx = nav_options.index("Plugin Manager") if "Plugin Manager" in nav_options else 1
     nav_options.insert(insert_idx, "Memory")
 if "active_view" not in st.session_state:
     st.session_state.active_view = nav_options[0]
-elif st.session_state.active_view == "Plugins":
-    st.session_state.active_view = "Verba Plugins"
-elif st.session_state.active_view == "Auto Plugins":
-    st.session_state.active_view = "Automation Plugins"
+elif st.session_state.active_view in {"Plugins", "Verba Plugins", "Auto Plugins", "Automation Plugins"}:
+    st.session_state.active_view = "Plugin Manager"
 elif st.session_state.active_view == "AI Tasks" and not ai_tasks_enabled:
-    st.session_state.active_view = "Platforms"
-elif st.session_state.active_view == "Memory" and not memory_platform_enabled:
-    st.session_state.active_view = "Platforms"
+    st.session_state.active_view = "Core Manager"
+elif st.session_state.active_view == "Memory" and not memory_core_enabled:
+    st.session_state.active_view = "Core Manager"
 elif st.session_state.active_view not in nav_options:
     st.session_state.active_view = nav_options[0]
 
@@ -742,31 +1141,28 @@ for opt in nav_options:
 active_view = st.session_state.active_view
 st.sidebar.markdown("---")
 
-# ------------------ PLATFORM MANAGEMENT ------------------
-auto_connected = []
-for platform in platform_registry:
-    key = platform["key"]  # e.g. irc_platform
+# ------------------ CORE MANAGEMENT ------------------
+for core in core_registry:
+    key = core["key"]  # e.g. ai_task_core
     state_key = f"{key}_running"
 
-    # Check Redis to determine if this platform should be running
-    platform_should_run = redis_client.get(state_key) == "true"
+    core_should_run = redis_client.get(state_key) == "true"
 
-    if platform_should_run:
-        if _platform_thread_alive(key):
-            auto_connected.append(platform.get("label") or platform.get("category") or platform.get("key"))
-        elif _should_autostart(key):
-            _start_platform(key)
-            auto_connected.append(platform.get("label") or platform.get("category") or platform.get("key"))
+    if core_should_run:
+        if not _core_thread_alive(key) and _should_autostart("core", key):
+            _start_core(key)
 
-# Prepare plugin groupings
-automation_plugins = _sort_plugins_for_display([
-    p for p in get_registry().values()
-    if set(getattr(p, "platforms", []) or []) == {"automation"} and not getattr(p, "notifier", False)
-])
-regular_plugins = _sort_plugins_for_display([
-    p for p in get_registry().values()
-    if set(getattr(p, "platforms", []) or []) != {"automation"} and not getattr(p, "notifier", False)
-])
+# ------------------ PORTAL MANAGEMENT ------------------
+for portal in portal_registry:
+    key = portal["key"]  # e.g. irc_portal
+    state_key = f"{key}_running"
+
+    # Check Redis to determine if this portal should be running
+    portal_should_run = redis_client.get(state_key) == "true"
+
+    if portal_should_run:
+        if not _portal_thread_alive(key) and _should_autostart("portal", key):
+            _start_portal(key)
 
 # Ensure chat history is available for any view
 if "chat_messages" not in st.session_state:
@@ -1024,27 +1420,6 @@ if active_view == "Chat":
             except Exception:
                 pass
 
-elif active_view == "Verba Plugins":
-    st.title("Verba Plugins")
-    st.write("Browse available plugins. Automation-only tools are listed separately.")
-    render_plugin_list(regular_plugins, "No plugins available.")
-
-elif active_view == "Automation Plugins":
-    st.title("Automation Plugins")
-    st.write("These plugins are available to the automation platform.")
-    render_plugin_list(automation_plugins, "No plugins available.")
-
-elif active_view == "Platforms":
-    st.title("Platforms")
-    render_platforms_panel(
-        platform_registry=platform_registry,
-        redis_client=redis_client,
-        start_platform_fn=_start_platform,
-        stop_platform_fn=_stop_platform,
-        wipe_memory_platform_data_fn=wipe_memory_platform_data,
-        auto_connected=auto_connected,
-    )
-
 elif active_view == "AI Tasks":
     render_ai_tasks_page(redis_client=redis_client)
 
@@ -1053,6 +1428,22 @@ elif active_view == "Memory":
 
 elif active_view == "Plugin Manager":
     render_plugin_store_page()
+
+elif active_view == "Portal Manager":
+    render_portal_store_page(
+        portal_registry=portal_registry,
+        start_portal_fn=_start_portal,
+        stop_portal_fn=_stop_portal,
+        wipe_memory_core_data_fn=wipe_memory_core_data,
+    )
+
+elif active_view == "Core Manager":
+    render_core_store_page(
+        core_registry=core_registry,
+        start_core_fn=_start_core,
+        stop_core_fn=_stop_core,
+        wipe_memory_core_data_fn=wipe_memory_core_data,
+    )
 
 elif active_view == "Settings":
     render_settings_page(
