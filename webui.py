@@ -19,7 +19,6 @@ from PIL import Image
 from io import BytesIO
 from platform_registry import platform_registry
 from helpers import (
-    run_async,
     set_main_loop,
     get_tater_name,
     get_llm_client_from_env,
@@ -31,9 +30,6 @@ from plugin_settings import (
 from admin_gate import (
     REDIS_KEY as ADMIN_GATE_KEY,
     get_admin_only_plugins,
-)
-from kernel_tools import (
-    AGENT_PLATFORMS_DIR,
 )
 from cerberus import (
     run_cerberus_turn,
@@ -236,12 +232,204 @@ def _platform_runtime():
 
 
 @st.cache_resource
-def _exp_platform_runtime():
+def _chat_job_runtime():
     return {
         "lock": threading.RLock(),
-        "threads": {},
-        "stop_flags": {},
+        "jobs": {},
+        "order": [],
     }
+
+
+def _set_webui_rerun_flag() -> None:
+    try:
+        redis_client.set("webui:needs_rerun", "true")
+    except Exception:
+        pass
+
+
+def _ensure_webui_session_id() -> str:
+    session_scope_id = str(st.session_state.get("webui_session_id") or "").strip()
+    if not session_scope_id:
+        session_scope_id = str(uuid.uuid4())
+        st.session_state["webui_session_id"] = session_scope_id
+    return session_scope_id
+
+
+def _job_label(message_content: str, input_artifacts: Optional[List[Dict[str, Any]]]) -> str:
+    content = " ".join(str(message_content or "").split())
+    if content:
+        return content[:119] + "…" if len(content) > 120 else content
+    names: List[str] = []
+    for item in input_artifacts or []:
+        if not isinstance(item, dict):
+            continue
+        name = " ".join(str(item.get("name") or "").split())
+        if not name:
+            continue
+        names.append(name[:39] + "…" if len(name) > 40 else name)
+        if len(names) >= 3:
+            break
+    if names:
+        return "files: " + ", ".join(names)
+    return "request"
+
+
+def _list_active_chat_jobs(*, session_id: str) -> List[Dict[str, Any]]:
+    runtime = _chat_job_runtime()
+    active: List[Dict[str, Any]] = []
+    with runtime["lock"]:
+        order = list(runtime.get("order") or [])
+        jobs = runtime.get("jobs") or {}
+        for job_id in order:
+            job = jobs.get(job_id)
+            if not isinstance(job, dict):
+                continue
+            if str(job.get("session_id") or "") != str(session_id or ""):
+                continue
+            status = str(job.get("status") or "").strip().lower()
+            if status not in {"queued", "running"}:
+                continue
+            active.append(
+                {
+                    "id": str(job.get("id") or ""),
+                    "status": status,
+                    "current_tool": str(job.get("current_tool") or "").strip(),
+                }
+            )
+    return active
+
+
+def _collect_finished_chat_jobs(*, session_id: str) -> List[Dict[str, Any]]:
+    runtime = _chat_job_runtime()
+    finished: List[Dict[str, Any]] = []
+    with runtime["lock"]:
+        order = list(runtime.get("order") or [])
+        jobs = runtime.get("jobs") or {}
+        remove_ids: List[str] = []
+        for job_id in order:
+            job = jobs.get(job_id)
+            if not isinstance(job, dict):
+                continue
+            if str(job.get("session_id") or "") != str(session_id or ""):
+                continue
+            status = str(job.get("status") or "").strip().lower()
+            if status not in {"done", "error"}:
+                continue
+            finished.append(
+                {
+                    "status": status,
+                    "label": str(job.get("label") or "request"),
+                    "responses": list(job.get("responses") or []),
+                    "error": str(job.get("error") or "").strip(),
+                    "completed_at": float(job.get("completed_at") or 0.0),
+                }
+            )
+            remove_ids.append(str(job_id))
+        for job_id in remove_ids:
+            jobs.pop(job_id, None)
+        if remove_ids:
+            remove_set = set(remove_ids)
+            runtime["order"] = [jid for jid in order if str(jid) not in remove_set]
+    finished.sort(key=lambda item: float(item.get("completed_at") or 0.0))
+    return finished
+
+
+def _enqueue_chat_job(
+    *,
+    user_name: str,
+    message_content: str,
+    input_artifacts: Optional[List[Dict[str, Any]]],
+    session_scope_id: str,
+) -> str:
+    runtime = _chat_job_runtime()
+    job_id = str(uuid.uuid4())
+    with runtime["lock"]:
+        runtime["jobs"][job_id] = {
+            "id": job_id,
+            "session_id": str(session_scope_id or ""),
+            "status": "queued",
+            "label": _job_label(message_content, input_artifacts),
+            "current_tool": "",
+            "responses": [],
+            "error": "",
+            "completed_at": 0.0,
+        }
+        runtime["order"] = [jid for jid in runtime.get("order", []) if jid != job_id]
+        runtime["order"].append(job_id)
+
+    def _run():
+        logger = logging.getLogger("webui")
+        with runtime["lock"]:
+            job = runtime["jobs"].get(job_id)
+            if isinstance(job, dict):
+                job["status"] = "running"
+                job["current_tool"] = ""
+        _set_webui_rerun_flag()
+
+        async def _wait_callback(func_name, plugin_obj):
+            if plugin_obj is None:
+                display_name = f"kernel::{func_name}"
+            else:
+                display_name = (
+                    getattr(plugin_obj, "plugin_name", None)
+                    or getattr(plugin_obj, "pretty_name", None)
+                    or getattr(plugin_obj, "name", None)
+                    or func_name
+                )
+            with runtime["lock"]:
+                job = runtime["jobs"].get(job_id)
+                if not isinstance(job, dict):
+                    return
+                if str(job.get("status") or "").strip().lower() not in {"queued", "running"}:
+                    return
+                job["status"] = "running"
+                job["current_tool"] = str(display_name or "").strip()
+            _set_webui_rerun_flag()
+
+        try:
+            job_llm_client = get_llm_client_from_env()
+            response_payload = asyncio.run(
+                process_message(
+                    user_name,
+                    message_content,
+                    input_artifacts=input_artifacts,
+                    wait_callback=_wait_callback,
+                    session_scope_id=session_scope_id,
+                    llm_client_override=job_llm_client,
+                )
+            )
+            if isinstance(response_payload, dict) and isinstance(response_payload.get("responses"), list):
+                responses = response_payload.get("responses") or []
+            else:
+                responses = [response_payload]
+            with runtime["lock"]:
+                job = runtime["jobs"].get(job_id)
+                if not isinstance(job, dict):
+                    return
+                if str(job.get("status") or "").strip().lower() not in {"queued", "running"}:
+                    return
+                job["status"] = "done"
+                job["responses"] = responses
+                job["current_tool"] = ""
+                job["completed_at"] = time.time()
+        except Exception as e:
+            logger.error(f"WebUI background job failed: {e}", exc_info=True)
+            with runtime["lock"]:
+                job = runtime["jobs"].get(job_id)
+                if not isinstance(job, dict):
+                    return
+                if str(job.get("status") or "").strip().lower() not in {"queued", "running"}:
+                    return
+                job["status"] = "error"
+                job["error"] = str(e)
+                job["current_tool"] = ""
+                job["completed_at"] = time.time()
+        finally:
+            _set_webui_rerun_flag()
+
+    worker = threading.Thread(target=_run, daemon=True, name=f"webui-chat-job-{job_id[:8]}")
+    worker.start()
+    return job_id
 
 AUTO_START_COOLDOWN_SEC = 30
 
@@ -253,22 +441,14 @@ def _platform_thread_alive(key: str) -> bool:
         return bool(thread and thread.is_alive())
 
 
-def _exp_platform_thread_alive(key: str) -> bool:
-    runtime = _exp_platform_runtime()
-    with runtime["lock"]:
-        thread = runtime["threads"].get(key)
-        return bool(thread and thread.is_alive())
-
-
-def _should_autostart(key: str, exp: bool = False) -> bool:
-    bucket = "exp" if exp else "platform"
-    token = f"{bucket}:{key}"
+def _should_autostart(key: str) -> bool:
+    token = f"platform:{key}"
     attempts = st.session_state.setdefault("autostart_attempts", set())
     if token in attempts:
         return False
 
     attempts.add(token)
-    redis_key = f"webui:autostart:{bucket}:{key}"
+    redis_key = f"webui:autostart:platform:{key}"
     last = redis_client.get(redis_key)
     if last:
         try:
@@ -335,104 +515,6 @@ def _stop_platform(key: str):
             runtime["stop_flags"].pop(key, None)
 
 
-def _start_agent_lab_platform(key: str, path: str):
-    runtime = _exp_platform_runtime()
-    with runtime["lock"]:
-        thread = runtime["threads"].get(key)
-        stop_flag = runtime["stop_flags"].get(key)
-
-        if thread and thread.is_alive():
-            return thread, stop_flag
-
-        stop_flag = threading.Event()
-
-    def runner():
-        try:
-            spec = importlib.util.spec_from_file_location(f"agent_lab_platform_{key}_{int(time.time())}", path)
-            if spec is None or spec.loader is None:
-                logging.getLogger("webui").warning(f"⚠️ Agent Lab platform {key} has no loader.")
-                return
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)  # type: ignore[attr-defined]
-            run_fn = getattr(module, "run", None)
-            if callable(run_fn):
-                run_fn(stop_event=stop_flag)
-            else:
-                logging.getLogger("webui").warning(f"⚠️ Agent Lab platform {key} missing run().")
-        except Exception as e:
-            logging.getLogger("webui").error(f"❌ Error in Agent Lab platform {key}: {e}", exc_info=True)
-        finally:
-            with runtime["lock"]:
-                current = runtime["threads"].get(key)
-                if current is threading.current_thread():
-                    runtime["threads"].pop(key, None)
-                    runtime["stop_flags"].pop(key, None)
-
-    thread = threading.Thread(target=runner, daemon=True, name=f"agent-lab-platform-{key}")
-    with runtime["lock"]:
-        runtime["threads"][key] = thread
-        runtime["stop_flags"][key] = stop_flag
-    thread.start()
-
-    return thread, stop_flag
-
-
-def _stop_agent_lab_platform(key: str):
-    runtime = _exp_platform_runtime()
-    with runtime["lock"]:
-        thread = runtime["threads"].get(key)
-        stop_flag = runtime["stop_flags"].get(key)
-
-    if stop_flag:
-        stop_flag.set()
-
-    if thread and thread.is_alive():
-        thread.join(timeout=0.5)
-
-    with runtime["lock"]:
-        if not thread or not thread.is_alive():
-            runtime["threads"].pop(key, None)
-            runtime["stop_flags"].pop(key, None)
-
-
-def _discover_agent_lab_platforms():
-    AGENT_PLATFORMS_DIR.mkdir(parents=True, exist_ok=True)
-    items = []
-    for path in sorted(AGENT_PLATFORMS_DIR.glob("*.py")):
-        name = path.stem
-        label = name
-        ok = True
-        error = ""
-        required = {}
-        try:
-            spec = importlib.util.spec_from_file_location(f"exp_platform_meta_{name}_{int(time.time())}", str(path))
-            if spec is None or spec.loader is None:
-                ok = False
-                error = "Missing loader"
-            else:
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)  # type: ignore[attr-defined]
-                meta = getattr(module, "PLATFORM", None)
-                if isinstance(meta, dict):
-                    label = meta.get("label") or meta.get("category") or meta.get("key") or label
-                    required = meta.get("required") or {}
-                else:
-                    ok = False
-                    error = "Missing PLATFORM dict"
-                if not callable(getattr(module, "run", None)):
-                    ok = False
-                    error = "Missing run()"
-        except Exception as e:
-            ok = False
-            error = str(e)
-        items.append({"key": name, "label": label, "path": str(path), "ok": ok, "error": error, "required": required})
-    return items
-
-# ---- background job refresh hook ----
-if redis_client.get("webui:needs_rerun") == "true":
-    redis_client.delete("webui:needs_rerun")
-    st.rerun()
-
 missing = _enabled_missing_plugin_ids()
 
 if missing:
@@ -478,7 +560,7 @@ else:
 llm_client = get_llm_client_from_env()
 logging.getLogger("webui").debug(f"LLM client → {build_llm_host_from_env()}")
 
-# Set the main event loop used for run_async.
+# Set a main event loop reference for shared async helpers.
 try:
     main_loop = asyncio.get_running_loop()
 except RuntimeError:
@@ -566,7 +648,14 @@ def save_emoji_responder_settings(
 
 
 # ----------------- PROCESSING FUNCTIONS -----------------
-async def process_message(user_name, message_content, input_artifacts=None, wait_callback=None):
+async def process_message(
+    user_name,
+    message_content,
+    input_artifacts=None,
+    wait_callback=None,
+    session_scope_id: Optional[str] = None,
+    llm_client_override=None,
+):
     max_llm = int(redis_client.get("tater:max_llm") or 8)
     history = load_chat_history_tail(max_llm)
 
@@ -585,29 +674,28 @@ async def process_message(user_name, message_content, input_artifacts=None, wait
     merged_registry = dict(get_registry() or {})
     merged_enabled = get_plugin_enabled
 
-    session_scope_id = str(st.session_state.get("webui_session_id") or "").strip()
-    if not session_scope_id:
-        session_scope_id = str(uuid.uuid4())
-        st.session_state["webui_session_id"] = session_scope_id
+    resolved_scope_id = str(session_scope_id or "").strip()
+    if not resolved_scope_id:
+        resolved_scope_id = _ensure_webui_session_id()
 
     origin = {
         "platform": "webui",
         "user": user_name,
         "user_id": user_name,
-        "session_id": session_scope_id,
+        "session_id": resolved_scope_id,
     }
     if isinstance(input_artifacts, list) and input_artifacts:
         origin["input_artifacts"] = [dict(item) for item in input_artifacts if isinstance(item, dict)]
     agent_max_rounds, agent_max_tool_calls = resolve_agent_limits(redis_client)
     result = await run_cerberus_turn(
-        llm_client=llm_client,
+        llm_client=(llm_client_override or llm_client),
         platform="webui",
         history_messages=messages_list,
         registry=merged_registry,
         enabled_predicate=merged_enabled,
         context={"raw_message": message_content},
         user_text=message_content or "",
-        scope=f"session:{session_scope_id}",
+        scope=f"session:{resolved_scope_id}",
         origin=origin,
         redis_client=redis_client,
         wait_callback=wait_callback,
@@ -666,21 +754,9 @@ for platform in platform_registry:
     if platform_should_run:
         if _platform_thread_alive(key):
             auto_connected.append(platform.get("label") or platform.get("category") or platform.get("key"))
-        elif _should_autostart(key, exp=False):
+        elif _should_autostart(key):
             _start_platform(key)
             auto_connected.append(platform.get("label") or platform.get("category") or platform.get("key"))
-
-# ------------------ EXPERIMENTAL PLATFORM MANAGEMENT ------------------
-exp_platforms = _discover_agent_lab_platforms()
-for exp in exp_platforms:
-    exp_key = exp.get("key")
-    exp_path = exp.get("path")
-    if not exp_key or not exp_path:
-        continue
-    state_key = f"exp:{exp_key}_running"
-    if (redis_client.get(state_key) or "") == "true":
-        if not _exp_platform_thread_alive(exp_key) and _should_autostart(exp_key, exp=True):
-            _start_experiment_platform(exp_key, exp_path)
 
 # Prepare plugin groupings
 automation_plugins = _sort_plugins_for_display([
@@ -704,6 +780,21 @@ if active_view == "Chat":
     chat_settings = get_chat_settings()
     avatar_b64  = chat_settings.get("avatar")
     user_avatar = load_avatar_image(avatar_b64) if avatar_b64 else None
+    session_scope_id = _ensure_webui_session_id()
+
+    finished_jobs = _collect_finished_chat_jobs(session_id=session_scope_id)
+    for update in finished_jobs:
+        status = str(update.get("status") or "").strip().lower()
+        if status == "done":
+            for item in (update.get("responses") or []):
+                st.session_state.chat_messages.append({"role": "assistant", "content": item})
+                save_message("assistant", "assistant", item)
+        elif status == "error":
+            label = str(update.get("label") or "request")
+            err = str(update.get("error") or "unknown error")
+            msg = f"I couldn't finish this request ({label}): {err}"
+            st.session_state.chat_messages.append({"role": "assistant", "content": msg})
+            save_message("assistant", "assistant", msg)
 
     # ------------------ render chat history ------------------
     for msg in st.session_state.chat_messages:
@@ -799,6 +890,42 @@ if active_view == "Chat":
             else:
                 st.write(content)
 
+    active_jobs = _list_active_chat_jobs(session_id=session_scope_id)
+    poll_interval = "2s" if active_jobs else None
+
+    @st.fragment(run_every=poll_interval)
+    def _render_active_job_statuses():
+        latest_jobs = _list_active_chat_jobs(session_id=session_scope_id)
+        for job in latest_jobs:
+            current_tool = str(job.get("current_tool") or "").strip()
+            label = f"{first_name} is working on: {current_tool}" if current_tool else f"{first_name} is thinking…"
+            if hasattr(st, "status"):
+                st.status(
+                    label,
+                    state="running",
+                    expanded=False,
+                )
+            else:
+                st.info(label)
+
+        completed = _collect_finished_chat_jobs(session_id=session_scope_id)
+        if completed:
+            for update in completed:
+                status = str(update.get("status") or "").strip().lower()
+                if status == "done":
+                    for item in (update.get("responses") or []):
+                        st.session_state.chat_messages.append({"role": "assistant", "content": item})
+                        save_message("assistant", "assistant", item)
+                elif status == "error":
+                    label = str(update.get("label") or "request")
+                    err = str(update.get("error") or "unknown error")
+                    msg = f"I couldn't finish this request ({label}): {err}"
+                    st.session_state.chat_messages.append({"role": "assistant", "content": msg})
+                    save_message("assistant", "assistant", msg)
+            st.rerun(scope="app")
+
+    _render_active_job_statuses()
+
     # ------------------ Chat Input (NOW SUPPORTS FILES) ------------------
     # Streamlit versions differ on chat_input kwargs (e.g., max_upload_size)
     _chat_kwargs = {
@@ -868,54 +995,12 @@ if active_view == "Chat":
                 }
             )
 
-        # ---- Send to LLM (even if only files were uploaded) ----
-        status_box = None
-        if hasattr(st, "status"):
-            status_box = st.status(
-                f"{first_name} is thinking…",
-                state="running",
-                expanded=False,
-            )
-
-        async def _wait_callback(func_name, plugin_obj):
-            if not status_box:
-                return
-            if plugin_obj is None:
-                display_name = f"kernel::{func_name}"
-            else:
-                display_name = (
-                    getattr(plugin_obj, "plugin_name", None)
-                    or getattr(plugin_obj, "pretty_name", None)
-                    or getattr(plugin_obj, "name", None)
-                    or func_name
-                )
-            status_box.update(
-                label=f"{first_name} is working on: {display_name}",
-                state="running",
-            )
-
-        if status_box is None:
-            spinner_label = f"{first_name} is thinking..."
-            with st.spinner(spinner_label):
-                response_payload = run_async(
-                    process_message(uname, user_text, input_artifacts=input_artifacts, wait_callback=_wait_callback)
-                )
-        else:
-            response_payload = run_async(
-                process_message(uname, user_text, input_artifacts=input_artifacts, wait_callback=_wait_callback)
-            )
-
-        if status_box is not None:
-            status_box.update(label=f"{first_name} finished.", state="complete")
-
-        if isinstance(response_payload, dict) and isinstance(response_payload.get("responses"), list):
-            responses = response_payload.get("responses") or []
-        else:
-            responses = [response_payload]
-
-        for item in responses:
-            st.session_state.chat_messages.append({"role": "assistant", "content": item})
-            save_message("assistant", "assistant", item)
+        _enqueue_chat_job(
+            user_name=uname,
+            message_content=user_text,
+            input_artifacts=input_artifacts,
+            session_scope_id=session_scope_id,
+        )
 
         st.rerun()
 

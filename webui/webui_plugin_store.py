@@ -516,7 +516,7 @@ def _get_item_platforms(item):
 
 
 def _get_item_display_platforms(item) -> str:
-    platforms = _get_item_platforms(item)
+    platforms = _ordered_platforms(set(_get_item_platforms(item)))
     return ", ".join(_platform_display_label(platform) for platform in platforms) if platforms else "(not provided)"
 
 
@@ -552,9 +552,12 @@ def _installed_plugin_ids() -> list[str]:
 
 
 def _ordered_platforms(platform_names: set[str]) -> list[str]:
-    ordered = [platform_name for platform_name in COMMON_PLATFORM_ORDER if platform_name in platform_names]
-    ordered += sorted(platform_name for platform_name in platform_names if platform_name not in set(COMMON_PLATFORM_ORDER))
-    return ordered
+    normalized = {
+        str(platform_name or "").strip().lower()
+        for platform_name in (platform_names or set())
+        if str(platform_name or "").strip()
+    }
+    return sorted(normalized)
 
 
 def _entry_platforms(entry: dict) -> list[str]:
@@ -566,7 +569,7 @@ def _entry_platforms(entry: dict) -> list[str]:
         platforms = _normalize_plats(getattr(loaded, "platforms", []) or [])
     if not platforms and catalog_item:
         platforms = _get_item_platforms(catalog_item)
-    return platforms
+    return _ordered_platforms(set(platforms))
 
 
 def _build_installed_entries(catalog_items: list[dict]) -> list[dict]:

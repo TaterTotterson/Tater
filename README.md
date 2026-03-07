@@ -2,7 +2,7 @@
   <img src="images/tater-new-logo.png" alt="Tater AI Assistant" width="300"/>
 </div>
 
-**Tater** is an AI assistant that connects to any OpenAI-compatible LLM, giving you a powerful set of AI-driven tools. It includes a WebUI for setup and private chats, and works across **Discord**, **Telegram**, **IRC**, **Matrix**, **Home Assistant**, **HomeKit**, and even the **OG Xbox via XBMC4Xbox**
+**Tater** is an AI assistant that connects to any OpenAI-compatible LLM, giving you a powerful set of AI-driven tools. It includes a WebUI for setup and private chats, and works across **Discord**, **Telegram**, **IRC**, **Matrix**, **macOS**, **Home Assistant**, **HomeKit**, and even the **OG Xbox via XBMC4Xbox**
 
 Main website: [taterassistant.com](https://taterassistant.com)
 
@@ -22,6 +22,7 @@ Tater runs on Cerberus — a closed-loop Planner → Doer → Checker architectu
 | `ha_automations`  | Lightweight Home Assistant automation-only endpoint for direct tool execution. Designed for fast, reliable automations like camera events, doorbell alerts, weather summaries, and dashboard sensors. Intended to be used with the [Tater Automations](https://github.com/TaterTotterson/tater_automations) custom component, which provides a native “Call Tater automation tool” action in Home Assistant. |
 | `ai_task`         | Built-in scheduled task runner for timed and recurring AI jobs, with delivery routed through notifier platforms (Discord, Telegram, Matrix, IRC, Home Assistant, and more). |
 | `memory_platform` | Background memory extraction platform that incrementally scans chat history, builds structured user/room memory profiles in Redis, and injects compact memory context into Cerberus. |
+| `macos`           | HTTP bridge for the [Tater-MacOS](https://github.com/TaterTotterson/Tater-MacOS) menu bar app, with Redis-backed per-device chat history, inline asset uploads, Cerberus chat turns, and direct quick-action plugin calls. |
 | `homekit`         | Siri / Apple Shortcuts integration for [HomeKit](https://github.com/TaterTotterson/Tater/wiki/How-to-Build-the-%E2%80%9CTater%E2%80%9D-Shortcut), enabling “Hey Siri, ask Tater…” voice commands, per-device conversation sessions, and Verba Plugin-backed actions. |
 | `irc`             | Lightweight IRC bot that responds to mentions and runs compatible Verba Plugins. |
 | `matrix`          | Modern Matrix client with end-to-end encryption support, Markdown rendering, and full Verba Plugin compatibility — bringing Tater to federated chat networks like Element and Cinny. |

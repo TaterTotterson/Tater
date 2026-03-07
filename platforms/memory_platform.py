@@ -113,8 +113,9 @@ PLATFORM_SETTINGS = {
     },
 }
 
-_SUPPORTED_PLATFORMS = ("webui", "discord", "telegram", "irc", "matrix", "homeassistant", "homekit", "xbmc")
+_SUPPORTED_PLATFORMS = ("webui", "macos", "discord", "telegram", "irc", "matrix", "homeassistant", "homekit", "xbmc")
 _AUTO_STATE_KEYS = {
+    "macos": "macos_platform_running",
     "discord": "discord_platform_running",
     "telegram": "telegram_platform_running",
     "irc": "irc_platform_running",
@@ -124,6 +125,7 @@ _AUTO_STATE_KEYS = {
     "xbmc": "xbmc_platform_running",
 }
 _HISTORY_SCAN_SPECS = {
+    "macos": ("tater:macos:session:*:history", "tater:macos:session:", ":history"),
     "discord": ("tater:channel:*:history", "tater:channel:", ":history"),
     "telegram": ("tater:telegram:*:history", "tater:telegram:", ":history"),
     "irc": ("tater:irc:*:history", "tater:irc:", ":history"),
@@ -591,7 +593,7 @@ def _normalize_history_entry(
         user_id = entry_user_id
     elif username:
         user_id = username
-    elif platform in {"homeassistant", "homekit", "xbmc"}:
+    elif platform in {"macos", "homeassistant", "homekit", "xbmc"}:
         user_id = scope_id
     else:
         user_id = "unknown_user"

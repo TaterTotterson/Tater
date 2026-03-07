@@ -367,7 +367,7 @@ def parse_function_json(response_text: str):
         try:
             args = json.loads(blob)
             if isinstance(args, dict):
-                if tool_name in {"get_plugin_help", "list_platforms_for_plugin"}:
+                if tool_name == "get_plugin_help":
                     if "plugin_id" not in args and "name" in args:
                         args["plugin_id"] = args.get("name")
                 return {"function": tool_name, "arguments": args}

@@ -6,20 +6,11 @@ import streamlit as st
 
 import plugin_registry as plugin_registry_mod
 from helpers import run_async
-from kernel_tools import AGENT_PLUGINS_DIR, validate_plugin, delete_file
 from plugin_settings import (
     get_plugin_enabled,
     set_plugin_enabled,
     get_plugin_settings,
     save_plugin_settings,
-)
-from .webui_platforms import (
-    exp_get_plugin_enabled,
-    exp_set_plugin_enabled,
-    _load_exp_validation,
-    _validation_status,
-    _dependency_lines,
-    render_exp_plugin_settings_form,
 )
 
 
@@ -211,117 +202,6 @@ def render_plugin_card(plugin):
             st.caption(f"Platforms: {', '.join(platforms)}")
 
         render_plugin_settings_form(plugin)
-
-
-def render_agent_lab_plugin_card(plugin):
-    display_name = (
-        getattr(plugin, "plugin_name", None)
-        or getattr(plugin, "pretty_name", None)
-        or plugin.name
-    )
-    description = get_plugin_description(plugin)
-    platforms = getattr(plugin, "platforms", []) or []
-    registry_id = plugin.name
-
-    enabled = exp_get_plugin_enabled(registry_id)
-    plugin_file = AGENT_PLUGINS_DIR / f"{registry_id}.py"
-    report = _load_exp_validation("plugin", registry_id)
-    status_label, status_detail = _validation_status(report)
-
-    with st.container(border=True):
-        header_cols = st.columns([4, 1.1, 1.1, 1.1])
-
-        with header_cols[0]:
-            st.subheader(display_name)
-            st.caption(f"ID: {registry_id}")
-            st.caption(f"Enabled: {'yes' if enabled else 'no'}")
-
-        with header_cols[1]:
-            if st.button("Validate", key=f"exp_validate_{registry_id}"):
-                report = validate_plugin(registry_id)
-                if report.get("ok"):
-                    st.success("Validation passed.")
-                else:
-                    st.error(f"Validation failed: {report.get('error') or report.get('missing_fields')}")
-
-        with header_cols[2]:
-            if st.button("Enable", key=f"exp_enable_{registry_id}"):
-                report = validate_plugin(registry_id)
-                if report.get("ok"):
-                    exp_set_plugin_enabled(registry_id, True)
-                    st.success("Enabled.")
-                    st.rerun()
-                else:
-                    st.error(f"Enable blocked: {report.get('error') or report.get('missing_fields')}")
-
-        with header_cols[3]:
-            if st.button("Disable", key=f"exp_disable_{registry_id}"):
-                exp_set_plugin_enabled(registry_id, False)
-                st.success("Disabled.")
-                st.rerun()
-
-        if description:
-            st.write(description)
-        if platforms:
-            st.caption(f"Platforms: {', '.join(platforms)}")
-        if status_label:
-            status_line = f"Validation: {status_label}"
-            if status_detail:
-                status_line = f"{status_line} ({status_detail})"
-            st.caption(status_line)
-        for line in _dependency_lines(report):
-            st.caption(line)
-
-        if plugin_file.exists():
-            if st.button("Delete", key=f"exp_delete_{registry_id}"):
-                result = delete_file(str(plugin_file))
-                if result.get("ok"):
-                    exp_set_plugin_enabled(registry_id, False)
-                    st.success("Deleted Agent Lab plugin file.")
-                    st.rerun()
-                else:
-                    st.error(result.get("error") or "Delete failed.")
-
-        render_exp_plugin_settings_form(plugin)
-
-
-def render_agent_lab_plugin_error_card(name: str, path: str):
-    report = _load_exp_validation("plugin", name)
-    status_label, status_detail = _validation_status(report, fallback_error="Failed to load")
-    missing_fields = report.get("missing_fields") if isinstance(report, dict) else []
-
-    with st.container(border=True):
-        header_cols = st.columns([4, 1, 1])
-        with header_cols[0]:
-            st.subheader(name)
-            st.caption(f"ID: {name}")
-            status_line = f"Validation: {status_label}"
-            if status_detail:
-                status_line = f"{status_line} ({status_detail})"
-            st.caption(status_line)
-        with header_cols[1]:
-            if st.button("Validate", key=f"exp_validate_error_{name}"):
-                report = validate_plugin(name)
-                if report.get("ok"):
-                    st.success("Validation passed.")
-                else:
-                    st.error(f"Validation failed: {report.get('error') or report.get('missing_fields')}")
-        with header_cols[2]:
-            if st.button("Delete", key=f"exp_delete_error_{name}"):
-                result = delete_file(str(path))
-                if result.get("ok"):
-                    exp_set_plugin_enabled(name, False)
-                    st.success("Deleted Agent Lab plugin file.")
-                    st.rerun()
-                else:
-                    st.error(result.get("error") or "Delete failed.")
-
-        if isinstance(missing_fields, list) and "name" in missing_fields:
-            st.caption("Tip: set plugin class `name` to match this file id exactly.")
-
-        for line in _dependency_lines(report):
-            st.caption(line)
-
 
 def _sort_plugins_for_display(plugins):
     return sorted(

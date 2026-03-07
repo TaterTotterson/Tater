@@ -7,6 +7,7 @@ from platforms.homekit_platform import PLATFORM_SETTINGS as homekit_settings
 from platforms.irc_platform import PLATFORM_SETTINGS as irc_settings
 from platforms.matrix_platform import PLATFORM_SETTINGS as matrix_settings
 from platforms.memory_platform import PLATFORM_SETTINGS as memory_settings
+from platforms.macos_platform import PLATFORM_SETTINGS as macos_settings
 from platforms.rss_platform import PLATFORM_SETTINGS as rss_settings
 from platforms.telegram_platform import PLATFORM_SETTINGS as telegram_settings
 from platforms.xbmc_platform import PLATFORM_SETTINGS as xbmc_settings
@@ -21,6 +22,11 @@ platform_registry = [
         **memory_settings,
         "key": "memory_platform",
         "label": "Memory Platform Settings",
+    },
+    {
+        **macos_settings,
+        "key": "macos_platform",
+        "label": "macOS Settings",
     },
     {
         **discord_settings,

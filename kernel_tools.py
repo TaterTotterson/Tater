@@ -1,5 +1,4 @@
 import base64
-import ast
 import codecs
 import csv
 import fnmatch
@@ -10,13 +9,10 @@ import mimetypes
 import os
 import re
 import shutil
-import subprocess
-import sys
 import tarfile
 import time
 import uuid
 import zipfile
-import importlib.util
 from datetime import datetime, timedelta
 import ipaddress
 import socket
@@ -32,10 +28,8 @@ import requests
 
 from helpers import redis_client
 from plugin_loader import load_plugins_from_directory
-from plugin_base import ToolPlugin
 from plugin_registry import reload_plugins
 from plugin_result import action_failure, action_success
-from plugin_settings import get_plugin_enabled
 from notify import dispatch_notification_sync
 from notify.queue import ALLOWED_PLATFORMS, normalize_platform as normalize_notify_platform
 from vision_settings import (
@@ -75,7 +69,6 @@ STABLE_PLUGINS_DIR = BASE_DIR / os.getenv("TATER_PLUGIN_DIR", "plugins")
 STABLE_PLATFORMS_DIR = BASE_DIR / "platforms"
 
 _SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
-_SAFE_DEP_RE = re.compile(r"^[A-Za-z0-9_.\\-\\[\\]==<>!~]+$")
 _READ_FILE_MAX_CHARS = int(os.getenv("TATER_READ_FILE_MAX_CHARS", "400000"))
 _READ_PDF_MAX_PAGES = int(os.getenv("TATER_READ_PDF_MAX_PAGES", "120"))
 _READ_DOCX_MAX_TABLE_ROWS = int(os.getenv("TATER_READ_DOCX_MAX_TABLE_ROWS", "300"))
@@ -98,7 +91,6 @@ WEB_SEARCH_TIMEOUT_SEC = int(os.getenv("TATER_WEB_SEARCH_TIMEOUT_SEC", "15"))
 WEB_SEARCH_MAX_RESULTS = int(os.getenv("TATER_WEB_SEARCH_MAX_RESULTS", "10"))
 WEB_SEARCH_MAX_RESPONSE_BYTES = int(os.getenv("TATER_WEB_SEARCH_MAX_RESPONSE_BYTES", "2000000"))
 WEB_SEARCH_MAX_SNIPPET_CHARS = int(os.getenv("TATER_WEB_SEARCH_MAX_SNIPPET_CHARS", "600"))
-VISION_MAX_IMAGE_BYTES = int(os.getenv("TATER_VISION_MAX_IMAGE_BYTES", str(12 * 1024 * 1024)))
 VISION_ALLOWED_MIMETYPES = {
     "image/png",
     "image/jpeg",
@@ -117,25 +109,35 @@ WEBUI_FILE_BLOB_KEY_PREFIX = "webui:file:"
 AI_TASKS_KEY_PREFIX = "reminders:"
 AI_TASKS_DUE_ZSET = "reminders:due"
 AI_TASKS_DAILY_MARKERS = ("every day", "everyday", "daily", "each day")
-AI_TASKS_WEEKLY_MARKERS = ("every week", "weekly")
+AI_TASKS_WEEKLY_MARKERS = ("every week", "each week", "weekly")
+AI_TASKS_MONTHLY_MARKERS = ("every month", "each month", "monthly")
 AI_TASKS_WEEKDAY_MAP = {
     "monday": 0,
     "mon": 0,
+    "mondays": 0,
     "tuesday": 1,
     "tue": 1,
     "tues": 1,
+    "tuesdays": 1,
     "wednesday": 2,
     "wed": 2,
+    "weds": 2,
+    "wedsday": 2,
+    "wednesdays": 2,
     "thursday": 3,
     "thu": 3,
     "thur": 3,
     "thurs": 3,
+    "thursdays": 3,
     "friday": 4,
     "fri": 4,
+    "fridays": 4,
     "saturday": 5,
     "sat": 5,
+    "saturdays": 5,
     "sunday": 6,
     "sun": 6,
+    "sundays": 6,
 }
 AI_TASKS_LOCAL_TZ_HINT_RE = re.compile(r"\bassume\s+local\s+timezone\b\.?", re.IGNORECASE)
 AI_TASKS_WEATHER_DEFAULT_HINT_RE = re.compile(
@@ -152,7 +154,19 @@ AI_TASKS_SCHEDULE_PREFIX_PATTERNS = (
         re.IGNORECASE,
     ),
     re.compile(
-        r"^\s*(?:every\s+week|weekly)\b(?:\s+on\s+[a-z,\s]+)?(?:\s+at\s+(?:\d{3,4}|\d{1,2}(?::\d{2})?(?::\d{2})?)\s*(?:am|pm)?)?\s*(?:,|:|-)?\s*",
+        r"^\s*(?:every\s+week|each\s+week|weekly)\b(?:\s+on\s+[a-z,\s]+)?(?:\s+at\s+(?:\d{3,4}|\d{1,2}(?::\d{2})?(?::\d{2})?)\s*(?:am|pm)?)?\s*(?:,|:|-)?\s*",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*on\s+(?:mon(?:day|days?)?|tues?(?:day|days?)?|wed(?:nesday|nesdays|s|sday|sdays)?|thu(?:r|rs|rsday|rsdays|day|days)?|fri(?:day|days)?|sat(?:urday|urdays)?|sun(?:day|days)?)(?:\s*(?:,|and)\s*(?:mon(?:day|days?)?|tues?(?:day|days?)?|wed(?:nesday|nesdays|s|sday|sdays)?|thu(?:r|rs|rsday|rsdays|day|days)?|fri(?:day|days)?|sat(?:urday|urdays)?|sun(?:day|days)?))*\s+(?:every|each)\s+week\b(?:\s+at\s+(?:\d{3,4}|\d{1,2}(?::\d{2})?(?::\d{2})?)\s*(?:am|pm)?)?\s*(?:,|:|-)?\s*",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*on\s+(?:the\s+)?(?:[12]?\d|3[01])(?:st|nd|rd|th)(?:\s*(?:,|and)\s*(?:the\s+)?(?:[12]?\d|3[01])(?:st|nd|rd|th))*\s+of\s+(?:every|each)\s+month\b(?:\s+at\s+(?:\d{3,4}|\d{1,2}(?::\d{2})?(?::\d{2})?)\s*(?:am|pm)?)?\s*(?:,|:|-)?\s*",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:every\s+month|each\s+month|monthly)\b(?:\s+on\s+(?:the\s+)?(?:[12]?\d|3[01])(?:st|nd|rd|th)(?:\s*(?:,|and)\s*(?:the\s+)?(?:[12]?\d|3[01])(?:st|nd|rd|th))*)?(?:\s+at\s+(?:\d{3,4}|\d{1,2}(?::\d{2})?(?::\d{2})?)\s*(?:am|pm)?)?\s*(?:,|:|-)?\s*",
         re.IGNORECASE,
     ),
     re.compile(
@@ -907,6 +921,17 @@ def _send_message_load_settings() -> Dict[str, str]:
     )
 
 
+def _send_message_last_macos_target() -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    last_scope = str(redis_client.get("tater:macos:last_scope") or "").strip()
+    last_device_id = str(redis_client.get("tater:macos:last_device_id") or "").strip()
+    if last_scope:
+        out["scope"] = last_scope
+    if last_device_id:
+        out["device_id"] = last_device_id
+    return out
+
+
 def _send_message_normalize_matrix_room_ref(room_ref: Any) -> str:
     ref = str(room_ref or "").strip()
     if not ref:
@@ -1093,6 +1118,8 @@ def send_message(
     persistent: Any = None,
     api_notification: Any = None,
     chat_id: Any = None,
+    device_id: Any = None,
+    scope: Any = None,
 ) -> Dict[str, Any]:
     text_message = str(message or content or "").strip()
     destination = normalize_notify_platform(platform)
@@ -1107,6 +1134,8 @@ def send_message(
         ("persistent", persistent),
         ("api_notification", api_notification),
         ("chat_id", chat_id),
+        ("device_id", device_id),
+        ("scope", scope),
     ):
         if value not in (None, "") and key not in target_map:
             target_map[key] = value
@@ -1128,12 +1157,38 @@ def send_message(
         if origin_platform in ALLOWED_PLATFORMS:
             destination = origin_platform
 
+    if destination == "macos" and not target_map.get("scope") and not target_map.get("device_id"):
+        inferred_target = _send_message_last_macos_target()
+        if inferred_target.get("scope"):
+            target_map["scope"] = inferred_target["scope"]
+        if inferred_target.get("device_id"):
+            target_map["device_id"] = inferred_target["device_id"]
+
     if destination not in ALLOWED_PLATFORMS:
         return action_failure(
             code="missing_destination_platform",
             message="Cannot queue: missing destination platform",
-            needs=["Specify a destination platform such as discord, matrix, telegram, homeassistant, ntfy, or irc."],
+            needs=[
+                "Specify a destination platform such as discord, matrix, telegram, macos, homeassistant, ntfy, or irc.",
+                "For macOS you can also say 'my mac' or 'mac os'.",
+            ],
             say_hint="Explain that a destination platform is required.",
+        )
+
+    origin_platform = normalize_notify_platform(origin.get("platform")) if isinstance(origin, dict) else ""
+    origin_has_macos_target = (
+        origin_platform == "macos"
+        and bool(str(origin.get("scope") or "").strip() or str(origin.get("device_id") or "").strip())
+    ) if isinstance(origin, dict) else False
+    if destination == "macos" and not target_map.get("scope") and not target_map.get("device_id") and not origin_has_macos_target:
+        return action_failure(
+            code="missing_macos_target",
+            message="Cannot queue: missing target device/scope",
+            needs=[
+                "Say 'to my mac' to target the last active Mac device, or specify targets.scope / targets.device_id explicitly.",
+                "If this is your first macOS message from WebUI, open the Mac app once so Tater can learn your current device.",
+            ],
+            say_hint="Ask which Mac device to target, and mention 'my mac' as shorthand.",
         )
 
     if destination == "matrix":
@@ -1382,13 +1437,9 @@ def _image_describe_download_image_url(
 
             content_type = _as_text(response.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
             chunks: List[bytes] = []
-            total = 0
             for chunk in response.iter_content(chunk_size=65536):
                 if not chunk:
                     continue
-                total += len(chunk)
-                if total > VISION_MAX_IMAGE_BYTES:
-                    return None, None, None, "url_too_large"
                 chunks.append(chunk)
             data = b"".join(chunks)
             final_url = _as_text(response.url).strip() or raw_url
@@ -1570,7 +1621,6 @@ def _image_describe_resolve_explicit_image(
                 "url_empty_response": "Image URL returned no data.",
                 "url_not_image": "URL did not resolve to an image.",
                 "url_unsupported_type": "Image URL returned an unsupported image type.",
-                "url_too_large": f"Image URL payload is too large. Max size is {VISION_MAX_IMAGE_BYTES} bytes.",
             }
             return None, None, None, err, msg_map.get(err, "Invalid image URL.")
         if data:
@@ -1712,7 +1762,13 @@ def image_describe(
     platform: Optional[str] = None,
     origin: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    prompt_text = _as_text(prompt or query or request).strip() or VISION_DEFAULT_PROMPT
+    origin_payload = origin if isinstance(origin, dict) else {}
+    origin_request = _as_text(
+        origin_payload.get("request_text")
+        or origin_payload.get("raw_message")
+        or origin_payload.get("raw")
+    ).strip()
+    prompt_text = _as_text(prompt or query or request or origin_request).strip() or VISION_DEFAULT_PROMPT
 
     image_bytes, filename, mime, resolution_source, error_message = _image_describe_resolve_explicit_image(
         prompt=prompt,
@@ -1747,14 +1803,6 @@ def image_describe(
             message="No image was found. Use an artifact_id from this conversation, provide an image URL, or provide a path in /downloads or /documents.",
             needs=["Please provide an image source to describe."],
             say_hint="Ask for an image artifact_id, URL, or a path in /downloads or /documents.",
-        )
-
-    if len(image_bytes) > VISION_MAX_IMAGE_BYTES:
-        return action_failure(
-            code="image_too_large",
-            message=f"Image is too large ({len(image_bytes)} bytes). Max supported size is {VISION_MAX_IMAGE_BYTES} bytes.",
-            needs=["Use a smaller image file."],
-            say_hint="Explain the size limit and ask for a smaller image.",
         )
 
     filename = _image_describe_normalize_filename(filename, mime)
@@ -2102,6 +2150,8 @@ def _ai_tasks_default_title(task_prompt: str, recurrence: Dict[str, Any], interv
         cadence_prefix = "Daily"
     elif recurrence_kind == "weekly_local_time":
         cadence_prefix = "Weekly"
+    elif recurrence_kind == "monthly_local_time":
+        cadence_prefix = "Monthly"
     elif float(interval or 0.0) > 0:
         cadence_prefix = "Recurring"
 
@@ -3255,623 +3305,8 @@ def delete_file(path: str) -> Dict[str, Any]:
     except Exception as e:
         return {"tool": "delete_file", "ok": False, "error": str(e)}
 
-
-def _requirements_path() -> Path:
-    _ensure_dirs()
-    return AGENT_REQUIREMENTS
-
-
-def _read_requirements() -> List[str]:
-    path = _requirements_path()
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except Exception:
-        return []
-    out = []
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        out.append(line)
-    return out
-
-
-def _write_requirements(lines: List[str]) -> None:
-    path = _requirements_path()
-    uniq = []
-    seen = set()
-    for line in lines:
-        if not line or line.startswith("#"):
-            continue
-        if line not in seen:
-            seen.add(line)
-            uniq.append(line)
-    path.write_text("\n".join(sorted(uniq)) + ("\n" if uniq else ""), encoding="utf-8")
-
-
-def _normalize_dependency(dep: str) -> str:
-    return str(dep or "").strip()
-
-
-def _dependency_import_name(dep: str) -> str:
-    dep = _normalize_dependency(dep)
-    if not dep:
-        return ""
-    # strip extras and version specifiers
-    name = re.split(r"[<>=!~]", dep, maxsplit=1)[0]
-    name = name.split("[", 1)[0]
-    return name.strip()
-
-
-def _extract_declared_dependencies(path: Path) -> List[str]:
-    try:
-        source = path.read_text(encoding="utf-8")
-    except Exception:
-        return []
-    try:
-        tree = ast.parse(source, filename=str(path))
-    except Exception:
-        return []
-    deps = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id in {"dependencies", "DEPENDENCIES", "requirements"}:
-                    if isinstance(node.value, (ast.List, ast.Tuple)):
-                        for item in node.value.elts:
-                            if isinstance(item, ast.Constant) and isinstance(item.value, str):
-                                deps.append(item.value.strip())
-    return [d for d in deps if d]
-
-
-def _action_failure_call_issues(tree: ast.AST) -> List[str]:
-    issues: List[str] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func_name = ""
-        if isinstance(node.func, ast.Name):
-            func_name = node.func.id
-        elif isinstance(node.func, ast.Attribute):
-            func_name = node.func.attr
-        if func_name != "action_failure":
-            continue
-
-        kw_names = {kw.arg for kw in node.keywords if kw.arg}
-        if node.args:
-            issues.append("action_failure must use keyword args only (`code` and `message`).")
-        if "fail_text" in kw_names:
-            issues.append("action_failure does not accept `fail_text`; use `code` and `message`.")
-        if "code" not in kw_names or "message" not in kw_names:
-            issues.append("action_failure requires `code` and `message` keyword arguments.")
-
-    # Keep output deterministic and compact.
-    deduped: List[str] = []
-    for item in issues:
-        if item not in deduped:
-            deduped.append(item)
-    return deduped
-
-
-def _waiting_prompt_style_issues(template: str) -> List[str]:
-    text = str(template or "").strip()
-    if not text:
-        return ["missing waiting_prompt_template text"]
-
-    lowered = text.lower()
-    issues: List[str] = []
-
-    if "{mention}" not in text:
-        issues.append("must include {mention}")
-
-    has_wait_tone = any(
-        token in lowered
-        for token in (
-            "wait",
-            "working on",
-            "working",
-            "creating",
-            "processing",
-            "loading",
-            "one moment",
-            "hang tight",
-            "be right back",
-            "right now",
-            "in progress",
-        )
-    )
-    if not has_wait_tone:
-        issues.append("must describe progress/please-wait status")
-
-    has_message_constraint = any(
-        phrase in lowered
-        for phrase in (
-            "only output that message",
-            "output only that message",
-            "return only that message",
-            "only output the message",
-            "return only the message",
-        )
-    )
-    if not has_message_constraint:
-        issues.append("must constrain output to only that message")
-
-    if any(
-        phrase in lowered
-        for phrase in (
-            "only output the joke",
-            "only output the summary",
-            "only output the answer",
-            "tell me a random joke",
-        )
-    ):
-        issues.append("must be a wait/status message, not the final task output")
-
-    return issues
-
-
-def _missing_dependencies(deps: List[str]) -> List[str]:
-    missing = []
-    for dep in deps:
-        name = _dependency_import_name(dep)
-        if not name:
-            continue
-        try:
-            __import__(name)
-        except Exception:
-            missing.append(dep)
-    return missing
-
-
-def _log_dependency(action: str, detail: str) -> None:
-    try:
-        _ensure_dirs()
-        ts = time.strftime("%Y-%m-%d %H:%M:%S")
-        line = f"{ts} | {action} | {detail}\n"
-        with (AGENT_LOGS_DIR / "agent_dependencies.log").open("a", encoding="utf-8") as f:
-            f.write(line)
-    except Exception:
-        return
-
-
-def _install_dependencies(deps: List[str]) -> Tuple[List[str], List[str]]:
-    installed = []
-    errors = []
-    for dep in deps:
-        dep = _normalize_dependency(dep)
-        if not dep:
-            continue
-        if not _SAFE_DEP_RE.fullmatch(dep):
-            errors.append(f"{dep} (invalid dependency spec)")
-            continue
-        try:
-            _log_dependency("install_start", dep)
-            result = subprocess.run(
-                [sys.executable, "-m", "pip", "install", dep],
-                capture_output=True,
-                text=True,
-                timeout=300,
-            )
-            if result.returncode == 0:
-                installed.append(dep)
-                _log_dependency("install_ok", dep)
-            else:
-                err = (result.stderr or result.stdout or "").strip()
-                errors.append(f"{dep} ({err[:200]})")
-                _log_dependency("install_fail", f"{dep} | {err[:200]}")
-        except Exception as e:
-            errors.append(f"{dep} ({e})")
-            _log_dependency("install_exception", f"{dep} | {e}")
-    return installed, errors
-
-
-def _update_requirements_union(deps: List[str]) -> None:
-    if not deps:
-        return
-    current = _read_requirements()
-    merged = current[:]
-    for dep in deps:
-        dep = _normalize_dependency(dep)
-        if dep and dep not in merged:
-            merged.append(dep)
-    _write_requirements(merged)
-
-
-def _store_validation(kind: str, name: str, report: Dict[str, Any]) -> None:
-    try:
-        key = f"exp:validation:{kind}:{name}"
-        redis_client.set(key, json.dumps(report, ensure_ascii=False))
-    except Exception:
-        return
-
-
-def list_stable_plugins() -> Dict[str, Any]:
-    try:
-        from plugin_registry import get_registry_snapshot
-        registry = get_registry_snapshot()
-    except Exception:
-        registry = {}
-    items = []
-    for pid, plugin in sorted(registry.items(), key=lambda kv: kv[0].lower()):
-        version = (
-            getattr(plugin, "version", None)
-            or getattr(plugin, "__version__", None)
-            or getattr(plugin, "plugin_version", None)
-            or "0.0.0"
-        )
-        platforms = getattr(plugin, "platforms", []) or []
-        items.append(
-            {
-                "id": pid,
-                "version": str(version),
-                "platforms": platforms,
-                "enabled": bool(get_plugin_enabled(pid)),
-            }
-        )
-    return {"tool": "list_stable_plugins", "ok": True, "plugins": items, "count": len(items)}
-
-
-def list_stable_platforms() -> Dict[str, Any]:
-    from platform_registry import platform_registry
-    items = []
-    for entry in platform_registry:
-        key = entry.get("key")
-        if not key:
-            continue
-        running = str(redis_client.get(f"{key}_running") or "").strip().lower() == "true"
-        items.append({"key": key, "running": running})
-    return {"tool": "list_stable_platforms", "ok": True, "platforms": items, "count": len(items)}
-
-
-def inspect_plugin(plugin_id: str) -> Dict[str, Any]:
-    try:
-        from plugin_registry import get_registry_snapshot
-        registry = get_registry_snapshot()
-    except Exception:
-        registry = {}
-    plugin = registry.get(plugin_id)
-    if not plugin:
-        return {"tool": "inspect_plugin", "ok": False, "error": f"Plugin '{plugin_id}' not found."}
-    return {
-        "tool": "inspect_plugin",
-        "ok": True,
-        "id": plugin_id,
-        "platforms": getattr(plugin, "platforms", []) or [],
-        "description": (
-            getattr(plugin, "description", None)
-            or getattr(plugin, "plugin_dec", None)
-            or ""
-        ),
-        "required_settings": getattr(plugin, "required_settings", None) or {},
-    }
-
-
 def _exp_plugin_path(name: str) -> Path:
     return AGENT_PLUGINS_DIR / f"{name}.py"
-
-
-def _exp_platform_path(name: str) -> Path:
-    return AGENT_PLATFORMS_DIR / f"{name}.py"
-
-
-def _import_from_path(path: Path) -> Optional[Any]:
-    try:
-        module_name = f"tater_exp_{path.stem}_{int(path.stat().st_mtime_ns)}"
-        spec = importlib.util.spec_from_file_location(module_name, str(path))
-        if spec is None or spec.loader is None:
-            return None
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)  # type: ignore[attr-defined]
-        return module
-    except Exception:
-        return None
-
-
-def validate_plugin(name: str, auto_install: bool = True) -> Dict[str, Any]:
-    _ensure_dirs()
-    if not _SAFE_NAME_RE.fullmatch(name or ""):
-        report = {"tool": "validate_plugin", "ok": False, "error": "Invalid plugin name."}
-        _store_validation("plugin", name, report)
-        return report
-    path = _exp_plugin_path(name)
-    if not path.exists():
-        report = {"tool": "validate_plugin", "ok": False, "error": "Plugin file not found."}
-        _store_validation("plugin", name, report)
-        return report
-
-    # Syntax check
-    try:
-        source = path.read_text(encoding="utf-8")
-        tree = ast.parse(source, filename=str(path))
-    except Exception as e:
-        report = {
-            "tool": "validate_plugin",
-            "ok": False,
-            "error": f"Syntax error: {e}",
-            "path": _display_workspace_path(path),
-        }
-        _store_validation("plugin", name, report)
-        return report
-
-    action_failure_issues = _action_failure_call_issues(tree)
-    if action_failure_issues:
-        report = {
-            "tool": "validate_plugin",
-            "ok": False,
-            "error": "; ".join(action_failure_issues),
-            "path": _display_workspace_path(path),
-            "missing_fields": ["action_failure_signature"],
-            "warnings": action_failure_issues,
-        }
-        _store_validation("plugin", name, report)
-        return report
-
-    declared_deps = _extract_declared_dependencies(path)
-    _update_requirements_union(declared_deps)
-    missing_deps = _missing_dependencies(declared_deps)
-    installed_deps: List[str] = []
-    install_errors: List[str] = []
-    if missing_deps and auto_install:
-        installed_deps, install_errors = _install_dependencies(missing_deps)
-        missing_deps = _missing_dependencies(declared_deps)
-
-    module = _import_from_path(path)
-    if not module:
-        report = {
-            "tool": "validate_plugin",
-            "ok": False,
-            "error": "Import failed.",
-            "path": _display_workspace_path(path),
-            "missing_dependencies": missing_deps,
-            "installed_dependencies": installed_deps,
-            "install_errors": install_errors,
-        }
-        _store_validation("plugin", name, report)
-        return report
-
-    plugin = getattr(module, "plugin", None)
-    missing = []
-    warnings = []
-    if not plugin:
-        missing.append("plugin")
-    else:
-        if not isinstance(plugin, ToolPlugin):
-            missing.append("plugin")
-        for field in ("name", "version", "platforms", "description"):
-            value = getattr(plugin, field, None)
-            if value is None or (isinstance(value, str) and not value.strip()):
-                missing.append(field)
-            if field == "platforms" and (not isinstance(value, list) or not value):
-                missing.append(field)
-        usage_val = getattr(plugin, "usage", None)
-        if not isinstance(usage_val, str) or not usage_val.strip():
-            missing.append("usage")
-        declared_name = getattr(plugin, "name", None)
-        if not isinstance(declared_name, str) or not declared_name.strip():
-            missing.append("name")
-        else:
-            declared_name = declared_name.strip()
-            if not _SAFE_NAME_RE.fullmatch(declared_name):
-                missing.append("name")
-                warnings.append(
-                    "name must use only letters, numbers, underscore, or hyphen."
-                )
-            if declared_name != name:
-                missing.append("name")
-                warnings.append(
-                    f"name must match filename id '{name}' to load reliably."
-                )
-        explicit_wait_prompt = None
-        try:
-            if "waiting_prompt_template" in getattr(plugin, "__dict__", {}):
-                explicit_wait_prompt = plugin.__dict__.get("waiting_prompt_template")
-            elif "waiting_prompt_template" in getattr(plugin.__class__, "__dict__", {}):
-                explicit_wait_prompt = plugin.__class__.__dict__.get("waiting_prompt_template")
-        except Exception:
-            explicit_wait_prompt = None
-
-        if not isinstance(explicit_wait_prompt, str) or not explicit_wait_prompt.strip():
-            missing.append("waiting_prompt_template")
-        else:
-            issues = _waiting_prompt_style_issues(explicit_wait_prompt)
-            if issues:
-                missing.append("waiting_prompt_template")
-                warnings.append(
-                    "waiting_prompt_template must be a friendly progress/wait message for {mention} "
-                    "and end with an only-that-message output constraint. "
-                    "Issues: " + "; ".join(issues) + "."
-                )
-        # Validate platform ids
-        try:
-            from plugin_kernel import KNOWN_PLATFORMS, expand_plugin_platforms
-            platforms = getattr(plugin, "platforms", []) or []
-            invalid = []
-            for p in platforms:
-                if str(p).strip().lower() == "both":
-                    continue
-                if str(p).strip().lower() not in KNOWN_PLATFORMS:
-                    invalid.append(p)
-            if invalid:
-                missing.append("platforms")
-        except Exception:
-            pass
-
-    ok = not missing and not missing_deps
-    report = {
-        "tool": "validate_plugin",
-        "ok": ok,
-        "name": name,
-        "path": _display_workspace_path(path),
-        "missing_fields": sorted(set(missing)),
-        "declared_dependencies": declared_deps,
-        "missing_dependencies": missing_deps,
-        "installed_dependencies": installed_deps,
-        "install_errors": install_errors,
-        "warnings": warnings,
-    }
-    if ok:
-        report["plugin_name"] = getattr(plugin, "plugin_name", None) or getattr(plugin, "name", name)
-        report["version"] = getattr(plugin, "version", "")
-        report["platforms"] = getattr(plugin, "platforms", []) or []
-    _store_validation("plugin", name, report)
-    return report
-
-
-def test_plugin(name: str, platform: Optional[str] = None, auto_install: bool = False) -> Dict[str, Any]:
-    _ensure_dirs()
-    if not _SAFE_NAME_RE.fullmatch(name or ""):
-        return {"tool": "test_plugin", "ok": False, "error": "Invalid plugin name."}
-
-    agent_path = _exp_plugin_path(name)
-    stable_path = STABLE_PLUGINS_DIR / f"{name}.py"
-
-    source_kind = ""
-    path: Optional[Path] = None
-    validation: Optional[Dict[str, Any]] = None
-    if agent_path.exists():
-        source_kind = "workspace"
-        path = agent_path
-        validation = validate_plugin(name, auto_install=auto_install)
-        if not validation.get("ok"):
-            return {
-                "tool": "test_plugin",
-                "ok": False,
-                "name": name,
-                "source": source_kind,
-                "path": _display_workspace_path(path),
-                "static_tested": True,
-                "live_tested": False,
-                "error": "Validation failed.",
-                "validation": validation,
-                "summary": "Static test failed: plugin validation did not pass.",
-            }
-    elif stable_path.exists():
-        source_kind = "stable"
-        path = stable_path
-    else:
-        return {"tool": "test_plugin", "ok": False, "error": "Plugin file not found."}
-
-    module = _import_from_path(path)
-    if not module:
-        return {
-            "tool": "test_plugin",
-            "ok": False,
-            "name": name,
-            "source": source_kind,
-            "path": _display_workspace_path(path),
-            "static_tested": True,
-            "live_tested": False,
-            "error": "Import failed.",
-            "summary": "Static test failed: plugin import failed.",
-        }
-
-    plugin = getattr(module, "plugin", None)
-    if not isinstance(plugin, ToolPlugin):
-        return {
-            "tool": "test_plugin",
-            "ok": False,
-            "name": name,
-            "source": source_kind,
-            "path": _display_workspace_path(path),
-            "static_tested": True,
-            "live_tested": False,
-            "error": "Missing module-level ToolPlugin instance `plugin`.",
-            "summary": "Static test failed: plugin instance is missing or invalid.",
-        }
-
-    try:
-        from plugin_kernel import expand_plugin_platforms
-
-        supported_platforms = expand_plugin_platforms(getattr(plugin, "platforms", []) or [])
-    except Exception:
-        supported_platforms = list(getattr(plugin, "platforms", []) or [])
-
-    requested_platform = str(platform or "").strip().lower()
-    if not requested_platform:
-        requested_platform = supported_platforms[0] if supported_platforms else ""
-
-    if not requested_platform:
-        return {
-            "tool": "test_plugin",
-            "ok": False,
-            "name": name,
-            "source": source_kind,
-            "path": _display_workspace_path(path),
-            "static_tested": True,
-            "live_tested": False,
-            "error": "Plugin does not declare any supported platforms.",
-            "summary": "Static test failed: plugin has no supported platform handlers to test.",
-        }
-
-    handler_name = f"handle_{requested_platform}"
-    class_dict = getattr(plugin.__class__, "__dict__", {})
-    handler_obj = getattr(plugin, handler_name, None)
-    handler_present = bool(handler_name in class_dict and callable(handler_obj))
-
-    usage_raw = getattr(plugin, "usage", None)
-    usage_parse_ok = False
-    usage_function = None
-    usage_matches_name = False
-    usage_error = ""
-    if not isinstance(usage_raw, str) or not usage_raw.strip():
-        usage_error = "usage is missing or empty."
-    else:
-        try:
-            usage_obj = json.loads(usage_raw)
-            if not isinstance(usage_obj, dict):
-                usage_error = "usage must parse to a JSON object."
-            else:
-                usage_function = _as_text(usage_obj.get("function")).strip()
-                usage_args = usage_obj.get("arguments")
-                usage_parse_ok = bool(usage_function and isinstance(usage_args, dict))
-                usage_matches_name = usage_function == _as_text(getattr(plugin, "name", name)).strip()
-                if not usage_parse_ok:
-                    usage_error = "usage must include function and arguments object."
-                elif not usage_matches_name:
-                    usage_error = "usage.function must match plugin name."
-        except Exception as e:
-            usage_error = f"usage JSON parse failed: {e}"
-
-    errors: List[str] = []
-    if requested_platform not in supported_platforms:
-        errors.append(f"requested platform '{requested_platform}' is not in plugin platforms.")
-    if not handler_present:
-        errors.append(f"missing callable handler `{handler_name}`.")
-    if not usage_parse_ok or not usage_matches_name:
-        errors.append(usage_error or "usage metadata check failed.")
-
-    ok = not errors
-    summary = (
-        f"Static test passed for `{name}` on `{requested_platform}`. "
-        "Live platform execution was not run."
-        if ok
-        else f"Static test failed for `{name}` on `{requested_platform}`: " + "; ".join(errors)
-    )
-
-    return {
-        "tool": "test_plugin",
-        "ok": ok,
-        "name": name,
-        "source": source_kind,
-        "path": _display_workspace_path(path),
-        "platform_tested": requested_platform,
-        "supported_platforms": supported_platforms,
-        "handler_name": handler_name,
-        "handler_present": handler_present,
-        "usage_parse_ok": usage_parse_ok,
-        "usage_function": usage_function,
-        "usage_matches_name": usage_matches_name,
-        "usage_error": usage_error,
-        "static_tested": True,
-        "live_tested": False,
-        "limitations": [
-            "This runs static readiness checks only (import/metadata/handler).",
-            "It does not execute the live platform event loop or send real platform messages.",
-        ],
-        "errors": errors,
-        "validation": validation,
-        "summary": summary,
-    }
 
 
 def promote_plugin(name: str, confirm: Optional[bool] = None, delete_source: bool = False) -> Dict[str, Any]:
@@ -3899,79 +3334,6 @@ def promote_plugin(name: str, confirm: Optional[bool] = None, delete_source: boo
         return {"tool": "promote_plugin", "ok": True, "path": _display_workspace_path(dest)}
     except Exception as e:
         return {"tool": "promote_plugin", "ok": False, "error": str(e)}
-
-
-def validate_platform(name: str, auto_install: bool = True) -> Dict[str, Any]:
-    _ensure_dirs()
-    if not _SAFE_NAME_RE.fullmatch(name or ""):
-        report = {"tool": "validate_platform", "ok": False, "error": "Invalid platform name."}
-        _store_validation("platform", name, report)
-        return report
-    path = _exp_platform_path(name)
-    if not path.exists():
-        report = {"tool": "validate_platform", "ok": False, "error": "Platform file not found."}
-        _store_validation("platform", name, report)
-        return report
-
-    try:
-        source = path.read_text(encoding="utf-8")
-        ast.parse(source, filename=str(path))
-    except Exception as e:
-        report = {
-            "tool": "validate_platform",
-            "ok": False,
-            "error": f"Syntax error: {e}",
-            "path": _display_workspace_path(path),
-        }
-        _store_validation("platform", name, report)
-        return report
-
-    declared_deps = _extract_declared_dependencies(path)
-    _update_requirements_union(declared_deps)
-    missing_deps = _missing_dependencies(declared_deps)
-    installed_deps: List[str] = []
-    install_errors: List[str] = []
-    if missing_deps and auto_install:
-        installed_deps, install_errors = _install_dependencies(missing_deps)
-        missing_deps = _missing_dependencies(declared_deps)
-
-    module = _import_from_path(path)
-    if not module:
-        report = {
-            "tool": "validate_platform",
-            "ok": False,
-            "error": "Import failed.",
-            "path": _display_workspace_path(path),
-            "missing_dependencies": missing_deps,
-            "installed_dependencies": installed_deps,
-            "install_errors": install_errors,
-        }
-        _store_validation("platform", name, report)
-        return report
-
-    platform_dict = getattr(module, "PLATFORM", None)
-    run_fn = getattr(module, "run", None)
-    missing = []
-    if not isinstance(platform_dict, dict):
-        missing.append("PLATFORM")
-    if not callable(run_fn):
-        missing.append("run")
-
-    ok = not missing and not missing_deps
-    report = {
-        "tool": "validate_platform",
-        "ok": ok,
-        "name": name,
-        "path": _display_workspace_path(path),
-        "missing_fields": missing,
-        "declared_dependencies": declared_deps,
-        "missing_dependencies": missing_deps,
-        "installed_dependencies": installed_deps,
-        "install_errors": install_errors,
-    }
-    _store_validation("platform", name, report)
-    return report
-
 
 def _as_text(value: Any) -> str:
     if value is None:
@@ -4024,6 +3386,7 @@ def _legacy_memory_preferred_user_id(
         "matrix_user",
         "irc_user",
         "webui_user",
+        "macos_user",
         "user",
     }
 
@@ -5141,46 +4504,3 @@ def list_workspace() -> Dict[str, Any]:
         return {"tool": "list_workspace", "ok": True, "files": files}
     except Exception as e:
         return {"tool": "list_workspace", "ok": False, "error": str(e)}
-
-
-def list_agent_plugins() -> Dict[str, Any]:
-    _ensure_dirs()
-    items = []
-    errors = []
-    for path in sorted(AGENT_PLUGINS_DIR.glob("*.py")):
-        name = path.stem
-        module = _import_from_path(path)
-        if not module:
-            errors.append({"name": name, "error": "Import failed"})
-            continue
-        plugin = getattr(module, "plugin", None)
-        if not plugin:
-            errors.append({"name": name, "error": "Missing plugin instance"})
-            continue
-        items.append(
-            {
-                "id": getattr(plugin, "name", name),
-                "version": getattr(plugin, "version", ""),
-                "platforms": getattr(plugin, "platforms", []) or [],
-                "description": getattr(plugin, "description", "") or getattr(plugin, "plugin_dec", "") or "",
-            }
-        )
-    return {"tool": "list_agent_plugins", "ok": True, "plugins": items, "errors": errors}
-
-
-def list_agent_platforms() -> Dict[str, Any]:
-    _ensure_dirs()
-    items = []
-    errors = []
-    for path in sorted(AGENT_PLATFORMS_DIR.glob("*.py")):
-        name = path.stem
-        module = _import_from_path(path)
-        if not module:
-            errors.append({"name": name, "error": "Import failed"})
-            continue
-        platform_dict = getattr(module, "PLATFORM", None)
-        if not isinstance(platform_dict, dict):
-            errors.append({"name": name, "error": "Missing PLATFORM dict"})
-            continue
-        items.append({"key": name, "label": platform_dict.get("label") or name})
-    return {"tool": "list_agent_platforms", "ok": True, "platforms": items, "errors": errors}

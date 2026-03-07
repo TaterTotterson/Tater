@@ -5,6 +5,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 KNOWN_PLATFORMS: Tuple[str, ...] = (
     "webui",
+    "macos",
     "discord",
     "irc",
     "homeassistant",
@@ -18,6 +19,7 @@ KNOWN_PLATFORMS: Tuple[str, ...] = (
 
 _BOTH_EXPANSION: Tuple[str, ...] = (
     "webui",
+    "macos",
     "discord",
     "irc",
     "homeassistant",
