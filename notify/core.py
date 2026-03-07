@@ -162,7 +162,7 @@ def _ha_call_service(domain: str, service: str, data: Dict[str, Any]) -> None:
 
 def _ha_bridge_port() -> int:
     try:
-        raw_port = redis_client.hget("homeassistant_platform_settings", "bind_port")
+        raw_port = redis_client.hget("homeassistant_portal_settings", "bind_port")
         return int(raw_port) if raw_port is not None else 8787
     except Exception:
         return 8787

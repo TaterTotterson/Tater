@@ -50,11 +50,11 @@ from plugin_kernel import (
 )
 from plugin_result import action_failure, narrate_result, normalize_plugin_result, result_for_llm
 from tool_runtime import META_TOOLS, execute_plugin_call, is_meta_tool, run_meta_tool
-from memory_platform_store import (
-    load_doc as load_memory_platform_doc,
+from memory_core_store import (
+    load_doc as load_memory_core_doc,
     resolve_user_doc_key as resolve_memory_user_doc_key,
     room_doc_key as memory_room_doc_key,
-    summarize_doc as summarize_memory_platform_doc,
+    summarize_doc as summarize_memory_core_doc,
     user_doc_key as memory_user_doc_key,
     value_to_text as memory_value_to_text,
 )
@@ -470,8 +470,8 @@ def _memory_context_payload(
         memory_context_room_id_fn=_memory_context_room_id,
         resolve_memory_user_doc_key_fn=resolve_memory_user_doc_key,
         memory_user_doc_key_fn=memory_user_doc_key,
-        load_memory_platform_doc_fn=load_memory_platform_doc,
-        summarize_memory_platform_doc_fn=summarize_memory_platform_doc,
+        load_memory_core_doc_fn=load_memory_core_doc,
+        summarize_memory_core_doc_fn=summarize_memory_core_doc,
         memory_context_summary_fn=_memory_context_summary,
         memory_room_doc_key_fn=memory_room_doc_key,
     )

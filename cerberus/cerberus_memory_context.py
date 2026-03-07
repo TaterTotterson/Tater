@@ -6,7 +6,7 @@ def memory_context_settings(redis_client: Any) -> Dict[str, Any]:
     if not callable(getter):
         return {}
     try:
-        settings = getter("memory_platform_settings") or {}
+        settings = getter("memory_core_settings") or {}
     except Exception:
         settings = {}
     return settings if isinstance(settings, dict) else {}
@@ -62,7 +62,7 @@ def memory_context_max_items(
     if configured <= 0:
         configured = default_items
     try:
-        raw = redis_client.get("tater:memory_platform:cerberus_max_items")
+        raw = redis_client.get("tater:memory_core:cerberus_max_items")
     except Exception:
         raw = None
     legacy = coerce_non_negative_int_fn(raw, configured) if raw is not None else configured
@@ -217,8 +217,8 @@ def memory_context_payload(
     memory_context_room_id_fn: Callable[[str, str, Optional[Dict[str, Any]]], str],
     resolve_memory_user_doc_key_fn: Callable[..., str],
     memory_user_doc_key_fn: Callable[[str, str], str],
-    load_memory_platform_doc_fn: Callable[[Any, str], Dict[str, Any]],
-    summarize_memory_platform_doc_fn: Callable[..., List[Dict[str, Any]]],
+    load_memory_core_doc_fn: Callable[[Any, str], Dict[str, Any]],
+    summarize_memory_core_doc_fn: Callable[..., List[Dict[str, Any]]],
     memory_context_summary_fn: Callable[..., str],
     memory_room_doc_key_fn: Callable[[str, str], str],
 ) -> Dict[str, Any]:
@@ -252,10 +252,10 @@ def memory_context_payload(
         else:
             user_key = memory_user_doc_key_fn(normalized_platform, user_id)
         try:
-            user_doc = load_memory_platform_doc_fn(redis_client, user_key)
+            user_doc = load_memory_core_doc_fn(redis_client, user_key)
         except Exception:
             user_doc = {}
-        user_items = summarize_memory_platform_doc_fn(
+        user_items = summarize_memory_core_doc_fn(
             user_doc,
             max_items=max_items,
             min_confidence=min_conf,
@@ -268,10 +268,10 @@ def memory_context_payload(
     if room_id:
         room_key = memory_room_doc_key_fn(normalized_platform, room_id)
         try:
-            room_doc = load_memory_platform_doc_fn(redis_client, room_key)
+            room_doc = load_memory_core_doc_fn(redis_client, room_key)
         except Exception:
             room_doc = {}
-        room_items = summarize_memory_platform_doc_fn(
+        room_items = summarize_memory_core_doc_fn(
             room_doc,
             max_items=max_items,
             min_confidence=min_conf,

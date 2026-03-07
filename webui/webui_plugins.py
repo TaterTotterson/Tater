@@ -199,7 +199,7 @@ def render_plugin_card(plugin):
         if description:
             st.write(description)
         if platforms:
-            st.caption(f"Platforms: {', '.join(platforms)}")
+            st.caption(f"Portals: {', '.join(platforms)}")
 
         render_plugin_settings_form(plugin)
 

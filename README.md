@@ -13,11 +13,29 @@ Tater runs on Cerberus — a closed-loop Planner → Doer → Checker architectu
 
 ---
 
-## 🌐 Tater Platform Overview
+## Branding Stack
 
-| Platform          | Description |
+- **Cerberus AI Core**: reasoning and orchestration layer
+- **Verba Plugins**: capabilities, actions, and tools
+- **Tater Portals**: external communication bridges (Discord, Matrix, IRC, Telegram, WebUI, Home Assistant, macOS, and more)
+
+Architecture flow:
+`User -> Portal -> Cerberus AI Core -> Verba Plugin -> Portal -> User`
+
+---
+
+## 🧠 Tater Core Overview
+
+| Core       | Description |
+|------------|-------------|
+| `ai_task`  | Built-in scheduled task runner for timed and recurring AI jobs, with delivery routed through notifier portals (Discord, Telegram, Matrix, IRC, Home Assistant, and more). |
+| `memory`   | Background memory extraction core that incrementally scans chat history, builds structured user/room memory profiles in Redis, and injects compact memory context into Cerberus. |
+| `rss`      | Background feed watcher that summarizes article content and dispatches updates through notifier portals. |
+
+## 🌐 Tater Portal Overview
+
+| Portal            | Description |
 |-------------------|-------------|
-| `ai_task`         | Built-in scheduled task runner for timed and recurring AI jobs, with delivery routed through notifier platforms (Discord, Telegram, Matrix, IRC, Home Assistant, and more). |
 | `discord`         | Full-featured Discord bot that runs compatible Verba Plugins and supports rich interactions, media output, and background jobs. |
 | `ha_automations`  | Lightweight Home Assistant automation-only endpoint for direct tool execution. Designed for fast, reliable automations like camera events, doorbell alerts, weather summaries, and dashboard sensors. Intended to be used with the [Tater Automations](https://github.com/TaterTotterson/tater_automations) custom component, which provides a native “Call Tater automation tool” action in Home Assistant. |
 | `homeassistant`   | Native integration for [Home Assistant](https://github.com/TaterTotterson/Tater-HomeAssistant), allowing Tater to act as a voice-enabled AI assistant through the Assist pipeline and control smart devices directly. |
@@ -25,7 +43,6 @@ Tater runs on Cerberus — a closed-loop Planner → Doer → Checker architectu
 | `irc`             | Lightweight IRC bot that responds to mentions and runs compatible Verba Plugins. |
 | `macos`           | HTTP bridge for the [Tater-MacOS](https://github.com/TaterTotterson/Tater-MacOS) menu bar app, with Redis-backed per-device chat history, inline asset uploads, Cerberus chat turns, and direct quick-action plugin calls. |
 | `matrix`          | Modern Matrix client with end-to-end encryption support, Markdown rendering, and full Verba Plugin compatibility — bringing Tater to federated chat networks like Element and Cinny. |
-| `memory_platform` | Background memory extraction platform that incrementally scans chat history, builds structured user/room memory profiles in Redis, and injects compact memory context into Cerberus. |
 | `telegram`        | Telegram bot integration with chat allowlists, DM user restrictions, queued notifications, media delivery, and Verba Plugin-backed tool execution. |
 | `webui`           | Streamlit-based WebUI for chatting, configuring Verba Plugins, and managing settings. |
 | `xbmc`            | OG Xbox integration for **XBMC4Xbox**, provided by the custom Cortana-powered skin and script at [skin.cortana.tater-xbmc](https://github.com/TaterTotterson/skin.cortana.tater-xbmc), enabling an on-console AI assistant with chat history, quick asks, and Verba Plugin-powered actions. |
@@ -49,7 +66,7 @@ All Verba Plugins, versions, descriptions, and update history now live here:
 From the WebUI you can:
 
 - Search by name or description  
-- Filter by platform (Discord, WebUI, Home Assistant, etc.)  
+- Filter by portal (Discord, WebUI, Home Assistant, etc.)  
 - See installed vs store versions  
 - One-click install, update, remove  
 - Bulk “Update All”  

@@ -10,14 +10,14 @@ import pandas as pd
 import redis
 import streamlit as st
 
-from memory_platform_store import (
-    forget_fact_keys as forget_memory_platform_fact_keys,
-    load_doc as load_memory_platform_doc,
-    room_doc_key as memory_platform_room_doc_key,
-    save_doc as save_memory_platform_doc,
-    summarize_doc as summarize_memory_platform_doc,
-    user_doc_key as memory_platform_user_doc_key,
-    value_to_text as memory_platform_value_to_text,
+from memory_core_store import (
+    forget_fact_keys as forget_memory_core_fact_keys,
+    load_doc as load_memory_core_doc,
+    room_doc_key as memory_core_room_doc_key,
+    save_doc as save_memory_core_doc,
+    summarize_doc as summarize_memory_core_doc,
+    user_doc_key as memory_core_user_doc_key,
+    value_to_text as memory_core_value_to_text,
 )
 
 
@@ -131,7 +131,7 @@ _LEGACY_MEMORY_ROOM_PREFIX = f"{_LEGACY_MEMORY_HASH_PREFIX}:room:"
 _LEGACY_MEMORY_DEFAULT_TTL_KEY = "tater:memory:default_ttl_sec"
 
 
-def _memory_platform_room_label_key(platform: Any, room_id: Any) -> str:
+def _memory_core_room_label_key(platform: Any, room_id: Any) -> str:
     platform_name = str(platform or "").strip().lower() or "unknown"
     scope_id = str(room_id or "").strip()
     if not scope_id:
@@ -139,13 +139,13 @@ def _memory_platform_room_label_key(platform: Any, room_id: Any) -> str:
     return f"{_MEMORY_ROOM_LABEL_PREFIX}:{platform_name}:{scope_id}"
 
 
-def _memory_platform_room_name(platform: Any, room_id: Any) -> str:
+def _memory_core_room_name(platform: Any, room_id: Any) -> str:
     platform_name = str(platform or "").strip().lower() or "unknown"
     scope_id = str(room_id or "").strip()
     if not scope_id:
         return "unknown"
 
-    key = _memory_platform_room_label_key(platform_name, scope_id)
+    key = _memory_core_room_label_key(platform_name, scope_id)
     if key:
         try:
             raw = redis_client.get(key)
@@ -184,7 +184,7 @@ def _memory_platform_room_name(platform: Any, room_id: Any) -> str:
     return scope_id
 
 
-def _memory_platform_room_display_name_from_row(row: Dict[str, Any]) -> str:
+def _memory_core_room_display_name_from_row(row: Dict[str, Any]) -> str:
     room_id = str((row or {}).get("room_id") or "").strip() or "unknown"
     room_name = str((row or {}).get("room_name") or "").strip() or room_id
     if room_name == room_id:
@@ -192,8 +192,8 @@ def _memory_platform_room_display_name_from_row(row: Dict[str, Any]) -> str:
     return f"{room_name} [{room_id}]"
 
 
-def _memory_platform_stats() -> Dict[str, Any]:
-    raw = redis_client.hgetall("mem:stats:memory_platform") or {}
+def _memory_core_stats() -> Dict[str, Any]:
+    raw = redis_client.hgetall("mem:stats:memory_core") or {}
     def _to_float(value: Any, default: float = 0.0) -> float:
         try:
             return float(value)
@@ -218,7 +218,7 @@ def _memory_platform_stats() -> Dict[str, Any]:
     return stats
 
 
-def _memory_platform_doc_discovery() -> Dict[str, Any]:
+def _memory_core_doc_discovery() -> Dict[str, Any]:
     user_rows: List[Dict[str, Any]] = []
     room_rows: List[Dict[str, Any]] = []
 
@@ -235,18 +235,18 @@ def _memory_platform_doc_discovery() -> Dict[str, Any]:
             user_id = user_id.strip()
             if not user_id:
                 continue
-            doc = load_memory_platform_doc(redis_client, key)
+            doc = load_memory_core_doc(redis_client, key)
             facts = doc.get("facts") if isinstance(doc.get("facts"), dict) else {}
             if not facts:
                 continue
-            items = summarize_memory_platform_doc(doc, max_items=4, min_confidence=0.0)
+            items = summarize_memory_core_doc(doc, max_items=4, min_confidence=0.0)
             fact_keys = sorted(list(facts.keys()))
             fact_keys_preview = ", ".join(fact_keys[:8])
             if len(fact_keys) > 8:
                 fact_keys_preview = f"{fact_keys_preview}, +{len(fact_keys) - 8} more"
             preview = "; ".join(
                 [
-                    f"{str(item.get('key') or '')}={memory_platform_value_to_text(item.get('value'), max_chars=40)}"
+                    f"{str(item.get('key') or '')}={memory_core_value_to_text(item.get('value'), max_chars=40)}"
                     for item in items
                 ]
             )
@@ -277,18 +277,18 @@ def _memory_platform_doc_discovery() -> Dict[str, Any]:
             room_id = room_id.strip()
             if not room_id:
                 continue
-            doc = load_memory_platform_doc(redis_client, key)
+            doc = load_memory_core_doc(redis_client, key)
             facts = doc.get("facts") if isinstance(doc.get("facts"), dict) else {}
             if not facts:
                 continue
-            items = summarize_memory_platform_doc(doc, max_items=4, min_confidence=0.0)
+            items = summarize_memory_core_doc(doc, max_items=4, min_confidence=0.0)
             fact_keys = sorted(list(facts.keys()))
             fact_keys_preview = ", ".join(fact_keys[:8])
             if len(fact_keys) > 8:
                 fact_keys_preview = f"{fact_keys_preview}, +{len(fact_keys) - 8} more"
             preview = "; ".join(
                 [
-                    f"{str(item.get('key') or '')}={memory_platform_value_to_text(item.get('value'), max_chars=40)}"
+                    f"{str(item.get('key') or '')}={memory_core_value_to_text(item.get('value'), max_chars=40)}"
                     for item in items
                 ]
             )
@@ -296,7 +296,7 @@ def _memory_platform_doc_discovery() -> Dict[str, Any]:
                 {
                     "platform": platform_name,
                     "room_id": room_id,
-                    "room_name": _memory_platform_room_name(platform_name, room_id),
+                    "room_name": _memory_core_room_name(platform_name, room_id),
                     "fact_count": len(facts),
                     "fact_keys": fact_keys_preview,
                     "last_updated": _format_unix_ts(doc.get("last_updated")),
@@ -331,7 +331,7 @@ def _memory_platform_doc_discovery() -> Dict[str, Any]:
     }
 
 
-def _memory_platform_fact_rows(
+def _memory_core_fact_rows(
     doc: Dict[str, Any],
     *,
     max_items: int = 500,
@@ -341,7 +341,7 @@ def _memory_platform_fact_rows(
     if not isinstance(doc, dict):
         return rows
     cap = max(1, min(int(max_items), 50_000))
-    items = summarize_memory_platform_doc(doc, max_items=cap, min_confidence=0.0)
+    items = summarize_memory_core_doc(doc, max_items=cap, min_confidence=0.0)
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -349,7 +349,7 @@ def _memory_platform_fact_rows(
         rows.append(
             {
                 "key": str(item.get("key") or ""),
-                "value": memory_platform_value_to_text(item.get("value"), max_chars=max(24, int(value_max_chars))),
+                "value": memory_core_value_to_text(item.get("value"), max_chars=max(24, int(value_max_chars))),
                 "confidence": f"{float(item.get('confidence') or 0.0):.2f}",
                 "evidence_count": len(evidence),
                 "updated_at": _format_unix_ts(item.get("updated_at")),
@@ -358,7 +358,7 @@ def _memory_platform_fact_rows(
     return rows
 
 
-def _memory_platform_export_lines(
+def _memory_core_export_lines(
     *,
     stats: Dict[str, Any],
     user_rows: List[Dict[str, Any]],
@@ -366,7 +366,7 @@ def _memory_platform_export_lines(
     insights: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
     lines: List[str] = []
-    insights = insights if isinstance(insights, dict) else _memory_platform_insight_frames(user_rows, room_rows)
+    insights = insights if isinstance(insights, dict) else _memory_core_insight_frames(user_rows, room_rows)
     now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     lines.append("Tater Memory Report")
     lines.append(f"Generated: {now_text}")
@@ -379,7 +379,7 @@ def _memory_platform_export_lines(
     lines.append(f"Updated facts (last run): {int(stats.get('updated_facts') or 0)}")
     lines.append(f"Updated docs (last run): {int(stats.get('updated_docs') or 0)}")
     lines.append(f"Scanned scopes (last run): {int(stats.get('scanned_scopes') or 0)}")
-    lines.append(f"Enabled platforms (last run): {int(stats.get('enabled_platform_count') or 0)}")
+    lines.append(f"Enabled portals (last run): {int(stats.get('enabled_platform_count') or 0)}")
     lines.append(f"Last run: {str(stats.get('last_run_text') or '').strip() or 'n/a'}")
     lines.append("")
 
@@ -413,7 +413,7 @@ def _memory_platform_export_lines(
             updated_text = str(row.get("last_updated") or "").strip() or "n/a"
             lines.append(f"- {platform_name} / {user_id} | facts={fact_count} | updated={updated_text}")
             doc = row.get("doc") if isinstance(row.get("doc"), dict) else {}
-            facts = _memory_platform_fact_rows(doc, max_items=10_000)
+            facts = _memory_core_fact_rows(doc, max_items=10_000)
             if not facts:
                 lines.append("  (no facts)")
             else:
@@ -441,7 +441,7 @@ def _memory_platform_export_lines(
             updated_text = str(row.get("last_updated") or "").strip() or "n/a"
             lines.append(f"- {platform_name} / {room_display} | facts={fact_count} | updated={updated_text}")
             doc = row.get("doc") if isinstance(row.get("doc"), dict) else {}
-            facts = _memory_platform_fact_rows(doc, max_items=10_000)
+            facts = _memory_core_fact_rows(doc, max_items=10_000)
             if not facts:
                 lines.append("  (no facts)")
             else:
@@ -458,7 +458,7 @@ def _memory_platform_export_lines(
     return lines
 
 
-def _memory_platform_export_styled_rows(
+def _memory_core_export_styled_rows(
     *,
     stats: Dict[str, Any],
     user_rows: List[Dict[str, Any]],
@@ -466,7 +466,7 @@ def _memory_platform_export_styled_rows(
     insights: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
-    insights = insights if isinstance(insights, dict) else _memory_platform_insight_frames(user_rows, room_rows)
+    insights = insights if isinstance(insights, dict) else _memory_core_insight_frames(user_rows, room_rows)
 
     def _add(style: str, text: Any = "", **extra: Any) -> None:
         row: Dict[str, Any] = {"style": str(style or "body"), "text": text}
@@ -487,7 +487,7 @@ def _memory_platform_export_styled_rows(
     _add("body", f"Updated facts (last run): {int(stats.get('updated_facts') or 0)}")
     _add("body", f"Updated docs (last run): {int(stats.get('updated_docs') or 0)}")
     _add("body", f"Scanned scopes (last run): {int(stats.get('scanned_scopes') or 0)}")
-    _add("body", f"Enabled platforms (last run): {int(stats.get('enabled_platform_count') or 0)}")
+    _add("body", f"Enabled portals (last run): {int(stats.get('enabled_platform_count') or 0)}")
     _add("body", f"Last run: {str(stats.get('last_run_text') or '').strip() or 'n/a'}")
     _add("spacer", "")
 
@@ -530,7 +530,7 @@ def _memory_platform_export_styled_rows(
             _add("entity", f"{platform_name} / {scope_display}")
             _add("meta", f"Facts: {fact_count}   Last Updated: {updated_text}")
             doc = row.get("doc") if isinstance(row.get("doc"), dict) else {}
-            facts = _memory_platform_fact_rows(doc, max_items=10_000, value_max_chars=320)
+            facts = _memory_core_fact_rows(doc, max_items=10_000, value_max_chars=320)
             if not facts:
                 _add("meta", "(no facts)")
                 _add("spacer", "")
@@ -946,15 +946,15 @@ def _build_simple_pdf_from_lines(lines: List[str], *, title: str = "Memory Repor
     return bytes(pdf)
 
 
-def _memory_platform_export_pdf(
+def _memory_core_export_pdf(
     *,
     stats: Dict[str, Any],
     user_rows: List[Dict[str, Any]],
     room_rows: List[Dict[str, Any]],
 ) -> bytes:
-    insights = _memory_platform_insight_frames(user_rows, room_rows)
+    insights = _memory_core_insight_frames(user_rows, room_rows)
     try:
-        styled_rows = _memory_platform_export_styled_rows(
+        styled_rows = _memory_core_export_styled_rows(
             stats=stats,
             user_rows=user_rows,
             room_rows=room_rows,
@@ -962,7 +962,7 @@ def _memory_platform_export_pdf(
         )
         return _build_styled_pdf_from_rows(styled_rows, title="Tater Memory Report")
     except Exception:
-        lines = _memory_platform_export_lines(
+        lines = _memory_core_export_lines(
             stats=stats,
             user_rows=user_rows,
             room_rows=room_rows,
@@ -971,7 +971,7 @@ def _memory_platform_export_pdf(
         return _build_simple_pdf_from_lines(lines, title="Tater Memory Report")
 
 
-def _memory_platform_user_fact_rows_by_category(doc: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
+def _memory_core_user_fact_rows_by_category(doc: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     for category in _MEMORY_USER_PROFILE_CATEGORIES:
         label = str(category.get("label") or "").strip()
@@ -979,7 +979,7 @@ def _memory_platform_user_fact_rows_by_category(doc: Dict[str, Any]) -> Dict[str
             grouped[label] = []
     grouped["Uncategorized"] = []
 
-    rows = _memory_platform_fact_rows(doc)
+    rows = _memory_core_fact_rows(doc)
     for row in rows:
         key = str(row.get("key") or "").strip()
         category_label = _MEMORY_USER_FACT_TO_CATEGORY.get(key, "Uncategorized")
@@ -987,7 +987,7 @@ def _memory_platform_user_fact_rows_by_category(doc: Dict[str, Any]) -> Dict[str
     return grouped
 
 
-def _memory_platform_room_fact_rows_by_category(doc: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
+def _memory_core_room_fact_rows_by_category(doc: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     for category in _MEMORY_ROOM_PROFILE_CATEGORIES:
         label = str(category.get("label") or "").strip()
@@ -995,7 +995,7 @@ def _memory_platform_room_fact_rows_by_category(doc: Dict[str, Any]) -> Dict[str
             grouped[label] = []
     grouped["Uncategorized"] = []
 
-    rows = _memory_platform_fact_rows(doc)
+    rows = _memory_core_fact_rows(doc)
     for row in rows:
         key = str(row.get("key") or "").strip()
         category_label = _MEMORY_ROOM_FACT_TO_CATEGORY.get(key, "Uncategorized")
@@ -1003,26 +1003,26 @@ def _memory_platform_room_fact_rows_by_category(doc: Dict[str, Any]) -> Dict[str
     return grouped
 
 
-def _memory_platform_ui_token(*parts: Any) -> str:
+def _memory_core_ui_token(*parts: Any) -> str:
     text = "|".join([str(part or "").strip() for part in parts])
     return hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()[:12]
 
 
-def _memory_platform_resolve_doc_key(scope: str, platform: Any, scope_id: Any) -> str:
+def _memory_core_resolve_doc_key(scope: str, platform: Any, scope_id: Any) -> str:
     scope_name = str(scope or "").strip().lower()
     platform_name = str(platform or "webui").strip() or "webui"
     scope_name_id = str(scope_id or "").strip()
     if not scope_name_id:
         return ""
     if scope_name == "user":
-        return memory_platform_user_doc_key(platform_name, scope_name_id)
+        return memory_core_user_doc_key(platform_name, scope_name_id)
     if scope_name == "room":
-        return memory_platform_room_doc_key(platform_name, scope_name_id)
+        return memory_core_room_doc_key(platform_name, scope_name_id)
     return ""
 
 
-def _memory_platform_forget_fact_keys(scope: str, platform: Any, scope_id: Any, keys: List[str]) -> Dict[str, Any]:
-    doc_key = _memory_platform_resolve_doc_key(scope, platform, scope_id)
+def _memory_core_forget_fact_keys(scope: str, platform: Any, scope_id: Any, keys: List[str]) -> Dict[str, Any]:
+    doc_key = _memory_core_resolve_doc_key(scope, platform, scope_id)
     if not doc_key:
         return {"ok": False, "error": "Invalid memory scope target."}
     requested = [str(item or "").strip() for item in (keys or []) if str(item or "").strip()]
@@ -1030,14 +1030,14 @@ def _memory_platform_forget_fact_keys(scope: str, platform: Any, scope_id: Any, 
         return {"ok": False, "error": "No memory keys selected."}
 
     try:
-        doc = load_memory_platform_doc(redis_client, doc_key)
-        deleted = int(forget_memory_platform_fact_keys(doc, requested) or 0)
+        doc = load_memory_core_doc(redis_client, doc_key)
+        deleted = int(forget_memory_core_fact_keys(doc, requested) or 0)
         if deleted <= 0:
             return {"ok": False, "error": "No matching memory keys found.", "deleted": 0}
 
         facts = doc.get("facts") if isinstance(doc.get("facts"), dict) else {}
         if facts:
-            save_memory_platform_doc(redis_client, doc_key, doc, now=time.time())
+            save_memory_core_doc(redis_client, doc_key, doc, now=time.time())
             return {"ok": True, "deleted": deleted, "deleted_doc": False}
 
         redis_client.delete(doc_key)
@@ -1046,8 +1046,8 @@ def _memory_platform_forget_fact_keys(scope: str, platform: Any, scope_id: Any, 
         return {"ok": False, "error": f"Memory delete failed: {exc}"}
 
 
-def _memory_platform_forget_doc(scope: str, platform: Any, scope_id: Any) -> Dict[str, Any]:
-    doc_key = _memory_platform_resolve_doc_key(scope, platform, scope_id)
+def _memory_core_forget_doc(scope: str, platform: Any, scope_id: Any) -> Dict[str, Any]:
+    doc_key = _memory_core_resolve_doc_key(scope, platform, scope_id)
     if not doc_key:
         return {"ok": False, "error": "Invalid memory scope target."}
     try:
@@ -1059,7 +1059,7 @@ def _memory_platform_forget_doc(scope: str, platform: Any, scope_id: Any) -> Dic
         return {"ok": False, "error": f"Memory document delete failed: {exc}"}
 
 
-def _memory_platform_wipe_all_data() -> Dict[str, Any]:
+def _memory_core_wipe_all_data() -> Dict[str, Any]:
     patterns = (
         "mem:user:*",
         "mem:room:*",
@@ -1092,8 +1092,8 @@ def _memory_platform_wipe_all_data() -> Dict[str, Any]:
             deleted_by_pattern[pattern] = removed
             deleted_total += removed
 
-        stats_removed = int(redis_client.delete("mem:stats:memory_platform") or 0)
-        deleted_by_pattern["mem:stats:memory_platform"] = stats_removed
+        stats_removed = int(redis_client.delete("mem:stats:memory_core") or 0)
+        deleted_by_pattern["mem:stats:memory_core"] = stats_removed
         deleted_total += stats_removed
 
         return {
@@ -1105,7 +1105,7 @@ def _memory_platform_wipe_all_data() -> Dict[str, Any]:
         return {"ok": False, "error": f"Memory wipe failed: {exc}"}
 
 
-def _memory_platform_scan_keys(pattern: str) -> List[str]:
+def _memory_core_scan_keys(pattern: str) -> List[str]:
     keys: List[str] = []
     try:
         for raw_key in redis_client.scan_iter(match=str(pattern or ""), count=500):
@@ -1118,7 +1118,7 @@ def _memory_platform_scan_keys(pattern: str) -> List[str]:
     return keys
 
 
-def _memory_platform_backup_payload() -> Dict[str, Any]:
+def _memory_core_backup_payload() -> Dict[str, Any]:
     user_docs: Dict[str, str] = {}
     room_docs: Dict[str, str] = {}
     cursors: Dict[str, str] = {}
@@ -1126,47 +1126,47 @@ def _memory_platform_backup_payload() -> Dict[str, Any]:
     identity_names: Dict[str, str] = {}
     room_labels: Dict[str, str] = {}
 
-    for key in _memory_platform_scan_keys("mem:user:*"):
+    for key in _memory_core_scan_keys("mem:user:*"):
         value = redis_client.get(key)
         if value is None:
             continue
         user_docs[key] = str(value)
 
-    for key in _memory_platform_scan_keys("mem:room:*"):
+    for key in _memory_core_scan_keys("mem:room:*"):
         value = redis_client.get(key)
         if value is None:
             continue
         room_docs[key] = str(value)
 
-    for key in _memory_platform_scan_keys("mem:cursor:*"):
+    for key in _memory_core_scan_keys("mem:cursor:*"):
         value = redis_client.get(key)
         if value is None:
             continue
         cursors[key] = str(value)
 
-    for key in _memory_platform_scan_keys("mem:identity_alias:*"):
+    for key in _memory_core_scan_keys("mem:identity_alias:*"):
         value = redis_client.get(key)
         if value is None:
             continue
         identity_aliases[key] = str(value)
 
-    for key in _memory_platform_scan_keys("mem:identity_name:*"):
+    for key in _memory_core_scan_keys("mem:identity_name:*"):
         value = redis_client.get(key)
         if value is None:
             continue
         identity_names[key] = str(value)
 
-    for key in _memory_platform_scan_keys("tater:room_label:*"):
+    for key in _memory_core_scan_keys("tater:room_label:*"):
         value = redis_client.get(key)
         if value is None:
             continue
         room_labels[key] = str(value)
 
-    settings = redis_client.hgetall("memory_platform_settings") or {}
-    stats = redis_client.hgetall("mem:stats:memory_platform") or {}
+    settings = redis_client.hgetall("memory_core_settings") or {}
+    stats = redis_client.hgetall("mem:stats:memory_core") or {}
 
     return {
-        "backup_type": "tater_memory_platform_backup",
+        "backup_type": "tater_memory_core_backup",
         "backup_version": 2,
         "exported_at": time.time(),
         "exported_at_text": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1191,13 +1191,13 @@ def _memory_platform_backup_payload() -> Dict[str, Any]:
     }
 
 
-def _memory_platform_backup_json_bytes() -> bytes:
-    payload = _memory_platform_backup_payload()
+def _memory_core_backup_json_bytes() -> bytes:
+    payload = _memory_core_backup_payload()
     text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
     return text.encode("utf-8")
 
 
-def _memory_platform_to_redis_string(value: Any) -> str:
+def _memory_core_to_redis_string(value: Any) -> str:
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     if isinstance(value, bool):
@@ -1207,7 +1207,7 @@ def _memory_platform_to_redis_string(value: Any) -> str:
     return str(value)
 
 
-def _memory_platform_filter_prefixed_map(raw: Any, prefix: str) -> Dict[str, str]:
+def _memory_core_filter_prefixed_map(raw: Any, prefix: str) -> Dict[str, str]:
     out: Dict[str, str] = {}
     if not isinstance(raw, dict):
         return out
@@ -1215,11 +1215,11 @@ def _memory_platform_filter_prefixed_map(raw: Any, prefix: str) -> Dict[str, str
         key = str(raw_key or "").strip()
         if not key or not key.startswith(prefix):
             continue
-        out[key] = _memory_platform_to_redis_string(raw_value)
+        out[key] = _memory_core_to_redis_string(raw_value)
     return out
 
 
-def _memory_platform_filter_hash_map(raw: Any) -> Dict[str, str]:
+def _memory_core_filter_hash_map(raw: Any) -> Dict[str, str]:
     out: Dict[str, str] = {}
     if not isinstance(raw, dict):
         return out
@@ -1227,11 +1227,11 @@ def _memory_platform_filter_hash_map(raw: Any) -> Dict[str, str]:
         key = str(raw_key or "").strip()
         if not key:
             continue
-        out[key] = _memory_platform_to_redis_string(raw_value)
+        out[key] = _memory_core_to_redis_string(raw_value)
     return out
 
 
-def _memory_platform_import_backup_payload(
+def _memory_core_import_backup_payload(
     payload: Any,
     *,
     replace_existing: bool,
@@ -1240,14 +1240,14 @@ def _memory_platform_import_backup_payload(
     if not isinstance(payload, dict):
         return {"ok": False, "error": "Backup payload is not valid JSON object."}
 
-    user_docs = _memory_platform_filter_prefixed_map(payload.get("user_docs"), "mem:user:")
-    room_docs = _memory_platform_filter_prefixed_map(payload.get("room_docs"), "mem:room:")
-    cursors = _memory_platform_filter_prefixed_map(payload.get("cursors"), "mem:cursor:")
-    identity_aliases = _memory_platform_filter_prefixed_map(payload.get("identity_aliases"), "mem:identity_alias:")
-    identity_names = _memory_platform_filter_prefixed_map(payload.get("identity_names"), "mem:identity_name:")
-    room_labels = _memory_platform_filter_prefixed_map(payload.get("room_labels"), "tater:room_label:")
-    stats = _memory_platform_filter_hash_map(payload.get("stats"))
-    settings = _memory_platform_filter_hash_map(payload.get("settings"))
+    user_docs = _memory_core_filter_prefixed_map(payload.get("user_docs"), "mem:user:")
+    room_docs = _memory_core_filter_prefixed_map(payload.get("room_docs"), "mem:room:")
+    cursors = _memory_core_filter_prefixed_map(payload.get("cursors"), "mem:cursor:")
+    identity_aliases = _memory_core_filter_prefixed_map(payload.get("identity_aliases"), "mem:identity_alias:")
+    identity_names = _memory_core_filter_prefixed_map(payload.get("identity_names"), "mem:identity_name:")
+    room_labels = _memory_core_filter_prefixed_map(payload.get("room_labels"), "tater:room_label:")
+    stats = _memory_core_filter_hash_map(payload.get("stats"))
+    settings = _memory_core_filter_hash_map(payload.get("settings"))
 
     if (
         not user_docs
@@ -1263,9 +1263,9 @@ def _memory_platform_import_backup_payload(
 
     try:
         if replace_existing:
-            _memory_platform_wipe_all_data()
+            _memory_core_wipe_all_data()
             if restore_settings:
-                redis_client.delete("memory_platform_settings")
+                redis_client.delete("memory_core_settings")
 
         pipe = redis_client.pipeline()
         for key, value in user_docs.items():
@@ -1283,9 +1283,9 @@ def _memory_platform_import_backup_payload(
         pipe.execute()
 
         if stats:
-            redis_client.hset("mem:stats:memory_platform", mapping=stats)
+            redis_client.hset("mem:stats:memory_core", mapping=stats)
         if restore_settings and settings:
-            redis_client.hset("memory_platform_settings", mapping=settings)
+            redis_client.hset("memory_core_settings", mapping=settings)
 
         return {
             "ok": True,
@@ -1302,7 +1302,7 @@ def _memory_platform_import_backup_payload(
         return {"ok": False, "error": f"Backup import failed: {exc}"}
 
 
-def _memory_platform_collect_fact_entries(
+def _memory_core_collect_fact_entries(
     user_rows: List[Dict[str, Any]],
     room_rows: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
@@ -1330,7 +1330,7 @@ def _memory_platform_collect_fact_entries(
                         "platform": platform_name,
                         "scope_id": str(row.get("user_id") or row.get("room_id") or "").strip(),
                         "key": str(key or "").strip(),
-                        "value": memory_platform_value_to_text(fact.get("value"), max_chars=240),
+                        "value": memory_core_value_to_text(fact.get("value"), max_chars=240),
                         "confidence": confidence,
                         "updated_at": updated_at,
                     }
@@ -1341,11 +1341,11 @@ def _memory_platform_collect_fact_entries(
     return entries
 
 
-def _memory_platform_insight_frames(
+def _memory_core_insight_frames(
     user_rows: List[Dict[str, Any]],
     room_rows: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    entries = _memory_platform_collect_fact_entries(user_rows, room_rows)
+    entries = _memory_core_collect_fact_entries(user_rows, room_rows)
     if not entries:
         return {}
 
@@ -1625,10 +1625,10 @@ def _legacy_memory_discovery() -> Dict[str, Any]:
 
 def render_memory_page():
     st.title("Memory")
-    st.caption("Durable memory extracted by the Memory Platform.")
+    st.caption("Durable memory extracted by the Memory Core.")
 
-    stats = _memory_platform_stats()
-    discovery = _memory_platform_doc_discovery()
+    stats = _memory_core_stats()
+    discovery = _memory_core_doc_discovery()
     user_rows = list(discovery.get("users") or [])
     room_rows = list(discovery.get("rooms") or [])
     tab_stats, tab_users, tab_rooms, tab_legacy, tab_export = st.tabs(["Stats", "Users", "Rooms", "Legacy", "Export"])
@@ -1644,20 +1644,20 @@ def render_memory_page():
         metric_cols_bottom[0].metric("Updated Facts", int(stats.get("updated_facts") or 0))
         metric_cols_bottom[1].metric("Updated Docs", int(stats.get("updated_docs") or 0))
         metric_cols_bottom[2].metric("Scanned Scopes", int(stats.get("scanned_scopes") or 0))
-        metric_cols_bottom[3].metric("Enabled Platforms", int(stats.get("enabled_platform_count") or 0))
+        metric_cols_bottom[3].metric("Enabled Portals", int(stats.get("enabled_platform_count") or 0))
 
         last_run = str(stats.get("last_run_text") or "").strip()
         if last_run:
-            st.caption(f"Memory platform last run: {last_run}")
+            st.caption(f"Memory portal last run: {last_run}")
         else:
-            st.caption("Memory platform has not reported stats yet.")
+            st.caption("Memory portal has not reported stats yet.")
 
         if not user_rows and not room_rows:
-            st.info("No platform memory documents with facts yet.")
+            st.info("No portal memory documents with facts yet.")
         else:
             st.caption(f"Found {len(user_rows)} users and {len(room_rows)} rooms with stored facts.")
 
-        insights = _memory_platform_insight_frames(user_rows, room_rows)
+        insights = _memory_core_insight_frames(user_rows, room_rows)
         st.markdown("**Insights**")
         if not insights:
             st.info("No fact data available for graphs yet.")
@@ -1739,7 +1739,7 @@ def render_memory_page():
 
             platform_df = insights.get("platform_df")
             if isinstance(platform_df, pd.DataFrame) and not platform_df.empty:
-                st.caption("Facts by platform")
+                st.caption("Facts by portal")
                 st.bar_chart(platform_df, width="stretch")
 
             trending_user_df = insights.get("trending_user_df")
@@ -1774,9 +1774,9 @@ def render_memory_page():
     with tab_users:
         user_platforms = sorted({str(row.get("platform") or "") for row in user_rows if row.get("platform")})
         user_platform_filter = st.selectbox(
-            "User Platform Filter",
+            "User Portal Filter",
             options=["all", *user_platforms],
-            key="memory_platform_user_filter",
+            key="memory_core_user_filter",
         )
         filtered_users = [
             row
@@ -1806,13 +1806,13 @@ def render_memory_page():
                     f"{filtered_users[i].get('platform')} / {filtered_users[i].get('user_id')} "
                     f"({filtered_users[i].get('fact_count')} facts)"
                 ),
-                key="memory_platform_user_doc_select",
+                key="memory_core_user_doc_select",
             )
             selected_user = filtered_users[int(selected_user_idx)]
             selected_user_doc = selected_user.get("doc") if isinstance(selected_user.get("doc"), dict) else {}
-            user_fact_rows = _memory_platform_fact_rows(selected_user_doc)
+            user_fact_rows = _memory_core_fact_rows(selected_user_doc)
             if user_fact_rows:
-                grouped_rows = _memory_platform_user_fact_rows_by_category(selected_user_doc)
+                grouped_rows = _memory_core_user_fact_rows_by_category(selected_user_doc)
                 for category in _MEMORY_USER_PROFILE_CATEGORIES:
                     label = str(category.get("label") or "").strip()
                     if not label:
@@ -1835,20 +1835,20 @@ def render_memory_page():
             user_fact_keys = sorted(
                 list((selected_user_doc.get("facts") or {}).keys())
             ) if isinstance(selected_user_doc.get("facts"), dict) else []
-            user_token = _memory_platform_ui_token("user", selected_user_platform, selected_user_id)
+            user_token = _memory_core_ui_token("user", selected_user_platform, selected_user_id)
 
             st.markdown("Remove user memory")
             selected_user_keys = st.multiselect(
                 "Select user fact keys to delete",
                 options=user_fact_keys,
-                key=f"memory_platform_user_delete_keys_{user_token}",
+                key=f"memory_core_user_delete_keys_{user_token}",
             )
             if st.button(
                 "Delete Selected User Fact Keys",
-                key=f"memory_platform_user_delete_button_{user_token}",
+                key=f"memory_core_user_delete_button_{user_token}",
                 disabled=not selected_user_keys,
             ):
-                delete_result = _memory_platform_forget_fact_keys(
+                delete_result = _memory_core_forget_fact_keys(
                     "user",
                     selected_user_platform,
                     selected_user_id,
@@ -1866,14 +1866,14 @@ def render_memory_page():
             confirm_user_doc_delete = st.checkbox(
                 "Confirm delete full user memory document",
                 value=False,
-                key=f"memory_platform_user_delete_doc_confirm_{user_token}",
+                key=f"memory_core_user_delete_doc_confirm_{user_token}",
             )
             if st.button(
                 "Delete Entire User Memory Document",
-                key=f"memory_platform_user_delete_doc_button_{user_token}",
+                key=f"memory_core_user_delete_doc_button_{user_token}",
                 disabled=not confirm_user_doc_delete,
             ):
-                delete_result = _memory_platform_forget_doc(
+                delete_result = _memory_core_forget_doc(
                     "user",
                     selected_user_platform,
                     selected_user_id,
@@ -1887,9 +1887,9 @@ def render_memory_page():
     with tab_rooms:
         room_platforms = sorted({str(row.get("platform") or "") for row in room_rows if row.get("platform")})
         room_platform_filter = st.selectbox(
-            "Room Platform Filter",
+            "Room Portal Filter",
             options=["all", *room_platforms],
-            key="memory_platform_room_filter",
+            key="memory_core_room_filter",
         )
         filtered_rooms = [
             row
@@ -1917,16 +1917,16 @@ def render_memory_page():
                 options=list(range(len(filtered_rooms))),
                 format_func=lambda i: (
                     f"{filtered_rooms[i].get('platform')} / "
-                    f"{_memory_platform_room_display_name_from_row(filtered_rooms[i])} "
+                    f"{_memory_core_room_display_name_from_row(filtered_rooms[i])} "
                     f"({filtered_rooms[i].get('fact_count')} facts)"
                 ),
-                key="memory_platform_room_doc_select",
+                key="memory_core_room_doc_select",
             )
             selected_room = filtered_rooms[int(selected_room_idx)]
             selected_room_doc = selected_room.get("doc") if isinstance(selected_room.get("doc"), dict) else {}
-            room_fact_rows = _memory_platform_fact_rows(selected_room_doc)
+            room_fact_rows = _memory_core_fact_rows(selected_room_doc)
             if room_fact_rows:
-                grouped_rows = _memory_platform_room_fact_rows_by_category(selected_room_doc)
+                grouped_rows = _memory_core_room_fact_rows_by_category(selected_room_doc)
                 for category in _MEMORY_ROOM_PROFILE_CATEGORIES:
                     label = str(category.get("label") or "").strip()
                     if not label:
@@ -1949,20 +1949,20 @@ def render_memory_page():
             room_fact_keys = sorted(
                 list((selected_room_doc.get("facts") or {}).keys())
             ) if isinstance(selected_room_doc.get("facts"), dict) else []
-            room_token = _memory_platform_ui_token("room", selected_room_platform, selected_room_id)
+            room_token = _memory_core_ui_token("room", selected_room_platform, selected_room_id)
 
             st.markdown("Remove room memory")
             selected_room_keys = st.multiselect(
                 "Select room fact keys to delete",
                 options=room_fact_keys,
-                key=f"memory_platform_room_delete_keys_{room_token}",
+                key=f"memory_core_room_delete_keys_{room_token}",
             )
             if st.button(
                 "Delete Selected Room Fact Keys",
-                key=f"memory_platform_room_delete_button_{room_token}",
+                key=f"memory_core_room_delete_button_{room_token}",
                 disabled=not selected_room_keys,
             ):
-                delete_result = _memory_platform_forget_fact_keys(
+                delete_result = _memory_core_forget_fact_keys(
                     "room",
                     selected_room_platform,
                     selected_room_id,
@@ -1980,14 +1980,14 @@ def render_memory_page():
             confirm_room_doc_delete = st.checkbox(
                 "Confirm delete full room memory document",
                 value=False,
-                key=f"memory_platform_room_delete_doc_confirm_{room_token}",
+                key=f"memory_core_room_delete_doc_confirm_{room_token}",
             )
             if st.button(
                 "Delete Entire Room Memory Document",
-                key=f"memory_platform_room_delete_doc_button_{room_token}",
+                key=f"memory_core_room_delete_doc_button_{room_token}",
                 disabled=not confirm_room_doc_delete,
             ):
-                delete_result = _memory_platform_forget_doc(
+                delete_result = _memory_core_forget_doc(
                     "room",
                     selected_room_platform,
                     selected_room_id,
@@ -2052,7 +2052,7 @@ def render_memory_page():
                     [
                         {
                             "key": item.get("key"),
-                            "value": memory_platform_value_to_text(item.get("value"), max_chars=160),
+                            "value": memory_core_value_to_text(item.get("value"), max_chars=160),
                             "source": item.get("source"),
                             "updated_at": item.get("updated_at"),
                             "expires_at": item.get("expires_at"),
@@ -2065,7 +2065,7 @@ def render_memory_page():
             else:
                 st.info("No key/value entries in this legacy memory scope.")
 
-            legacy_scope_token = _memory_platform_ui_token("legacy", selected_legacy_scope.get("redis_key"))
+            legacy_scope_token = _memory_core_ui_token("legacy", selected_legacy_scope.get("redis_key"))
             legacy_key_options = [str(item.get("key") or "") for item in selected_legacy_items if str(item.get("key") or "").strip()]
 
             selected_legacy_keys = st.multiselect(
@@ -2140,23 +2140,23 @@ def render_memory_page():
         total_facts = int(discovery.get("fact_count") or 0)
         st.caption(f"Current snapshot: {total_docs} docs, {total_facts} facts.")
 
-        if st.button("Generate Memory PDF", key="memory_platform_export_generate_pdf"):
-            pdf_bytes = _memory_platform_export_pdf(
+        if st.button("Generate Memory PDF", key="memory_core_export_generate_pdf"):
+            pdf_bytes = _memory_core_export_pdf(
                 stats=stats,
                 user_rows=user_rows,
                 room_rows=room_rows,
             )
-            st.session_state["memory_platform_export_pdf_bytes"] = pdf_bytes
-            st.session_state["memory_platform_export_pdf_name"] = (
+            st.session_state["memory_core_export_pdf_bytes"] = pdf_bytes
+            st.session_state["memory_core_export_pdf_name"] = (
                 f"memory_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
             )
             size_kb = len(pdf_bytes) / 1024.0
             st.success(f"PDF generated ({size_kb:.1f} KB).")
 
-        pdf_payload = st.session_state.get("memory_platform_export_pdf_bytes")
+        pdf_payload = st.session_state.get("memory_core_export_pdf_bytes")
         if isinstance(pdf_payload, (bytes, bytearray)) and len(pdf_payload) > 0:
             export_name = str(
-                st.session_state.get("memory_platform_export_pdf_name")
+                st.session_state.get("memory_core_export_pdf_name")
                 or f"memory_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
             )
             st.download_button(
@@ -2164,28 +2164,28 @@ def render_memory_page():
                 data=bytes(pdf_payload),
                 file_name=export_name,
                 mime="application/pdf",
-                key="memory_platform_export_download_pdf",
+                key="memory_core_export_download_pdf",
                 width="stretch",
             )
 
         st.markdown("---")
         st.subheader("Backup and Restore (JSON)")
         st.caption(
-            "Backup includes user docs, room docs, cursors, identity alias/name maps, room labels, memory stats, and memory platform settings."
+            "Backup includes user docs, room docs, cursors, identity alias/name maps, room labels, memory stats, and memory core settings."
         )
 
-        if st.button("Generate Memory Backup (JSON)", key="memory_platform_backup_generate_json"):
-            backup_bytes = _memory_platform_backup_json_bytes()
-            st.session_state["memory_platform_backup_json_bytes"] = backup_bytes
-            st.session_state["memory_platform_backup_json_name"] = (
+        if st.button("Generate Memory Backup (JSON)", key="memory_core_backup_generate_json"):
+            backup_bytes = _memory_core_backup_json_bytes()
+            st.session_state["memory_core_backup_json_bytes"] = backup_bytes
+            st.session_state["memory_core_backup_json_name"] = (
                 f"memory_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
             )
             st.success(f"Backup generated ({len(backup_bytes) / 1024.0:.1f} KB).")
 
-        backup_payload = st.session_state.get("memory_platform_backup_json_bytes")
+        backup_payload = st.session_state.get("memory_core_backup_json_bytes")
         if isinstance(backup_payload, (bytes, bytearray)) and len(backup_payload) > 0:
             backup_name = str(
-                st.session_state.get("memory_platform_backup_json_name")
+                st.session_state.get("memory_core_backup_json_name")
                 or f"memory_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
             )
             st.download_button(
@@ -2193,28 +2193,28 @@ def render_memory_page():
                 data=bytes(backup_payload),
                 file_name=backup_name,
                 mime="application/json",
-                key="memory_platform_backup_download_json",
+                key="memory_core_backup_download_json",
                 width="stretch",
             )
 
         import_file = st.file_uploader(
             "Import Memory Backup JSON",
             type=["json"],
-            key="memory_platform_backup_import_file",
+            key="memory_core_backup_import_file",
         )
         replace_existing = st.checkbox(
             "Replace existing memory before import",
             value=False,
-            key="memory_platform_backup_replace_existing",
+            key="memory_core_backup_replace_existing",
         )
         restore_settings = st.checkbox(
-            "Restore memory platform settings from backup",
+            "Restore memory core settings from backup",
             value=True,
-            key="memory_platform_backup_restore_settings",
+            key="memory_core_backup_restore_settings",
         )
         if st.button(
             "Import Memory Backup",
-            key="memory_platform_backup_import_button",
+            key="memory_core_backup_import_button",
             disabled=import_file is None,
         ):
             if import_file is None:
@@ -2228,7 +2228,7 @@ def render_memory_page():
                     payload = None
 
                 if payload is not None:
-                    result = _memory_platform_import_backup_payload(
+                    result = _memory_core_import_backup_payload(
                         payload,
                         replace_existing=bool(replace_existing),
                         restore_settings=bool(restore_settings),
@@ -2250,5 +2250,5 @@ def render_memory_page():
                         st.error(result.get("error") or "Backup import failed.")
 
 
-def wipe_memory_platform_data() -> Dict[str, Any]:
-    return _memory_platform_wipe_all_data()
+def wipe_memory_core_data() -> Dict[str, Any]:
+    return _memory_core_wipe_all_data()

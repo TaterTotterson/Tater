@@ -11,7 +11,8 @@ import streamlit as st
 
 import plugin_registry as plugin_registry_mod
 from plugin_kernel import expand_plugin_platforms
-from plugin_settings import set_plugin_enabled
+from plugin_settings import get_plugin_enabled, set_plugin_enabled
+from webui.webui_plugins import render_plugin_settings_form
 
 PLUGIN_DIR = os.getenv("TATER_PLUGIN_DIR", "plugins")
 SHOP_MANIFEST_URL_DEFAULT = os.getenv(
@@ -512,7 +513,11 @@ def _get_item_platforms(item):
             if normalized:
                 return normalized
 
-    return _normalize_plats(item.get("platforms") or item.get("platform") or [])
+    return _normalize_plats(
+        item.get("portals")
+        or item.get("portal")
+        or []
+    )
 
 
 def _get_item_display_platforms(item) -> str:
@@ -921,43 +926,53 @@ def _render_plugin_store_tab(catalog_items: list[dict], catalog_errors: list[str
             ]
 
         with tab:
-            platform_label = "all platforms" if selected_platform is None else _platform_display_label(selected_platform)
+            platform_label = "all portals" if selected_platform is None else _platform_display_label(selected_platform)
             st.caption(
                 f"Showing {len(filtered_items)} of {len(available_items)} available plugin(s) across {len(manifest_repos)} repo(s) for {platform_label}."
             )
 
             if not filtered_items:
-                st.info("No downloadable plugins match this platform.")
+                st.info("No downloadable plugins match this portal.")
                 continue
 
-            for item in filtered_items:
-                plugin_id = (item.get("id") or "").strip()
-                name = (item.get("name") or plugin_id).strip()
-                description = (item.get("description") or "").strip()
-                min_ver = (item.get("min_tater_version") or "0.0.0").strip()
-                store_ver = (item.get("version") or "0.0.0").strip()
-                source_label = (item.get("_source_label") or "Custom Repo").strip()
-                platforms_str = _get_item_display_platforms(item)
+            for row_start in range(0, len(filtered_items), 2):
+                row_items = filtered_items[row_start:row_start + 2]
+                row_cols = st.columns(2)
 
-                with st.container(border=True):
-                    st.subheader(name)
-                    st.caption(
-                        f"ID: {plugin_id} | version: {store_ver} | min tater: {min_ver} | source: {source_label}"
-                    )
+                for col_idx, item in enumerate(row_items):
+                    plugin_id = (item.get("id") or "").strip()
+                    name = (item.get("name") or plugin_id).strip()
+                    description = (item.get("description") or "").strip()
+                    min_ver = (item.get("min_tater_version") or "0.0.0").strip()
+                    store_ver = (item.get("version") or "0.0.0").strip()
+                    source_label = (item.get("_source_label") or "Custom Repo").strip()
+                    platforms_str = _get_item_display_platforms(item)
 
-                    if description:
-                        st.write(description)
+                    with row_cols[col_idx]:
+                        with st.container(border=True):
+                            st.subheader(name)
+                            st.caption(
+                                f"ID: {plugin_id} | version: {store_ver} | min tater: {min_ver} | source: {source_label}"
+                            )
 
-                    st.caption(f"Platforms: {platforms_str}")
+                            if description:
+                                st.write(description)
 
-                    if st.button("Install", key=f"plugin_manager_install_{selected_platform or 'all'}_{plugin_id}"):
-                        ok, msg = install_plugin_from_shop_item(item)
-                        if ok:
-                            st.success(msg)
-                            _refresh_plugins_after_fs_change()
-                            st.rerun()
-                        else:
-                            st.error(msg)
+                            st.caption(f"Portals: {platforms_str}")
+
+                            if st.button(
+                                "Install",
+                                key=f"plugin_manager_install_{selected_platform or 'all'}_{plugin_id}",
+                                type="primary",
+                                use_container_width=True,
+                            ):
+                                ok, msg = install_plugin_from_shop_item(item)
+                                if ok:
+                                    st.success(msg)
+                                    _refresh_plugins_after_fs_change()
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
 
 
 def _render_installed_plugins_tab(catalog_items: list[dict], catalog_errors: list[str]):
@@ -1008,13 +1023,13 @@ def _render_installed_plugins_tab(catalog_items: list[dict], catalog_errors: lis
                     filtered_entries.append(entry)
 
         with tab:
-            platform_label = "all platforms" if selected_platform is None else _platform_display_label(selected_platform)
+            platform_label = "all portals" if selected_platform is None else _platform_display_label(selected_platform)
             st.caption(
                 f"Showing {len(filtered_entries)} of {len(installed_entries)} installed plugin(s) for {platform_label}."
             )
 
             if not filtered_entries:
-                st.info("No installed plugins match this platform.")
+                st.info("No installed plugins match this portal.")
                 continue
 
             for entry in filtered_entries:
@@ -1045,14 +1060,35 @@ def _render_installed_plugins_tab(catalog_items: list[dict], catalog_errors: lis
                     if description:
                         st.write(description)
 
-                    st.caption(f"Platforms: {platforms_str}")
+                    st.caption(f"Portals: {platforms_str}")
 
                     if not loaded:
                         st.caption("Status: file exists on disk but the plugin is not currently loaded in the registry.")
 
+                    enabled_now = bool(get_plugin_enabled(plugin_id))
+                    enabled_toggle_key = f"plugin_manager_enabled_{tab_token}_{plugin_id}"
+                    enabled_next = st.toggle(
+                        "Enabled",
+                        value=enabled_now,
+                        key=enabled_toggle_key,
+                    )
+                    if enabled_next != enabled_now:
+                        set_plugin_enabled(plugin_id, enabled_next)
+                        st.rerun()
+
+                    if selected_platform is None and loaded:
+                        render_plugin_settings_form(loaded)
+                    elif selected_platform is not None and loaded:
+                        st.caption("Use the All tab to edit plugin settings.")
+
                     controls = st.columns([1, 1, 3])
                     if update_available:
-                        if controls[0].button("Update", key=f"plugin_manager_update_{tab_token}_{plugin_id}"):
+                        if controls[0].button(
+                            "Update",
+                            key=f"plugin_manager_update_{tab_token}_{plugin_id}",
+                            type="primary",
+                            use_container_width=True,
+                        ):
                             ok, msg = _update_plugin_entry(entry)
                             if ok:
                                 _refresh_plugins_after_fs_change()
@@ -1061,11 +1097,21 @@ def _render_installed_plugins_tab(catalog_items: list[dict], catalog_errors: lis
                             else:
                                 st.error(msg)
                     else:
-                        controls[0].button("Up to date", disabled=True, key=f"plugin_manager_uptodate_{tab_token}_{plugin_id}")
+                        controls[0].button(
+                            "Up to date",
+                            disabled=True,
+                            key=f"plugin_manager_uptodate_{tab_token}_{plugin_id}",
+                            use_container_width=True,
+                        )
 
                     purge_redis = controls[2].checkbox("Delete Data?", value=False, key=purge_key)
 
-                    if controls[1].button("Remove", key=f"plugin_manager_remove_{tab_token}_{plugin_id}"):
+                    if controls[1].button(
+                        "Remove",
+                        key=f"plugin_manager_remove_{tab_token}_{plugin_id}",
+                        type="secondary",
+                        use_container_width=True,
+                    ):
                         category_hint = getattr(loaded, "settings_category", None) if loaded else None
 
                         ok, msg = uninstall_plugin_file(plugin_id)
@@ -1106,7 +1152,13 @@ def _render_updates_tab(catalog_items: list[dict], catalog_errors: list[str]):
     summary_cols[3].metric("Local Only", len(local_only_entries))
 
     action_col, text_col = st.columns([1, 3])
-    if action_col.button("Update All", key="plugin_manager_update_all", disabled=not update_entries):
+    if action_col.button(
+        "Update All",
+        key="plugin_manager_update_all",
+        disabled=not update_entries,
+        type="primary",
+        use_container_width=True,
+    ):
         with st.spinner(f"Updating {len(update_entries)} plugin(s)..."):
             updated, failed = _update_plugin_entries(update_entries)
         flash_messages = []
@@ -1178,13 +1230,13 @@ def _render_updates_tab(catalog_items: list[dict], catalog_errors: list[str]):
             ]
 
         with tab:
-            platform_label = "all platforms" if selected_platform is None else _platform_display_label(selected_platform)
+            platform_label = "all portals" if selected_platform is None else _platform_display_label(selected_platform)
             st.caption(
                 f"Showing {len(filtered_entries)} of {len(update_entries)} plugin(s) with available updates for {platform_label}."
             )
 
             if not filtered_entries:
-                st.info("No plugin updates match this platform.")
+                st.info("No plugin updates match this portal.")
                 continue
 
             for entry in filtered_entries:
@@ -1207,9 +1259,14 @@ def _render_updates_tab(catalog_items: list[dict], catalog_errors: list[str]):
                     if entry["description"]:
                         st.write(entry["description"])
 
-                    st.caption(f"Platforms: {entry['platforms_str']}")
+                    st.caption(f"Portals: {entry['platforms_str']}")
 
-                    if st.button("Update", key=f"plugin_manager_updates_update_{tab_token}_{plugin_id}"):
+                    if st.button(
+                        "Update",
+                        key=f"plugin_manager_updates_update_{tab_token}_{plugin_id}",
+                        type="primary",
+                        use_container_width=True,
+                    ):
                         ok, msg = _update_plugin_entry(entry)
                         if ok:
                             _refresh_plugins_after_fs_change()
@@ -1265,14 +1322,14 @@ def _render_settings_tab(catalog_errors: list[str], manifest_repos: list[dict[st
 
     add_col, remove_col, save_col, refresh_col = st.columns([1, 1, 1, 1])
 
-    if add_col.button("Add Repo", key="plugin_manager_add_repo"):
+    if add_col.button("Add Repo", key="plugin_manager_add_repo", type="secondary", use_container_width=True):
         next_idx = int(st.session_state.get("plugin_manager_repo_form_count", 1))
         st.session_state["plugin_manager_repo_form_count"] = next_idx + 1
         st.session_state[f"plugin_manager_repo_name_{next_idx}"] = ""
         st.session_state[f"plugin_manager_repo_url_{next_idx}"] = ""
         st.rerun()
 
-    if remove_col.button("Remove Last", key="plugin_manager_remove_repo"):
+    if remove_col.button("Remove Last", key="plugin_manager_remove_repo", type="secondary", use_container_width=True):
         count = max(1, int(st.session_state.get("plugin_manager_repo_form_count", 1)))
         if count > 1:
             last_idx = count - 1
@@ -1284,7 +1341,7 @@ def _render_settings_tab(catalog_errors: list[str], manifest_repos: list[dict[st
             st.session_state["plugin_manager_repo_url_0"] = ""
         st.rerun()
 
-    if save_col.button("Save Repos", key="plugin_manager_save_repos"):
+    if save_col.button("Save Repos", key="plugin_manager_save_repos", type="primary", use_container_width=True):
         parsed_repos = []
         row_count = max(1, int(st.session_state.get("plugin_manager_repo_form_count", 1)))
         for idx in range(row_count):
@@ -1303,7 +1360,7 @@ def _render_settings_tab(catalog_errors: list[str], manifest_repos: list[dict[st
         st.success("Plugin repos saved.")
         st.rerun()
 
-    if refresh_col.button("Refresh Catalog", key="plugin_manager_refresh_catalog"):
+    if refresh_col.button("Refresh Catalog", key="plugin_manager_refresh_catalog", type="secondary", use_container_width=True):
         st.rerun()
 
     st.caption(
@@ -1324,15 +1381,15 @@ def render_plugin_store_page():
     manifest_repos = get_configured_shop_manifest_repos()
     catalog_items, catalog_errors = load_shop_catalog(manifest_repos)
 
-    store_tab, installed_tab, updates_tab, settings_tab = st.tabs(
-        ["Plugin Store", "Installed Plugins", "Updates", "Settings"]
+    installed_tab, store_tab, updates_tab, settings_tab = st.tabs(
+        ["Installed Plugins", "Plugin Store", "Updates", "Settings"]
     )
-
-    with store_tab:
-        _render_plugin_store_tab(catalog_items, catalog_errors, manifest_repos)
 
     with installed_tab:
         _render_installed_plugins_tab(catalog_items, catalog_errors)
+
+    with store_tab:
+        _render_plugin_store_tab(catalog_items, catalog_errors, manifest_repos)
 
     with updates_tab:
         _render_updates_tab(catalog_items, catalog_errors)

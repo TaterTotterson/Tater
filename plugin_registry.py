@@ -52,7 +52,7 @@ def get_registry_snapshot() -> Dict[str, object]:
     """
     Return a stable snapshot (copy) of the current registry.
 
-    Use this in platforms/RSS when building prompts so iteration is safe even if
+    Use this in portals/RSS when building prompts so iteration is safe even if
     WebUI triggers a reload concurrently.
     """
     with _reload_lock:
