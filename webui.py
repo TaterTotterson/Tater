@@ -479,11 +479,15 @@ def _import_portal_module(key: str):
     module_key = str(key or "").strip()
     if not module_key:
         raise ImportError("Missing portal module key")
+    module_name = f"portals.{module_key}"
     errors = []
     try:
-        return importlib.import_module(f"portals.{module_key}")
+        importlib.invalidate_caches()
+        if module_name in sys.modules:
+            return importlib.reload(sys.modules[module_name])
+        return importlib.import_module(module_name)
     except Exception as exc:
-        errors.append(f"portals.{module_key}: {exc}")
+        errors.append(f"{module_name}: {exc}")
     raise ImportError("; ".join(errors))
 
 
@@ -534,7 +538,7 @@ def _stop_portal(key: str):
         stop_flag.set()
 
     if thread and thread.is_alive():
-        thread.join(timeout=0.5)
+        thread.join(timeout=3.0)
 
     with runtime["lock"]:
         if not thread or not thread.is_alive():
@@ -553,11 +557,15 @@ def _import_core_module(key: str):
     module_key = str(key or "").strip()
     if not module_key:
         raise ImportError("Missing core module key")
+    module_name = f"cores.{module_key}"
     errors = []
     try:
-        return importlib.import_module(f"cores.{module_key}")
+        importlib.invalidate_caches()
+        if module_name in sys.modules:
+            return importlib.reload(sys.modules[module_name])
+        return importlib.import_module(module_name)
     except Exception as exc:
-        errors.append(f"cores.{module_key}: {exc}")
+        errors.append(f"{module_name}: {exc}")
     raise ImportError("; ".join(errors))
 
 
@@ -607,7 +615,7 @@ def _stop_core(key: str):
         stop_flag.set()
 
     if thread and thread.is_alive():
-        thread.join(timeout=0.5)
+        thread.join(timeout=3.0)
 
     with runtime["lock"]:
         if not thread or not thread.is_alive():
