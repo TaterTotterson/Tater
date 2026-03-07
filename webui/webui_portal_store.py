@@ -652,7 +652,36 @@ def _render_catalog_warnings(catalog_errors: list[str]) -> None:
         st.caption(error)
 
 
-def _update_portal_entry(entry: dict) -> tuple[bool, str]:
+def _restart_portal_runtime(
+    entry: dict,
+    *,
+    start_portal_fn=None,
+    stop_portal_fn=None,
+) -> tuple[bool, str]:
+    module_key = str(entry.get("module_key") or "").strip()
+    is_running = bool(entry.get("running"))
+
+    if not is_running:
+        return True, "restart not required"
+    if not module_key:
+        return False, "module key is missing; restart Tater to load the new portal code"
+    if not callable(start_portal_fn) or not callable(stop_portal_fn):
+        return False, "automatic runtime restart is unavailable; restart Tater to load the new portal code"
+
+    try:
+        stop_portal_fn(module_key)
+        start_portal_fn(module_key)
+        return True, "runtime restarted"
+    except Exception as exc:
+        return False, f"hot-restart failed ({exc}); restart Tater to load the new portal code"
+
+
+def _update_portal_entry(
+    entry: dict,
+    *,
+    start_portal_fn=None,
+    stop_portal_fn=None,
+) -> tuple[bool, str]:
     platform_id = str(entry.get("id") or "").strip()
     catalog_item = entry.get("catalog_item")
     if not platform_id:
@@ -667,15 +696,31 @@ def _update_portal_entry(entry: dict) -> tuple[bool, str]:
     installed_ver = str(entry.get("installed_ver") or "0.0.0").strip() or "0.0.0"
     store_ver = str(entry.get("store_ver") or installed_ver).strip() or installed_ver
     display_name = str(entry.get("display_name") or platform_id).strip() or platform_id
-    return True, f"{display_name} updated {installed_ver} -> {store_ver}"
+    restarted, restart_msg = _restart_portal_runtime(
+        entry,
+        start_portal_fn=start_portal_fn,
+        stop_portal_fn=stop_portal_fn,
+    )
+    if not restarted:
+        return False, f"{display_name} updated {installed_ver} -> {store_ver}, but {restart_msg}."
+    return True, f"{display_name} updated {installed_ver} -> {store_ver} ({restart_msg})"
 
 
-def _update_portal_entries(entries: list[dict]) -> tuple[list[str], list[str]]:
+def _update_portal_entries(
+    entries: list[dict],
+    *,
+    start_portal_fn=None,
+    stop_portal_fn=None,
+) -> tuple[list[str], list[str]]:
     updated: list[str] = []
     failed: list[str] = []
 
     for entry in entries:
-        ok, msg = _update_portal_entry(entry)
+        ok, msg = _update_portal_entry(
+            entry,
+            start_portal_fn=start_portal_fn,
+            stop_portal_fn=stop_portal_fn,
+        )
         if ok:
             updated.append(str(entry.get("display_name") or entry.get("id") or "").strip() or msg)
         else:
@@ -837,7 +882,11 @@ def _render_installed_portals_tab(
                     type="primary",
                     use_container_width=True,
                 ):
-                    ok, msg = _update_portal_entry(entry)
+                    ok, msg = _update_portal_entry(
+                        entry,
+                        start_portal_fn=start_portal_fn,
+                        stop_portal_fn=stop_portal_fn,
+                    )
                     if ok:
                         _queue_portal_manager_messages([{"level": "success", "text": msg}])
                         st.rerun()
@@ -876,7 +925,13 @@ def _render_installed_portals_tab(
                 st.rerun()
 
 
-def _render_updates_tab(catalog_items: list[dict], catalog_errors: list[str]):
+def _render_updates_tab(
+    catalog_items: list[dict],
+    catalog_errors: list[str],
+    *,
+    start_portal_fn=None,
+    stop_portal_fn=None,
+):
     _render_catalog_warnings(catalog_errors)
 
     installed_entries = _build_installed_portal_entries(catalog_items)
@@ -900,7 +955,11 @@ def _render_updates_tab(catalog_items: list[dict], catalog_errors: list[str]):
         use_container_width=True,
     ):
         with st.spinner(f"Updating {len(update_entries)} portal(s)..."):
-            updated, failed = _update_portal_entries(update_entries)
+            updated, failed = _update_portal_entries(
+                update_entries,
+                start_portal_fn=start_portal_fn,
+                stop_portal_fn=stop_portal_fn,
+            )
         flash_messages = []
         if updated:
             updated_text = ", ".join(updated[:8])
@@ -971,7 +1030,11 @@ def _render_updates_tab(catalog_items: list[dict], catalog_errors: list[str]):
                 type="primary",
                 use_container_width=True,
             ):
-                ok, msg = _update_portal_entry(entry)
+                ok, msg = _update_portal_entry(
+                    entry,
+                    start_portal_fn=start_portal_fn,
+                    stop_portal_fn=stop_portal_fn,
+                )
                 if ok:
                     _queue_portal_manager_messages([{"level": "success", "text": msg}])
                     st.rerun()
@@ -1106,7 +1169,12 @@ def render_portal_store_page(
         _render_portal_store_tab(catalog_items, catalog_errors, manifest_repos)
 
     with updates_tab:
-        _render_updates_tab(catalog_items, catalog_errors)
+        _render_updates_tab(
+            catalog_items,
+            catalog_errors,
+            start_portal_fn=start_portal_fn,
+            stop_portal_fn=stop_portal_fn,
+        )
 
     with settings_tab:
         _render_settings_tab(catalog_errors, manifest_repos)
