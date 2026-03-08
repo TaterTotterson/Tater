@@ -85,7 +85,7 @@ def render_webui_settings(
 
 def render_web_search_settings(*, redis_client) -> None:
     st.subheader("Web Search")
-    st.caption("Used by kernel `search_web` for research and current information.")
+    st.caption("Used by core tool `search_web` for research and current information.")
 
     legacy_web_search = redis_client.hgetall("plugin_settings:Web Search") or {}
     web_search_api_default = (

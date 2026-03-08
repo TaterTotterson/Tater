@@ -9,7 +9,7 @@ from plugin_kernel import (
     plugin_supports_platform,
     infer_needs_from_plugin,
 )
-from kernel_tools import (
+from core_tools import (
     read_file,
     search_web,
     search_files,
@@ -73,8 +73,8 @@ META_TOOLS = {
     "send_message",
 }
 
-_KERNEL_TOOL_PURPOSE_HINTS = {
-    "list_tools": "list kernel and enabled plugin tools for current platform",
+_CORE_TOOL_PURPOSE_HINTS = {
+    "list_tools": "list core and enabled plugin tools for current platform",
     "get_plugin_help": "show plugin usage example and guidance",
     "read_file": "read local file contents",
     "search_web": "web search for current information",
@@ -484,7 +484,7 @@ def _resolve_memory_scope(args: Dict[str, Any], origin: Optional[Dict[str, Any]]
     if raw_scope in {"global", "user", "room"}:
         return raw_scope
     if raw_scope:
-        # Preserve invalid explicit values so kernel validation can return a useful error.
+        # Preserve invalid explicit values so core tool validation can return a useful error.
         return raw_scope
 
     args_origin = args.get("origin") if isinstance(args.get("origin"), dict) else None
@@ -527,11 +527,11 @@ def list_tools(
 ) -> Dict[str, Any]:
     normalized_platform = normalize_platform(platform) or str(platform or "").strip().lower() or "webui"
 
-    kernel_tools: list[str] = []
+    core_tools: list[str] = []
     for tool_id in sorted(META_TOOLS):
         token = str(tool_id or "").strip()
         if token:
-            kernel_tools.append(token)
+            core_tools.append(token)
 
     enabled_check = _effective_enabled_predicate(enabled_predicate)
     plugin_tools: list[Dict[str, str]] = []
@@ -557,9 +557,9 @@ def list_tools(
         "tool": "list_tools",
         "ok": True,
         "platform": normalized_platform,
-        "kernel_tools": kernel_tools,
+        "core_tools": core_tools,
         "plugin_tools": plugin_tools,
-        "summary_for_user": f"Found {len(kernel_tools)} kernel tools and {len(plugin_tools)} enabled plugin tools on {normalized_platform}.",
+        "summary_for_user": f"Found {len(core_tools)} core tools and {len(plugin_tools)} enabled plugin tools on {normalized_platform}.",
     }
 
 
@@ -645,13 +645,11 @@ def run_meta_tool(
     if func == "read_url":
         return read_url(
             str(args.get("url") or ""),
-            max_bytes=int(args.get("max_bytes") or 200000),
             timeout_sec=int(args.get("timeout_sec") or 15),
         )
     if func == "inspect_webpage":
         return inspect_webpage(
             str(args.get("url") or ""),
-            max_bytes=int(args.get("max_bytes") or 300000),
             timeout_sec=int(args.get("timeout_sec") or 20),
             max_links=int(args.get("max_links") or 20),
             max_images=int(args.get("max_images") or 20),
@@ -663,7 +661,6 @@ def run_meta_tool(
             str(args.get("url") or ""),
             filename=args.get("filename"),
             subdir=args.get("subdir"),
-            max_bytes=int(args.get("max_bytes") or 25000000),
             timeout_sec=int(args.get("timeout_sec") or 30),
             platform=platform,
             origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
@@ -685,7 +682,6 @@ def run_meta_tool(
             destination=args.get("destination"),
             overwrite=overwrite,
             max_files=int(args.get("max_files") or 1000),
-            max_total_bytes=int(args.get("max_total_bytes") or 100000000),
         )
 
     if func == "write_workspace_note":

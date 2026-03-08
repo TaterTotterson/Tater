@@ -67,8 +67,8 @@ TOOL_NAME_ALIASES = {
     "inspect_website": "inspect_webpage",
 }
 
-_KERNEL_TOOL_PURPOSE_HINTS = {
-    "list_tools": "list kernel and enabled plugin tools for current platform",
+_CORE_TOOL_PURPOSE_HINTS = {
+    "list_tools": "list core and enabled plugin tools for current platform",
     "get_plugin_help": "show plugin usage example and guidance",
     "read_file": "read local file contents",
     "search_web": "web search for current information",
@@ -92,7 +92,7 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
     "attach_file": "attach an available artifact or local file to the current conversation",
     "send_message": "queue a structured cross-platform notification or message",
 }
-_KERNEL_TOOL_USAGE_HINTS = {
+_CORE_TOOL_USAGE_HINTS = {
     "list_tools": '{"function":"list_tools","arguments":{}}',
     "get_plugin_help": '{"function":"get_plugin_help","arguments":{"plugin_id":"<plugin_id>"}}',
     "read_file": '{"function":"read_file","arguments":{"path":"<path>"}}',
@@ -537,16 +537,16 @@ def _plugin_usage_text(plugin: Any) -> str:
     return '{"function":"","arguments":{}}'
 
 
-def _kernel_tool_purpose(tool_id: str) -> str:
-    return tool_index_helpers.kernel_tool_purpose(
+def _core_tool_purpose(tool_id: str) -> str:
+    return tool_index_helpers.core_tool_purpose(
         tool_id,
-        kernel_tool_purpose_hints=_KERNEL_TOOL_PURPOSE_HINTS,
+        core_tool_purpose_hints=_CORE_TOOL_PURPOSE_HINTS,
     )
 
 
-def _kernel_tool_usage(tool_id: str) -> str:
+def _core_tool_usage(tool_id: str) -> str:
     key = str(tool_id or "").strip()
-    usage = str(_KERNEL_TOOL_USAGE_HINTS.get(key) or "").strip()
+    usage = str(_CORE_TOOL_USAGE_HINTS.get(key) or "").strip()
     if usage:
         return usage
     if key:
@@ -554,8 +554,8 @@ def _kernel_tool_usage(tool_id: str) -> str:
     return '{"function":"","arguments":{}}'
 
 
-def _ordered_kernel_tool_ids() -> List[str]:
-    return tool_index_helpers.ordered_kernel_tool_ids(
+def _ordered_core_tool_ids() -> List[str]:
+    return tool_index_helpers.ordered_core_tool_ids(
         meta_tools=META_TOOLS,
     )
 
@@ -570,9 +570,9 @@ def _enabled_tool_mini_index(
         platform=platform,
         registry=registry,
         enabled_predicate=enabled_predicate,
-        ordered_kernel_tool_ids_fn=_ordered_kernel_tool_ids,
-        kernel_tool_purpose_fn=_kernel_tool_purpose,
-        kernel_tool_usage_fn=_kernel_tool_usage,
+        ordered_core_tool_ids_fn=_ordered_core_tool_ids,
+        core_tool_purpose_fn=_core_tool_purpose,
+        core_tool_usage_fn=_core_tool_usage,
         plugin_supports_platform_fn=plugin_supports_platform,
         plugin_usage_text_fn=_plugin_usage_text,
         tool_purpose_fn=_tool_purpose,
@@ -586,7 +586,7 @@ def _enabled_tool_ids(
     enabled_predicate: Optional[Callable[[str], bool]],
 ) -> List[str]:
     enabled_check = enabled_predicate or (lambda _name: True)
-    tool_ids: List[str] = list(_ordered_kernel_tool_ids())
+    tool_ids: List[str] = list(_ordered_core_tool_ids())
     for plugin_id, plugin in sorted(registry.items(), key=lambda kv: str(kv[0]).lower()):
         if not enabled_check(plugin_id):
             continue
@@ -2493,7 +2493,7 @@ async def run_cerberus_turn(
             {
                 "role": "system",
                 "content": (
-                    "Tool catalog for this turn (kernel + enabled plugins on this platform):\n"
+                    "Tool catalog for this turn (core tools + enabled plugins on this platform):\n"
                     f"{tool_index}\n\n"
                     "Use this catalog directly for tool selection and argument shape."
                 ),
