@@ -806,7 +806,6 @@ def _render_installed_portals_tab(
     portal_registry: list[dict],
     start_portal_fn,
     stop_portal_fn,
-    wipe_memory_core_data_fn,
 ):
     _render_catalog_warnings(catalog_errors)
     installed_entries = _build_installed_portal_entries(catalog_items)
@@ -867,7 +866,6 @@ def _render_installed_portals_tab(
                         redis_client,
                         start_portal_fn=start_portal_fn,
                         stop_portal_fn=stop_portal_fn,
-                        wipe_memory_core_data_fn=wipe_memory_core_data_fn,
                     )
             else:
                 running_text = "running" if entry["running"] else "stopped"
@@ -1142,7 +1140,6 @@ def render_portal_store_page(
     portal_registry: list[dict],
     start_portal_fn,
     stop_portal_fn,
-    wipe_memory_core_data_fn,
 ):
     st.title("Portal Manager")
     st.caption("Install portals from configured repos, manage installed portals, and edit portal repo settings.")
@@ -1162,7 +1159,6 @@ def render_portal_store_page(
             portal_registry=portal_registry,
             start_portal_fn=start_portal_fn,
             stop_portal_fn=stop_portal_fn,
-            wipe_memory_core_data_fn=wipe_memory_core_data_fn,
         )
 
     with store_tab:
