@@ -33,19 +33,19 @@ def tool_purpose(
     return text
 
 
-def core_tool_purpose(
+def kernel_tool_purpose(
     tool_id: str,
     *,
-    core_tool_purpose_hints: Dict[str, str],
+    kernel_tool_purpose_hints: Dict[str, str],
 ) -> str:
-    text = core_tool_purpose_hints.get(str(tool_id or "").strip(), "")
+    text = kernel_tool_purpose_hints.get(str(tool_id or "").strip(), "")
     if text:
         return text
     fallback = str(tool_id or "").strip().replace("_", " ")
-    return fallback or "core tool"
+    return fallback or "kernel tool"
 
 
-def ordered_core_tool_ids(
+def ordered_kernel_tool_ids(
     *,
     meta_tools: Dict[str, Any],
 ) -> List[str]:
@@ -67,20 +67,20 @@ def enabled_tool_mini_index(
     platform: str,
     registry: Dict[str, Any],
     enabled_predicate: Optional[Callable[[str], bool]],
-    ordered_core_tool_ids_fn: Callable[[], List[str]],
-    core_tool_purpose_fn: Callable[[str], str],
-    core_tool_usage_fn: Callable[[str], str],
+    ordered_kernel_tool_ids_fn: Callable[[], List[str]],
+    kernel_tool_purpose_fn: Callable[[str], str],
+    kernel_tool_usage_fn: Callable[[str], str],
     plugin_supports_platform_fn: Callable[[Any, str], bool],
     plugin_usage_text_fn: Callable[[Any], str],
     tool_purpose_fn: Callable[[Any], str],
 ) -> str:
-    core_rows: List[str] = []
-    for tool_id in ordered_core_tool_ids_fn():
-        description = core_tool_purpose_fn(tool_id)
-        usage = _usage_text(core_tool_usage_fn(tool_id), tool_id)
-        core_rows.append(f"- id: {tool_id} | description: {description} | usage: {usage}")
-    if not core_rows:
-        core_rows.append("- (none)")
+    kernel_rows: List[str] = []
+    for tool_id in ordered_kernel_tool_ids_fn():
+        description = kernel_tool_purpose_fn(tool_id)
+        usage = _usage_text(kernel_tool_usage_fn(tool_id), tool_id)
+        kernel_rows.append(f"- id: {tool_id} | description: {description} | usage: {usage}")
+    if not kernel_rows:
+        kernel_rows.append("- (none)")
 
     enabled_check = enabled_predicate or (lambda _name: True)
     plugin_rows: List[str] = []
@@ -96,8 +96,8 @@ def enabled_tool_mini_index(
         plugin_rows.append("- (none)")
 
     return (
-        "Core tools:\n"
-        + "\n".join(core_rows)
+        "Kernel tools:\n"
+        + "\n".join(kernel_rows)
         + "\nEnabled plugin tools on this platform:\n"
         + "\n".join(plugin_rows)
     )

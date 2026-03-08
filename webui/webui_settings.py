@@ -3,6 +3,11 @@ import json
 from typing import Any, Callable
 
 import streamlit as st
+from webui.webui_cerberus import (
+    render_cerberus_data_tools,
+    render_cerberus_metrics_dashboard,
+    render_cerberus_settings,
+)
 
 
 def render_webui_settings(
@@ -85,7 +90,7 @@ def render_webui_settings(
 
 def render_web_search_settings(*, redis_client) -> None:
     st.subheader("Web Search")
-    st.caption("Used by core tool `search_web` for research and current information.")
+    st.caption("Used by kernel `search_web` for research and current information.")
 
     legacy_web_search = redis_client.hgetall("plugin_settings:Web Search") or {}
     web_search_api_default = (
@@ -394,8 +399,8 @@ def render_settings_page(
     file_blob_key_prefix: str,
 ) -> None:
     st.title("Settings")
-    tab_general, tab_integrations, tab_emoji, tab_advanced = st.tabs(
-        ["General", "Integrations", "Emoji", "Advanced"]
+    tab_general, tab_integrations, tab_emoji, tab_advanced, tab_cerberus = st.tabs(
+        ["General", "Integrations", "Emoji", "Advanced", "Cerberus"]
     )
 
     with tab_general:
@@ -440,3 +445,17 @@ def render_settings_page(
             get_admin_only_plugins_fn=get_admin_only_plugins_fn,
             get_registry_fn=get_registry_fn,
         )
+
+    with tab_cerberus:
+        cerberus_tab_settings, cerberus_tab_metrics, cerberus_tab_data = st.tabs(
+            ["Cerberus", "Cerberus Metrics", "Cerberus Data"]
+        )
+        with cerberus_tab_settings:
+            render_cerberus_settings()
+        with cerberus_tab_metrics:
+            render_cerberus_metrics_dashboard(
+                key_prefix="settings_cerberus_dashboard",
+                allow_controls=False,
+            )
+        with cerberus_tab_data:
+            render_cerberus_data_tools(key_prefix="settings_cerberus_data")
