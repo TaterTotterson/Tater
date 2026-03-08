@@ -42,11 +42,6 @@ from vision_settings import (
     save_vision_settings as save_shared_vision_settings,
 )
 from emoji_responder import get_emoji_settings as get_core_emoji_settings, save_emoji_settings as save_core_emoji_settings
-from webui.webui_cerberus import (
-    render_cerberus_settings,
-    render_cerberus_metrics_dashboard,
-    render_cerberus_data_tools,
-)
 from webui.webui_plugin_store import (
     _enabled_missing_plugin_ids,
     ensure_plugins_ready,
@@ -409,7 +404,7 @@ def _enqueue_chat_job(
 
         async def _wait_callback(func_name, plugin_obj):
             if plugin_obj is None:
-                display_name = f"core::{func_name}"
+                display_name = f"kernel::{func_name}"
             else:
                 display_name = (
                     getattr(plugin_obj, "plugin_name", None)
@@ -1306,7 +1301,7 @@ def _render_cores_page(core_tabs: List[Dict[str, Any]]) -> None:
             continue
         dynamic_tabs.append(spec)
 
-    tab_labels = ["Manage", "Cerberus", *[str(item.get("label") or "").strip() for item in dynamic_tabs]]
+    tab_labels = ["Manage", *[str(item.get("label") or "").strip() for item in dynamic_tabs]]
     tab_views = st.tabs(tab_labels)
 
     with tab_views[0]:
@@ -1316,18 +1311,7 @@ def _render_cores_page(core_tabs: List[Dict[str, Any]]) -> None:
             stop_core_fn=_stop_core,
         )
 
-    with tab_views[1]:
-        cerberus_tab_settings, cerberus_tab_metrics, cerberus_tab_data = st.tabs(
-            ["Cerberus", "Cerberus Metrics", "Cerberus Data"]
-        )
-        with cerberus_tab_settings:
-            render_cerberus_settings()
-        with cerberus_tab_metrics:
-            render_cerberus_metrics_dashboard(key_prefix="core_settings_cerberus_dashboard", allow_controls=False)
-        with cerberus_tab_data:
-            render_cerberus_data_tools(key_prefix="core_settings_cerberus_data")
-
-    for idx, spec in enumerate(dynamic_tabs, start=2):
+    for idx, spec in enumerate(dynamic_tabs, start=1):
         with tab_views[idx]:
             _render_core_webui_tab(spec)
 

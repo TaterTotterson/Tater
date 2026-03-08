@@ -197,7 +197,7 @@ MEMORY_VOLATILE_PREFIXES = (
     "session.",
 )
 
-logger = logging.getLogger("core_tools")
+logger = logging.getLogger("kernel_tools")
 
 
 def _ensure_dirs() -> None:
