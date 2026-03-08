@@ -79,7 +79,7 @@ def _load_core_settings(module_key: str) -> tuple[Dict[str, Any] | None, str]:
     module_name = f"cores.{module_key}"
     try:
         if module_name in sys.modules:
-            module = importlib.reload(sys.modules[module_name])
+            module = sys.modules[module_name]
         else:
             module = importlib.import_module(module_name)
     except Exception as exc:
