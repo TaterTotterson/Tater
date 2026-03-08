@@ -47,7 +47,7 @@ Some Portals are paired with companion repos/apps that complete the end-user int
 | https://github.com/TaterTotterson/tater_automations | HA Automations Portal | Native Home Assistant automation actions that call Tater tools directly. |
 | https://github.com/TaterTotterson/Tater-MacOS | macOS Portal | Menu bar companion app and bridge client for desktop chat, quick actions, and uploads. |
 | https://github.com/TaterTotterson/skin.cortana.tater-xbmc | XBMC Portal | OG Xbox/XBMC4Xbox skin and script integration for on-console Tater access. |
-| https://github.com/TaterTotterson/Tater/wiki/How-to-Build-the-%E2%80%9CTater%E2%80%9D-Shortcut | HomeKit Portal | Shortcut guide for Siri -> HomeKit bridge -> Tater workflows. |
+| https://taterassistant.com/portals/homekit.html | HomeKit Portal | Shortcut guide for Siri -> HomeKit bridge -> Tater workflows. |
 
 ---
 
