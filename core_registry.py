@@ -75,6 +75,41 @@ def _derive_label(module_key: str, settings: Dict[str, Any]) -> str:
     return f"{_humanize_core_key(module_key)} Core Settings"
 
 
+def _coerce_bool(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if text in {"0", "false", "no", "off", "disabled"}:
+        return False
+    return default
+
+
+def _load_webui_tab_config(module: Any) -> Dict[str, Any]:
+    raw = getattr(module, "CORE_WEBUI_TAB", None)
+    if not isinstance(raw, dict):
+        return {}
+
+    label = str(raw.get("label") or "").strip()
+    if not label:
+        return {}
+
+    order_raw = raw.get("order", 1000)
+    try:
+        order = int(order_raw)
+    except Exception:
+        order = 1000
+
+    return {
+        "label": label,
+        "order": order,
+        "requires_running": _coerce_bool(raw.get("requires_running"), True),
+    }
+
+
 def _load_core_settings(module_key: str) -> tuple[Dict[str, Any] | None, str]:
     module_name = f"cores.{module_key}"
     try:
@@ -93,6 +128,9 @@ def _load_core_settings(module_key: str) -> tuple[Dict[str, Any] | None, str]:
         settings["required"] = {}
 
     settings["module_import_name"] = str(getattr(module, "__name__", "")).strip()
+    settings["webui_tab"] = _load_webui_tab_config(module)
+    settings["has_webui_tab_renderer"] = callable(getattr(module, "render_webui_tab", None))
+    settings["has_manager_extras_renderer"] = callable(getattr(module, "render_core_manager_extras", None))
     return settings, ""
 
 

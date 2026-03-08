@@ -392,13 +392,10 @@ def render_settings_page(
     webui_attach_ttl_seconds: int,
     file_index_key: str,
     file_blob_key_prefix: str,
-    render_cerberus_settings_fn: Callable[[], None],
-    render_cerberus_metrics_dashboard_fn: Callable[..., None],
-    render_cerberus_data_tools_fn: Callable[..., None],
 ) -> None:
     st.title("Settings")
-    tab_general, tab_integrations, tab_emoji, tab_cerberus, tab_advanced = st.tabs(
-        ["General", "Integrations", "Emoji", "Cerberus", "Advanced"]
+    tab_general, tab_integrations, tab_emoji, tab_advanced = st.tabs(
+        ["General", "Integrations", "Emoji", "Advanced"]
     )
 
     with tab_general:
@@ -435,17 +432,6 @@ def render_settings_page(
             get_emoji_responder_settings_fn=get_emoji_responder_settings_fn,
             save_emoji_responder_settings_fn=save_emoji_responder_settings_fn,
         )
-
-    with tab_cerberus:
-        cerberus_tab_settings, cerberus_tab_metrics, cerberus_tab_data = st.tabs(
-            ["Cerberus", "Cerberus Metrics", "Cerberus Data"]
-        )
-        with cerberus_tab_settings:
-            render_cerberus_settings_fn()
-        with cerberus_tab_metrics:
-            render_cerberus_metrics_dashboard_fn(key_prefix="cerberus_tab_dashboard", allow_controls=False)
-        with cerberus_tab_data:
-            render_cerberus_data_tools_fn(key_prefix="cerberus_tab_data")
 
     with tab_advanced:
         render_admin_gating_settings(
