@@ -47,7 +47,6 @@ from webui.webui_cerberus import (
     render_cerberus_metrics_dashboard,
     render_cerberus_data_tools,
 )
-from webui.webui_memory import wipe_memory_core_data
 from webui.webui_plugin_store import (
     _enabled_missing_plugin_ids,
     ensure_plugins_ready,
@@ -1296,7 +1295,7 @@ def _render_core_webui_tab(tab_spec: Dict[str, Any]) -> None:
 
 
 def _render_cores_page(core_tabs: List[Dict[str, Any]]) -> None:
-    st.title("Core Settings")
+    st.title("Cores")
 
     dynamic_tabs = []
     for spec in core_tabs or []:
@@ -1307,10 +1306,17 @@ def _render_cores_page(core_tabs: List[Dict[str, Any]]) -> None:
             continue
         dynamic_tabs.append(spec)
 
-    tab_labels = ["Cerberus", *[str(item.get("label") or "").strip() for item in dynamic_tabs]]
+    tab_labels = ["Manage", "Cerberus", *[str(item.get("label") or "").strip() for item in dynamic_tabs]]
     tab_views = st.tabs(tab_labels)
 
     with tab_views[0]:
+        render_core_store_page(
+            core_registry=core_registry,
+            start_core_fn=_start_core,
+            stop_core_fn=_stop_core,
+        )
+
+    with tab_views[1]:
         cerberus_tab_settings, cerberus_tab_metrics, cerberus_tab_data = st.tabs(
             ["Cerberus", "Cerberus Metrics", "Cerberus Data"]
         )
@@ -1321,7 +1327,7 @@ def _render_cores_page(core_tabs: List[Dict[str, Any]]) -> None:
         with cerberus_tab_data:
             render_cerberus_data_tools(key_prefix="core_settings_cerberus_data")
 
-    for idx, spec in enumerate(dynamic_tabs, start=1):
+    for idx, spec in enumerate(dynamic_tabs, start=2):
         with tab_views[idx]:
             _render_core_webui_tab(spec)
 
@@ -1334,15 +1340,25 @@ core_tabs_by_label = {
     if str(item.get("label") or "").strip()
 }
 
-nav_options = ["Chat", "Core Settings", "Verba Manager", "Portal Manager", "Core Manager", "Settings"]
+nav_options = ["Chat", "Verbas", "Portals", "Cores", "Settings"]
 if "active_view" not in st.session_state:
     st.session_state.active_view = nav_options[0]
-elif st.session_state.active_view in {"Plugins", "Verba Plugins", "Verba's", "Plugin Manager", "Auto Plugins", "Automation Plugins"}:
-    st.session_state.active_view = "Verba Manager"
+elif st.session_state.active_view in {
+    "Plugins",
+    "Verba Plugins",
+    "Verba's",
+    "Plugin Manager",
+    "Auto Plugins",
+    "Automation Plugins",
+    "Verba Manager",
+}:
+    st.session_state.active_view = "Verbas"
+elif st.session_state.active_view in {"Portal Manager"}:
+    st.session_state.active_view = "Portals"
 elif st.session_state.active_view in core_tabs_by_label:
-    st.session_state.active_view = "Core Settings"
-elif st.session_state.active_view in {"AI Tasks", "Memory", "RSS Feeds", "Cores"}:
-    st.session_state.active_view = "Core Settings"
+    st.session_state.active_view = "Cores"
+elif st.session_state.active_view in {"AI Tasks", "Memory", "RSS Feeds", "Core Settings", "Core Manager"}:
+    st.session_state.active_view = "Cores"
 elif st.session_state.active_view not in nav_options:
     st.session_state.active_view = nav_options[0]
 
@@ -1634,26 +1650,17 @@ if active_view == "Chat":
             except Exception:
                 pass
 
-elif active_view == "Core Settings":
+elif active_view == "Cores":
     _render_cores_page(core_webui_tabs)
 
-elif active_view == "Verba Manager":
+elif active_view == "Verbas":
     render_plugin_store_page()
 
-elif active_view == "Portal Manager":
+elif active_view == "Portals":
     render_portal_store_page(
         portal_registry=portal_registry,
         start_portal_fn=_start_portal,
         stop_portal_fn=_stop_portal,
-        wipe_memory_core_data_fn=wipe_memory_core_data,
-    )
-
-elif active_view == "Core Manager":
-    render_core_store_page(
-        core_registry=core_registry,
-        start_core_fn=_start_core,
-        stop_core_fn=_stop_core,
-        wipe_memory_core_data_fn=wipe_memory_core_data,
     )
 
 elif active_view == "Settings":

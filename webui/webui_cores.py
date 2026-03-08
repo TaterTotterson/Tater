@@ -52,8 +52,6 @@ def _import_core_module_for_ui(module_key: str):
 def _render_core_manager_extras(
     core: Dict[str, Any],
     redis_client,
-    *,
-    wipe_memory_core_data_fn,
 ) -> None:
     key = str((core or {}).get("key") or "").strip()
     if not key:
@@ -74,7 +72,6 @@ def _render_core_manager_extras(
             core=core,
             redis_client=redis_client,
             surface_kind="core",
-            wipe_memory_core_data_fn=wipe_memory_core_data_fn,
         )
     except Exception as exc:
         st.error(f"Failed to render core extras for {key}: {exc}")
@@ -86,13 +83,11 @@ def render_core_controls(
     *,
     start_core_fn,
     stop_core_fn,
-    wipe_memory_core_data_fn,
 ):
     def _extras_renderer(**_kwargs):
         _render_core_manager_extras(
             core,
             redis_client,
-            wipe_memory_core_data_fn=wipe_memory_core_data_fn,
         )
 
     return render_portal_controls(
@@ -100,7 +95,6 @@ def render_core_controls(
         redis_client,
         start_portal_fn=start_core_fn,
         stop_portal_fn=stop_core_fn,
-        wipe_memory_core_data_fn=wipe_memory_core_data_fn,
         surface_kind="core",
         render_surface_extras_fn=_extras_renderer,
     )

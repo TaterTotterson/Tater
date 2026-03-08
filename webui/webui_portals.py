@@ -53,7 +53,6 @@ def render_portal_controls(
     *,
     start_portal_fn,
     stop_portal_fn,
-    wipe_memory_core_data_fn,
     surface_kind: str = "portal",
     render_surface_extras_fn=None,
 ):
@@ -298,7 +297,6 @@ def render_portal_controls(
             surface=portal,
             redis_client=redis_client,
             surface_kind=surface_text,
-            wipe_memory_core_data_fn=wipe_memory_core_data_fn,
         )
 
 
@@ -312,7 +310,6 @@ def render_portals_panel(
     redis_client,
     start_portal_fn,
     stop_portal_fn,
-    wipe_memory_core_data_fn,
     auto_connected=None,
 ):
     st.subheader("Portals")
@@ -324,5 +321,4 @@ def render_portals_panel(
                 redis_client,
                 start_portal_fn=start_portal_fn,
                 stop_portal_fn=stop_portal_fn,
-                wipe_memory_core_data_fn=wipe_memory_core_data_fn,
             )

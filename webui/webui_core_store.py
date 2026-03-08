@@ -806,7 +806,6 @@ def _render_installed_cores_tab(
     core_registry: list[dict],
     start_core_fn,
     stop_core_fn,
-    wipe_memory_core_data_fn,
 ):
     _render_catalog_warnings(catalog_errors)
     installed_entries = _build_installed_core_entries(catalog_items)
@@ -867,7 +866,6 @@ def _render_installed_cores_tab(
                         redis_client,
                         start_core_fn=start_core_fn,
                         stop_core_fn=stop_core_fn,
-                        wipe_memory_core_data_fn=wipe_memory_core_data_fn,
                     )
             else:
                 running_text = "running" if entry["running"] else "stopped"
@@ -1142,7 +1140,6 @@ def render_core_store_page(
     core_registry: list[dict],
     start_core_fn,
     stop_core_fn,
-    wipe_memory_core_data_fn,
 ):
     st.title("Core Manager")
     st.caption("Install cores from configured repos, manage installed cores, and edit core repo settings.")
@@ -1162,7 +1159,6 @@ def render_core_store_page(
             core_registry=core_registry,
             start_core_fn=start_core_fn,
             stop_core_fn=stop_core_fn,
-            wipe_memory_core_data_fn=wipe_memory_core_data_fn,
         )
 
     with store_tab:
