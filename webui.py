@@ -12,6 +12,7 @@ import importlib
 import threading
 import sys
 import uuid
+from pathlib import Path
 import plugin_registry as plugin_registry_mod
 import core_registry as core_registry_module
 from datetime import datetime
@@ -112,6 +113,35 @@ WEBUI_ATTACH_INDEX_MAX = int(os.getenv("WEBUI_ATTACH_INDEX_MAX", "500"))
 
 FILE_BLOB_KEY_PREFIX = "webui:file:"
 FILE_INDEX_KEY = "webui:file_index"
+
+_APP_ROOT = Path(__file__).resolve().parent
+
+
+def _resolve_module_dir(env_name: str, default_subdir: str) -> Path:
+    raw = str(os.getenv(env_name, "") or "").strip()
+    if not raw:
+        return (_APP_ROOT / default_subdir).resolve()
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        candidate = (_APP_ROOT / candidate).resolve()
+    return candidate.resolve()
+
+
+PORTAL_MODULE_DIR = _resolve_module_dir("TATER_PORTAL_DIR", "portals")
+CORE_MODULE_DIR = _resolve_module_dir("TATER_CORE_DIR", "cores")
+
+
+def _ensure_surface_import_context(surface_dir: Path, package_name: str) -> None:
+    try:
+        parent = str(surface_dir.parent)
+        if parent and parent not in sys.path:
+            sys.path.insert(0, parent)
+        importlib.invalidate_caches()
+        if package_name not in sys.modules:
+            importlib.import_module(package_name)
+    except Exception:
+        # Import attempt will raise a clean error in _import_* if package/module is still unavailable.
+        return
 # Redis configuration for the web UI (using a separate DB)
 redis_host = os.getenv('REDIS_HOST', '127.0.0.1')
 redis_port = int(os.getenv('REDIS_PORT', 6379))
@@ -479,6 +509,7 @@ def _import_portal_module(key: str):
     module_key = str(key or "").strip()
     if not module_key:
         raise ImportError("Missing portal module key")
+    _ensure_surface_import_context(PORTAL_MODULE_DIR, "portals")
     module_name = f"portals.{module_key}"
     errors = []
     try:
@@ -557,6 +588,7 @@ def _import_core_module(key: str):
     module_key = str(key or "").strip()
     if not module_key:
         raise ImportError("Missing core module key")
+    _ensure_surface_import_context(CORE_MODULE_DIR, "cores")
     module_name = f"cores.{module_key}"
     errors = []
     try:
