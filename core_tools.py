@@ -82,7 +82,6 @@ _SEARCH_DEFAULT_MAX_RESULTS = int(os.getenv("TATER_SEARCH_MAX_RESULTS", "100"))
 _SEARCH_MAX_FILE_CHARS = int(os.getenv("TATER_SEARCH_MAX_FILE_CHARS", "200000"))
 _ARCHIVE_LIST_MAX_ENTRIES = int(os.getenv("TATER_ARCHIVE_LIST_MAX_ENTRIES", "1000"))
 _ARCHIVE_EXTRACT_MAX_FILES = int(os.getenv("TATER_ARCHIVE_EXTRACT_MAX_FILES", "1000"))
-_ARCHIVE_EXTRACT_MAX_TOTAL_BYTES = int(os.getenv("TATER_ARCHIVE_EXTRACT_MAX_TOTAL_BYTES", "100000000"))
 
 WEB_SEARCH_API_KEY_REDIS_KEY = "tater:web_search:google_api_key"
 WEB_SEARCH_CX_REDIS_KEY = "tater:web_search:google_cx"
@@ -198,7 +197,7 @@ MEMORY_VOLATILE_PREFIXES = (
     "session.",
 )
 
-logger = logging.getLogger("kernel_tools")
+logger = logging.getLogger("core_tools")
 
 
 def _ensure_dirs() -> None:
@@ -2172,7 +2171,7 @@ def _ai_tasks_default_title(task_prompt: str, recurrence: Dict[str, Any], interv
 def read_url(
     url: str,
     *,
-    max_bytes: int = 200_000,
+    max_bytes: Optional[int] = None,
     timeout_sec: int = 15,
 ) -> Dict[str, Any]:
     normalized_url = _normalize_url_input(url)
@@ -2187,10 +2186,8 @@ def read_url(
         with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
             content_type = resp.headers.get("Content-Type", "") or ""
             final_url = resp.geturl() or normalized_url
-            raw = resp.read(max_bytes + 1)
-        truncated = len(raw) > max_bytes
-        if truncated:
-            raw = raw[:max_bytes]
+            raw = resp.read()
+            truncated = False
         # Only allow textual content.
         if not (
             content_type.startswith("text/")
@@ -2397,7 +2394,7 @@ def _score_image_candidate(image: Dict[str, Any]) -> int:
 def inspect_webpage(
     url: str,
     *,
-    max_bytes: int = 300_000,
+    max_bytes: Optional[int] = None,
     timeout_sec: int = 20,
     max_links: int = 20,
     max_images: int = 20,
@@ -2416,13 +2413,10 @@ def inspect_webpage(
         with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
             content_type = _as_text(resp.headers.get("Content-Type") or "")
             final_url = resp.geturl() or normalized_url
-            raw = resp.read(max_bytes + 1)
+            raw = resp.read()
+            truncated = False
     except Exception as e:
         return {"tool": "inspect_webpage", "ok": False, "error": str(e)}
-
-    truncated = len(raw) > max_bytes
-    if truncated:
-        raw = raw[:max_bytes]
 
     content_type_norm = content_type.split(";", 1)[0].strip().lower()
     if content_type_norm and not (
@@ -2514,7 +2508,7 @@ def download_file(
     *,
     filename: Optional[str] = None,
     subdir: Optional[str] = None,
-    max_bytes: int = 25_000_000,
+    max_bytes: Optional[int] = None,
     timeout_sec: int = 30,
     platform: Optional[str] = None,
     origin: Optional[Dict[str, Any]] = None,
@@ -2553,34 +2547,12 @@ def download_file(
         with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
             content_type = resp.headers.get("Content-Type", "") or ""
             final_url = resp.geturl() or normalized_url
-            length = resp.headers.get("Content-Length")
-            if length:
-                try:
-                    if int(length) > max_bytes:
-                        return {
-                            "tool": "download_file",
-                            "ok": False,
-                            "error": f"File exceeds max_bytes ({max_bytes}).",
-                        }
-                except Exception:
-                    pass
             with dest.open("wb") as f:
                 while True:
                     chunk = resp.read(8192)
                     if not chunk:
                         break
                     size += len(chunk)
-                    if size > max_bytes:
-                        f.close()
-                        try:
-                            dest.unlink()
-                        except Exception:
-                            pass
-                        return {
-                            "tool": "download_file",
-                            "ok": False,
-                            "error": f"File exceeds max_bytes ({max_bytes}).",
-                        }
                     f.write(chunk)
                     hasher.update(chunk)
     except Exception as e:
@@ -3018,7 +2990,7 @@ def extract_archive(
     destination: Optional[str] = None,
     overwrite: bool = False,
     max_files: int = _ARCHIVE_EXTRACT_MAX_FILES,
-    max_total_bytes: int = _ARCHIVE_EXTRACT_MAX_TOTAL_BYTES,
+    max_total_bytes: Optional[int] = None,
 ) -> Dict[str, Any]:
     _ensure_dirs()
     allowed = [AGENT_LAB_DIR]
@@ -3040,12 +3012,6 @@ def extract_archive(
         dest_path.mkdir(parents=True, exist_ok=True)
 
     max_files_i = _coerce_int(max_files, default=_ARCHIVE_EXTRACT_MAX_FILES, min_value=1, max_value=20000)
-    max_bytes_i = _coerce_int(
-        max_total_bytes,
-        default=_ARCHIVE_EXTRACT_MAX_TOTAL_BYTES,
-        min_value=1,
-        max_value=2_000_000_000,
-    )
 
     extracted: List[str] = []
     skipped: List[Dict[str, str]] = []
@@ -3082,10 +3048,6 @@ def extract_archive(
                         continue
                     if extracted_count >= max_files_i:
                         _record_skip(name, "max_files_reached")
-                        limit_hit = True
-                        break
-                    if total_bytes + size > max_bytes_i:
-                        _record_skip(name, "max_total_bytes_reached")
                         limit_hit = True
                         break
                     if target.exists() and not overwrite:
@@ -3142,10 +3104,6 @@ def extract_archive(
                         _record_skip(name, "max_files_reached")
                         limit_hit = True
                         break
-                    if total_bytes + size > max_bytes_i:
-                        _record_skip(name, "max_total_bytes_reached")
-                        limit_hit = True
-                        break
                     if target.exists() and not overwrite:
                         _record_skip(name, "exists")
                         continue
@@ -3186,10 +3144,6 @@ def extract_archive(
                         continue
                     if extracted_count >= max_files_i:
                         _record_skip(name, "max_files_reached")
-                        limit_hit = True
-                        break
-                    if total_bytes + int(info.file_size) > max_bytes_i:
-                        _record_skip(name, "max_total_bytes_reached")
                         limit_hit = True
                         break
                     if target.exists() and not overwrite:
@@ -3233,10 +3187,6 @@ def extract_archive(
                     size = int(member.size or 0)
                     if extracted_count >= max_files_i:
                         _record_skip(name, "max_files_reached")
-                        limit_hit = True
-                        break
-                    if total_bytes + size > max_bytes_i:
-                        _record_skip(name, "max_total_bytes_reached")
                         limit_hit = True
                         break
                     if target.exists() and not overwrite:

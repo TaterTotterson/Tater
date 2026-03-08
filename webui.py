@@ -409,7 +409,7 @@ def _enqueue_chat_job(
 
         async def _wait_callback(func_name, plugin_obj):
             if plugin_obj is None:
-                display_name = f"kernel::{func_name}"
+                display_name = f"core::{func_name}"
             else:
                 display_name = (
                     getattr(plugin_obj, "plugin_name", None)
