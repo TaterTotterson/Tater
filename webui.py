@@ -47,8 +47,7 @@ from webui.webui_cerberus import (
     render_cerberus_metrics_dashboard,
     render_cerberus_data_tools,
 )
-from webui.webui_ai_tasks import render_ai_tasks_page
-from webui.webui_memory import render_memory_page, wipe_memory_core_data
+from webui.webui_memory import wipe_memory_core_data
 from webui.webui_plugin_store import (
     _enabled_missing_plugin_ids,
     ensure_plugins_ready,
@@ -584,7 +583,7 @@ def _core_thread_alive(key: str) -> bool:
         return bool(thread and thread.is_alive())
 
 
-def _import_core_module(key: str):
+def _import_core_module(key: str, *, reload_module: bool = True):
     module_key = str(key or "").strip()
     if not module_key:
         raise ImportError("Missing core module key")
@@ -594,7 +593,9 @@ def _import_core_module(key: str):
     try:
         importlib.invalidate_caches()
         if module_name in sys.modules:
-            return importlib.reload(sys.modules[module_name])
+            if reload_module:
+                return importlib.reload(sys.modules[module_name])
+            return sys.modules[module_name]
         return importlib.import_module(module_name)
     except Exception as exc:
         errors.append(f"{module_name}: {exc}")
@@ -1152,23 +1153,196 @@ async def process_message(
     return {"responses": responses, "agent": True}
 
 
+def _as_bool_flag(value: Any, default: bool = True) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if text in {"0", "false", "no", "off", "disabled"}:
+        return False
+    return bool(default)
+
+
+def _discover_core_webui_tabs(core_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    discovered: List[Dict[str, Any]] = []
+    seen_labels = set()
+
+    for core in core_entries or []:
+        if not isinstance(core, dict):
+            continue
+
+        key = str(core.get("key") or "").strip()
+        if not key:
+            continue
+        if not _as_bool_flag(core.get("has_webui_tab_renderer"), False):
+            continue
+
+        tab_cfg = core.get("webui_tab") if isinstance(core.get("webui_tab"), dict) else {}
+        label = str(tab_cfg.get("label") or "").strip()
+        if not label:
+            continue
+        if label in seen_labels:
+            continue
+
+        requires_running = _as_bool_flag(tab_cfg.get("requires_running"), True)
+        is_running = str(redis_client.get(f"{key}_running") or "").strip().lower() == "true"
+        if requires_running and not is_running:
+            continue
+
+        try:
+            order = int(tab_cfg.get("order", 1000))
+        except Exception:
+            order = 1000
+
+        discovered.append(
+            {
+                "label": label,
+                "core_key": key,
+                "order": order,
+            }
+        )
+        seen_labels.add(label)
+
+    discovered.sort(key=lambda row: (int(row.get("order", 1000)), str(row.get("label") or "").lower()))
+    return discovered
+
+
+def _render_core_webui_tab(tab_spec: Dict[str, Any]) -> None:
+    key = str(tab_spec.get("core_key") or "").strip()
+    if not key:
+        st.error("Core tab metadata is missing a core key.")
+        return
+
+    try:
+        module = _import_core_module(key, reload_module=False)
+    except Exception as exc:
+        st.error(f"Failed to import core module for tab '{tab_spec.get('label') or key}': {exc}")
+        return
+
+    def _core_mini_tabs_for_module(imported_module: Any) -> List[Dict[str, Any]]:
+        raw = getattr(imported_module, "CORE_WEBUI_MINI_TABS", None)
+        if not isinstance(raw, list):
+            return []
+
+        parsed: List[Dict[str, Any]] = []
+        seen_keys = set()
+        for idx, item in enumerate(raw):
+            if isinstance(item, dict):
+                label = str(item.get("label") or "").strip()
+                mini_key = str(item.get("key") or label).strip()
+                order_raw = item.get("order", idx)
+            else:
+                label = str(item or "").strip()
+                mini_key = label
+                order_raw = idx
+
+            if not label or not mini_key:
+                continue
+            if mini_key in seen_keys:
+                continue
+            seen_keys.add(mini_key)
+
+            try:
+                order = int(order_raw)
+            except Exception:
+                order = idx
+
+            parsed.append({"key": mini_key, "label": label, "order": order})
+
+        parsed.sort(key=lambda row: (int(row.get("order", 0)), str(row.get("label") or "").lower()))
+        return parsed
+
+    mini_tab_renderer = getattr(module, "render_webui_mini_tab", None)
+    mini_tabs = _core_mini_tabs_for_module(module)
+    if mini_tabs and callable(mini_tab_renderer):
+        mini_views = st.tabs([str(item.get("label") or "").strip() for item in mini_tabs])
+        for idx, mini_tab in enumerate(mini_tabs):
+            with mini_views[idx]:
+                try:
+                    mini_tab_renderer(
+                        redis_client=redis_client,
+                        first_name=first_name,
+                        last_name=last_name,
+                        core_key=key,
+                        core_tab=tab_spec,
+                        mini_tab=mini_tab,
+                        mini_tab_key=str(mini_tab.get("key") or "").strip(),
+                    )
+                except Exception as exc:
+                    st.error(
+                        f"Failed to render mini tab '{mini_tab.get('label') or mini_tab.get('key')}' "
+                        f"for core '{tab_spec.get('label') or key}': {exc}"
+                    )
+        return
+
+    render_fn = getattr(module, "render_webui_tab", None)
+    if not callable(render_fn):
+        st.warning(f"{key} does not expose render_webui_tab().")
+        return
+
+    try:
+        render_fn(
+            redis_client=redis_client,
+            first_name=first_name,
+            last_name=last_name,
+            core_key=key,
+            core_tab=tab_spec,
+        )
+    except Exception as exc:
+        st.error(f"Failed to render core tab '{tab_spec.get('label') or key}': {exc}")
+
+
+def _render_cores_page(core_tabs: List[Dict[str, Any]]) -> None:
+    st.title("Core Settings")
+
+    dynamic_tabs = []
+    for spec in core_tabs or []:
+        label = str(spec.get("label") or "").strip()
+        if not label:
+            continue
+        if label.lower() == "cerberus":
+            continue
+        dynamic_tabs.append(spec)
+
+    tab_labels = ["Cerberus", *[str(item.get("label") or "").strip() for item in dynamic_tabs]]
+    tab_views = st.tabs(tab_labels)
+
+    with tab_views[0]:
+        cerberus_tab_settings, cerberus_tab_metrics, cerberus_tab_data = st.tabs(
+            ["Cerberus", "Cerberus Metrics", "Cerberus Data"]
+        )
+        with cerberus_tab_settings:
+            render_cerberus_settings()
+        with cerberus_tab_metrics:
+            render_cerberus_metrics_dashboard(key_prefix="core_settings_cerberus_dashboard", allow_controls=False)
+        with cerberus_tab_data:
+            render_cerberus_data_tools(key_prefix="core_settings_cerberus_data")
+
+    for idx, spec in enumerate(dynamic_tabs, start=1):
+        with tab_views[idx]:
+            _render_core_webui_tab(spec)
+
+
 # ------------------ NAVIGATION ------------------
-ai_tasks_enabled = str(redis_client.get("ai_task_core_running") or "").strip().lower() == "true"
-memory_core_enabled = str(redis_client.get("memory_core_running") or "").strip().lower() == "true"
-nav_options = ["Chat", "Verba Manager", "Portal Manager", "Core Manager", "Settings"]
-if ai_tasks_enabled:
-    nav_options.insert(1, "AI Tasks")
-if memory_core_enabled:
-    insert_idx = nav_options.index("Verba Manager") if "Verba Manager" in nav_options else 1
-    nav_options.insert(insert_idx, "Memory")
+core_webui_tabs = _discover_core_webui_tabs(core_registry)
+core_tabs_by_label = {
+    str(item.get("label") or "").strip(): item
+    for item in core_webui_tabs
+    if str(item.get("label") or "").strip()
+}
+
+nav_options = ["Chat", "Core Settings", "Verba Manager", "Portal Manager", "Core Manager", "Settings"]
 if "active_view" not in st.session_state:
     st.session_state.active_view = nav_options[0]
 elif st.session_state.active_view in {"Plugins", "Verba Plugins", "Verba's", "Plugin Manager", "Auto Plugins", "Automation Plugins"}:
     st.session_state.active_view = "Verba Manager"
-elif st.session_state.active_view == "AI Tasks" and not ai_tasks_enabled:
-    st.session_state.active_view = "Core Manager"
-elif st.session_state.active_view == "Memory" and not memory_core_enabled:
-    st.session_state.active_view = "Core Manager"
+elif st.session_state.active_view in core_tabs_by_label:
+    st.session_state.active_view = "Core Settings"
+elif st.session_state.active_view in {"AI Tasks", "Memory", "RSS Feeds", "Cores"}:
+    st.session_state.active_view = "Core Settings"
 elif st.session_state.active_view not in nav_options:
     st.session_state.active_view = nav_options[0]
 
@@ -1460,11 +1634,8 @@ if active_view == "Chat":
             except Exception:
                 pass
 
-elif active_view == "AI Tasks":
-    render_ai_tasks_page(redis_client=redis_client)
-
-elif active_view == "Memory":
-    render_memory_page()
+elif active_view == "Core Settings":
+    _render_cores_page(core_webui_tabs)
 
 elif active_view == "Verba Manager":
     render_plugin_store_page()
@@ -1508,7 +1679,4 @@ elif active_view == "Settings":
         webui_attach_ttl_seconds=WEBUI_ATTACH_TTL_SECONDS,
         file_index_key=FILE_INDEX_KEY,
         file_blob_key_prefix=FILE_BLOB_KEY_PREFIX,
-        render_cerberus_settings_fn=render_cerberus_settings,
-        render_cerberus_metrics_dashboard_fn=render_cerberus_metrics_dashboard,
-        render_cerberus_data_tools_fn=render_cerberus_data_tools,
     )
