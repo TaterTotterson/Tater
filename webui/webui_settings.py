@@ -399,8 +399,8 @@ def render_settings_page(
     file_blob_key_prefix: str,
 ) -> None:
     st.title("Settings")
-    tab_general, tab_integrations, tab_emoji, tab_advanced, tab_cerberus = st.tabs(
-        ["General", "Integrations", "Emoji", "Advanced", "Cerberus"]
+    tab_general, tab_integrations, tab_emoji, tab_cerberus, tab_advanced = st.tabs(
+        ["General", "Integrations", "Emoji", "Cerberus", "Advanced"]
     )
 
     with tab_general:
@@ -438,14 +438,6 @@ def render_settings_page(
             save_emoji_responder_settings_fn=save_emoji_responder_settings_fn,
         )
 
-    with tab_advanced:
-        render_admin_gating_settings(
-            redis_client=redis_client,
-            admin_gate_key=admin_gate_key,
-            get_admin_only_plugins_fn=get_admin_only_plugins_fn,
-            get_registry_fn=get_registry_fn,
-        )
-
     with tab_cerberus:
         cerberus_tab_settings, cerberus_tab_metrics, cerberus_tab_data = st.tabs(
             ["Cerberus", "Cerberus Metrics", "Cerberus Data"]
@@ -459,3 +451,11 @@ def render_settings_page(
             )
         with cerberus_tab_data:
             render_cerberus_data_tools(key_prefix="settings_cerberus_data")
+
+    with tab_advanced:
+        render_admin_gating_settings(
+            redis_client=redis_client,
+            admin_gate_key=admin_gate_key,
+            get_admin_only_plugins_fn=get_admin_only_plugins_fn,
+            get_registry_fn=get_registry_fn,
+        )
