@@ -36,6 +36,21 @@ Each manager supports browse/install/update/remove and startup restore for enabl
 
 ---
 
+## Supporting Apps
+
+Some Portals are paired with companion repos/apps that complete the end-user integration:
+
+| Companion Repo/App | Used With | Purpose |
+|---|---|---|
+| https://github.com/TaterTotterson/hassio-addons-tater | Home Assistant | Home Assistant add-on repository for running Tater + Redis Stack directly inside HAOS/Supervised setups. |
+| https://github.com/TaterTotterson/Tater-HomeAssistant | Home Assistant Portal | Conversation Agent integration that routes Home Assistant Assist requests to Tater. |
+| https://github.com/TaterTotterson/tater_automations | HA Automations Portal | Native Home Assistant automation actions that call Tater tools directly. |
+| https://github.com/TaterTotterson/Tater-MacOS | macOS Portal | Menu bar companion app and bridge client for desktop chat, quick actions, and uploads. |
+| https://github.com/TaterTotterson/skin.cortana.tater-xbmc | XBMC Portal | OG Xbox/XBMC4Xbox skin and script integration for on-console Tater access. |
+| https://github.com/TaterTotterson/Tater/wiki/How-to-Build-the-%E2%80%9CTater%E2%80%9D-Shortcut | HomeKit Portal | Shortcut guide for Siri -> HomeKit bridge -> Tater workflows. |
+
+---
+
 # Installation
 > **Note**:
 > - Tater currently recommends using qwen3-coder-next, qwen3-next-80b, gpt-oss-120b, qwen3-coder-30b or Gemma3-27b
