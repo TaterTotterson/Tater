@@ -93,7 +93,7 @@ dotenv.load_dotenv()
 
 # ------------------ Plugin Registry Access ------------------
 def get_registry():
-    return plugin_registry_mod.plugin_registry
+    return plugin_registry_mod.get_registry()
 
 # ------------------ Upload / Attachment Limits ------------------
 # Per-file max upload size (MB) for st.chat_input + our Redis storage

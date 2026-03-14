@@ -53,7 +53,7 @@ redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_respon
 
 
 def get_registry():
-    return plugin_registry_mod.plugin_registry
+    return plugin_registry_mod.get_registry()
 
 
 def _enabled_missing_plugin_ids() -> list[str]:
