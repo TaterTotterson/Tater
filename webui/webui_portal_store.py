@@ -581,7 +581,20 @@ def _build_installed_portal_entries(catalog_items: list[dict]) -> list[dict]:
         catalog_item = catalog_by_id.get(platform_id)
         display_name = _portal_display_name(platform_id, fallback=(catalog_item or {}).get("name"))
         description = str((catalog_item or {}).get("description") or "").strip() or "Local portal module."
-        module_key = str((catalog_item or {}).get("module_key") or _portal_module_key(platform_id)).strip()
+        canonical_module_key = _portal_module_key(platform_id)
+        catalog_module_key = str((catalog_item or {}).get("module_key") or "").strip()
+        module_key = canonical_module_key or catalog_module_key
+        if (
+            catalog_module_key
+            and canonical_module_key
+            and catalog_module_key != canonical_module_key
+        ):
+            logging.warning(
+                "[portal-manager] module_key mismatch for %s: catalog=%s expected=%s; using expected key",
+                platform_id,
+                catalog_module_key,
+                canonical_module_key,
+            )
         installed_ver = _get_installed_portal_version(platform_id)
         store_ver = str((catalog_item or {}).get("version") or "").strip()
         source_label = str((catalog_item or {}).get("_source_label") or "Local portal").strip()
