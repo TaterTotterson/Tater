@@ -128,6 +128,8 @@ DEFAULT_CHECKER_MAX_TOKENS = 2550
 DEFAULT_DOER_MAX_TOKENS = 2700
 DEFAULT_TOOL_REPAIR_MAX_TOKENS = 2250
 DEFAULT_RECOVERY_MAX_TOKENS = 1050
+DEFAULT_RESULT_MEMORY_MAX_SETS = 6
+DEFAULT_RESULT_MEMORY_MAX_ITEMS = 8
 AGENT_MAX_ROUNDS_KEY = "tater:agent:max_rounds"
 AGENT_MAX_TOOL_CALLS_KEY = "tater:agent:max_tool_calls"
 CERBERUS_AGENT_STATE_TTL_SECONDS_KEY = "tater:cerberus:agent_state_ttl_seconds"
@@ -137,11 +139,15 @@ CERBERUS_DOER_MAX_TOKENS_KEY = "tater:cerberus:doer_max_tokens"
 CERBERUS_TOOL_REPAIR_MAX_TOKENS_KEY = "tater:cerberus:tool_repair_max_tokens"
 CERBERUS_RECOVERY_MAX_TOKENS_KEY = "tater:cerberus:recovery_max_tokens"
 CERBERUS_MAX_LEDGER_ITEMS_KEY = "tater:cerberus:max_ledger_items"
+CERBERUS_RESULT_MEMORY_MAX_SETS_KEY = "tater:cerberus:result_memory_max_sets"
+CERBERUS_RESULT_MEMORY_MAX_ITEMS_KEY = "tater:cerberus:result_memory_max_items"
 AGENT_STATE_PROMPT_MAX_CHARS = 800
 AGENT_STATE_LEDGER_MAX_CHARS = 900
 AGENT_STATE_KEY_PREFIX = "tater:cerberus:state:"
 DEFAULT_AGENT_STATE_TTL_SECONDS = 7 * 24 * 60 * 60
 AGENT_STATE_TTL_SECONDS = DEFAULT_AGENT_STATE_TTL_SECONDS
+RESULT_MEMORY_MAX_SETS = DEFAULT_RESULT_MEMORY_MAX_SETS
+RESULT_MEMORY_MAX_ITEMS = DEFAULT_RESULT_MEMORY_MAX_ITEMS
 CERBERUS_LEDGER_SCHEMA_VERSION = "2"
 
 _PLATFORM_DISPLAY = {
@@ -290,6 +296,30 @@ def _configured_recovery_max_tokens(redis_client: Any = None) -> int:
         default=DEFAULT_RECOVERY_MAX_TOKENS,
         redis_config_positive_int_fn=_redis_config_positive_int,
     )
+
+
+def _configured_result_memory_max_sets(redis_client: Any = None) -> int:
+    global RESULT_MEMORY_MAX_SETS
+    value = runtime_config.configured_positive_int(
+        redis_client=(redis_client or default_redis),
+        key=CERBERUS_RESULT_MEMORY_MAX_SETS_KEY,
+        default=DEFAULT_RESULT_MEMORY_MAX_SETS,
+        redis_config_positive_int_fn=_redis_config_positive_int,
+    )
+    RESULT_MEMORY_MAX_SETS = max(1, min(24, int(value)))
+    return RESULT_MEMORY_MAX_SETS
+
+
+def _configured_result_memory_max_items(redis_client: Any = None) -> int:
+    global RESULT_MEMORY_MAX_ITEMS
+    value = runtime_config.configured_positive_int(
+        redis_client=(redis_client or default_redis),
+        key=CERBERUS_RESULT_MEMORY_MAX_ITEMS_KEY,
+        default=DEFAULT_RESULT_MEMORY_MAX_ITEMS,
+        redis_config_positive_int_fn=_redis_config_positive_int,
+    )
+    RESULT_MEMORY_MAX_ITEMS = max(1, min(16, int(value)))
+    return RESULT_MEMORY_MAX_ITEMS
 
 
 def _coerce_text(content: Any) -> str:
@@ -1414,6 +1444,66 @@ def _state_plan_steps(value: Any, *, max_items: int = 12) -> List[Dict[str, str]
     return out
 
 
+def _state_result_memory(
+    value: Any,
+    *,
+    max_sets: Optional[int] = None,
+    max_items: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    sets_limit = max(1, int(max_sets or RESULT_MEMORY_MAX_SETS or DEFAULT_RESULT_MEMORY_MAX_SETS))
+    items_limit = max(1, int(max_items or RESULT_MEMORY_MAX_ITEMS or DEFAULT_RESULT_MEMORY_MAX_ITEMS))
+    if not isinstance(value, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for idx, item in enumerate(value):
+        if not isinstance(item, dict):
+            continue
+        result_set_id = _short_text(item.get("result_set_id"), limit=18) or f"rs{idx + 1}"
+        tool_name = _short_text(item.get("tool"), limit=64) or "tool"
+        summary = _short_text(item.get("summary"), limit=180)
+        query = _short_text(item.get("query"), limit=180)
+        request = _short_text(item.get("request"), limit=180)
+        normalized_items: List[Dict[str, str]] = []
+        raw_items = item.get("items") if isinstance(item.get("items"), list) else []
+        for item_idx, raw_result_item in enumerate(raw_items):
+            if not isinstance(raw_result_item, dict):
+                continue
+            item_ref = _short_text(raw_result_item.get("item_ref"), limit=12) or f"#{item_idx + 1}"
+            title = _short_text(raw_result_item.get("title"), limit=120)
+            locator = _short_text(raw_result_item.get("locator"), limit=220)
+            preview = _short_text(raw_result_item.get("preview"), limit=180)
+            compact_item: Dict[str, str] = {"item_ref": item_ref}
+            if title:
+                compact_item["title"] = title
+            if locator:
+                compact_item["locator"] = locator
+            if preview and preview != title:
+                compact_item["preview"] = preview
+            if len(compact_item) <= 1:
+                continue
+            normalized_items.append(compact_item)
+            if len(normalized_items) >= items_limit:
+                break
+        if not any((summary, query, request, normalized_items)):
+            continue
+        compact_set: Dict[str, Any] = {
+            "result_set_id": result_set_id,
+            "tool": tool_name,
+        }
+        if summary:
+            compact_set["summary"] = summary
+        if query:
+            compact_set["query"] = query
+        if request:
+            compact_set["request"] = request
+        if normalized_items:
+            compact_set["items"] = normalized_items
+        out.append(compact_set)
+        if len(out) >= sets_limit:
+            break
+    return out
+
+
 def _normalize_agent_state(state: Optional[Dict[str, Any]], *, fallback_goal: str) -> Dict[str, Any]:
     normalized = state_core_helpers.normalize_agent_state(
         state,
@@ -1430,6 +1520,12 @@ def _normalize_agent_state(state: Optional[Dict[str, Any]], *, fallback_goal: st
     source = state if isinstance(state, dict) else {}
     plan_steps = _state_plan_steps(source.get("plan_steps"), max_items=12)
     normalized["plan_steps"] = plan_steps
+    result_memory = _state_result_memory(
+        source.get("result_memory"),
+        max_sets=RESULT_MEMORY_MAX_SETS,
+        max_items=RESULT_MEMORY_MAX_ITEMS,
+    )
+    normalized["result_memory"] = result_memory
     if plan_steps:
         if not normalized.get("plan"):
             normalized["plan"] = [_render_plan_line(step) for step in plan_steps if _render_plan_line(step)]
@@ -1966,6 +2062,247 @@ def _available_artifacts_payload(available_artifacts: List[Dict[str, Any]]) -> L
     return out
 
 
+_RESULT_MEMORY_LIST_KEYS = (
+    "results",
+    "items",
+    "entries",
+    "matches",
+    "links",
+    "rows",
+    "candidates",
+    "files",
+    "options",
+    "values",
+)
+_RESULT_MEMORY_TITLE_KEYS = ("title", "name", "label", "display_name", "filename")
+_RESULT_MEMORY_LOCATOR_KEYS = ("magnet", "url", "link", "href", "uri", "path", "id")
+_RESULT_MEMORY_PREVIEW_KEYS = ("snippet", "summary", "description", "text", "message", "content")
+
+
+def _first_non_empty_text(mapping: Dict[str, Any], keys: tuple[str, ...], *, limit: int = 0) -> str:
+    for key in keys:
+        text = _short_text(mapping.get(key), limit=limit or 260)
+        if text:
+            return text
+    return ""
+
+
+def _normalize_result_memory_item(raw_item: Any, *, rank: int) -> Optional[Dict[str, str]]:
+    if isinstance(raw_item, dict):
+        title = _first_non_empty_text(raw_item, _RESULT_MEMORY_TITLE_KEYS, limit=140)
+        locator = _first_non_empty_text(raw_item, _RESULT_MEMORY_LOCATOR_KEYS, limit=260)
+        preview = _first_non_empty_text(raw_item, _RESULT_MEMORY_PREVIEW_KEYS, limit=180)
+    elif isinstance(raw_item, str):
+        title = ""
+        locator = ""
+        preview = _short_text(raw_item, limit=180)
+    else:
+        title = ""
+        locator = ""
+        preview = _short_text(raw_item, limit=180)
+
+    if not any((title, locator, preview)):
+        return None
+    item_ref = f"#{max(1, int(rank or 1))}"
+    out: Dict[str, str] = {"item_ref": item_ref}
+    if title:
+        out["title"] = title
+    if locator:
+        out["locator"] = locator
+    if preview and preview != title:
+        out["preview"] = preview
+    if len(out) <= 1:
+        return None
+    return out
+
+
+def _extract_result_memory_items(payload: Optional[Dict[str, Any]], *, max_items: int = 8) -> List[Dict[str, str]]:
+    source = payload if isinstance(payload, dict) else {}
+    max_items = max(1, int(max_items or 8))
+
+    candidates: List[List[Any]] = []
+    for key in _RESULT_MEMORY_LIST_KEYS:
+        value = source.get(key)
+        if isinstance(value, list) and value:
+            candidates.append(value)
+    data_blob = source.get("data")
+    if isinstance(data_blob, dict):
+        for key in _RESULT_MEMORY_LIST_KEYS:
+            value = data_blob.get(key)
+            if isinstance(value, list) and value:
+                candidates.append(value)
+
+    best: List[Dict[str, str]] = []
+    for sequence in candidates:
+        parsed: List[Dict[str, str]] = []
+        for idx, raw_item in enumerate(sequence, start=1):
+            normalized = _normalize_result_memory_item(raw_item, rank=idx)
+            if normalized is None:
+                continue
+            parsed.append(normalized)
+            if len(parsed) >= max_items:
+                break
+        if len(parsed) > len(best):
+            best = parsed
+        if len(best) >= max_items:
+            break
+    if best:
+        return best[:max_items]
+
+    text_lines: List[str] = []
+    for key in ("summary_for_user", "summary", "answer", "message", "text", "content", "description"):
+        value = source.get(key)
+        if isinstance(value, str) and value.strip():
+            text_lines.extend([line.strip() for line in value.splitlines() if line.strip()])
+    if isinstance(data_blob, dict):
+        for key in ("summary", "message", "text", "content", "description"):
+            value = data_blob.get(key)
+            if isinstance(value, str) and value.strip():
+                text_lines.extend([line.strip() for line in value.splitlines() if line.strip()])
+
+    out: List[Dict[str, str]] = []
+    for idx, line in enumerate(text_lines, start=1):
+        normalized = _normalize_result_memory_item(line, rank=idx)
+        if normalized is None:
+            continue
+        out.append(normalized)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def _result_memory_prompt(result_memory: List[Dict[str, Any]]) -> str:
+    if not result_memory:
+        return ""
+    lines = ["Remembered tool result sets (conversation memory for follow-up references):"]
+    for entry in result_memory[:4]:
+        if not isinstance(entry, dict):
+            continue
+        result_set_id = _short_text(entry.get("result_set_id"), limit=18) or "rs?"
+        tool_name = _short_text(entry.get("tool"), limit=50) or "tool"
+        query = _short_text(entry.get("query"), limit=140)
+        summary = _short_text(entry.get("summary"), limit=140)
+        header = [f"result_set_id={result_set_id}", f"tool={tool_name}"]
+        if query:
+            header.append(f"query={query}")
+        elif summary:
+            header.append(f"summary={summary}")
+        lines.append("- " + " | ".join(header))
+        items = entry.get("items") if isinstance(entry.get("items"), list) else []
+        for item in items[:6]:
+            if not isinstance(item, dict):
+                continue
+            item_ref = _short_text(item.get("item_ref"), limit=12) or "?"
+            title = _short_text(item.get("title") or item.get("preview"), limit=120) or "(no title)"
+            locator = _short_text(item.get("locator"), limit=220)
+            if locator:
+                lines.append(f"  - {item_ref}: {title} -> {locator}")
+            else:
+                lines.append(f"  - {item_ref}: {title}")
+    lines.append("Use this memory when the user references previous results/items/links. Prefer the most recent relevant result set.")
+    return "\n".join(lines)
+
+
+def _next_result_set_id(result_memory: List[Dict[str, Any]]) -> str:
+    highest = 0
+    for entry in result_memory:
+        if not isinstance(entry, dict):
+            continue
+        token = str(entry.get("result_set_id") or "").strip().lower()
+        if not token.startswith("rs"):
+            continue
+        suffix = token[2:]
+        if suffix.isdigit():
+            highest = max(highest, int(suffix))
+    return f"rs{highest + 1}"
+
+
+def _result_memory_signature(entry: Dict[str, Any]) -> str:
+    if not isinstance(entry, dict):
+        return ""
+    parts = [
+        str(entry.get("tool") or "").strip().lower(),
+        str(entry.get("query") or "").strip().lower(),
+    ]
+    items = entry.get("items") if isinstance(entry.get("items"), list) else []
+    for item in items[:3]:
+        if not isinstance(item, dict):
+            continue
+        locator = str(item.get("locator") or "").strip().lower()
+        title = str(item.get("title") or item.get("preview") or "").strip().lower()
+        if locator:
+            parts.append(locator)
+        elif title:
+            parts.append(title)
+    return "|".join([part for part in parts if part])
+
+
+def _remember_tool_result_in_agent_state(
+    *,
+    agent_state: Optional[Dict[str, Any]],
+    tool_call: Optional[Dict[str, Any]],
+    raw_payload: Optional[Dict[str, Any]],
+    tool_result: Optional[Dict[str, Any]],
+    request_text: str,
+    fallback_goal: str,
+    max_sets: int,
+    max_items: int,
+) -> Dict[str, Any]:
+    source = dict(agent_state) if isinstance(agent_state, dict) else {}
+    memory = _state_result_memory(source.get("result_memory"), max_sets=max_sets, max_items=max_items)
+    normalized = _normalize_agent_state(source, fallback_goal=fallback_goal or request_text)
+    if not memory:
+        normalized["result_memory"] = []
+    else:
+        normalized["result_memory"] = memory
+
+    if not (isinstance(tool_result, dict) and bool(tool_result.get("ok"))):
+        return normalized
+
+    payload = raw_payload if isinstance(raw_payload, dict) else {}
+    items = _extract_result_memory_items(payload, max_items=max_items)
+    summary = _short_text((tool_result or {}).get("summary_for_user"), limit=180)
+    if not items and not summary:
+        return normalized
+
+    tool_name = _short_text(
+        (tool_call or {}).get("function") or payload.get("tool") or "tool",
+        limit=64,
+    ) or "tool"
+    query = _first_non_empty_text(payload, ("query", "q", "request", "prompt", "search_query"), limit=180)
+    request = _short_text(request_text, limit=180)
+    entry: Dict[str, Any] = {
+        "result_set_id": _next_result_set_id(memory),
+        "tool": tool_name,
+    }
+    if query:
+        entry["query"] = query
+    if request:
+        entry["request"] = request
+    if summary:
+        entry["summary"] = summary
+    if items:
+        entry["items"] = items
+
+    signature = _result_memory_signature(entry)
+    merged_memory: List[Dict[str, Any]] = [entry]
+    for existing in memory:
+        if not isinstance(existing, dict):
+            continue
+        if signature and _result_memory_signature(existing) == signature:
+            continue
+        merged_memory.append(existing)
+    normalized["result_memory"] = _state_result_memory(
+        merged_memory[:max_sets],
+        max_sets=max_sets,
+        max_items=max_items,
+    )
+    return _normalize_agent_state(
+        normalized,
+        fallback_goal=fallback_goal or request_text or str(normalized.get("goal") or ""),
+    )
+
+
 _BAD_ARGS_FAILURE_CODES = retry_helpers.BAD_ARGS_FAILURE_CODES
 
 _BAD_ARGS_FAILURE_TEXT_MARKERS = retry_helpers.BAD_ARGS_FAILURE_TEXT_MARKERS
@@ -2260,6 +2597,8 @@ async def run_cerberus_turn(
     doer_max_tokens = _configured_doer_max_tokens(r)
     tool_repair_max_tokens = _configured_tool_repair_max_tokens(r)
     recovery_max_tokens = _configured_recovery_max_tokens(r)
+    result_memory_max_sets = _configured_result_memory_max_sets(r)
+    result_memory_max_items = _configured_result_memory_max_items(r)
     turn_started_at = time.perf_counter()
     planner_ms_total = 0.0
     tool_ms_total = 0.0
@@ -2519,6 +2858,15 @@ async def run_cerberus_turn(
         artifact_manifest_prompt = _available_artifacts_prompt(turn_available_artifacts)
         if artifact_manifest_prompt:
             planner_messages.append({"role": "system", "content": artifact_manifest_prompt})
+        result_memory_prompt = _result_memory_prompt(
+            _state_result_memory(
+                agent_state.get("result_memory"),
+                max_sets=result_memory_max_sets,
+                max_items=result_memory_max_items,
+            )
+        )
+        if result_memory_prompt:
+            planner_messages.append({"role": "system", "content": result_memory_prompt})
         if isinstance(current_plan_step, dict):
             planner_messages.append(
                 {
@@ -2894,6 +3242,16 @@ async def run_cerberus_turn(
                 plan_queue=structured_plan_queue,
                 fallback_goal=resolved_user_text or user_text,
             )
+        agent_state = _remember_tool_result_in_agent_state(
+            agent_state=agent_state,
+            tool_call=planned_tool,
+            raw_payload=(raw_payload if isinstance(raw_payload, dict) else None),
+            tool_result=(tool_result_for_checker if isinstance(tool_result_for_checker, dict) else None),
+            request_text=str(tool_user_text or round_request_text or resolved_user_text or "").strip(),
+            fallback_goal=resolved_user_text or user_text,
+            max_sets=result_memory_max_sets,
+            max_items=result_memory_max_items,
+        )
         _save_persistent_agent_state(
             redis_client=r,
             platform=platform,

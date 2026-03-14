@@ -179,6 +179,8 @@ async def run_doer_state_update(
             )
             if isinstance(previous.get("plan_steps"), list):
                 merged["plan_steps"] = list(previous.get("plan_steps") or [])
+            if isinstance(previous.get("result_memory"), list):
+                merged["result_memory"] = [dict(item) for item in previous.get("result_memory") if isinstance(item, dict)]
     except Exception:
         merged = dict(previous)
 
