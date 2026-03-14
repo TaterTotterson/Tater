@@ -14,6 +14,10 @@ def _compact_text(value: Any, *, max_chars: int) -> str:
     return text
 
 
+def _summary_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
 def action_success(
     *,
     facts: Optional[Dict[str, Any]] = None,
@@ -30,7 +34,7 @@ def action_success(
         "ok": True,
         "facts": facts_payload,
         "data": data_payload,
-        "summary_for_user": _compact_text(summary_for_user, max_chars=350),
+        "summary_for_user": _summary_text(summary_for_user),
         "flair": _compact_text(flair, max_chars=240),
         "say_hint": (say_hint or "").strip(),
         "suggested_followups": suggested_followups or [],
@@ -118,7 +122,7 @@ def _sanitize_contract(result: Dict[str, Any]) -> Dict[str, Any]:
         summary = out.get("summary_for_user")
         if not isinstance(summary, str) or not summary.strip():
             summary = out.get("summary") if isinstance(out.get("summary"), str) else ""
-        out["summary_for_user"] = _compact_text(summary, max_chars=350)
+        out["summary_for_user"] = _summary_text(summary)
         out["flair"] = _compact_text(out.get("flair"), max_chars=240)
         out.setdefault("say_hint", "")
         out.setdefault("suggested_followups", [])
@@ -177,7 +181,7 @@ def normalize_plugin_result(raw: Any) -> Dict[str, Any]:
             data["messages"] = [x for x in text_parts if x][:5]
         return action_success(
             data=data,
-            summary_for_user=_compact_text(text_parts[0], max_chars=350) if text_parts else "",
+            summary_for_user=_summary_text(text_parts[0]) if text_parts else "",
             say_hint="Summarize what was completed using only the returned data.",
             artifacts=artifacts,
         )
@@ -192,7 +196,7 @@ def normalize_plugin_result(raw: Any) -> Dict[str, Any]:
             )
         return action_success(
             data={"message": text},
-            summary_for_user=_compact_text(text, max_chars=350),
+            summary_for_user=_summary_text(text),
             say_hint="Provide this result directly without adding unverified details.",
         )
 
@@ -206,7 +210,7 @@ def normalize_plugin_result(raw: Any) -> Dict[str, Any]:
     text = _coerce_text(raw)
     return action_success(
         data={"message": text},
-        summary_for_user=_compact_text(text, max_chars=350),
+        summary_for_user=_summary_text(text),
         say_hint="Provide this result directly and keep it factual.",
     )
 
@@ -427,7 +431,7 @@ async def narrate_result(
         return clean.strip()
 
     # 1) summary_for_user
-    summary_hint = _trim_text(result.get("summary_for_user"), max_chars=420)
+    summary_hint = _summary_text(result.get("summary_for_user"))
     if summary_hint and not _is_low_information_narration(summary_hint):
         summary_hint = _safe_text(summary_hint)
         flair = _trim_text(result.get("flair"), max_chars=240)
