@@ -56,17 +56,28 @@ def render_portal_controls(
     surface_kind: str = "portal",
     render_surface_extras_fn=None,
 ):
-    category     = portal["label"]
-    key          = portal["key"]
-    required     = portal["required"]
+    category     = str((portal or {}).get("label") or "").strip()
+    key          = str((portal or {}).get("key") or "").strip()
+    required     = (portal or {}).get("required") or {}
+    if not isinstance(required, dict):
+        required = {}
+    if not category:
+        category = key or "Portal Settings"
     short_name   = category.replace(" Settings", "").strip()
     surface_text = "core" if str(surface_kind or "").strip().lower() == "core" else "portal"
     state_key    = f"{key}_running"
     cooldown_key = f"tater:cooldown:{key}"
     cooldown_secs = 10
-    toggle_key = f"{category}_toggle"
-    cooldown_notice_key = f"{category}_cooldown_notice"
-    toggle_reset_key = f"{category}_toggle_reset_to"
+    widget_prefix = key or re.sub(r"[^a-zA-Z0-9_]+", "_", category).strip("_") or "portal"
+    toggle_key = f"{widget_prefix}_toggle"
+    cooldown_notice_key = f"{widget_prefix}_cooldown_notice"
+    toggle_reset_key = f"{widget_prefix}_toggle_reset_to"
+    last_running_key = f"{widget_prefix}_last_running_state"
+
+    def _to_bool(v):
+        if isinstance(v, bool):
+            return v
+        return str(v).strip().lower() in ("true", "1", "yes", "on")
 
     # read current on/off from Redis
     is_running = (redis_client.get(state_key) == "true")
@@ -78,10 +89,20 @@ def render_portal_controls(
         st.warning(cooldown_notice)
 
     # If we asked for a reset on the previous run, apply it before rendering widget.
+    synced_from_runtime = False
     if toggle_reset_key in st.session_state:
-        st.session_state[toggle_key] = bool(st.session_state.pop(toggle_reset_key))
+        st.session_state[toggle_key] = _to_bool(st.session_state.pop(toggle_reset_key))
     elif toggle_key not in st.session_state:
         st.session_state[toggle_key] = is_running
+    else:
+        # Keep widget state aligned when runtime state changes outside this control.
+        # Without this, a stale widget value can flip a running portal off on refresh.
+        last_running = _to_bool(st.session_state.get(last_running_key))
+        if last_running != is_running:
+            st.session_state[toggle_key] = is_running
+            synced_from_runtime = True
+
+    st.session_state[last_running_key] = is_running
 
     new_toggle = st.toggle(
         f"{emoji} Enable {short_name}",
@@ -90,7 +111,7 @@ def render_portal_controls(
     is_enabled = new_toggle
 
     # --- TURNING ON ---
-    if is_enabled and not is_running:
+    if not synced_from_runtime and is_enabled and not is_running:
         # cooldown check
         last = redis_client.get(cooldown_key)
         now  = time.time()
@@ -107,7 +128,7 @@ def render_portal_controls(
         st.rerun()
 
     # --- TURNING OFF ---
-    elif not is_enabled and is_running:
+    elif not synced_from_runtime and not is_enabled and is_running:
         stop_portal_fn(key)
         redis_client.set(state_key, "false")
         redis_client.set(cooldown_key, str(time.time()))
@@ -125,14 +146,8 @@ def render_portal_controls(
         desc        = setting.get("description", "")
         default_val = setting.get("default", "")
         current_val = current_settings.get(setting_key, default_val)
-        widget_key  = f"{category}_{setting_key}"
+        widget_key  = f"{widget_prefix}_{setting_key}"
         is_token_setting = _looks_like_token_setting(setting_key, label)
-
-        # normalize bools from redis strings
-        def _to_bool(v):
-            if isinstance(v, bool):
-                return v
-            return str(v).lower() in ("true", "1", "yes", "on")
 
         if input_type == "number":
             s = str(current_val).strip()
@@ -281,7 +296,7 @@ def render_portal_controls(
             new_settings[setting_key] = new_val
 
     if new_settings:
-        if st.button(f"Save {short_name} Settings", key=f"save_{category}_unique"):
+        if st.button(f"Save {short_name} Settings", key=f"save_{widget_prefix}_settings"):
             # coerce all values to strings for Redis HSET
             save_map = {
                 k: (json.dumps(v) if isinstance(v, (dict, list, bool)) else str(v))

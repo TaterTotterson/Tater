@@ -15,7 +15,7 @@ from plugin_settings import (
 
 
 def get_registry():
-    return plugin_registry_mod.plugin_registry
+    return plugin_registry_mod.get_registry()
 
 
 def render_plugin_controls(plugin_name, label=None):
