@@ -13,6 +13,7 @@ import threading
 import sys
 import uuid
 from pathlib import Path
+from types import ModuleType
 import plugin_registry as plugin_registry_mod
 import core_registry as core_registry_module
 from datetime import datetime
@@ -129,9 +130,24 @@ def _ensure_surface_import_context(surface_dir: Path, package_name: str) -> None
         parent = str(surface_dir.parent)
         if parent and parent not in sys.path:
             sys.path.insert(0, parent)
+
+        package = sys.modules.get(package_name)
+        if package is not None and not isinstance(package, ModuleType):
+            # Corrupt cache entry can happen after failed imports; force a clean package import.
+            sys.modules.pop(package_name, None)
+            package = None
+
         importlib.invalidate_caches()
-        if package_name not in sys.modules:
-            importlib.import_module(package_name)
+        if package is None:
+            package = importlib.import_module(package_name)
+
+        package_paths = getattr(package, "__path__", None)
+        if package_paths is not None:
+            surface_path = str(surface_dir)
+            normalized_paths = {str(Path(path).resolve()) for path in package_paths}
+            if surface_path not in normalized_paths:
+                # Keep namespace/package path in sync when portal/core dirs move between updates.
+                package_paths.append(surface_path)
     except Exception:
         # Import attempt will raise a clean error in _import_* if package/module is still unavailable.
         return
@@ -502,17 +518,12 @@ def _import_portal_module(key: str):
     module_key = str(key or "").strip()
     if not module_key:
         raise ImportError("Missing portal module key")
-    _ensure_surface_import_context(PORTAL_MODULE_DIR, "portals")
-    module_name = f"portals.{module_key}"
-    errors = []
-    try:
-        importlib.invalidate_caches()
-        if module_name in sys.modules:
-            return importlib.reload(sys.modules[module_name])
-        return importlib.import_module(module_name)
-    except Exception as exc:
-        errors.append(f"{module_name}: {exc}")
-    raise ImportError("; ".join(errors))
+    return _import_surface_module(
+        module_key=module_key,
+        package_name="portals",
+        surface_dir=PORTAL_MODULE_DIR,
+        reload_module=True,
+    )
 
 
 def _start_portal(key: str):
@@ -581,19 +592,47 @@ def _import_core_module(key: str, *, reload_module: bool = True):
     module_key = str(key or "").strip()
     if not module_key:
         raise ImportError("Missing core module key")
-    _ensure_surface_import_context(CORE_MODULE_DIR, "cores")
-    module_name = f"cores.{module_key}"
-    errors = []
-    try:
-        importlib.invalidate_caches()
-        if module_name in sys.modules:
-            if reload_module:
-                return importlib.reload(sys.modules[module_name])
-            return sys.modules[module_name]
-        return importlib.import_module(module_name)
-    except Exception as exc:
-        errors.append(f"{module_name}: {exc}")
-    raise ImportError("; ".join(errors))
+    return _import_surface_module(
+        module_key=module_key,
+        package_name="cores",
+        surface_dir=CORE_MODULE_DIR,
+        reload_module=reload_module,
+    )
+
+
+def _import_surface_module(
+    *,
+    module_key: str,
+    package_name: str,
+    surface_dir: Path,
+    reload_module: bool,
+):
+    _ensure_surface_import_context(surface_dir, package_name)
+    module_name = f"{package_name}.{module_key}"
+    errors: List[str] = []
+    last_exc: Exception | None = None
+
+    for _attempt in range(2):
+        try:
+            importlib.invalidate_caches()
+
+            existing = sys.modules.get(module_name)
+            if isinstance(existing, ModuleType):
+                if reload_module:
+                    return importlib.reload(existing)
+                return existing
+
+            if module_name in sys.modules:
+                # Remove stale placeholders (for example None) before import.
+                sys.modules.pop(module_name, None)
+            return importlib.import_module(module_name)
+        except Exception as exc:
+            last_exc = exc
+            errors.append(f"{module_name}: {type(exc).__name__}: {exc}")
+            # Recover once after clearing stale cache entries.
+            sys.modules.pop(module_name, None)
+
+    raise ImportError("; ".join(errors)) from last_exc
 
 
 def _start_core(key: str):
