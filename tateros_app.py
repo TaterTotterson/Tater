@@ -57,9 +57,9 @@ from plugin_settings import (
 )
 from plugin_kernel import normalize_platform, plugin_supports_platform
 from vision_settings import get_vision_settings as get_shared_vision_settings, save_vision_settings as save_shared_vision_settings
-from webui import webui_core_store as core_store_module
-from webui import webui_plugin_store as plugin_store_module
-from webui import webui_portal_store as portal_store_module
+from tateros import core_store as core_store_module
+from tateros import plugin_store as plugin_store_module
+from tateros import portal_store as portal_store_module
 
 
 dotenv.load_dotenv()
