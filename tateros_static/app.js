@@ -1,7 +1,35 @@
+function safeStorageGet(key, fallback = "") {
+  try {
+    const value = window.localStorage.getItem(String(key || ""));
+    return value === null ? fallback : value;
+  } catch {
+    return fallback;
+  }
+}
+
+function safeStorageSet(key, value) {
+  try {
+    window.localStorage.setItem(String(key || ""), String(value || ""));
+  } catch {
+    // Ignore storage failures (for example, restricted iframe storage).
+  }
+}
+
+function createSessionId() {
+  try {
+    if (window.crypto && typeof window.crypto.randomUUID === "function") {
+      return window.crypto.randomUUID();
+    }
+  } catch {
+    // Ignore and fall back.
+  }
+  return `sess_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
 const state = {
   view: "chat",
-  sessionId: localStorage.getItem("tater_tateros_session_id") || crypto.randomUUID(),
-  coreTopTab: localStorage.getItem("tater_tateros_core_tab") || "manage",
+  sessionId: safeStorageGet("tater_tateros_session_id", "") || createSessionId(),
+  coreTopTab: safeStorageGet("tater_tateros_core_tab", "") || "manage",
   sending: false,
   activeChatJobId: "",
   chatEventSource: null,
@@ -19,7 +47,7 @@ const state = {
   },
 };
 
-localStorage.setItem("tater_tateros_session_id", state.sessionId);
+safeStorageSet("tater_tateros_session_id", state.sessionId);
 
 const APP_BASE_PATH = (() => {
   const rawPath = String(window.location.pathname || "/").trim();
@@ -400,7 +428,7 @@ async function refreshBranding() {
 function persistCoreTopTab(tabName) {
   const normalized = String(tabName || "manage").trim() || "manage";
   state.coreTopTab = normalized;
-  localStorage.setItem("tater_tateros_core_tab", normalized);
+  safeStorageSet("tater_tateros_core_tab", normalized);
 }
 
 function setActiveNav(viewName) {
@@ -2398,7 +2426,7 @@ async function loadChatView() {
       const sessionId = String(response.session_id || "").trim();
       if (sessionId) {
         state.sessionId = sessionId;
-        localStorage.setItem("tater_tateros_session_id", state.sessionId);
+        safeStorageSet("tater_tateros_session_id", state.sessionId);
       }
 
       const jobId = String(response.job_id || "").trim();
@@ -3766,4 +3794,9 @@ window.addEventListener("beforeunload", () => {
   closeChatEventSource();
 });
 
-init();
+init().catch((error) => {
+  const root = document.getElementById("view-root");
+  if (root) {
+    root.innerHTML = renderNotice(`Failed to initialize UI: ${error?.message || "unknown error"}`);
+  }
+});
