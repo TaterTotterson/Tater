@@ -8,7 +8,6 @@ Pillow
 moviepy
 python-dotenv
 requests
-streamlit
 youtube-transcript-api
 redis
 nest_asyncio

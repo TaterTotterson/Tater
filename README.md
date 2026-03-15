@@ -197,11 +197,37 @@ Tater will automatically connect using HTTPS without appending a port number.
 
 5. **Run the Web UI**
 
-Launch the web UI using Streamlit:
+Run the TaterOS backend/frontend (FastAPI + static HTML/CSS/JS):
 
 ```bash
-streamlit run webui.py
+uvicorn tateros_app:app --host 0.0.0.0 --port 8501 --reload --no-access-log
 ```
+
+Docker-style launcher (also disables access logs by default):
+
+```bash
+sh run_ui.sh
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8501
+```
+
+HTML UI now includes:
+- Live chat job streaming with tool-status updates
+- Verba/Core/Portal shop install, update, remove, and repo management
+- Core top tabs built from each core's `CORE_WEBUI_TAB` metadata (`Manage` + dynamic core tabs)
+- Startup restore of missing enabled verbas/cores/portals, then autostart of enabled cores/portals
+
+Core HTMLUI tab payload contract:
+- Optional per-core function: `get_htmlui_tab_data(redis_client=..., core_key=..., core_tab=...) -> dict`
+- Payload keys used by HTMLUI: `summary`, `stats`, `items`, `empty_message`
+
+Startup behavior env toggles (optional):
+- `HTMLUI_RESTORE_ENABLED_SURFACES_ON_STARTUP=true|false` (default `true`)
+- `HTMLUI_AUTOSTART_ENABLED_SURFACES_ON_STARTUP=true|false` (default `true`)
 
 ## Docker
 
@@ -266,6 +292,8 @@ Tater will automatically connect using HTTPS without appending a port number.
 Tip: The runtime data lives in `/app/agent_lab` inside the container.  
 If you don’t mount it to the host, `/agent_lab` data can be lost when the container is rebuilt or updated.
 
+Access-log note: `run_ui.sh` now starts Uvicorn with `--no-access-log` to suppress per-request lines.
+
 Unraid note: add a container path mapping for `/app/agent_lab` to a persistent share (e.g., `/mnt/user/appdata/tater/agent_lab`) so you don’t lose Agent Lab data during container updates.
 Unraid note: also set `TZ` and map `/etc/localtime` + `/etc/timezone` if you want local time inside the container.
 
@@ -274,8 +302,6 @@ Unraid note: also set `TZ` and map `/etc/localtime` + `/etc/timezone` if you wan
 Once the container is running, open your browser and navigate to:
 
 [http://localhost:8501](http://localhost:8501)
-
-The Streamlit-based web UI will be available for interacting with Tater.
 
 ---
 

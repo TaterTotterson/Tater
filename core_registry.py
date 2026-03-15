@@ -129,7 +129,10 @@ def _load_core_settings(module_key: str) -> tuple[Dict[str, Any] | None, str]:
 
     settings["module_import_name"] = str(getattr(module, "__name__", "")).strip()
     settings["webui_tab"] = _load_webui_tab_config(module)
-    settings["has_webui_tab_renderer"] = callable(getattr(module, "render_webui_tab", None))
+    has_legacy_tab_renderer = callable(getattr(module, "render_webui_tab", None))
+    has_htmlui_provider = callable(getattr(module, "get_htmlui_tab_data", None))
+    settings["has_webui_tab_renderer"] = bool(has_legacy_tab_renderer or has_htmlui_provider)
+    settings["has_htmlui_tab_provider"] = bool(has_htmlui_provider)
     settings["has_manager_extras_renderer"] = callable(getattr(module, "render_core_manager_extras", None))
     return settings, ""
 
