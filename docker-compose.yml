@@ -5,8 +5,9 @@ services:
     build: .
     container_name: tater_app
     ports:
-      - "8501:8501"  # Streamlit web UI
+      - "8501:8501"  # HTML Web UI
     environment:
+      HTMLUI_PORT: ${HTMLUI_PORT:-8501}
       LLM_HOST: ${LLM_HOST}
       LLM_PORT: ${LLM_PORT}
       LLM_MODEL: ${LLM_MODEL}
@@ -28,4 +29,3 @@ services:
 
 volumes:
   redis_data:
-

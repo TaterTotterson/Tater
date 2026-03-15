@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TaterOS</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="bg-shape bg-shape-a" aria-hidden="true"></div>
+    <div class="bg-shape bg-shape-b" aria-hidden="true"></div>
+
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand-wrap">
+          <div class="brand-dot"></div>
+          <div>
+            <h1 id="brand-name">Tater</h1>
+            <p id="brand-subtitle">TaterOS Control Surface</p>
+          </div>
+        </div>
+
+        <nav class="nav-stack" aria-label="Primary">
+          <button class="nav-btn active" data-view="chat">Chat</button>
+          <button class="nav-btn" data-view="verbas">Verbas</button>
+          <button class="nav-btn" data-view="portals">Portals</button>
+          <button class="nav-btn" data-view="cores">Cores</button>
+          <button class="nav-btn" data-view="settings">Settings</button>
+        </nav>
+      </aside>
+
+      <main class="main-pane">
+        <header class="topbar">
+          <div>
+            <h2 id="view-title">Chat</h2>
+            <p id="view-subtitle">Talk to Verbas through Cerberus.</p>
+          </div>
+          <div id="runtime-summary" class="runtime-summary"></div>
+        </header>
+
+        <section id="view-root" class="view-root"></section>
+      </main>
+    </div>
+
+    <div id="toast-root" class="toast-root" aria-live="polite" aria-atomic="true"></div>
+
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

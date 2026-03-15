@@ -31,12 +31,11 @@ RUN python -m pip install --upgrade pip && python -m pip install -r requirements
 # Copy the rest of your application code into the container.
 COPY . .
 
-# Expose the port Streamlit will run on.
+# Expose HTML UI port.
 EXPOSE 8501
 
-# Set environment variables for Streamlit if needed.
-ENV STREAMLIT_SERVER_PORT=8501
-ENV STREAMLIT_SERVER_ENABLECORS=false
+# Set environment variables for HTML UI.
+ENV HTMLUI_PORT=8501
 
-# Command to run your Streamlit web UI.
-CMD ["streamlit", "run", "webui.py"]
+# Command to run HTML UI.
+CMD ["sh", "run_ui.sh"]

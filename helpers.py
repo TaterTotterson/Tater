@@ -211,6 +211,72 @@ class LLMClientWrapper:
         self.max_tokens = int(os.getenv("LLM_MAX_TOKENS", "1024"))
         self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.7"))
 
+        # Per-instance perf aggregation for one chat turn.
+        self._llm_calls = 0
+        self._llm_elapsed_sec = 0.0
+        self._llm_prompt_tokens = 0
+        self._llm_completion_tokens = 0
+        self._llm_total_tokens = 0
+        self._llm_model_last = str(model or "").strip() or "LLM"
+
+    async def aclose(self):
+        client = getattr(self, "client", None)
+        if client is None:
+            return
+
+        close_async = getattr(client, "aclose", None)
+        if callable(close_async):
+            try:
+                await close_async()
+            except RuntimeError as exc:
+                # Defensive shutdown guard: can happen if app is tearing down.
+                if "Event loop is closed" not in str(exc):
+                    raise
+            return
+
+        close_sync = getattr(client, "close", None)
+        if callable(close_sync):
+            result = close_sync()
+            if asyncio.iscoroutine(result):
+                try:
+                    await result
+                except RuntimeError as exc:
+                    if "Event loop is closed" not in str(exc):
+                        raise
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self.aclose()
+
+    def get_perf_stats(self, *, reset: bool = False) -> Dict[str, Any]:
+        elapsed = max(0.0, float(self._llm_elapsed_sec))
+        prompt_tokens = max(0, int(self._llm_prompt_tokens))
+        completion_tokens = max(0, int(self._llm_completion_tokens))
+        total_tokens = max(0, int(self._llm_total_tokens))
+        tps_total = (float(total_tokens) / elapsed) if elapsed > 0.0 and total_tokens > 0 else 0.0
+        tps_comp = (float(completion_tokens) / elapsed) if elapsed > 0.0 and completion_tokens > 0 else 0.0
+
+        out: Dict[str, Any] = {
+            "model": str(self._llm_model_last or self.model or "LLM"),
+            "elapsed": round(elapsed, 6),
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "tps_total": round(tps_total, 4),
+            "tps_comp": round(tps_comp, 4),
+            "calls": max(0, int(self._llm_calls)),
+        }
+
+        if reset:
+            self._llm_calls = 0
+            self._llm_elapsed_sec = 0.0
+            self._llm_prompt_tokens = 0
+            self._llm_completion_tokens = 0
+            self._llm_total_tokens = 0
+        return out
+
     async def chat(self, messages, **kwargs):
         """
         Thin wrapper around OpenAI-compatible /v1/chat/completions.
@@ -242,6 +308,7 @@ class LLMClientWrapper:
             # fail open: at least avoid crashing
             messages = messages if isinstance(messages, list) else []
 
+        started_at = asyncio.get_running_loop().time()
         response = await self.client.chat.completions.create(
             model=model,
             messages=messages,
@@ -249,6 +316,37 @@ class LLMClientWrapper:
             timeout=timeout,
             **kwargs,
         )
+        elapsed = max(0.0, float(asyncio.get_running_loop().time() - started_at))
+        self._llm_calls += 1
+        self._llm_elapsed_sec += elapsed
+
+        response_model = getattr(response, "model", model)
+        if response_model:
+            self._llm_model_last = str(response_model)
+
+        usage = getattr(response, "usage", None)
+        prompt_tokens = 0
+        completion_tokens = 0
+        total_tokens = 0
+        try:
+            if isinstance(usage, dict):
+                prompt_tokens = int(usage.get("prompt_tokens") or 0)
+                completion_tokens = int(usage.get("completion_tokens") or 0)
+                total_tokens = int(usage.get("total_tokens") or 0)
+            elif usage is not None:
+                prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+                completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+                total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
+        except Exception:
+            prompt_tokens = 0
+            completion_tokens = 0
+            total_tokens = 0
+        if total_tokens <= 0:
+            total_tokens = max(0, prompt_tokens + completion_tokens)
+
+        self._llm_prompt_tokens += max(0, prompt_tokens)
+        self._llm_completion_tokens += max(0, completion_tokens)
+        self._llm_total_tokens += max(0, total_tokens)
 
         if stream:
             return response

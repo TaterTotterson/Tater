@@ -2062,6 +2062,82 @@ def _available_artifacts_payload(available_artifacts: List[Dict[str, Any]]) -> L
     return out
 
 
+def _image_like_artifact(item: Dict[str, Any]) -> bool:
+    if not isinstance(item, dict):
+        return False
+    artifact_type = str(item.get("type") or "").strip().lower()
+    if artifact_type == "image":
+        return True
+    mimetype = str(item.get("mimetype") or "").strip().lower()
+    return mimetype.startswith("image/")
+
+
+def _select_image_artifact_for_call(
+    *,
+    available_artifacts: List[Dict[str, Any]],
+    hinted_value: str = "",
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(available_artifacts, list) or not available_artifacts:
+        return None
+
+    candidates = [dict(item) for item in available_artifacts if _image_like_artifact(item)]
+    if not candidates:
+        return None
+
+    hinted = str(hinted_value or "").strip().lower()
+    if hinted:
+        for item in candidates:
+            artifact_id = str(item.get("artifact_id") or "").strip().lower()
+            name = str(item.get("name") or "").strip().lower()
+            if hinted == artifact_id or hinted == name:
+                return item
+            if name and hinted in name:
+                return item
+
+    if len(candidates) == 1:
+        return candidates[0]
+    return candidates[0]
+
+
+def _autofix_image_describe_tool_call(
+    tool_call: Optional[Dict[str, Any]],
+    available_artifacts: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(tool_call, dict):
+        return tool_call
+    func = str(tool_call.get("function") or "").strip().lower()
+    if func != "image_describe":
+        return tool_call
+
+    args = dict(tool_call.get("arguments") or {}) if isinstance(tool_call.get("arguments"), dict) else {}
+    explicit_refs = any(
+        str(args.get(key) or "").strip()
+        for key in ("url", "path", "blob_key", "file_id")
+    )
+    if explicit_refs:
+        return tool_call
+
+    artifact_id = str(args.get("artifact_id") or "").strip()
+    if artifact_id:
+        for item in available_artifacts or []:
+            if str(item.get("artifact_id") or "").strip() == artifact_id:
+                return tool_call
+
+    selected = _select_image_artifact_for_call(
+        available_artifacts=available_artifacts,
+        hinted_value=artifact_id,
+    )
+    if not isinstance(selected, dict):
+        return tool_call
+
+    selected_id = str(selected.get("artifact_id") or "").strip()
+    if not selected_id:
+        return tool_call
+
+    args["artifact_id"] = selected_id
+    return {"function": str(tool_call.get("function") or ""), "arguments": args}
+
+
 _RESULT_MEMORY_LIST_KEYS = (
     "results",
     "items",
@@ -3154,6 +3230,10 @@ async def run_cerberus_turn(
                 validation_status_override=validation_status,
             )
 
+        planned_tool = _autofix_image_describe_tool_call(
+            planned_tool,
+            turn_available_artifacts,
+        )
         tool_used = True
         tool_user_text = round_request_text
         tool_started = time.perf_counter()
