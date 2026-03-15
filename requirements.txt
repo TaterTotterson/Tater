@@ -27,3 +27,4 @@ openpyxl
 python-pptx
 py7zr
 rarfile
+pandas
