@@ -4,7 +4,19 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>TaterOS</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <script>
+      (() => {
+        const rawPath = String(window.location.pathname || "/");
+        const normalized = rawPath.replace(/\/+$/, "");
+        const basePath = normalized === "" ? "" : normalized;
+        window.__TATER_BASE_PATH__ = basePath;
+
+        const css = document.createElement("link");
+        css.rel = "stylesheet";
+        css.href = `${basePath}/static/styles.css`;
+        document.head.appendChild(css);
+      })();
+    </script>
   </head>
   <body>
     <div class="bg-shape bg-shape-a" aria-hidden="true"></div>
@@ -44,6 +56,14 @@
 
     <div id="toast-root" class="toast-root" aria-live="polite" aria-atomic="true"></div>
 
-    <script src="/static/app.js" defer></script>
+    <script>
+      (() => {
+        const basePath = String(window.__TATER_BASE_PATH__ || "");
+        const script = document.createElement("script");
+        script.defer = true;
+        script.src = `${basePath}/static/app.js`;
+        document.body.appendChild(script);
+      })();
+    </script>
   </body>
 </html>

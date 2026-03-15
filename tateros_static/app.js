@@ -21,6 +21,29 @@ const state = {
 
 localStorage.setItem("tater_tateros_session_id", state.sessionId);
 
+const APP_BASE_PATH = (() => {
+  const raw = String(window.__TATER_BASE_PATH__ || "").trim();
+  if (!raw || raw === "/") {
+    return "";
+  }
+  return raw.endsWith("/") ? raw.slice(0, -1) : raw;
+})();
+
+function withBasePath(path) {
+  const raw = String(path || "").trim();
+  if (!raw) {
+    return APP_BASE_PATH || "/";
+  }
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw) || raw.startsWith("//")) {
+    return raw;
+  }
+  if (!APP_BASE_PATH) {
+    return raw;
+  }
+  const normalized = raw.startsWith("/") ? raw : `/${raw}`;
+  return `${APP_BASE_PATH}${normalized}`;
+}
+
 const VIEW_META = {
   chat: { title: "Chat", subtitle: "Talk to Tater Totterson" },
   verbas: { title: "Verbas", subtitle: "Enable tools and manage Verba settings + shop updates." },
@@ -76,7 +99,7 @@ function showToast(message, type = "success", timeoutMs = 2600) {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
+  const response = await fetch(withBasePath(path), {
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
     ...options,
   });
@@ -453,7 +476,8 @@ function _chatFileUrl(fileId, mimetype = "") {
   }
   const base = `/api/chat/files/${encodeURIComponent(token)}`;
   const mm = String(mimetype || "").trim();
-  return mm ? `${base}?mimetype=${encodeURIComponent(mm)}` : base;
+  const withQuery = mm ? `${base}?mimetype=${encodeURIComponent(mm)}` : base;
+  return withBasePath(withQuery);
 }
 
 function renderChatMessage(message) {
@@ -2249,7 +2273,7 @@ async function loadChatView() {
     closeChatEventSource();
     state.activeChatJobId = jobId;
 
-    const eventSource = new EventSource(`/api/chat/jobs/${encodeURIComponent(jobId)}/events`);
+    const eventSource = new EventSource(withBasePath(`/api/chat/jobs/${encodeURIComponent(jobId)}/events`));
     state.chatEventSource = eventSource;
 
     eventSource.addEventListener("status", (event) => {
