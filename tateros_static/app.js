@@ -57,6 +57,7 @@ const APP_BASE_PATH = (() => {
   }
   return normalized;
 })();
+const IS_HA_INGRESS = APP_BASE_PATH.includes("/api/hassio_ingress/");
 
 function withBasePath(path) {
   const raw = String(path || "").trim();
@@ -2257,6 +2258,47 @@ async function loadChatView() {
     await refreshChatSpeedStats();
   }
 
+  const _normalizeAssistantMessages = (responses) => {
+    if (!Array.isArray(responses)) {
+      return [];
+    }
+    return responses
+      .map((item) => ({
+        role: "assistant",
+        username: "assistant",
+        content: item,
+      }))
+      .filter((item) => {
+        if (!item || typeof item !== "object") {
+          return false;
+        }
+        const content = item.content;
+        if (typeof content === "string") {
+          return Boolean(content.trim());
+        }
+        if (content && typeof content === "object") {
+          return true;
+        }
+        return false;
+      });
+  };
+
+  const appendAssistantResponses = (responses) => {
+    const messages = _normalizeAssistantMessages(responses);
+    if (!messages.length) {
+      return false;
+    }
+    const existingLog = String(chatLog.innerHTML || "").trim();
+    if (!existingLog || existingLog.includes('class="notice"')) {
+      chatLog.innerHTML = "";
+    }
+    const html = messages.map(renderChatMessage).join("");
+    chatLog.insertAdjacentHTML("beforeend", html);
+    stickChatToBottom();
+    bindChatMediaAutoScroll();
+    return true;
+  };
+
   async function refreshChatSpeedStats() {
     if (!speedStatsEl) {
       return;
@@ -2298,9 +2340,89 @@ async function loadChatView() {
     }
   }
 
+  let chatPollToken = 0;
+  let chatPollTimer = 0;
+
+  const stopChatJobPolling = () => {
+    chatPollToken += 1;
+    if (chatPollTimer) {
+      window.clearTimeout(chatPollTimer);
+      chatPollTimer = 0;
+    }
+  };
+
+  const finalizeChatJob = async ({ jobId, statusText, responses = [] }) => {
+    if (state.activeChatJobId !== jobId) {
+      return;
+    }
+    status.textContent = String(statusText || "");
+    state.sending = false;
+    state.activeChatJobId = "";
+    stopChatJobPolling();
+    closeChatEventSource();
+    const inlineRendered = appendAssistantResponses(responses);
+    if (inlineRendered) {
+      await refreshChatSpeedStats();
+    } else {
+      await refreshChatHistory();
+    }
+    await refreshHealth();
+  };
+
+  const scheduleChatJobPoll = (jobId, delayMs = 1200) => {
+    const token = chatPollToken;
+    chatPollTimer = window.setTimeout(async () => {
+      if (token !== chatPollToken) {
+        return;
+      }
+      if (state.view !== "chat" || state.activeChatJobId !== jobId) {
+        return;
+      }
+
+      try {
+        const snapshot = await api(`/api/chat/jobs/${encodeURIComponent(jobId)}`);
+        const snapshotStatus = String(snapshot.status || "").trim().toLowerCase();
+        if (snapshotStatus === "done") {
+          await finalizeChatJob({
+            jobId,
+            statusText: "Complete.",
+            responses: Array.isArray(snapshot.responses) ? snapshot.responses : [],
+          });
+          return;
+        }
+        if (snapshotStatus === "error") {
+          await finalizeChatJob({
+            jobId,
+            statusText: `Job failed: ${snapshot.error || "unknown error"}`,
+          });
+          return;
+        }
+
+        const tool = String(snapshot.current_tool || "").trim();
+        if (tool) {
+          status.textContent = `Using ${tool}...`;
+        } else if (snapshotStatus) {
+          status.textContent = `Running (${snapshotStatus})...`;
+        } else {
+          status.textContent = "Waiting for response...";
+        }
+      } catch {
+        status.textContent = "Waiting for response...";
+      }
+
+      scheduleChatJobPoll(jobId, 1200);
+    }, Math.max(250, Number(delayMs) || 1200));
+  };
+
   function attachJobStream(jobId) {
     closeChatEventSource();
+    stopChatJobPolling();
     state.activeChatJobId = jobId;
+    scheduleChatJobPoll(jobId, IS_HA_INGRESS ? 900 : 2000);
+
+    if (typeof EventSource !== "function") {
+      return;
+    }
 
     const eventSource = new EventSource(withBasePath(`/api/chat/jobs/${encodeURIComponent(jobId)}/events`));
     state.chatEventSource = eventSource;
@@ -2329,46 +2451,32 @@ async function loadChatView() {
         return;
       }
       status.textContent = waitText;
-      await refreshChatHistory();
     });
 
-    eventSource.addEventListener("done", async () => {
-      status.textContent = "Complete.";
-      state.sending = false;
-      closeChatEventSource();
-      await refreshChatHistory();
-      await refreshHealth();
+    eventSource.addEventListener("done", async (event) => {
+      const payload = safeJsonParse(event.data) || {};
+      await finalizeChatJob({
+        jobId,
+        statusText: "Complete.",
+        responses: Array.isArray(payload.responses) ? payload.responses : [],
+      });
     });
 
     eventSource.addEventListener("job_error", async (event) => {
       const payload = safeJsonParse(event.data) || {};
-      status.textContent = `Job failed: ${payload.error || "unknown error"}`;
-      state.sending = false;
-      closeChatEventSource();
-      await refreshChatHistory();
-      await refreshHealth();
+      await finalizeChatJob({
+        jobId,
+        statusText: `Job failed: ${payload.error || "unknown error"}`,
+      });
     });
 
-    eventSource.onerror = async () => {
-      try {
-        const snapshot = await api(`/api/chat/jobs/${encodeURIComponent(jobId)}`);
-        const snapshotStatus = String(snapshot.status || "");
-        if (snapshotStatus === "done") {
-          status.textContent = "Complete.";
-          state.sending = false;
-          closeChatEventSource();
-          await refreshChatHistory();
-          await refreshHealth();
-        } else if (snapshotStatus === "error") {
-          status.textContent = `Job failed: ${snapshot.error || "unknown error"}`;
-          state.sending = false;
-          closeChatEventSource();
-          await refreshChatHistory();
-          await refreshHealth();
-        }
-      } catch {
-        status.textContent = "Stream disconnected while waiting for job updates.";
+    eventSource.onerror = () => {
+      if (state.activeChatJobId !== jobId) {
+        return;
       }
+      // In some HA ingress/proxy setups SSE is unstable. Keep polling as the source of truth.
+      closeChatEventSource();
+      status.textContent = "Waiting for response...";
     };
   }
 
