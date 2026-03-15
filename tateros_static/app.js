@@ -22,11 +22,12 @@ const state = {
 localStorage.setItem("tater_tateros_session_id", state.sessionId);
 
 const APP_BASE_PATH = (() => {
-  const raw = String(window.__TATER_BASE_PATH__ || "").trim();
-  if (!raw || raw === "/") {
+  const rawPath = String(window.location.pathname || "/").trim();
+  const normalized = rawPath.replace(/\/+$/, "");
+  if (!normalized || normalized === "/") {
     return "";
   }
-  return raw.endsWith("/") ? raw.slice(0, -1) : raw;
+  return normalized;
 })();
 
 function withBasePath(path) {
