@@ -1,6 +1,39 @@
 from typing import Any, Callable, Dict, List, Optional
 
 
+def _is_awaitable(value: Any) -> bool:
+    return hasattr(value, "__await__")
+
+
+async def _dispatch_wait_callback(
+    wait_callback: Optional[Callable[..., Any]],
+    *,
+    func: str,
+    plugin_obj: Any,
+    wait_text: str,
+    wait_payload: Optional[Dict[str, Any]],
+) -> None:
+    if not callable(wait_callback):
+        return
+    payload = dict(wait_payload) if isinstance(wait_payload, dict) else {}
+    text = str(wait_text or "").strip()
+    attempts = [
+        (func, plugin_obj, text, payload),
+        (func, plugin_obj, text),
+        (func, plugin_obj),
+    ]
+    for args in attempts:
+        try:
+            result = wait_callback(*args)
+            if _is_awaitable(result):
+                await result
+            return
+        except TypeError:
+            continue
+        except Exception:
+            return
+
+
 async def normalize_tool_result_for_checker(
     *,
     result_payload: Any,
@@ -67,7 +100,9 @@ async def execute_tool_call(
     user_text: str,
     origin: Optional[Dict[str, Any]],
     scope: str,
-    wait_callback: Optional[Callable[[str, Any], Any]],
+    wait_callback: Optional[Callable[..., Any]],
+    wait_text: str,
+    wait_payload: Optional[Dict[str, Any]],
     admin_guard: Optional[Callable[[str], Optional[Dict[str, Any]]]],
     canonical_tool_name_fn: Callable[[str], str],
     attach_origin_fn: Callable[..., Dict[str, Any]],
@@ -104,11 +139,13 @@ async def execute_tool_call(
             )
             return {"payload": payload, "checker_result": checker_result}
 
-    if wait_callback:
-        try:
-            await wait_callback(func, plugin_obj)
-        except Exception:
-            pass
+    await _dispatch_wait_callback(
+        wait_callback,
+        func=func,
+        plugin_obj=plugin_obj,
+        wait_text=wait_text,
+        wait_payload=wait_payload,
+    )
 
     runtime_context: Dict[str, Any] = {}
     if isinstance(context, dict):

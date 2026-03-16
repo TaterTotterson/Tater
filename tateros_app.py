@@ -55,7 +55,7 @@ from plugin_settings import (
     save_plugin_settings,
     set_plugin_enabled,
 )
-from plugin_kernel import normalize_platform, plugin_supports_platform
+from plugin_kernel import normalize_platform
 from vision_settings import get_vision_settings as get_shared_vision_settings, save_vision_settings as save_shared_vision_settings
 from tateros import core_store as core_store_module
 from tateros import plugin_store as plugin_store_module
@@ -902,33 +902,35 @@ async def _process_message(
     agent_max_rounds, agent_max_tool_calls = resolve_agent_limits(redis_client)
 
     async with get_llm_client_from_env() as llm_client:
-        async def _wait(func_name, plugin_obj):
-            wait_text = ""
-            try:
-                if plugin_obj and plugin_supports_platform(plugin_obj, "webui"):
-                    template = str(getattr(plugin_obj, "waiting_prompt_template", "") or "").strip()
-                    if template:
-                        try:
-                            wait_msg = template.format(mention=user_name)
-                        except Exception:
-                            wait_msg = template
-                        wait_response = await llm_client.chat(
-                            messages=[
-                                {"role": "system", "content": "Write one short, friendly status line."},
-                                {"role": "user", "content": wait_msg},
-                            ]
-                        )
-                        wait_text = str((wait_response.get("message", {}) or {}).get("content", "") or "").strip()
-            except Exception:
-                logger.exception("wait_callback wait-text generation failed")
+        async def _wait(
+            func_name: str,
+            plugin_obj: Any,
+            wait_text: str = "",
+            wait_payload: Optional[Dict[str, Any]] = None,
+        ) -> None:
+            progress_payload = dict(wait_payload) if isinstance(wait_payload, dict) else {}
+            text = str(wait_text or progress_payload.get("text") or "").strip()
+            if not text:
+                text = "I'm working on that now."
+            progress_payload["text"] = text
 
             if callable(wait_callback):
-                try:
-                    wait_callback(func_name, plugin_obj, wait_text)
-                except TypeError:
-                    wait_callback(func_name, plugin_obj)
-                except Exception:
-                    logger.exception("wait_callback failed")
+                attempts = [
+                    (func_name, plugin_obj, text, progress_payload),
+                    (func_name, plugin_obj, text),
+                    (func_name, plugin_obj),
+                ]
+                for args in attempts:
+                    try:
+                        callback_result = wait_callback(*args)
+                        if hasattr(callback_result, "__await__"):
+                            await callback_result
+                        break
+                    except TypeError:
+                        continue
+                    except Exception:
+                        logger.exception("wait_callback failed")
+                        break
 
         result = await run_cerberus_turn(
             llm_client=llm_client,
@@ -1031,7 +1033,12 @@ class ChatJobManager:
             self._set_status_locked(job, status="running")
             self._emit(job, {"type": "status", "status": "running", "job_id": job_id})
 
-        def _on_tool(func_name: str, plugin_obj: Any, wait_text: str = "") -> None:
+        def _on_tool(
+            func_name: str,
+            plugin_obj: Any,
+            wait_text: str = "",
+            wait_payload: Optional[Dict[str, Any]] = None,
+        ) -> None:
             display_name = ""
             if plugin_obj is None:
                 display_name = f"kernel::{func_name}"
@@ -1058,16 +1065,23 @@ class ChatJobManager:
                         "job_id": job_id,
                     },
                 )
-                if wait_text:
-                    _save_chat_message("assistant", "assistant", {"marker": "plugin_wait", "content": wait_text})
+                progress_payload = dict(wait_payload) if isinstance(wait_payload, dict) else {}
+                wait_line = str(wait_text or progress_payload.get("text") or "").strip()
+                if not wait_line:
+                    wait_line = "I'm working on that now."
+                if wait_line:
+                    _save_chat_message("assistant", "assistant", {"marker": "plugin_wait", "content": wait_line})
+                    event_payload: Dict[str, Any] = {
+                        "type": "waiting",
+                        "status": "running",
+                        "wait_text": wait_line,
+                        "job_id": job_id,
+                    }
+                    if progress_payload:
+                        event_payload["wait_payload"] = progress_payload
                     self._emit(
                         job_local,
-                        {
-                            "type": "waiting",
-                            "status": "running",
-                            "wait_text": wait_text,
-                            "job_id": job_id,
-                        },
+                        event_payload,
                     )
 
         try:

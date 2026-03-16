@@ -1072,8 +1072,10 @@ async def _execute_tool_call(
     user_text: str,
     origin: Optional[Dict[str, Any]],
     scope: str,
-    wait_callback: Optional[Callable[[str, Any], Any]],
-    admin_guard: Optional[Callable[[str], Optional[Dict[str, Any]]]],
+    wait_callback: Optional[Callable[..., Any]],
+    admin_guard: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
+    wait_text: str = "",
+    wait_payload: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     return await execution.execute_tool_call(
         llm_client=llm_client,
@@ -1086,6 +1088,8 @@ async def _execute_tool_call(
         origin=origin,
         scope=scope,
         wait_callback=wait_callback,
+        wait_text=wait_text,
+        wait_payload=wait_payload,
         admin_guard=admin_guard,
         canonical_tool_name_fn=_canonical_tool_name,
         attach_origin_fn=_attach_origin,
@@ -1840,6 +1844,109 @@ def _turn_completion_fragment(*, request_text: str, summary_text: str) -> str:
                 return f"{request} ({summary})" if request else summary
         return summary
     return request
+
+
+async def _tool_start_progress(
+    *,
+    llm_client: Any,
+    platform: str,
+    tool_call: Optional[Dict[str, Any]],
+    round_request_text: str,
+    current_plan_step: Optional[Dict[str, str]],
+    completed_steps_count: int,
+    total_plan_steps: int,
+    platform_preamble: str = "",
+) -> tuple[str, Dict[str, Any]]:
+    tool_name = _canonical_tool_name(str((tool_call or {}).get("function") or "").strip()) or "tool"
+    instruction_source = (
+        str((current_plan_step or {}).get("nl") or "").strip()
+        if isinstance(current_plan_step, dict)
+        else ""
+    )
+    instruction = _short_text(" ".join(str(instruction_source or round_request_text or "").split()), limit=200)
+    instruction = instruction.lstrip()
+    if instruction.lower().startswith("to "):
+        instruction = instruction[3:].lstrip()
+    instruction = instruction.rstrip(".!?")
+
+    step_total = max(0, int(total_plan_steps or 0))
+    step_index = 0
+    if step_total > 0:
+        step_index = min(step_total, max(1, int(completed_steps_count or 0) + 1))
+
+    stage = ""
+    if step_total > 1:
+        if step_index <= 1:
+            stage = "first"
+        elif step_index >= step_total:
+            stage = "final"
+        else:
+            stage = "next"
+
+    progress_prompt_payload: Dict[str, Any] = {
+        "tool": tool_name,
+        "instruction": instruction or round_request_text or "",
+        "step_index": step_index if step_index > 0 else None,
+        "step_total": step_total if step_total > 0 else None,
+        "stage": stage or None,
+        "execution_phase": "before_tool_execution_no_results_available",
+    }
+    progress_messages: List[Dict[str, Any]] = [
+        {
+            "role": "system",
+            "content": (
+                "You are writing a live in-progress status line before a tool call executes. "
+                "No results exist yet. "
+                "Write exactly one short first-person sentence about the action you are about to do now. "
+                "Do not include findings, forecasts, temperatures, numbers, dates, outcomes, confirmations, or past-tense claims. "
+                "Do not mention internal systems, JSON, markdown, or tool names. "
+                "Do not ask a question. "
+                "Good style examples: \"I'm checking that for you now.\" \"I'm pulling that up now.\" "
+                "Return only the sentence."
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps(progress_prompt_payload, ensure_ascii=False),
+        },
+    ]
+    progress_messages = _with_platform_preamble(
+        progress_messages,
+        platform_preamble=platform_preamble,
+    )
+    text = ""
+    try:
+        progress_resp = await llm_client.chat(
+            messages=progress_messages,
+            max_tokens=56,
+            temperature=0.1,
+        )
+        text = _coerce_text((progress_resp.get("message", {}) or {}).get("content", "")).strip()
+    except Exception:
+        text = ""
+    text = _short_text(" ".join(str(text or "").split()), limit=220)
+    if looks_like_tool_markup(text) or parse_function_json(text) is not None:
+        text = ""
+    if platform in ASCII_ONLY_PLATFORMS:
+        text = text.encode("ascii", "ignore").decode().strip()
+    if not text:
+        text = "I'm working on that now."
+
+    payload: Dict[str, Any] = {
+        "phase": "tool_start",
+        "tool": tool_name,
+        "text": text,
+        "source": "llm",
+    }
+    step_id = _short_text((current_plan_step or {}).get("id"), limit=24)
+    if step_id:
+        payload["step_id"] = step_id
+    if instruction:
+        payload["instruction"] = instruction
+    if step_index > 0 and step_total > 0:
+        payload["step_index"] = step_index
+        payload["step_total"] = step_total
+    return text, payload
 
 
 def _multi_step_turn_draft(
@@ -2623,7 +2730,7 @@ async def run_cerberus_turn(
     scope: str,
     task_id: Optional[str] = None,
     origin: Optional[Dict[str, Any]] = None,
-    wait_callback: Optional[Callable[[str, Any], Any]] = None,
+    wait_callback: Optional[Callable[..., Any]] = None,
     admin_guard: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
     redis_client: Any = None,
     max_rounds: Optional[int] = None,
@@ -2748,6 +2855,7 @@ async def run_cerberus_turn(
     queued_retry_tool_for_ledger: Optional[Dict[str, Any]] = None
     repair_returned_no_tool_retries = 0
     structured_plan_queue: List[Dict[str, str]] = []
+    structured_plan_total_steps = 0
     plan_builder_mode = "unknown"
     completed_tool_steps: List[Dict[str, str]] = []
     try:
@@ -2770,6 +2878,7 @@ async def run_cerberus_turn(
         raw_steps = plan_decision.get("steps")
         if isinstance(raw_steps, list):
             structured_plan_queue = [step for step in raw_steps if isinstance(step, dict)]
+    structured_plan_total_steps = len(structured_plan_queue)
     if structured_plan_queue:
         agent_state = _sync_agent_state_with_plan_queue(
             agent_state=agent_state,
@@ -3236,6 +3345,16 @@ async def run_cerberus_turn(
         )
         tool_used = True
         tool_user_text = round_request_text
+        wait_text, wait_payload = await _tool_start_progress(
+            llm_client=llm_client,
+            platform=platform,
+            tool_call=planned_tool,
+            round_request_text=tool_user_text,
+            current_plan_step=(current_plan_step if isinstance(current_plan_step, dict) else None),
+            completed_steps_count=len(completed_tool_steps),
+            total_plan_steps=structured_plan_total_steps,
+            platform_preamble=platform_preamble,
+        )
         tool_started = time.perf_counter()
         doer_exec = await _execute_tool_call(
             llm_client=llm_client,
@@ -3248,6 +3367,8 @@ async def run_cerberus_turn(
             origin=origin_payload,
             scope=scope,
             wait_callback=wait_callback,
+            wait_text=wait_text,
+            wait_payload=wait_payload,
             admin_guard=admin_guard,
         )
         tool_ms_total += (time.perf_counter() - tool_started) * 1000.0

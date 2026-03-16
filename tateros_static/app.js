@@ -334,7 +334,13 @@ function buildSettingInput(field, inputId) {
   }
 
   const htmlType = type === "password" ? "password" : type === "number" ? "number" : "text";
-  return `<label>${safeLabel}<input id="${inputId}" type="${htmlType}" value="${escapeHtml(field.value ?? "")}" data-setting-type="${escapeHtml(type)}" data-setting-key="${safeKey}" />${safeDesc}</label>`;
+  const numberAttrs =
+    type === "number"
+      ? ` step="${escapeHtml(field?.step ?? "any")}"${
+          field?.min !== undefined ? ` min="${escapeHtml(field.min)}"` : ""
+        }${field?.max !== undefined ? ` max="${escapeHtml(field.max)}"` : ""}`
+      : "";
+  return `<label>${safeLabel}<input id="${inputId}" type="${htmlType}"${numberAttrs} value="${escapeHtml(field.value ?? "")}" data-setting-type="${escapeHtml(type)}" data-setting-key="${safeKey}" />${safeDesc}</label>`;
 }
 
 function getInputValue(input) {
@@ -1188,9 +1194,15 @@ function renderCoreManagerField(field) {
   }
 
   const htmlType = type === "password" ? "password" : type === "number" ? "number" : "text";
+  const numberAttrs =
+    type === "number"
+      ? ` step="${escapeHtml(field?.step ?? "any")}"${
+          field?.min !== undefined ? ` min="${escapeHtml(field.min)}"` : ""
+        }${field?.max !== undefined ? ` max="${escapeHtml(field.max)}"` : ""}`
+      : "";
   return `
     <label>${escapeHtml(label)}
-      <input type="${htmlType}" value="${escapeHtml(field?.value ?? "")}" ${placeholderAttr} data-core-field-key="${escapeHtml(
+      <input type="${htmlType}"${numberAttrs} value="${escapeHtml(field?.value ?? "")}" ${placeholderAttr} data-core-field-key="${escapeHtml(
     key
   )}" data-core-field-type="${escapeHtml(type)}" />
       ${descHtml}
@@ -2299,6 +2311,19 @@ async function loadChatView() {
     return true;
   };
 
+  const appendAssistantWaitLine = (waitText) => {
+    const text = String(waitText || "").trim();
+    if (!text) {
+      return false;
+    }
+    return appendAssistantResponses([
+      {
+        marker: "plugin_wait",
+        content: text,
+      },
+    ]);
+  };
+
   async function refreshChatSpeedStats() {
     if (!speedStatsEl) {
       return;
@@ -2450,7 +2475,7 @@ async function loadChatView() {
       if (!waitText) {
         return;
       }
-      status.textContent = waitText;
+      appendAssistantWaitLine(waitText);
     });
 
     eventSource.addEventListener("done", async (event) => {
