@@ -10,7 +10,6 @@ from . import cerberus_checker as checker
 from . import cerberus_doer_state as doer_state
 from . import cerberus_execution as execution
 from . import cerberus_common_helpers as common_helpers
-from . import cerberus_followup_intents as followup_intents
 from . import cerberus_ledger as ledger
 from . import cerberus_limits as limits_helpers
 from . import cerberus_memory_context as memory_context_helpers
@@ -24,7 +23,6 @@ from . import cerberus_state_core as state_core_helpers
 from . import cerberus_state_store as state_store
 from . import cerberus_toolcall_utils as toolcall_utils
 from . import cerberus_tool_index as tool_index_helpers
-from . import cerberus_turn_classifiers as turn_classifiers
 from . import cerberus_turn_utils as turn_utils
 from . import cerberus_validation as validation
 from . import cerberus_validation_flow as validation_flow
@@ -640,31 +638,8 @@ def _platform_label(platform: str) -> str:
     )
 
 
-def _contains_action_intent(text: str) -> bool:
-    return turn_classifiers.contains_action_intent(
-        text,
-        url_re=_URL_RE,
-    )
-
-
-def _is_stop_only(text: str) -> bool:
-    return turn_classifiers.is_stop_only(
-        text,
-        contains_action_intent_fn=_contains_action_intent,
-    )
-
-
 def _strip_user_sender_prefix(text: str) -> str:
     return common_helpers.strip_user_sender_prefix(text)
-
-
-def _looks_like_standalone_request(text: str) -> bool:
-    return followup_intents.looks_like_standalone_request(
-        text,
-        is_acknowledgement_only_fn=lambda _text: False,
-        is_stop_only_fn=_is_stop_only,
-        url_re=_URL_RE,
-    )
 
 
 def _web_research_url_key(url: Any) -> str:
@@ -1412,6 +1387,97 @@ async def _resolve_user_request_for_turn(
     return _short_text(" ".join(resolved.split()), limit=420) or current
 
 
+def _turn_goal_for_state(*, current_user_text: str, resolved_user_text: str) -> str:
+    goal = _short_text((resolved_user_text or current_user_text or "").strip(), limit=180)
+    return goal or "Fulfill the user request."
+
+
+async def _llm_topic_shift_decision_for_turn(
+    *,
+    llm_client: Any,
+    current_user_text: str,
+    resolved_user_text: str,
+    history: List[Dict[str, Any]],
+    prior_state: Optional[Dict[str, Any]],
+    platform_preamble: str,
+    max_tokens: int,
+) -> Dict[str, Any]:
+    current = str(current_user_text or "").strip()
+    if not current:
+        return {"new_topic": False, "confidence": 0.0, "reason": "empty"}
+
+    resolved = str(resolved_user_text or current).strip() or current
+    recent_history: List[Dict[str, str]] = []
+    for msg in (history or [])[-8:]:
+        if not isinstance(msg, dict):
+            continue
+        role = str(msg.get("role") or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = _coerce_text(msg.get("content")).strip()
+        if not content:
+            continue
+        recent_history.append({"role": role, "content": _short_text(content, limit=240)})
+
+    prior_state_compact = ""
+    if isinstance(prior_state, dict):
+        prior_state_compact = _compact_agent_state_json(
+            prior_state,
+            fallback_goal=resolved,
+            limit=700,
+        )
+
+    payload = {
+        "current_user_message": current,
+        "resolved_request_for_turn": resolved,
+        "recent_history": recent_history,
+        "prior_agent_state_compact_json": prior_state_compact,
+    }
+    messages: List[Dict[str, Any]] = [
+        {
+            "role": "system",
+            "content": (
+                "You classify whether the user's current turn starts a new topic relative to prior agent state.\n"
+                "Return exactly one strict JSON object with this schema:\n"
+                "{\"new_topic\":true|false,\"confidence\":number,\"reason\":\"short text\"}\n"
+                "Rules:\n"
+                "- new_topic=true only when the current turn changes objective enough that prior plan/facts should be discarded.\n"
+                "- new_topic=false for follow-ups, clarifications, refinements, corrections, and references to prior work/results.\n"
+                "- If uncertain, choose false.\n"
+                "- Do not answer the user.\n"
+                "- Output JSON only.\n"
+            ),
+        },
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+    messages = _with_platform_preamble(messages, platform_preamble=platform_preamble)
+    try:
+        resp = await llm_client.chat(
+            messages=messages,
+            max_tokens=max(90, int(max_tokens or 200)),
+            temperature=0.0,
+        )
+    except Exception:
+        return {"new_topic": False, "confidence": 0.0, "reason": "classifier_error"}
+
+    raw = _coerce_text((resp.get("message", {}) or {}).get("content", "")).strip()
+    parsed = _first_json_object(raw)
+    if not isinstance(parsed, dict):
+        return {"new_topic": False, "confidence": 0.0, "reason": "invalid_json"}
+
+    new_topic = parsed.get("new_topic") if isinstance(parsed.get("new_topic"), bool) else False
+    confidence = 0.0
+    raw_confidence = parsed.get("confidence")
+    if isinstance(raw_confidence, (int, float)):
+        confidence = max(0.0, min(1.0, float(raw_confidence)))
+    reason = _short_text(parsed.get("reason"), limit=180)
+    return {
+        "new_topic": bool(new_topic),
+        "confidence": confidence,
+        "reason": reason or "ok",
+    }
+
+
 def _state_list(value: Any, *, max_items: int, item_limit: int) -> List[str]:
     return state_core_helpers.state_list(
         value,
@@ -1633,42 +1699,6 @@ def _save_persistent_agent_state(
     )
 
 
-def _references_previous_work(text: str) -> bool:
-    return state_core_helpers.references_previous_work(
-        text,
-    )
-
-
-def _looks_like_short_followup_request(text: str) -> bool:
-    return state_core_helpers.looks_like_short_followup_request(
-        text,
-        references_previous_work_fn=_references_previous_work,
-    )
-
-
-def _should_reset_state_for_topic_change(current_user_text: str) -> bool:
-    return state_core_helpers.should_reset_state_for_topic_change(
-        current_user_text,
-        contains_new_domain_reset_keywords_fn=_contains_new_domain_reset_keywords,
-        references_explicit_prior_work_fn=_references_explicit_prior_work,
-        looks_like_short_followup_request_fn=_looks_like_short_followup_request,
-        references_previous_work_fn=_references_previous_work,
-        looks_like_standalone_request_fn=_looks_like_standalone_request,
-    )
-
-
-def _contains_new_domain_reset_keywords(text: str) -> bool:
-    return state_core_helpers.contains_new_domain_reset_keywords(
-        text,
-    )
-
-
-def _references_explicit_prior_work(text: str) -> bool:
-    return state_core_helpers.references_explicit_prior_work(
-        text,
-    )
-
-
 def _new_agent_state(goal: str) -> Dict[str, Any]:
     return state_core_helpers.new_agent_state(
         goal,
@@ -1676,21 +1706,24 @@ def _new_agent_state(goal: str) -> Dict[str, Any]:
     )
 
 
-def _initial_agent_state_for_turn(
+def _initial_agent_state_for_turn_from_topic_signal(
     *,
     prior_state: Optional[Dict[str, Any]],
     current_user_text: str,
     resolved_user_text: str,
+    topic_shift_new_topic: bool,
 ) -> Dict[str, Any]:
-    return state_core_helpers.initial_agent_state_for_turn(
-        prior_state=prior_state,
+    goal = _turn_goal_for_state(
         current_user_text=current_user_text,
         resolved_user_text=resolved_user_text,
-        short_text_fn=_short_text,
-        should_reset_state_for_topic_change_fn=_should_reset_state_for_topic_change,
-        new_agent_state_fn=_new_agent_state,
-        normalize_agent_state_fn=_normalize_agent_state,
     )
+    if not isinstance(prior_state, dict):
+        return _new_agent_state(goal)
+    if bool(topic_shift_new_topic):
+        return _new_agent_state(goal)
+    merged = _normalize_agent_state(prior_state, fallback_goal=goal)
+    merged["goal"] = goal
+    return merged
 
 
 def _state_add_line(state_list: List[str], line: str, *, max_items: int) -> List[str]:
@@ -2840,10 +2873,20 @@ async def run_cerberus_turn(
         platform=platform,
         scope=scope,
     )
-    agent_state: Dict[str, Any] = _initial_agent_state_for_turn(
+    topic_shift_decision = await _llm_topic_shift_decision_for_turn(
+        llm_client=llm_client,
+        current_user_text=current_user_turn_text,
+        resolved_user_text=resolved_user_text,
+        history=history,
+        prior_state=prior_state,
+        platform_preamble=platform_preamble,
+        max_tokens=max(120, planner_max_tokens // 8),
+    )
+    agent_state: Dict[str, Any] = _initial_agent_state_for_turn_from_topic_signal(
         prior_state=prior_state,
         current_user_text=current_user_turn_text,
         resolved_user_text=resolved_user_text,
+        topic_shift_new_topic=bool(topic_shift_decision.get("new_topic")),
     )
     memory_context_payload = _memory_context_payload(
         redis_client=r,
