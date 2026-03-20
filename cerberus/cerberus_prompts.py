@@ -68,7 +68,7 @@ def thanatos_execution_step_prompt(*, intent: str, nl: str, goal: str = "", repa
         "- If a retry repair hint is present, apply it directly in this attempt.\n"
         "- Do not merge with other actions.\n"
         "- Do not reinterpret or resplit the original user message.\n"
-        "- For NL-first plugins, pass only the step instruction text for this step.\n"
+        "- For NL-first verba tools, pass only the step instruction text for this step.\n"
     )
 
 
@@ -79,7 +79,7 @@ def astraeus_system_prompt(*, platform: str) -> str:
         "Return exactly one strict JSON object with this schema:\n"
         "{\"topic\":\"short topic\",\"topic_shift\":false,\"goal\":\"clear goal\",\"steps\":[{\"step_id\":1,\"intent\":\"atomic intent\",\"nl\":\"single scoped instruction\"}]}\n"
         "Rules:\n"
-        "- You are intent-only. Do not reference tools, plugins, portals, cores, function names, or argument schemas.\n"
+        "- You are intent-only. Do not reference tools, verba tools, portals, cores, function names, or argument schemas.\n"
         "- steps must be empty only when this turn is conversational and does not require execution.\n"
         "- For greetings, acknowledgements, reactions, social check-ins, or meta conversation, return steps as an empty list.\n"
         "- Do not create execution steps for chit-chat or acknowledgements.\n"
@@ -148,7 +148,7 @@ def chat_fallback_system_prompt(
         "Answer socially and directly when the user is making small talk.\n"
         "For questions like what are you up to / what have you been up to / what do you think, answer in first person like a normal conversation.\n"
         "Do not ask a clarifying question unless the user is actually requesting a missing detail for a task.\n"
-        "Do not simulate calling Verbas or pretend actions executed in chat mode.\n"
+        "Do not simulate calling Verba tools or pretend actions executed in chat mode.\n"
         "Do not mention internal modes, branches, or orchestration roles unless asked.\n"
         "Do not mention tools, planning, internal state, or limitations unless the user asked.\n"
         f"{plain_text_rule}"
@@ -207,7 +207,7 @@ def thanatos_system_prompt(
         "- For files: search_files → read_file before acting; do not guess paths.\n"
         "- For remote URLs (http/https), do not invent local filesystem paths; use a URL/web-capable tool first.\n"
         "- Never claim completion without a successful tool result this turn.\n"
-        "- For NL-first plugins: pass only a concise action phrase for ONE checklist item; rewrite, don’t quote; remove filler.\n"
+        "- For NL-first verba tools: pass only a concise action phrase for ONE checklist item; rewrite, don’t quote; remove filler.\n"
         "- Memory is context; use memory_get only when explicit retrieval is needed.\n"
         "- Prefer inspect_webpage for summaries.\n"
         "- For scene/event follow-up questions, always use available camera/snapshot/events/vision tools before giving a direct answer.\n"

@@ -86,7 +86,7 @@ function withBasePath(path) {
 
 const VIEW_META = {
   chat: { title: "Chat", subtitle: "Talk to Tater Totterson" },
-  verbas: { title: "Verbas", subtitle: "Enable tools and manage Verba settings + shop updates." },
+  verbas: { title: "Verba", subtitle: "Enable tools and manage Verba settings + shop updates." },
   portals: { title: "Portals", subtitle: "Portal runtime controls and full Portal Shop manager." },
   cores: { title: "Cores", subtitle: "Core runtime controls and full Core Shop manager." },
   settings: { title: "Settings", subtitle: "Global WebUI and Tater runtime configuration." },
@@ -997,7 +997,7 @@ function formatRuntimeSummary(health) {
   const portalsRunning = Number(health?.portals_running ?? 0);
   const coresRunning = Number(health?.cores_running ?? 0);
   const chatJobsActive = Number(health?.chat_jobs_active ?? 0);
-  return `${verbasEnabled} verbas enabled • ${portalsRunning} portals running • ${coresRunning} cores running • ${chatJobsActive} chat jobs`;
+  return `${verbasEnabled} verba enabled • ${portalsRunning} portals running • ${coresRunning} cores running • ${chatJobsActive} chat jobs`;
 }
 
 function setRuntimeSummaryText(text, tone = "normal") {
@@ -1882,7 +1882,7 @@ function buildVerbaRuntimeHtml(runtimeData, shopData) {
 
   if (!items.length) {
     resetRuntimeSettingsCatalog("verbas");
-    return renderNotice("No verbas found in plugin registry.");
+    return renderNotice("No verba found in verba registry.");
   }
 
   resetRuntimeSettingsCatalog("verbas");
