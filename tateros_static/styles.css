@@ -1,5 +1,6 @@
 :root {
   --content-max: 1240px;
+  --sidebar-width: 260px;
   --bg: #111213;
   --bg-soft: #151617;
   --panel: #1a1b1d;
@@ -31,6 +32,11 @@ body {
   background-attachment: fixed;
 }
 
+body.modal-open {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
 .bg-shape {
   position: fixed;
   border-radius: 999px;
@@ -60,18 +66,767 @@ body {
   position: relative;
   z-index: 1;
   display: grid;
-  grid-template-columns: 260px 1fr;
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
   min-height: 100vh;
+  background: linear-gradient(180deg, rgba(16, 17, 19, 0.16), rgba(16, 17, 19, 0.16));
+  transition: grid-template-columns 0.24s ease;
 }
 
 .sidebar {
   border-right: 1px solid var(--line);
-  background: linear-gradient(180deg, rgba(27, 28, 31, 0.86), rgba(16, 16, 18, 0.95));
-  backdrop-filter: blur(6px);
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
   padding: 26px 18px;
   display: flex;
   flex-direction: column;
   gap: 24px;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+  transition: transform 0.24s ease, opacity 0.2s ease;
+  isolation: isolate;
+}
+
+.sidebar::before,
+.sidebar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.app-shell.sidebar-collapsed {
+  --sidebar-width: 0px;
+}
+
+.app-shell.sidebar-collapsed .sidebar {
+  transform: translateX(calc(-100% - 10px));
+  opacity: 0;
+  pointer-events: none;
+}
+
+.app-shell.sidebar-collapsing .sidebar {
+  transition: none;
+  pointer-events: none;
+  border-right-color: rgba(240, 131, 69, 0.42);
+  box-shadow: 0 0 26px rgba(240, 131, 69, 0.26), 0 0 58px rgba(214, 90, 31, 0.2);
+  animation: sidebar-burn-slide 460ms cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
+}
+
+.app-shell.sidebar-collapsing .sidebar::before {
+  opacity: 1;
+  background:
+    radial-gradient(circle at 8% 14%, rgba(255, 198, 115, 0.66), transparent 33%),
+    radial-gradient(circle at 18% 38%, rgba(255, 141, 56, 0.7), transparent 30%),
+    radial-gradient(circle at 12% 66%, rgba(255, 96, 38, 0.64), transparent 34%),
+    radial-gradient(circle at 24% 84%, rgba(255, 188, 108, 0.48), transparent 26%),
+    linear-gradient(180deg, rgba(255, 127, 56, 0.18), rgba(255, 74, 30, 0.14) 45%, rgba(10, 10, 12, 0.22));
+  mix-blend-mode: screen;
+  animation: sidebar-flame-flicker 460ms ease-out forwards;
+}
+
+.app-shell.sidebar-collapsing .sidebar::after {
+  opacity: 1;
+  background:
+    radial-gradient(3px 3px at 16% 22%, rgba(255, 224, 170, 0.86), transparent 62%),
+    radial-gradient(2px 2px at 12% 34%, rgba(255, 183, 116, 0.76), transparent 62%),
+    radial-gradient(2px 2px at 20% 47%, rgba(255, 208, 148, 0.72), transparent 62%),
+    radial-gradient(3px 3px at 14% 61%, rgba(255, 174, 102, 0.76), transparent 62%),
+    radial-gradient(2px 2px at 24% 73%, rgba(255, 222, 164, 0.72), transparent 62%),
+    radial-gradient(3px 3px at 10% 86%, rgba(255, 185, 109, 0.76), transparent 62%);
+  animation: sidebar-ember-drift 500ms ease-out forwards;
+}
+
+.app-shell.sidebar-expanding .sidebar {
+  transition: none;
+  pointer-events: none;
+  border-right-color: rgba(240, 131, 69, 0.42);
+  box-shadow: 0 0 24px rgba(240, 131, 69, 0.22), 0 0 56px rgba(214, 90, 31, 0.18);
+  animation: sidebar-ignite-slide 480ms cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
+}
+
+.app-shell.sidebar-expanding .sidebar::before {
+  opacity: 1;
+  background:
+    radial-gradient(circle at 10% 16%, rgba(255, 207, 132, 0.6), transparent 32%),
+    radial-gradient(circle at 18% 34%, rgba(255, 150, 66, 0.62), transparent 31%),
+    radial-gradient(circle at 13% 58%, rgba(255, 104, 42, 0.58), transparent 32%),
+    radial-gradient(circle at 25% 82%, rgba(255, 188, 108, 0.44), transparent 26%),
+    linear-gradient(180deg, rgba(255, 120, 52, 0.13), rgba(255, 80, 32, 0.11) 45%, rgba(10, 10, 12, 0.14));
+  mix-blend-mode: screen;
+  animation: sidebar-ignite-flare 480ms ease-out forwards;
+}
+
+.app-shell.sidebar-expanding .sidebar::after {
+  opacity: 1;
+  background:
+    radial-gradient(3px 3px at 9% 21%, rgba(255, 233, 178, 0.82), transparent 62%),
+    radial-gradient(2px 2px at 15% 32%, rgba(255, 192, 120, 0.72), transparent 62%),
+    radial-gradient(2px 2px at 11% 46%, rgba(255, 216, 152, 0.68), transparent 62%),
+    radial-gradient(3px 3px at 21% 63%, rgba(255, 176, 108, 0.74), transparent 62%),
+    radial-gradient(2px 2px at 15% 78%, rgba(255, 229, 170, 0.66), transparent 62%);
+  animation: sidebar-ignite-embers 500ms ease-out forwards;
+}
+
+body[data-popup-effect="disabled"] .app-shell.sidebar-collapsing .sidebar,
+body[data-popup-effect="disabled"] .app-shell.sidebar-expanding .sidebar {
+  animation: none !important;
+  border-right-color: var(--line);
+  box-shadow: none;
+  filter: none;
+}
+
+body[data-popup-effect="disabled"] .app-shell.sidebar-collapsing .sidebar {
+  transform: translateX(calc(-100% - 10px));
+  opacity: 0.02;
+}
+
+body[data-popup-effect="disabled"] .app-shell.sidebar-expanding .sidebar {
+  transform: translateX(0);
+  opacity: 1;
+}
+
+body[data-popup-effect="disabled"] .app-shell.sidebar-collapsing .sidebar::before,
+body[data-popup-effect="disabled"] .app-shell.sidebar-collapsing .sidebar::after,
+body[data-popup-effect="disabled"] .app-shell.sidebar-expanding .sidebar::before,
+body[data-popup-effect="disabled"] .app-shell.sidebar-expanding .sidebar::after {
+  display: none;
+}
+
+body[data-popup-effect="dust"] .app-shell.sidebar-collapsing .sidebar {
+  border-right-color: rgba(214, 198, 166, 0.54);
+  box-shadow: 0 0 24px rgba(175, 156, 124, 0.24), 0 0 54px rgba(118, 98, 72, 0.2);
+  animation: sidebar-dust-slide-out 500ms cubic-bezier(0.23, 0.82, 0.22, 1) forwards;
+}
+
+body[data-popup-effect="dust"] .app-shell.sidebar-collapsing .sidebar::before {
+  background:
+    radial-gradient(circle at 8% 16%, rgba(243, 232, 208, 0.52), transparent 34%),
+    radial-gradient(circle at 18% 42%, rgba(214, 198, 166, 0.4), transparent 32%),
+    linear-gradient(180deg, rgba(186, 164, 136, 0.16), rgba(94, 80, 64, 0.2) 62%, transparent);
+  animation: sidebar-dust-cloud-out 500ms ease-out forwards;
+}
+
+body[data-popup-effect="dust"] .app-shell.sidebar-collapsing .sidebar::after {
+  background:
+    radial-gradient(3px 3px at 12% 24%, rgba(244, 236, 218, 0.76), transparent 62%),
+    radial-gradient(2px 2px at 20% 42%, rgba(226, 212, 186, 0.68), transparent 62%),
+    radial-gradient(2px 2px at 14% 68%, rgba(212, 196, 168, 0.64), transparent 62%);
+  animation: sidebar-dust-particles-out 510ms ease-out forwards;
+}
+
+body[data-popup-effect="dust"] .app-shell.sidebar-expanding .sidebar {
+  border-right-color: rgba(214, 198, 166, 0.48);
+  box-shadow: 0 0 22px rgba(175, 156, 124, 0.2), 0 0 46px rgba(118, 98, 72, 0.16);
+  animation: sidebar-dust-slide-in 520ms cubic-bezier(0.23, 0.82, 0.22, 1) forwards;
+}
+
+body[data-popup-effect="dust"] .app-shell.sidebar-expanding .sidebar::before {
+  background:
+    radial-gradient(circle at 10% 18%, rgba(244, 236, 218, 0.5), transparent 33%),
+    radial-gradient(circle at 20% 44%, rgba(224, 208, 180, 0.36), transparent 31%),
+    linear-gradient(180deg, rgba(198, 178, 146, 0.12), rgba(104, 88, 70, 0.16) 64%, transparent);
+  animation: sidebar-dust-cloud-in 520ms ease-out forwards;
+}
+
+body[data-popup-effect="dust"] .app-shell.sidebar-expanding .sidebar::after {
+  background:
+    radial-gradient(3px 3px at 9% 20%, rgba(245, 238, 220, 0.72), transparent 62%),
+    radial-gradient(2px 2px at 18% 38%, rgba(230, 216, 190, 0.64), transparent 62%),
+    radial-gradient(2px 2px at 13% 60%, rgba(214, 198, 170, 0.6), transparent 62%);
+  animation: sidebar-dust-particles-in 530ms ease-out forwards;
+}
+
+body[data-popup-effect="glitch"] .app-shell.sidebar-collapsing .sidebar {
+  border-right-color: rgba(36, 255, 233, 0.52);
+  box-shadow: 0 0 20px rgba(36, 255, 233, 0.24), 0 0 40px rgba(255, 68, 170, 0.2);
+  animation: sidebar-glitch-slide-out 340ms steps(4, end) forwards;
+}
+
+body[data-popup-effect="glitch"] .app-shell.sidebar-collapsing .sidebar::before {
+  background:
+    repeating-linear-gradient(0deg, rgba(36, 255, 233, 0.24) 0 3px, transparent 3px 7px),
+    repeating-linear-gradient(0deg, rgba(255, 68, 170, 0.2) 1px 4px, transparent 4px 8px);
+  mix-blend-mode: screen;
+  animation: sidebar-glitch-overlay-out 340ms steps(4, end) forwards;
+}
+
+body[data-popup-effect="glitch"] .app-shell.sidebar-collapsing .sidebar::after {
+  background:
+    linear-gradient(90deg, transparent, rgba(8, 10, 12, 0.32) 34%, transparent 66%),
+    radial-gradient(circle at 18% 36%, rgba(255, 255, 255, 0.2), transparent 38%);
+  animation: sidebar-glitch-noise-out 350ms steps(4, end) forwards;
+}
+
+body[data-popup-effect="glitch"] .app-shell.sidebar-expanding .sidebar {
+  border-right-color: rgba(36, 255, 233, 0.46);
+  box-shadow: 0 0 18px rgba(36, 255, 233, 0.2), 0 0 34px rgba(255, 68, 170, 0.16);
+  animation: sidebar-glitch-slide-in 360ms steps(4, end) forwards;
+}
+
+body[data-popup-effect="glitch"] .app-shell.sidebar-expanding .sidebar::before {
+  background:
+    repeating-linear-gradient(0deg, rgba(36, 255, 233, 0.2) 0 3px, transparent 3px 7px),
+    repeating-linear-gradient(0deg, rgba(255, 68, 170, 0.16) 1px 4px, transparent 4px 8px);
+  mix-blend-mode: screen;
+  animation: sidebar-glitch-overlay-in 360ms steps(4, end) forwards;
+}
+
+body[data-popup-effect="glitch"] .app-shell.sidebar-expanding .sidebar::after {
+  background:
+    linear-gradient(90deg, transparent, rgba(8, 10, 12, 0.26) 34%, transparent 66%),
+    radial-gradient(circle at 16% 32%, rgba(255, 255, 255, 0.16), transparent 36%);
+  animation: sidebar-glitch-noise-in 370ms steps(4, end) forwards;
+}
+
+body[data-popup-effect="portal"] .app-shell.sidebar-collapsing .sidebar {
+  border-right-color: rgba(146, 166, 255, 0.58);
+  box-shadow: 0 0 24px rgba(120, 178, 255, 0.24), 0 0 48px rgba(164, 122, 255, 0.2);
+  animation: sidebar-portal-slide-out 500ms cubic-bezier(0.16, 0.84, 0.2, 1) forwards;
+}
+
+body[data-popup-effect="portal"] .app-shell.sidebar-collapsing .sidebar::before {
+  background:
+    radial-gradient(circle at 10% 18%, rgba(138, 192, 255, 0.44), transparent 33%),
+    radial-gradient(circle at 20% 48%, rgba(178, 134, 255, 0.4), transparent 33%);
+  mix-blend-mode: screen;
+  animation: sidebar-portal-ring-out 500ms ease-out forwards;
+}
+
+body[data-popup-effect="portal"] .app-shell.sidebar-collapsing .sidebar::after {
+  background:
+    radial-gradient(3px 3px at 12% 22%, rgba(206, 230, 255, 0.74), transparent 62%),
+    radial-gradient(2px 2px at 20% 46%, rgba(218, 194, 255, 0.66), transparent 62%),
+    radial-gradient(2px 2px at 14% 70%, rgba(188, 218, 255, 0.62), transparent 62%);
+  animation: sidebar-portal-particles-out 510ms ease-out forwards;
+}
+
+body[data-popup-effect="portal"] .app-shell.sidebar-expanding .sidebar {
+  border-right-color: rgba(146, 166, 255, 0.5);
+  box-shadow: 0 0 22px rgba(120, 178, 255, 0.2), 0 0 42px rgba(164, 122, 255, 0.16);
+  animation: sidebar-portal-slide-in 520ms cubic-bezier(0.16, 0.84, 0.2, 1) forwards;
+}
+
+body[data-popup-effect="portal"] .app-shell.sidebar-expanding .sidebar::before {
+  background:
+    radial-gradient(circle at 9% 16%, rgba(128, 184, 255, 0.4), transparent 32%),
+    radial-gradient(circle at 18% 42%, rgba(170, 128, 255, 0.36), transparent 32%);
+  mix-blend-mode: screen;
+  animation: sidebar-portal-ring-in 520ms ease-out forwards;
+}
+
+body[data-popup-effect="portal"] .app-shell.sidebar-expanding .sidebar::after {
+  background:
+    radial-gradient(3px 3px at 10% 19%, rgba(198, 226, 255, 0.7), transparent 62%),
+    radial-gradient(2px 2px at 18% 40%, rgba(209, 186, 255, 0.62), transparent 62%),
+    radial-gradient(2px 2px at 13% 62%, rgba(180, 212, 255, 0.58), transparent 62%);
+  animation: sidebar-portal-particles-in 530ms ease-out forwards;
+}
+
+body[data-popup-effect="melt"] .app-shell.sidebar-collapsing .sidebar {
+  border-right-color: rgba(255, 156, 92, 0.56);
+  box-shadow: 0 0 24px rgba(255, 138, 84, 0.22), 0 0 48px rgba(214, 90, 31, 0.18);
+  transform-origin: center top;
+  animation: sidebar-melt-slide-out 480ms cubic-bezier(0.26, 0.82, 0.24, 1) forwards;
+}
+
+body[data-popup-effect="melt"] .app-shell.sidebar-collapsing .sidebar::before {
+  background:
+    linear-gradient(180deg, rgba(255, 194, 120, 0.34), rgba(255, 118, 62, 0.28) 56%, transparent 88%),
+    radial-gradient(circle at 14% 20%, rgba(255, 228, 170, 0.36), transparent 34%);
+  mix-blend-mode: screen;
+  animation: sidebar-melt-drip-out 480ms ease-out forwards;
+}
+
+body[data-popup-effect="melt"] .app-shell.sidebar-collapsing .sidebar::after {
+  background:
+    radial-gradient(2px 3px at 14% 30%, rgba(255, 214, 150, 0.68), transparent 62%),
+    radial-gradient(2px 3px at 20% 58%, rgba(255, 188, 126, 0.62), transparent 62%);
+  animation: sidebar-melt-droplets-out 490ms ease-out forwards;
+}
+
+body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar {
+  border-right-color: rgba(255, 156, 92, 0.5);
+  box-shadow: 0 0 22px rgba(255, 138, 84, 0.2), 0 0 40px rgba(214, 90, 31, 0.15);
+  transform-origin: center top;
+  animation: sidebar-melt-slide-in 500ms cubic-bezier(0.26, 0.82, 0.24, 1) forwards;
+}
+
+body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::before {
+  background:
+    linear-gradient(180deg, rgba(255, 182, 108, 0.3), rgba(255, 108, 58, 0.24) 54%, transparent 86%),
+    radial-gradient(circle at 13% 18%, rgba(255, 220, 158, 0.32), transparent 32%);
+  mix-blend-mode: screen;
+  animation: sidebar-melt-drip-in 500ms ease-out forwards;
+}
+
+body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
+  background:
+    radial-gradient(2px 3px at 13% 26%, rgba(255, 206, 144, 0.64), transparent 62%),
+    radial-gradient(2px 3px at 18% 52%, rgba(255, 180, 122, 0.58), transparent 62%);
+  animation: sidebar-melt-droplets-in 510ms ease-out forwards;
+}
+
+.sidebar-controls {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.sidebar-toggle-btn {
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  font-size: 1rem;
+  line-height: 1;
+  font-weight: 700;
+}
+
+.sidebar-toggle-btn:disabled {
+  opacity: 0.74;
+  cursor: default;
+  transform: none;
+}
+
+.sidebar-toggle-btn:disabled:hover {
+  border-color: var(--line);
+}
+
+.sidebar-expand-fab {
+  position: fixed;
+  left: 12px;
+  top: 12px;
+  z-index: 2400;
+  border: 1px solid rgba(214, 90, 31, 0.5);
+  border-radius: 10px;
+  background: rgba(25, 26, 29, 0.92);
+  color: var(--text);
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  font-size: 1.02rem;
+  font-weight: 700;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-4px);
+  transition: opacity 0.18s ease, transform 0.18s ease, border-color 0.18s ease;
+}
+
+.sidebar-expand-fab:hover {
+  border-color: var(--accent-soft);
+}
+
+.app-shell.sidebar-collapsed ~ .sidebar-expand-fab {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+@keyframes sidebar-burn-slide {
+  0% {
+    transform: translateX(0) scale(1);
+    opacity: 1;
+    filter: brightness(1);
+  }
+  20% {
+    transform: translateX(-8%) scale(1.005);
+    opacity: 1;
+    filter: brightness(1.2);
+  }
+  65% {
+    transform: translateX(-78%) scale(0.99);
+    opacity: 0.62;
+    filter: brightness(1.04);
+  }
+  100% {
+    transform: translateX(calc(-100% - 10px)) scale(0.985);
+    opacity: 0.02;
+    filter: brightness(0.9);
+  }
+}
+
+@keyframes sidebar-flame-flicker {
+  0% {
+    opacity: 0.2;
+    transform: translateX(0) scale(1);
+  }
+  15% {
+    opacity: 0.92;
+    transform: translateX(3%) scale(1.015);
+  }
+  48% {
+    opacity: 0.74;
+    transform: translateX(7%) scale(1.03);
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(19%) scale(1.08);
+  }
+}
+
+@keyframes sidebar-ember-drift {
+  0% {
+    opacity: 0.24;
+    transform: translate(0, 0) scale(1);
+  }
+  30% {
+    opacity: 0.66;
+    transform: translate(9%, -6%) scale(1.02);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(30%, -13%) scale(1.05);
+  }
+}
+
+@keyframes sidebar-ignite-slide {
+  0% {
+    transform: translateX(calc(-100% - 10px)) scale(0.985);
+    opacity: 0.08;
+    filter: brightness(0.92);
+  }
+  35% {
+    transform: translateX(-46%) scale(0.994);
+    opacity: 0.62;
+    filter: brightness(1.12);
+  }
+  78% {
+    transform: translateX(2%) scale(1.002);
+    opacity: 1;
+    filter: brightness(1.06);
+  }
+  100% {
+    transform: translateX(0) scale(1);
+    opacity: 1;
+    filter: brightness(1);
+  }
+}
+
+@keyframes sidebar-ignite-flare {
+  0% {
+    opacity: 0.08;
+    transform: translateX(-14%) scale(1.04);
+  }
+  40% {
+    opacity: 0.84;
+    transform: translateX(2%) scale(1.015);
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(12%) scale(1.03);
+  }
+}
+
+@keyframes sidebar-ignite-embers {
+  0% {
+    opacity: 0.12;
+    transform: translate(-16%, 6%) scale(0.96);
+  }
+  45% {
+    opacity: 0.62;
+    transform: translate(0, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(16%, -10%) scale(1.04);
+  }
+}
+
+@keyframes sidebar-dust-slide-out {
+  0% {
+    transform: translateX(0) scale(1);
+    opacity: 1;
+    filter: blur(0);
+  }
+  100% {
+    transform: translateX(calc(-100% - 10px)) scale(0.98);
+    opacity: 0.04;
+    filter: blur(4px);
+  }
+}
+
+@keyframes sidebar-dust-slide-in {
+  0% {
+    transform: translateX(calc(-100% - 10px)) scale(0.98);
+    opacity: 0.08;
+    filter: blur(4px);
+  }
+  100% {
+    transform: translateX(0) scale(1);
+    opacity: 1;
+    filter: blur(0);
+  }
+}
+
+@keyframes sidebar-dust-cloud-out {
+  0% {
+    opacity: 0.18;
+    transform: translate(0, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(24%, -14%) scale(1.14);
+  }
+}
+
+@keyframes sidebar-dust-cloud-in {
+  0% {
+    opacity: 0.18;
+    transform: translate(-12%, 8%) scale(0.92);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(10%, -8%) scale(1.06);
+  }
+}
+
+@keyframes sidebar-dust-particles-out {
+  0% {
+    opacity: 0.24;
+    transform: translate(0, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(28%, -16%) scale(1.16);
+  }
+}
+
+@keyframes sidebar-dust-particles-in {
+  0% {
+    opacity: 0.18;
+    transform: translate(-12%, 10%) scale(0.9);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(12%, -10%) scale(1.08);
+  }
+}
+
+@keyframes sidebar-glitch-slide-out {
+  0% {
+    transform: translateX(0) scale(1);
+    opacity: 1;
+    filter: none;
+  }
+  30% {
+    transform: translate(-4px, -1px) scale(1.01);
+  }
+  70% {
+    transform: translate(-8px, 2px) scale(0.99);
+  }
+  100% {
+    transform: translateX(calc(-100% - 10px)) scale(0.98);
+    opacity: 0.04;
+    filter: hue-rotate(22deg) saturate(1.2);
+  }
+}
+
+@keyframes sidebar-glitch-slide-in {
+  0% {
+    transform: translateX(calc(-100% - 10px)) scale(0.98);
+    opacity: 0.08;
+    filter: hue-rotate(22deg) saturate(1.2);
+  }
+  35% {
+    transform: translate(-6px, 2px) scale(1.01);
+  }
+  75% {
+    transform: translate(3px, -1px) scale(0.995);
+  }
+  100% {
+    transform: translateX(0) scale(1);
+    opacity: 1;
+    filter: none;
+  }
+}
+
+@keyframes sidebar-glitch-overlay-out {
+  0% {
+    opacity: 0.16;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes sidebar-glitch-overlay-in {
+  0% {
+    opacity: 0.1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes sidebar-glitch-noise-out {
+  0% {
+    opacity: 0.18;
+    transform: translateX(0);
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(10%);
+  }
+}
+
+@keyframes sidebar-glitch-noise-in {
+  0% {
+    opacity: 0.1;
+    transform: translateX(-8%);
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(8%);
+  }
+}
+
+@keyframes sidebar-portal-slide-out {
+  0% {
+    transform: translateX(0) scale(1) rotate(0);
+    opacity: 1;
+    filter: none;
+  }
+  100% {
+    transform: translateX(calc(-100% - 10px)) scale(0.74) rotate(-7deg);
+    opacity: 0.03;
+    filter: hue-rotate(22deg) saturate(1.2);
+  }
+}
+
+@keyframes sidebar-portal-slide-in {
+  0% {
+    transform: translateX(calc(-100% - 10px)) scale(0.74) rotate(7deg);
+    opacity: 0.07;
+    filter: hue-rotate(20deg) saturate(1.2);
+  }
+  100% {
+    transform: translateX(0) scale(1) rotate(0);
+    opacity: 1;
+    filter: none;
+  }
+}
+
+@keyframes sidebar-portal-ring-out {
+  0% {
+    opacity: 0.16;
+    transform: scale(1) rotate(0);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.24) rotate(-20deg);
+  }
+}
+
+@keyframes sidebar-portal-ring-in {
+  0% {
+    opacity: 0.14;
+    transform: scale(0.86) rotate(-16deg);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.12) rotate(14deg);
+  }
+}
+
+@keyframes sidebar-portal-particles-out {
+  0% {
+    opacity: 0.18;
+    transform: translate(0, 0) scale(1) rotate(0);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(20%, -14%) scale(1.14) rotate(-16deg);
+  }
+}
+
+@keyframes sidebar-portal-particles-in {
+  0% {
+    opacity: 0.16;
+    transform: translate(-10%, 8%) scale(0.9) rotate(-12deg);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(12%, -10%) scale(1.08) rotate(14deg);
+  }
+}
+
+@keyframes sidebar-melt-slide-out {
+  0% {
+    transform: translateX(0) scaleY(1) scaleX(1) skewX(0);
+    opacity: 1;
+    filter: none;
+  }
+  100% {
+    transform: translateX(calc(-100% - 10px)) scaleY(0.82) scaleX(1.04) skewX(2deg);
+    opacity: 0.03;
+    filter: saturate(1.1);
+  }
+}
+
+@keyframes sidebar-melt-slide-in {
+  0% {
+    transform: translateX(calc(-100% - 10px)) scaleY(1.18) scaleX(0.96) skewX(-3deg);
+    opacity: 0.08;
+    filter: saturate(1.12);
+  }
+  100% {
+    transform: translateX(0) scaleY(1) scaleX(1) skewX(0);
+    opacity: 1;
+    filter: none;
+  }
+}
+
+@keyframes sidebar-melt-drip-out {
+  0% {
+    opacity: 0.2;
+    transform: translateY(0) scaleY(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(20%) scaleY(0.76);
+  }
+}
+
+@keyframes sidebar-melt-drip-in {
+  0% {
+    opacity: 0.14;
+    transform: translateY(-10%) scaleY(1.12);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(12%) scaleY(0.86);
+  }
+}
+
+@keyframes sidebar-melt-droplets-out {
+  0% {
+    opacity: 0.2;
+    transform: translate(0, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(16%, 18%) scale(1.12);
+  }
+}
+
+@keyframes sidebar-melt-droplets-in {
+  0% {
+    opacity: 0.16;
+    transform: translate(-8%, -6%) scale(0.92);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(10%, 14%) scale(1.06);
+  }
 }
 
 .brand-wrap {
@@ -136,6 +891,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  min-width: 0;
 }
 
 .topbar {
@@ -166,6 +922,29 @@ body {
   padding: 7px 11px;
   color: var(--muted);
   font-size: 0.85rem;
+}
+
+.runtime-summary.interactive {
+  cursor: pointer;
+  transition: transform 0.15s ease, border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+.runtime-summary.interactive:hover,
+.runtime-summary.interactive:focus-visible {
+  transform: translateY(-1px);
+  border-color: var(--accent-soft);
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.runtime-summary.offline {
+  border-color: rgba(255, 92, 92, 0.45);
+  color: #ffd2d2;
+}
+
+.runtime-summary.degraded {
+  border-color: rgba(240, 180, 80, 0.5);
+  color: #ffe1a8;
 }
 
 .view-root {
@@ -223,6 +1002,11 @@ body {
 .status-chip.running {
   color: var(--ok);
   border-color: rgba(79, 209, 140, 0.5);
+}
+
+.status-chip.pending {
+  color: #ffe1a8;
+  border-color: rgba(240, 180, 80, 0.5);
 }
 
 .status-chip.stopped {
@@ -751,16 +1535,27 @@ body {
 .cerb-modal {
   position: fixed;
   inset: 0;
-  display: none;
+  display: flex;
   align-items: center;
   justify-content: center;
   padding: 20px;
   background: rgba(0, 0, 0, 0.64);
   z-index: 2500;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .cerb-modal.active {
-  display: flex;
+  visibility: visible;
+  pointer-events: auto;
+  animation: popup-backdrop-flame-in 280ms ease-out both;
+}
+
+.cerb-modal.closing {
+  visibility: visible;
+  pointer-events: none;
+  animation: popup-backdrop-flame-out 250ms ease-out both;
 }
 
 .cerb-modal-dialog {
@@ -770,6 +1565,66 @@ body {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  position: relative;
+  overflow: hidden;
+  opacity: 0;
+  transform: translateY(14px) scale(0.97);
+}
+
+.cerb-modal-dialog::before,
+.cerb-modal-dialog::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.cerb-modal.active .cerb-modal-dialog {
+  animation: popup-dialog-flame-in 300ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+.cerb-modal.active .cerb-modal-dialog::before {
+  opacity: 1;
+  background:
+    radial-gradient(circle at 10% 14%, rgba(255, 210, 136, 0.46), transparent 32%),
+    radial-gradient(circle at 24% 18%, rgba(255, 145, 66, 0.38), transparent 30%),
+    radial-gradient(circle at 14% 72%, rgba(255, 106, 42, 0.28), transparent 34%);
+  mix-blend-mode: screen;
+  animation: popup-dialog-flare-in 300ms ease-out both;
+}
+
+.cerb-modal.active .cerb-modal-dialog::after {
+  opacity: 1;
+  background:
+    radial-gradient(3px 3px at 16% 23%, rgba(255, 224, 172, 0.72), transparent 62%),
+    radial-gradient(2px 2px at 25% 34%, rgba(255, 196, 130, 0.66), transparent 62%),
+    radial-gradient(2px 2px at 12% 64%, rgba(255, 178, 112, 0.6), transparent 62%);
+  animation: popup-dialog-embers-in 330ms ease-out both;
+}
+
+.cerb-modal.closing .cerb-modal-dialog {
+  animation: popup-dialog-flame-out 260ms ease-in both;
+}
+
+.cerb-modal.closing .cerb-modal-dialog::before {
+  opacity: 1;
+  background:
+    radial-gradient(circle at 12% 18%, rgba(255, 218, 148, 0.58), transparent 33%),
+    radial-gradient(circle at 24% 34%, rgba(255, 142, 63, 0.44), transparent 31%),
+    radial-gradient(circle at 14% 78%, rgba(255, 98, 40, 0.36), transparent 34%);
+  mix-blend-mode: screen;
+  animation: popup-dialog-flare-out 260ms ease-out both;
+}
+
+.cerb-modal.closing .cerb-modal-dialog::after {
+  opacity: 1;
+  background:
+    radial-gradient(3px 3px at 14% 22%, rgba(255, 228, 178, 0.76), transparent 62%),
+    radial-gradient(2px 2px at 23% 42%, rgba(255, 202, 134, 0.68), transparent 62%),
+    radial-gradient(2px 2px at 11% 68%, rgba(255, 182, 112, 0.64), transparent 62%);
+  animation: popup-dialog-embers-out 280ms ease-out both;
 }
 
 .cerb-modal-body {
@@ -790,6 +1645,163 @@ body {
   word-break: break-word;
   font-size: 0.78rem;
   line-height: 1.34;
+}
+
+.action-progress-dialog {
+  width: min(620px, 94vw);
+  gap: 10px;
+}
+
+.action-progress-track {
+  width: 100%;
+  height: 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.action-progress-fill {
+  width: 8%;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(214, 90, 31, 0.6), rgba(240, 131, 69, 0.82));
+  transition: width 0.18s ease;
+}
+
+.action-progress-fill.success {
+  background: linear-gradient(90deg, rgba(79, 209, 140, 0.65), rgba(130, 226, 174, 0.86));
+}
+
+.action-progress-fill.error {
+  background: linear-gradient(90deg, rgba(255, 92, 92, 0.7), rgba(255, 152, 152, 0.86));
+}
+
+.action-progress-status.success {
+  color: var(--ok);
+}
+
+.action-progress-status.error {
+  color: #ffd2d2;
+}
+
+.action-progress-dialog .inline-btn:disabled {
+  opacity: 0.7;
+  cursor: default;
+  transform: none;
+}
+
+.runtime-breakdown-dialog {
+  width: min(1180px, 97vw);
+}
+
+.runtime-settings-dialog {
+  width: min(760px, 95vw);
+  height: min(90vh, 900px);
+}
+
+.runtime-settings-form {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.runtime-settings-fields {
+  display: grid;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.runtime-breakdown-content {
+  margin-top: 8px;
+}
+
+.runtime-breakdown-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.runtime-breakdown-card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.22);
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+  min-height: 0;
+}
+
+.runtime-breakdown-head {
+  display: grid;
+  gap: 3px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 8px;
+}
+
+.runtime-breakdown-title {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.runtime-breakdown-block {
+  display: grid;
+  gap: 6px;
+}
+
+.runtime-breakdown-subtitle {
+  font-size: 0.78rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.runtime-breakdown-list {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+  overflow: auto;
+  max-height: 220px;
+}
+
+.runtime-breakdown-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.runtime-breakdown-row.compact {
+  padding-top: 7px;
+  padding-bottom: 7px;
+}
+
+.runtime-breakdown-row:last-child {
+  border-bottom: none;
+}
+
+.runtime-breakdown-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.runtime-breakdown-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.runtime-breakdown-status {
+  flex: 0 0 auto;
 }
 
 .core-bar-chart {
@@ -877,6 +1889,15 @@ textarea {
   font: inherit;
 }
 
+input:disabled,
+select:disabled,
+textarea:disabled {
+  opacity: 0.55;
+  color: #9f988e;
+  background: rgba(0, 0, 0, 0.34);
+  cursor: not-allowed;
+}
+
 textarea {
   min-height: 120px;
   resize: vertical;
@@ -939,10 +1960,15 @@ textarea {
   gap: 10px;
   max-height: 58vh;
   overflow-y: auto;
-  padding: 12px;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: rgba(0, 0, 0, 0.16);
+  padding: 2px 2px 6px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.chat-feed-card {
+  display: grid;
+  gap: 8px;
 }
 
 .chat-live-status {
@@ -1104,15 +2130,323 @@ textarea {
   color: var(--text);
   box-shadow: 0 16px 26px rgba(0, 0, 0, 0.28);
   opacity: 0;
-  transform: translateY(-8px);
+  transform: translateY(-8px) scale(0.98);
   transition: opacity 0.16s ease, transform 0.16s ease;
   pointer-events: auto;
   cursor: pointer;
+  position: relative;
+  overflow: hidden;
+}
+
+.toast-item::before,
+.toast-item::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .toast-item.show {
   opacity: 1;
-  transform: translateY(0);
+  transform: translateY(0) scale(1);
+}
+
+.toast-item.show::before {
+  opacity: 1;
+  background:
+    radial-gradient(circle at 10% 24%, rgba(255, 208, 136, 0.36), transparent 33%),
+    radial-gradient(circle at 22% 48%, rgba(255, 136, 60, 0.26), transparent 30%);
+  mix-blend-mode: screen;
+  animation: toast-flare-in 250ms ease-out both;
+}
+
+.toast-item.show::after {
+  opacity: 1;
+  background:
+    radial-gradient(2px 2px at 14% 26%, rgba(255, 224, 172, 0.64), transparent 62%),
+    radial-gradient(2px 2px at 26% 52%, rgba(255, 196, 130, 0.58), transparent 62%);
+  animation: toast-embers-in 280ms ease-out both;
+}
+
+.toast-item.flame-out {
+  opacity: 0;
+  transform: translateY(-12px) scale(0.96);
+}
+
+.toast-item.flame-out::before {
+  opacity: 1;
+  background:
+    radial-gradient(circle at 12% 26%, rgba(255, 220, 158, 0.46), transparent 35%),
+    radial-gradient(circle at 24% 52%, rgba(255, 148, 66, 0.34), transparent 32%);
+  mix-blend-mode: screen;
+  animation: toast-flare-out 280ms ease-out both;
+}
+
+.toast-item.flame-out::after {
+  opacity: 1;
+  background:
+    radial-gradient(2px 2px at 14% 26%, rgba(255, 230, 186, 0.72), transparent 62%),
+    radial-gradient(2px 2px at 24% 58%, rgba(255, 200, 138, 0.66), transparent 62%);
+  animation: toast-embers-out 300ms ease-out both;
+}
+
+body[data-popup-effect="disabled"] .cerb-modal.active,
+body[data-popup-effect="disabled"] .cerb-modal.closing {
+  animation: none !important;
+}
+
+body[data-popup-effect="disabled"] .cerb-modal.active {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
+
+body[data-popup-effect="disabled"] .cerb-modal.closing {
+  opacity: 0;
+  visibility: visible;
+  pointer-events: none;
+}
+
+body[data-popup-effect="disabled"] .cerb-modal.active .cerb-modal-dialog {
+  animation: none !important;
+  opacity: 1;
+  transform: none;
+  filter: none;
+}
+
+body[data-popup-effect="disabled"] .cerb-modal.closing .cerb-modal-dialog {
+  animation: none !important;
+  opacity: 0;
+  transform: translateY(8px);
+  filter: none;
+}
+
+body[data-popup-effect="disabled"] .cerb-modal-dialog::before,
+body[data-popup-effect="disabled"] .cerb-modal-dialog::after,
+body[data-popup-effect="disabled"] .toast-item::before,
+body[data-popup-effect="disabled"] .toast-item::after {
+  display: none;
+}
+
+body[data-popup-effect="disabled"] .toast-item {
+  transition: none !important;
+}
+
+body[data-popup-effect="disabled"] .toast-item.show {
+  transform: none;
+}
+
+body[data-popup-effect="disabled"] .toast-item.flame-out {
+  transform: none;
+}
+
+body[data-popup-effect="dust"] .cerb-modal.active {
+  animation: popup-backdrop-dust-in 300ms ease-out both;
+}
+
+body[data-popup-effect="dust"] .cerb-modal.closing {
+  animation: popup-backdrop-dust-out 260ms ease-out both;
+}
+
+body[data-popup-effect="dust"] .cerb-modal.active .cerb-modal-dialog {
+  animation: popup-dialog-dust-in 320ms ease-out both;
+}
+
+body[data-popup-effect="dust"] .cerb-modal.closing .cerb-modal-dialog {
+  animation: popup-dialog-dust-out 280ms ease-in both;
+}
+
+body[data-popup-effect="dust"] .cerb-modal.active .cerb-modal-dialog::before,
+body[data-popup-effect="dust"] .toast-item.show::before {
+  background:
+    radial-gradient(circle at 14% 22%, rgba(241, 224, 184, 0.44), transparent 34%),
+    radial-gradient(circle at 28% 52%, rgba(208, 188, 150, 0.32), transparent 32%);
+  animation: popup-dust-cloud-in 320ms ease-out both;
+}
+
+body[data-popup-effect="dust"] .cerb-modal.closing .cerb-modal-dialog::before,
+body[data-popup-effect="dust"] .toast-item.flame-out::before {
+  background:
+    radial-gradient(circle at 15% 24%, rgba(236, 222, 190, 0.54), transparent 36%),
+    radial-gradient(circle at 30% 58%, rgba(210, 190, 154, 0.38), transparent 34%);
+  animation: popup-dust-cloud-out 300ms ease-out both;
+}
+
+body[data-popup-effect="dust"] .cerb-modal.active .cerb-modal-dialog::after,
+body[data-popup-effect="dust"] .toast-item.show::after {
+  background:
+    radial-gradient(2px 2px at 12% 24%, rgba(243, 232, 206, 0.62), transparent 62%),
+    radial-gradient(2px 2px at 24% 46%, rgba(219, 204, 176, 0.58), transparent 62%);
+  animation: popup-dust-particles-in 330ms ease-out both;
+}
+
+body[data-popup-effect="dust"] .cerb-modal.closing .cerb-modal-dialog::after,
+body[data-popup-effect="dust"] .toast-item.flame-out::after {
+  background:
+    radial-gradient(2px 2px at 13% 25%, rgba(245, 236, 214, 0.68), transparent 62%),
+    radial-gradient(2px 2px at 26% 52%, rgba(224, 209, 182, 0.62), transparent 62%);
+  animation: popup-dust-particles-out 310ms ease-out both;
+}
+
+body[data-popup-effect="glitch"] .cerb-modal.active {
+  animation: popup-backdrop-glitch-in 240ms steps(3, end) both;
+}
+
+body[data-popup-effect="glitch"] .cerb-modal.closing {
+  animation: popup-backdrop-glitch-out 220ms steps(3, end) both;
+}
+
+body[data-popup-effect="glitch"] .cerb-modal.active .cerb-modal-dialog {
+  animation: popup-dialog-glitch-in 290ms steps(4, end) both;
+}
+
+body[data-popup-effect="glitch"] .cerb-modal.closing .cerb-modal-dialog {
+  animation: popup-dialog-glitch-out 250ms steps(4, end) both;
+}
+
+body[data-popup-effect="glitch"] .cerb-modal.active .cerb-modal-dialog::before,
+body[data-popup-effect="glitch"] .toast-item.show::before {
+  background:
+    repeating-linear-gradient(
+      0deg,
+      rgba(36, 255, 233, 0.2) 0 3px,
+      transparent 3px 7px
+    ),
+    repeating-linear-gradient(
+      0deg,
+      rgba(255, 68, 170, 0.18) 1px 4px,
+      transparent 4px 8px
+    );
+  mix-blend-mode: screen;
+  animation: popup-glitch-overlay-in 280ms steps(4, end) both;
+}
+
+body[data-popup-effect="glitch"] .cerb-modal.closing .cerb-modal-dialog::before,
+body[data-popup-effect="glitch"] .toast-item.flame-out::before {
+  background:
+    repeating-linear-gradient(0deg, rgba(36, 255, 233, 0.28) 0 3px, transparent 3px 7px),
+    repeating-linear-gradient(0deg, rgba(255, 68, 170, 0.24) 1px 4px, transparent 4px 8px);
+  mix-blend-mode: screen;
+  animation: popup-glitch-overlay-out 260ms steps(4, end) both;
+}
+
+body[data-popup-effect="glitch"] .cerb-modal.active .cerb-modal-dialog::after,
+body[data-popup-effect="glitch"] .toast-item.show::after {
+  background:
+    linear-gradient(90deg, transparent, rgba(0, 0, 0, 0.26) 32%, transparent 64%),
+    radial-gradient(circle at 16% 36%, rgba(255, 255, 255, 0.18), transparent 36%);
+  animation: popup-glitch-noise-in 290ms steps(4, end) both;
+}
+
+body[data-popup-effect="glitch"] .cerb-modal.closing .cerb-modal-dialog::after,
+body[data-popup-effect="glitch"] .toast-item.flame-out::after {
+  background:
+    linear-gradient(90deg, transparent, rgba(0, 0, 0, 0.32) 32%, transparent 64%),
+    radial-gradient(circle at 16% 36%, rgba(255, 255, 255, 0.24), transparent 36%);
+  animation: popup-glitch-noise-out 270ms steps(4, end) both;
+}
+
+body[data-popup-effect="portal"] .cerb-modal.active {
+  animation: popup-backdrop-portal-in 300ms ease-out both;
+}
+
+body[data-popup-effect="portal"] .cerb-modal.closing {
+  animation: popup-backdrop-portal-out 260ms ease-in both;
+}
+
+body[data-popup-effect="portal"] .cerb-modal.active .cerb-modal-dialog {
+  animation: popup-dialog-portal-in 330ms cubic-bezier(0.16, 0.85, 0.2, 1) both;
+}
+
+body[data-popup-effect="portal"] .cerb-modal.closing .cerb-modal-dialog {
+  animation: popup-dialog-portal-out 270ms ease-in both;
+}
+
+body[data-popup-effect="portal"] .cerb-modal.active .cerb-modal-dialog::before,
+body[data-popup-effect="portal"] .toast-item.show::before {
+  background:
+    radial-gradient(circle at 16% 28%, rgba(120, 178, 255, 0.36), transparent 32%),
+    radial-gradient(circle at 28% 58%, rgba(165, 120, 255, 0.3), transparent 32%);
+  mix-blend-mode: screen;
+  animation: popup-portal-ring-in 330ms ease-out both;
+}
+
+body[data-popup-effect="portal"] .cerb-modal.closing .cerb-modal-dialog::before,
+body[data-popup-effect="portal"] .toast-item.flame-out::before {
+  background:
+    radial-gradient(circle at 16% 28%, rgba(138, 190, 255, 0.42), transparent 34%),
+    radial-gradient(circle at 28% 58%, rgba(178, 140, 255, 0.36), transparent 34%);
+  mix-blend-mode: screen;
+  animation: popup-portal-ring-out 280ms ease-out both;
+}
+
+body[data-popup-effect="portal"] .cerb-modal.active .cerb-modal-dialog::after,
+body[data-popup-effect="portal"] .toast-item.show::after {
+  background:
+    radial-gradient(2px 2px at 14% 24%, rgba(188, 222, 255, 0.66), transparent 62%),
+    radial-gradient(2px 2px at 30% 54%, rgba(201, 176, 255, 0.6), transparent 62%);
+  animation: popup-portal-particles-in 340ms ease-out both;
+}
+
+body[data-popup-effect="portal"] .cerb-modal.closing .cerb-modal-dialog::after,
+body[data-popup-effect="portal"] .toast-item.flame-out::after {
+  background:
+    radial-gradient(2px 2px at 14% 24%, rgba(201, 228, 255, 0.72), transparent 62%),
+    radial-gradient(2px 2px at 30% 54%, rgba(214, 190, 255, 0.66), transparent 62%);
+  animation: popup-portal-particles-out 300ms ease-out both;
+}
+
+body[data-popup-effect="melt"] .cerb-modal.active {
+  animation: popup-backdrop-melt-in 290ms ease-out both;
+}
+
+body[data-popup-effect="melt"] .cerb-modal.closing {
+  animation: popup-backdrop-melt-out 260ms ease-in both;
+}
+
+body[data-popup-effect="melt"] .cerb-modal.active .cerb-modal-dialog {
+  transform-origin: center top;
+  animation: popup-dialog-melt-in 320ms cubic-bezier(0.25, 0.82, 0.25, 1) both;
+}
+
+body[data-popup-effect="melt"] .cerb-modal.closing .cerb-modal-dialog {
+  transform-origin: center top;
+  animation: popup-dialog-melt-out 270ms ease-in both;
+}
+
+body[data-popup-effect="melt"] .cerb-modal.active .cerb-modal-dialog::before,
+body[data-popup-effect="melt"] .toast-item.show::before {
+  background:
+    linear-gradient(180deg, rgba(255, 188, 108, 0.34), rgba(255, 110, 58, 0.24) 48%, transparent 84%),
+    radial-gradient(circle at 16% 22%, rgba(255, 222, 164, 0.34), transparent 32%);
+  mix-blend-mode: screen;
+  animation: popup-melt-drip-in 320ms ease-out both;
+}
+
+body[data-popup-effect="melt"] .cerb-modal.closing .cerb-modal-dialog::before,
+body[data-popup-effect="melt"] .toast-item.flame-out::before {
+  background:
+    linear-gradient(180deg, rgba(255, 194, 118, 0.4), rgba(255, 118, 62, 0.3) 56%, transparent 86%),
+    radial-gradient(circle at 16% 22%, rgba(255, 230, 178, 0.4), transparent 34%);
+  mix-blend-mode: screen;
+  animation: popup-melt-drip-out 280ms ease-out both;
+}
+
+body[data-popup-effect="melt"] .cerb-modal.active .cerb-modal-dialog::after,
+body[data-popup-effect="melt"] .toast-item.show::after {
+  background:
+    radial-gradient(2px 3px at 15% 32%, rgba(255, 210, 146, 0.66), transparent 62%),
+    radial-gradient(2px 3px at 24% 64%, rgba(255, 184, 124, 0.6), transparent 62%);
+  animation: popup-melt-droplets-in 330ms ease-out both;
+}
+
+body[data-popup-effect="melt"] .cerb-modal.closing .cerb-modal-dialog::after,
+body[data-popup-effect="melt"] .toast-item.flame-out::after {
+  background:
+    radial-gradient(2px 3px at 15% 32%, rgba(255, 220, 160, 0.72), transparent 62%),
+    radial-gradient(2px 3px at 24% 64%, rgba(255, 192, 132, 0.66), transparent 62%);
+  animation: popup-melt-droplets-out 290ms ease-out both;
 }
 
 .toast-item.success {
@@ -1129,15 +2463,117 @@ textarea {
   gap: 10px;
 }
 
-.message-box textarea {
-  min-height: 56px;
+.chat-composer-card {
+  margin-top: 4px;
+  padding: 10px 0 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
 
-.chat-attach-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
+.chat-composer {
+  display: grid;
   gap: 8px;
+}
+
+.chat-composer-bar {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  border: 1px solid rgba(240, 131, 69, 0.22);
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at 12% 18%, rgba(240, 131, 69, 0.08), transparent 42%),
+    rgba(12, 13, 15, 0.56);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  padding: 8px;
+}
+
+.chat-composer-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 44px;
+  max-height: 180px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  padding: 9px 4px;
+  resize: vertical;
+  line-height: 1.35;
+}
+
+.chat-composer-input:focus {
+  outline: none;
+  box-shadow: none;
+}
+
+.chat-composer-input::placeholder {
+  color: rgba(168, 160, 150, 0.86);
+}
+
+.chat-composer-btn,
+.chat-composer-send {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.03);
+  width: 38px;
+  min-width: 38px;
+  height: 38px;
+  padding: 0;
+  font-size: 0.84rem;
+  font-weight: 650;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease;
+}
+
+.chat-composer-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.chat-composer-icon {
+  display: inline-block;
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.chat-composer-btn:hover,
+.chat-composer-send:hover {
+  border-color: var(--accent-soft);
+  transform: translateY(-1px);
+}
+
+.chat-composer-clear {
+  color: #d6c9bc;
+}
+
+.chat-composer-clear-plus {
+  transform: rotate(45deg);
+}
+
+.chat-composer-send {
+  background: linear-gradient(135deg, rgba(214, 90, 31, 0.48), rgba(214, 90, 31, 0.24));
+  border-color: rgba(214, 90, 31, 0.6);
+  width: 40px;
+  min-width: 40px;
+}
+
+.chat-composer-send-arrow {
+  font-size: 1.03rem;
+  transform: translateX(1px);
+}
+
+.chat-composer-send:disabled {
+  opacity: 0.55;
+  cursor: default;
+  transform: none;
+}
+
+.chat-files-meta {
+  min-height: 1.15rem;
+  padding: 0 4px;
 }
 
 .chat-file-input {
@@ -1146,6 +2582,513 @@ textarea {
   width: 0;
   height: 0;
   pointer-events: none;
+}
+
+@keyframes popup-backdrop-flame-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes popup-backdrop-flame-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes popup-dialog-flame-in {
+  0% {
+    opacity: 0;
+    transform: translateY(14px) scale(0.97);
+    filter: brightness(0.94);
+  }
+  55% {
+    opacity: 1;
+    transform: translateY(-2px) scale(1.005);
+    filter: brightness(1.08);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: brightness(1);
+  }
+}
+
+@keyframes popup-dialog-flame-out {
+  0% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: brightness(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(12px) scale(0.965);
+    filter: brightness(0.9);
+  }
+}
+
+@keyframes popup-dialog-flare-in {
+  0% {
+    opacity: 0.1;
+    transform: translateX(-8%) scale(1.03);
+  }
+  45% {
+    opacity: 0.8;
+    transform: translateX(3%) scale(1.01);
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(12%) scale(1.02);
+  }
+}
+
+@keyframes popup-dialog-flare-out {
+  0% {
+    opacity: 0.18;
+    transform: translateX(0) scale(1);
+  }
+  35% {
+    opacity: 0.86;
+    transform: translateX(5%) scale(1.02);
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(16%) scale(1.05);
+  }
+}
+
+@keyframes popup-dialog-embers-in {
+  0% {
+    opacity: 0.14;
+    transform: translate(-10%, 6%) scale(0.95);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(12%, -8%) scale(1.05);
+  }
+}
+
+@keyframes popup-dialog-embers-out {
+  0% {
+    opacity: 0.18;
+    transform: translate(0, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(18%, -11%) scale(1.08);
+  }
+}
+
+@keyframes toast-flare-in {
+  0% {
+    opacity: 0.08;
+    transform: translateX(-7%) scale(1.02);
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(9%) scale(1.03);
+  }
+}
+
+@keyframes toast-embers-in {
+  0% {
+    opacity: 0.14;
+    transform: translate(-8%, 4%) scale(0.95);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(10%, -7%) scale(1.04);
+  }
+}
+
+@keyframes toast-flare-out {
+  0% {
+    opacity: 0.2;
+    transform: translateX(0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(13%) scale(1.04);
+  }
+}
+
+@keyframes toast-embers-out {
+  0% {
+    opacity: 0.2;
+    transform: translate(0, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(18%, -10%) scale(1.08);
+  }
+}
+
+@keyframes popup-backdrop-dust-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes popup-backdrop-dust-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes popup-dialog-dust-in {
+  0% {
+    opacity: 0;
+    transform: translateY(14px) scale(0.97);
+    filter: blur(8px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
+}
+
+@keyframes popup-dialog-dust-out {
+  0% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(10px) scale(0.96);
+    filter: blur(10px);
+  }
+}
+
+@keyframes popup-dust-cloud-in {
+  0% {
+    opacity: 0.2;
+    transform: translate(-10%, 7%) scale(0.96);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(12%, -9%) scale(1.08);
+  }
+}
+
+@keyframes popup-dust-cloud-out {
+  0% {
+    opacity: 0.2;
+    transform: translate(0, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(18%, -12%) scale(1.11);
+  }
+}
+
+@keyframes popup-dust-particles-in {
+  0% {
+    opacity: 0.2;
+    transform: translate(-10%, 8%) scale(0.95);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(14%, -10%) scale(1.1);
+  }
+}
+
+@keyframes popup-dust-particles-out {
+  0% {
+    opacity: 0.22;
+    transform: translate(0, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(20%, -13%) scale(1.12);
+  }
+}
+
+@keyframes popup-backdrop-glitch-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes popup-backdrop-glitch-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes popup-dialog-glitch-in {
+  0% {
+    opacity: 0;
+    transform: translateY(12px) scale(0.98);
+    filter: hue-rotate(40deg) saturate(1.25);
+  }
+  20% {
+    transform: translate(3px, -2px) scale(1.01);
+  }
+  45% {
+    transform: translate(-4px, 2px) scale(0.99);
+  }
+  100% {
+    opacity: 1;
+    transform: translate(0, 0) scale(1);
+    filter: none;
+  }
+}
+
+@keyframes popup-dialog-glitch-out {
+  0% {
+    opacity: 1;
+    transform: translate(0, 0) scale(1);
+    filter: none;
+  }
+  30% {
+    transform: translate(4px, -2px) scale(1.01);
+    filter: hue-rotate(20deg) saturate(1.2);
+  }
+  70% {
+    transform: translate(-5px, 2px) scale(0.99);
+    filter: hue-rotate(-20deg) saturate(1.2);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(10px) scale(0.97);
+    filter: hue-rotate(30deg) saturate(1.3);
+  }
+}
+
+@keyframes popup-glitch-overlay-in {
+  0% {
+    opacity: 0.06;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes popup-glitch-overlay-out {
+  0% {
+    opacity: 0.16;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes popup-glitch-noise-in {
+  0% {
+    opacity: 0.08;
+    transform: translateX(-6%);
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(8%);
+  }
+}
+
+@keyframes popup-glitch-noise-out {
+  0% {
+    opacity: 0.16;
+    transform: translateX(0);
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(11%);
+  }
+}
+
+@keyframes popup-backdrop-portal-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes popup-backdrop-portal-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes popup-dialog-portal-in {
+  0% {
+    opacity: 0;
+    transform: translateY(20px) scale(0.74) rotate(-7deg);
+    filter: hue-rotate(25deg) saturate(1.2);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1) rotate(0);
+    filter: none;
+  }
+}
+
+@keyframes popup-dialog-portal-out {
+  0% {
+    opacity: 1;
+    transform: translateY(0) scale(1) rotate(0);
+    filter: none;
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(16px) scale(0.72) rotate(8deg);
+    filter: hue-rotate(24deg) saturate(1.2);
+  }
+}
+
+@keyframes popup-portal-ring-in {
+  0% {
+    opacity: 0.14;
+    transform: scale(0.86) rotate(-18deg);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.14) rotate(16deg);
+  }
+}
+
+@keyframes popup-portal-ring-out {
+  0% {
+    opacity: 0.2;
+    transform: scale(1) rotate(0);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.24) rotate(22deg);
+  }
+}
+
+@keyframes popup-portal-particles-in {
+  0% {
+    opacity: 0.18;
+    transform: translate(-10%, 10%) scale(0.92) rotate(-14deg);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(14%, -12%) scale(1.12) rotate(12deg);
+  }
+}
+
+@keyframes popup-portal-particles-out {
+  0% {
+    opacity: 0.2;
+    transform: translate(0, 0) scale(1) rotate(0);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(20%, -16%) scale(1.16) rotate(18deg);
+  }
+}
+
+@keyframes popup-backdrop-melt-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes popup-backdrop-melt-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes popup-dialog-melt-in {
+  0% {
+    opacity: 0;
+    transform: translateY(-18px) scaleY(1.22) scaleX(0.96) skewX(-4deg);
+    filter: saturate(1.15);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scaleY(1) scaleX(1) skewX(0);
+    filter: none;
+  }
+}
+
+@keyframes popup-dialog-melt-out {
+  0% {
+    opacity: 1;
+    transform: translateY(0) scaleY(1) scaleX(1) skewX(0);
+    filter: none;
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(16px) scaleY(0.78) scaleX(1.04) skewX(2deg);
+    filter: saturate(1.1);
+  }
+}
+
+@keyframes popup-melt-drip-in {
+  0% {
+    opacity: 0.14;
+    transform: translateY(-10%) scaleY(1.12);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(14%) scaleY(0.84);
+  }
+}
+
+@keyframes popup-melt-drip-out {
+  0% {
+    opacity: 0.2;
+    transform: translateY(0) scaleY(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(22%) scaleY(0.74);
+  }
+}
+
+@keyframes popup-melt-droplets-in {
+  0% {
+    opacity: 0.18;
+    transform: translate(-6%, -6%) scale(0.94);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(12%, 15%) scale(1.08);
+  }
+}
+
+@keyframes popup-melt-droplets-out {
+  0% {
+    opacity: 0.2;
+    transform: translate(0, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(16%, 20%) scale(1.12);
+  }
 }
 
 @keyframes reveal-up {
@@ -1171,10 +3114,49 @@ textarea {
     grid-template-columns: 1fr;
   }
 
+  .app-shell.sidebar-collapsed {
+    grid-template-columns: 1fr;
+  }
+
   .sidebar {
+    position: static;
+    height: auto;
+    max-height: 70vh;
+    overflow: hidden;
+    transform: none !important;
+    opacity: 1 !important;
+    pointer-events: auto !important;
     border-right: 0;
     border-bottom: 1px solid var(--line);
     padding: 14px;
+    transition: max-height 0.2s ease, opacity 0.18s ease, padding 0.18s ease, border-color 0.18s ease;
+  }
+
+  .app-shell.sidebar-collapsed .sidebar {
+    max-height: 0;
+    opacity: 0 !important;
+    pointer-events: none !important;
+    padding-top: 0;
+    padding-bottom: 0;
+    border-bottom-color: transparent;
+    border-bottom-width: 0;
+  }
+
+  .app-shell.sidebar-collapsed .sidebar > * {
+    opacity: 0;
+  }
+
+  .sidebar > * {
+    transition: opacity 0.14s ease;
+  }
+
+  .sidebar-controls {
+    display: flex;
+  }
+
+  .sidebar-expand-fab {
+    left: 10px;
+    top: 10px;
   }
 
   .nav-stack {
@@ -1188,6 +3170,55 @@ textarea {
 
   .main-pane {
     padding: 14px;
+  }
+
+  .topbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .runtime-summary {
+    width: 100%;
+    border-radius: 12px;
+  }
+
+  .runtime-breakdown-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .runtime-breakdown-dialog {
+    width: min(98vw, 98vw);
+  }
+
+  .runtime-settings-dialog {
+    width: min(98vw, 98vw);
+  }
+
+  .chat-composer-card {
+    padding: 10px 0 0;
+  }
+
+  .chat-composer-bar {
+    flex-wrap: wrap;
+    align-items: center;
+    border-radius: 14px;
+    padding: 7px;
+  }
+
+  .chat-composer-input {
+    order: -1;
+    flex-basis: 100%;
+    min-height: 42px;
+    max-height: 160px;
+    padding: 8px 2px;
+  }
+
+  .chat-composer-btn,
+  .chat-composer-send {
+    width: 36px;
+    min-width: 36px;
+    height: 36px;
+    padding: 0;
   }
 
   .form-grid.two-col {
@@ -1213,5 +3244,37 @@ textarea {
 
   .shop-repo-item .inline-btn {
     width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-shell,
+  .sidebar,
+  .sidebar-expand-fab,
+  .cerb-modal,
+  .cerb-modal-dialog,
+  .toast-item {
+    transition: none !important;
+  }
+
+  .app-shell.sidebar-collapsing .sidebar,
+  .app-shell.sidebar-collapsing .sidebar::before,
+  .app-shell.sidebar-collapsing .sidebar::after,
+  .app-shell.sidebar-expanding .sidebar,
+  .app-shell.sidebar-expanding .sidebar::before,
+  .app-shell.sidebar-expanding .sidebar::after,
+  .cerb-modal.active,
+  .cerb-modal.closing,
+  .cerb-modal.active .cerb-modal-dialog,
+  .cerb-modal.active .cerb-modal-dialog::before,
+  .cerb-modal.active .cerb-modal-dialog::after,
+  .cerb-modal.closing .cerb-modal-dialog,
+  .cerb-modal.closing .cerb-modal-dialog::before,
+  .cerb-modal.closing .cerb-modal-dialog::after,
+  .toast-item.show::before,
+  .toast-item.show::after,
+  .toast-item.flame-out::before,
+  .toast-item.flame-out::after {
+    animation: none !important;
   }
 }

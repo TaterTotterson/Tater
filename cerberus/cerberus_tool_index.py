@@ -24,7 +24,7 @@ def tool_purpose(
     if not text:
         text = _meta_text(getattr(plugin, "description", "") or "")
     if not text:
-        text = _meta_text(getattr(plugin, "plugin_dec", "") or "")
+        text = _meta_text(getattr(plugin, "verba_dec", "") or "")
     text = " ".join(text.split())
     if not text:
         return "no description"

@@ -94,7 +94,7 @@ async def repair_tool_call_text(
     tool_index: str,
     tool_markup_repair_prompt: str,
     with_platform_preamble_fn: Callable[[List[Dict[str, Any]], str], List[Dict[str, Any]]],
-    configured_tool_repair_max_tokens_fn: Callable[[], int],
+    configured_tool_repair_max_tokens_fn: Callable[[], Optional[int]],
     coerce_text_fn: Callable[[Any], str] = _coerce_text,
     user_text: str = "",
     tool_name_hint: str = "",
@@ -105,7 +105,7 @@ async def repair_tool_call_text(
     tool_hint = str(tool_name_hint or "").strip()
     prompt = (
         f"{tool_markup_repair_prompt}\n"
-        "Repair invalid planner output.\n"
+        "Repair invalid Thanatos step output.\n"
         f"Current platform: {platform}\n"
         "Return ONLY one of:\n"
         "- strict JSON tool call: {\"function\":\"tool_id\",\"arguments\":{...}}\n"
@@ -139,21 +139,22 @@ async def repair_tool_call_text(
         f"Reason: {reason}\n"
         f"{hint_text}"
         f"Enabled tool index:\n{tool_index}\n\n"
-        + f"Original planner output:\n{original_text}"
+        + f"Original Thanatos output:\n{original_text}"
     )
     try:
         token_limit = int(max_tokens) if max_tokens is not None else configured_tool_repair_max_tokens_fn()
-        response = await llm_client.chat(
-            messages=with_platform_preamble_fn(
+        chat_kwargs: Dict[str, Any] = {
+            "messages": with_platform_preamble_fn(
                 [
                     {"role": "system", "content": prompt},
                     {"role": "user", "content": user_payload},
                 ],
                 platform_preamble,
             ),
-            max_tokens=max(1, token_limit),
-            temperature=0.1,
-        )
+            "temperature": 0.1,
+            "max_tokens": (max(1, int(token_limit)) if token_limit is not None else None),
+        }
+        response = await llm_client.chat(**chat_kwargs)
         return coerce_text_fn((response.get("message", {}) or {}).get("content", "")).strip()
     except Exception:
         return ""
@@ -321,7 +322,7 @@ async def generate_recovery_text(
     reason: str,
     fallback: str,
     with_platform_preamble_fn: Callable[[List[Dict[str, Any]], str], List[Dict[str, Any]]],
-    configured_recovery_max_tokens_fn: Callable[[], int],
+    configured_recovery_max_tokens_fn: Callable[[], Optional[int]],
     looks_like_tool_markup_fn: Callable[[str], bool],
     parse_function_json_fn: Callable[[str], Any],
     checker_decision_prefix_re: Any,
@@ -344,22 +345,23 @@ async def generate_recovery_text(
         "- Plain text only.\n"
         "- Do not mention internal systems, tools, JSON, or orchestration roles.\n"
         "- If error_kind is 'validation', ask for exactly the missing clarification needed to proceed.\n"
-        "- If error_kind is 'planner_empty', ask the user to restate briefly.\n"
+        "- If error_kind is 'planner_empty' or 'astraeus_empty', ask the user to restate briefly.\n"
         "- Do not include markdown."
     )
     try:
         token_limit = int(max_tokens) if max_tokens is not None else configured_recovery_max_tokens_fn()
-        response = await llm_client.chat(
-            messages=with_platform_preamble_fn(
+        chat_kwargs: Dict[str, Any] = {
+            "messages": with_platform_preamble_fn(
                 [
                     {"role": "system", "content": prompt},
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
                 ],
                 platform_preamble,
             ),
-            max_tokens=max(1, token_limit),
-            temperature=0.2,
-        )
+            "temperature": 0.2,
+            "max_tokens": (max(1, int(token_limit)) if token_limit is not None else None),
+        }
+        response = await llm_client.chat(**chat_kwargs)
         out = coerce_text_fn((response.get("message", {}) or {}).get("content", "")).strip()
     except Exception:
         return fallback_text

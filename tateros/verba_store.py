@@ -8,10 +8,10 @@ from urllib.parse import urljoin, urlparse
 import redis
 import requests
 
-import plugin_registry as plugin_registry_mod
-from plugin_kernel import expand_plugin_platforms
+import verba_registry as verba_registry_mod
+from verba_kernel import expand_verba_platforms
 
-PLUGIN_DIR = os.getenv("TATER_PLUGIN_DIR", "plugins")
+VERBA_DIR = os.getenv("TATER_VERBA_DIR", "verba")
 SHOP_MANIFEST_URL_DEFAULT = os.getenv(
     "TATER_SHOP_MANIFEST_URL",
     "https://raw.githubusercontent.com/TaterTotterson/Tater_Shop/main/manifest.json",
@@ -35,11 +35,11 @@ redis_port = int(os.getenv("REDIS_PORT", 6379))
 redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
 
 
-def get_registry():
-    return plugin_registry_mod.get_registry()
+def get_verba_registry():
+    return verba_registry_mod.get_verba_registry()
 
 
-def _enabled_missing_plugin_ids() -> list[str]:
+def _enabled_missing_verba_ids() -> list[str]:
     """
     Returns a list of plugin ids that are ENABLED in Redis but missing on disk.
     This is fast and lets us avoid showing UI unless we truly need to download.
@@ -54,7 +54,7 @@ def _enabled_missing_plugin_ids() -> list[str]:
     seen = set()
 
     try:
-        enabled_states = redis_client.hgetall("plugin_enabled") or {}
+        enabled_states = redis_client.hgetall("verba_enabled") or {}
     except Exception:
         return missing
 
@@ -66,12 +66,12 @@ def _enabled_missing_plugin_ids() -> list[str]:
             continue
         if pid in RETIRED_PLUGIN_IDS:
             try:
-                redis_client.hdel("plugin_enabled", pid)
+                redis_client.hdel("verba_enabled", pid)
             except Exception:
                 pass
             continue
 
-        if _to_bool(raw) and not is_plugin_installed(pid):
+        if _to_bool(raw) and not is_verba_installed(pid):
             if pid not in seen:
                 seen.add(pid)
                 missing.append(pid)
@@ -91,10 +91,10 @@ def _default_shop_manifest_repo() -> dict[str, str]:
     return {"name": DEFAULT_SHOP_LABEL, "url": SHOP_MANIFEST_URL_DEFAULT}
 
 
-def _safe_plugin_file_path(plugin_id: str) -> str:
+def _safe_verba_file_path(plugin_id: str) -> str:
     if not _re.fullmatch(r"[a-zA-Z0-9_\-]+", plugin_id or ""):
         raise ValueError("Invalid plugin id")
-    return os.path.join(PLUGIN_DIR, f"{plugin_id}.py")
+    return os.path.join(VERBA_DIR, f"{plugin_id}.py")
 
 
 def _normalize_manifest_repo_entry(raw) -> dict[str, str] | None:
@@ -210,9 +210,9 @@ def fetch_shop_manifest(url: str) -> dict:
 
 
 def _manifest_items(manifest: dict) -> list[dict]:
-    items = manifest.get("plugins") or manifest.get("items") or manifest.get("data") or []
+    items = manifest.get("verbas") or []
     if not isinstance(items, list):
-        raise ValueError("Manifest format unexpected (expected list under plugins/items/data).")
+        raise ValueError("Manifest format unexpected (expected list under verbas).")
     return [item for item in items if isinstance(item, dict)]
 
 
@@ -275,9 +275,9 @@ def load_shop_catalog(manifest_sources=None) -> tuple[list[dict], list[str]]:
     return merged_items, errors
 
 
-def is_plugin_installed(plugin_id: str) -> bool:
+def is_verba_installed(plugin_id: str) -> bool:
     try:
-        return os.path.exists(_safe_plugin_file_path(plugin_id))
+        return os.path.exists(_safe_verba_file_path(plugin_id))
     except Exception:
         return False
 
@@ -288,10 +288,10 @@ def _sha256_bytes(data: bytes) -> str:
     return h.hexdigest()
 
 
-def install_plugin_from_shop_item(item: dict, manifest_url: str | None = None) -> tuple[bool, str]:
+def install_verba_from_shop_item(item: dict, manifest_url: str | None = None) -> tuple[bool, str]:
     """
     Downloads a plugin .py from the shop manifest entry, verifies sha256 if provided,
-    and writes it to PLUGIN_DIR as <id>.py.
+    and writes it to VERBA_DIR as <id>.py.
     Supports relative 'entry' paths.
     """
     try:
@@ -311,8 +311,8 @@ def install_plugin_from_shop_item(item: dict, manifest_url: str | None = None) -
         entry = entry.lstrip("/")
         full_url = urljoin(source_manifest_url, entry)
 
-        path = _safe_plugin_file_path(plugin_id)
-        os.makedirs(PLUGIN_DIR, exist_ok=True)
+        path = _safe_verba_file_path(plugin_id)
+        os.makedirs(VERBA_DIR, exist_ok=True)
 
         r = requests.get(full_url, timeout=30)
         r.raise_for_status()
@@ -339,13 +339,13 @@ def install_plugin_from_shop_item(item: dict, manifest_url: str | None = None) -
         return False, f"Install failed: {e}"
 
 
-def uninstall_plugin_file(plugin_id: str) -> tuple[bool, str]:
+def uninstall_verba_file(plugin_id: str) -> tuple[bool, str]:
     """
     Remove only the plugin .py file.
     Do NOT clear Redis settings.
     """
     try:
-        path = _safe_plugin_file_path(plugin_id)
+        path = _safe_verba_file_path(plugin_id)
         if not os.path.exists(path):
             return True, "Plugin file not found (already removed)."
 
@@ -355,31 +355,31 @@ def uninstall_plugin_file(plugin_id: str) -> tuple[bool, str]:
         return False, f"Uninstall failed: {e}"
 
 
-def clear_plugin_redis_data(plugin_id: str, category_hint: str | None = None) -> tuple[bool, str]:
+def clear_verba_redis_data(plugin_id: str, category_hint: str | None = None) -> tuple[bool, str]:
     """
-    Best-effort cleanup for plugin-related Redis keys.
+    Best-effort cleanup for verba-related Redis keys.
 
     What we delete:
-      - plugin_settings:<category> (if we can determine the category)
-      - plugin_enabled hash field for this plugin_id
+      - verba_settings:<category> (if we can determine the category)
+      - verba_enabled hash field for this plugin_id
     """
     try:
         deleted = []
 
         category = (category_hint or "").strip() or None
         if not category:
-            loaded = get_registry().get(plugin_id)
+            loaded = get_verba_registry().get(plugin_id)
             category = getattr(loaded, "settings_category", None) if loaded else None
 
         if category:
-            settings_key = f"plugin_settings:{category}"
+            settings_key = f"verba_settings:{category}"
             if redis_client.exists(settings_key):
                 redis_client.delete(settings_key)
                 deleted.append(settings_key)
 
-        if redis_client.hexists("plugin_enabled", plugin_id):
-            redis_client.hdel("plugin_enabled", plugin_id)
-            deleted.append(f"plugin_enabled[{plugin_id}]")
+        if redis_client.hexists("verba_enabled", plugin_id):
+            redis_client.hdel("verba_enabled", plugin_id)
+            deleted.append(f"verba_enabled[{plugin_id}]")
 
         if deleted:
             return True, "Deleted: " + ", ".join(deleted)
@@ -389,8 +389,8 @@ def clear_plugin_redis_data(plugin_id: str, category_hint: str | None = None) ->
         return False, f"Redis cleanup failed: {e}"
 
 
-def _refresh_plugins_after_fs_change():
-    plugin_registry_mod.reload_plugins()
+def _refresh_verbas_after_fs_change():
+    verba_registry_mod.reload_verbas()
 
 
 def _semver_tuple(v: str) -> tuple[int, int, int]:
@@ -415,7 +415,7 @@ def _get_installed_version(plugin_id: str) -> str:
     if not plugin_id:
         return "0.0.0"
 
-    loaded = get_registry().get(plugin_id)
+    loaded = get_verba_registry().get(plugin_id)
     if not loaded:
         return "0.0.0"
 
@@ -478,7 +478,7 @@ def _normalize_plats(plats) -> list[str]:
 
     seen = set()
     out: list[str] = []
-    for platform_name in expand_plugin_platforms(raw_items):
+    for platform_name in expand_verba_platforms(raw_items):
         normalized = _normalize_platform_alias(platform_name)
         if normalized and normalized not in seen:
             seen.add(normalized)
@@ -488,8 +488,8 @@ def _normalize_plats(plats) -> list[str]:
 
 def _get_item_platforms(item):
     pid = (item.get("id") or "").strip()
-    if pid and is_plugin_installed(pid):
-        loaded = get_registry().get(pid)
+    if pid and is_verba_installed(pid):
+        loaded = get_verba_registry().get(pid)
         if loaded:
             loaded_platforms = getattr(loaded, "platforms", []) or []
             normalized = _normalize_plats(loaded_platforms)
@@ -508,33 +508,33 @@ def _get_item_display_platforms(item) -> str:
     return ", ".join(_platform_display_label(platform) for platform in platforms) if platforms else "(not provided)"
 
 
-def _get_loaded_plugin_display_name(plugin, fallback_id: str) -> str:
-    if not plugin:
+def _get_loaded_verba_display_name(verba, fallback_id: str) -> str:
+    if not verba:
         return fallback_id
     return (
-        getattr(plugin, "plugin_name", None)
-        or getattr(plugin, "pretty_name", None)
-        or getattr(plugin, "name", None)
+        getattr(verba, "verba_name", None)
+        or getattr(verba, "pretty_name", None)
+        or getattr(verba, "name", None)
         or fallback_id
     )
 
 
-def _get_loaded_plugin_description(plugin) -> str:
-    if not plugin:
+def _get_loaded_verba_description(verba) -> str:
+    if not verba:
         return ""
-    return getattr(plugin, "plugin_dec", None) or getattr(plugin, "description", "") or ""
+    return getattr(verba, "verba_dec", None) or getattr(verba, "description", "") or ""
 
 
-def _installed_plugin_ids() -> list[str]:
+def _installed_verba_ids() -> list[str]:
     installed_ids = set()
 
-    if os.path.isdir(PLUGIN_DIR):
-        for filename in os.listdir(PLUGIN_DIR):
+    if os.path.isdir(VERBA_DIR):
+        for filename in os.listdir(VERBA_DIR):
             if not filename.endswith(".py") or filename == "__init__.py":
                 continue
             installed_ids.add(filename[:-3])
 
-    installed_ids.update(str(plugin_id).strip() for plugin_id in get_registry().keys() if str(plugin_id).strip())
+    installed_ids.update(str(plugin_id).strip() for plugin_id in get_verba_registry().keys() if str(plugin_id).strip())
 
     return sorted(installed_ids)
 
@@ -568,14 +568,14 @@ def _build_installed_entries(catalog_items: list[dict]) -> list[dict]:
     }
 
     installed_entries = []
-    for plugin_id in _installed_plugin_ids():
-        loaded = get_registry().get(plugin_id)
+    for plugin_id in _installed_verba_ids():
+        loaded = get_verba_registry().get(plugin_id)
         catalog_item = catalog_by_id.get(plugin_id)
-        display_name = _get_loaded_plugin_display_name(
+        display_name = _get_loaded_verba_display_name(
             loaded,
             (catalog_item.get("name") if catalog_item else None) or plugin_id,
         )
-        description = _get_loaded_plugin_description(loaded) or (
+        description = _get_loaded_verba_description(loaded) or (
             (catalog_item.get("description") or "").strip() if catalog_item else ""
         )
         installed_ver = _get_installed_version(plugin_id)
@@ -607,12 +607,12 @@ def _build_installed_entries(catalog_items: list[dict]) -> list[dict]:
     return installed_entries
 
 
-def auto_restore_missing_plugins(
+def auto_restore_missing_verbas(
     manifest_urls: list[str] | str | None = None,
     progress_cb=None,
 ) -> tuple[bool, list[str], list[str]]:
     """
-    Restore any plugins that are ENABLED in Redis but missing on disk.
+    Restore any verbas that are ENABLED in Redis but missing on disk.
     Uses the configured manifests as the source of install URLs.
 
     progress_cb (optional): callable(progress_float_0_to_1, status_text)
@@ -629,14 +629,14 @@ def auto_restore_missing_plugins(
         manifest_url_list = manifest_urls
 
     try:
-        enabled_states = redis_client.hgetall("plugin_enabled") or {}
+        enabled_states = redis_client.hgetall("verba_enabled") or {}
     except Exception as e:
-        logging.error(f"[restore] Failed to read plugin_enabled: {e}")
+        logging.error(f"[restore] Failed to read verba_enabled: {e}")
         return changed, restored, enabled_missing
 
     for plugin_id, raw in enabled_states.items():
         enabled = str(raw).lower() == "true"
-        if enabled and not is_plugin_installed(plugin_id):
+        if enabled and not is_verba_installed(plugin_id):
             enabled_missing.append(plugin_id)
 
     if not enabled_missing:
@@ -645,7 +645,7 @@ def auto_restore_missing_plugins(
     total = len(enabled_missing)
     if progress_cb:
         try:
-            progress_cb(0.0, f"Found {total} enabled plugin(s) missing - preparing downloads...")
+            progress_cb(0.0, f"Found {total} enabled verba(s) missing - preparing downloads...")
         except Exception:
             pass
 
@@ -657,7 +657,7 @@ def auto_restore_missing_plugins(
     }
 
     if catalog_errors:
-        logging.warning(f"[restore] Failed to load some plugin repos: {catalog_errors}")
+        logging.warning(f"[restore] Failed to load some verba repos: {catalog_errors}")
 
     for idx, plugin_id in enumerate(enabled_missing, start=1):
         item = by_id.get(plugin_id)
@@ -678,10 +678,10 @@ def auto_restore_missing_plugins(
 
             logging.error(f"[restore] {plugin_id} enabled but not found in manifest")
             try:
-                redis_client.hdel("plugin_enabled", plugin_id)
-                logging.info(f"[restore] Removed stale plugin_enabled key for {plugin_id}")
+                redis_client.hdel("verba_enabled", plugin_id)
+                logging.info(f"[restore] Removed stale enabled key for {plugin_id}")
             except Exception as e:
-                logging.error(f"[restore] Failed to remove stale plugin_enabled key for {plugin_id}: {e}")
+                logging.error(f"[restore] Failed to remove stale enabled key for {plugin_id}: {e}")
             if progress_cb:
                 try:
                     progress_cb(
@@ -698,7 +698,7 @@ def auto_restore_missing_plugins(
             except Exception:
                 pass
 
-        ok, msg = install_plugin_from_shop_item(item)
+        ok, msg = install_verba_from_shop_item(item)
         if ok:
             restored.append(plugin_id)
             changed = True
@@ -715,39 +715,39 @@ def auto_restore_missing_plugins(
     return changed, restored, enabled_missing
 
 
-def ensure_plugins_ready(progress_cb=None):
+def ensure_verbas_ready(progress_cb=None):
     """
-    Ensure any ENABLED plugins that are missing on disk are restored from the shop.
+    Ensure any ENABLED verbas that are missing on disk are restored from the shop.
 
     progress_cb (optional): callable(progress_float_0_to_1, status_text)
     """
-    os.makedirs(PLUGIN_DIR, exist_ok=True)
+    os.makedirs(VERBA_DIR, exist_ok=True)
 
     shop_urls = get_configured_shop_manifest_urls()
     if not shop_urls:
         if progress_cb:
             try:
-                progress_cb(1.0, "Plugin shop manifest URLs are not configured.")
+                progress_cb(1.0, "Verba shop manifest URLs are not configured.")
             except Exception:
                 pass
         return
 
-    missing = _enabled_missing_plugin_ids()
+    missing = _enabled_missing_verba_ids()
     if not missing:
         if progress_cb:
             try:
-                progress_cb(1.0, "All enabled plugins are present.")
+                progress_cb(1.0, "All enabled verbas are present.")
             except Exception:
                 pass
         return
 
     if progress_cb:
         try:
-            progress_cb(0.0, f"Restoring {len(missing)} missing plugin(s) from {len(shop_urls)} repo(s)...")
+            progress_cb(0.0, f"Restoring {len(missing)} missing verba(s) from {len(shop_urls)} repo(s)...")
         except Exception:
             pass
 
-    changed, restored, enabled_missing = auto_restore_missing_plugins(
+    changed, restored, enabled_missing = auto_restore_missing_verbas(
         shop_urls,
         progress_cb=progress_cb,
     )
@@ -755,14 +755,14 @@ def ensure_plugins_ready(progress_cb=None):
     if changed:
         if progress_cb:
             try:
-                progress_cb(0.98, "Reloading plugins...")
+                progress_cb(0.98, "Reloading verbas...")
             except Exception:
                 pass
-        _refresh_plugins_after_fs_change()
+        _refresh_verbas_after_fs_change()
 
     if progress_cb and not restored and enabled_missing:
         try:
-            progress_cb(1.0, "Missing plugins could not be restored from the configured repos.")
+            progress_cb(1.0, "Missing verbas could not be restored from the configured repos.")
         except Exception:
             pass
     elif progress_cb:
@@ -770,4 +770,3 @@ def ensure_plugins_ready(progress_cb=None):
             progress_cb(1.0, "")
         except Exception:
             pass
-

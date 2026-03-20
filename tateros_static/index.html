@@ -10,8 +10,13 @@
     <div class="bg-shape bg-shape-a" aria-hidden="true"></div>
     <div class="bg-shape bg-shape-b" aria-hidden="true"></div>
 
-    <div class="app-shell">
-      <aside class="sidebar">
+    <div id="app-shell" class="app-shell">
+      <aside class="sidebar" id="app-sidebar">
+        <div class="sidebar-controls">
+          <button id="sidebar-collapse-btn" class="inline-btn sidebar-toggle-btn" type="button" aria-label="Hide menu">
+            ✕
+          </button>
+        </div>
         <div class="brand-wrap">
           <div class="brand-dot"></div>
           <div>
@@ -41,6 +46,10 @@
         <section id="view-root" class="view-root"></section>
       </main>
     </div>
+
+    <button id="sidebar-expand-btn" class="sidebar-expand-fab" type="button" aria-label="Show menu" title="Show menu">
+      ☰
+    </button>
 
     <div id="toast-root" class="toast-root" aria-live="polite" aria-atomic="true"></div>
 

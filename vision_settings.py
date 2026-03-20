@@ -2,7 +2,7 @@ from typing import Any, Dict, Optional
 
 from helpers import redis_client
 
-VISION_SETTINGS_KEY = "plugin_settings:Vision"
+VISION_SETTINGS_KEY = "verba_settings:Vision"
 DEFAULT_VISION_API_BASE = "http://127.0.0.1:1234"
 DEFAULT_VISION_MODEL = "qwen2.5-vl-7b-instruct"
 

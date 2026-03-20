@@ -27,9 +27,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from helpers import redis_client
-from plugin_loader import load_plugins_from_directory
-from plugin_registry import reload_plugins
-from plugin_result import action_failure, action_success
+from verba_loader import load_verbas_from_directory
+from verba_registry import reload_verbas
+from verba_result import action_failure, action_success
 from notify import dispatch_notification_sync
 from notify.queue import ALLOWED_PLATFORMS, normalize_platform as normalize_notify_platform
 from vision_settings import (
@@ -56,7 +56,7 @@ if _agent_root_env:
 else:
     _agent_root_path = BASE_DIR / "agent_lab"
 AGENT_LAB_DIR = _agent_root_path.resolve()
-AGENT_PLUGINS_DIR = AGENT_LAB_DIR / "plugins"
+AGENT_PLUGINS_DIR = AGENT_LAB_DIR / "verba"
 AGENT_PORTALS_DIR = AGENT_LAB_DIR / "portals"
 AGENT_ARTIFACTS_DIR = AGENT_LAB_DIR / "artifacts"
 AGENT_DOCUMENTS_DIR = AGENT_LAB_DIR / "documents"
@@ -65,7 +65,7 @@ AGENT_WORKSPACE_DIR = AGENT_LAB_DIR / "workspace"
 AGENT_LOGS_DIR = AGENT_LAB_DIR / "logs"
 AGENT_REQUIREMENTS = AGENT_LAB_DIR / "requirements.txt"
 
-STABLE_PLUGINS_DIR = BASE_DIR / os.getenv("TATER_PLUGIN_DIR", "plugins")
+STABLE_PLUGINS_DIR = BASE_DIR / os.getenv("TATER_VERBA_DIR", "verba")
 STABLE_PORTALS_DIR = BASE_DIR / "portals"
 
 _SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
@@ -85,7 +85,7 @@ _ARCHIVE_EXTRACT_MAX_FILES = int(os.getenv("TATER_ARCHIVE_EXTRACT_MAX_FILES", "1
 
 WEB_SEARCH_API_KEY_REDIS_KEY = "tater:web_search:google_api_key"
 WEB_SEARCH_CX_REDIS_KEY = "tater:web_search:google_cx"
-WEB_SEARCH_LEGACY_SETTINGS_KEY = "plugin_settings:Web Search"
+WEB_SEARCH_LEGACY_SETTINGS_KEY = "verba_settings:Web Search"
 WEB_SEARCH_TIMEOUT_SEC = int(os.getenv("TATER_WEB_SEARCH_TIMEOUT_SEC", "15"))
 WEB_SEARCH_MAX_RESULTS = int(os.getenv("TATER_WEB_SEARCH_MAX_RESULTS", "10"))
 WEB_SEARCH_MAX_RESPONSE_BYTES = int(os.getenv("TATER_WEB_SEARCH_MAX_RESPONSE_BYTES", "2000000"))
@@ -914,8 +914,8 @@ def _send_message_boolish(value: Any, default: bool = False) -> bool:
 
 def _send_message_load_settings() -> Dict[str, str]:
     return (
-        redis_client.hgetall("plugin_settings:Send Message")
-        or redis_client.hgetall("plugin_settings: Send Message")
+        redis_client.hgetall("verba_settings:Send Message")
+        or redis_client.hgetall("verba_settings: Send Message")
         or {}
     )
 
@@ -2770,11 +2770,11 @@ def write_file(
                 top = rel.parts[0] if rel.parts else ""
             except Exception:
                 top = ""
-            if top in {"plugins", "portals"}:
+            if top in {"verba", "portals"}:
                 return {
                     "tool": "write_file",
                     "ok": False,
-                    "error": "Direct python writes are disabled for plugins/portals.",
+                    "error": "Direct python writes are disabled for verba/portals.",
                 }
             return {
                 "tool": "write_file",
@@ -3266,7 +3266,7 @@ def promote_plugin(name: str, confirm: Optional[bool] = None, delete_source: boo
             "tool": "promote_plugin",
             "ok": False,
             "error": "Confirmation required.",
-            "needs": ["Please confirm promotion to stable plugins by setting confirm=true."],
+            "needs": ["Please confirm promotion to stable verbas by setting confirm=true."],
         }
     if not _SAFE_NAME_RE.fullmatch(name or ""):
         return {"tool": "promote_plugin", "ok": False, "error": "Invalid plugin name."}
@@ -3277,7 +3277,7 @@ def promote_plugin(name: str, confirm: Optional[bool] = None, delete_source: boo
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dest)
-        reload_plugins()
+        reload_verbas()
         _log_write("promote_plugin", dest, dest.stat().st_size if dest.exists() else 0)
         if delete_source:
             src.unlink()

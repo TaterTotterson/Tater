@@ -10,8 +10,8 @@ logger = logging.getLogger("emoji_responder")
 
 EMOJI_SETTINGS_KEY = "emoji_responder_settings"
 EMOJI_SETTINGS_LEGACY_KEYS = (
-    "plugin_settings:Emoji AI Responder",
-    "plugin_settings: Emoji AI Responder",
+    "verba_settings:Emoji AI Responder",
+    "verba_settings: Emoji AI Responder",
 )
 
 _FALLBACK_LLM = None

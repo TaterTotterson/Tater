@@ -1,13 +1,14 @@
 import json
 import mimetypes
 import re
+import threading
 import time
 import uuid
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
-from . import cerberus_checker as checker
-from . import cerberus_doer_state as doer_state
+from . import cerberus_checker as minos
+from . import cerberus_doer_state as thanatos_state
 from . import cerberus_execution as execution
 from . import cerberus_common_helpers as common_helpers
 from . import cerberus_ledger as ledger
@@ -39,14 +40,14 @@ from conversation_artifacts import (
     load_conversation_artifacts,
     save_conversation_artifacts,
 )
-from plugin_kernel import (
-    expand_plugin_platforms,
+from verba_kernel import (
+    expand_verba_platforms,
     normalize_platform,
-    plugin_display_name,
-    plugin_supports_platform,
-    plugin_when_to_use,
+    verba_display_name,
+    verba_supports_platform,
+    verba_when_to_use,
 )
-from plugin_result import action_failure, narrate_result, normalize_plugin_result, result_for_llm
+from verba_result import action_failure, narrate_result, normalize_verba_result, result_for_llm
 from tool_runtime import META_TOOLS, execute_plugin_call, is_meta_tool, run_meta_tool
 from memory_core_store import (
     load_doc as load_memory_core_doc,
@@ -66,8 +67,8 @@ TOOL_NAME_ALIASES = {
 }
 
 _KERNEL_TOOL_PURPOSE_HINTS = {
-    "list_tools": "list kernel and enabled plugin tools for current platform",
-    "get_plugin_help": "show plugin usage example and guidance",
+    "list_tools": "list kernel and enabled verba tools for current platform",
+    "get_verba_help": "show verba usage example and guidance",
     "read_file": "read local file contents",
     "search_web": "web search for current information",
     "search_files": "search text across local files",
@@ -92,7 +93,7 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
 }
 _KERNEL_TOOL_USAGE_HINTS = {
     "list_tools": '{"function":"list_tools","arguments":{}}',
-    "get_plugin_help": '{"function":"get_plugin_help","arguments":{"plugin_id":"<plugin_id>"}}',
+    "get_verba_help": '{"function":"get_verba_help","arguments":{"verba_id":"<verba_id>"}}',
     "read_file": '{"function":"read_file","arguments":{"path":"<path>"}}',
     "search_web": '{"function":"search_web","arguments":{"query":"<query>"}}',
     "search_files": '{"function":"search_files","arguments":{"query":"<query>","path":"/"}}',
@@ -118,24 +119,14 @@ _KERNEL_TOOL_USAGE_HINTS = {
 
 ASCII_ONLY_PLATFORMS = {"irc", "homeassistant", "homekit", "xbmc"}
 DEFAULT_CLARIFICATION = "Could you clarify exactly what you want me to do next?"
-DEFAULT_MAX_ROUNDS = 18
-DEFAULT_MAX_TOOL_CALLS = 18
+DEFAULT_MAX_ROUNDS = 0
+DEFAULT_MAX_TOOL_CALLS = 0
 DEFAULT_MAX_LEDGER_ITEMS = 1500
-DEFAULT_PLANNER_MAX_TOKENS = 3300
-DEFAULT_CHECKER_MAX_TOKENS = 2550
-DEFAULT_DOER_MAX_TOKENS = 2700
-DEFAULT_TOOL_REPAIR_MAX_TOKENS = 2250
-DEFAULT_RECOVERY_MAX_TOKENS = 1050
 DEFAULT_RESULT_MEMORY_MAX_SETS = 6
 DEFAULT_RESULT_MEMORY_MAX_ITEMS = 8
-AGENT_MAX_ROUNDS_KEY = "tater:agent:max_rounds"
-AGENT_MAX_TOOL_CALLS_KEY = "tater:agent:max_tool_calls"
+DEFAULT_STEP_RETRY_LIMIT = 3
+DEFAULT_IDENTICAL_FAILED_TOOL_CALL_LIMIT = 2
 CERBERUS_AGENT_STATE_TTL_SECONDS_KEY = "tater:cerberus:agent_state_ttl_seconds"
-CERBERUS_PLANNER_MAX_TOKENS_KEY = "tater:cerberus:planner_max_tokens"
-CERBERUS_CHECKER_MAX_TOKENS_KEY = "tater:cerberus:checker_max_tokens"
-CERBERUS_DOER_MAX_TOKENS_KEY = "tater:cerberus:doer_max_tokens"
-CERBERUS_TOOL_REPAIR_MAX_TOKENS_KEY = "tater:cerberus:tool_repair_max_tokens"
-CERBERUS_RECOVERY_MAX_TOKENS_KEY = "tater:cerberus:recovery_max_tokens"
 CERBERUS_MAX_LEDGER_ITEMS_KEY = "tater:cerberus:max_ledger_items"
 CERBERUS_RESULT_MEMORY_MAX_SETS_KEY = "tater:cerberus:result_memory_max_sets"
 CERBERUS_RESULT_MEMORY_MAX_ITEMS_KEY = "tater:cerberus:result_memory_max_items"
@@ -162,17 +153,71 @@ _PLATFORM_DISPLAY = {
 }
 
 _URL_RE = re.compile(r"https?://[^\s<>)\]\"']+", flags=re.IGNORECASE)
-_CHECKER_DECISION_PREFIX_RE = re.compile(
-    r"^\s*(FINAL[\s_-]*ANSWER|RETRY[\s_-]*TOOL|NEED[\s_-]*USER[\s_-]*INFO)\s*:\s*(.*)$",
+_MINOS_DECISION_PREFIX_RE = re.compile(
+    r"^\s*(CONTINUE|RETRY|ASK[\s_-]*USER|FAIL|FINAL|FINAL[\s_-]*ANSWER|RETRY[\s_-]*TOOL|NEED[\s_-]*USER[\s_-]*INFO)\s*:\s*(.*)$",
     flags=re.IGNORECASE | re.DOTALL,
 )
 _MEMORY_CONTEXT_DEFAULT_ITEMS = 12
 _MEMORY_CONTEXT_DEFAULT_VALUE_MAX_CHARS = 288
 _MEMORY_CONTEXT_DEFAULT_SUMMARY_MAX_CHARS = 2100
 _WEB_RESEARCH_MAX_CANDIDATES = 8
-_WEB_RESEARCH_MAX_LINK_TRIES = 4
 _WEB_RESEARCH_MIN_PREVIEW_CHARS = 260
 _WEB_RESEARCH_MIN_PREVIEW_WORDS = 45
+_ACTIVE_CHAT_JOB_LOCK = threading.RLock()
+_ACTIVE_CHAT_JOBS: Dict[str, Dict[str, Any]] = {}
+
+
+def _register_active_chat_job(
+    *,
+    platform: str,
+    scope: str,
+    origin: Optional[Dict[str, Any]],
+) -> str:
+    job_id = str(uuid.uuid4())
+    platform_value = normalize_platform(platform)
+    scope_value = str(scope or "").strip()
+    origin_payload = dict(origin) if isinstance(origin, dict) else {}
+    source_value = str(
+        origin_payload.get("platform")
+        or origin_payload.get("source")
+        or platform_value
+    ).strip()
+    with _ACTIVE_CHAT_JOB_LOCK:
+        _ACTIVE_CHAT_JOBS[job_id] = {
+            "id": job_id,
+            "platform": platform_value,
+            "scope": scope_value,
+            "source": source_value,
+            "started_at": time.time(),
+        }
+    return job_id
+
+
+def _unregister_active_chat_job(job_id: str) -> None:
+    with _ACTIVE_CHAT_JOB_LOCK:
+        _ACTIVE_CHAT_JOBS.pop(str(job_id or "").strip(), None)
+
+
+def get_active_chat_jobs_count(*, platform: Optional[str] = None) -> int:
+    platform_filter = normalize_platform(platform) if str(platform or "").strip() else ""
+    with _ACTIVE_CHAT_JOB_LOCK:
+        if not platform_filter:
+            return len(_ACTIVE_CHAT_JOBS)
+        count = 0
+        for row in _ACTIVE_CHAT_JOBS.values():
+            if normalize_platform(row.get("platform")) == platform_filter:
+                count += 1
+        return count
+
+
+def get_active_chat_jobs_snapshot(*, platform: Optional[str] = None) -> List[Dict[str, Any]]:
+    platform_filter = normalize_platform(platform) if str(platform or "").strip() else ""
+    with _ACTIVE_CHAT_JOB_LOCK:
+        rows = [dict(row) for row in _ACTIVE_CHAT_JOBS.values() if isinstance(row, dict)]
+    if platform_filter:
+        rows = [row for row in rows if normalize_platform(row.get("platform")) == platform_filter]
+    rows.sort(key=lambda row: float(row.get("started_at") or 0.0))
+    return rows
 
 
 def _normalize_tool_call_for_user_request(
@@ -251,49 +296,88 @@ def _configured_max_ledger_items(redis_client: Any = None) -> int:
     )
 
 
-def _configured_planner_max_tokens(redis_client: Any = None) -> int:
-    return runtime_config.configured_positive_int(
-        redis_client=(redis_client or default_redis),
-        key=CERBERUS_PLANNER_MAX_TOKENS_KEY,
-        default=DEFAULT_PLANNER_MAX_TOKENS,
-        redis_config_positive_int_fn=_redis_config_positive_int,
+def _configured_astraeus_max_tokens(redis_client: Any = None) -> Optional[int]:
+    del redis_client
+    return None
+
+
+def _configured_minos_max_tokens(redis_client: Any = None) -> Optional[int]:
+    del redis_client
+    return None
+
+
+def _configured_thanatos_max_tokens(redis_client: Any = None) -> Optional[int]:
+    del redis_client
+    return None
+
+
+def _configured_tool_repair_max_tokens(redis_client: Any = None) -> Optional[int]:
+    del redis_client
+    return None
+
+
+def _configured_recovery_max_tokens(redis_client: Any = None) -> Optional[int]:
+    del redis_client
+    return None
+
+
+def _normalize_token_limit(
+    value: Optional[int],
+    *,
+    minimum: int = 1,
+    fallback: Optional[int] = None,
+    maximum: Optional[int] = None,
+) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except Exception:
+        parsed = int(fallback if fallback is not None else minimum)
+    if parsed <= 0 and fallback is not None:
+        parsed = int(fallback)
+    parsed = max(int(minimum), parsed)
+    if maximum is not None:
+        parsed = min(int(maximum), parsed)
+    return parsed
+
+
+def _scale_token_limit(
+    value: Optional[int],
+    *,
+    numerator: int = 1,
+    denominator: int = 1,
+    minimum: int = 1,
+    maximum: Optional[int] = None,
+) -> Optional[int]:
+    if value is None:
+        return None
+    num = max(1, int(numerator))
+    den = max(1, int(denominator))
+    scaled = (int(value) * num) // den
+    return _normalize_token_limit(
+        scaled,
+        minimum=minimum,
+        maximum=maximum,
     )
 
 
-def _configured_checker_max_tokens(redis_client: Any = None) -> int:
-    return runtime_config.configured_positive_int(
-        redis_client=(redis_client or default_redis),
-        key=CERBERUS_CHECKER_MAX_TOKENS_KEY,
-        default=DEFAULT_CHECKER_MAX_TOKENS,
-        redis_config_positive_int_fn=_redis_config_positive_int,
+def _chat_with_optional_max_tokens_kwargs(
+    *,
+    max_tokens: Optional[int],
+    minimum: int = 1,
+    fallback: Optional[int] = None,
+    maximum: Optional[int] = None,
+) -> Dict[str, Any]:
+    token_limit = _normalize_token_limit(
+        max_tokens,
+        minimum=minimum,
+        fallback=fallback,
+        maximum=maximum,
     )
-
-
-def _configured_doer_max_tokens(redis_client: Any = None) -> int:
-    return runtime_config.configured_positive_int(
-        redis_client=(redis_client or default_redis),
-        key=CERBERUS_DOER_MAX_TOKENS_KEY,
-        default=DEFAULT_DOER_MAX_TOKENS,
-        redis_config_positive_int_fn=_redis_config_positive_int,
-    )
-
-
-def _configured_tool_repair_max_tokens(redis_client: Any = None) -> int:
-    return runtime_config.configured_positive_int(
-        redis_client=(redis_client or default_redis),
-        key=CERBERUS_TOOL_REPAIR_MAX_TOKENS_KEY,
-        default=DEFAULT_TOOL_REPAIR_MAX_TOKENS,
-        redis_config_positive_int_fn=_redis_config_positive_int,
-    )
-
-
-def _configured_recovery_max_tokens(redis_client: Any = None) -> int:
-    return runtime_config.configured_positive_int(
-        redis_client=(redis_client or default_redis),
-        key=CERBERUS_RECOVERY_MAX_TOKENS_KEY,
-        default=DEFAULT_RECOVERY_MAX_TOKENS,
-        redis_config_positive_int_fn=_redis_config_positive_int,
-    )
+    if token_limit is None:
+        return {"max_tokens": None}
+    return {"max_tokens": int(token_limit)}
 
 
 def _configured_result_memory_max_sets(redis_client: Any = None) -> int:
@@ -524,17 +608,8 @@ def resolve_agent_limits(
     max_rounds: Optional[int] = None,
     max_tool_calls: Optional[int] = None,
 ) -> tuple[int, int]:
-    return limits_helpers.resolve_agent_limits(
-        redis_client=redis_client,
-        max_rounds=max_rounds,
-        max_tool_calls=max_tool_calls,
-        fallback_redis=default_redis,
-        coerce_non_negative_int_fn=_coerce_non_negative_int,
-        default_max_rounds=DEFAULT_MAX_ROUNDS,
-        default_max_tool_calls=DEFAULT_MAX_TOOL_CALLS,
-        agent_max_rounds_key=AGENT_MAX_ROUNDS_KEY,
-        agent_max_tool_calls_key=AGENT_MAX_TOOL_CALLS_KEY,
-    )
+    del redis_client, max_rounds, max_tool_calls
+    return 0, 0
 
 
 def _canonical_tool_name(name: str) -> str:
@@ -551,7 +626,7 @@ def _looks_like_invalid_tool_call_text(text: str) -> bool:
 def _tool_purpose(plugin: Any) -> str:
     return tool_index_helpers.tool_purpose(
         plugin,
-        plugin_when_to_use_fn=plugin_when_to_use,
+        plugin_when_to_use_fn=verba_when_to_use,
     )
 
 
@@ -601,27 +676,10 @@ def _enabled_tool_mini_index(
         ordered_kernel_tool_ids_fn=_ordered_kernel_tool_ids,
         kernel_tool_purpose_fn=_kernel_tool_purpose,
         kernel_tool_usage_fn=_kernel_tool_usage,
-        plugin_supports_platform_fn=plugin_supports_platform,
+        plugin_supports_platform_fn=verba_supports_platform,
         plugin_usage_text_fn=_plugin_usage_text,
         tool_purpose_fn=_tool_purpose,
     )
-
-
-def _enabled_tool_ids(
-    *,
-    platform: str,
-    registry: Dict[str, Any],
-    enabled_predicate: Optional[Callable[[str], bool]],
-) -> List[str]:
-    enabled_check = enabled_predicate or (lambda _name: True)
-    tool_ids: List[str] = list(_ordered_kernel_tool_ids())
-    for plugin_id, plugin in sorted(registry.items(), key=lambda kv: str(kv[0]).lower()):
-        if not enabled_check(plugin_id):
-            continue
-        if not plugin_supports_platform(plugin, platform):
-            continue
-        tool_ids.append(str(plugin_id))
-    return tool_ids
 
 
 def _compact_history(history_messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -640,6 +698,46 @@ def _platform_label(platform: str) -> str:
 
 def _strip_user_sender_prefix(text: str) -> str:
     return common_helpers.strip_user_sender_prefix(text)
+
+
+def _looks_like_social_chat_turn(text: str) -> bool:
+    lowered = " ".join(str(text or "").strip().lower().split())
+    if not lowered:
+        return False
+    if _URL_RE.search(lowered):
+        return False
+    if re.search(
+        r"\b(turn|set|check|find|search|summarize|download|upload|send|post|add|share|inspect|read|run|open|create|make|build|write|delete|list|extract|attach|remind|schedule|notify)\b",
+        lowered,
+    ):
+        return False
+    if lowered in {
+        "ok",
+        "okay",
+        "kk",
+        "got it",
+        "sounds good",
+        "thanks",
+        "thank you",
+        "thx",
+        "cool",
+        "nice",
+        "awesome",
+        "great",
+        "lol",
+        "haha",
+    }:
+        return True
+    if re.match(r"^(hi|hey|hello|yo|sup|howdy)\b", lowered):
+        return True
+    if re.match(r"^(good\s+(morning|afternoon|evening)|good night|gn)\b", lowered):
+        return True
+    if re.search(
+        r"\b(how are you|how's it going|how is it going|what are you up to|what've you been up to|what do you think|tell me about yourself|who are you)\b",
+        lowered,
+    ):
+        return True
+    return False
 
 
 def _web_research_url_key(url: Any) -> str:
@@ -774,30 +872,32 @@ def _find_concrete_destination(payload: Any, *, _in_destination_context: bool = 
     return _looks_like_destination_scalar(payload, key_hint=_key_hint, in_destination_context=_in_destination_context)
 
 
-def _planner_focus_prompt(*, current_user_text: str, resolved_user_text: str) -> str:
-    return prompts.planner_focus_prompt(
+def _thanatos_focus_prompt(*, current_user_text: str, resolved_user_text: str) -> str:
+    return prompts.thanatos_focus_prompt(
         current_user_text=current_user_text,
         resolved_user_text=resolved_user_text,
     )
 
 
-def _planner_round_mode_prompt(*, round_index: int, current_user_text: str) -> str:
-    return prompts.planner_round_mode_prompt(
+def _thanatos_round_mode_prompt(*, round_index: int, current_user_text: str) -> str:
+    return prompts.thanatos_round_mode_prompt(
         round_index=round_index,
         current_user_text=current_user_text,
     )
 
 
-def _planner_execution_step_prompt(*, tool: str, nl: str) -> str:
-    return prompts.planner_execution_step_prompt(
-        tool=tool,
+def _thanatos_execution_step_prompt(*, intent: str, nl: str, goal: str = "", repair_hint: str = "") -> str:
+    return prompts.thanatos_execution_step_prompt(
+        intent=intent,
         nl=nl,
+        goal=goal,
+        repair_hint=repair_hint,
     )
 
 
-def _planner_system_prompt(platform: str) -> str:
+def _thanatos_system_prompt(platform: str) -> str:
     first, last = get_tater_name()
-    return prompts.planner_system_prompt(
+    return prompts.thanatos_system_prompt(
         platform=platform,
         platform_label=_platform_label(platform),
         now_text=datetime.now().strftime("%A, %B %d, %Y at %I:%M %p"),
@@ -808,16 +908,16 @@ def _planner_system_prompt(platform: str) -> str:
     ).strip()
 
 
-def _checker_system_prompt(platform: str, retry_allowed: bool) -> str:
-    return prompts.checker_system_prompt(
+def _minos_system_prompt(platform: str, retry_allowed: bool) -> str:
+    return prompts.minos_system_prompt(
         platform=platform,
         retry_allowed=retry_allowed,
         ascii_only_platforms=ASCII_ONLY_PLATFORMS,
     ).strip()
 
 
-def _plan_builder_system_prompt(platform: str) -> str:
-    return prompts.plan_builder_system_prompt(platform=platform)
+def _astraeus_system_prompt(platform: str) -> str:
+    return prompts.astraeus_system_prompt(platform=platform)
 
 
 def _chat_fallback_system_prompt(platform: str) -> str:
@@ -831,6 +931,275 @@ def _chat_fallback_system_prompt(platform: str) -> str:
         personality=(get_tater_personality() or "").strip(),
         ascii_only_platforms=ASCII_ONLY_PLATFORMS,
     ).strip()
+
+
+def _status_bool(value: Any, *, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    token = str(value).strip().lower()
+    if token in {"1", "true", "yes", "on", "enabled", "running", "connected"}:
+        return True
+    if token in {"0", "false", "no", "off", "disabled", "stopped", "disconnected"}:
+        return False
+    return bool(default)
+
+
+def _status_desc(*values: Any, fallback: str = "") -> str:
+    for value in values:
+        text = _short_text(" ".join(_coerce_text(value).split()), limit=120)
+        if text:
+            return text
+    return _short_text(fallback, limit=120)
+
+
+def _display_name_from_key(key: str, *, suffix: str) -> str:
+    token = str(key or "").strip()
+    if suffix and token.endswith(suffix):
+        token = token[: -len(suffix)]
+    token = token.replace("_", " ").strip()
+    return token or str(key or "").strip()
+
+
+def _collect_verbas_status_rows(
+    *,
+    registry: Dict[str, Any],
+    enabled_predicate: Optional[Callable[[str], bool]],
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    enabled_check = enabled_predicate or (lambda _name: True)
+    for plugin_id, plugin in sorted((registry or {}).items(), key=lambda kv: str(kv[0]).lower()):
+        pid = str(plugin_id or "").strip()
+        if not pid:
+            continue
+        enabled = bool(enabled_check(pid))
+        description = _status_desc(
+            getattr(plugin, "description", ""),
+            getattr(plugin, "verba_dec", ""),
+            getattr(plugin, "when_to_use", ""),
+            getattr(plugin, "usage", ""),
+            fallback="plugin capability",
+        )
+        rows.append(
+            {
+                "name": pid,
+                "description": description or "plugin capability",
+                "enabled": enabled,
+            }
+        )
+    return rows
+
+
+def _collect_portals_status_rows(*, redis_client: Any, platform: str) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    try:
+        import portal_registry as portal_registry_module
+
+        portal_entries = list(portal_registry_module.get_portal_registry() or [])
+    except Exception:
+        portal_entries = []
+
+    for entry in portal_entries:
+        if not isinstance(entry, dict):
+            continue
+        key = str(entry.get("key") or "").strip()
+        if not key:
+            continue
+        running = False
+        enabled_hint = _status_bool(entry.get("enabled"), default=True)
+        if redis_client is not None:
+            try:
+                running = _status_bool(redis_client.get(f"{key}_running"), default=False)
+            except Exception:
+                running = False
+        connected = running
+        enabled = enabled_hint
+        rows.append(
+            {
+                "name": _display_name_from_key(key, suffix="_portal"),
+                "description": _status_desc(
+                    entry.get("description"),
+                    entry.get("summary"),
+                    entry.get("category"),
+                    entry.get("label"),
+                    fallback=f"interact through {key}",
+                ),
+                "connected": connected,
+                "enabled": enabled,
+            }
+        )
+
+    if not rows and platform:
+        rows.append(
+            {
+                "name": str(platform).strip(),
+                "description": _status_desc(
+                    _platform_label(platform),
+                    fallback=f"interact through {platform}",
+                ),
+                "connected": True,
+                "enabled": True,
+            }
+        )
+
+    return rows
+
+
+def _collect_cores_status_rows(*, redis_client: Any) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    try:
+        import core_registry as core_registry_module
+
+        core_entries = list(core_registry_module.get_core_registry() or [])
+    except Exception:
+        core_entries = []
+
+    for entry in core_entries:
+        if not isinstance(entry, dict):
+            continue
+        key = str(entry.get("key") or "").strip()
+        if not key:
+            continue
+        running = False
+        enabled_hint = _status_bool(entry.get("enabled"), default=True)
+        if redis_client is not None:
+            try:
+                running = _status_bool(redis_client.get(f"{key}_running"), default=False)
+            except Exception:
+                running = False
+        rows.append(
+            {
+                "name": _display_name_from_key(key, suffix="_core"),
+                "description": _status_desc(
+                    entry.get("description"),
+                    entry.get("summary"),
+                    entry.get("category"),
+                    entry.get("label"),
+                    fallback=f"core system {key}",
+                ),
+                "running": running,
+                "enabled": enabled_hint,
+            }
+        )
+
+    return rows
+
+
+def _filter_status_rows(
+    rows: List[Dict[str, Any]],
+    *,
+    active_key: str,
+    compact_mode: bool,
+    max_compact: int,
+    max_full: int,
+    inactive_tail: int = 2,
+) -> List[Dict[str, Any]]:
+    del compact_mode, max_compact, max_full, inactive_tail
+    active = [row for row in rows if _status_bool(row.get(active_key), default=False)]
+    inactive = [row for row in rows if not _status_bool(row.get(active_key), default=False)]
+    active.sort(key=lambda row: str(row.get("name") or "").lower())
+    inactive.sort(key=lambda row: str(row.get("name") or "").lower())
+    return active + inactive
+
+
+def _chat_status_compact_mode(
+    *,
+    history: List[Dict[str, Any]],
+    max_tokens: Optional[int],
+    total_rows: int,
+) -> bool:
+    del history, max_tokens, total_rows
+    return False
+
+
+def _render_tater_system_status_prompt(
+    *,
+    platform: str,
+    registry: Dict[str, Any],
+    enabled_predicate: Optional[Callable[[str], bool]],
+    redis_client: Any,
+    history: List[Dict[str, Any]],
+    max_tokens: Optional[int],
+) -> str:
+    verbas = _collect_verbas_status_rows(registry=registry, enabled_predicate=enabled_predicate)
+    portals = _collect_portals_status_rows(redis_client=redis_client, platform=platform)
+    cores = _collect_cores_status_rows(redis_client=redis_client)
+    compact_mode = _chat_status_compact_mode(
+        history=history,
+        max_tokens=max_tokens,
+        total_rows=len(verbas) + len(portals) + len(cores),
+    )
+    verbas_rows = _filter_status_rows(
+        verbas,
+        active_key="enabled",
+        compact_mode=compact_mode,
+        max_compact=6,
+        max_full=12,
+        inactive_tail=3,
+    )
+    portals_rows = _filter_status_rows(
+        portals,
+        active_key="connected",
+        compact_mode=compact_mode,
+        max_compact=6,
+        max_full=10,
+        inactive_tail=2,
+    )
+    cores_rows = _filter_status_rows(
+        cores,
+        active_key="running",
+        compact_mode=compact_mode,
+        max_compact=6,
+        max_full=8,
+        inactive_tail=2,
+    )
+
+    lines: List[str] = []
+    lines.append("Tater System Status")
+    lines.append("")
+    lines.append("Verbas (Capabilities)")
+    lines.append("These are the Verbas you currently have available for reference.")
+    if verbas_rows:
+        for row in verbas_rows:
+            status_text = "enabled" if _status_bool(row.get("enabled"), default=False) else "disabled"
+            lines.append(f"- {row.get('name')}: {row.get('description')} ({status_text})")
+    else:
+        lines.append("- none detected")
+
+    lines.append("")
+    lines.append("Portals (Platforms)")
+    lines.append("These are the Portals you are currently running or connected through.")
+    if portals_rows:
+        for row in portals_rows:
+            connected_text = "connected" if _status_bool(row.get("connected"), default=False) else "disconnected"
+            enabled_text = "enabled" if _status_bool(row.get("enabled"), default=False) else "disabled"
+            lines.append(f"- {row.get('name')}: {row.get('description')} ({connected_text}, {enabled_text})")
+    else:
+        lines.append("- none detected")
+
+    lines.append("")
+    lines.append("Cores (Systems)")
+    lines.append("These are the Cores currently active in your system.")
+    if cores_rows:
+        for row in cores_rows:
+            running_text = "running" if _status_bool(row.get("running"), default=False) else "stopped"
+            enabled_text = "enabled" if _status_bool(row.get("enabled"), default=False) else "disabled"
+            lines.append(f"- {row.get('name')}: {row.get('description')} ({running_text}, {enabled_text})")
+    else:
+        lines.append("- none detected")
+
+    lines.append("")
+    lines.append("Rules:")
+    lines.append("- Use this information for awareness of current capability and system status.")
+    lines.append("- You may reference these Verbas, Portals, and Cores when relevant.")
+    lines.append("- Do NOT simulate calling Verbas in this response.")
+    lines.append("- Do NOT pretend to execute actions in chat mode.")
+    lines.append("- Do NOT mention internal modes, pipelines, or branches unless asked.")
+    lines.append("- If the user asks to perform an action, respond naturally as Tater without claiming execution occurred.")
+    lines.append("- Keep responses immersive and user-facing, not mechanical.")
+    lines.append("- Chat path alignment: Astraeus speaks with awareness; Thanatos stands down; Minos is inactive unless execution occurs.")
+    return "\n".join(lines).strip()
 
 
 def _attach_origin(
@@ -873,7 +1242,7 @@ def _validate_tool_call_dict(
         enabled_predicate=enabled_predicate,
         canonical_tool_name_fn=_canonical_tool_name,
         is_meta_tool_fn=is_meta_tool,
-        plugin_supports_platform_fn=plugin_supports_platform,
+        plugin_supports_platform_fn=verba_supports_platform,
         meta_tool_args_reason_fn=_meta_tool_args_reason,
     )
 
@@ -1011,7 +1380,7 @@ async def _generate_recovery_text(
         configured_recovery_max_tokens_fn=_configured_recovery_max_tokens,
         looks_like_tool_markup_fn=looks_like_tool_markup,
         parse_function_json_fn=parse_function_json,
-        checker_decision_prefix_re=_CHECKER_DECISION_PREFIX_RE,
+        checker_decision_prefix_re=_MINOS_DECISION_PREFIX_RE,
         default_clarification=DEFAULT_CLARIFICATION,
         coerce_text_fn=_coerce_text,
         platform_preamble=platform_preamble,
@@ -1019,17 +1388,17 @@ async def _generate_recovery_text(
     )
 
 
-async def _normalize_tool_result_for_checker(
+async def _normalize_tool_result_for_minos(
     *,
     result_payload: Any,
     llm_client: Any,
     platform: str,
 ) -> Dict[str, Any]:
-    return await execution.normalize_tool_result_for_checker(
+    return await execution.normalize_tool_result_for_minos(
         result_payload=result_payload,
         llm_client=llm_client,
         platform=platform,
-        normalize_plugin_result_fn=normalize_plugin_result,
+        normalize_plugin_result_fn=normalize_verba_result,
         narrate_result_fn=narrate_result,
         result_for_llm_fn=result_for_llm,
         short_text_fn=_short_text,
@@ -1068,29 +1437,29 @@ async def _execute_tool_call(
         admin_guard=admin_guard,
         canonical_tool_name_fn=_canonical_tool_name,
         attach_origin_fn=_attach_origin,
-        normalize_plugin_result_fn=normalize_plugin_result,
-        normalize_tool_result_for_checker_fn=_normalize_tool_result_for_checker,
+        normalize_plugin_result_fn=normalize_verba_result,
+        normalize_tool_result_for_minos_fn=_normalize_tool_result_for_minos,
         action_failure_fn=action_failure,
-        plugin_display_name_fn=plugin_display_name,
-        expand_plugin_platforms_fn=expand_plugin_platforms,
-        plugin_supports_platform_fn=plugin_supports_platform,
+        plugin_display_name_fn=verba_display_name,
+        expand_plugin_platforms_fn=expand_verba_platforms,
+        plugin_supports_platform_fn=verba_supports_platform,
         is_meta_tool_fn=is_meta_tool,
         run_meta_tool_fn=run_meta_tool,
         execute_plugin_call_fn=execute_plugin_call,
     )
 
 
-def _parse_checker_decision(text: str) -> Dict[str, Any]:
-    return checker.parse_checker_decision(
+def _parse_minos_decision(text: str) -> Dict[str, Any]:
+    return minos.parse_minos_decision(
         text,
-        checker_decision_prefix_re=_CHECKER_DECISION_PREFIX_RE,
+        minos_decision_prefix_re=_MINOS_DECISION_PREFIX_RE,
         parse_function_json_fn=parse_function_json,
         is_tool_candidate_fn=_is_tool_candidate,
-        normalize_checker_kind_fn=_normalize_checker_kind,
+        normalize_minos_decision_fn=_normalize_minos_decision,
     )
 
 
-async def _run_checker(
+async def _run_minos_validation(
     *,
     llm_client: Any,
     platform: str,
@@ -1099,14 +1468,17 @@ async def _run_checker(
     agent_state: Optional[Dict[str, Any]],
     memory_context: Optional[Dict[str, Any]],
     available_artifacts: Optional[List[Dict[str, Any]]],
+    current_step: Optional[Dict[str, Any]],
+    goal: str,
     planned_tool: Optional[Dict[str, Any]],
     tool_result: Optional[Dict[str, Any]],
     draft_response: str,
+    retry_count: int,
     retry_allowed: bool,
     platform_preamble: str = "",
     max_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
-    return await checker.run_checker(
+    return await minos.run_minos_validation(
         llm_client=llm_client,
         platform=platform,
         current_user_text=current_user_text,
@@ -1114,20 +1486,23 @@ async def _run_checker(
         agent_state=agent_state,
         memory_context=memory_context,
         available_artifacts=available_artifacts,
+        current_step=current_step,
+        goal=goal,
         planned_tool=planned_tool,
         tool_result=tool_result,
         draft_response=draft_response,
+        retry_count=retry_count,
         retry_allowed=retry_allowed,
         normalize_agent_state_fn=lambda state, fallback: _normalize_agent_state(state, fallback_goal=fallback),
         coerce_non_negative_int_fn=_coerce_non_negative_int,
         short_text_fn=_short_text,
         memory_context_default_summary_max_chars=_MEMORY_CONTEXT_DEFAULT_SUMMARY_MAX_CHARS,
-        configured_checker_max_tokens_fn=_configured_checker_max_tokens,
-        checker_system_prompt_fn=lambda plat, retry: _checker_system_prompt(plat, retry_allowed=retry),
+        configured_minos_max_tokens_fn=_configured_minos_max_tokens,
+        minos_system_prompt_fn=lambda plat, retry: _minos_system_prompt(plat, retry_allowed=retry),
         with_platform_preamble_fn=lambda messages, preamble: _with_platform_preamble(
             messages, platform_preamble=preamble
         ),
-        parse_checker_decision_fn=_parse_checker_decision,
+        parse_minos_decision_fn=_parse_minos_decision,
         coerce_text_fn=_coerce_text,
         platform_preamble=platform_preamble,
         max_tokens=max_tokens,
@@ -1142,7 +1517,7 @@ def _sanitize_user_text(text: str, *, platform: str, tool_used: bool) -> str:
         default_clarification=DEFAULT_CLARIFICATION,
         looks_like_tool_markup_fn=looks_like_tool_markup,
         parse_function_json_fn=parse_function_json,
-        checker_decision_prefix_re=_CHECKER_DECISION_PREFIX_RE,
+        checker_decision_prefix_re=_MINOS_DECISION_PREFIX_RE,
         ascii_only_platforms=ASCII_ONLY_PLATFORMS,
     )
 
@@ -1151,8 +1526,31 @@ def _short_text(value: Any, *, limit: int = 280) -> str:
     return common_helpers.short_text(value, limit=limit)
 
 
-def _normalize_checker_kind(label: str) -> str:
-    return checker.normalize_checker_kind(label)
+def _normalize_minos_decision(label: str) -> str:
+    return minos.normalize_minos_decision(label)
+
+
+def _checker_decision_value(decision: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(decision, dict):
+        return "FINAL"
+    raw = (
+        decision.get("decision")
+        or decision.get("kind")
+        or decision.get("action")
+        or decision.get("checker_action")
+        or "FINAL"
+    )
+    return _normalize_minos_decision(str(raw or "FINAL"))
+
+
+def _checker_decision_text(decision: Optional[Dict[str, Any]], *keys: str) -> str:
+    if not isinstance(decision, dict):
+        return ""
+    for key in keys:
+        text = str(decision.get(key) or "").strip()
+        if text:
+            return text
+    return ""
 
 
 def _is_low_information_text(value: Any) -> bool:
@@ -1167,27 +1565,31 @@ def _first_json_object(text: str) -> Optional[Dict[str, Any]]:
 
 
 def _render_plan_line(step: Dict[str, str]) -> str:
-    tool = _short_text(step.get("tool"), limit=64)
+    intent = _short_text(step.get("intent"), limit=96)
     nl = _short_text(step.get("nl"), limit=160)
-    if tool and nl:
-        return f"{tool}: {nl}"
-    return tool or nl
+    if intent and nl:
+        intent_norm = intent.rstrip(".!?").strip().lower()
+        nl_norm = nl.rstrip(".!?").strip().lower()
+        if intent_norm and nl_norm and intent_norm != nl_norm:
+            return f"{intent}: {nl}"
+    return nl or intent
 
 
 def _normalize_plan_step_candidate(
     candidate: Any,
     *,
     index: int,
-    enabled_tool_ids: set[str],
 ) -> Optional[Dict[str, str]]:
     if not isinstance(candidate, dict):
         return None
-    raw_tool = str(candidate.get("tool") or candidate.get("function") or "").strip()
-    tool = _canonical_tool_name(raw_tool)
-    if not tool:
-        return None
-    if enabled_tool_ids and tool not in enabled_tool_ids:
-        return None
+    raw_intent = (
+        candidate.get("intent")
+        or candidate.get("goal")
+        or candidate.get("task")
+        or candidate.get("summary")
+        or ""
+    )
+    intent = _short_text(" ".join(_coerce_text(raw_intent).split()), limit=180)
     raw_nl = (
         candidate.get("nl")
         or candidate.get("instruction")
@@ -1197,11 +1599,15 @@ def _normalize_plan_step_candidate(
         or ""
     )
     nl = _short_text(" ".join(_coerce_text(raw_nl).split()), limit=220)
-    if not nl:
+    if not nl and not intent:
         return None
-    raw_id = str(candidate.get("id") or f"s{index + 1}").strip()
+    if not intent:
+        intent = nl
+    if not nl:
+        nl = intent
+    raw_id = str(candidate.get("step_id") or candidate.get("id") or f"s{index + 1}").strip()
     step_id = _short_text(raw_id, limit=24) or f"s{index + 1}"
-    return {"id": step_id, "tool": tool, "nl": nl}
+    return {"id": step_id, "intent": intent, "nl": nl}
 
 
 def _sync_agent_state_with_plan_queue(
@@ -1223,72 +1629,143 @@ def _generic_chat_fallback_text(text: str) -> str:
     return "I'm here and ready to talk or help."
 
 
-async def _build_structured_plan_decision(
+async def _run_astraeus_plan(
     *,
     llm_client: Any,
     platform: str,
     current_user_text: str,
     resolved_user_text: str,
-    tool_index: str,
-    enabled_tool_ids: List[str],
+    history: List[Dict[str, Any]],
+    prior_state: Optional[Dict[str, Any]],
+    memory_context: Optional[Dict[str, Any]],
     platform_preamble: str,
-    max_tokens: int,
+    max_tokens: Optional[int],
 ) -> Dict[str, Any]:
-    enabled_set = {str(item or "").strip() for item in enabled_tool_ids if str(item or "").strip()}
-    if not enabled_set:
-        return {"mode": "unknown", "steps": []}
+    fallback_goal = _short_text(resolved_user_text or current_user_text, limit=220) or "Fulfill the user request."
+    if _looks_like_social_chat_turn(current_user_text):
+        return {
+            "mode": "chat",
+            "topic": "conversation",
+            "topic_shift": False,
+            "goal": fallback_goal,
+            "steps": [],
+        }
+    recent_history: List[Dict[str, str]] = []
+    for msg in (history or []):
+        if not isinstance(msg, dict):
+            continue
+        role = str(msg.get("role") or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = _short_text(msg.get("content"), limit=240)
+        if not content:
+            continue
+        recent_history.append({"role": role, "content": content})
+        if len(recent_history) >= 10:
+            break
+
     payload = {
         "current_user_message": str(current_user_text or ""),
         "resolved_request_for_this_turn": str(resolved_user_text or current_user_text or ""),
-        "enabled_tool_ids": sorted(enabled_set),
+        "recent_history": recent_history,
     }
+    if isinstance(prior_state, dict) and prior_state:
+        normalized_prior = _normalize_agent_state(
+            prior_state,
+            fallback_goal=fallback_goal,
+        )
+        payload["prior_context"] = {
+            "goal": _short_text(normalized_prior.get("goal"), limit=180),
+            "plan": [str(item) for item in (normalized_prior.get("plan") or []) if str(item).strip()][:8],
+            "facts": [str(item) for item in (normalized_prior.get("facts") or []) if str(item).strip()][:8],
+            "open_questions": [
+                str(item) for item in (normalized_prior.get("open_questions") or []) if str(item).strip()
+            ][:4],
+        }
+    if isinstance(memory_context, dict) and memory_context:
+        user_ctx = memory_context.get("user") if isinstance(memory_context.get("user"), dict) else {}
+        room_ctx = memory_context.get("room") if isinstance(memory_context.get("room"), dict) else {}
+        payload["memory_context"] = {
+            "user_memory": _short_text(user_ctx.get("summary"), limit=1200),
+            "room_memory": _short_text(room_ctx.get("summary"), limit=1200),
+        }
+
     messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": _plan_builder_system_prompt(platform)},
-        {
-            "role": "system",
-            "content": (
-                "Tool catalog for planning:\n"
-                f"{tool_index}\n\n"
-                "Use only tool ids listed above."
-            ),
-        },
+        {"role": "system", "content": _astraeus_system_prompt(platform)},
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
     ]
     messages = _with_platform_preamble(messages, platform_preamble=platform_preamble)
     try:
         resp = await llm_client.chat(
             messages=messages,
-            max_tokens=max(200, int(max_tokens or 900)),
             temperature=0.1,
+            **_chat_with_optional_max_tokens_kwargs(
+                max_tokens=max_tokens,
+                minimum=200,
+                fallback=900,
+            ),
         )
     except Exception:
-        return {"mode": "unknown", "steps": []}
+        return {"mode": "unknown", "topic": "", "topic_shift": False, "goal": fallback_goal, "steps": []}
     raw = _coerce_text((resp.get("message", {}) or {}).get("content", "")).strip()
     obj = _first_json_object(raw)
     if not isinstance(obj, dict):
-        return {"mode": "unknown", "steps": []}
+        return {"mode": "unknown", "topic": "", "topic_shift": False, "goal": fallback_goal, "steps": []}
     mode = str(obj.get("mode") or "").strip().lower()
+    topic = _short_text(obj.get("topic"), limit=90)
+    goal = _short_text(obj.get("goal"), limit=220) or fallback_goal
+    topic_shift = bool(obj.get("topic_shift")) if isinstance(obj.get("topic_shift"), bool) else False
     raw_steps = obj.get("steps")
     if mode == "chat":
-        return {"mode": "chat", "steps": []}
+        return {"mode": "chat", "topic": topic, "topic_shift": topic_shift, "goal": goal, "steps": []}
+    if raw_steps is None:
+        raw_steps = []
     if not isinstance(raw_steps, list):
-        return {"mode": "unknown", "steps": []}
+        return {"mode": "unknown", "topic": topic, "topic_shift": topic_shift, "goal": goal, "steps": []}
     out: List[Dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for idx, item in enumerate(raw_steps):
-        step = _normalize_plan_step_candidate(item, index=idx, enabled_tool_ids=enabled_set)
+        step = _normalize_plan_step_candidate(item, index=idx)
         if not isinstance(step, dict):
             continue
-        dedupe_key = (step.get("tool", ""), step.get("nl", ""))
+        dedupe_key = (step.get("intent", ""), step.get("nl", ""))
         if dedupe_key in seen:
             continue
         seen.add(dedupe_key)
         out.append(step)
         if len(out) >= 12:
             break
-    if mode == "execute" and out:
-        return {"mode": "execute", "steps": out}
-    return {"mode": "unknown", "steps": []}
+    if mode == "execute":
+        if out:
+            return {"mode": "execute", "topic": topic, "topic_shift": topic_shift, "goal": goal, "steps": out}
+        return {"mode": "unknown", "topic": topic, "topic_shift": topic_shift, "goal": goal, "steps": []}
+    if out:
+        return {"mode": "execute", "topic": topic, "topic_shift": topic_shift, "goal": goal, "steps": out}
+    return {"mode": "chat", "topic": topic, "topic_shift": topic_shift, "goal": goal, "steps": []}
+
+
+async def _run_thanatos_step(
+    *,
+    llm_client: Any,
+    thanatos_messages: List[Dict[str, Any]],
+    max_tokens: Optional[int],
+) -> tuple[str, float]:
+    started = time.perf_counter()
+    text = ""
+    try:
+        thanatos_resp = await llm_client.chat(
+            messages=thanatos_messages,
+            temperature=0.2,
+            **_chat_with_optional_max_tokens_kwargs(
+                max_tokens=max_tokens,
+                minimum=1,
+                fallback=1,
+            ),
+        )
+        text = _coerce_text((thanatos_resp.get("message", {}) or {}).get("content", "")).strip()
+    except Exception:
+        text = ""
+    return text, (time.perf_counter() - started) * 1000.0
 
 
 async def _run_chat_fallback_reply(
@@ -1297,13 +1774,26 @@ async def _run_chat_fallback_reply(
     platform: str,
     user_text: str,
     history: List[Dict[str, Any]],
+    registry: Dict[str, Any],
+    enabled_predicate: Optional[Callable[[str], bool]],
+    redis_client: Any,
     memory_context_message: str,
     platform_preamble: str,
-    max_tokens: int,
+    max_tokens: Optional[int],
 ) -> str:
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": _chat_fallback_system_prompt(platform)},
     ]
+    status_prompt = _render_tater_system_status_prompt(
+        platform=platform,
+        registry=registry,
+        enabled_predicate=enabled_predicate,
+        redis_client=redis_client,
+        history=history,
+        max_tokens=max_tokens,
+    )
+    if status_prompt:
+        messages.append({"role": "system", "content": status_prompt})
     if memory_context_message:
         messages.append({"role": "system", "content": memory_context_message})
     messages = _with_platform_preamble(messages, platform_preamble=platform_preamble)
@@ -1312,8 +1802,12 @@ async def _run_chat_fallback_reply(
     try:
         resp = await llm_client.chat(
             messages=messages,
-            max_tokens=max(64, int(max_tokens or 220)),
             temperature=0.4,
+            **_chat_with_optional_max_tokens_kwargs(
+                max_tokens=max_tokens,
+                minimum=64,
+                fallback=220,
+            ),
         )
     except Exception:
         return ""
@@ -1326,14 +1820,14 @@ async def _resolve_user_request_for_turn(
     current_user_text: str,
     history: List[Dict[str, Any]],
     platform_preamble: str,
-    max_tokens: int,
+    max_tokens: Optional[int],
 ) -> str:
     current = str(current_user_text or "").strip()
     if not current:
         return ""
 
     recent_history: List[Dict[str, str]] = []
-    for msg in (history or [])[-8:]:
+    for msg in (history or []):
         if not isinstance(msg, dict):
             continue
         role = str(msg.get("role") or "").strip().lower()
@@ -1342,7 +1836,7 @@ async def _resolve_user_request_for_turn(
         content = _coerce_text(msg.get("content")).strip()
         if not content:
             continue
-        recent_history.append({"role": role, "content": _short_text(content, limit=240)})
+        recent_history.append({"role": role, "content": content})
 
     payload = {
         "current_user_message": current,
@@ -1360,6 +1854,8 @@ async def _resolve_user_request_for_turn(
                 "- Short follow-up questions that shift location/time/subject are still explicit retrieval requests; keep intent from prior turn and update only what changed.\n"
                 "- Preserve requested time windows and area/entity constraints when the follow-up implies them.\n"
                 "- If the current message is standalone, keep it unchanged.\n"
+                "- Never continue a prior objective unless the current message explicitly asks to continue/retry/repeat.\n"
+                "- If the current message only shares context/logs/content without a clear ask, return it unchanged.\n"
                 "- Do not answer the request.\n"
                 "- Do not invent facts, entities, or outcomes.\n"
                 "- Keep wording concise and faithful to the user's intent.\n"
@@ -1371,8 +1867,12 @@ async def _resolve_user_request_for_turn(
     try:
         resp = await llm_client.chat(
             messages=messages,
-            max_tokens=max(80, int(max_tokens or 180)),
             temperature=0.0,
+            **_chat_with_optional_max_tokens_kwargs(
+                max_tokens=max_tokens,
+                minimum=80,
+                fallback=180,
+            ),
         )
     except Exception:
         return current
@@ -1400,7 +1900,7 @@ async def _llm_topic_shift_decision_for_turn(
     history: List[Dict[str, Any]],
     prior_state: Optional[Dict[str, Any]],
     platform_preamble: str,
-    max_tokens: int,
+    max_tokens: Optional[int],
 ) -> Dict[str, Any]:
     current = str(current_user_text or "").strip()
     if not current:
@@ -1408,7 +1908,7 @@ async def _llm_topic_shift_decision_for_turn(
 
     resolved = str(resolved_user_text or current).strip() or current
     recent_history: List[Dict[str, str]] = []
-    for msg in (history or [])[-8:]:
+    for msg in (history or []):
         if not isinstance(msg, dict):
             continue
         role = str(msg.get("role") or "").strip().lower()
@@ -1417,21 +1917,21 @@ async def _llm_topic_shift_decision_for_turn(
         content = _coerce_text(msg.get("content")).strip()
         if not content:
             continue
-        recent_history.append({"role": role, "content": _short_text(content, limit=240)})
+        recent_history.append({"role": role, "content": content})
 
-    prior_state_compact = ""
+    prior_state_full = ""
     if isinstance(prior_state, dict):
-        prior_state_compact = _compact_agent_state_json(
+        prior_state_full = _compact_agent_state_json(
             prior_state,
             fallback_goal=resolved,
-            limit=700,
+            limit=0,
         )
 
     payload = {
         "current_user_message": current,
         "resolved_request_for_turn": resolved,
         "recent_history": recent_history,
-        "prior_agent_state_compact_json": prior_state_compact,
+        "prior_agent_state_full_json": prior_state_full,
     }
     messages: List[Dict[str, Any]] = [
         {
@@ -1454,8 +1954,12 @@ async def _llm_topic_shift_decision_for_turn(
     try:
         resp = await llm_client.chat(
             messages=messages,
-            max_tokens=max(90, int(max_tokens or 200)),
             temperature=0.0,
+            **_chat_with_optional_max_tokens_kwargs(
+                max_tokens=max_tokens,
+                minimum=90,
+                fallback=200,
+            ),
         )
     except Exception:
         return {"new_topic": False, "confidence": 0.0, "reason": "classifier_error"}
@@ -1503,12 +2007,16 @@ def _state_plan_steps(value: Any, *, max_items: int = 12) -> List[Dict[str, str]
     for idx, item in enumerate(value):
         if not isinstance(item, dict):
             continue
-        tool = _short_text(item.get("tool"), limit=64)
+        intent = _short_text(item.get("intent"), limit=96)
         nl = _short_text(item.get("nl"), limit=200)
-        if not tool or not nl:
+        if not intent and not nl:
             continue
+        if not intent:
+            intent = nl
+        if not nl:
+            nl = intent
         step_id = _short_text(item.get("id"), limit=24) or f"s{idx + 1}"
-        out.append({"id": step_id, "tool": tool, "nl": nl})
+        out.append({"id": step_id, "intent": intent, "nl": nl})
         if len(out) >= max_items:
             break
     return out
@@ -1726,8 +2234,21 @@ def _initial_agent_state_for_turn_from_topic_signal(
     return merged
 
 
+def _clear_state_plan_for_new_turn(
+    *,
+    agent_state: Optional[Dict[str, Any]],
+    fallback_goal: str,
+) -> Dict[str, Any]:
+    state = dict(agent_state) if isinstance(agent_state, dict) else {}
+    state["goal"] = _short_text(fallback_goal, limit=180) or _short_text(state.get("goal"), limit=180) or "Fulfill the user request."
+    state["plan"] = []
+    state["plan_steps"] = []
+    state["next_step"] = ""
+    return _normalize_agent_state(state, fallback_goal=fallback_goal)
+
+
 def _state_add_line(state_list: List[str], line: str, *, max_items: int) -> List[str]:
-    return doer_state.state_add_line(
+    return thanatos_state.state_add_line(
         state_list,
         line,
         max_items=max_items,
@@ -1740,21 +2261,21 @@ def _tool_history_line(
     tool_call: Optional[Dict[str, Any]],
     tool_result: Optional[Dict[str, Any]],
 ) -> str:
-    return doer_state.tool_history_line(
+    return thanatos_state.tool_history_line(
         tool_call=tool_call,
         tool_result=tool_result,
         short_text_fn=_short_text,
     )
 
 
-def _compact_tool_result_for_doer(tool_result: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    return doer_state.compact_tool_result_for_doer(
+def _compact_tool_result_for_thanatos(tool_result: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    return thanatos_state.compact_tool_result_for_thanatos(
         tool_result,
         short_text_fn=_short_text,
     )
 
 
-async def _run_doer_state_update(
+async def _run_thanatos_state_update(
     *,
     llm_client: Any,
     platform: str,
@@ -1764,7 +2285,7 @@ async def _run_doer_state_update(
     tool_result: Optional[Dict[str, Any]],
     max_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
-    return await doer_state.run_doer_state_update(
+    return await thanatos_state.run_thanatos_state_update(
         llm_client=llm_client,
         platform=platform,
         user_request=user_request,
@@ -1773,7 +2294,7 @@ async def _run_doer_state_update(
         tool_result=tool_result,
         max_tokens=max_tokens,
         normalize_agent_state_fn=lambda s, fallback_goal: _normalize_agent_state(s, fallback_goal=fallback_goal),
-        configured_doer_max_tokens_fn=_configured_doer_max_tokens,
+        configured_thanatos_max_tokens_fn=_configured_thanatos_max_tokens,
         coerce_text_fn=_coerce_text,
         first_json_object_fn=_first_json_object,
         state_add_line_fn=lambda items, line, max_items: _state_add_line(items, line, max_items=max_items),
@@ -1785,7 +2306,7 @@ async def _run_doer_state_update(
 
 
 def _state_first_open_question(state: Optional[Dict[str, Any]]) -> str:
-    return doer_state.state_first_open_question(
+    return thanatos_state.state_first_open_question(
         state,
         short_text_fn=_short_text,
     )
@@ -1797,7 +2318,7 @@ def _state_best_effort_answer(
     draft_response: str,
     tool_result: Optional[Dict[str, Any]],
 ) -> str:
-    return doer_state.state_best_effort_answer(
+    return thanatos_state.state_best_effort_answer(
         state=state,
         draft_response=draft_response,
         tool_result=tool_result,
@@ -1826,7 +2347,7 @@ def _should_continue_after_incomplete_final_answer(
     return bool(retry_allowed and _agent_state_has_remaining_actions(agent_state))
 
 
-def _tool_failure_checker_reason(tool_result: Optional[Dict[str, Any]]) -> str:
+def _tool_failure_minos_reason(tool_result: Optional[Dict[str, Any]]) -> str:
     if not isinstance(tool_result, dict):
         return ""
     if bool(tool_result.get("ok")):
@@ -1840,6 +2361,10 @@ def _tool_failure_checker_reason(tool_result: Optional[Dict[str, Any]]) -> str:
     if code:
         return f"tool_failed:{code}"
     return "tool_failed"
+
+
+def _tool_failure_checker_reason(tool_result: Optional[Dict[str, Any]]) -> str:
+    return _tool_failure_minos_reason(tool_result)
 
 
 def _select_final_answer_text(
@@ -1866,6 +2391,82 @@ def _select_final_answer_text(
     return candidate
 
 
+async def _synthesize_completed_steps_answer(
+    *,
+    llm_client: Any,
+    platform: str,
+    user_text: str,
+    goal: str,
+    completed_steps: List[Dict[str, str]],
+    draft_response: str,
+    platform_preamble: str,
+    max_tokens: Optional[int],
+) -> str:
+    if not completed_steps:
+        return ""
+
+    findings: List[Dict[str, str]] = []
+    for step in completed_steps[:8]:
+        if not isinstance(step, dict):
+            continue
+        request_text = " ".join(str(step.get("request") or "").split()).strip()
+        summary_text = " ".join(str(step.get("summary") or "").split()).strip()
+        if not summary_text:
+            continue
+        findings.append(
+            {
+                "request": request_text,
+                "summary": summary_text,
+            }
+        )
+    if not findings:
+        return ""
+
+    payload = {
+        "user_request": str(user_text or "").strip(),
+        "goal": str(goal or "").strip(),
+        "findings": findings,
+        "draft_response": str(draft_response or "").strip(),
+    }
+    messages: List[Dict[str, Any]] = [
+        {
+            "role": "system",
+            "content": (
+                "You are composing the final user-facing answer from tool findings.\n"
+                "Write a clean, informative summary that directly answers the user.\n"
+                "Rules:\n"
+                "- Do not narrate internal execution steps.\n"
+                "- Do not say \"I searched\" or \"I inspected\".\n"
+                "- Use clear sections and bullets when useful.\n"
+                "- Keep only relevant facts; remove duplicates.\n"
+                "- If sources/links are present in findings, include a short Sources section.\n"
+                "- Do not invent facts not present in findings.\n"
+            ),
+        },
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+    messages = _with_platform_preamble(messages, platform_preamble=platform_preamble)
+    try:
+        resp = await llm_client.chat(
+            messages=messages,
+            temperature=0.2,
+            **_chat_with_optional_max_tokens_kwargs(
+                max_tokens=max_tokens,
+                minimum=220,
+                fallback=700,
+            ),
+        )
+    except Exception:
+        return ""
+
+    text = _coerce_text((resp.get("message", {}) or {}).get("content", "")).strip()
+    if not text:
+        return ""
+    if looks_like_tool_markup(text) or parse_function_json(text):
+        return ""
+    return text
+
+
 def _turn_completion_fragment(*, request_text: str, summary_text: str) -> str:
     request = _short_text(" ".join(str(request_text or "").split()), limit=140)
     summary = _short_text(" ".join(str(summary_text or "").split()), limit=140)
@@ -1889,6 +2490,7 @@ async def _tool_start_progress(
     completed_steps_count: int,
     total_plan_steps: int,
     platform_preamble: str = "",
+    max_tokens: Optional[int] = 56,
 ) -> tuple[str, Dict[str, Any]]:
     tool_name = _canonical_tool_name(str((tool_call or {}).get("function") or "").strip()) or "tool"
     instruction_source = (
@@ -1951,8 +2553,12 @@ async def _tool_start_progress(
     try:
         progress_resp = await llm_client.chat(
             messages=progress_messages,
-            max_tokens=56,
             temperature=0.1,
+            **_chat_with_optional_max_tokens_kwargs(
+                max_tokens=max_tokens,
+                minimum=56,
+                fallback=56,
+            ),
         )
         text = _coerce_text((progress_resp.get("message", {}) or {}).get("content", "")).strip()
     except Exception:
@@ -1990,26 +2596,42 @@ def _multi_step_turn_draft(
     if len(completed_steps) <= 1:
         return str(fallback_draft or "").strip()
 
-    fragments: List[str] = []
-    for step in completed_steps[:4]:
+    lines: List[str] = []
+    seen: set[tuple[str, str]] = set()
+    for step in completed_steps[:6]:
         if not isinstance(step, dict):
             continue
-        fragment = _turn_completion_fragment(
-            request_text=str(step.get("request") or ""),
-            summary_text=str(step.get("summary") or ""),
-        ).strip()
-        if not fragment:
+        request = " ".join(str(step.get("request") or "").split()).strip()
+        summary = " ".join(str(step.get("summary") or "").split()).strip()
+        if not summary:
             continue
-        fragments.append(fragment.rstrip(".!?"))
+        req_key = request.rstrip(".!?").strip().lower()
+        sum_key = summary.rstrip(".!?").strip().lower()
+        dedupe_key = (req_key, sum_key)
+        if not sum_key or dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        if request:
+            request_norm = req_key
+            summary_norm = sum_key
+            if (
+                request_norm
+                and summary_norm
+                and request_norm != summary_norm
+                and request_norm not in summary_norm
+                and summary_norm not in request_norm
+            ):
+                lines.append(f"- {request}: {summary.rstrip('.!?')}.")
+                continue
+        lines.append(f"- {summary.rstrip('.!?')}.")
 
-    if not fragments:
+    if not lines:
         return str(fallback_draft or "").strip()
 
-    prefix = f"Done. Completed {len(completed_steps)} steps in order: "
-    body = "; ".join(fragments)
-    if len(completed_steps) > len(fragments):
-        body += f"; and {len(completed_steps) - len(fragments)} more"
-    return _short_text(prefix + body + ".", limit=520)
+    body = "\n".join(lines)
+    if len(lines) == 1:
+        return lines[0].lstrip("- ").strip()
+    return "Here is what I found:\n" + body
 
 
 def _artifact_name_from_path(path: Any) -> str:
@@ -2751,7 +3373,7 @@ def _is_tool_candidate(text: str) -> bool:
     )
 
 
-async def run_cerberus_turn(
+async def _run_cerberus_turn_impl(
     *,
     llm_client: Any,
     platform: str,
@@ -2808,17 +3430,38 @@ async def run_cerberus_turn(
         max_rounds=max_rounds,
         max_tool_calls=max_tool_calls,
     )
-    planner_max_tokens = _configured_planner_max_tokens(r)
-    checker_max_tokens = _configured_checker_max_tokens(r)
-    doer_max_tokens = _configured_doer_max_tokens(r)
+    astraeus_max_tokens = _configured_astraeus_max_tokens(r)
+    minos_max_tokens = _configured_minos_max_tokens(r)
+    thanatos_max_tokens = _configured_thanatos_max_tokens(r)
     tool_repair_max_tokens = _configured_tool_repair_max_tokens(r)
     recovery_max_tokens = _configured_recovery_max_tokens(r)
+    resolver_max_tokens = _scale_token_limit(
+        astraeus_max_tokens,
+        denominator=6,
+        minimum=120,
+    )
+    astraeus_plan_max_tokens = _scale_token_limit(
+        astraeus_max_tokens,
+        denominator=2,
+        minimum=400,
+    )
+    chat_reply_max_tokens = _scale_token_limit(
+        astraeus_max_tokens,
+        denominator=2,
+        minimum=128,
+    )
+    thanatos_step_max_tokens = _normalize_token_limit(
+        thanatos_max_tokens,
+        minimum=1,
+        fallback=1,
+    )
+    progress_update_max_tokens: Optional[int] = 56 if thanatos_max_tokens is not None else None
     result_memory_max_sets = _configured_result_memory_max_sets(r)
     result_memory_max_items = _configured_result_memory_max_items(r)
     turn_started_at = time.perf_counter()
-    planner_ms_total = 0.0
+    astraeus_ms_total = 0.0
     tool_ms_total = 0.0
-    checker_ms_total = 0.0
+    minos_ms_total = 0.0
     repairs_used_count = 0
     validation_failures_count = 0
     tool_failures_count = 0
@@ -2836,11 +3479,15 @@ async def run_cerberus_turn(
     checker_reason = "complete"
     tool_result_for_checker: Optional[Dict[str, Any]] = None
     raw_tool_payload_out: Optional[Dict[str, Any]] = None
-    normalized_checker_result_out: Optional[Dict[str, Any]] = None
+    normalized_minos_result_out: Optional[Dict[str, Any]] = None
     artifacts_out: List[Dict[str, Any]] = []
     rounds_used = 0
     tool_calls_used = 0
     critic_continue_count = 0
+    step_retry_counts: Dict[str, int] = {}
+    step_retry_hints: Dict[str, str] = {}
+    step_last_failed_call_sig: Dict[str, str] = {}
+    step_failed_call_sig_counts: Dict[str, int] = {}
     draft_response = ""
     tool_used = False
     planner_kind = "answer"
@@ -2854,7 +3501,7 @@ async def run_cerberus_turn(
         current_user_text=current_user_turn_text,
         history=history,
         platform_preamble=platform_preamble,
-        max_tokens=max(120, planner_max_tokens // 6),
+        max_tokens=resolver_max_tokens,
     )
     if not resolved_user_text:
         resolved_user_text = current_user_turn_text or str(user_text or "").strip()
@@ -2863,30 +3510,10 @@ async def run_cerberus_turn(
         registry=registry,
         enabled_predicate=enabled_predicate,
     )
-    enabled_tool_ids = _enabled_tool_ids(
-        platform=platform,
-        registry=registry,
-        enabled_predicate=enabled_predicate,
-    )
     prior_state = _load_persistent_agent_state(
         redis_client=r,
         platform=platform,
         scope=scope,
-    )
-    topic_shift_decision = await _llm_topic_shift_decision_for_turn(
-        llm_client=llm_client,
-        current_user_text=current_user_turn_text,
-        resolved_user_text=resolved_user_text,
-        history=history,
-        prior_state=prior_state,
-        platform_preamble=platform_preamble,
-        max_tokens=max(120, planner_max_tokens // 8),
-    )
-    agent_state: Dict[str, Any] = _initial_agent_state_for_turn_from_topic_signal(
-        prior_state=prior_state,
-        current_user_text=current_user_turn_text,
-        resolved_user_text=resolved_user_text,
-        topic_shift_new_topic=bool(topic_shift_decision.get("new_topic")),
     )
     memory_context_payload = _memory_context_payload(
         redis_client=r,
@@ -2899,35 +3526,60 @@ async def run_cerberus_turn(
     repair_returned_no_tool_retries = 0
     structured_plan_queue: List[Dict[str, str]] = []
     structured_plan_total_steps = 0
-    plan_builder_mode = "unknown"
+    astraeus_mode = "unknown"
+    astraeus_goal = _short_text(resolved_user_text or current_user_turn_text, limit=220) or "Fulfill the user request."
+    astraeus_topic_shift = False
     completed_tool_steps: List[Dict[str, str]] = []
     try:
-        plan_started = time.perf_counter()
-        plan_decision = await _build_structured_plan_decision(
+        astraeus_started = time.perf_counter()
+        astraeus_result = await _run_astraeus_plan(
             llm_client=llm_client,
             platform=platform,
             current_user_text=current_user_turn_text,
             resolved_user_text=resolved_user_text,
-            tool_index=tool_index,
-            enabled_tool_ids=enabled_tool_ids,
+            history=history,
+            prior_state=prior_state,
+            memory_context=memory_context_payload,
             platform_preamble=platform_preamble,
-            max_tokens=max(400, planner_max_tokens // 2),
+            max_tokens=astraeus_plan_max_tokens,
         )
-        planner_ms_total += (time.perf_counter() - plan_started) * 1000.0
+        astraeus_ms_total += (time.perf_counter() - astraeus_started) * 1000.0
     except Exception:
-        plan_decision = {"mode": "unknown", "steps": []}
-    if isinstance(plan_decision, dict):
-        plan_builder_mode = str(plan_decision.get("mode") or "unknown").strip().lower() or "unknown"
-        raw_steps = plan_decision.get("steps")
+        astraeus_result = {"mode": "unknown", "topic_shift": False, "goal": astraeus_goal, "steps": []}
+    if isinstance(astraeus_result, dict):
+        astraeus_mode = str(astraeus_result.get("mode") or "unknown").strip().lower() or "unknown"
+        astraeus_goal = _short_text(astraeus_result.get("goal"), limit=220) or astraeus_goal
+        if isinstance(astraeus_result.get("topic_shift"), bool):
+            astraeus_topic_shift = bool(astraeus_result.get("topic_shift"))
+        raw_steps = astraeus_result.get("steps")
         if isinstance(raw_steps, list):
             structured_plan_queue = [step for step in raw_steps if isinstance(step, dict)]
+    agent_state: Dict[str, Any] = _initial_agent_state_for_turn_from_topic_signal(
+        prior_state=prior_state,
+        current_user_text=current_user_turn_text,
+        resolved_user_text=astraeus_goal or resolved_user_text,
+        topic_shift_new_topic=astraeus_topic_shift,
+    )
+    agent_state["goal"] = astraeus_goal
+    if not structured_plan_queue:
+        agent_state = _clear_state_plan_for_new_turn(
+            agent_state=agent_state,
+            fallback_goal=astraeus_goal or resolved_user_text or user_text,
+        )
     structured_plan_total_steps = len(structured_plan_queue)
     if structured_plan_queue:
         agent_state = _sync_agent_state_with_plan_queue(
             agent_state=agent_state,
             plan_queue=structured_plan_queue,
-            fallback_goal=resolved_user_text or user_text,
+            fallback_goal=astraeus_goal or resolved_user_text or user_text,
         )
+        _save_persistent_agent_state(
+            redis_client=r,
+            platform=platform,
+            scope=scope,
+            state=agent_state,
+        )
+    else:
         _save_persistent_agent_state(
             redis_client=r,
             platform=platform,
@@ -2938,6 +3590,62 @@ async def run_cerberus_turn(
         rounds_left = effective_max_rounds == 0 or rounds_used < effective_max_rounds
         tools_left = effective_max_tool_calls == 0 or tool_calls_used < effective_max_tool_calls
         return rounds_left and tools_left
+
+    def _step_retry_allowed(step_id: str, retry_count: int) -> bool:
+        del step_id
+        return int(max(0, retry_count or 0)) < int(max(1, DEFAULT_STEP_RETRY_LIMIT))
+
+    def _retry_allowed_for_step(step_id: str, retry_count: int) -> bool:
+        return _retry_allowed_within_limits() and _step_retry_allowed(step_id, retry_count)
+
+    def _remember_step_retry_hint(step_id: str, decision: Optional[Dict[str, Any]]) -> None:
+        hint_text = _short_text(
+            _checker_decision_text(decision, "repair", "next_action", "reason"),
+            limit=220,
+        )
+        if hint_text:
+            step_retry_hints[step_id] = hint_text
+
+    def _clear_step_retry_state(step_id: str) -> None:
+        step_retry_counts.pop(step_id, None)
+        step_retry_hints.pop(step_id, None)
+        step_last_failed_call_sig.pop(step_id, None)
+        step_failed_call_sig_counts.pop(step_id, None)
+
+    def _retry_limit_message(decision: Optional[Dict[str, Any]]) -> str:
+        return (
+            _checker_decision_text(decision, "question", "repair", "reason")
+            or "I could not complete that step after several retries. Please clarify or rephrase the step."
+        )
+
+    async def _compose_final_answer_text(
+        *,
+        checker_decision: Optional[Dict[str, Any]],
+        draft_response_text: str,
+        user_request_text: str,
+        tool_result_payload: Optional[Dict[str, Any]],
+    ) -> str:
+        base_text = _select_final_answer_text(
+            checker_decision=checker_decision,
+            draft_response=draft_response_text,
+            user_text=user_request_text,
+            tool_result=tool_result_payload,
+        )
+        if len(completed_tool_steps) < 2:
+            return base_text
+        synthesized = await _synthesize_completed_steps_answer(
+            llm_client=llm_client,
+            platform=platform,
+            user_text=user_request_text,
+            goal=astraeus_goal or resolved_user_text or current_user_turn_text,
+            completed_steps=completed_tool_steps,
+            draft_response=base_text,
+            platform_preamble=platform_preamble,
+            max_tokens=chat_reply_max_tokens,
+        )
+        if synthesized:
+            return synthesized
+        return base_text
 
     def _finish(
         *,
@@ -2989,9 +3697,9 @@ async def run_cerberus_turn(
             ),
             outcome=outcome_value,
             outcome_reason=outcome_reason_value,
-            planner_ms=int(max(0.0, planner_ms_total)),
+            planner_ms=int(max(0.0, astraeus_ms_total)),
             tool_ms=int(max(0.0, tool_ms_total)),
-            checker_ms=int(max(0.0, checker_ms_total)),
+            checker_ms=int(max(0.0, minos_ms_total)),
             total_ms=total_ms,
             retry_tool=retry_tool,
             rounds_used=rounds_used,
@@ -3014,28 +3722,40 @@ async def run_cerberus_turn(
             "task_id": task_id,
             "artifacts": artifacts_out,
             "raw_tool_payload": raw_tool_payload_out,
-            "normalized_checker_result": normalized_checker_result_out,
+            "normalized_minos_result": normalized_minos_result_out,
+            "normalized_checker_result": normalized_minos_result_out,
         }
 
-    if plan_builder_mode == "chat" and not structured_plan_queue:
-        chat_started = time.perf_counter()
-        chat_text = await _run_chat_fallback_reply(
-            llm_client=llm_client,
-            platform=platform,
-            user_text=current_user_turn_text,
-            history=history,
-            memory_context_message=memory_context_message,
-            platform_preamble=platform_preamble,
-            max_tokens=max(128, min(420, planner_max_tokens // 2)),
-        )
-        planner_ms_total += (time.perf_counter() - chat_started) * 1000.0
-        planner_kind = "answer"
-        planner_text_is_tool_candidate = False
-        checker_reason = "complete"
+    if not structured_plan_queue:
+        if astraeus_mode == "chat":
+            chat_started = time.perf_counter()
+            chat_text = await _run_chat_fallback_reply(
+                llm_client=llm_client,
+                platform=platform,
+                user_text=current_user_turn_text,
+                history=history,
+                registry=registry,
+                enabled_predicate=enabled_predicate,
+                redis_client=r,
+                memory_context_message=memory_context_message,
+                platform_preamble=platform_preamble,
+                max_tokens=chat_reply_max_tokens,
+            )
+            astraeus_ms_total += (time.perf_counter() - chat_started) * 1000.0
+            planner_kind = "answer"
+            planner_text_is_tool_candidate = False
+            checker_reason = "complete"
+            return _finish(
+                text=chat_text or _generic_chat_fallback_text(current_user_turn_text),
+                status="done",
+                checker_action_value="FINAL_ANSWER",
+                checker_reason_value=checker_reason,
+            )
+        checker_reason = "needs_user_input"
         return _finish(
-            text=chat_text or _generic_chat_fallback_text(current_user_turn_text),
-            status="done",
-            checker_action_value="FINAL_ANSWER",
+            text="I need a specific request for this turn. Tell me exactly what you want me to do next.",
+            status="blocked",
+            checker_action_value="NEED_USER_INFO",
             checker_reason_value=checker_reason,
         )
 
@@ -3045,18 +3765,28 @@ async def run_cerberus_turn(
     ):
         rounds_used += 1
         planned_tool = None
-        planner_text = ""
-        round_planner_kind = "answer"
+        thanatos_text = ""
+        round_thanatos_kind = "answer"
         current_plan_step = structured_plan_queue[0] if structured_plan_queue else None
         round_request_text = (
             str((current_plan_step or {}).get("nl") or "").strip()
             if isinstance(current_plan_step, dict)
             else ""
         ) or resolved_user_text
+        current_step_id = (
+            _short_text((current_plan_step or {}).get("id"), limit=24)
+            if isinstance(current_plan_step, dict)
+            else ""
+        ) or "ad_hoc"
+        current_step_retry_count = max(0, int(step_retry_counts.get(current_step_id, 0)))
+        current_step_retry_hint = str(step_retry_hints.get(current_step_id) or "").strip()
 
-        state_message = _agent_state_prompt_message(agent_state, fallback_goal=resolved_user_text or user_text)
-        planner_messages: List[Dict[str, Any]] = [
-            {"role": "system", "content": _planner_system_prompt(platform)},
+        state_message = _agent_state_prompt_message(
+            agent_state,
+            fallback_goal=astraeus_goal or resolved_user_text or user_text,
+        )
+        thanatos_messages: List[Dict[str, Any]] = [
+            {"role": "system", "content": _thanatos_system_prompt(platform)},
             {
                 "role": "system",
                 "content": (
@@ -3066,17 +3796,17 @@ async def run_cerberus_turn(
                 ),
             },
         ]
-        planner_messages.extend([
+        thanatos_messages.extend([
             {
                 "role": "system",
-                "content": _planner_focus_prompt(
+                "content": _thanatos_focus_prompt(
                     current_user_text=current_user_turn_text,
                     resolved_user_text=round_request_text,
                 ),
             },
             {
                 "role": "system",
-                "content": _planner_round_mode_prompt(
+                "content": _thanatos_round_mode_prompt(
                     round_index=rounds_used,
                     current_user_text=current_user_turn_text,
                 ),
@@ -3085,7 +3815,7 @@ async def run_cerberus_turn(
         ])
         artifact_manifest_prompt = _available_artifacts_prompt(turn_available_artifacts)
         if artifact_manifest_prompt:
-            planner_messages.append({"role": "system", "content": artifact_manifest_prompt})
+            thanatos_messages.append({"role": "system", "content": artifact_manifest_prompt})
         result_memory_prompt = _result_memory_prompt(
             _state_result_memory(
                 agent_state.get("result_memory"),
@@ -3094,48 +3824,45 @@ async def run_cerberus_turn(
             )
         )
         if result_memory_prompt:
-            planner_messages.append({"role": "system", "content": result_memory_prompt})
+            thanatos_messages.append({"role": "system", "content": result_memory_prompt})
         if isinstance(current_plan_step, dict):
-            planner_messages.append(
+            thanatos_messages.append(
                 {
                     "role": "system",
-                    "content": _planner_execution_step_prompt(
-                        tool=str(current_plan_step.get("tool") or ""),
+                    "content": _thanatos_execution_step_prompt(
+                        intent=str(current_plan_step.get("intent") or ""),
                         nl=str(current_plan_step.get("nl") or ""),
+                        goal=astraeus_goal or resolved_user_text or current_user_turn_text,
+                        repair_hint=current_step_retry_hint,
                     ),
                 }
             )
         if memory_context_message:
-            planner_messages.append({"role": "system", "content": memory_context_message})
-        planner_messages = _with_platform_preamble(
-            planner_messages,
+            thanatos_messages.append({"role": "system", "content": memory_context_message})
+        thanatos_messages = _with_platform_preamble(
+            thanatos_messages,
             platform_preamble=platform_preamble,
         )
-        planner_messages.extend(history)
-        planner_messages.append({"role": "user", "content": round_request_text})
+        thanatos_messages.extend(history)
+        thanatos_messages.append({"role": "user", "content": round_request_text})
 
-        try:
-            planner_started = time.perf_counter()
-            planner_resp = await llm_client.chat(
-                messages=planner_messages,
-                max_tokens=max(1, int(planner_max_tokens)),
-                temperature=0.2,
-            )
-            planner_ms_total += (time.perf_counter() - planner_started) * 1000.0
-            planner_text = _coerce_text((planner_resp.get("message", {}) or {}).get("content", "")).strip()
-        except Exception:
-            planner_text = ""
+        thanatos_text, thanatos_ms = await _run_thanatos_step(
+            llm_client=llm_client,
+            thanatos_messages=thanatos_messages,
+            max_tokens=thanatos_step_max_tokens,
+        )
+        astraeus_ms_total += thanatos_ms
 
-        if _is_tool_candidate(planner_text):
-            round_planner_kind = "tool"
+        if _is_tool_candidate(thanatos_text):
+            round_thanatos_kind = "tool"
         else:
-            round_planner_kind = "answer"
-        planner_text_is_tool_candidate = _is_tool_candidate(planner_text)
-        if not _is_tool_candidate(planner_text):
-            planner_kind = round_planner_kind
-            draft_response = str(planner_text or "").strip()
+            round_thanatos_kind = "answer"
+        planner_text_is_tool_candidate = _is_tool_candidate(thanatos_text)
+        if not _is_tool_candidate(thanatos_text):
+            planner_kind = round_thanatos_kind
+            draft_response = str(thanatos_text or "").strip()
             checker_started = time.perf_counter()
-            checker_decision = await _run_checker(
+            checker_decision = await _run_minos_validation(
                 llm_client=llm_client,
                 platform=platform,
                 current_user_text=current_user_turn_text,
@@ -3143,18 +3870,21 @@ async def run_cerberus_turn(
                 agent_state=agent_state,
                 memory_context=memory_context_payload,
                 available_artifacts=_available_artifacts_payload(turn_available_artifacts),
+                current_step=(current_plan_step if isinstance(current_plan_step, dict) else None),
+                goal=astraeus_goal or resolved_user_text or current_user_turn_text,
                 planned_tool=None,
                 tool_result=tool_result_for_checker,
                 draft_response=draft_response,
-                retry_allowed=_retry_allowed_within_limits(),
+                retry_count=current_step_retry_count,
+                retry_allowed=_retry_allowed_for_step(current_step_id, current_step_retry_count),
                 platform_preamble=platform_preamble,
-                max_tokens=checker_max_tokens,
+                max_tokens=minos_max_tokens,
             )
-            checker_ms_total += (time.perf_counter() - checker_started) * 1000.0
-            checker_action = str(checker_decision.get("kind") or "FINAL_ANSWER")
+            minos_ms_total += (time.perf_counter() - checker_started) * 1000.0
+            checker_action = _checker_decision_value(checker_decision)
 
-            if checker_action == "NEED_USER_INFO":
-                need_text = str(checker_decision.get("text") or DEFAULT_CLARIFICATION).strip()
+            if checker_action == "ASK_USER":
+                need_text = _checker_decision_text(checker_decision, "question", "text", "reason") or DEFAULT_CLARIFICATION
                 checker_reason = "needs_user_input"
                 return _finish(
                     text=need_text,
@@ -3163,102 +3893,77 @@ async def run_cerberus_turn(
                     checker_reason_value=checker_reason,
                 )
 
-            if checker_action == "RETRY_TOOL":
-                retry_text = str(checker_decision.get("text") or "").strip()
-                if not _retry_allowed_within_limits():
-                    queued_retry_tool_for_ledger = parse_function_json(retry_text)
-                    planner_text_is_tool_candidate = True
-                    checker_reason = "budget_exhausted"
-                    break
-                retry_eval = await _validate_or_recover_tool_call(
-                    llm_client=llm_client,
-                    text=retry_text,
-                    platform=platform,
-                    registry=registry,
-                    enabled_predicate=enabled_predicate,
-                    tool_index=tool_index,
-                    user_text=round_request_text,
-                    origin=origin_payload,
-                    scope=scope,
-                    history_messages=history,
-                    context=context if isinstance(context, dict) else {},
-                    platform_preamble=platform_preamble,
-                    repair_max_tokens=tool_repair_max_tokens,
-                    recovery_max_tokens=recovery_max_tokens,
-                )
-                retry_validation = (
-                    retry_eval.get("validation_status")
-                    if isinstance(retry_eval.get("validation_status"), dict)
-                    else {"status": "failed", "reason": str(retry_eval.get("reason") or "invalid_tool_call")}
-                )
-                attempted_tool_for_ledger = str(retry_eval.get("attempted_tool") or attempted_tool_for_ledger or "")
-                if bool(retry_eval.get("repair_used")):
-                    repairs_used_count += 1
-                if not bool(retry_eval.get("ok")):
-                    reason = str(retry_eval.get("reason") or "invalid_tool_call")
-                    assistant_text = str(retry_eval.get("assistant_text") or "").strip()
-                    failed_retry_tool = retry_eval.get("tool_call")
-                    if not isinstance(failed_retry_tool, dict):
-                        failed_retry_tool = {"function": "invalid_tool_call", "arguments": {}}
-                    if reason == "repair_returned_answer" and assistant_text:
-                        planner_kind_value = "repaired_answer"
-                        checker_reason = "complete"
-                        return _finish(
-                            text=assistant_text,
-                            status="done",
-                            checker_action_value="FINAL_ANSWER",
-                            checker_reason_value=checker_reason,
-                            planner_kind_value=planner_kind_value,
-                            planned_tool_override=failed_retry_tool,
-                            validation_status_override=retry_validation,
-                            attempted_tool_override=str(retry_eval.get("attempted_tool") or ""),
-                        )
-                    if (
-                        reason == "repair_returned_no_tool"
-                        and _retry_allowed_within_limits()
-                        and repair_returned_no_tool_retries < 2
-                    ):
-                        repair_returned_no_tool_retries += 1
-                        checker_reason = "continue_after_repair_returned_no_tool"
-                        critic_continue_count += 1
-                        continue
-                    validation_failures_count += 1
-                    checker_reason = f"validation_failed:{reason}"
+            if checker_action == "RETRY":
+                if not _retry_allowed_for_step(current_step_id, current_step_retry_count):
+                    checker_reason = "step_retry_limit_reached"
                     return _finish(
-                        text=str(retry_eval.get("recovery_text_if_blocked") or DEFAULT_CLARIFICATION).strip(),
+                        text=_retry_limit_message(checker_decision),
                         status="blocked",
                         checker_action_value="NEED_USER_INFO",
                         checker_reason_value=checker_reason,
-                        planned_tool_override=failed_retry_tool,
-                        validation_status_override=retry_validation,
-                        attempted_tool_override=str(retry_eval.get("attempted_tool") or ""),
                     )
-                queued = retry_eval.get("tool_call")
-                if not isinstance(queued, dict):
-                    validation_failures_count += 1
-                    checker_reason = "validation_failed:invalid_tool_call"
-                    return _finish(
-                        text=DEFAULT_CLARIFICATION,
-                        status="blocked",
-                        checker_action_value="NEED_USER_INFO",
-                        checker_reason_value=checker_reason,
-                        planned_tool_override={"function": "invalid_tool_call", "arguments": {}},
-                        validation_status_override=retry_validation,
-                    )
-                queued_retry_tool_for_ledger = queued
-                validation_status = retry_validation
+                step_retry_counts[current_step_id] = current_step_retry_count + 1
+                _remember_step_retry_hint(current_step_id, checker_decision)
+                checker_reason = _checker_decision_text(checker_decision, "reason", "repair") or "retry_current_step"
                 critic_continue_count += 1
-                checker_reason = "continue"
-                planner_text_is_tool_candidate = True
                 continue
 
-            final_text_candidate = _select_final_answer_text(
+            if checker_action == "CONTINUE":
+                if structured_plan_queue:
+                    if not _retry_allowed_for_step(current_step_id, current_step_retry_count):
+                        checker_reason = "step_retry_limit_reached"
+                        return _finish(
+                            text=_retry_limit_message(checker_decision),
+                            status="blocked",
+                            checker_action_value="NEED_USER_INFO",
+                            checker_reason_value=checker_reason,
+                        )
+                    step_retry_counts[current_step_id] = current_step_retry_count + 1
+                    _remember_step_retry_hint(current_step_id, checker_decision)
+                    checker_reason = _checker_decision_text(checker_decision, "reason", "repair") or "retry_current_step"
+                    critic_continue_count += 1
+                    continue
+                if not _retry_allowed_for_step(current_step_id, current_step_retry_count):
+                    checker_reason = "step_retry_limit_reached"
+                    return _finish(
+                        text=_retry_limit_message(checker_decision),
+                        status="blocked",
+                        checker_action_value="NEED_USER_INFO",
+                        checker_reason_value=checker_reason,
+                    )
+                step_retry_counts[current_step_id] = current_step_retry_count + 1
+                _remember_step_retry_hint(current_step_id, checker_decision)
+                checker_reason = _checker_decision_text(checker_decision, "reason", "next_action") or "continue"
+                critic_continue_count += 1
+                continue
+
+            if checker_action == "FAIL":
+                fail_text = _checker_decision_text(checker_decision, "reason", "text") or DEFAULT_CLARIFICATION
+                checker_reason = "minos_fail"
+                return _finish(
+                    text=fail_text,
+                    status="blocked",
+                    checker_action_value="FAIL",
+                    checker_reason_value=checker_reason,
+                )
+
+            final_text_candidate = await _compose_final_answer_text(
                 checker_decision=checker_decision,
-                draft_response=draft_response,
-                user_text=resolved_user_text or user_text,
-                tool_result=tool_result_for_checker,
+                draft_response_text=draft_response,
+                user_request_text=resolved_user_text or user_text,
+                tool_result_payload=tool_result_for_checker,
             )
-            if structured_plan_queue and _retry_allowed_within_limits():
+            if structured_plan_queue:
+                if not _retry_allowed_for_step(current_step_id, current_step_retry_count):
+                    checker_reason = "step_retry_limit_reached"
+                    return _finish(
+                        text=_retry_limit_message(checker_decision),
+                        status="blocked",
+                        checker_action_value="NEED_USER_INFO",
+                        checker_reason_value=checker_reason,
+                    )
+                step_retry_counts[current_step_id] = current_step_retry_count + 1
+                _remember_step_retry_hint(current_step_id, checker_decision)
                 checker_reason = "continue_plan_step"
                 critic_continue_count += 1
                 continue
@@ -3266,8 +3971,10 @@ async def run_cerberus_turn(
                 user_text=resolved_user_text or user_text,
                 final_text=final_text_candidate,
                 agent_state=agent_state,
-                retry_allowed=_retry_allowed_within_limits(),
+                retry_allowed=_retry_allowed_for_step(current_step_id, current_step_retry_count),
             ):
+                step_retry_counts[current_step_id] = current_step_retry_count + 1
+                _remember_step_retry_hint(current_step_id, checker_decision)
                 checker_reason = "continue_after_incomplete_final_answer"
                 critic_continue_count += 1
                 continue
@@ -3281,7 +3988,7 @@ async def run_cerberus_turn(
 
         tool_eval = await _validate_or_recover_tool_call(
             llm_client=llm_client,
-            text=planner_text,
+            text=thanatos_text,
             platform=platform,
             registry=registry,
             enabled_predicate=enabled_predicate,
@@ -3304,9 +4011,9 @@ async def run_cerberus_turn(
         if bool(tool_eval.get("repair_used")):
             repairs_used_count += 1
         if bool(tool_eval.get("repair_used")):
-            round_planner_kind = "repaired_tool"
+            round_thanatos_kind = "repaired_tool"
         else:
-            round_planner_kind = "tool"
+            round_thanatos_kind = "tool"
 
         if not bool(tool_eval.get("ok")):
             planner_text_is_tool_candidate = True
@@ -3340,7 +4047,7 @@ async def run_cerberus_turn(
                 continue
 
             validation_failures_count += 1
-            planner_kind = round_planner_kind
+            planner_kind = round_thanatos_kind
             checker_reason = f"validation_failed:{reason}"
             return _finish(
                 text=recovery_text,
@@ -3366,11 +4073,11 @@ async def run_cerberus_turn(
                 validation_status_override=validation_status,
             )
         attempted_tool_for_ledger = str((planned_tool or {}).get("function") or attempted_tool_for_ledger or "")
-        planner_kind = round_planner_kind
+        planner_kind = round_thanatos_kind
 
-        planner_kind = round_planner_kind
+        planner_kind = round_thanatos_kind
         if not isinstance(planned_tool, dict):
-            planner_kind = round_planner_kind
+            planner_kind = round_thanatos_kind
             validation_failures_count += 1
             checker_reason = "validation_failed:invalid_tool_call"
             return _finish(
@@ -3386,6 +4093,25 @@ async def run_cerberus_turn(
             planned_tool,
             turn_available_artifacts,
         )
+        planned_tool_sig = _tool_call_signature(planned_tool)
+        repeated_failed_call_count = max(0, int(step_failed_call_sig_counts.get(current_step_id, 0)))
+        if (
+            current_step_retry_count > 0
+            and planned_tool_sig
+            and step_last_failed_call_sig.get(current_step_id) == planned_tool_sig
+            and repeated_failed_call_count >= int(max(1, DEFAULT_IDENTICAL_FAILED_TOOL_CALL_LIMIT))
+        ):
+            checker_reason = "identical_failed_tool_call_loop"
+            return _finish(
+                text=(
+                    "I hit the same failure repeatedly on the same tool call. "
+                    "Do you want me to try a different source or stop?"
+                ),
+                status="blocked",
+                checker_action_value="NEED_USER_INFO",
+                checker_reason_value=checker_reason,
+                retry_tool=queued_retry_tool_for_ledger,
+            )
         tool_used = True
         tool_user_text = round_request_text
         wait_text, wait_payload = await _tool_start_progress(
@@ -3397,6 +4123,7 @@ async def run_cerberus_turn(
             completed_steps_count=len(completed_tool_steps),
             total_plan_steps=structured_plan_total_steps,
             platform_preamble=platform_preamble,
+            max_tokens=progress_update_max_tokens,
         )
         tool_started = time.perf_counter()
         doer_exec = await _execute_tool_call(
@@ -3417,14 +4144,24 @@ async def run_cerberus_turn(
         tool_ms_total += (time.perf_counter() - tool_started) * 1000.0
         raw_payload = doer_exec.get("payload")
         raw_tool_payload_out = raw_payload if isinstance(raw_payload, dict) else None
-        tool_result_for_checker = doer_exec.get("checker_result")
-        normalized_checker_result_out = (
-            tool_result_for_checker if isinstance(tool_result_for_checker, dict) else None
-        )
+        tool_result_for_checker = doer_exec.get("minos_result")
+        if not isinstance(tool_result_for_checker, dict):
+            tool_result_for_checker = doer_exec.get("checker_result")
+        normalized_minos_result_out = tool_result_for_checker if isinstance(tool_result_for_checker, dict) else None
         if isinstance(tool_result_for_checker, dict) and not bool(tool_result_for_checker.get("ok")):
             tool_failures_count += 1
+            if planned_tool_sig:
+                previous_sig = str(step_last_failed_call_sig.get(current_step_id) or "")
+                if previous_sig == planned_tool_sig:
+                    step_failed_call_sig_counts[current_step_id] = max(
+                        0, int(step_failed_call_sig_counts.get(current_step_id, 0))
+                    ) + 1
+                else:
+                    step_last_failed_call_sig[current_step_id] = planned_tool_sig
+                    step_failed_call_sig_counts[current_step_id] = 1
         draft_response = str((tool_result_for_checker or {}).get("summary_for_user") or "").strip()
         if isinstance(tool_result_for_checker, dict) and bool(tool_result_for_checker.get("ok")):
+            _clear_step_retry_state(current_step_id)
             completed_tool_steps.append(
                 {
                     "request": str(tool_user_text or round_request_text or "").strip(),
@@ -3469,22 +4206,20 @@ async def run_cerberus_turn(
                     break
         tool_calls_used += 1
 
-        agent_state = await _run_doer_state_update(
+        agent_state = await _run_thanatos_state_update(
             llm_client=llm_client,
             platform=platform,
             user_request=tool_user_text or resolved_user_text,
             prior_state=agent_state,
             tool_call=planned_tool,
             tool_result=tool_result_for_checker,
-            max_tokens=doer_max_tokens,
+            max_tokens=thanatos_max_tokens,
         )
         if structured_plan_queue:
-            if isinstance(tool_result_for_checker, dict) and bool(tool_result_for_checker.get("ok")):
-                structured_plan_queue = structured_plan_queue[1:]
             agent_state = _sync_agent_state_with_plan_queue(
                 agent_state=agent_state,
                 plan_queue=structured_plan_queue,
-                fallback_goal=resolved_user_text or user_text,
+                fallback_goal=astraeus_goal or resolved_user_text or user_text,
             )
         agent_state = _remember_tool_result_in_agent_state(
             agent_state=agent_state,
@@ -3492,7 +4227,7 @@ async def run_cerberus_turn(
             raw_payload=(raw_payload if isinstance(raw_payload, dict) else None),
             tool_result=(tool_result_for_checker if isinstance(tool_result_for_checker, dict) else None),
             request_text=str(tool_user_text or round_request_text or resolved_user_text or "").strip(),
-            fallback_goal=resolved_user_text or user_text,
+            fallback_goal=astraeus_goal or resolved_user_text or user_text,
             max_sets=result_memory_max_sets,
             max_items=result_memory_max_items,
         )
@@ -3503,17 +4238,12 @@ async def run_cerberus_turn(
             state=agent_state,
         )
 
-        if structured_plan_queue and isinstance(tool_result_for_checker, dict) and bool(tool_result_for_checker.get("ok")):
-            checker_reason = "continue_plan_step"
-            critic_continue_count += 1
-            continue
-
         checker_started = time.perf_counter()
         turn_draft_response = _multi_step_turn_draft(
             completed_steps=completed_tool_steps,
             fallback_draft=draft_response,
         )
-        checker_decision = await _run_checker(
+        checker_decision = await _run_minos_validation(
             llm_client=llm_client,
             platform=platform,
             current_user_text=current_user_turn_text,
@@ -3521,43 +4251,72 @@ async def run_cerberus_turn(
             agent_state=agent_state,
             memory_context=memory_context_payload,
             available_artifacts=_available_artifacts_payload(turn_available_artifacts),
+            current_step=(current_plan_step if isinstance(current_plan_step, dict) else None),
+            goal=astraeus_goal or resolved_user_text or current_user_turn_text,
             planned_tool=planned_tool,
             tool_result=tool_result_for_checker,
             draft_response=turn_draft_response,
-            retry_allowed=_retry_allowed_within_limits(),
+            retry_count=current_step_retry_count,
+            retry_allowed=_retry_allowed_for_step(current_step_id, current_step_retry_count),
             platform_preamble=platform_preamble,
-            max_tokens=checker_max_tokens,
+            max_tokens=minos_max_tokens,
         )
-        checker_ms_total += (time.perf_counter() - checker_started) * 1000.0
-        checker_action = str(checker_decision.get("kind") or "FINAL_ANSWER")
+        minos_ms_total += (time.perf_counter() - checker_started) * 1000.0
+        checker_action = _checker_decision_value(checker_decision)
 
-        if checker_action == "FINAL_ANSWER":
-            final_text_candidate = _select_final_answer_text(
-                checker_decision=checker_decision,
-                draft_response=turn_draft_response,
-                user_text=resolved_user_text or user_text,
-                tool_result=tool_result_for_checker,
-            )
-            if _should_continue_after_incomplete_final_answer(
-                user_text=resolved_user_text or user_text,
-                final_text=final_text_candidate,
-                agent_state=agent_state,
-                retry_allowed=_retry_allowed_within_limits(),
-            ):
-                checker_reason = "continue_after_incomplete_final_answer"
+        if checker_action == "CONTINUE":
+            if not structured_plan_queue:
+                checker_action = "FINAL"
+            elif isinstance(tool_result_for_checker, dict) and bool(tool_result_for_checker.get("ok")):
+                structured_plan_queue = structured_plan_queue[1:]
+                _clear_step_retry_state(current_step_id)
+                agent_state = _sync_agent_state_with_plan_queue(
+                    agent_state=agent_state,
+                    plan_queue=structured_plan_queue,
+                    fallback_goal=astraeus_goal or resolved_user_text or user_text,
+                )
+                _save_persistent_agent_state(
+                    redis_client=r,
+                    platform=platform,
+                    scope=scope,
+                    state=agent_state,
+                )
+                if not structured_plan_queue:
+                    final_text_candidate = await _compose_final_answer_text(
+                        checker_decision=checker_decision,
+                        draft_response_text=turn_draft_response,
+                        user_request_text=resolved_user_text or user_text,
+                        tool_result_payload=tool_result_for_checker,
+                    )
+                    checker_reason = _tool_failure_checker_reason(tool_result_for_checker) or "complete"
+                    return _finish(
+                        text=final_text_candidate,
+                        status="done",
+                        checker_action_value="FINAL_ANSWER",
+                        checker_reason_value=checker_reason,
+                        retry_tool=queued_retry_tool_for_ledger,
+                    )
+                checker_reason = _checker_decision_text(checker_decision, "reason", "next_action") or "continue_plan_step"
                 critic_continue_count += 1
                 continue
-            checker_reason = _tool_failure_checker_reason(tool_result_for_checker) or "complete"
-            return _finish(
-                text=final_text_candidate,
-                status="done",
-                checker_action_value="FINAL_ANSWER",
-                checker_reason_value=checker_reason,
-                retry_tool=queued_retry_tool_for_ledger,
-            )
+            elif _retry_allowed_for_step(current_step_id, current_step_retry_count):
+                step_retry_counts[current_step_id] = current_step_retry_count + 1
+                _remember_step_retry_hint(current_step_id, checker_decision)
+                checker_reason = _checker_decision_text(checker_decision, "reason", "repair") or "retry_current_step"
+                critic_continue_count += 1
+                continue
+            else:
+                checker_reason = "step_retry_limit_reached"
+                return _finish(
+                    text=_retry_limit_message(checker_decision),
+                    status="blocked",
+                    checker_action_value="NEED_USER_INFO",
+                    checker_reason_value=checker_reason,
+                    retry_tool=queued_retry_tool_for_ledger,
+                )
 
-        if checker_action == "NEED_USER_INFO":
-            need_text = str(checker_decision.get("text") or DEFAULT_CLARIFICATION).strip()
+        if checker_action == "ASK_USER":
+            need_text = _checker_decision_text(checker_decision, "question", "text", "reason") or DEFAULT_CLARIFICATION
             checker_reason = "needs_user_input"
             return _finish(
                 text=need_text,
@@ -3567,94 +4326,97 @@ async def run_cerberus_turn(
                 retry_tool=queued_retry_tool_for_ledger,
             )
 
-        if checker_action == "RETRY_TOOL":
-            retry_text = str(checker_decision.get("text") or "").strip()
-            if not _retry_allowed_within_limits():
-                queued_retry_tool_for_ledger = parse_function_json(retry_text)
-                planner_text_is_tool_candidate = True
-                checker_reason = "budget_exhausted"
-                break
-            retry_eval = await _validate_or_recover_tool_call(
-                llm_client=llm_client,
-                text=retry_text,
-                platform=platform,
-                registry=registry,
-                enabled_predicate=enabled_predicate,
-                tool_index=tool_index,
-                user_text=round_request_text,
-                origin=origin_payload,
-                scope=scope,
-                history_messages=history,
-                context=context if isinstance(context, dict) else {},
-                platform_preamble=platform_preamble,
-                repair_max_tokens=tool_repair_max_tokens,
-                recovery_max_tokens=recovery_max_tokens,
-            )
-            retry_validation = (
-                retry_eval.get("validation_status")
-                if isinstance(retry_eval.get("validation_status"), dict)
-                else {"status": "failed", "reason": str(retry_eval.get("reason") or "invalid_tool_call")}
-            )
-            attempted_tool_for_ledger = str(retry_eval.get("attempted_tool") or attempted_tool_for_ledger or "")
-            if bool(retry_eval.get("repair_used")):
-                repairs_used_count += 1
-            if not bool(retry_eval.get("ok")):
-                reason = str(retry_eval.get("reason") or "invalid_tool_call")
-                assistant_text = str(retry_eval.get("assistant_text") or "").strip()
-                failed_retry_tool = retry_eval.get("tool_call")
-                if not isinstance(failed_retry_tool, dict):
-                    failed_retry_tool = {"function": "invalid_tool_call", "arguments": {}}
-                if reason == "repair_returned_answer" and assistant_text:
-                    planner_kind_value = "repaired_answer"
-                    checker_reason = "complete"
-                    return _finish(
-                        text=assistant_text,
-                        status="done",
-                        checker_action_value="FINAL_ANSWER",
-                        checker_reason_value=checker_reason,
-                        planner_kind_value=planner_kind_value,
-                        planned_tool_override=failed_retry_tool,
-                        validation_status_override=retry_validation,
-                        attempted_tool_override=str(retry_eval.get("attempted_tool") or ""),
-                    )
-                if (
-                    reason == "repair_returned_no_tool"
-                    and _retry_allowed_within_limits()
-                    and repair_returned_no_tool_retries < 2
-                ):
-                    repair_returned_no_tool_retries += 1
-                    checker_reason = "continue_after_repair_returned_no_tool"
-                    critic_continue_count += 1
-                    continue
-                validation_failures_count += 1
-                checker_reason = f"validation_failed:{reason}"
+        if checker_action == "RETRY":
+            if not _retry_allowed_for_step(current_step_id, current_step_retry_count):
+                checker_reason = "step_retry_limit_reached"
                 return _finish(
-                    text=str(retry_eval.get("recovery_text_if_blocked") or DEFAULT_CLARIFICATION).strip(),
+                    text=_retry_limit_message(checker_decision),
                     status="blocked",
                     checker_action_value="NEED_USER_INFO",
                     checker_reason_value=checker_reason,
-                    planned_tool_override=failed_retry_tool,
-                    validation_status_override=retry_validation,
-                    attempted_tool_override=str(retry_eval.get("attempted_tool") or ""),
+                    retry_tool=queued_retry_tool_for_ledger,
                 )
-            queued = retry_eval.get("tool_call")
-            if not isinstance(queued, dict):
-                validation_failures_count += 1
-                checker_reason = "validation_failed:invalid_tool_call"
-                return _finish(
-                    text=DEFAULT_CLARIFICATION,
-                    status="blocked",
-                    checker_action_value="NEED_USER_INFO",
-                    checker_reason_value=checker_reason,
-                    planned_tool_override={"function": "invalid_tool_call", "arguments": {}},
-                    validation_status_override=retry_validation,
-                )
-            queued_retry_tool_for_ledger = queued
-            validation_status = retry_validation
+            step_retry_counts[current_step_id] = current_step_retry_count + 1
+            _remember_step_retry_hint(current_step_id, checker_decision)
+            checker_reason = _checker_decision_text(checker_decision, "reason", "repair") or "retry_current_step"
             critic_continue_count += 1
-            checker_reason = "continue"
-            planner_text_is_tool_candidate = True
             continue
+
+        if checker_action == "FAIL":
+            fail_text = _checker_decision_text(checker_decision, "reason", "text") or DEFAULT_CLARIFICATION
+            checker_reason = "minos_fail"
+            return _finish(
+                text=fail_text,
+                status="blocked",
+                checker_action_value="FAIL",
+                checker_reason_value=checker_reason,
+                retry_tool=queued_retry_tool_for_ledger,
+            )
+
+        if (
+            checker_action == "FINAL"
+            and structured_plan_queue
+            and isinstance(tool_result_for_checker, dict)
+            and bool(tool_result_for_checker.get("ok"))
+            and _retry_allowed_for_step(current_step_id, current_step_retry_count)
+        ):
+            structured_plan_queue = structured_plan_queue[1:]
+            _clear_step_retry_state(current_step_id)
+            agent_state = _sync_agent_state_with_plan_queue(
+                agent_state=agent_state,
+                plan_queue=structured_plan_queue,
+                fallback_goal=astraeus_goal or resolved_user_text or user_text,
+            )
+            _save_persistent_agent_state(
+                redis_client=r,
+                platform=platform,
+                scope=scope,
+                state=agent_state,
+            )
+            if not structured_plan_queue:
+                final_text_candidate = await _compose_final_answer_text(
+                    checker_decision=checker_decision,
+                    draft_response_text=turn_draft_response,
+                    user_request_text=resolved_user_text or user_text,
+                    tool_result_payload=tool_result_for_checker,
+                )
+                checker_reason = _tool_failure_checker_reason(tool_result_for_checker) or "complete"
+                return _finish(
+                    text=final_text_candidate,
+                    status="done",
+                    checker_action_value="FINAL_ANSWER",
+                    checker_reason_value=checker_reason,
+                    retry_tool=queued_retry_tool_for_ledger,
+                )
+            checker_reason = "continue_plan_step"
+            critic_continue_count += 1
+            continue
+
+        final_text_candidate = await _compose_final_answer_text(
+            checker_decision=checker_decision,
+            draft_response_text=turn_draft_response,
+            user_request_text=resolved_user_text or user_text,
+            tool_result_payload=tool_result_for_checker,
+        )
+        if _should_continue_after_incomplete_final_answer(
+            user_text=resolved_user_text or user_text,
+            final_text=final_text_candidate,
+            agent_state=agent_state,
+            retry_allowed=_retry_allowed_for_step(current_step_id, current_step_retry_count),
+        ):
+            step_retry_counts[current_step_id] = current_step_retry_count + 1
+            _remember_step_retry_hint(current_step_id, checker_decision)
+            checker_reason = "continue_after_incomplete_final_answer"
+            critic_continue_count += 1
+            continue
+        checker_reason = _tool_failure_checker_reason(tool_result_for_checker) or "complete"
+        return _finish(
+            text=final_text_candidate,
+            status="done",
+            checker_action_value="FINAL_ANSWER",
+            checker_reason_value=checker_reason,
+            retry_tool=queued_retry_tool_for_ledger,
+        )
 
     pending_question = _state_first_open_question(agent_state)
     if pending_question:
@@ -3675,8 +4437,15 @@ async def run_cerberus_turn(
         ),
         tool_result=tool_result_for_checker,
     )
+    fallback_step = structured_plan_queue[0] if structured_plan_queue else None
+    fallback_step_id = (
+        _short_text((fallback_step or {}).get("id"), limit=24)
+        if isinstance(fallback_step, dict)
+        else ""
+    ) or "ad_hoc"
+    fallback_step_retry_count = max(0, int(step_retry_counts.get(fallback_step_id, 0)))
     checker_started = time.perf_counter()
-    checker_decision = await _run_checker(
+    checker_decision = await _run_minos_validation(
         llm_client=llm_client,
         platform=platform,
         current_user_text=current_user_turn_text,
@@ -3684,18 +4453,21 @@ async def run_cerberus_turn(
         agent_state=agent_state,
         memory_context=memory_context_payload,
         available_artifacts=_available_artifacts_payload(turn_available_artifacts),
+        current_step=(fallback_step if isinstance(fallback_step, dict) else None),
+        goal=astraeus_goal or resolved_user_text or current_user_turn_text,
         planned_tool=planned_tool,
         tool_result=tool_result_for_checker,
         draft_response=best_effort,
-        retry_allowed=_retry_allowed_within_limits(),
+        retry_count=fallback_step_retry_count,
+        retry_allowed=_retry_allowed_for_step(fallback_step_id, fallback_step_retry_count),
         platform_preamble=platform_preamble,
-        max_tokens=checker_max_tokens,
+        max_tokens=minos_max_tokens,
     )
-    checker_ms_total += (time.perf_counter() - checker_started) * 1000.0
-    checker_action = str(checker_decision.get("kind") or "FINAL_ANSWER")
+    minos_ms_total += (time.perf_counter() - checker_started) * 1000.0
+    checker_action = _checker_decision_value(checker_decision)
 
-    if checker_action == "NEED_USER_INFO":
-        need_text = str(checker_decision.get("text") or pending_question or DEFAULT_CLARIFICATION).strip()
+    if checker_action == "ASK_USER":
+        need_text = _checker_decision_text(checker_decision, "question", "text", "reason") or pending_question or DEFAULT_CLARIFICATION
         checker_reason = "needs_user_input"
         return _finish(
             text=need_text,
@@ -3705,26 +4477,39 @@ async def run_cerberus_turn(
             retry_tool=queued_retry_tool_for_ledger,
         )
 
-    if checker_action == "RETRY_TOOL":
-        retry_tool = parse_function_json(str(checker_decision.get("text") or ""))
-        if isinstance(retry_tool, dict):
-            queued_retry_tool_for_ledger = retry_tool
-            planner_text_is_tool_candidate = True
+    if checker_action in {"RETRY", "CONTINUE"}:
         checker_reason = "budget_exhausted"
+        final_text_candidate = await _compose_final_answer_text(
+            checker_decision=checker_decision,
+            draft_response_text=best_effort,
+            user_request_text=resolved_user_text or user_text,
+            tool_result_payload=tool_result_for_checker,
+        )
         return _finish(
-            text=best_effort or "Completed.",
+            text=final_text_candidate or best_effort or "Completed.",
             status="done",
             checker_action_value="FINAL_ANSWER",
             checker_reason_value=checker_reason,
             retry_tool=queued_retry_tool_for_ledger,
         )
 
+    if checker_action == "FAIL":
+        fail_text = _checker_decision_text(checker_decision, "reason", "text") or DEFAULT_CLARIFICATION
+        checker_reason = "minos_fail"
+        return _finish(
+            text=fail_text,
+            status="blocked",
+            checker_action_value="FAIL",
+            checker_reason_value=checker_reason,
+            retry_tool=queued_retry_tool_for_ledger,
+        )
+
     checker_reason = _tool_failure_checker_reason(tool_result_for_checker) or checker_reason or "complete"
-    final_text_candidate = _select_final_answer_text(
+    final_text_candidate = await _compose_final_answer_text(
         checker_decision=checker_decision,
-        draft_response=best_effort,
-        user_text=resolved_user_text or user_text,
-        tool_result=tool_result_for_checker,
+        draft_response_text=best_effort,
+        user_request_text=resolved_user_text or user_text,
+        tool_result_payload=tool_result_for_checker,
     )
     return _finish(
         text=final_text_candidate,
@@ -3733,3 +4518,50 @@ async def run_cerberus_turn(
         checker_reason_value=checker_reason,
         retry_tool=queued_retry_tool_for_ledger,
     )
+
+
+async def run_cerberus_turn(
+    *,
+    llm_client: Any,
+    platform: str,
+    history_messages: List[Dict[str, Any]],
+    registry: Dict[str, Any],
+    enabled_predicate: Optional[Callable[[str], bool]] = None,
+    context: Optional[Dict[str, Any]] = None,
+    user_text: str,
+    scope: str,
+    task_id: Optional[str] = None,
+    origin: Optional[Dict[str, Any]] = None,
+    wait_callback: Optional[Callable[..., Any]] = None,
+    admin_guard: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
+    redis_client: Any = None,
+    max_rounds: Optional[int] = None,
+    max_tool_calls: Optional[int] = None,
+    platform_preamble: str = "",
+) -> Dict[str, Any]:
+    active_job_id = _register_active_chat_job(
+        platform=platform,
+        scope=scope,
+        origin=origin,
+    )
+    try:
+        return await _run_cerberus_turn_impl(
+            llm_client=llm_client,
+            platform=platform,
+            history_messages=history_messages,
+            registry=registry,
+            enabled_predicate=enabled_predicate,
+            context=context,
+            user_text=user_text,
+            scope=scope,
+            task_id=task_id,
+            origin=origin,
+            wait_callback=wait_callback,
+            admin_guard=admin_guard,
+            redis_client=redis_client,
+            max_rounds=max_rounds,
+            max_tool_calls=max_tool_calls,
+            platform_preamble=platform_preamble,
+        )
+    finally:
+        _unregister_active_chat_job(active_job_id)

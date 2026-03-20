@@ -18,7 +18,7 @@ from notify.queue import (
     queue_key,
     resolve_targets,
 )
-from plugin_settings import get_plugin_settings
+from verba_settings import get_verba_settings
 
 logger = logging.getLogger("notify_core")
 logger.setLevel(logging.INFO)
@@ -83,7 +83,7 @@ def _matrix_room_ref(room_ref: Any) -> str:
 
 
 def _telegram_legacy_defaults() -> Dict[str, str]:
-    settings = redis_client.hgetall("plugin_settings:Telegram Notifier") or {}
+    settings = redis_client.hgetall("verba_settings:Telegram Notifier") or {}
     chat_id = str(settings.get("telegram_chat_id") or "").strip()
     if chat_id:
         return {"chat_id": chat_id}
@@ -214,7 +214,7 @@ def _send_mobile(device_service: str, title: Optional[str], message: str) -> Non
 
 
 def _default_homeassistant_device_service() -> str:
-    settings = redis_client.hgetall("plugin_settings:Home Assistant Notifier") or {}
+    settings = redis_client.hgetall("verba_settings:Home Assistant Notifier") or {}
     return (settings.get("DEFAULT_DEVICE_SERVICE") or "").strip()
 
 
@@ -325,7 +325,7 @@ def _ntfy_markdown(title: Optional[str], message: str) -> str:
 
 
 def _ntfy_settings(targets: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    settings = get_plugin_settings("NTFY Notifier") or {}
+    settings = get_verba_settings("NTFY Notifier") or {}
     target_map = dict(targets or {})
 
     server = (
@@ -482,7 +482,7 @@ def _wordpress_markdown_to_html(text: str) -> str:
 
 
 def _wordpress_settings(targets: Optional[Dict[str, Any]]) -> Dict[str, str]:
-    settings = get_plugin_settings("WordPress Poster") or {}
+    settings = get_verba_settings("WordPress Poster") or {}
     target_map = dict(targets or {})
 
     site_url = (

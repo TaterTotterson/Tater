@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib.parse import urlparse, urlunparse
 
 import dotenv
 import redis
@@ -23,42 +24,28 @@ from pydantic import BaseModel, Field
 from redis.exceptions import RedisError
 
 import core_registry as core_registry_module
-import plugin_registry as plugin_registry_module
+import verba_registry as verba_registry_module
 import portal_registry as portal_registry_module
 from admin_gate import DEFAULT_ADMIN_ONLY_PLUGINS, REDIS_KEY as ADMIN_GATE_KEY, get_admin_only_plugins
-from cerberus import resolve_agent_limits, run_cerberus_turn
+from cerberus import get_active_chat_jobs_snapshot, run_cerberus_turn
 from cerberus import (
-    AGENT_MAX_ROUNDS_KEY,
-    AGENT_MAX_TOOL_CALLS_KEY,
     CERBERUS_AGENT_STATE_TTL_SECONDS_KEY,
-    CERBERUS_PLANNER_MAX_TOKENS_KEY,
-    CERBERUS_CHECKER_MAX_TOKENS_KEY,
-    CERBERUS_DOER_MAX_TOKENS_KEY,
-    CERBERUS_TOOL_REPAIR_MAX_TOKENS_KEY,
-    CERBERUS_RECOVERY_MAX_TOKENS_KEY,
     CERBERUS_MAX_LEDGER_ITEMS_KEY,
     DEFAULT_AGENT_STATE_TTL_SECONDS,
-    DEFAULT_CHECKER_MAX_TOKENS,
-    DEFAULT_DOER_MAX_TOKENS,
     DEFAULT_MAX_LEDGER_ITEMS,
-    DEFAULT_MAX_ROUNDS,
-    DEFAULT_MAX_TOOL_CALLS,
-    DEFAULT_PLANNER_MAX_TOKENS,
-    DEFAULT_RECOVERY_MAX_TOKENS,
-    DEFAULT_TOOL_REPAIR_MAX_TOKENS,
 )
 from emoji_responder import get_emoji_settings as get_core_emoji_settings, save_emoji_settings as save_core_emoji_settings
 from helpers import get_llm_client_from_env, set_main_loop
-from plugin_settings import (
-    get_plugin_enabled,
-    get_plugin_settings,
-    save_plugin_settings,
-    set_plugin_enabled,
+from verba_settings import (
+    get_verba_enabled,
+    get_verba_settings,
+    save_verba_settings as save_verba_settings_values,
+    set_verba_enabled as set_verba_enabled_flag,
 )
-from plugin_kernel import normalize_platform
+from verba_kernel import normalize_platform
 from vision_settings import get_vision_settings as get_shared_vision_settings, save_vision_settings as save_shared_vision_settings
 from tateros import core_store as core_store_module
-from tateros import plugin_store as plugin_store_module
+from tateros import verba_store as verba_store_module
 from tateros import portal_store as portal_store_module
 
 
@@ -99,6 +86,12 @@ WEBUI_ATTACH_INDEX_MAX = int(os.getenv("WEBUI_ATTACH_INDEX_MAX", "500"))
 FILE_BLOB_KEY_PREFIX = "webui:file:"
 FILE_INDEX_KEY = "webui:file_index"
 LAST_LLM_STATS_KEY = "webui:last_llm_stats"
+WEBUI_POPUP_EFFECT_STYLE_KEY = "tater:webui:popup_effect_style"
+DEFAULT_WEBUI_POPUP_EFFECT_STYLE = "flame"
+WEBUI_POPUP_EFFECT_STYLE_CHOICES = {"disabled", "flame", "dust", "glitch", "portal", "melt"}
+CERBERUS_LLM_HOST_KEY = "tater:cerberus:llm_host"
+CERBERUS_LLM_PORT_KEY = "tater:cerberus:llm_port"
+CERBERUS_LLM_MODEL_KEY = "tater:cerberus:llm_model"
 
 
 bootstrap_state: Dict[str, Any] = {
@@ -108,6 +101,7 @@ bootstrap_state: Dict[str, Any] = {
     "restore_error": "",
     "restore_summary": {},
     "autostart_enabled": True,
+    "redis_migration": {},
 }
 
 
@@ -332,6 +326,41 @@ def _as_bool_flag(value: Any, default: bool = True) -> bool:
     return bool(default)
 
 
+def _normalize_popup_effect_style(value: Any, default: str = DEFAULT_WEBUI_POPUP_EFFECT_STYLE) -> str:
+    token = str(value or "").strip().lower()
+    if token in WEBUI_POPUP_EFFECT_STYLE_CHOICES:
+        return token
+    fallback = str(default or DEFAULT_WEBUI_POPUP_EFFECT_STYLE).strip().lower()
+    return fallback if fallback in WEBUI_POPUP_EFFECT_STYLE_CHOICES else DEFAULT_WEBUI_POPUP_EFFECT_STYLE
+
+
+def _build_cerberus_llm_endpoint(host: Any, port: Any) -> str:
+    raw_host = str(host or "").strip()
+    raw_port = str(port or "").strip()
+    if not raw_host:
+        return ""
+
+    candidate = raw_host if raw_host.startswith(("http://", "https://")) else f"http://{raw_host}"
+    parsed = urlparse(candidate)
+    hostname = str(parsed.hostname or "").strip()
+    if not hostname:
+        return ""
+
+    resolved_port = raw_port or (str(parsed.port) if parsed.port is not None else "")
+    if resolved_port:
+        try:
+            port_int = int(str(resolved_port).strip())
+        except Exception:
+            return ""
+        if port_int < 1 or port_int > 65535:
+            return ""
+        netloc = f"{hostname}:{port_int}"
+    else:
+        netloc = hostname
+
+    return urlunparse((parsed.scheme or "http", netloc, "", "", "", "")).rstrip("/")
+
+
 def _discover_core_webui_tabs(core_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     discovered: List[Dict[str, Any]] = []
     seen_labels = set()
@@ -445,11 +474,11 @@ def _load_core_htmlui_tab_payload(tab_spec: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _plugin_display_name(plugin: Any) -> str:
+def _verba_display_name(verba: Any) -> str:
     return (
-        str(getattr(plugin, "plugin_name", "") or "").strip()
-        or str(getattr(plugin, "pretty_name", "") or "").strip()
-        or str(getattr(plugin, "name", "") or "").strip()
+        str(getattr(verba, "verba_name", "") or "").strip()
+        or str(getattr(verba, "pretty_name", "") or "").strip()
+        or str(getattr(verba, "name", "") or "").strip()
     )
 
 
@@ -888,8 +917,8 @@ async def _process_message(
             loop_messages.append(templ)
     loop_messages = _enforce_user_assistant_alternation(loop_messages)
 
-    plugin_registry_module.ensure_plugins_loaded()
-    merged_registry = dict(plugin_registry_module.get_registry() or {})
+    verba_registry_module.ensure_verbas_loaded()
+    merged_registry = dict(verba_registry_module.get_verba_registry() or {})
 
     origin = {
         "platform": "webui",
@@ -899,9 +928,16 @@ async def _process_message(
     }
     if isinstance(input_artifacts, list) and input_artifacts:
         origin["input_artifacts"] = [dict(item) for item in input_artifacts if isinstance(item, dict)]
-    agent_max_rounds, agent_max_tool_calls = resolve_agent_limits(redis_client)
+    cerberus_llm_host = str(redis_client.get(CERBERUS_LLM_HOST_KEY) or "").strip()
+    cerberus_llm_port = str(redis_client.get(CERBERUS_LLM_PORT_KEY) or "").strip()
+    cerberus_llm_url = _build_cerberus_llm_endpoint(cerberus_llm_host, cerberus_llm_port)
+    cerberus_llm_model = str(redis_client.get(CERBERUS_LLM_MODEL_KEY) or "").strip()
+    if not cerberus_llm_url or not cerberus_llm_model:
+        raise RuntimeError(
+            "Cerberus LLM is not configured. Open Settings > Cerberus and set Cerberus LLM Host/IP, Port, and Model."
+        )
 
-    async with get_llm_client_from_env() as llm_client:
+    async with get_llm_client_from_env(host=cerberus_llm_url, model=cerberus_llm_model) as llm_client:
         async def _wait(
             func_name: str,
             plugin_obj: Any,
@@ -937,15 +973,15 @@ async def _process_message(
             platform="webui",
             history_messages=loop_messages,
             registry=merged_registry,
-            enabled_predicate=get_plugin_enabled,
+            enabled_predicate=get_verba_enabled,
             context={"raw_message": message_content, "input_artifacts": list(input_artifacts or [])},
             user_text=(message_content or ""),
             scope=f"session:{session_scope_id}",
             origin=origin,
             redis_client=redis_client,
             wait_callback=(_wait if callable(wait_callback) else None),
-            max_rounds=agent_max_rounds,
-            max_tool_calls=agent_max_tool_calls,
+            max_rounds=0,
+            max_tool_calls=0,
             platform_preamble="",
         )
         try:
@@ -1044,7 +1080,7 @@ class ChatJobManager:
                 display_name = f"kernel::{func_name}"
             else:
                 display_name = (
-                    getattr(plugin_obj, "plugin_name", None)
+                    getattr(plugin_obj, "verba_name", None)
                     or getattr(plugin_obj, "pretty_name", None)
                     or getattr(plugin_obj, "name", None)
                     or func_name
@@ -1241,7 +1277,7 @@ def _normalize_repo_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, str]]:
 
 
 def _plugin_platforms(item: Dict[str, Any]) -> List[str]:
-    helper = getattr(plugin_store_module, "_get_item_platforms", None)
+    helper = getattr(verba_store_module, "_get_item_platforms", None)
     if callable(helper):
         try:
             platforms = helper(item)
@@ -1261,11 +1297,11 @@ def _plugin_platforms(item: Dict[str, Any]) -> List[str]:
 
 
 def _verba_shop_raw() -> Dict[str, Any]:
-    plugin_registry_module.ensure_plugins_loaded()
-    manifest_repos = plugin_store_module.get_configured_shop_manifest_repos()
-    catalog_items, catalog_errors = plugin_store_module.load_shop_catalog(manifest_repos)
+    verba_registry_module.ensure_verbas_loaded()
+    manifest_repos = verba_store_module.get_configured_shop_manifest_repos()
+    catalog_items, catalog_errors = verba_store_module.load_shop_catalog(manifest_repos)
 
-    build_entries = getattr(plugin_store_module, "_build_installed_entries", None)
+    build_entries = getattr(verba_store_module, "_build_installed_entries", None)
     installed_entries = build_entries(catalog_items) if callable(build_entries) else []
 
     if not isinstance(installed_entries, list):
@@ -1290,7 +1326,7 @@ def _verba_shop_raw() -> Dict[str, Any]:
                 "source_label": str(entry.get("source_label") or ""),
                 "update_available": bool(entry.get("update_available")),
                 "catalog_backed": bool(entry.get("catalog_item")),
-                "enabled": bool(get_plugin_enabled(plugin_id)),
+                "enabled": bool(get_verba_enabled(plugin_id)),
                 "platforms": list(entry.get("platforms") or []),
                 "platforms_str": str(entry.get("platforms_str") or ""),
             }
@@ -1318,7 +1354,7 @@ def _verba_shop_raw() -> Dict[str, Any]:
     return {
         "repos": {
             "configured": manifest_repos,
-            "additional": plugin_store_module.get_additional_shop_manifest_repos(),
+            "additional": verba_store_module.get_additional_shop_manifest_repos(),
             "default": manifest_repos[0] if manifest_repos else {"name": "", "url": ""},
         },
         "errors": list(catalog_errors or []),
@@ -1501,6 +1537,70 @@ def _restore_progress_logger(label: str):
     return _cb
 
 
+def _merge_hash_fields_without_overwrite(target_key: str, source: Dict[str, Any]) -> tuple[int, int]:
+    existing = redis_client.hgetall(target_key) or {}
+    to_write: Dict[str, str] = {}
+    skipped_existing = 0
+
+    for raw_field, raw_value in (source or {}).items():
+        field = str(raw_field or "").strip()
+        if not field:
+            continue
+        if field in existing:
+            skipped_existing += 1
+            continue
+        to_write[field] = str(raw_value) if raw_value is not None else ""
+
+    if to_write:
+        redis_client.hset(target_key, mapping=to_write)
+    return len(to_write), skipped_existing
+
+
+def _migrate_legacy_plugin_redis_keys() -> Dict[str, Any]:
+    """
+    One-way Redis key migration:
+    - plugin_enabled -> verba_enabled
+    - plugin_settings:* -> verba_settings:*
+
+    Migration is no-op when legacy keys are absent.
+    """
+    summary: Dict[str, Any] = {
+        "changed": False,
+        "legacy_plugin_enabled_fields": 0,
+        "verba_enabled_fields_migrated": 0,
+        "verba_enabled_fields_skipped_existing": 0,
+        "legacy_plugin_settings_keys": 0,
+        "verba_settings_fields_migrated": 0,
+        "verba_settings_fields_skipped_existing": 0,
+        "legacy_keys_deleted": 0,
+    }
+
+    old_enabled = redis_client.hgetall("plugin_enabled") or {}
+    if old_enabled:
+        summary["legacy_plugin_enabled_fields"] = len(old_enabled)
+        moved, skipped = _merge_hash_fields_without_overwrite("verba_enabled", old_enabled)
+        summary["verba_enabled_fields_migrated"] = moved
+        summary["verba_enabled_fields_skipped_existing"] = skipped
+        redis_client.delete("plugin_enabled")
+        summary["legacy_keys_deleted"] += 1
+        summary["changed"] = True
+
+    old_settings_keys = [str(k) for k in redis_client.scan_iter(match="plugin_settings:*")]
+    summary["legacy_plugin_settings_keys"] = len(old_settings_keys)
+    for old_key in old_settings_keys:
+        suffix = old_key[len("plugin_settings:") :]
+        new_key = f"verba_settings:{suffix}"
+        old_fields = redis_client.hgetall(old_key) or {}
+        moved, skipped = _merge_hash_fields_without_overwrite(new_key, old_fields)
+        summary["verba_settings_fields_migrated"] += moved
+        summary["verba_settings_fields_skipped_existing"] += skipped
+        redis_client.delete(old_key)
+        summary["legacy_keys_deleted"] += 1
+        summary["changed"] = True
+
+    return summary
+
+
 def _restore_enabled_surfaces() -> Dict[str, Any]:
     """
     Match legacy startup behavior:
@@ -1517,18 +1617,18 @@ def _restore_enabled_surfaces() -> Dict[str, Any]:
         "portals_missing_after": 0,
     }
 
-    # 1) Verbas (plugins)
+    # 1) Verbas
     try:
-        missing_plugins_before = list(plugin_store_module._enabled_missing_plugin_ids() or [])
+        missing_plugins_before = list(verba_store_module._enabled_missing_verba_ids() or [])
     except Exception:
         missing_plugins_before = []
     summary["plugins_missing_before"] = len(missing_plugins_before)
     if missing_plugins_before:
         logger.info("[startup-restore] restoring %d missing enabled verba(s)", len(missing_plugins_before))
-        plugin_store_module.ensure_plugins_ready(progress_cb=_restore_progress_logger("verbas"))
-        plugin_registry_module.reload_plugins()
+        verba_store_module.ensure_verbas_ready(progress_cb=_restore_progress_logger("verbas"))
+        verba_registry_module.reload_verbas()
     try:
-        missing_plugins_after = list(plugin_store_module._enabled_missing_plugin_ids() or [])
+        missing_plugins_after = list(verba_store_module._enabled_missing_verba_ids() or [])
     except Exception:
         missing_plugins_after = []
     summary["plugins_missing_after"] = len(missing_plugins_after)
@@ -1637,15 +1737,12 @@ class AppSettingsRequest(BaseModel):
     emoji_reaction_chain_cooldown_seconds: Optional[int] = None
     emoji_reply_reaction_cooldown_seconds: Optional[int] = None
     emoji_min_message_length: Optional[int] = None
-    cerberus_max_rounds: Optional[int] = None
-    cerberus_max_tool_calls: Optional[int] = None
+    cerberus_llm_host: Optional[str] = None
+    cerberus_llm_port: Optional[str] = None
+    cerberus_llm_model: Optional[str] = None
     cerberus_agent_state_ttl_seconds: Optional[int] = None
-    cerberus_planner_max_tokens: Optional[int] = None
-    cerberus_checker_max_tokens: Optional[int] = None
-    cerberus_doer_max_tokens: Optional[int] = None
-    cerberus_tool_repair_max_tokens: Optional[int] = None
-    cerberus_recovery_max_tokens: Optional[int] = None
     cerberus_max_ledger_items: Optional[int] = None
+    popup_effect_style: Optional[str] = None
     admin_only_plugins: Optional[List[str]] = None
 
 
@@ -1663,7 +1760,7 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 @app.on_event("startup")
 async def _startup_event() -> None:
     set_main_loop(asyncio.get_running_loop())
-    plugin_registry_module.ensure_plugins_loaded()
+    verba_registry_module.ensure_verbas_loaded()
     restore_enabled = str(os.getenv("HTMLUI_RESTORE_ENABLED_SURFACES_ON_STARTUP", "true")).strip().lower() in {
         "1",
         "true",
@@ -1682,8 +1779,13 @@ async def _startup_event() -> None:
     bootstrap_state["restore_complete"] = False
     bootstrap_state["restore_error"] = ""
     bootstrap_state["restore_summary"] = {}
+    bootstrap_state["redis_migration"] = {}
 
     try:
+        migration_summary = _migrate_legacy_plugin_redis_keys()
+        bootstrap_state["redis_migration"] = migration_summary
+        if migration_summary.get("changed"):
+            logger.info("[startup-migrate] migrated legacy plugin redis keys: %s", migration_summary)
         if restore_enabled:
             bootstrap_state["restore_in_progress"] = True
             summary = _restore_enabled_surfaces()
@@ -1724,6 +1826,210 @@ def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
+_RUNTIME_PLATFORM_LABELS: Dict[str, str] = {
+    "webui": "WebUI",
+    "macos": "macOS",
+    "discord": "Discord",
+    "irc": "IRC",
+    "telegram": "Telegram",
+    "matrix": "Matrix",
+    "homeassistant": "Home Assistant",
+    "homekit": "HomeKit",
+    "xbmc": "XBMC",
+    "automation": "Automation",
+}
+
+
+def _runtime_platform_label(platform: Any) -> str:
+    token = normalize_platform(str(platform or ""))
+    if token in _RUNTIME_PLATFORM_LABELS:
+        return _RUNTIME_PLATFORM_LABELS[token]
+    parts = [part for part in token.replace("-", "_").split("_") if part]
+    return " ".join(part.capitalize() for part in parts) if parts else "Unknown"
+
+
+def _load_chat_job_history_rows(max_items: int = 5000) -> List[Dict[str, Any]]:
+    max_rows = max(200, min(int(max_items or 0), 20000))
+    keys: List[str] = []
+    try:
+        if redis_client.exists("tater:cerberus:ledger"):
+            keys = ["tater:cerberus:ledger"]
+    except Exception:
+        keys = []
+    if not keys:
+        try:
+            keys = sorted(str(k) for k in redis_client.scan_iter(match="tater:cerberus:ledger:*"))
+        except Exception:
+            keys = []
+
+    rows: List[Dict[str, Any]] = []
+    seen_ids = set()
+    for key in keys:
+        try:
+            raw_items = redis_client.lrange(key, -max_rows, -1) or []
+        except Exception:
+            raw_items = []
+        for raw in raw_items:
+            try:
+                item = json.loads(raw)
+            except Exception:
+                continue
+            if not isinstance(item, dict):
+                continue
+            turn_id = str(item.get("turn_id") or "").strip()
+            if turn_id and turn_id in seen_ids:
+                continue
+            if turn_id:
+                seen_ids.add(turn_id)
+            rows.append(dict(item))
+    rows.sort(key=lambda row: float(row.get("timestamp") or 0.0), reverse=True)
+    return rows
+
+
+def _chat_job_history_windows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    now = time.time()
+    windows = [
+        ("24h", "Last 24 hours", 24 * 60 * 60),
+        ("7d", "Last 7 days", 7 * 24 * 60 * 60),
+        ("30d", "Last 30 days", 30 * 24 * 60 * 60),
+    ]
+    buckets: Dict[str, Dict[str, Any]] = {
+        key: {
+            "key": key,
+            "label": label,
+            "jobs": 0,
+            "done": 0,
+            "blocked": 0,
+            "failed": 0,
+            "tool_turns": 0,
+            "platform_counts": {},
+        }
+        for key, label, _ in windows
+    }
+
+    for row in rows:
+        ts = float(row.get("timestamp") or 0.0)
+        if ts <= 0:
+            continue
+        age = max(0.0, now - ts)
+        outcome = str(row.get("outcome") or "").strip().lower()
+        platform = normalize_platform(row.get("platform")) or "unknown"
+        planned_tool = row.get("planned_tool") if isinstance(row.get("planned_tool"), dict) else {}
+        has_tool = bool(str(planned_tool.get("function") or "").strip())
+
+        for key, _label, seconds in windows:
+            if age > float(seconds):
+                continue
+            bucket = buckets[key]
+            bucket["jobs"] = int(bucket.get("jobs") or 0) + 1
+            if outcome == "done":
+                bucket["done"] = int(bucket.get("done") or 0) + 1
+            elif outcome == "blocked":
+                bucket["blocked"] = int(bucket.get("blocked") or 0) + 1
+            elif outcome == "failed":
+                bucket["failed"] = int(bucket.get("failed") or 0) + 1
+            if has_tool:
+                bucket["tool_turns"] = int(bucket.get("tool_turns") or 0) + 1
+            platform_counts = bucket.get("platform_counts")
+            if isinstance(platform_counts, dict):
+                platform_counts[platform] = int(platform_counts.get(platform) or 0) + 1
+
+    window_rows: List[Dict[str, Any]] = []
+    for key, label, _seconds in windows:
+        bucket = buckets.get(key) or {"key": key, "label": label}
+        platform_counts = bucket.get("platform_counts") if isinstance(bucket.get("platform_counts"), dict) else {}
+        top_platforms = [
+            {
+                "platform": platform,
+                "label": _runtime_platform_label(platform),
+                "jobs": int(count),
+            }
+            for platform, count in platform_counts.items()
+        ]
+        top_platforms.sort(key=lambda row: (-int(row.get("jobs") or 0), str(row.get("label") or "")))
+        window_rows.append(
+            {
+                "key": key,
+                "label": label,
+                "jobs": int(bucket.get("jobs") or 0),
+                "done": int(bucket.get("done") or 0),
+                "blocked": int(bucket.get("blocked") or 0),
+                "failed": int(bucket.get("failed") or 0),
+                "tool_turns": int(bucket.get("tool_turns") or 0),
+                "top_platforms": top_platforms[:4],
+            }
+        )
+
+    return {
+        "windows": window_rows,
+        "sample_size": int(len(rows)),
+    }
+
+
+def _chat_job_counts_with_breakdown(*, include_history: bool = False) -> Dict[str, Any]:
+    active_turn_rows = get_active_chat_jobs_snapshot()
+    running_by_platform: Dict[str, int] = {}
+    webui_running_turns = 0
+    now = time.time()
+    active_turns: List[Dict[str, Any]] = []
+
+    for row in active_turn_rows:
+        platform = normalize_platform(row.get("platform"))
+        if not platform:
+            platform = "unknown"
+        running_by_platform[platform] = int(running_by_platform.get(platform, 0)) + 1
+        if platform == "webui":
+            webui_running_turns += 1
+
+        started_at = float(row.get("started_at") or 0.0)
+        age_seconds = max(0, int(now - started_at)) if started_at > 0 else 0
+        active_turns.append(
+            {
+                "id": str(row.get("id") or "").strip(),
+                "platform": platform,
+                "platform_label": _runtime_platform_label(platform),
+                "source": str(row.get("source") or platform).strip() or platform,
+                "scope": str(row.get("scope") or "").strip(),
+                "started_at": started_at,
+                "age_seconds": age_seconds,
+            }
+        )
+
+    active_turns.sort(key=lambda row: float(row.get("started_at") or 0.0))
+    webui_jobs = int(chat_jobs.active_count())
+    surface_running_turns = max(0, int(len(active_turn_rows)) - int(webui_running_turns))
+    total = int(webui_jobs + surface_running_turns)
+
+    by_platform = [
+        {
+            "platform": platform,
+            "label": _runtime_platform_label(platform),
+            "running_turns": int(count),
+        }
+        for platform, count in running_by_platform.items()
+    ]
+    by_platform.sort(key=lambda row: (-int(row.get("running_turns") or 0), str(row.get("label") or "")))
+
+    out = {
+        "total": total,
+        "webui_jobs": webui_jobs,
+        "webui_running_turns": int(webui_running_turns),
+        "surface_running_turns": int(surface_running_turns),
+        "by_platform": by_platform,
+        "active_turns": active_turns,
+    }
+    if include_history:
+        history_rows = _load_chat_job_history_rows()
+        out["history"] = _chat_job_history_windows(history_rows)
+    return out
+
+
+def _runtime_breakdown_payload() -> Dict[str, Any]:
+    return {
+        "chat_jobs": _chat_job_counts_with_breakdown(include_history=True),
+    }
+
+
 @app.get("/api/health")
 def health() -> Dict[str, Any]:
     try:
@@ -1734,15 +2040,17 @@ def health() -> Dict[str, Any]:
 
     verbas_enabled = 0
     try:
-        registry = plugin_registry_module.get_registry_snapshot() or {}
+        registry = verba_registry_module.get_verba_registry_snapshot() or {}
         for plugin_id in registry.keys():
             try:
-                if get_plugin_enabled(str(plugin_id or "").strip()):
+                if get_verba_enabled(str(plugin_id or "").strip()):
                     verbas_enabled += 1
             except Exception:
                 continue
     except Exception:
         verbas_enabled = 0
+
+    chat_job_counts = _chat_job_counts_with_breakdown()
 
     return {
         "ok": redis_ok,
@@ -1750,7 +2058,7 @@ def health() -> Dict[str, Any]:
         "verbas_enabled": int(verbas_enabled),
         "cores_running": len([k for k in core_runtime.threads if core_runtime.is_running(k)]),
         "portals_running": len([k for k in portal_runtime.threads if portal_runtime.is_running(k)]),
-        "chat_jobs_active": chat_jobs.active_count(),
+        "chat_jobs_active": int(chat_job_counts.get("total") or 0),
         "bootstrap": {
             "restore_enabled": bool(bootstrap_state.get("restore_enabled")),
             "autostart_enabled": bool(bootstrap_state.get("autostart_enabled")),
@@ -1758,8 +2066,15 @@ def health() -> Dict[str, Any]:
             "restore_complete": bool(bootstrap_state.get("restore_complete")),
             "restore_error": str(bootstrap_state.get("restore_error") or ""),
             "restore_summary": dict(bootstrap_state.get("restore_summary") or {}),
+            "redis_migration": dict(bootstrap_state.get("redis_migration") or {}),
         },
     }
+
+
+@app.get("/api/runtime/breakdown")
+def runtime_breakdown() -> Dict[str, Any]:
+    payload = _runtime_breakdown_payload()
+    return {"ok": True, **payload}
 
 
 @app.get("/api/chat/history")
@@ -1790,6 +2105,10 @@ def chat_profile() -> Dict[str, Any]:
         "attach_max_mb_each": int(WEBUI_ATTACH_MAX_MB_EACH),
         "attach_max_mb_total": int(WEBUI_ATTACH_MAX_MB_TOTAL),
         "show_speed_stats": _show_speed_stats_enabled(default=False),
+        "popup_effect_style": _normalize_popup_effect_style(
+            redis_client.get(WEBUI_POPUP_EFFECT_STYLE_KEY),
+            default=DEFAULT_WEBUI_POPUP_EFFECT_STYLE,
+        ),
     }
 
 
@@ -1949,23 +2268,23 @@ def clear_chat() -> Dict[str, Any]:
 
 @app.get("/api/verbas")
 def list_verbas() -> Dict[str, Any]:
-    plugin_registry_module.ensure_plugins_loaded()
-    registry = plugin_registry_module.get_registry_snapshot()
+    verba_registry_module.ensure_verbas_loaded()
+    registry = verba_registry_module.get_verba_registry_snapshot()
 
     items: List[Dict[str, Any]] = []
     for plugin_id, plugin in registry.items():
         settings_category = str(getattr(plugin, "settings_category", "") or "").strip()
         required_settings = getattr(plugin, "required_settings", None)
         required_settings = required_settings if isinstance(required_settings, dict) else {}
-        current_settings = get_plugin_settings(settings_category) if settings_category else {}
+        current_settings = get_verba_settings(settings_category) if settings_category else {}
 
         items.append(
             {
                 "id": plugin_id,
-                "name": _plugin_display_name(plugin) or plugin_id,
-                "description": str(getattr(plugin, "plugin_dec", "") or getattr(plugin, "description", "") or "").strip(),
+                "name": _verba_display_name(plugin) or plugin_id,
+                "description": str(getattr(plugin, "verba_dec", "") or getattr(plugin, "description", "") or "").strip(),
                 "platforms": list(getattr(plugin, "platforms", []) or []),
-                "enabled": get_plugin_enabled(plugin_id),
+                "enabled": get_verba_enabled(plugin_id),
                 "settings_category": settings_category,
                 "settings": _setting_fields(required_settings, current_settings),
             }
@@ -1976,20 +2295,20 @@ def list_verbas() -> Dict[str, Any]:
 
 
 @app.post("/api/verbas/{plugin_id}/enabled")
-def set_verba_enabled(plugin_id: str, payload: PluginToggleRequest) -> Dict[str, Any]:
-    plugin_registry_module.ensure_plugins_loaded()
-    registry = plugin_registry_module.get_registry_snapshot()
+def set_verba_enabled_endpoint(plugin_id: str, payload: PluginToggleRequest) -> Dict[str, Any]:
+    verba_registry_module.ensure_verbas_loaded()
+    registry = verba_registry_module.get_verba_registry_snapshot()
     if plugin_id not in registry:
         raise HTTPException(status_code=404, detail=f"Unknown verba: {plugin_id}")
 
-    set_plugin_enabled(plugin_id, bool(payload.enabled))
+    set_verba_enabled_flag(plugin_id, bool(payload.enabled))
     return {"id": plugin_id, "enabled": bool(payload.enabled)}
 
 
 @app.post("/api/verbas/{plugin_id}/settings")
-def save_verba_settings(plugin_id: str, payload: SettingsUpdateRequest) -> Dict[str, Any]:
-    plugin_registry_module.ensure_plugins_loaded()
-    registry = plugin_registry_module.get_registry_snapshot()
+def save_verba_settings_endpoint(plugin_id: str, payload: SettingsUpdateRequest) -> Dict[str, Any]:
+    verba_registry_module.ensure_verbas_loaded()
+    registry = verba_registry_module.get_verba_registry_snapshot()
     plugin = registry.get(plugin_id)
     if plugin is None:
         raise HTTPException(status_code=404, detail=f"Unknown verba: {plugin_id}")
@@ -1999,7 +2318,7 @@ def save_verba_settings(plugin_id: str, payload: SettingsUpdateRequest) -> Dict[
         raise HTTPException(status_code=400, detail=f"{plugin_id} has no settings category")
 
     values = dict(payload.values or {})
-    save_plugin_settings(category, values)
+    save_verba_settings_values(category, values)
     return {"id": plugin_id, "saved": True}
 
 
@@ -2210,7 +2529,7 @@ def get_verba_shop() -> Dict[str, Any]:
 @app.post("/api/shop/verbas/repos")
 def save_verba_repos(payload: ShopReposRequest) -> Dict[str, Any]:
     rows = _normalize_repo_rows(payload.repos)
-    plugin_store_module.save_additional_shop_manifest_repos(rows)
+    verba_store_module.save_additional_shop_manifest_repos(rows)
     snapshot = _verba_shop_raw()
     return {"ok": True, "repos": snapshot["repos"]}
 
@@ -2230,11 +2549,11 @@ def install_verba(payload: ShopItemRequest) -> Dict[str, Any]:
     if not isinstance(item, dict):
         raise HTTPException(status_code=404, detail=f"Plugin not found in catalog: {plugin_id}")
 
-    ok, msg = plugin_store_module.install_plugin_from_shop_item(item)
+    ok, msg = verba_store_module.install_verba_from_shop_item(item)
     if not ok:
         raise HTTPException(status_code=400, detail=msg)
 
-    plugin_registry_module.reload_plugins()
+    verba_registry_module.reload_verbas()
     return {"ok": True, "message": msg}
 
 
@@ -2257,11 +2576,11 @@ def update_verba(payload: ShopItemRequest) -> Dict[str, Any]:
     if not isinstance(catalog_item, dict):
         raise HTTPException(status_code=400, detail=f"No catalog update source for {plugin_id}")
 
-    ok, msg = plugin_store_module.install_plugin_from_shop_item(catalog_item)
+    ok, msg = verba_store_module.install_verba_from_shop_item(catalog_item)
     if not ok:
         raise HTTPException(status_code=400, detail=msg)
 
-    plugin_registry_module.reload_plugins()
+    verba_registry_module.reload_verbas()
     return {"ok": True, "message": msg}
 
 
@@ -2280,14 +2599,14 @@ def update_all_verbas() -> Dict[str, Any]:
         catalog_item = entry.get("catalog_item")
         if not plugin_id or not isinstance(catalog_item, dict):
             continue
-        ok, msg = plugin_store_module.install_plugin_from_shop_item(catalog_item)
+        ok, msg = verba_store_module.install_verba_from_shop_item(catalog_item)
         if ok:
             updated.append(plugin_id)
         else:
             failed.append(msg)
 
     if updated:
-        plugin_registry_module.reload_plugins()
+        verba_registry_module.reload_verbas()
 
     return {
         "ok": True,
@@ -2302,26 +2621,26 @@ def remove_verba(payload: ShopRemoveRequest) -> Dict[str, Any]:
     if not plugin_id:
         raise HTTPException(status_code=400, detail="Plugin id is required.")
 
-    loaded = plugin_registry_module.get_registry_snapshot().get(plugin_id)
+    loaded = verba_registry_module.get_verba_registry_snapshot().get(plugin_id)
     category_hint = getattr(loaded, "settings_category", None) if loaded else None
 
-    ok, msg = plugin_store_module.uninstall_plugin_file(plugin_id)
+    ok, msg = verba_store_module.uninstall_verba_file(plugin_id)
     if not ok:
         raise HTTPException(status_code=400, detail=msg)
 
     try:
-        set_plugin_enabled(plugin_id, False)
+        set_verba_enabled_flag(plugin_id, False)
     except Exception:
         pass
 
     cleanup_message = ""
     if bool(payload.purge_redis):
-        ok2, msg2 = plugin_store_module.clear_plugin_redis_data(plugin_id, category_hint=category_hint)
+        ok2, msg2 = verba_store_module.clear_verba_redis_data(plugin_id, category_hint=category_hint)
         cleanup_message = msg2
         if not ok2:
             raise HTTPException(status_code=400, detail=f"Removed file, but Redis cleanup failed: {msg2}")
 
-    plugin_registry_module.reload_plugins()
+    verba_registry_module.reload_verbas()
     return {
         "ok": True,
         "message": msg,
@@ -2926,12 +3245,14 @@ def get_cerberus_metrics(
                 "platform": str(row.get("platform") or ""),
                 "scope": str(row.get("scope") or ""),
                 "planner_kind": str(row.get("planner_kind") or ""),
+                "astraeus_thanatos_kind": str(row.get("planner_kind") or ""),
                 "outcome": str(row.get("outcome") or ""),
                 "outcome_reason": str(row.get("outcome_reason") or ""),
                 "planned_tool": planned_tool_name,
                 "validation_status": str(validation.get("status") or ""),
                 "validation_reason": str(validation.get("reason") or ""),
                 "checker_action": str(row.get("checker_action") or ""),
+                "minos_action": str(row.get("checker_action") or ""),
                 "tool_result_ok": tool_result.get("ok") if isinstance(tool_result, dict) else row.get("tool_result_ok"),
                 "tool_result_summary": tool_result_summary,
                 "total_ms": int(row.get("total_ms") or 0),
@@ -2949,7 +3270,7 @@ def get_cerberus_metrics(
 
         checker_reason = str(row.get("checker_reason") or "").strip()
         if checker_reason:
-            key = f"checker:{checker_reason}"
+            key = f"minos:{checker_reason}"
             reason_counts[key] = int(reason_counts.get(key, 0)) + 1
 
         outcome_reason = str(row.get("outcome_reason") or "").strip()
@@ -3093,7 +3414,7 @@ def clear_cerberus_data(payload: CerberusDataClearRequest) -> Dict[str, Any]:
 @app.get("/api/settings")
 def get_settings() -> Dict[str, Any]:
     chat_settings = redis_client.hgetall("chat_settings") or {}
-    legacy_web_search = redis_client.hgetall("plugin_settings:Web Search") or {}
+    legacy_web_search = redis_client.hgetall("verba_settings:Web Search") or {}
     homeassistant_settings = redis_client.hgetall("homeassistant_settings") or {}
 
     vision_settings = get_shared_vision_settings(
@@ -3102,20 +3423,20 @@ def get_settings() -> Dict[str, Any]:
     )
     emoji_settings = get_core_emoji_settings() or {}
 
-    plugin_registry_module.ensure_plugins_loaded()
-    registry_snapshot = plugin_registry_module.get_registry_snapshot()
+    verba_registry_module.ensure_verbas_loaded()
+    registry_snapshot = verba_registry_module.get_verba_registry_snapshot()
     admin_plugin_options = sorted(str(plugin_id or "").strip() for plugin_id in registry_snapshot.keys() if str(plugin_id or "").strip())
     admin_only_plugins = sorted(get_admin_only_plugins(redis_client))
 
+    cerberus_llm_host = str(redis_client.get(CERBERUS_LLM_HOST_KEY) or "").strip()
+    cerberus_llm_port = str(redis_client.get(CERBERUS_LLM_PORT_KEY) or "").strip()
+    cerberus_llm_model = str(redis_client.get(CERBERUS_LLM_MODEL_KEY) or "").strip()
+
     cerberus_defaults = {
-        "cerberus_max_rounds": int(DEFAULT_MAX_ROUNDS),
-        "cerberus_max_tool_calls": int(DEFAULT_MAX_TOOL_CALLS),
+        "cerberus_llm_host": "",
+        "cerberus_llm_port": "",
+        "cerberus_llm_model": "",
         "cerberus_agent_state_ttl_seconds": int(DEFAULT_AGENT_STATE_TTL_SECONDS),
-        "cerberus_planner_max_tokens": int(DEFAULT_PLANNER_MAX_TOKENS),
-        "cerberus_checker_max_tokens": int(DEFAULT_CHECKER_MAX_TOKENS),
-        "cerberus_doer_max_tokens": int(DEFAULT_DOER_MAX_TOKENS),
-        "cerberus_tool_repair_max_tokens": int(DEFAULT_TOOL_REPAIR_MAX_TOKENS),
-        "cerberus_recovery_max_tokens": int(DEFAULT_RECOVERY_MAX_TOKENS),
         "cerberus_max_ledger_items": int(DEFAULT_MAX_LEDGER_ITEMS),
     }
 
@@ -3130,6 +3451,10 @@ def get_settings() -> Dict[str, Any]:
         "tater_personality": redis_client.get("tater:personality") or "",
         "max_store": _read_non_negative_int("tater:max_store", DEFAULT_MAX_STORE),
         "max_llm": _read_positive_int("tater:max_llm", DEFAULT_MAX_LLM),
+        "popup_effect_style": _normalize_popup_effect_style(
+            redis_client.get(WEBUI_POPUP_EFFECT_STYLE_KEY),
+            default=DEFAULT_WEBUI_POPUP_EFFECT_STYLE,
+        ),
         "web_search_google_api_key": redis_client.get("tater:web_search:google_api_key")
         or legacy_web_search.get("GOOGLE_API_KEY")
         or "",
@@ -3148,20 +3473,13 @@ def get_settings() -> Dict[str, Any]:
         "emoji_reaction_chain_cooldown_seconds": int(emoji_settings.get("reaction_chain_cooldown_seconds", 30)),
         "emoji_reply_reaction_cooldown_seconds": int(emoji_settings.get("reply_reaction_cooldown_seconds", 120)),
         "emoji_min_message_length": int(emoji_settings.get("min_message_length", 4)),
-        "cerberus_max_rounds": _read_non_negative_int(AGENT_MAX_ROUNDS_KEY, DEFAULT_MAX_ROUNDS),
-        "cerberus_max_tool_calls": _read_non_negative_int(AGENT_MAX_TOOL_CALLS_KEY, DEFAULT_MAX_TOOL_CALLS),
+        "cerberus_llm_host": cerberus_llm_host,
+        "cerberus_llm_port": cerberus_llm_port,
+        "cerberus_llm_model": cerberus_llm_model,
         "cerberus_agent_state_ttl_seconds": _read_non_negative_int(
             CERBERUS_AGENT_STATE_TTL_SECONDS_KEY,
             DEFAULT_AGENT_STATE_TTL_SECONDS,
         ),
-        "cerberus_planner_max_tokens": _read_positive_int(CERBERUS_PLANNER_MAX_TOKENS_KEY, DEFAULT_PLANNER_MAX_TOKENS),
-        "cerberus_checker_max_tokens": _read_positive_int(CERBERUS_CHECKER_MAX_TOKENS_KEY, DEFAULT_CHECKER_MAX_TOKENS),
-        "cerberus_doer_max_tokens": _read_positive_int(CERBERUS_DOER_MAX_TOKENS_KEY, DEFAULT_DOER_MAX_TOKENS),
-        "cerberus_tool_repair_max_tokens": _read_positive_int(
-            CERBERUS_TOOL_REPAIR_MAX_TOKENS_KEY,
-            DEFAULT_TOOL_REPAIR_MAX_TOKENS,
-        ),
-        "cerberus_recovery_max_tokens": _read_positive_int(CERBERUS_RECOVERY_MAX_TOKENS_KEY, DEFAULT_RECOVERY_MAX_TOKENS),
         "cerberus_max_ledger_items": _read_positive_int(CERBERUS_MAX_LEDGER_ITEMS_KEY, DEFAULT_MAX_LEDGER_ITEMS),
         "cerberus_defaults": cerberus_defaults,
         "admin_plugin_options": admin_plugin_options,
@@ -3237,6 +3555,14 @@ def update_settings(payload: AppSettingsRequest) -> Dict[str, Any]:
 
     if "max_llm" in updates:
         redis_client.set("tater:max_llm", max(1, int(updates["max_llm"])))
+
+    if "popup_effect_style" in updates:
+        raw_style = str(updates.get("popup_effect_style") or "").strip().lower()
+        if raw_style and raw_style not in WEBUI_POPUP_EFFECT_STYLE_CHOICES:
+            allowed = ", ".join(sorted(WEBUI_POPUP_EFFECT_STYLE_CHOICES))
+            raise HTTPException(status_code=400, detail=f"popup_effect_style must be one of: {allowed}")
+        normalized_style = _normalize_popup_effect_style(raw_style, default=DEFAULT_WEBUI_POPUP_EFFECT_STYLE)
+        redis_client.set(WEBUI_POPUP_EFFECT_STYLE_KEY, normalized_style)
 
     if "web_search_google_api_key" in updates:
         redis_client.set("tater:web_search:google_api_key", str(updates["web_search_google_api_key"]).strip())
@@ -3334,25 +3660,47 @@ def update_settings(payload: AppSettingsRequest) -> Dict[str, Any]:
             }
         )
 
+    current_llm_host = str(redis_client.get(CERBERUS_LLM_HOST_KEY) or "").strip()
+    current_llm_port = str(redis_client.get(CERBERUS_LLM_PORT_KEY) or "").strip()
+
+    if "cerberus_llm_host" in updates:
+        current_llm_host = str(updates.get("cerberus_llm_host") or "").strip()
+
+    if "cerberus_llm_port" in updates:
+        current_llm_port = str(updates.get("cerberus_llm_port") or "").strip()
+
+    if current_llm_host:
+        redis_client.set(CERBERUS_LLM_HOST_KEY, current_llm_host)
+    else:
+        redis_client.delete(CERBERUS_LLM_HOST_KEY)
+
+    if current_llm_port:
+        if not str(current_llm_port).isdigit():
+            raise HTTPException(status_code=400, detail="cerberus_llm_port must be an integer between 1 and 65535")
+        parsed_port = int(current_llm_port)
+        if parsed_port < 1 or parsed_port > 65535:
+            raise HTTPException(status_code=400, detail="cerberus_llm_port must be an integer between 1 and 65535")
+        current_llm_port = str(parsed_port)
+        redis_client.set(CERBERUS_LLM_PORT_KEY, current_llm_port)
+    else:
+        redis_client.delete(CERBERUS_LLM_PORT_KEY)
+    # Remove deprecated legacy key if it exists.
+    redis_client.delete("tater:cerberus:llm_url")
+
+    if "cerberus_llm_model" in updates:
+        value = str(updates.get("cerberus_llm_model") or "").strip()
+        if value:
+            redis_client.set(CERBERUS_LLM_MODEL_KEY, value)
+        else:
+            redis_client.delete(CERBERUS_LLM_MODEL_KEY)
+
     cerberus_mappings = {
-        "cerberus_max_rounds": (AGENT_MAX_ROUNDS_KEY, DEFAULT_MAX_ROUNDS, 0, None),
-        "cerberus_max_tool_calls": (AGENT_MAX_TOOL_CALLS_KEY, DEFAULT_MAX_TOOL_CALLS, 0, None),
         "cerberus_agent_state_ttl_seconds": (
             CERBERUS_AGENT_STATE_TTL_SECONDS_KEY,
             DEFAULT_AGENT_STATE_TTL_SECONDS,
             0,
             None,
         ),
-        "cerberus_planner_max_tokens": (CERBERUS_PLANNER_MAX_TOKENS_KEY, DEFAULT_PLANNER_MAX_TOKENS, 1, None),
-        "cerberus_checker_max_tokens": (CERBERUS_CHECKER_MAX_TOKENS_KEY, DEFAULT_CHECKER_MAX_TOKENS, 1, None),
-        "cerberus_doer_max_tokens": (CERBERUS_DOER_MAX_TOKENS_KEY, DEFAULT_DOER_MAX_TOKENS, 1, None),
-        "cerberus_tool_repair_max_tokens": (
-            CERBERUS_TOOL_REPAIR_MAX_TOKENS_KEY,
-            DEFAULT_TOOL_REPAIR_MAX_TOKENS,
-            1,
-            None,
-        ),
-        "cerberus_recovery_max_tokens": (CERBERUS_RECOVERY_MAX_TOKENS_KEY, DEFAULT_RECOVERY_MAX_TOKENS, 1, None),
         "cerberus_max_ledger_items": (CERBERUS_MAX_LEDGER_ITEMS_KEY, DEFAULT_MAX_LEDGER_ITEMS, 1, None),
     }
     for payload_key, (redis_key, default, min_value, max_value) in cerberus_mappings.items():

@@ -119,7 +119,7 @@ def load_default_targets(platform: str, redis_client) -> Dict[str, str]:
     if not info:
         return {}
 
-    settings = redis_client.hgetall(f"plugin_settings:{info['category']}") or {}
+    settings = redis_client.hgetall(f"verba_settings:{info['category']}") or {}
     defaults: Dict[str, str] = {}
     for target_key, setting_key in info.get("fields", {}).items():
         val = settings.get(setting_key)

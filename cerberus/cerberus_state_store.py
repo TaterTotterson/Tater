@@ -11,89 +11,12 @@ def compact_agent_state_json(
     normalize_agent_state_fn: Callable[[Optional[Dict[str, Any]], str], Dict[str, Any]],
     short_text_fn: Callable[..., str],
 ) -> str:
-    compact = normalize_agent_state_fn(state, fallback_goal=fallback_goal)
-
-    def _dump() -> str:
-        return json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
-
-    payload = _dump()
-    if len(payload) <= limit:
-        return payload
-
-    for key in ("tool_history", "facts", "plan", "open_questions", "plan_steps", "result_memory"):
-        while len(payload) > limit and isinstance(compact.get(key), list) and len(compact.get(key) or []) > 1:
-            compact[key] = (compact.get(key) or [])[1:]
-            payload = _dump()
-    if len(payload) <= limit:
-        return payload
-
-    compact["goal"] = short_text_fn(compact.get("goal"), limit=120)
-    compact["next_step"] = short_text_fn(compact.get("next_step"), limit=100)
-    for key in ("facts", "tool_history", "plan", "open_questions"):
-        lines = compact.get(key) if isinstance(compact.get(key), list) else []
-        compact[key] = [short_text_fn(line, limit=80) for line in lines[:3]]
-    result_memory = compact.get("result_memory") if isinstance(compact.get("result_memory"), list) else []
-    compact["result_memory"] = []
-    for entry in result_memory[:3]:
-        if not isinstance(entry, dict):
-            continue
-        compact_entry: Dict[str, Any] = {
-            "result_set_id": short_text_fn(entry.get("result_set_id"), limit=14),
-            "tool": short_text_fn(entry.get("tool"), limit=32),
-        }
-        for key in ("query", "request", "summary"):
-            value = short_text_fn(entry.get(key), limit=80)
-            if value:
-                compact_entry[key] = value
-        items = entry.get("items") if isinstance(entry.get("items"), list) else []
-        compact_items = []
-        for item in items[:3]:
-            if not isinstance(item, dict):
-                continue
-            compact_item: Dict[str, Any] = {
-                "item_ref": short_text_fn(item.get("item_ref"), limit=10),
-            }
-            title = short_text_fn(item.get("title"), limit=48)
-            locator = short_text_fn(item.get("locator"), limit=72)
-            preview = short_text_fn(item.get("preview"), limit=72)
-            if title:
-                compact_item["title"] = title
-            if locator:
-                compact_item["locator"] = locator
-            if preview:
-                compact_item["preview"] = preview
-            if len(compact_item) <= 1:
-                continue
-            compact_items.append(compact_item)
-        if compact_items:
-            compact_entry["items"] = compact_items
-        compact["result_memory"].append(compact_entry)
-    plan_steps = compact.get("plan_steps") if isinstance(compact.get("plan_steps"), list) else []
-    compact["plan_steps"] = []
-    for step in plan_steps[:3]:
-        if not isinstance(step, dict):
-            continue
-        compact["plan_steps"].append(
-            {
-                "id": short_text_fn(step.get("id"), limit=16),
-                "tool": short_text_fn(step.get("tool"), limit=40),
-                "nl": short_text_fn(step.get("nl"), limit=80),
-            }
-        )
-    payload = _dump()
-    if len(payload) <= limit:
-        return payload
-
-    compact["facts"] = compact.get("facts", [])[:2]
-    compact["tool_history"] = compact.get("tool_history", [])[:2]
-    compact["plan"] = compact.get("plan", [])[:2]
-    compact["open_questions"] = compact.get("open_questions", [])[:1]
-    compact["plan_steps"] = compact.get("plan_steps", [])[:1]
-    compact["result_memory"] = compact.get("result_memory", [])[:1]
-    payload = _dump()
-    if len(payload) <= limit:
-        return payload
-    return short_text_fn(payload, limit=limit)
+    del limit, short_text_fn
+    full_state = normalize_agent_state_fn(state, fallback_goal=fallback_goal)
+    try:
+        return json.dumps(full_state, ensure_ascii=False, separators=(",", ":"), default=str)
+    except Exception:
+        return "{}"
 
 
 def agent_state_prompt_message(
@@ -108,7 +31,7 @@ def agent_state_prompt_message(
         fallback_goal=fallback_goal,
         limit=prompt_max_chars,
     )
-    return "Current agent state (compact JSON):\n" + payload
+    return "Current agent state (full JSON):\n" + payload
 
 
 def agent_state_hash(

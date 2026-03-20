@@ -54,7 +54,7 @@ def action_failure(
     out: Dict[str, Any] = {
         "ok": False,
         "error": {
-            "code": (code or "plugin_error").strip(),
+            "code": (code or "verba_error").strip(),
             "message": (message or "The tool failed.").strip(),
         },
         "diagnosis": diagnosis or {},
@@ -129,10 +129,10 @@ def _sanitize_contract(result: Dict[str, Any]) -> Dict[str, Any]:
         out.setdefault("artifacts", [])
     else:
         err = out.get("error")
-        code = "plugin_error"
+        code = "verba_error"
         message = "The tool failed."
         if isinstance(err, dict):
-            code = str(err.get("code") or "plugin_error")
+            code = str(err.get("code") or "verba_error")
             message = str(err.get("message") or "The tool failed.")
         elif isinstance(err, str) and err.strip():
             message = err.strip()
@@ -146,7 +146,7 @@ def _sanitize_contract(result: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-def normalize_plugin_result(raw: Any) -> Dict[str, Any]:
+def normalize_verba_result(raw: Any) -> Dict[str, Any]:
     if isinstance(raw, dict) and "ok" in raw:
         return _sanitize_contract(raw)
 
@@ -326,7 +326,7 @@ def _is_low_information_narration(text: str) -> bool:
 
 
 def _tool_result_summary(result: Dict[str, Any]) -> str:
-    summary_hint = _trim_text(result.get("summary_for_user"), max_chars=420)
+    summary_hint = _summary_text(result.get("summary_for_user"))
     if summary_hint and not _is_low_information_narration(summary_hint):
         return summary_hint
 
@@ -407,7 +407,7 @@ def _tool_result_summary(result: Dict[str, Any]) -> str:
     for key in ("answer", "description", "summary", "text", "message"):
         value = result.get(key)
         if isinstance(value, str) and value.strip():
-            candidate = _trim_text(value, max_chars=420)
+            candidate = _summary_text(value)
             if candidate and not _is_low_information_narration(candidate):
                 return candidate
     return ""
@@ -419,7 +419,7 @@ async def narrate_result(
     llm_client: Any = None,
     platform: str = "webui",
 ) -> str:
-    result = _sanitize_contract(result) if "ok" in result else normalize_plugin_result(result)
+    result = _sanitize_contract(result) if "ok" in result else normalize_verba_result(result)
     _ = llm_client  # Intentionally unused: narration is deterministic-only under Cerberus.
 
     ascii_only = platform in {"irc", "homeassistant", "homekit", "xbmc"}

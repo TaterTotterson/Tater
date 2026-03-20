@@ -43,7 +43,7 @@ def tool_history_line(
     return f"{func}:{status}:{summary}"
 
 
-def compact_tool_result_for_doer(
+def compact_tool_result_for_thanatos(
     tool_result: Optional[Dict[str, Any]],
     *,
     short_text_fn: Callable[..., str],
@@ -80,7 +80,7 @@ def compact_tool_result_for_doer(
     return out
 
 
-async def run_doer_state_update(
+async def run_thanatos_state_update(
     *,
     llm_client: Any,
     platform: str,
@@ -90,7 +90,7 @@ async def run_doer_state_update(
     tool_result: Optional[Dict[str, Any]],
     max_tokens: Optional[int],
     normalize_agent_state_fn: Callable[[Optional[Dict[str, Any]], str], Dict[str, Any]],
-    configured_doer_max_tokens_fn: Callable[[], int],
+    configured_thanatos_max_tokens_fn: Callable[[], Optional[int]],
     coerce_text_fn: Callable[[Any], str],
     first_json_object_fn: Callable[[str], Optional[Dict[str, Any]]],
     state_add_line_fn: Callable[[List[str], str, int], List[str]],
@@ -117,10 +117,10 @@ async def run_doer_state_update(
             if isinstance((tool_call or {}).get("arguments"), dict)
             else {},
         },
-        "tool_result": compact_tool_result_for_doer(tool_result, short_text_fn=short_text_fn),
+        "tool_result": compact_tool_result_for_thanatos(tool_result, short_text_fn=short_text_fn),
     }
     prompt = (
-        "You are the Doer head in a Planner/Doer/Critic loop.\n"
+        "You are Thanatos, the Reaper head in the Astraeus/Thanatos/Minos loop.\n"
         "Update only the agent state.\n"
         "Return exactly one compact JSON object with keys:\n"
         "goal, plan, facts, open_questions, next_step, tool_history\n"
@@ -144,15 +144,16 @@ async def run_doer_state_update(
     )
     merged: Dict[str, Any] = dict(previous)
     try:
-        token_limit = int(max_tokens) if max_tokens is not None else configured_doer_max_tokens_fn()
-        response = await llm_client.chat(
-            messages=[
+        token_limit = int(max_tokens) if max_tokens is not None else configured_thanatos_max_tokens_fn()
+        chat_kwargs: Dict[str, Any] = {
+            "messages": [
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ],
-            max_tokens=max(1, token_limit),
-            temperature=0.1,
-        )
+            "temperature": 0.1,
+            "max_tokens": (max(1, int(token_limit)) if token_limit is not None else None),
+        }
+        response = await llm_client.chat(**chat_kwargs)
         text = coerce_text_fn((response.get("message", {}) or {}).get("content", "")).strip()
         patch_state = first_json_object_fn(text)
         if isinstance(patch_state, dict):
@@ -210,6 +211,7 @@ async def run_doer_state_update(
         merged["open_questions"] = []
 
     return normalize_agent_state_fn(merged, fallback_goal=previous.get("goal") or user_request)
+
 
 
 def state_first_open_question(
