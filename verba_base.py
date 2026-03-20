@@ -1,12 +1,12 @@
-class ToolPlugin:
+class ToolVerba:
     name = ""
-    plugin_name = ""
+    verba_name = ""
     pretty_name = ""
     version = "1.0.0"
     usage = ""
     platforms = []
     notifier = False
-    plugin_dec = ""
+    verba_dec = ""
     description = ""
     when_to_use = ""
     how_to_use = ""

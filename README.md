@@ -9,7 +9,19 @@ Main website: [taterassistant.com](https://taterassistant.com)
 ---
 
 ## Cerberus
-Tater runs on Cerberus — a closed-loop Planner → Doer → Checker architecture designed for reliable tool execution.
+Tater is powered by the Cerberus Core, a three-headed execution system:
+
+- Astraeus, the Seer, determines the path ahead
+- Thanatos, the executor, carries out the work
+- Minos, the Arbiter, judges the outcome
+
+Cerberus operates in a loop: foresight -> execution -> judgment -> repeat -> respond.
+
+Chat path:
+
+- Astraeus speaks with awareness
+- Thanatos stands down
+- Minos is not invoked unless execution occurs
 
 ---
 

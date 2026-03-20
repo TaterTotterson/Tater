@@ -1,9 +1,9 @@
-# plugins/example_plugin.py
+# verba/example_plugin.py
 import asyncio
 import logging
 from dotenv import load_dotenv
 
-from plugin_base import ToolPlugin
+from verba_base import ToolVerba
 from helpers import redis_client, get_tater_name
 
 load_dotenv()
@@ -11,7 +11,7 @@ logger = logging.getLogger("example_plugin")
 logger.setLevel(logging.INFO)
 
 
-class ExamplePlugin(ToolPlugin):
+class ExamplePlugin(ToolVerba):
     """
     Short description of what this plugin does.
 
@@ -61,7 +61,7 @@ class ExamplePlugin(ToolPlugin):
 
     def _load_settings(self):
         """Helper to load plugin settings from Redis."""
-        return redis_client.hgetall(f"plugin_settings:{self.settings_category}")
+        return redis_client.hgetall(f"verba_settings:{self.settings_category}")
 
     def _do_example_work(self, input_text: str) -> str:
         """
@@ -174,4 +174,4 @@ class ExamplePlugin(ToolPlugin):
         return (answer or "No answer available.").strip()
 
 
-plugin = ExamplePlugin()
+verba = ExamplePlugin()

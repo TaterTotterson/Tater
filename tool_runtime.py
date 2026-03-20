@@ -1,13 +1,13 @@
 import inspect
 from typing import Any, Callable, Dict, Optional
 
-from plugin_base import ToolPlugin
-from plugin_kernel import (
-    get_plugin_help,
+from verba_base import ToolVerba
+from verba_kernel import (
+    get_verba_help,
     normalize_platform,
-    plugin_display_name,
-    plugin_supports_platform,
-    infer_needs_from_plugin,
+    verba_display_name,
+    verba_supports_platform,
+    infer_needs_from_verba,
 )
 from kernel_tools import (
     read_file,
@@ -33,7 +33,7 @@ from kernel_tools import (
     attach_file,
     send_message,
 )
-from plugin_result import action_failure, normalize_plugin_result
+from verba_result import action_failure, normalize_verba_result
 from helpers import redis_client as default_redis
 from memory_core_store import (
     forget_fact_keys,
@@ -49,7 +49,7 @@ from memory_core_store import (
 
 META_TOOLS = {
     "list_tools",
-    "get_plugin_help",
+    "get_verba_help",
     "read_file",
     "search_web",
     "search_files",
@@ -74,8 +74,8 @@ META_TOOLS = {
 }
 
 _KERNEL_TOOL_PURPOSE_HINTS = {
-    "list_tools": "list kernel and enabled plugin tools for current platform",
-    "get_plugin_help": "show plugin usage example and guidance",
+    "list_tools": "list kernel and enabled verba tools for current platform",
+    "get_verba_help": "show verba usage example and guidance",
     "read_file": "read local file contents",
     "search_web": "web search for current information",
     "search_files": "search text across local files",
@@ -172,12 +172,12 @@ _MEMORY_SCOPE_ROOM_HINTS = (
 )
 
 
-def _plugin_enabled_from_settings(plugin_id: str) -> bool:
-    pid = str(plugin_id or "").strip()
-    if not pid:
+def _verba_enabled_from_settings(verba_id: str) -> bool:
+    vid = str(verba_id or "").strip()
+    if not vid:
         return False
     try:
-        raw = default_redis.hget("plugin_enabled", pid) if default_redis is not None else None
+        raw = default_redis.hget("verba_enabled", vid) if default_redis is not None else None
     except Exception:
         raw = None
     value = str(raw or "").strip().lower()
@@ -195,7 +195,7 @@ def _effective_enabled_predicate(
 ) -> Callable[[str], bool]:
     if callable(enabled_predicate):
         return enabled_predicate
-    return _plugin_enabled_from_settings
+    return _verba_enabled_from_settings
 
 
 def _memory_core_key_list(args: Dict[str, Any]) -> list[str]:
@@ -534,21 +534,25 @@ def list_tools(
             kernel_tools.append(token)
 
     enabled_check = _effective_enabled_predicate(enabled_predicate)
-    plugin_tools: list[Dict[str, str]] = []
-    for plugin_id, plugin in sorted((registry or {}).items(), key=lambda item: str(item[0] or "").lower()):
-        pid = str(plugin_id or "").strip()
-        if not pid or plugin is None:
+    verba_tools: list[Dict[str, str]] = []
+    for verba_id, verba in sorted((registry or {}).items(), key=lambda item: str(item[0] or "").lower()):
+        vid = str(verba_id or "").strip()
+        if not vid or verba is None:
             continue
-        if not enabled_check(pid):
+        if not enabled_check(vid):
             continue
-        if not plugin_supports_platform(plugin, normalized_platform):
+        if not verba_supports_platform(verba, normalized_platform):
             continue
-        description = str(getattr(plugin, "description", "") or getattr(plugin, "plugin_dec", "") or "").strip()
+        description = str(
+            getattr(verba, "description", "")
+            or getattr(verba, "verba_dec", "")
+            or ""
+        ).strip()
         if len(description) > 260:
             description = description[:257].rstrip() + "..."
-        plugin_tools.append(
+        verba_tools.append(
             {
-                "id": pid,
+                "id": vid,
                 "description": description,
             }
         )
@@ -558,8 +562,8 @@ def list_tools(
         "ok": True,
         "platform": normalized_platform,
         "kernel_tools": kernel_tools,
-        "plugin_tools": plugin_tools,
-        "summary_for_user": f"Found {len(kernel_tools)} kernel tools and {len(plugin_tools)} enabled plugin tools on {normalized_platform}.",
+        "verba_tools": verba_tools,
+        "summary_for_user": f"Found {len(kernel_tools)} kernel tools and {len(verba_tools)} enabled verba tools on {normalized_platform}.",
     }
 
 
@@ -579,10 +583,10 @@ def run_meta_tool(
             enabled_predicate=enabled_predicate,
         )
 
-    if func == "get_plugin_help":
-        plugin_id = str(args.get("plugin_id") or "").strip()
-        return get_plugin_help(
-            plugin_id=plugin_id,
+    if func == "get_verba_help":
+        verba_id = str(args.get("verba_id") or "").strip()
+        return get_verba_help(
+            verba_id=verba_id,
             platform=args.get("platform") or platform,
             registry=registry,
         )
@@ -860,7 +864,7 @@ def unsupported_platform_result(plugin: Any, platform: str) -> Dict[str, Any]:
         ]
     return action_failure(
         code="unsupported_platform",
-        message=f"`{plugin_display_name(plugin)}` is not available on {platform}.",
+        message=f"`{verba_display_name(plugin)}` is not available on {platform}.",
         needs=[],
         available_on=available_on,
         say_hint="Explain that this tool is unavailable on the current platform and list where it works.",
@@ -930,7 +934,7 @@ def _needs_request_arg(needs: Any) -> bool:
 
 def _autofill_request_arg(plugin: Any, args: Dict[str, Any], context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     try:
-        needs = infer_needs_from_plugin(plugin)
+        needs = infer_needs_from_verba(plugin)
     except Exception:
         needs = []
 
@@ -1007,7 +1011,7 @@ def _plugin_has_handler(plugin: Any, handler_name: str) -> bool:
     method = getattr(plugin.__class__, handler_name, None)
     if not callable(method):
         return False
-    base = getattr(ToolPlugin, handler_name, None)
+    base = getattr(ToolVerba, handler_name, None)
     if base is None:
         return True
     return method is not base
@@ -1043,7 +1047,7 @@ async def execute_plugin_call(
     if not enabled_check(func):
         return {
             "plugin_id": func,
-            "plugin_name": plugin_display_name(plugin),
+            "plugin_name": verba_display_name(plugin),
             "result": action_failure(
                 code="plugin_disabled",
                 message=f"Plugin `{func}` is currently disabled.",
@@ -1052,10 +1056,10 @@ async def execute_plugin_call(
             "raw": None,
         }
 
-    if not plugin_supports_platform(plugin, platform):
+    if not verba_supports_platform(plugin, platform):
         return {
             "plugin_id": func,
-            "plugin_name": plugin_display_name(plugin),
+            "plugin_name": verba_display_name(plugin),
             "result": unsupported_platform_result(plugin, platform),
             "raw": None,
         }
@@ -1066,10 +1070,10 @@ async def execute_plugin_call(
         display_handlers = ", ".join(handler_candidates) if handler_candidates else f"handle_{platform}"
         return {
             "plugin_id": func,
-            "plugin_name": plugin_display_name(plugin),
+            "plugin_name": verba_display_name(plugin),
             "result": action_failure(
                 code="unsupported_platform",
-                message=f"`{plugin_display_name(plugin)}` does not expose {display_handlers}.",
+                message=f"`{verba_display_name(plugin)}` does not expose {display_handlers}.",
                 available_on=list(getattr(plugin, "platforms", []) or []),
                 say_hint="Explain this tool cannot run on the current platform and list supported platforms.",
             ),
@@ -1087,10 +1091,10 @@ async def execute_plugin_call(
     except Exception as e:
         return {
             "plugin_id": func,
-            "plugin_name": plugin_display_name(plugin),
+            "plugin_name": verba_display_name(plugin),
             "result": action_failure(
                 code="plugin_exception",
-                message=f"{plugin_display_name(plugin)} failed: {e}",
+                message=f"{verba_display_name(plugin)} failed: {e}",
                 say_hint="Explain that execution failed and ask whether to retry after checking settings.",
             ),
             "raw": None,
@@ -1098,7 +1102,7 @@ async def execute_plugin_call(
 
     return {
         "plugin_id": func,
-        "plugin_name": plugin_display_name(plugin),
-        "result": normalize_plugin_result(raw),
+        "plugin_name": verba_display_name(plugin),
+        "result": normalize_verba_result(raw),
         "raw": raw,
     }

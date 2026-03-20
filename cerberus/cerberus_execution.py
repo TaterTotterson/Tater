@@ -34,7 +34,7 @@ async def _dispatch_wait_callback(
             return
 
 
-async def normalize_tool_result_for_checker(
+async def normalize_tool_result_for_minos(
     *,
     result_payload: Any,
     llm_client: Any,
@@ -107,7 +107,7 @@ async def execute_tool_call(
     canonical_tool_name_fn: Callable[[str], str],
     attach_origin_fn: Callable[..., Dict[str, Any]],
     normalize_plugin_result_fn: Callable[[Any], Dict[str, Any]],
-    normalize_tool_result_for_checker_fn: Callable[..., Any],
+    normalize_tool_result_for_minos_fn: Callable[..., Any],
     action_failure_fn: Callable[..., Dict[str, Any]],
     plugin_display_name_fn: Callable[[Any], str],
     expand_plugin_platforms_fn: Callable[[Any], List[str]],
@@ -132,12 +132,12 @@ async def execute_tool_call(
         guard_result = admin_guard(func)
         if guard_result:
             payload = normalize_plugin_result_fn(guard_result)
-            checker_result = await normalize_tool_result_for_checker_fn(
+            minos_result = await normalize_tool_result_for_minos_fn(
                 result_payload=payload,
                 llm_client=llm_client,
                 platform=platform,
             )
-            return {"payload": payload, "checker_result": checker_result}
+            return {"payload": payload, "minos_result": minos_result, "checker_result": minos_result}
 
     await _dispatch_wait_callback(
         wait_callback,
@@ -198,14 +198,14 @@ async def execute_tool_call(
             origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
         )
         normalize_source = payload
-        if func == "get_plugin_help" and isinstance(payload, dict) and "ok" not in payload:
+        if func == "get_verba_help" and isinstance(payload, dict) and "ok" not in payload:
             normalize_source = dict(payload)
             normalize_source["ok"] = not bool(payload.get("error"))
             if not str(normalize_source.get("summary_for_user") or "").strip():
-                plugin_id = str(normalize_source.get("plugin_id") or "").strip()
-                if plugin_id:
+                verba_id = str(normalize_source.get("verba_id") or "").strip()
+                if verba_id:
                     normalize_source["summary_for_user"] = (
-                        f"Loaded plugin help for {plugin_id}. Use usage_example for exact call shape."
+                        f"Loaded verba help for {verba_id}. Use usage_example for exact call shape."
                     )
         normalized_payload = normalize_plugin_result_fn(normalize_source)
     else:
@@ -229,9 +229,30 @@ async def execute_tool_call(
             )
             normalized_payload = normalize_plugin_result_fn(exec_result.get("result"))
 
-    checker_result = await normalize_tool_result_for_checker_fn(
+    minos_result = await normalize_tool_result_for_minos_fn(
         result_payload=normalized_payload,
         llm_client=llm_client,
         platform=platform,
     )
-    return {"payload": normalized_payload, "checker_result": checker_result}
+    return {"payload": normalized_payload, "minos_result": minos_result, "checker_result": minos_result}
+
+
+async def normalize_tool_result_for_checker(
+    *,
+    result_payload: Any,
+    llm_client: Any,
+    platform: str,
+    normalize_plugin_result_fn: Callable[[Any], Dict[str, Any]],
+    narrate_result_fn: Callable[..., Any],
+    result_for_llm_fn: Callable[[Dict[str, Any]], Dict[str, Any]],
+    short_text_fn: Callable[..., str],
+) -> Dict[str, Any]:
+    return await normalize_tool_result_for_minos(
+        result_payload=result_payload,
+        llm_client=llm_client,
+        platform=platform,
+        normalize_plugin_result_fn=normalize_plugin_result_fn,
+        narrate_result_fn=narrate_result_fn,
+        result_for_llm_fn=result_for_llm_fn,
+        short_text_fn=short_text_fn,
+    )

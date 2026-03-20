@@ -30,6 +30,16 @@ const state = {
   view: "chat",
   sessionId: safeStorageGet("tater_tateros_session_id", "") || createSessionId(),
   coreTopTab: safeStorageGet("tater_tateros_core_tab", "") || "manage",
+  sidebarCollapsed: String(safeStorageGet("tater_tateros_sidebar_collapsed", "false")).trim().toLowerCase() === "true",
+  sidebarCollapseTimer: 0,
+  runtimeBreakdownPollTimer: 0,
+  runtimeSettingsSaveHandler: null,
+  runtimeSettingsCatalog: {
+    verbas: {},
+    portals: {},
+    cores: {},
+  },
+  popupEffectStyle: String(safeStorageGet("tater_tateros_popup_effect_style", "flame")).trim().toLowerCase() || "flame",
   sending: false,
   activeChatJobId: "",
   chatEventSource: null,
@@ -82,6 +92,163 @@ const VIEW_META = {
   settings: { title: "Settings", subtitle: "Global WebUI and Tater runtime configuration." },
 };
 
+const POPUP_EFFECT_STYLE_CHOICES = ["disabled", "flame", "dust", "glitch", "portal", "melt"];
+const POPUP_EFFECT_CLOSE_MS = {
+  disabled: 120,
+  flame: 280,
+  dust: 320,
+  glitch: 260,
+  portal: 300,
+  melt: 300,
+};
+const SIDEBAR_EFFECT_MS = {
+  disabled: { collapse: 120, expand: 140 },
+  flame: { collapse: 460, expand: 480 },
+  dust: { collapse: 500, expand: 520 },
+  glitch: { collapse: 340, expand: 360 },
+  portal: { collapse: 500, expand: 520 },
+  melt: { collapse: 480, expand: 500 },
+};
+const SIDEBAR_EFFECT_LABELS = {
+  disabled: { collapse: "Closing...", expand: "Opening..." },
+  flame: { collapse: "Burning...", expand: "Igniting..." },
+  dust: { collapse: "Crumbling...", expand: "Gathering..." },
+  glitch: { collapse: "Glitching...", expand: "Re-syncing..." },
+  portal: { collapse: "Warping...", expand: "Returning..." },
+  melt: { collapse: "Melting...", expand: "Reforming..." },
+};
+const SIDEBAR_SYMBOLS = {
+  menu: "☰",
+  hide: "✕",
+  busy: "⋯",
+};
+
+function normalizePopupEffectStyle(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (POPUP_EFFECT_STYLE_CHOICES.includes(normalized)) {
+    return normalized;
+  }
+  return "flame";
+}
+
+function applyPopupEffectStyle(value) {
+  const normalized = normalizePopupEffectStyle(value);
+  state.popupEffectStyle = normalized;
+  safeStorageSet("tater_tateros_popup_effect_style", normalized);
+  if (document.body) {
+    document.body.setAttribute("data-popup-effect", normalized);
+  }
+  applySidebarState();
+  return normalized;
+}
+
+function getPopupEffectCloseMs(style = state.popupEffectStyle) {
+  const normalized = normalizePopupEffectStyle(style);
+  const mapped = Number(POPUP_EFFECT_CLOSE_MS[normalized]);
+  return Number.isFinite(mapped) && mapped > 0 ? mapped : 280;
+}
+
+function getSidebarEffectMs(direction = "collapse", style = state.popupEffectStyle) {
+  const normalized = normalizePopupEffectStyle(style);
+  const profile = SIDEBAR_EFFECT_MS[normalized] || SIDEBAR_EFFECT_MS.flame;
+  const key = direction === "expand" ? "expand" : "collapse";
+  const fallback = key === "expand" ? 480 : 460;
+  const mapped = Number(profile?.[key]);
+  return Number.isFinite(mapped) && mapped > 0 ? mapped : fallback;
+}
+
+function getSidebarEffectLabel(direction = "collapse", style = state.popupEffectStyle) {
+  const normalized = normalizePopupEffectStyle(style);
+  const profile = SIDEBAR_EFFECT_LABELS[normalized] || SIDEBAR_EFFECT_LABELS.flame;
+  return direction === "expand" ? profile.expand : profile.collapse;
+}
+
+applyPopupEffectStyle(state.popupEffectStyle);
+
+function applySidebarState() {
+  const shell = document.getElementById("app-shell");
+  const collapseBtn = document.getElementById("sidebar-collapse-btn");
+  const expandBtn = document.getElementById("sidebar-expand-btn");
+  if (!shell) {
+    return;
+  }
+  const isCollapsing = shell.classList.contains("sidebar-collapsing");
+  const isExpanding = shell.classList.contains("sidebar-expanding");
+  const isAnimating = isCollapsing || isExpanding;
+  shell.classList.toggle("sidebar-collapsed", Boolean(state.sidebarCollapsed));
+  if (collapseBtn) {
+    collapseBtn.disabled = isAnimating;
+    collapseBtn.setAttribute("aria-label", state.sidebarCollapsed ? "Show menu" : "Hide menu");
+    collapseBtn.title = state.sidebarCollapsed ? "Show menu" : "Hide menu";
+    const collapseLabel = getSidebarEffectLabel("collapse");
+    const expandLabel = getSidebarEffectLabel("expand");
+    collapseBtn.textContent = isCollapsing || isExpanding ? SIDEBAR_SYMBOLS.busy : state.sidebarCollapsed ? SIDEBAR_SYMBOLS.menu : SIDEBAR_SYMBOLS.hide;
+    collapseBtn.dataset.statusText = isCollapsing ? collapseLabel : isExpanding ? expandLabel : "";
+  }
+  if (expandBtn) {
+    expandBtn.disabled = isAnimating;
+    expandBtn.setAttribute("aria-label", state.sidebarCollapsed ? "Show menu" : "Hide menu");
+    expandBtn.title = state.sidebarCollapsed ? "Show menu" : "Hide menu";
+    expandBtn.textContent = isAnimating ? SIDEBAR_SYMBOLS.busy : SIDEBAR_SYMBOLS.menu;
+  }
+}
+
+function setSidebarCollapsed(nextValue) {
+  const shell = document.getElementById("app-shell");
+  const nextCollapsed = Boolean(nextValue);
+  const isDesktop = window.matchMedia ? window.matchMedia("(min-width: 981px)").matches : window.innerWidth > 980;
+
+  if (state.sidebarCollapseTimer) {
+    window.clearTimeout(state.sidebarCollapseTimer);
+    state.sidebarCollapseTimer = 0;
+  }
+
+  if (!shell) {
+    state.sidebarCollapsed = nextCollapsed;
+    safeStorageSet("tater_tateros_sidebar_collapsed", state.sidebarCollapsed ? "true" : "false");
+    applySidebarState();
+    return;
+  }
+
+  if (nextCollapsed && !state.sidebarCollapsed && isDesktop) {
+    const collapseMs = getSidebarEffectMs("collapse");
+    shell.classList.remove("sidebar-expanding");
+    shell.classList.remove("sidebar-collapsed");
+    shell.classList.add("sidebar-collapsing");
+    applySidebarState();
+    state.sidebarCollapseTimer = window.setTimeout(() => {
+      shell.classList.remove("sidebar-collapsing");
+      state.sidebarCollapsed = true;
+      safeStorageSet("tater_tateros_sidebar_collapsed", "true");
+      state.sidebarCollapseTimer = 0;
+      applySidebarState();
+    }, collapseMs);
+    return;
+  }
+
+  if (!nextCollapsed && state.sidebarCollapsed && isDesktop) {
+    const expandMs = getSidebarEffectMs("expand");
+    shell.classList.remove("sidebar-collapsing");
+    shell.classList.remove("sidebar-collapsed");
+    shell.classList.add("sidebar-expanding");
+    state.sidebarCollapsed = false;
+    safeStorageSet("tater_tateros_sidebar_collapsed", "false");
+    applySidebarState();
+    state.sidebarCollapseTimer = window.setTimeout(() => {
+      shell.classList.remove("sidebar-expanding");
+      state.sidebarCollapseTimer = 0;
+      applySidebarState();
+    }, expandMs);
+    return;
+  }
+
+  shell.classList.remove("sidebar-collapsing");
+  shell.classList.remove("sidebar-expanding");
+  state.sidebarCollapsed = nextCollapsed;
+  safeStorageSet("tater_tateros_sidebar_collapsed", state.sidebarCollapsed ? "true" : "false");
+  applySidebarState();
+}
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -115,9 +282,10 @@ function showToast(message, type = "success", timeoutMs = 2600) {
     }
     closed = true;
     item.classList.remove("show");
+    item.classList.add("flame-out");
     window.setTimeout(() => {
       item.remove();
-    }, 180);
+    }, getPopupEffectCloseMs());
   };
 
   const ttl = Math.max(1200, Number(timeoutMs) || 2600);
@@ -126,6 +294,206 @@ function showToast(message, type = "success", timeoutMs = 2600) {
     window.clearTimeout(timer);
     closeToast();
   });
+}
+
+function waitMs(ms) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, Math.max(0, Number(ms) || 0));
+  });
+}
+
+function syncPopupBodyScrollLock() {
+  const hasVisibleModal = Boolean(document.querySelector(".cerb-modal.active, .cerb-modal.closing"));
+  if (document.body) {
+    document.body.classList.toggle("modal-open", hasVisibleModal);
+  }
+}
+
+function openPopupModal(modal) {
+  if (!modal) {
+    return;
+  }
+  const existingTimer = Number(modal.dataset.closeTimer || "0");
+  if (existingTimer) {
+    window.clearTimeout(existingTimer);
+    modal.dataset.closeTimer = "0";
+  }
+  modal.classList.remove("closing");
+  modal.classList.add("active");
+  modal.setAttribute("aria-hidden", "false");
+  syncPopupBodyScrollLock();
+}
+
+function closePopupModal(modal) {
+  if (!modal) {
+    return;
+  }
+  const existingTimer = Number(modal.dataset.closeTimer || "0");
+  if (existingTimer) {
+    window.clearTimeout(existingTimer);
+    modal.dataset.closeTimer = "0";
+  }
+  if (!modal.classList.contains("active") && !modal.classList.contains("closing")) {
+    modal.setAttribute("aria-hidden", "true");
+    return;
+  }
+  modal.classList.remove("active");
+  modal.classList.add("closing");
+  modal.setAttribute("aria-hidden", "true");
+  const timer = window.setTimeout(() => {
+    modal.classList.remove("closing");
+    modal.dataset.closeTimer = "0";
+    syncPopupBodyScrollLock();
+  }, getPopupEffectCloseMs());
+  modal.dataset.closeTimer = String(timer);
+  syncPopupBodyScrollLock();
+}
+
+function ensureActionProgressModal() {
+  let modal = document.getElementById("action-progress-modal");
+  if (modal) {
+    return modal;
+  }
+
+  document.body.insertAdjacentHTML(
+    "beforeend",
+    `
+      <div id="action-progress-modal" class="cerb-modal" aria-hidden="true">
+        <div class="cerb-modal-dialog card action-progress-dialog" role="dialog" aria-modal="true" aria-label="Action Progress">
+          <div class="card-head">
+            <h3 id="action-progress-title" class="card-title">Working...</h3>
+            <button type="button" class="inline-btn" id="action-progress-close">Close</button>
+          </div>
+          <div id="action-progress-detail" class="small"></div>
+          <div class="action-progress-track" aria-hidden="true">
+            <div id="action-progress-fill" class="action-progress-fill"></div>
+          </div>
+          <div id="action-progress-status" class="small action-progress-status">Starting...</div>
+        </div>
+      </div>
+    `
+  );
+
+  modal = document.getElementById("action-progress-modal");
+  const closeBtn = document.getElementById("action-progress-close");
+  const closeModal = () => {
+    closePopupModal(modal);
+  };
+
+  closeBtn?.addEventListener("click", () => {
+    if (closeBtn.disabled) {
+      return;
+    }
+    closeModal();
+  });
+  modal.addEventListener("click", (event) => {
+    if (event.target === modal && !closeBtn?.disabled) {
+      closeModal();
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && modal.classList.contains("active") && !closeBtn?.disabled) {
+      closeModal();
+    }
+  });
+  return modal;
+}
+
+function openActionProgressModal(title, detail = "") {
+  const modal = ensureActionProgressModal();
+  const titleEl = document.getElementById("action-progress-title");
+  const detailEl = document.getElementById("action-progress-detail");
+  const fillEl = document.getElementById("action-progress-fill");
+  const statusEl = document.getElementById("action-progress-status");
+  const closeBtn = document.getElementById("action-progress-close");
+
+  if (titleEl) {
+    titleEl.textContent = String(title || "Working...").trim() || "Working...";
+  }
+  if (detailEl) {
+    detailEl.textContent = String(detail || "").trim();
+  }
+  if (fillEl) {
+    fillEl.style.width = "8%";
+    fillEl.classList.remove("success", "error");
+  }
+  if (statusEl) {
+    statusEl.textContent = "Starting...";
+    statusEl.classList.remove("success", "error");
+  }
+  if (closeBtn) {
+    closeBtn.disabled = true;
+    closeBtn.textContent = "Working...";
+  }
+  openPopupModal(modal);
+  return modal;
+}
+
+function setActionProgress(percent, statusText, tone = "running") {
+  const safePercent = Math.max(0, Math.min(100, Number(percent) || 0));
+  const fillEl = document.getElementById("action-progress-fill");
+  const statusEl = document.getElementById("action-progress-status");
+  if (fillEl) {
+    fillEl.style.width = `${safePercent}%`;
+    fillEl.classList.toggle("success", tone === "success");
+    fillEl.classList.toggle("error", tone === "error");
+  }
+  if (statusEl) {
+    statusEl.textContent = String(statusText || "").trim() || "Working...";
+    statusEl.classList.toggle("success", tone === "success");
+    statusEl.classList.toggle("error", tone === "error");
+  }
+}
+
+function finishActionProgress(tone = "success", statusText = "Completed.") {
+  const closeBtn = document.getElementById("action-progress-close");
+  if (closeBtn) {
+    closeBtn.disabled = false;
+    closeBtn.textContent = "Close";
+  }
+  setActionProgress(100, statusText, tone);
+}
+
+function closeActionProgressModal() {
+  const modal = document.getElementById("action-progress-modal");
+  if (!modal) {
+    return;
+  }
+  closePopupModal(modal);
+}
+
+async function runActionWithProgress(meta, actionFn) {
+  const title = String(meta?.title || "Working...").trim() || "Working...";
+  const detail = String(meta?.detail || "").trim();
+  const workingText = String(meta?.workingText || "Working...").trim() || "Working...";
+  const successText = String(meta?.successText || "Completed.").trim() || "Completed.";
+  const errorPrefix = String(meta?.errorPrefix || "Action failed").trim() || "Action failed";
+
+  openActionProgressModal(title, detail);
+  let progress = 8;
+  setActionProgress(progress, workingText, "running");
+
+  const timer = window.setInterval(() => {
+    if (progress >= 92) {
+      return;
+    }
+    const delta = Math.max(1, Math.round((95 - progress) * 0.12));
+    progress = Math.min(92, progress + delta);
+    setActionProgress(progress, workingText, "running");
+  }, 170);
+
+  try {
+    const result = await actionFn();
+    window.clearInterval(timer);
+    finishActionProgress("success", successText);
+    await waitMs(520);
+    closeActionProgressModal();
+    return result;
+  } catch (error) {
+    window.clearInterval(timer);
+    finishActionProgress("error", `${errorPrefix}: ${error.message}`);
+    throw error;
+  }
 }
 
 async function api(path, options = {}) {
@@ -363,6 +731,183 @@ function collectFormValues(formElement) {
   return values;
 }
 
+function _normalizeRuntimeSettingsKind(kind) {
+  const token = String(kind || "").trim().toLowerCase();
+  if (token === "verbas" || token === "portals" || token === "cores") {
+    return token;
+  }
+  return "";
+}
+
+function resetRuntimeSettingsCatalog(kind) {
+  const token = _normalizeRuntimeSettingsKind(kind);
+  if (!token) {
+    return;
+  }
+  state.runtimeSettingsCatalog[token] = {};
+}
+
+function registerRuntimeSettings(kind, key, payload) {
+  const token = _normalizeRuntimeSettingsKind(kind);
+  const entryKey = String(key || "").trim();
+  if (!token || !entryKey || !payload || typeof payload !== "object") {
+    return;
+  }
+  state.runtimeSettingsCatalog[token][entryKey] = {
+    key: entryKey,
+    label: String(payload.label || entryKey).trim() || entryKey,
+    kind: token,
+    endpoint: String(payload.endpoint || "").trim(),
+    settings: Array.isArray(payload.settings) ? payload.settings : [],
+  };
+}
+
+function getRuntimeSettingsEntry(kind, key) {
+  const token = _normalizeRuntimeSettingsKind(kind);
+  const entryKey = String(key || "").trim();
+  if (!token || !entryKey) {
+    return null;
+  }
+  const group = state.runtimeSettingsCatalog[token];
+  if (!group || typeof group !== "object") {
+    return null;
+  }
+  return group[entryKey] || null;
+}
+
+function ensureRuntimeSettingsModal() {
+  let modal = document.getElementById("runtime-settings-modal");
+  if (modal) {
+    return modal;
+  }
+
+  document.body.insertAdjacentHTML(
+    "beforeend",
+    `
+      <div id="runtime-settings-modal" class="cerb-modal" aria-hidden="true">
+        <div class="cerb-modal-dialog card runtime-settings-dialog" role="dialog" aria-modal="true" aria-label="Runtime Settings">
+          <div class="card-head">
+            <h3 id="runtime-settings-title" class="card-title">Settings</h3>
+            <div class="inline-row">
+              <button type="button" class="inline-btn" id="runtime-settings-close">Close</button>
+            </div>
+          </div>
+          <div id="runtime-settings-meta" class="small"></div>
+          <form id="runtime-settings-form" class="form-grid runtime-settings-form">
+            <div id="runtime-settings-fields" class="form-grid runtime-settings-fields"></div>
+            <div class="inline-row">
+              <button type="submit" id="runtime-settings-save" class="action-btn">Save Settings</button>
+            </div>
+          </form>
+          <div id="runtime-settings-status" class="small"></div>
+        </div>
+      </div>
+    `
+  );
+
+  modal = document.getElementById("runtime-settings-modal");
+  const form = document.getElementById("runtime-settings-form");
+  const closeBtn = document.getElementById("runtime-settings-close");
+  const saveBtn = document.getElementById("runtime-settings-save");
+  const statusEl = document.getElementById("runtime-settings-status");
+
+  const closeModal = () => {
+    state.runtimeSettingsSaveHandler = null;
+    closePopupModal(modal);
+  };
+
+  closeBtn?.addEventListener("click", closeModal);
+  modal.addEventListener("click", (event) => {
+    if (event.target === modal) {
+      closeModal();
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && modal.classList.contains("active")) {
+      closeModal();
+    }
+  });
+  form?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (typeof state.runtimeSettingsSaveHandler !== "function") {
+      return;
+    }
+    const values = collectFormValues(form);
+    if (statusEl) {
+      statusEl.textContent = "Saving...";
+    }
+    if (saveBtn) {
+      saveBtn.disabled = true;
+    }
+    if (closeBtn) {
+      closeBtn.disabled = true;
+    }
+    try {
+      const result = await state.runtimeSettingsSaveHandler(values);
+      const successText = String(result?.message || "Settings saved.").trim() || "Settings saved.";
+      if (statusEl) {
+        statusEl.textContent = successText;
+      }
+      showToast(successText);
+      closeModal();
+    } catch (error) {
+      const msg = String(error?.message || "unknown error");
+      if (statusEl) {
+        statusEl.textContent = `Save failed: ${msg}`;
+      }
+      showToast(`Save failed: ${msg}`, "error", 3600);
+    } finally {
+      if (saveBtn) {
+        saveBtn.disabled = false;
+      }
+      if (closeBtn) {
+        closeBtn.disabled = false;
+      }
+    }
+  });
+  return modal;
+}
+
+function openRuntimeSettingsModal({ title, meta, fields, onSave }) {
+  const modal = ensureRuntimeSettingsModal();
+  const titleEl = document.getElementById("runtime-settings-title");
+  const metaEl = document.getElementById("runtime-settings-meta");
+  const fieldsEl = document.getElementById("runtime-settings-fields");
+  const statusEl = document.getElementById("runtime-settings-status");
+  const saveBtn = document.getElementById("runtime-settings-save");
+  const normalizedFields = Array.isArray(fields) ? fields : [];
+
+  state.runtimeSettingsSaveHandler = typeof onSave === "function" ? onSave : null;
+
+  if (titleEl) {
+    titleEl.textContent = String(title || "Settings").trim() || "Settings";
+  }
+  if (metaEl) {
+    metaEl.textContent = String(meta || "").trim();
+  }
+  if (statusEl) {
+    statusEl.textContent = "";
+  }
+  if (saveBtn) {
+    saveBtn.disabled = false;
+  }
+
+  if (fieldsEl) {
+    if (!normalizedFields.length) {
+      fieldsEl.innerHTML = `<div class="small">No configurable settings.</div>`;
+    } else {
+      fieldsEl.innerHTML = normalizedFields
+        .map((field, idx) => {
+          const inputId = `runtime_settings_${idx}_${String(field?.key || "").replace(/[^a-zA-Z0-9_]/g, "_")}`;
+          return buildSettingInput(field, inputId);
+        })
+        .join("");
+    }
+  }
+
+  openPopupModal(modal);
+}
+
 function _composeName(firstRaw, lastRaw, fallback = "Tater Totterson") {
   const first = String(firstRaw || "").trim();
   const last = String(lastRaw || "").trim();
@@ -387,7 +932,7 @@ function syncChatCopy() {
   }
   const input = document.getElementById("chat-input");
   if (input) {
-    input.placeholder = `Type your message to ${getTaterFullName()}...`;
+    input.placeholder = `Message ${getTaterFullName()}...`;
   }
 }
 
@@ -423,6 +968,9 @@ async function refreshBranding() {
     state.chatProfile.taterFullName = fullName;
     state.chatProfile.attachMaxMbEach = Number(profile.attach_max_mb_each || state.chatProfile.attachMaxMbEach || 25);
     state.chatProfile.attachMaxMbTotal = Number(profile.attach_max_mb_total || state.chatProfile.attachMaxMbTotal || 50);
+    if (profile && Object.prototype.hasOwnProperty.call(profile, "popup_effect_style")) {
+      applyPopupEffectStyle(profile.popup_effect_style);
+    }
 
     applyBranding(firstName);
     syncChatCopy();
@@ -444,22 +992,301 @@ function setActiveNav(viewName) {
   });
 }
 
-async function refreshHealth() {
+function formatRuntimeSummary(health) {
+  const verbasEnabled = Number(health?.verbas_enabled ?? 0);
+  const portalsRunning = Number(health?.portals_running ?? 0);
+  const coresRunning = Number(health?.cores_running ?? 0);
+  const chatJobsActive = Number(health?.chat_jobs_active ?? 0);
+  return `${verbasEnabled} verbas enabled • ${portalsRunning} portals running • ${coresRunning} cores running • ${chatJobsActive} chat jobs`;
+}
+
+function setRuntimeSummaryText(text, tone = "normal") {
   const summary = document.getElementById("runtime-summary");
+  if (!summary) {
+    return;
+  }
+  summary.textContent = String(text || "").trim();
+  summary.classList.toggle("degraded", tone === "degraded");
+  summary.classList.toggle("offline", tone === "offline");
+}
+
+function _runtimeAgeLabel(secondsRaw) {
+  const seconds = Math.max(0, Number(secondsRaw) || 0);
+  if (seconds < 60) {
+    return `${Math.round(seconds)}s`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  const remSeconds = Math.floor(seconds % 60);
+  if (minutes < 60) {
+    return `${minutes}m ${remSeconds}s`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const remMinutes = minutes % 60;
+  return `${hours}h ${remMinutes}m`;
+}
+
+function _renderRuntimeChatJobRows(chatJobs) {
+  const byPlatform = Array.isArray(chatJobs?.by_platform) ? chatJobs.by_platform : [];
+  const activeTurns = Array.isArray(chatJobs?.active_turns) ? chatJobs.active_turns : [];
+  const history = chatJobs?.history && typeof chatJobs.history === "object" ? chatJobs.history : {};
+  const historyWindows = Array.isArray(history?.windows) ? history.windows : [];
+  const platformRowsHtml = byPlatform.length
+    ? `
+        <div class="runtime-breakdown-list">
+          ${byPlatform
+            .map((row) => {
+              const count = Number(row?.running_turns ?? 0);
+              return `
+                <div class="runtime-breakdown-row compact">
+                  <div class="runtime-breakdown-main">
+                    <div class="runtime-breakdown-name">${escapeHtml(String(row?.label || row?.platform || "Unknown"))}</div>
+                  </div>
+                  <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(`${count} running`)}</span></div>
+                </div>
+              `;
+            })
+            .join("")}
+        </div>
+      `
+    : `<div class="small muted">No active running turns.</div>`;
+
+  const activeTurnsHtml = activeTurns.length
+    ? `
+        <div class="runtime-breakdown-list">
+          ${activeTurns
+            .map((row) => {
+              const platformLabel = String(row?.platform_label || row?.platform || "Unknown");
+              const source = String(row?.source || "").trim();
+              const scope = String(row?.scope || "").trim();
+              const age = _runtimeAgeLabel(row?.age_seconds);
+              const detailParts = [source, scope].filter(Boolean);
+              return `
+                <div class="runtime-breakdown-row compact">
+                  <div class="runtime-breakdown-main">
+                    <div class="runtime-breakdown-name">${escapeHtml(platformLabel)}</div>
+                    <div class="small muted">${escapeHtml(detailParts.join(" • "))}</div>
+                  </div>
+                  <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(age)}</span></div>
+                </div>
+              `;
+            })
+            .join("")}
+        </div>
+      `
+    : `<div class="small muted">No active chat turns right now.</div>`;
+
+  const historyHtml = historyWindows.length
+    ? `
+        <div class="runtime-breakdown-list">
+          ${historyWindows
+            .map((windowRow) => {
+              const jobs = Number(windowRow?.jobs ?? 0);
+              const done = Number(windowRow?.done ?? 0);
+              const blocked = Number(windowRow?.blocked ?? 0);
+              const failed = Number(windowRow?.failed ?? 0);
+              const topPlatforms = Array.isArray(windowRow?.top_platforms) ? windowRow.top_platforms : [];
+              const platformLine = topPlatforms.length
+                ? topPlatforms
+                    .map((row) => `${String(row?.label || row?.platform || "Unknown")}: ${Number(row?.jobs ?? 0)}`)
+                    .join(" • ")
+                : "No jobs in this period.";
+              return `
+                <div class="runtime-breakdown-row">
+                  <div class="runtime-breakdown-main">
+                    <div class="runtime-breakdown-name">${escapeHtml(String(windowRow?.label || "Window"))}</div>
+                    <div class="small muted">Done ${done} • Blocked ${blocked} • Failed ${failed}</div>
+                    <div class="small muted">${escapeHtml(platformLine)}</div>
+                  </div>
+                  <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(`${jobs} jobs`)}</span></div>
+                </div>
+              `;
+            })
+            .join("")}
+        </div>
+      `
+    : `<div class="small muted">No history available yet.</div>`;
+
+  return `
+    <div class="runtime-breakdown-block">
+      <div class="runtime-breakdown-subtitle">By Platform</div>
+      ${platformRowsHtml}
+    </div>
+    <div class="runtime-breakdown-block">
+      <div class="runtime-breakdown-subtitle">Active Turns</div>
+      ${activeTurnsHtml}
+    </div>
+    <div class="runtime-breakdown-block">
+      <div class="runtime-breakdown-subtitle">History</div>
+      ${historyHtml}
+      <div class="small muted">Sample size: ${escapeHtml(String(Number(history?.sample_size ?? 0)))} ledger rows</div>
+    </div>
+  `;
+}
+
+function renderRuntimeBreakdown(payload) {
+  const chatJobs = payload?.chat_jobs && typeof payload.chat_jobs === "object" ? payload.chat_jobs : {};
+  const summary = `${Number(chatJobs.total ?? 0)} total • WebUI queue ${Number(chatJobs.webui_jobs ?? 0)} • Surface turns ${Number(chatJobs.surface_running_turns ?? 0)}`;
+  return `
+    <section class="runtime-breakdown-card">
+      <div class="runtime-breakdown-head">
+        <h4 class="runtime-breakdown-title">Chat Jobs</h4>
+        <div class="small muted">${escapeHtml(summary)}</div>
+      </div>
+      ${_renderRuntimeChatJobRows(chatJobs)}
+    </section>
+  `;
+}
+
+function ensureRuntimeBreakdownModal() {
+  let modal = document.getElementById("runtime-breakdown-modal");
+  if (modal) {
+    return modal;
+  }
+
+  document.body.insertAdjacentHTML(
+    "beforeend",
+    `
+      <div id="runtime-breakdown-modal" class="cerb-modal" aria-hidden="true">
+        <div class="cerb-modal-dialog card runtime-breakdown-dialog" role="dialog" aria-modal="true" aria-label="Chat Jobs">
+          <div class="card-head">
+            <h3 class="card-title">Live Chat Jobs</h3>
+            <div class="inline-row">
+              <span id="runtime-breakdown-updated" class="small"></span>
+              <button type="button" class="inline-btn" id="runtime-breakdown-refresh">Refresh</button>
+              <button type="button" class="inline-btn" id="runtime-breakdown-close">Close</button>
+            </div>
+          </div>
+          <div id="runtime-breakdown-status" class="small"></div>
+          <div id="runtime-breakdown-content" class="cerb-modal-body runtime-breakdown-content"></div>
+        </div>
+      </div>
+    `
+  );
+
+  modal = document.getElementById("runtime-breakdown-modal");
+  const closeBtn = document.getElementById("runtime-breakdown-close");
+  const refreshBtn = document.getElementById("runtime-breakdown-refresh");
+
+  const closeModal = () => {
+    stopRuntimeBreakdownPolling();
+    closePopupModal(modal);
+  };
+
+  closeBtn?.addEventListener("click", closeModal);
+  refreshBtn?.addEventListener("click", async () => {
+    await loadRuntimeBreakdown({ force: true });
+  });
+  modal.addEventListener("click", (event) => {
+    if (event.target === modal) {
+      closeModal();
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && modal.classList.contains("active")) {
+      closeModal();
+    }
+  });
+  return modal;
+}
+
+function stopRuntimeBreakdownPolling() {
+  const timer = Number(state.runtimeBreakdownPollTimer || 0);
+  if (timer) {
+    window.clearInterval(timer);
+    state.runtimeBreakdownPollTimer = 0;
+  }
+}
+
+function startRuntimeBreakdownPolling() {
+  stopRuntimeBreakdownPolling();
+  state.runtimeBreakdownPollTimer = window.setInterval(() => {
+    const modal = document.getElementById("runtime-breakdown-modal");
+    if (!modal || !modal.classList.contains("active")) {
+      stopRuntimeBreakdownPolling();
+      return;
+    }
+    loadRuntimeBreakdown({ silent: true });
+  }, 5000);
+}
+
+async function loadRuntimeBreakdown({ force = false, silent = false } = {}) {
+  const modal = ensureRuntimeBreakdownModal();
+  if (!modal) {
+    return;
+  }
+  if (!force && modal.dataset.loading === "1") {
+    return;
+  }
+  const statusEl = document.getElementById("runtime-breakdown-status");
+  const updatedEl = document.getElementById("runtime-breakdown-updated");
+  const contentEl = document.getElementById("runtime-breakdown-content");
+  modal.dataset.loading = "1";
+
+  if (statusEl && !silent) {
+    statusEl.textContent = "Loading runtime state...";
+  }
+
+  try {
+    const payload = await api("/api/runtime/breakdown");
+    if (contentEl) {
+      contentEl.innerHTML = renderRuntimeBreakdown(payload);
+    }
+    if (statusEl) {
+      statusEl.textContent = "";
+    }
+    if (updatedEl) {
+      updatedEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+    }
+  } catch (error) {
+    if (statusEl) {
+      statusEl.textContent = `Runtime breakdown failed: ${error?.message || "unknown error"}`;
+    }
+    if (contentEl && !silent) {
+      contentEl.innerHTML = "";
+    }
+  } finally {
+    modal.dataset.loading = "0";
+  }
+}
+
+async function openRuntimeBreakdownModal() {
+  const modal = ensureRuntimeBreakdownModal();
+  openPopupModal(modal);
+  await loadRuntimeBreakdown({ force: true });
+  startRuntimeBreakdownPolling();
+}
+
+function bindRuntimeSummary() {
+  const summary = document.getElementById("runtime-summary");
+  if (!summary || summary.dataset.bound === "1") {
+    return;
+  }
+  summary.dataset.bound = "1";
+  summary.setAttribute("role", "button");
+  summary.setAttribute("tabindex", "0");
+  summary.title = "Open live chat jobs";
+  summary.classList.add("interactive");
+  summary.addEventListener("click", () => {
+    openRuntimeBreakdownModal();
+  });
+  summary.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      openRuntimeBreakdownModal();
+    }
+  });
+}
+
+async function refreshHealth() {
   try {
     const health = await api("/api/health");
-    if (!summary) {
-      return;
-    }
     if (health.ok === false) {
-      summary.textContent = "Backend degraded";
+      setRuntimeSummaryText("Backend degraded", "degraded");
       return;
     }
-    summary.textContent = `${health.verbas_enabled ?? 0} verbas enabled • ${health.portals_running ?? 0} portals running • ${health.cores_running ?? 0} cores running • ${health.chat_jobs_active ?? 0} chat jobs`;
+    setRuntimeSummaryText(formatRuntimeSummary(health), "normal");
   } catch {
-    if (summary) {
-      summary.textContent = "Backend offline";
-    }
+    setRuntimeSummaryText("Backend offline", "offline");
   }
 }
 
@@ -726,6 +1553,39 @@ function shopLabel(kind) {
   return "Portal";
 }
 
+function setShopStatus(kind, text) {
+  const statusEl = document.getElementById(`shop-status-${kind}`);
+  if (statusEl) {
+    statusEl.textContent = String(text || "").trim();
+  }
+}
+
+function getActiveShopTab(kind) {
+  const active = document.querySelector(`.shop-tab-btn[data-kind='${kind}'].active`);
+  return String(active?.dataset?.tab || "").trim();
+}
+
+function activateShopTab(kind, tabName) {
+  const requested = String(tabName || "").trim();
+  const buttons = Array.from(document.querySelectorAll(`.shop-tab-btn[data-kind='${kind}']`));
+  const panels = Array.from(document.querySelectorAll(`.shop-tab-panel[data-kind='${kind}']`));
+  if (!buttons.length || !panels.length) {
+    return;
+  }
+  const available = new Set(buttons.map((button) => String(button.dataset.tab || "").trim()).filter(Boolean));
+  const fallback = String(buttons[0]?.dataset?.tab || "").trim();
+  const activeTab = available.has(requested) ? requested : fallback;
+  if (!activeTab) {
+    return;
+  }
+  buttons.forEach((button) => {
+    button.classList.toggle("active", button.dataset.tab === activeTab);
+  });
+  panels.forEach((panel) => {
+    panel.classList.toggle("active", panel.dataset.tabPanel === activeTab);
+  });
+}
+
 function renderShopManager(kind, data) {
   const noun = shopLabel(kind);
   const repos = data?.repos || {};
@@ -928,7 +1788,8 @@ function renderShopTabbedManager(kind, data, options = {}) {
   const additionalRepoRows = additionalRepos.map((repo) => renderShopRepoListItem(kind, repo)).filter(Boolean).join("");
 
   return `
-    <div class="card">
+    <section class="shop-manager-root" data-kind="${kind}">
+      <div class="card">
       <div class="card-head">
         <h3 class="card-title">${noun} Manager</h3>
         <div class="inline-row">
@@ -992,7 +1853,8 @@ function renderShopTabbedManager(kind, data, options = {}) {
           </div>
         </div>
       </section>
-    </div>
+      </div>
+    </section>
   `;
 }
 
@@ -1003,18 +1865,210 @@ function bindShopTabs(kind) {
     return;
   }
 
-  const activate = (tabName) => {
-    buttons.forEach((button) => {
-      button.classList.toggle("active", button.dataset.tab === tabName);
-    });
-    panels.forEach((panel) => {
-      panel.classList.toggle("active", panel.dataset.tabPanel === tabName);
-    });
+  buttons.forEach((button) => {
+    button.addEventListener("click", () => activateShopTab(kind, button.dataset.tab));
+  });
+  activateShopTab(kind, getActiveShopTab(kind) || String(buttons[0]?.dataset?.tab || "installed"));
+}
+
+function buildVerbaRuntimeHtml(runtimeData, shopData) {
+  const items = Array.isArray(runtimeData?.items) ? runtimeData.items : [];
+  const installedShopItems = Array.isArray(shopData?.installed) ? shopData.installed : [];
+  const shopById = new Map(
+    installedShopItems
+      .map((entry) => [String(entry?.id || "").trim(), entry])
+      .filter(([id]) => Boolean(id))
+  );
+
+  if (!items.length) {
+    resetRuntimeSettingsCatalog("verbas");
+    return renderNotice("No verbas found in plugin registry.");
+  }
+
+  resetRuntimeSettingsCatalog("verbas");
+
+  return items
+    .map((item) => {
+      const shopEntry = shopById.get(String(item.id || "").trim()) || {};
+      const settings = Array.isArray(item.settings) ? item.settings : [];
+      const pluginId = String(item.id || "").trim();
+      registerRuntimeSettings("verbas", pluginId, {
+        label: String(item.name || pluginId).trim() || pluginId,
+        endpoint: "/api/verbas",
+        settings,
+      });
+      const settingsBlock = settings.length
+        ? `
+            <div class="inline-row" style="margin-top:8px;">
+              <button class="inline-btn open-runtime-settings" data-runtime-kind="verbas" data-runtime-key="${escapeHtml(pluginId)}">Settings</button>
+            </div>
+          `
+        : `<div class="small">No configurable settings.</div>`;
+      const platformValues = Array.isArray(item.platforms) && item.platforms.length
+        ? item.platforms
+        : Array.isArray(shopEntry.platforms)
+          ? shopEntry.platforms
+          : [];
+      const platforms = platformValues.length ? platformValues.join(", ") : "all";
+      const installedVer = String(shopEntry.installed_ver || "0.0.0").trim() || "0.0.0";
+      const storeVer = String(shopEntry.store_ver || "-").trim() || "-";
+      const sourceLabel = String(shopEntry.source_label || "local").trim() || "local";
+      const description = String(shopEntry.description || item.description || "No description").trim() || "No description";
+      return `
+        <article class="card" data-plugin-id="${escapeHtml(item.id)}">
+          <div class="card-head">
+            <h3 class="card-title">${escapeHtml(item.name)}</h3>
+            <div class="inline-row">
+              <span class="small">${escapeHtml(item.id)}</span>
+              <button class="inline-btn verba-toggle">${item.enabled ? "Disable" : "Enable"}</button>
+            </div>
+          </div>
+          <div class="small">installed: ${escapeHtml(installedVer)} • store: ${escapeHtml(storeVer)} • source: ${escapeHtml(sourceLabel)} • enabled: ${item.enabled ? "yes" : "no"}</div>
+          <div class="muted">${escapeHtml(description)}</div>
+          <div class="small">Portals: ${escapeHtml(platforms)}</div>
+          ${settingsBlock}
+        </article>
+      `;
+    })
+    .join("");
+}
+
+function buildSurfaceRuntimeHtml(kind, runtimeData, shopData) {
+  const items = Array.isArray(runtimeData?.items) ? runtimeData.items : [];
+  const installedShopItems = Array.isArray(shopData?.installed) ? shopData.installed : [];
+  const endpoint = kind === "cores" ? "/api/cores" : "/api/portals";
+  const moduleSuffix = kind === "cores" ? "_core" : "_portal";
+  const shopByModuleKey = new Map();
+  const shopById = new Map();
+  installedShopItems.forEach((entry) => {
+    const moduleKey = String(entry?.module_key || "").trim();
+    const entryId = String(entry?.id || "").trim();
+    if (moduleKey) {
+      shopByModuleKey.set(moduleKey, entry);
+    }
+    if (entryId) {
+      shopById.set(entryId, entry);
+    }
+  });
+  const resolveShopEntry = (runtimeKey) => {
+    const key = String(runtimeKey || "").trim();
+    if (!key) {
+      return null;
+    }
+    const byModule = shopByModuleKey.get(key);
+    if (byModule) {
+      return byModule;
+    }
+    const normalizedId = key.endsWith(moduleSuffix) ? key.slice(0, -moduleSuffix.length) : key;
+    return shopById.get(normalizedId) || shopById.get(key) || null;
   };
 
-  buttons.forEach((button) => {
-    button.addEventListener("click", () => activate(button.dataset.tab));
-  });
+  if (!items.length) {
+    resetRuntimeSettingsCatalog(kind);
+    return renderNotice(`No ${kind} found.`);
+  }
+
+  resetRuntimeSettingsCatalog(kind);
+
+  return items
+    .map((item) => {
+      const shopEntry = resolveShopEntry(item.key) || {};
+      const settings = Array.isArray(item.settings) ? item.settings : [];
+      const running = Boolean(item.running);
+      const desired = Boolean(item.desired_running);
+      const statusClass = running ? "running" : "stopped";
+      const statusText = running ? "Running" : desired ? "Pending start" : "Stopped";
+      const actionLabel = running ? "Stop" : "Start";
+      const installedVer = String(shopEntry.installed_ver || "0.0.0").trim() || "0.0.0";
+      const storeVer = String(shopEntry.store_ver || "-").trim() || "-";
+      const sourceLabel = String(shopEntry.source_label || "local").trim() || "local";
+      const description = String(shopEntry.description || "").trim();
+      const surfaceKey = String(item.key || "").trim();
+      registerRuntimeSettings(kind, surfaceKey, {
+        label: String(item.label || surfaceKey).trim() || surfaceKey,
+        endpoint,
+        settings,
+      });
+      const settingsBlock = settings.length
+        ? `
+            <div class="inline-row" style="margin-top:8px;">
+              <button class="inline-btn open-runtime-settings" data-runtime-kind="${escapeHtml(kind)}" data-runtime-key="${escapeHtml(surfaceKey)}">Settings</button>
+            </div>
+          `
+        : `<div class="small">No settings in manifest.</div>`;
+      return `
+        <article class="card" data-surface-key="${escapeHtml(item.key)}">
+          <div class="card-head">
+            <h3 class="card-title">${escapeHtml(item.label || item.key)}</h3>
+            <div class="inline-row">
+              <span class="status-chip ${statusClass}">${statusText}</span>
+              <button class="inline-btn surface-toggle">${actionLabel}</button>
+            </div>
+          </div>
+          <div class="small">installed: ${escapeHtml(installedVer)} • store: ${escapeHtml(storeVer)} • source: ${escapeHtml(sourceLabel)} • running: ${running ? "yes" : "no"}</div>
+          ${description ? `<div class="muted">${escapeHtml(description)}</div>` : ""}
+          ${settingsBlock}
+        </article>
+      `;
+    })
+    .join("");
+}
+
+function replaceShopManagerInPlace(kind, managerHtml) {
+  const existing = document.querySelector(`.shop-manager-root[data-kind='${kind}']`);
+  if (!existing) {
+    return false;
+  }
+  const template = document.createElement("template");
+  template.innerHTML = String(managerHtml || "").trim();
+  const replacement = template.content.firstElementChild;
+  if (!replacement) {
+    return false;
+  }
+  existing.replaceWith(replacement);
+  return true;
+}
+
+async function refreshShopManagerInPlace(kind, preferredTab = "") {
+  const targetTab = String(preferredTab || getActiveShopTab(kind) || "installed").trim() || "installed";
+
+  if (kind === "verbas") {
+    const [runtimeData, shopData] = await Promise.all([api("/api/verbas"), api("/api/shop/verbas")]);
+    const runtimeHtml = buildVerbaRuntimeHtml(runtimeData, shopData);
+    const managerHtml = renderShopTabbedManager("verbas", shopData, {
+      runtimeHtml,
+      runtimeTitle: "Verba Runtime",
+    });
+    if (!replaceShopManagerInPlace("verbas", managerHtml)) {
+      return false;
+    }
+    bindVerbaRuntimeActions(document.getElementById("view-root"));
+    bindShopTabs("verbas");
+    bindShopActions("verbas");
+    activateShopTab("verbas", targetTab);
+    return true;
+  }
+
+  if (kind === "portals" || kind === "cores") {
+    const endpoint = kind === "cores" ? "/api/cores" : "/api/portals";
+    const shopApi = kind === "cores" ? "/api/shop/cores" : "/api/shop/portals";
+    const [runtimeData, shopData] = await Promise.all([api(endpoint), api(shopApi)]);
+    const runtimeHtml = buildSurfaceRuntimeHtml(kind, runtimeData, shopData);
+    const managerHtml = renderShopTabbedManager(kind, shopData, {
+      runtimeHtml,
+      runtimeTitle: kind === "cores" ? "Core Runtime" : "Portal Runtime",
+    });
+    if (!replaceShopManagerInPlace(kind, managerHtml)) {
+      return false;
+    }
+    bindSurfaceRuntimeActions(kind, endpoint, document.getElementById("view-root"));
+    bindShopTabs(kind);
+    bindShopActions(kind);
+    activateShopTab(kind, targetTab);
+    return true;
+  }
+
+  return false;
 }
 
 function encodeCoreManagerId(value) {
@@ -1725,6 +2779,33 @@ function renderCoreTopTabs(dynamicTabs, manageHtml, manageLabel = "Manage") {
   `;
 }
 
+function getActiveCoreTopTab() {
+  const active = document.querySelector(".core-top-tab-btn.active[data-core-tab]");
+  return String(active?.dataset?.coreTab || "").trim();
+}
+
+function activateCoreTopTab(tabName) {
+  const buttons = Array.from(document.querySelectorAll(".core-top-tab-btn[data-core-tab]"));
+  const panels = Array.from(document.querySelectorAll(".core-top-tab-panel[data-core-tab-panel]"));
+  if (!buttons.length || !panels.length) {
+    return;
+  }
+  const requested = String(tabName || "").trim();
+  const available = new Set(buttons.map((button) => String(button.dataset.coreTab || "").trim()).filter(Boolean));
+  const activeTab = available.has(requested) ? requested : available.has("manage") ? "manage" : String(buttons[0]?.dataset?.coreTab || "");
+  if (!activeTab) {
+    return;
+  }
+
+  persistCoreTopTab(activeTab);
+  buttons.forEach((button) => {
+    button.classList.toggle("active", button.dataset.coreTab === activeTab);
+  });
+  panels.forEach((panel) => {
+    panel.classList.toggle("active", panel.dataset.coreTabPanel === activeTab);
+  });
+}
+
 function bindCoreTopTabs() {
   const buttons = Array.from(document.querySelectorAll(".core-top-tab-btn[data-core-tab]"));
   const panels = Array.from(document.querySelectorAll(".core-top-tab-panel[data-core-tab-panel]"));
@@ -1732,26 +2813,24 @@ function bindCoreTopTabs() {
     return;
   }
 
-  const activate = (tabName) => {
-    persistCoreTopTab(tabName);
-    buttons.forEach((button) => {
-      button.classList.toggle("active", button.dataset.coreTab === tabName);
-    });
-    panels.forEach((panel) => {
-      panel.classList.toggle("active", panel.dataset.coreTabPanel === tabName);
-    });
-  };
-
   buttons.forEach((button) => {
-    button.addEventListener("click", () => activate(button.dataset.coreTab));
+    if (button.dataset.coreTopBound === "1") {
+      return;
+    }
+    button.dataset.coreTopBound = "1";
+    button.addEventListener("click", () => activateCoreTopTab(button.dataset.coreTab));
   });
 
   const available = new Set(buttons.map((button) => button.dataset.coreTab));
-  activate(available.has(state.coreTopTab) ? state.coreTopTab : "manage");
+  activateCoreTopTab(available.has(state.coreTopTab) ? state.coreTopTab : "manage");
 }
 
 function bindCoreManagerTabs() {
   document.querySelectorAll(".core-manager-tabs").forEach((tabsRoot) => {
+    if (tabsRoot.dataset.coreManagerTabsBound === "1") {
+      return;
+    }
+    tabsRoot.dataset.coreManagerTabsBound = "1";
     const buttons = Array.from(tabsRoot.querySelectorAll(".core-manager-tab-btn[data-core-manager-tab]"));
     if (!buttons.length) {
       return;
@@ -1788,6 +2867,10 @@ function bindCoreManagerTabs() {
 
 function bindCoreManagerSubtabs() {
   document.querySelectorAll(".core-manager-subtabs").forEach((tabsRoot) => {
+    if (tabsRoot.dataset.coreManagerSubtabsBound === "1") {
+      return;
+    }
+    tabsRoot.dataset.coreManagerSubtabsBound = "1";
     const buttons = Array.from(tabsRoot.querySelectorAll(".core-manager-subtab-btn[data-core-manager-subtab]"));
     if (!buttons.length) {
       return;
@@ -1823,6 +2906,10 @@ function bindCoreManagerSubtabs() {
 
 function bindCoreManagerSelectors() {
   document.querySelectorAll(".core-manager-selector[data-core-manager-selector]").forEach((select) => {
+    if (select.dataset.coreManagerSelectorBound === "1") {
+      return;
+    }
+    select.dataset.coreManagerSelectorBound = "1";
     const block = select.closest("[data-core-manager-selector-block]");
     if (!block) {
       return;
@@ -1892,6 +2979,34 @@ function persistCoreTabFromNode(node) {
   if (tabName) {
     persistCoreTopTab(tabName);
   }
+  return tabName;
+}
+
+async function refreshCoreTabInPlace(tabName = "") {
+  const targetTab = String(tabName || getActiveCoreTopTab() || "manage").trim() || "manage";
+  if (targetTab === "manage") {
+    await refreshShopManagerInPlace("cores", getActiveShopTab("cores") || "installed");
+    activateCoreTopTab("manage");
+    return;
+  }
+
+  const tabsData = await api("/api/cores/tabs");
+  const tabs = Array.isArray(tabsData?.tabs) ? tabsData.tabs : [];
+  const spec = tabs.find((entry) => String(entry?.core_key || "").trim() === targetTab);
+  const panel = Array.from(document.querySelectorAll(".core-top-tab-panel[data-core-tab-panel]")).find(
+    (entry) => String(entry?.dataset?.coreTabPanel || "").trim() === targetTab
+  );
+  if (!panel) {
+    return;
+  }
+  if (!spec) {
+    panel.innerHTML = renderNotice("This core tab is no longer available.");
+    return;
+  }
+
+  panel.innerHTML = renderCoreTabPayload(spec.payload, spec);
+  bindCoreTabManagers();
+  activateCoreTopTab(targetTab);
 }
 
 function bindCoreTabManagers() {
@@ -1900,6 +3015,10 @@ function bindCoreTabManagers() {
   bindCoreManagerSelectors();
 
   document.querySelectorAll(".core-manager-add-form[data-core-key][data-core-action]").forEach((form) => {
+    if (form.dataset.coreManagerActionBound === "1") {
+      return;
+    }
+    form.dataset.coreManagerActionBound = "1";
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       const coreKey = String(form.dataset.coreKey || "").trim();
@@ -1910,18 +3029,33 @@ function bindCoreTabManagers() {
       const values = collectCoreManagerValues(form);
       setCoreManagerStatus(form, "Saving...");
       try {
-        persistCoreTabFromNode(form);
-        const result = await runCoreTabAction(coreKey, action, { ...values, values });
+        const activeTab = persistCoreTabFromNode(form);
+        const result = await runActionWithProgress(
+          {
+            title: "Saving core item",
+            detail: coreKey,
+            workingText: "Saving changes...",
+            successText: "Saved.",
+            errorPrefix: "Core manager save failed",
+          },
+          () => runCoreTabAction(coreKey, action, { ...values, values })
+        );
+        await refreshCoreTabInPlace(activeTab);
         state.notice = String(result?.message || "Saved.");
+        setCoreManagerStatus(form, state.notice);
         showToast(state.notice);
-        await loadView("cores");
       } catch (error) {
         setCoreManagerStatus(form, `Failed: ${error.message}`);
+        showToast(`Failed: ${error.message}`, "error", 3600);
       }
     });
   });
 
   document.querySelectorAll(".core-manager-save").forEach((button) => {
+    if (button.dataset.coreManagerActionBound === "1") {
+      return;
+    }
+    button.dataset.coreManagerActionBound = "1";
     button.addEventListener("click", async (event) => {
       const card = event.currentTarget.closest(".core-manager-item");
       const coreKey = String(card?.dataset?.coreKey || "").trim();
@@ -1933,18 +3067,33 @@ function bindCoreTabManagers() {
       const values = collectCoreManagerValues(card);
       setCoreManagerStatus(card, "Saving...");
       try {
-        persistCoreTabFromNode(card);
-        const result = await runCoreTabAction(coreKey, action, { id: itemId, values });
+        const activeTab = persistCoreTabFromNode(card);
+        const result = await runActionWithProgress(
+          {
+            title: "Saving core item",
+            detail: itemId || coreKey,
+            workingText: "Saving changes...",
+            successText: "Saved.",
+            errorPrefix: "Core manager save failed",
+          },
+          () => runCoreTabAction(coreKey, action, { id: itemId, values })
+        );
+        await refreshCoreTabInPlace(activeTab);
         state.notice = String(result?.message || "Saved.");
+        setCoreManagerStatus(card, state.notice);
         showToast(state.notice);
-        await loadView("cores");
       } catch (error) {
         setCoreManagerStatus(card, `Failed: ${error.message}`);
+        showToast(`Failed: ${error.message}`, "error", 3600);
       }
     });
   });
 
   document.querySelectorAll(".core-manager-remove").forEach((button) => {
+    if (button.dataset.coreManagerActionBound === "1") {
+      return;
+    }
+    button.dataset.coreManagerActionBound = "1";
     button.addEventListener("click", async (event) => {
       const card = event.currentTarget.closest(".core-manager-item");
       const coreKey = String(card?.dataset?.coreKey || "").trim();
@@ -1959,12 +3108,24 @@ function bindCoreTabManagers() {
       }
       setCoreManagerStatus(card, "Removing...");
       try {
-        persistCoreTabFromNode(card);
-        const result = await runCoreTabAction(coreKey, action, { id: itemId });
+        const activeTab = persistCoreTabFromNode(card);
+        const result = await runActionWithProgress(
+          {
+            title: "Removing core item",
+            detail: itemId || coreKey,
+            workingText: "Removing item...",
+            successText: "Removed.",
+            errorPrefix: "Core manager remove failed",
+          },
+          () => runCoreTabAction(coreKey, action, { id: itemId })
+        );
+        await refreshCoreTabInPlace(activeTab);
         state.notice = String(result?.message || "Removed.");
-        await loadView("cores");
+        setCoreManagerStatus(card, state.notice);
+        showToast(state.notice);
       } catch (error) {
         setCoreManagerStatus(card, `Failed: ${error.message}`);
+        showToast(`Failed: ${error.message}`, "error", 3600);
       }
     });
   });
@@ -1979,13 +3140,7 @@ async function runShopAction(kind, action, payload) {
 }
 
 function bindShopActions(kind) {
-  const statusEl = document.getElementById(`shop-status-${kind}`);
-
-  function setStatus(text) {
-    if (statusEl) {
-      statusEl.textContent = text;
-    }
-  }
+  const setStatus = (text) => setShopStatus(kind, text);
 
   const repoNameInput = document.getElementById(`shop-repo-name-${kind}`);
   const repoUrlInput = document.getElementById(`shop-repo-url-${kind}`);
@@ -2060,10 +3215,19 @@ function bindShopActions(kind) {
     saveButton.addEventListener("click", async () => {
       const repos = collectShopReposFromList(kind);
       try {
-        await runShopAction(kind, "repos", { repos });
+        await runActionWithProgress(
+          {
+            title: `Saving ${shopLabel(kind)} repos`,
+            detail: `${repos.length} additional repo(s)`,
+            workingText: "Saving repositories...",
+            successText: "Repo settings saved.",
+            errorPrefix: "Repo save failed",
+          },
+          () => runShopAction(kind, "repos", { repos })
+        );
+        await refreshShopManagerInPlace(kind, "settings");
         state.notice = `${shopLabel(kind)} repos saved.`;
         showToast(state.notice);
-        await loadView(state.view);
       } catch (error) {
         setStatus(`Repo save failed: ${error.message}`);
         showToast(`Repo save failed: ${error.message}`, "error", 3600);
@@ -2074,15 +3238,28 @@ function bindShopActions(kind) {
   const updateAllButton = document.querySelector(`.shop-update-all[data-kind='${kind}']`);
   if (updateAllButton) {
     updateAllButton.addEventListener("click", async () => {
+      const activeTab = getActiveShopTab(kind);
       setStatus("Running update all...");
       try {
-        const result = await runShopAction(kind, "update-all", {});
+        const result = await runActionWithProgress(
+          {
+            title: `Updating all ${shopLabel(kind)} items`,
+            detail: "Applying all available updates",
+            workingText: "Running updates...",
+            successText: "Update-all finished.",
+            errorPrefix: "Update all failed",
+          },
+          () => runShopAction(kind, "update-all", {})
+        );
+        await refreshShopManagerInPlace(kind, activeTab || "manage");
         const updated = Array.isArray(result.updated) ? result.updated.length : 0;
         const failed = Array.isArray(result.failed) ? result.failed.length : 0;
         state.notice = `${shopLabel(kind)} update-all completed. Updated ${updated}, failed ${failed}.`;
-        await loadView(state.view);
+        showToast(state.notice, failed ? "error" : "success", 3400);
+        setStatus(state.notice);
       } catch (error) {
         setStatus(`Update all failed: ${error.message}`);
+        showToast(`Update all failed: ${error.message}`, "error", 3600);
       }
     });
   }
@@ -2097,20 +3274,169 @@ function bindShopActions(kind) {
 
       const payload = { id };
       if (action === "remove") {
-        const card = event.currentTarget.closest(".shop-installed-card");
+        const card = event.currentTarget.closest(".shop-installed-card, .card");
         const purge = Boolean(card?.querySelector(".shop-purge")?.checked);
         payload.purge_redis = purge;
       }
 
       setStatus(`${action} ${id}...`);
       try {
-        const result = await runShopAction(kind, action, payload);
+        const activeTab = getActiveShopTab(kind);
+        const verb = action === "install" ? "Installing" : action === "update" ? "Updating" : action === "remove" ? "Removing" : "Running";
+        const result = await runActionWithProgress(
+          {
+            title: `${verb} ${shopLabel(kind).toLowerCase()}`,
+            detail: id,
+            workingText: `${verb.toLowerCase()} ${id}...`,
+            successText: `${shopLabel(kind)} action completed.`,
+            errorPrefix: `${action} ${id} failed`,
+          },
+          () => runShopAction(kind, action, payload)
+        );
+        await refreshShopManagerInPlace(kind, activeTab || (action === "install" ? "installed" : "manage"));
         const message = result.message || `${shopLabel(kind)} action completed.`;
         state.notice = message;
-        await loadView(state.view);
+        setStatus(message);
+        showToast(message);
       } catch (error) {
         setStatus(`${action} ${id} failed: ${error.message}`);
+        showToast(`${action} ${id} failed: ${error.message}`, "error", 3600);
       }
+    });
+  });
+}
+
+function bindVerbaRuntimeActions(root = document) {
+  root.querySelectorAll(".verba-toggle").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      const card = event.currentTarget.closest("[data-plugin-id]");
+      const pluginId = String(card?.dataset?.pluginId || "").trim();
+      const nextEnabled = String(event.currentTarget.textContent || "").trim().toLowerCase() === "enable";
+      if (!pluginId) {
+        return;
+      }
+
+      setShopStatus("verbas", `${nextEnabled ? "Enabling" : "Disabling"} ${pluginId}...`);
+      try {
+        await runActionWithProgress(
+          {
+            title: `${nextEnabled ? "Enabling" : "Disabling"} verba`,
+            detail: pluginId,
+            workingText: `${nextEnabled ? "Enabling" : "Disabling"} ${pluginId}...`,
+            successText: `${pluginId} ${nextEnabled ? "enabled" : "disabled"}.`,
+            errorPrefix: "Verba toggle failed",
+          },
+          () =>
+            api(`/api/verbas/${pluginId}/enabled`, {
+              method: "POST",
+              body: JSON.stringify({ enabled: nextEnabled }),
+            })
+        );
+
+        await refreshShopManagerInPlace("verbas", getActiveShopTab("verbas") || "installed");
+        await refreshHealth();
+        showToast(`${pluginId} ${nextEnabled ? "enabled" : "disabled"}.`);
+      } catch (error) {
+        setShopStatus("verbas", `Toggle failed: ${error.message}`);
+        showToast(`Toggle failed: ${error.message}`, "error", 3600);
+      }
+    });
+  });
+
+  root.querySelectorAll(".open-runtime-settings[data-runtime-kind='verbas']").forEach((button) => {
+    if (button.dataset.runtimeSettingsBound === "1") {
+      return;
+    }
+    button.dataset.runtimeSettingsBound = "1";
+    button.addEventListener("click", async (event) => {
+      const trigger = event.currentTarget;
+      const pluginId = String(trigger?.dataset?.runtimeKey || "").trim();
+      const entry = getRuntimeSettingsEntry("verbas", pluginId);
+      if (!pluginId || !entry) {
+        return;
+      }
+      openRuntimeSettingsModal({
+        title: `${entry.label} Settings`,
+        meta: pluginId,
+        fields: entry.settings,
+        onSave: async (values) => {
+          await api(`/api/verbas/${pluginId}/settings`, {
+            method: "POST",
+            body: JSON.stringify({ values }),
+          });
+          const message = `Saved settings for ${pluginId}.`;
+          setShopStatus("verbas", message);
+          state.notice = message;
+          await refreshShopManagerInPlace("verbas", getActiveShopTab("verbas") || "installed");
+          return { message };
+        },
+      });
+    });
+  });
+}
+
+function bindSurfaceRuntimeActions(kind, endpoint, root = document) {
+  root.querySelectorAll(".surface-toggle").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      const card = event.currentTarget.closest("[data-surface-key]");
+      const surfaceKey = String(card?.dataset?.surfaceKey || "").trim();
+      if (!surfaceKey) {
+        return;
+      }
+      const action = String(event.currentTarget.textContent || "").trim().toLowerCase() === "start" ? "start" : "stop";
+      const noun = shopLabel(kind).toLowerCase();
+      setShopStatus(kind, `${action} ${surfaceKey}...`);
+
+      try {
+        await runActionWithProgress(
+          {
+            title: `${action === "start" ? "Starting" : "Stopping"} ${noun}`,
+            detail: surfaceKey,
+            workingText: `${action} ${surfaceKey}...`,
+            successText: `${surfaceKey} ${action === "start" ? "started" : "stopped"}.`,
+            errorPrefix: `${noun} ${action} failed`,
+          },
+          () => api(`${endpoint}/${surfaceKey}/${action}`, { method: "POST" })
+        );
+
+        await refreshShopManagerInPlace(kind, getActiveShopTab(kind) || "installed");
+        await refreshHealth();
+        showToast(`${surfaceKey} ${action === "start" ? "started" : "stopped"}.`);
+      } catch (error) {
+        setShopStatus(kind, `${action} failed: ${error.message}`);
+        showToast(`${action} failed: ${error.message}`, "error", 3600);
+      }
+    });
+  });
+
+  root.querySelectorAll(`.open-runtime-settings[data-runtime-kind='${kind}']`).forEach((button) => {
+    if (button.dataset.runtimeSettingsBound === "1") {
+      return;
+    }
+    button.dataset.runtimeSettingsBound = "1";
+    button.addEventListener("click", (event) => {
+      const trigger = event.currentTarget;
+      const surfaceKey = String(trigger?.dataset?.runtimeKey || "").trim();
+      const entry = getRuntimeSettingsEntry(kind, surfaceKey);
+      if (!surfaceKey || !entry) {
+        return;
+      }
+      openRuntimeSettingsModal({
+        title: `${entry.label} Settings`,
+        meta: surfaceKey,
+        fields: entry.settings,
+        onSave: async (values) => {
+          await api(`${endpoint}/${surfaceKey}/settings`, {
+            method: "POST",
+            body: JSON.stringify({ values }),
+          });
+          const message = `Saved settings for ${surfaceKey}.`;
+          setShopStatus(kind, message);
+          state.notice = message;
+          await refreshShopManagerInPlace(kind, getActiveShopTab(kind) || "installed");
+          return { message };
+        },
+      });
     });
   });
 }
@@ -2118,25 +3444,39 @@ function bindShopActions(kind) {
 async function loadChatView() {
   const root = document.getElementById("view-root");
   root.innerHTML = `${consumeNoticeHtml()}
-    <div class="card">
-      <div class="card-head">
-        <h3 class="card-title">Conversation</h3>
-      </div>
+    <div class="card chat-feed-card">
       <div id="chat-log" class="chat-log"></div>
       <div id="chat-speed-stats" class="small chat-speed-stats" style="display:none;"></div>
       <div id="chat-status" class="small chat-live-status" aria-live="polite"></div>
-    </div>
-    <div class="card message-box">
-      <label>Message
-        <textarea id="chat-input" rows="2" placeholder="${escapeHtml(`Type your message to ${getTaterFullName()}...`)}"></textarea>
-      </label>
-      <div class="inline-row">
-        <label for="chat-files" class="inline-btn">Attach Files</label>
-        <button type="button" id="clear-chat-files" class="inline-btn" style="display:none;">Clear</button>
-        <input id="chat-files" class="chat-file-input" type="file" multiple />
-        <button class="action-btn" id="send-chat">Send</button>
-        <span class="small">Session: <code>${escapeHtml(state.sessionId.slice(0, 8))}</code></span>
-        <span id="chat-files-meta" class="small">No files selected.</span>
+      <div class="message-box chat-composer-card">
+        <div class="chat-composer" role="group" aria-label="Chat composer">
+          <div class="chat-composer-bar">
+            <input id="chat-files" class="chat-file-input" type="file" multiple />
+            <label for="chat-files" class="chat-composer-btn chat-composer-attach" title="Attach files" aria-label="Attach files">
+              <span class="chat-composer-icon" aria-hidden="true">📎</span>
+            </label>
+            <textarea
+              id="chat-input"
+              class="chat-composer-input"
+              rows="1"
+              placeholder="${escapeHtml(`Message ${getTaterFullName()}...`)}"
+            ></textarea>
+            <button
+              type="button"
+              id="clear-chat-files"
+              class="chat-composer-btn chat-composer-clear"
+              style="display:none;"
+              title="Clear attached files"
+              aria-label="Clear attached files"
+            >
+              <span class="chat-composer-icon chat-composer-clear-plus" aria-hidden="true">＋</span>
+            </button>
+            <button type="button" id="send-chat" class="chat-composer-send" title="Send message" aria-label="Send message">
+              <span class="chat-composer-icon chat-composer-send-arrow" aria-hidden="true">➤</span>
+            </button>
+          </div>
+          <div id="chat-files-meta" class="small chat-files-meta">No files selected.</div>
+        </div>
       </div>
     </div>
   `;
@@ -2510,6 +3850,15 @@ async function loadChatView() {
 
   const chatInputEl = document.getElementById("chat-input");
   const sendChatBtn = document.getElementById("send-chat");
+  const autoSizeChatInput = () => {
+    if (!chatInputEl) {
+      return;
+    }
+    chatInputEl.style.height = "auto";
+    const nextHeight = Math.min(Math.max(chatInputEl.scrollHeight, 44), 180);
+    chatInputEl.style.height = `${nextHeight}px`;
+  };
+  autoSizeChatInput();
 
   if (chatFilesEl) {
     chatFilesEl.addEventListener("change", () => {
@@ -2551,6 +3900,7 @@ async function loadChatView() {
         });
       }
       chatInputEl.value = "";
+      autoSizeChatInput();
       const response = await api("/api/chat/jobs", {
         method: "POST",
         body: JSON.stringify({ message, session_id: state.sessionId, attachments }),
@@ -2598,6 +3948,7 @@ async function loadChatView() {
       sendChatMessage();
     }
   });
+  chatInputEl.addEventListener("input", autoSizeChatInput);
 }
 
 async function loadVerbasView() {
@@ -2607,53 +3958,7 @@ async function loadVerbasView() {
     api("/api/verbas"),
     api("/api/shop/verbas"),
   ]);
-
-  const items = Array.isArray(runtimeData.items) ? runtimeData.items : [];
-  const installedShopItems = Array.isArray(shopData?.installed) ? shopData.installed : [];
-  const shopById = new Map(
-    installedShopItems
-      .map((entry) => [String(entry?.id || "").trim(), entry])
-      .filter(([id]) => Boolean(id))
-  );
-  const runtimeHtml = items.length
-    ? items
-        .map((item) => {
-          const shopEntry = shopById.get(String(item.id || "").trim()) || {};
-          const settings = Array.isArray(item.settings) ? item.settings : [];
-          const settingsHtml = settings
-            .map((field) => buildSettingInput(field, `verba_${item.id}_${field.key}`))
-            .join("");
-          const settingsBlock = settingsHtml
-            ? `<details class="settings-dropdown"><summary class="settings-summary">Settings</summary><form class="form-grid verba-settings">${settingsHtml}<button type="submit" class="action-btn">Save Settings</button></form></details>`
-            : `<div class="small">No configurable settings.</div>`;
-          const platformValues = Array.isArray(item.platforms) && item.platforms.length
-            ? item.platforms
-            : Array.isArray(shopEntry.platforms)
-              ? shopEntry.platforms
-              : [];
-          const platforms = platformValues.length ? platformValues.join(", ") : "all";
-          const installedVer = String(shopEntry.installed_ver || "0.0.0").trim() || "0.0.0";
-          const storeVer = String(shopEntry.store_ver || "-").trim() || "-";
-          const sourceLabel = String(shopEntry.source_label || "local").trim() || "local";
-          const description = String(shopEntry.description || item.description || "No description").trim() || "No description";
-          return `
-            <article class="card" data-plugin-id="${escapeHtml(item.id)}">
-              <div class="card-head">
-                <h3 class="card-title">${escapeHtml(item.name)}</h3>
-                <div class="inline-row">
-                  <span class="small">${escapeHtml(item.id)}</span>
-                  <button class="inline-btn verba-toggle">${item.enabled ? "Disable" : "Enable"}</button>
-                </div>
-              </div>
-              <div class="small">installed: ${escapeHtml(installedVer)} • store: ${escapeHtml(storeVer)} • source: ${escapeHtml(sourceLabel)} • enabled: ${item.enabled ? "yes" : "no"}</div>
-              <div class="muted">${escapeHtml(description)}</div>
-              <div class="small">Portals: ${escapeHtml(platforms)}</div>
-              ${settingsBlock}
-            </article>
-          `;
-        })
-        .join("")
-    : renderNotice("No verbas found in plugin registry.");
+  const runtimeHtml = buildVerbaRuntimeHtml(runtimeData, shopData);
 
   root.innerHTML = `${consumeNoticeHtml()}
     ${renderShopTabbedManager("verbas", shopData, {
@@ -2661,37 +3966,7 @@ async function loadVerbasView() {
       runtimeTitle: "Verba Runtime",
     })}
   `;
-
-  root.querySelectorAll(".verba-toggle").forEach((button) => {
-    button.addEventListener("click", async (event) => {
-      const card = event.target.closest("[data-plugin-id]");
-      const pluginId = card.dataset.pluginId;
-      const nextEnabled = event.target.textContent.trim() === "Enable";
-      await api(`/api/verbas/${pluginId}/enabled`, {
-        method: "POST",
-        body: JSON.stringify({ enabled: nextEnabled }),
-      });
-      await loadView("verbas");
-      await refreshHealth();
-    });
-  });
-
-  root.querySelectorAll("form.verba-settings").forEach((form) => {
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const card = event.target.closest("[data-plugin-id]");
-      const pluginId = card.dataset.pluginId;
-      const values = collectFormValues(form);
-      await api(`/api/verbas/${pluginId}/settings`, {
-        method: "POST",
-        body: JSON.stringify({ values }),
-      });
-      state.notice = `Saved settings for ${pluginId}.`;
-      showToast(state.notice);
-      await loadView("verbas");
-    });
-  });
-
+  bindVerbaRuntimeActions(root);
   bindShopTabs("verbas");
   bindShopActions("verbas");
 }
@@ -2708,74 +3983,8 @@ async function loadSurfaceView(kind) {
     [runtimeData, shopData] = await Promise.all([api(endpoint), api(shopApi)]);
   }
 
-  const items = Array.isArray(runtimeData.items) ? runtimeData.items : [];
   const root = document.getElementById("view-root");
-  const installedShopItems = Array.isArray(shopData?.installed) ? shopData.installed : [];
-  const moduleSuffix = kind === "cores" ? "_core" : "_portal";
-  const shopByModuleKey = new Map();
-  const shopById = new Map();
-  installedShopItems.forEach((entry) => {
-    const moduleKey = String(entry?.module_key || "").trim();
-    const entryId = String(entry?.id || "").trim();
-    if (moduleKey) {
-      shopByModuleKey.set(moduleKey, entry);
-    }
-    if (entryId) {
-      shopById.set(entryId, entry);
-    }
-  });
-  const resolveShopEntry = (runtimeKey) => {
-    const key = String(runtimeKey || "").trim();
-    if (!key) {
-      return null;
-    }
-    const byModule = shopByModuleKey.get(key);
-    if (byModule) {
-      return byModule;
-    }
-    const normalizedId = key.endsWith(moduleSuffix) ? key.slice(0, -moduleSuffix.length) : key;
-    return shopById.get(normalizedId) || shopById.get(key) || null;
-  };
-
-  const runtimeHtml = items.length
-    ? items
-        .map((item) => {
-          const shopEntry = resolveShopEntry(item.key) || {};
-          const settings = Array.isArray(item.settings) ? item.settings : [];
-          const settingsHtml = settings
-            .map((field) => buildSettingInput(field, `${kind}_${item.key}_${field.key}`))
-            .join("");
-
-          const running = Boolean(item.running);
-          const desired = Boolean(item.desired_running);
-          const statusClass = running ? "running" : "stopped";
-          const statusText = running ? "Running" : desired ? "Pending start" : "Stopped";
-          const actionLabel = running ? "Stop" : "Start";
-          const installedVer = String(shopEntry.installed_ver || "0.0.0").trim() || "0.0.0";
-          const storeVer = String(shopEntry.store_ver || "-").trim() || "-";
-          const sourceLabel = String(shopEntry.source_label || "local").trim() || "local";
-          const description = String(shopEntry.description || "").trim();
-          const settingsBlock = settingsHtml
-            ? `<details class="settings-dropdown"><summary class="settings-summary">Settings</summary><form class="form-grid surface-settings">${settingsHtml}<button type="submit" class="action-btn">Save Settings</button></form></details>`
-            : `<div class="small">No settings in manifest.</div>`;
-
-          return `
-            <article class="card" data-surface-key="${escapeHtml(item.key)}">
-              <div class="card-head">
-                <h3 class="card-title">${escapeHtml(item.label || item.key)}</h3>
-                <div class="inline-row">
-                  <span class="status-chip ${statusClass}">${statusText}</span>
-                  <button class="inline-btn surface-toggle">${actionLabel}</button>
-                </div>
-              </div>
-              <div class="small">installed: ${escapeHtml(installedVer)} • store: ${escapeHtml(storeVer)} • source: ${escapeHtml(sourceLabel)} • running: ${running ? "yes" : "no"}</div>
-              ${description ? `<div class="muted">${escapeHtml(description)}</div>` : ""}
-              ${settingsBlock}
-            </article>
-          `;
-        })
-        .join("")
-    : renderNotice(`No ${kind} found.`);
+  const runtimeHtml = buildSurfaceRuntimeHtml(kind, runtimeData, shopData);
 
   if (kind === "portals") {
     root.innerHTML = `${consumeNoticeHtml()}
@@ -2796,34 +4005,7 @@ async function loadSurfaceView(kind) {
     `;
   }
 
-  root.querySelectorAll(".surface-toggle").forEach((button) => {
-    button.addEventListener("click", async (event) => {
-      const card = event.target.closest("[data-surface-key]");
-      const surfaceKey = card.dataset.surfaceKey;
-      const action = event.target.textContent.trim().toLowerCase() === "start" ? "start" : "stop";
-      await api(`${endpoint}/${surfaceKey}/${action}`, { method: "POST" });
-      await loadView(kind);
-      await refreshHealth();
-    });
-  });
-
-  root.querySelectorAll("form.surface-settings").forEach((form) => {
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const card = event.target.closest("[data-surface-key]");
-      const surfaceKey = card.dataset.surfaceKey;
-      const values = collectFormValues(form);
-
-      await api(`${endpoint}/${surfaceKey}/settings`, {
-        method: "POST",
-        body: JSON.stringify({ values }),
-      });
-
-      state.notice = `Saved settings for ${surfaceKey}.`;
-      showToast(state.notice);
-      await loadView(kind);
-    });
-  });
+  bindSurfaceRuntimeActions(kind, endpoint, root);
 
   if (kind === "portals") {
     bindShopTabs("portals");
@@ -2853,6 +4035,8 @@ async function loadSettingsView() {
   );
   const cerberusDefaults =
     settings?.cerberus_defaults && typeof settings.cerberus_defaults === "object" ? settings.cerberus_defaults : {};
+  const popupEffectStyle = normalizePopupEffectStyle(settings?.popup_effect_style || state.popupEffectStyle);
+  applyPopupEffectStyle(popupEffectStyle);
   const cerberusPlatforms = ["webui", "discord", "irc", "telegram", "matrix", "homeassistant", "homekit", "xbmc", "automation"];
   const cerberusPlatformOptionsHtml = cerberusPlatforms
     .map((platform) => `<option value="${escapeHtml(platform)}">${escapeHtml(cerberusPlatformLabel(platform))}</option>`)
@@ -2872,14 +4056,15 @@ async function loadSettingsView() {
       <div class="card-head">
         <h3 class="card-title">Settings</h3>
       </div>
-      <div class="small">Categories: General, Integrations, Emoji, Cerberus, Advanced.</div>
+      <div class="small">Categories: General, Cerberus, Integrations, Emoji, Compotato, Advanced.</div>
       <div id="settings-status" class="small" style="margin-top: 6px;"></div>
 
       <div class="settings-tabs">
         <button type="button" class="settings-tab-btn active" data-settings-tab="general">General</button>
+        <button type="button" class="settings-tab-btn" data-settings-tab="cerberus">Cerberus</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="integrations">Integrations</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="emoji">Emoji</button>
-        <button type="button" class="settings-tab-btn" data-settings-tab="cerberus">Cerberus</button>
+        <button type="button" class="settings-tab-btn" data-settings-tab="compozr">Compotato</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="advanced">Advanced</button>
       </div>
 
@@ -3034,44 +4219,24 @@ async function loadSettingsView() {
 
           <div class="settings-subpanel active" data-cerberus-panel="settings">
             <div class="form-grid two-col">
-              <label>Agent Max Rounds (0 = unlimited)
-                <input id="set_cerberus_max_rounds" type="number" min="0" value="${escapeHtml(
-                  settings.cerberus_max_rounds ?? 18
+              <label>Cerberus LLM Host / IP
+                <input id="set_cerberus_llm_host" type="text" value="${escapeHtml(
+                  settings.cerberus_llm_host || ""
                 )}" />
               </label>
-              <label>Agent Max Tool Calls (0 = unlimited)
-                <input id="set_cerberus_max_tool_calls" type="number" min="0" value="${escapeHtml(
-                  settings.cerberus_max_tool_calls ?? 18
+              <label>Cerberus LLM Port
+                <input id="set_cerberus_llm_port" type="number" min="1" max="65535" value="${escapeHtml(
+                  settings.cerberus_llm_port || ""
+                )}" />
+              </label>
+              <label>Cerberus LLM Model
+                <input id="set_cerberus_llm_model" type="text" value="${escapeHtml(
+                  settings.cerberus_llm_model || ""
                 )}" />
               </label>
               <label>Agent State TTL Seconds (0 = no TTL)
                 <input id="set_cerberus_agent_state_ttl_seconds" type="number" min="0" value="${escapeHtml(
                   settings.cerberus_agent_state_ttl_seconds ?? 604800
-                )}" />
-              </label>
-              <label>Planner Max Tokens
-                <input id="set_cerberus_planner_max_tokens" type="number" min="1" value="${escapeHtml(
-                  settings.cerberus_planner_max_tokens ?? 3300
-                )}" />
-              </label>
-              <label>Checker Max Tokens
-                <input id="set_cerberus_checker_max_tokens" type="number" min="1" value="${escapeHtml(
-                  settings.cerberus_checker_max_tokens ?? 2550
-                )}" />
-              </label>
-              <label>Doer Max Tokens
-                <input id="set_cerberus_doer_max_tokens" type="number" min="1" value="${escapeHtml(
-                  settings.cerberus_doer_max_tokens ?? 2700
-                )}" />
-              </label>
-              <label>Tool-Repair Max Tokens
-                <input id="set_cerberus_tool_repair_max_tokens" type="number" min="1" value="${escapeHtml(
-                  settings.cerberus_tool_repair_max_tokens ?? 2250
-                )}" />
-              </label>
-              <label>Recovery Max Tokens
-                <input id="set_cerberus_recovery_max_tokens" type="number" min="1" value="${escapeHtml(
-                  settings.cerberus_recovery_max_tokens ?? 1050
                 )}" />
               </label>
               <label>Max Ledger Items
@@ -3143,6 +4308,23 @@ async function loadSettingsView() {
             </div>
             <div id="settings-cerb-data-status" class="small" style="margin-top: 8px;"></div>
             <div id="settings-cerb-data-content" class="form-grid"></div>
+          </div>
+        </section>
+
+        <section class="settings-tab-panel" data-settings-panel="compozr">
+          <div class="form-grid two-col">
+            <div class="settings-section-title">Compotato Popup Effects</div>
+            <label>Popup Animation Style
+              <select id="set_popup_effect_style">
+                <option value="disabled" ${popupEffectStyle === "disabled" ? "selected" : ""}>Disabled</option>
+                <option value="flame" ${popupEffectStyle === "flame" ? "selected" : ""}>Flame</option>
+                <option value="dust" ${popupEffectStyle === "dust" ? "selected" : ""}>Crumble To Dust</option>
+                <option value="glitch" ${popupEffectStyle === "glitch" ? "selected" : ""}>Glitch Out</option>
+                <option value="portal" ${popupEffectStyle === "portal" ? "selected" : ""}>Portal Swirl Shut</option>
+                <option value="melt" ${popupEffectStyle === "melt" ? "selected" : ""}>Melt Downward</option>
+              </select>
+            </label>
+            <div class="small">Applies to modal popups and toast popups when they appear and close.</div>
           </div>
         </section>
 
@@ -3294,22 +4476,23 @@ async function loadSettingsView() {
 
   document.getElementById("settings-cerberus-defaults").addEventListener("click", () => {
     const map = [
-      ["set_cerberus_max_rounds", "cerberus_max_rounds"],
-      ["set_cerberus_max_tool_calls", "cerberus_max_tool_calls"],
+      ["set_cerberus_llm_host", "cerberus_llm_host"],
+      ["set_cerberus_llm_port", "cerberus_llm_port"],
+      ["set_cerberus_llm_model", "cerberus_llm_model"],
       ["set_cerberus_agent_state_ttl_seconds", "cerberus_agent_state_ttl_seconds"],
-      ["set_cerberus_planner_max_tokens", "cerberus_planner_max_tokens"],
-      ["set_cerberus_checker_max_tokens", "cerberus_checker_max_tokens"],
-      ["set_cerberus_doer_max_tokens", "cerberus_doer_max_tokens"],
-      ["set_cerberus_tool_repair_max_tokens", "cerberus_tool_repair_max_tokens"],
-      ["set_cerberus_recovery_max_tokens", "cerberus_recovery_max_tokens"],
       ["set_cerberus_max_ledger_items", "cerberus_max_ledger_items"],
     ];
-    map.forEach(([inputId, key]) => {
+    map.forEach(([inputId, primaryKey]) => {
       const input = document.getElementById(inputId);
-      if (!input || !(key in cerberusDefaults)) {
+      if (!input) {
         return;
       }
-      input.value = String(cerberusDefaults[key]);
+      const hasPrimary = Object.prototype.hasOwnProperty.call(cerberusDefaults, primaryKey);
+      if (!hasPrimary) {
+        return;
+      }
+      const rawValue = cerberusDefaults[primaryKey];
+      input.value = String(rawValue);
     });
     statusEl.textContent = "Cerberus defaults loaded into form. Click Save Settings to apply.";
   });
@@ -3372,8 +4555,7 @@ async function loadSettingsView() {
     const copyBtn = document.getElementById("cerb-ledger-copy");
 
     const closeModal = () => {
-      modal.classList.remove("active");
-      modal.setAttribute("aria-hidden", "true");
+      closePopupModal(modal);
     };
 
     closeBtn?.addEventListener("click", closeModal);
@@ -3425,8 +4607,7 @@ async function loadSettingsView() {
       const parts = [time, platform, scope, outcome].filter(Boolean);
       metaEl.textContent = parts.join(" • ");
     }
-    modal.classList.add("active");
-    modal.setAttribute("aria-hidden", "false");
+    openPopupModal(modal);
   };
 
   const toRateText = (value) => {
@@ -3465,7 +4646,7 @@ async function loadSettingsView() {
             <td>${escapeHtml(String(row?.time ?? ""))}</td>
             <td>${escapeHtml(String(row?.platform ?? ""))}</td>
             <td>${escapeHtml(String(row?.scope ?? ""))}</td>
-            <td>${escapeHtml(String(row?.planner_kind ?? ""))}</td>
+            <td>${escapeHtml(String(row?.astraeus_thanatos_kind ?? row?.planner_kind ?? ""))}</td>
             <td>${escapeHtml(String(row?.outcome ?? ""))}</td>
             <td>${escapeHtml(String(row?.planned_tool ?? ""))}</td>
             <td>${escapeHtml(String(row?.validation_status ?? ""))}</td>
@@ -3487,7 +4668,7 @@ async function loadSettingsView() {
               <th>Time</th>
               <th>Platform</th>
               <th>Scope</th>
-              <th>Planner</th>
+              <th>Astraeus/Thanatos</th>
               <th>Outcome</th>
               <th>Tool</th>
               <th>Validation</th>
@@ -3821,19 +5002,14 @@ async function loadSettingsView() {
         document.getElementById("set_emoji_reply_reaction_cooldown_seconds").value || 120
       ),
       emoji_min_message_length: Number(document.getElementById("set_emoji_min_message_length").value || 4),
-      cerberus_max_rounds: Number(document.getElementById("set_cerberus_max_rounds").value || 18),
-      cerberus_max_tool_calls: Number(document.getElementById("set_cerberus_max_tool_calls").value || 18),
+      cerberus_llm_host: document.getElementById("set_cerberus_llm_host").value,
+      cerberus_llm_port: document.getElementById("set_cerberus_llm_port").value,
+      cerberus_llm_model: document.getElementById("set_cerberus_llm_model").value,
       cerberus_agent_state_ttl_seconds: Number(
         document.getElementById("set_cerberus_agent_state_ttl_seconds").value || 604800
       ),
-      cerberus_planner_max_tokens: Number(document.getElementById("set_cerberus_planner_max_tokens").value || 3300),
-      cerberus_checker_max_tokens: Number(document.getElementById("set_cerberus_checker_max_tokens").value || 2550),
-      cerberus_doer_max_tokens: Number(document.getElementById("set_cerberus_doer_max_tokens").value || 2700),
-      cerberus_tool_repair_max_tokens: Number(
-        document.getElementById("set_cerberus_tool_repair_max_tokens").value || 2250
-      ),
-      cerberus_recovery_max_tokens: Number(document.getElementById("set_cerberus_recovery_max_tokens").value || 1050),
       cerberus_max_ledger_items: Number(document.getElementById("set_cerberus_max_ledger_items").value || 1500),
+      popup_effect_style: normalizePopupEffectStyle(document.getElementById("set_popup_effect_style")?.value || "flame"),
       admin_only_plugins: adminOnlyPlugins,
     };
 
@@ -3858,6 +5034,7 @@ async function loadSettingsView() {
         method: "POST",
         body: JSON.stringify(payload),
       });
+      applyPopupEffectStyle(payload.popup_effect_style);
       await refreshBranding();
       clearUserAvatarRequested = false;
       clearTaterAvatarRequested = false;
@@ -3914,8 +5091,24 @@ function bindNav() {
   });
 }
 
+function bindSidebarControls() {
+  const collapseBtn = document.getElementById("sidebar-collapse-btn");
+  const expandBtn = document.getElementById("sidebar-expand-btn");
+
+  collapseBtn?.addEventListener("click", () => {
+    setSidebarCollapsed(!state.sidebarCollapsed);
+  });
+  expandBtn?.addEventListener("click", () => {
+    setSidebarCollapsed(false);
+  });
+
+  applySidebarState();
+}
+
 async function init() {
+  bindSidebarControls();
   bindNav();
+  bindRuntimeSummary();
   await refreshBranding();
   await refreshHealth();
   await loadView(state.view);
@@ -3925,6 +5118,7 @@ async function init() {
 
 window.addEventListener("beforeunload", () => {
   closeChatEventSource();
+  stopRuntimeBreakdownPolling();
 });
 
 init().catch((error) => {

@@ -10,7 +10,7 @@ import json
 import base64
 import uuid
 import websocket
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse, urlunparse
 
 load_dotenv()
@@ -186,12 +186,14 @@ def build_llm_host_from_env(default_host="127.0.0.1", default_port="11434") -> s
     # No scheme provided -> assume http:// and append port
     return f"http://{llm_host}:{llm_port}"
 
-def get_llm_client_from_env(**kwargs) -> "LLMClientWrapper":
+def get_llm_client_from_env(host: Optional[str] = None, model: Optional[str] = None, **kwargs) -> "LLMClientWrapper":
     """
-    Construct an LLMClientWrapper using LLM_HOST/LLM_PORT env vars.
+    Construct an LLMClientWrapper using explicit host/model overrides,
+    with LLM_HOST/LLM_PORT and LLM_MODEL env fallback.
     """
-    host = build_llm_host_from_env()
-    return LLMClientWrapper(host=host, **kwargs)
+    resolved_host = str(host or "").strip() or build_llm_host_from_env()
+    resolved_model = str(model or "").strip() or None
+    return LLMClientWrapper(host=resolved_host, model=resolved_model, **kwargs)
 
 class LLMClientWrapper:
     def __init__(self, host, model=None, **kwargs):
@@ -295,9 +297,12 @@ class LLMClientWrapper:
         stream = kwargs.pop("stream", False)
         model = kwargs.pop("model", self.model)
 
-        # Provide sensible defaults if not supplied
+        # Provide sensible defaults if not supplied. A caller can pass
+        # max_tokens=None to explicitly disable token capping for this call.
         if "max_tokens" not in kwargs:
             kwargs["max_tokens"] = self.max_tokens
+        elif kwargs.get("max_tokens") is None:
+            kwargs.pop("max_tokens", None)
         if "temperature" not in kwargs:
             kwargs["temperature"] = self.temperature
 
@@ -431,10 +436,21 @@ def looks_like_tool_markup(text: str) -> bool:
 
 def parse_function_json(response_text: str):
     _DECISION_PREFIX_RE = re.compile(
-        r"^\s*(FINAL[\s_-]*ANSWER|RETRY[\s_-]*TOOL|NEED[\s_-]*USER[\s_-]*INFO|ANSWER|NO_TOOL)\s*:\s*(.*)$",
+        r"^\s*(CONTINUE|RETRY|ASK[\s_-]*USER|FAIL|FINAL|FINAL[\s_-]*ANSWER|RETRY[\s_-]*TOOL|NEED[\s_-]*USER[\s_-]*INFO|ANSWER|NO_TOOL)\s*:\s*(.*)$",
         re.IGNORECASE | re.DOTALL,
     )
-    _NON_TOOL_PREFIXES = {"retry_tool", "final_answer", "need_user_info", "answer", "no_tool"}
+    _NON_TOOL_PREFIXES = {
+        "continue",
+        "retry",
+        "ask_user",
+        "fail",
+        "final",
+        "retry_tool",
+        "final_answer",
+        "need_user_info",
+        "answer",
+        "no_tool",
+    }
 
     def _pick(obj):
         if isinstance(obj, dict):
@@ -455,7 +471,7 @@ def parse_function_json(response_text: str):
 
     # ---------------------------------------------------------
     # Tool-call markup (Codex/OpenAI style) support:
-    #   <|channel|>commentary to=repo_browser.get_plugin_help <|message|>{"plugin_id":"weather_forecast"}
+    #   <|channel|>commentary to=repo_browser.get_verba_help <|message|>{"verba_id":"weather_forecast"}
     # ---------------------------------------------------------
     m_tool = re.search(r"to=([a-zA-Z0-9_.-]+).*?<\|message\|>(\{.*\})", s, re.DOTALL)
     if m_tool:
@@ -465,9 +481,9 @@ def parse_function_json(response_text: str):
         try:
             args = json.loads(blob)
             if isinstance(args, dict):
-                if tool_name == "get_plugin_help":
-                    if "plugin_id" not in args and "name" in args:
-                        args["plugin_id"] = args.get("name")
+                if tool_name == "get_verba_help":
+                    if "verba_id" not in args and "name" in args:
+                        args["verba_id"] = args.get("name")
                 return {"function": tool_name, "arguments": args}
         except Exception:
             return {"function": tool_name, "arguments": {}}
@@ -483,7 +499,7 @@ def parse_function_json(response_text: str):
     if "<|message|>" in s:
         s = s.rsplit("<|message|>", 1)[-1].strip()
 
-    # Handle checker decision wrappers:
+    # Handle Minos decision wrappers:
     #   RETRY_TOOL: {...}
     #   FINAL_ANSWER: ...
     decision_match = _DECISION_PREFIX_RE.match(s)

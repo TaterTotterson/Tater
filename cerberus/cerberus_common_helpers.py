@@ -125,7 +125,7 @@ def sanitize_user_text(
         out = str(match.group(2) or "").strip()
 
     if re.search(
-        r"\b(planner head|doer head|critic head|internal orchestration|tool runtime|repair prompt|orchestration roles?)\b",
+        r"\b(planner head|doer head|critic head|astraeus|thanatos|minos|seer head|reaper head|arbiter head|internal orchestration|tool runtime|repair prompt|orchestration roles?)\b",
         out,
         flags=re.IGNORECASE,
     ):
@@ -153,7 +153,7 @@ def compact_history(
         if not content:
             continue
         out.append({"role": role, "content": content})
-    return out[-12:]
+    return out
 
 
 def platform_label(

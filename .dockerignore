@@ -6,9 +6,9 @@ agent_lab/logs/*.log
 agent_lab/workspace/extracted_tmp_archive_*
 tests/
 
-# Plugin source now lives in the plugin store; exclude local plugin files from build context.
-plugins/*
-!plugins/__init__.py
+# Verba source now lives in the verba store; exclude local verba files from build context.
+verba/*
+!verba/__init__.py
 
 # Portal source now lives in the portal store; exclude local portal files from build context.
 portals/*

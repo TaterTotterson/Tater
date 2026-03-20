@@ -6,9 +6,9 @@ agent_lab/logs/*.log
 agent_lab/workspace/extracted_tmp_archive_*
 tests/
 
-# Plugin source now lives in the plugin store; keep local plugin files out of this repo.
-plugins/*
-!plugins/__init__.py
+# Verba source now lives in the verba store; keep local verba files out of this repo.
+verba/*
+!verba/__init__.py
 
 # Portal source now lives in the portal store; keep local portal files out of this repo.
 portals/*

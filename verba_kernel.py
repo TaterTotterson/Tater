@@ -58,7 +58,7 @@ def _normalize_platforms(platforms: Iterable[str]) -> List[str]:
     return out
 
 
-def expand_plugin_platforms(platforms: Iterable[str]) -> List[str]:
+def expand_verba_platforms(platforms: Iterable[str]) -> List[str]:
     raw = _normalize_platforms(platforms)
     expanded: List[str] = []
     for p in raw:
@@ -72,38 +72,38 @@ def expand_plugin_platforms(platforms: Iterable[str]) -> List[str]:
     return expanded
 
 
-def plugin_supports_platform(plugin: Any, platform: str) -> bool:
+def verba_supports_platform(verba: Any, platform: str) -> bool:
     p = normalize_platform(platform)
     if not p:
         return False
-    supported = expand_plugin_platforms(getattr(plugin, "platforms", []) or [])
+    supported = expand_verba_platforms(getattr(verba, "platforms", []) or [])
     return p in supported
 
 
-def plugin_display_name(plugin: Any) -> str:
+def verba_display_name(verba: Any) -> str:
     return (
-        _coerce_attr_text(getattr(plugin, "plugin_name", None))
-        or _coerce_attr_text(getattr(plugin, "name", None))
-        or "Unknown Plugin"
+        _coerce_attr_text(getattr(verba, "verba_name", None))
+        or _coerce_attr_text(getattr(verba, "name", None))
+        or "Unknown Verba"
     )
 
 
-def plugin_when_to_use(plugin: Any) -> str:
-    explicit = _coerce_attr_text(getattr(plugin, "when_to_use", None))
+def verba_when_to_use(verba: Any) -> str:
+    explicit = _coerce_attr_text(getattr(verba, "when_to_use", None))
     if explicit:
         return explicit
     desc = (
-        _coerce_attr_text(getattr(plugin, "description", None))
-        or _coerce_attr_text(getattr(plugin, "plugin_dec", None))
+        _coerce_attr_text(getattr(verba, "description", None))
+        or _coerce_attr_text(getattr(verba, "verba_dec", None))
     )
     if not desc:
-        return "Use this plugin when the user asks for this capability."
+        return "Use this verba when the user asks for this capability."
     first_sentence = re.split(r"(?<=[.!?])\s+", desc, maxsplit=1)[0].strip()
     return first_sentence or desc
 
 
-def plugin_how_to_use(plugin: Any) -> str:
-    explicit = _coerce_attr_text(getattr(plugin, "how_to_use", None))
+def verba_how_to_use(verba: Any) -> str:
+    explicit = _coerce_attr_text(getattr(verba, "how_to_use", None))
     if explicit:
         return explicit
     return "Use usage_example for exact call shape."
@@ -149,8 +149,8 @@ def _infer_type(value: Any) -> str:
     return "string"
 
 
-def _extract_usage_arguments(plugin: Any) -> Dict[str, Any]:
-    usage = _coerce_attr_text(getattr(plugin, "usage", None))
+def _extract_usage_arguments(verba: Any) -> Dict[str, Any]:
+    usage = _coerce_attr_text(getattr(verba, "usage", None))
     if not usage:
         return {}
 
@@ -168,8 +168,8 @@ def _extract_usage_arguments(plugin: Any) -> Dict[str, Any]:
     return args if isinstance(args, dict) else {}
 
 
-def _canonical_usage_example(plugin: Any, plugin_id: str) -> str:
-    usage = _coerce_attr_text(getattr(plugin, "usage", None))
+def _canonical_usage_example(verba: Any, verba_id: str) -> str:
+    usage = _coerce_attr_text(getattr(verba, "usage", None))
     obj_txt = _find_first_json_object(usage)
     data: Dict[str, Any] = {}
     if obj_txt:
@@ -180,15 +180,15 @@ def _canonical_usage_example(plugin: Any, plugin_id: str) -> str:
         except Exception:
             data = {}
     if not data:
-        data = {"function": plugin_id, "arguments": {}}
-    data["function"] = str(plugin_id)
+        data = {"function": verba_id, "arguments": {}}
+    data["function"] = str(verba_id)
     if not isinstance(data.get("arguments"), dict):
         data["arguments"] = {}
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
 
-def _required_settings_summary(plugin: Any) -> Dict[str, Dict[str, Any]]:
-    raw = getattr(plugin, "required_settings", None)
+def _required_settings_summary(verba: Any) -> Dict[str, Dict[str, Any]]:
+    raw = getattr(verba, "required_settings", None)
     if not isinstance(raw, dict):
         return {}
     out: Dict[str, Dict[str, Any]] = {}
@@ -205,12 +205,12 @@ def _required_settings_summary(plugin: Any) -> Dict[str, Dict[str, Any]]:
     return out
 
 
-def infer_needs_from_plugin(plugin: Any) -> List[str]:
-    explicit = getattr(plugin, "common_needs", None)
+def infer_needs_from_verba(verba: Any) -> List[str]:
+    explicit = getattr(verba, "common_needs", None)
     if isinstance(explicit, list) and explicit:
         return [str(x).strip() for x in explicit if str(x).strip()]
 
-    args = _extract_usage_arguments(plugin)
+    args = _extract_usage_arguments(verba)
     needs: List[str] = []
     for key in args.keys():
         k = str(key).strip()
@@ -220,9 +220,9 @@ def infer_needs_from_plugin(plugin: Any) -> List[str]:
     return needs[:6]
 
 
-def plugin_arguments_help(plugin: Any) -> Dict[str, List[Dict[str, str]]]:
-    if hasattr(plugin, "argument_schema") and isinstance(plugin.argument_schema, dict):
-        schema = plugin.argument_schema
+def verba_arguments_help(verba: Any) -> Dict[str, List[Dict[str, str]]]:
+    if hasattr(verba, "argument_schema") and isinstance(verba.argument_schema, dict):
+        schema = verba.argument_schema
         required = schema.get("required", []) if isinstance(schema.get("required"), list) else []
         props = schema.get("properties", {}) if isinstance(schema.get("properties"), dict) else {}
         req_items: List[Dict[str, str]] = []
@@ -242,7 +242,7 @@ def plugin_arguments_help(plugin: Any) -> Dict[str, List[Dict[str, str]]]:
                 opt_items.append(item)
         return {"required": req_items, "optional": opt_items}
 
-    usage_args = _extract_usage_arguments(plugin)
+    usage_args = _extract_usage_arguments(verba)
     req_items: List[Dict[str, str]] = []
     opt_items: List[Dict[str, str]] = []
 
@@ -256,29 +256,29 @@ def plugin_arguments_help(plugin: Any) -> Dict[str, List[Dict[str, str]]]:
     return {"required": req_items, "optional": opt_items}
 
 
-def get_plugin_help(
+def get_verba_help(
     *,
-    plugin_id: str,
+    verba_id: str,
     platform: Optional[str],
     registry: Dict[str, Any],
 ) -> Dict[str, Any]:
-    pid = (plugin_id or "").strip()
-    plugin = registry.get(pid)
-    if not plugin:
+    vid = (verba_id or "").strip()
+    verba = registry.get(vid)
+    if not verba:
         return {
-            "tool": "get_plugin_help",
+            "tool": "get_verba_help",
             "ok": False,
-            "error": {"code": "unknown_plugin", "message": f"Plugin '{pid}' was not found."},
+            "error": {"code": "unknown_verba", "message": f"Verba '{vid}' was not found."},
         }
 
-    usage = _canonical_usage_example(plugin, pid)
-    examples = getattr(plugin, "example_calls", None)
+    usage = _canonical_usage_example(verba, vid)
+    examples = getattr(verba, "example_calls", None)
     if not isinstance(examples, list) or not examples:
         examples = [usage] if usage else []
-    how_to_use = plugin_how_to_use(plugin)
+    how_to_use = verba_how_to_use(verba)
 
     payload: Dict[str, Any] = {
-        "plugin_id": pid,
+        "verba_id": vid,
         "how_to_use": str(how_to_use or ""),
         "usage_example": usage,
         "example_calls": [str(x).strip() for x in examples if str(x).strip()],
@@ -286,22 +286,22 @@ def get_plugin_help(
     return payload
 
 
-def list_platforms_for_plugin(
+def list_platforms_for_verba(
     *,
-    plugin_id: str,
+    verba_id: str,
     registry: Dict[str, Any],
     known_platforms: Iterable[str] = KNOWN_PLATFORMS,
 ) -> Dict[str, Any]:
-    pid = (plugin_id or "").strip()
-    plugin = registry.get(pid)
-    if not plugin:
+    vid = (verba_id or "").strip()
+    verba = registry.get(vid)
+    if not verba:
         return {
-            "tool": "list_platforms_for_plugin",
+            "tool": "list_platforms_for_verba",
             "ok": False,
-            "error": {"code": "unknown_plugin", "message": f"Plugin '{pid}' was not found."},
+            "error": {"code": "unknown_verba", "message": f"Verba '{vid}' was not found."},
         }
 
-    available_on = expand_plugin_platforms(getattr(plugin, "platforms", []) or [])
+    available_on = expand_verba_platforms(getattr(verba, "platforms", []) or [])
     known = _normalize_platforms(known_platforms)
     for p in available_on:
         if p not in known:
@@ -309,10 +309,10 @@ def list_platforms_for_plugin(
     not_available_on = [p for p in known if p not in available_on]
 
     return {
-        "tool": "list_platforms_for_plugin",
+        "tool": "list_platforms_for_verba",
         "ok": True,
-        "plugin_id": pid,
-        "plugin_name": plugin_display_name(plugin),
+        "verba_id": vid,
+        "verba_name": verba_display_name(verba),
         "available_on": available_on,
         "not_available_on": not_available_on,
     }
