@@ -1556,6 +1556,102 @@ def _merge_hash_fields_without_overwrite(target_key: str, source: Dict[str, Any]
     return len(to_write), skipped_existing
 
 
+def _history_keys_for_legacy_marker_migration() -> List[str]:
+    keys = {CHAT_HISTORY_KEY}
+    for pattern in ("tater:channel:*:history", "tater:telegram:*:history", "tater:matrix:*:history"):
+        for raw_key in redis_client.scan_iter(match=pattern):
+            key = str(raw_key or "").strip()
+            if key:
+                keys.add(key)
+    return sorted(keys)
+
+
+def _migrate_legacy_plugin_history_markers() -> Dict[str, Any]:
+    """
+    One-way chat history migration:
+    - Drops legacy transient plugin wrappers: plugin_call, plugin_wait
+    - Unwraps plugin_response payloads into plain assistant content
+
+    This keeps conversation history readable after plugin -> verba rename and
+    avoids feeding wrapper-only tool markers back into Cerberus context.
+    """
+    summary: Dict[str, Any] = {
+        "changed": False,
+        "history_keys_scanned": 0,
+        "history_keys_migrated": 0,
+        "history_entries_scanned": 0,
+        "history_entries_removed": 0,
+        "history_entries_unwrapped": 0,
+    }
+
+    history_keys = _history_keys_for_legacy_marker_migration()
+    summary["history_keys_scanned"] = len(history_keys)
+
+    for key in history_keys:
+        try:
+            rows = list(redis_client.lrange(key, 0, -1) or [])
+        except Exception:
+            continue
+        if not rows:
+            continue
+
+        migrated_rows: List[str] = []
+        key_changed = False
+
+        for raw_line in rows:
+            line = str(raw_line or "")
+            summary["history_entries_scanned"] += 1
+
+            try:
+                parsed = json.loads(line)
+            except Exception:
+                migrated_rows.append(line)
+                continue
+
+            if not isinstance(parsed, dict):
+                migrated_rows.append(line)
+                continue
+
+            content = parsed.get("content")
+            if not isinstance(content, dict):
+                migrated_rows.append(line)
+                continue
+
+            marker = str(content.get("marker") or "").strip().lower()
+            if marker not in {"plugin_call", "plugin_wait", "plugin_response"}:
+                migrated_rows.append(line)
+                continue
+
+            key_changed = True
+
+            if marker in {"plugin_call", "plugin_wait"}:
+                summary["history_entries_removed"] += 1
+                continue
+
+            payload = content.get("content")
+            if payload is None or (isinstance(payload, str) and not payload.strip()):
+                summary["history_entries_removed"] += 1
+                continue
+
+            migrated = dict(parsed)
+            migrated["content"] = payload
+            migrated_rows.append(json.dumps(migrated, ensure_ascii=False))
+            summary["history_entries_unwrapped"] += 1
+
+        if not key_changed:
+            continue
+
+        pipe = redis_client.pipeline()
+        pipe.delete(key)
+        if migrated_rows:
+            pipe.rpush(key, *migrated_rows)
+        pipe.execute()
+        summary["history_keys_migrated"] += 1
+        summary["changed"] = True
+
+    return summary
+
+
 def _migrate_legacy_plugin_redis_keys() -> Dict[str, Any]:
     """
     One-way Redis key migration:
@@ -1573,6 +1669,11 @@ def _migrate_legacy_plugin_redis_keys() -> Dict[str, Any]:
         "verba_settings_fields_migrated": 0,
         "verba_settings_fields_skipped_existing": 0,
         "legacy_keys_deleted": 0,
+        "legacy_history_keys_scanned": 0,
+        "legacy_history_keys_migrated": 0,
+        "legacy_history_entries_scanned": 0,
+        "legacy_history_entries_removed": 0,
+        "legacy_history_entries_unwrapped": 0,
     }
 
     old_enabled = redis_client.hgetall("plugin_enabled") or {}
@@ -1596,6 +1697,15 @@ def _migrate_legacy_plugin_redis_keys() -> Dict[str, Any]:
         summary["verba_settings_fields_skipped_existing"] += skipped
         redis_client.delete(old_key)
         summary["legacy_keys_deleted"] += 1
+        summary["changed"] = True
+
+    history_summary = _migrate_legacy_plugin_history_markers()
+    summary["legacy_history_keys_scanned"] = int(history_summary.get("history_keys_scanned") or 0)
+    summary["legacy_history_keys_migrated"] = int(history_summary.get("history_keys_migrated") or 0)
+    summary["legacy_history_entries_scanned"] = int(history_summary.get("history_entries_scanned") or 0)
+    summary["legacy_history_entries_removed"] = int(history_summary.get("history_entries_removed") or 0)
+    summary["legacy_history_entries_unwrapped"] = int(history_summary.get("history_entries_unwrapped") or 0)
+    if history_summary.get("changed"):
         summary["changed"] = True
 
     return summary

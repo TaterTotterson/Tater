@@ -98,6 +98,6 @@ def enabled_tool_mini_index(
     return (
         "Kernel tools:\n"
         + "\n".join(kernel_rows)
-        + "\nEnabled plugin tools on this platform:\n"
+        + "\nEnabled verba tools on this platform:\n"
         + "\n".join(plugin_rows)
     )

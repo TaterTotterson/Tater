@@ -979,12 +979,12 @@ def _collect_verbas_status_rows(
             getattr(plugin, "verba_dec", ""),
             getattr(plugin, "when_to_use", ""),
             getattr(plugin, "usage", ""),
-            fallback="plugin capability",
+            fallback="verba capability",
         )
         rows.append(
             {
                 "name": pid,
-                "description": description or "plugin capability",
+                "description": description or "verba capability",
                 "enabled": enabled,
             }
         )
@@ -1158,8 +1158,8 @@ def _render_tater_system_status_prompt(
     lines: List[str] = []
     lines.append("Tater System Status")
     lines.append("")
-    lines.append("Verbas (Capabilities)")
-    lines.append("These are the Verbas you currently have available for reference.")
+    lines.append("Verba (Capabilities)")
+    lines.append("These are the Verba tools you currently have available for reference.")
     if verbas_rows:
         for row in verbas_rows:
             status_text = "enabled" if _status_bool(row.get("enabled"), default=False) else "disabled"
@@ -1192,8 +1192,8 @@ def _render_tater_system_status_prompt(
     lines.append("")
     lines.append("Rules:")
     lines.append("- Use this information for awareness of current capability and system status.")
-    lines.append("- You may reference these Verbas, Portals, and Cores when relevant.")
-    lines.append("- Do NOT simulate calling Verbas in this response.")
+    lines.append("- You may reference these Verba tools, Portals, and Cores when relevant.")
+    lines.append("- Do NOT simulate calling Verba tools in this response.")
     lines.append("- Do NOT pretend to execute actions in chat mode.")
     lines.append("- Do NOT mention internal modes, pipelines, or branches unless asked.")
     lines.append("- If the user asks to perform an action, respond naturally as Tater without claiming execution occurred.")
@@ -3790,7 +3790,7 @@ async def _run_cerberus_turn_impl(
             {
                 "role": "system",
                 "content": (
-                    "Tool catalog for this turn (kernel + enabled plugins on this platform):\n"
+                    "Tool catalog for this turn (kernel + enabled verba tools on this platform):\n"
                     f"{tool_index}\n\n"
                     "Use this catalog directly for tool selection and argument shape."
                 ),
