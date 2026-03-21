@@ -26,7 +26,6 @@ Model routing:
 - You can add multiple Base servers; regular AI calls rotate round-robin.
 - Beast Mode off: all heads use the Base server pool.
 - Beast Mode on: AI Calls still use the Base pool, while Chat/Astraeus/Thanatos/Minos/Hermes each use their own model settings.
-- If required model settings are missing, Hydra returns the setup message and does not fall back.
 
 ---
 
