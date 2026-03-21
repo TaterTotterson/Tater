@@ -124,10 +124,11 @@ DEFAULT_MAX_TOOL_CALLS = 0
 DEFAULT_MAX_LEDGER_ITEMS = 1500
 DEFAULT_RESULT_MEMORY_MAX_SETS = 6
 DEFAULT_RESULT_MEMORY_MAX_ITEMS = 8
-DEFAULT_STEP_RETRY_LIMIT = 3
+DEFAULT_STEP_RETRY_LIMIT = 1
 DEFAULT_IDENTICAL_FAILED_TOOL_CALL_LIMIT = 1
 CERBERUS_AGENT_STATE_TTL_SECONDS_KEY = "tater:cerberus:agent_state_ttl_seconds"
 CERBERUS_MAX_LEDGER_ITEMS_KEY = "tater:cerberus:max_ledger_items"
+CERBERUS_STEP_RETRY_LIMIT_KEY = "tater:cerberus:step_retry_limit"
 CERBERUS_RESULT_MEMORY_MAX_SETS_KEY = "tater:cerberus:result_memory_max_sets"
 CERBERUS_RESULT_MEMORY_MAX_ITEMS_KEY = "tater:cerberus:result_memory_max_items"
 AGENT_STATE_PROMPT_MAX_CHARS = 800
@@ -137,6 +138,7 @@ DEFAULT_AGENT_STATE_TTL_SECONDS = 7 * 24 * 60 * 60
 AGENT_STATE_TTL_SECONDS = DEFAULT_AGENT_STATE_TTL_SECONDS
 RESULT_MEMORY_MAX_SETS = DEFAULT_RESULT_MEMORY_MAX_SETS
 RESULT_MEMORY_MAX_ITEMS = DEFAULT_RESULT_MEMORY_MAX_ITEMS
+STEP_RETRY_LIMIT = DEFAULT_STEP_RETRY_LIMIT
 CERBERUS_LEDGER_SCHEMA_VERSION = "2"
 
 _PLATFORM_DISPLAY = {
@@ -307,6 +309,18 @@ def _configured_max_ledger_items(redis_client: Any = None) -> int:
         default=DEFAULT_MAX_LEDGER_ITEMS,
         redis_config_positive_int_fn=_redis_config_positive_int,
     )
+
+
+def _configured_step_retry_limit(redis_client: Any = None) -> int:
+    global STEP_RETRY_LIMIT
+    value = runtime_config.configured_positive_int(
+        redis_client=(redis_client or default_redis),
+        key=CERBERUS_STEP_RETRY_LIMIT_KEY,
+        default=DEFAULT_STEP_RETRY_LIMIT,
+        redis_config_positive_int_fn=_redis_config_positive_int,
+    )
+    STEP_RETRY_LIMIT = max(1, min(10, int(value)))
+    return STEP_RETRY_LIMIT
 
 
 def _configured_astraeus_max_tokens(redis_client: Any = None) -> Optional[int]:
@@ -4061,6 +4075,7 @@ async def _run_cerberus_turn_impl(
     progress_update_max_tokens: Optional[int] = 56 if thanatos_max_tokens is not None else None
     result_memory_max_sets = _configured_result_memory_max_sets(r)
     result_memory_max_items = _configured_result_memory_max_items(r)
+    step_retry_limit = _configured_step_retry_limit(r)
     turn_started_at = time.perf_counter()
     astraeus_ms_total = 0.0
     tool_ms_total = 0.0
@@ -4300,7 +4315,7 @@ async def _run_cerberus_turn_impl(
 
     def _step_retry_allowed(step_id: str, retry_count: int) -> bool:
         del step_id
-        return int(max(0, retry_count or 0)) < int(max(1, DEFAULT_STEP_RETRY_LIMIT))
+        return int(max(0, retry_count or 0)) < int(max(1, step_retry_limit))
 
     def _retry_allowed_for_step(step_id: str, retry_count: int) -> bool:
         return _retry_allowed_within_limits() and _step_retry_allowed(step_id, retry_count)
@@ -4322,7 +4337,7 @@ async def _run_cerberus_turn_impl(
     def _retry_limit_message(decision: Optional[Dict[str, Any]]) -> str:
         return (
             _checker_decision_text(decision, "question", "repair", "reason")
-            or "I could not complete that step after several retries. Please clarify or rephrase the step."
+            or "I could not complete that step after retry attempts. Please clarify or rephrase the step."
         )
 
     async def _compose_final_answer_text(

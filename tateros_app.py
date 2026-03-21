@@ -31,8 +31,10 @@ from cerberus import get_active_chat_jobs_snapshot, run_cerberus_turn
 from cerberus import (
     CERBERUS_AGENT_STATE_TTL_SECONDS_KEY,
     CERBERUS_MAX_LEDGER_ITEMS_KEY,
+    CERBERUS_STEP_RETRY_LIMIT_KEY,
     DEFAULT_AGENT_STATE_TTL_SECONDS,
     DEFAULT_MAX_LEDGER_ITEMS,
+    DEFAULT_STEP_RETRY_LIMIT,
 )
 from emoji_responder import get_emoji_settings as get_core_emoji_settings, save_emoji_settings as save_core_emoji_settings
 from helpers import get_llm_client_from_env, set_main_loop
@@ -1852,6 +1854,7 @@ class AppSettingsRequest(BaseModel):
     cerberus_llm_model: Optional[str] = None
     cerberus_agent_state_ttl_seconds: Optional[int] = None
     cerberus_max_ledger_items: Optional[int] = None
+    cerberus_step_retry_limit: Optional[int] = None
     popup_effect_style: Optional[str] = None
     admin_only_plugins: Optional[List[str]] = None
 
@@ -3548,6 +3551,7 @@ def get_settings() -> Dict[str, Any]:
         "cerberus_llm_model": "",
         "cerberus_agent_state_ttl_seconds": int(DEFAULT_AGENT_STATE_TTL_SECONDS),
         "cerberus_max_ledger_items": int(DEFAULT_MAX_LEDGER_ITEMS),
+        "cerberus_step_retry_limit": int(DEFAULT_STEP_RETRY_LIMIT),
     }
 
     return {
@@ -3591,6 +3595,7 @@ def get_settings() -> Dict[str, Any]:
             DEFAULT_AGENT_STATE_TTL_SECONDS,
         ),
         "cerberus_max_ledger_items": _read_positive_int(CERBERUS_MAX_LEDGER_ITEMS_KEY, DEFAULT_MAX_LEDGER_ITEMS),
+        "cerberus_step_retry_limit": _read_positive_int(CERBERUS_STEP_RETRY_LIMIT_KEY, DEFAULT_STEP_RETRY_LIMIT),
         "cerberus_defaults": cerberus_defaults,
         "admin_plugin_options": admin_plugin_options,
         "admin_only_plugins": admin_only_plugins,
@@ -3812,6 +3817,7 @@ def update_settings(payload: AppSettingsRequest) -> Dict[str, Any]:
             None,
         ),
         "cerberus_max_ledger_items": (CERBERUS_MAX_LEDGER_ITEMS_KEY, DEFAULT_MAX_LEDGER_ITEMS, 1, None),
+        "cerberus_step_retry_limit": (CERBERUS_STEP_RETRY_LIMIT_KEY, DEFAULT_STEP_RETRY_LIMIT, 1, 10),
     }
     for payload_key, (redis_key, default, min_value, max_value) in cerberus_mappings.items():
         if payload_key not in updates:
