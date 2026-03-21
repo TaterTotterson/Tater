@@ -2,7 +2,7 @@
   <img src="images/tater-new-logo.png" alt="Tater AI Assistant" width="300"/>
 </div>
 
-**Tater** is a local-first AI assistant powered by local LLM runtimes, giving you a powerful set of AI-driven tools. It includes a WebUI for setup and private chats, and works across **Discord**, **Home Assistant**, **HomeKit**, **IRC**, **macOS**, **Matrix**, **Telegram**, and even the **OG Xbox via XBMC4Xbox**
+**Tater** is a local AI assistant powered by local LLM runtimes, giving you a powerful set of AI-driven tools. It includes a WebUI for setup and private chats, and works across **Discord**, **Home Assistant**, **HomeKit**, **IRC**, **macOS**, **Matrix**, **Telegram**, and even the **OG Xbox via XBMC4Xbox**
 
 Main website: [taterassistant.com](https://taterassistant.com)
 
