@@ -420,7 +420,7 @@ async def narrate_result(
     platform: str = "webui",
 ) -> str:
     result = _sanitize_contract(result) if "ok" in result else normalize_verba_result(result)
-    _ = llm_client  # Intentionally unused: narration is deterministic-only under Cerberus.
+    _ = llm_client  # Intentionally unused: narration is deterministic-only under Hydra.
 
     ascii_only = platform in {"irc", "homeassistant", "homekit", "xbmc"}
 

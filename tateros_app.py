@@ -27,12 +27,14 @@ import core_registry as core_registry_module
 import verba_registry as verba_registry_module
 import portal_registry as portal_registry_module
 from admin_gate import DEFAULT_ADMIN_ONLY_PLUGINS, REDIS_KEY as ADMIN_GATE_KEY, get_admin_only_plugins
-from cerberus import get_active_chat_jobs_snapshot, run_cerberus_turn
-from cerberus import (
-    CERBERUS_AGENT_STATE_TTL_SECONDS_KEY,
-    CERBERUS_MAX_LEDGER_ITEMS_KEY,
-    CERBERUS_STEP_RETRY_LIMIT_KEY,
+from hydra import get_active_chat_jobs_snapshot, run_hydra_turn
+from hydra import (
+    HYDRA_AGENT_STATE_TTL_SECONDS_KEY,
+    HYDRA_ASTRAEUS_PLAN_REVIEW_ENABLED_KEY,
+    HYDRA_MAX_LEDGER_ITEMS_KEY,
+    HYDRA_STEP_RETRY_LIMIT_KEY,
     DEFAULT_AGENT_STATE_TTL_SECONDS,
+    DEFAULT_ASTRAEUS_PLAN_REVIEW_ENABLED,
     DEFAULT_MAX_LEDGER_ITEMS,
     DEFAULT_STEP_RETRY_LIMIT,
 )
@@ -91,9 +93,9 @@ LAST_LLM_STATS_KEY = "webui:last_llm_stats"
 WEBUI_POPUP_EFFECT_STYLE_KEY = "tater:webui:popup_effect_style"
 DEFAULT_WEBUI_POPUP_EFFECT_STYLE = "flame"
 WEBUI_POPUP_EFFECT_STYLE_CHOICES = {"disabled", "flame", "dust", "glitch", "portal", "melt"}
-CERBERUS_LLM_HOST_KEY = "tater:cerberus:llm_host"
-CERBERUS_LLM_PORT_KEY = "tater:cerberus:llm_port"
-CERBERUS_LLM_MODEL_KEY = "tater:cerberus:llm_model"
+HYDRA_LLM_HOST_KEY = "tater:hydra:llm_host"
+HYDRA_LLM_PORT_KEY = "tater:hydra:llm_port"
+HYDRA_LLM_MODEL_KEY = "tater:hydra:llm_model"
 
 
 bootstrap_state: Dict[str, Any] = {
@@ -336,7 +338,7 @@ def _normalize_popup_effect_style(value: Any, default: str = DEFAULT_WEBUI_POPUP
     return fallback if fallback in WEBUI_POPUP_EFFECT_STYLE_CHOICES else DEFAULT_WEBUI_POPUP_EFFECT_STYLE
 
 
-def _build_cerberus_llm_endpoint(host: Any, port: Any) -> str:
+def _build_hydra_llm_endpoint(host: Any, port: Any) -> str:
     raw_host = str(host or "").strip()
     raw_port = str(port or "").strip()
     if not raw_host:
@@ -930,16 +932,16 @@ async def _process_message(
     }
     if isinstance(input_artifacts, list) and input_artifacts:
         origin["input_artifacts"] = [dict(item) for item in input_artifacts if isinstance(item, dict)]
-    cerberus_llm_host = str(redis_client.get(CERBERUS_LLM_HOST_KEY) or "").strip()
-    cerberus_llm_port = str(redis_client.get(CERBERUS_LLM_PORT_KEY) or "").strip()
-    cerberus_llm_url = _build_cerberus_llm_endpoint(cerberus_llm_host, cerberus_llm_port)
-    cerberus_llm_model = str(redis_client.get(CERBERUS_LLM_MODEL_KEY) or "").strip()
-    if not cerberus_llm_url or not cerberus_llm_model:
+    hydra_llm_host = str(redis_client.get(HYDRA_LLM_HOST_KEY) or "").strip()
+    hydra_llm_port = str(redis_client.get(HYDRA_LLM_PORT_KEY) or "").strip()
+    hydra_llm_url = _build_hydra_llm_endpoint(hydra_llm_host, hydra_llm_port)
+    hydra_llm_model = str(redis_client.get(HYDRA_LLM_MODEL_KEY) or "").strip()
+    if not hydra_llm_url or not hydra_llm_model:
         raise RuntimeError(
-            "Cerberus LLM is not configured. Open Settings > Cerberus and set Cerberus LLM Host/IP, Port, and Model."
+            "Hydra LLM is not configured. Open Settings > Hydra and set Hydra LLM Host/IP, Port, and Model."
         )
 
-    async with get_llm_client_from_env(host=cerberus_llm_url, model=cerberus_llm_model) as llm_client:
+    async with get_llm_client_from_env(host=hydra_llm_url, model=hydra_llm_model) as llm_client:
         async def _wait(
             func_name: str,
             plugin_obj: Any,
@@ -970,7 +972,7 @@ async def _process_message(
                         logger.exception("wait_callback failed")
                         break
 
-        result = await run_cerberus_turn(
+        result = await run_hydra_turn(
             llm_client=llm_client,
             platform="webui",
             history_messages=loop_messages,
@@ -1575,7 +1577,7 @@ def _migrate_legacy_plugin_history_markers() -> Dict[str, Any]:
     - Unwraps plugin_response payloads into plain assistant content
 
     This keeps conversation history readable after plugin -> verba rename and
-    avoids feeding wrapper-only tool markers back into Cerberus context.
+    avoids feeding wrapper-only tool markers back into Hydra context.
     """
     summary: Dict[str, Any] = {
         "changed": False,
@@ -1849,17 +1851,18 @@ class AppSettingsRequest(BaseModel):
     emoji_reaction_chain_cooldown_seconds: Optional[int] = None
     emoji_reply_reaction_cooldown_seconds: Optional[int] = None
     emoji_min_message_length: Optional[int] = None
-    cerberus_llm_host: Optional[str] = None
-    cerberus_llm_port: Optional[str] = None
-    cerberus_llm_model: Optional[str] = None
-    cerberus_agent_state_ttl_seconds: Optional[int] = None
-    cerberus_max_ledger_items: Optional[int] = None
-    cerberus_step_retry_limit: Optional[int] = None
+    hydra_llm_host: Optional[str] = None
+    hydra_llm_port: Optional[str] = None
+    hydra_llm_model: Optional[str] = None
+    hydra_agent_state_ttl_seconds: Optional[int] = None
+    hydra_max_ledger_items: Optional[int] = None
+    hydra_step_retry_limit: Optional[int] = None
+    hydra_astraeus_plan_review_enabled: Optional[bool] = None
     popup_effect_style: Optional[str] = None
     admin_only_plugins: Optional[List[str]] = None
 
 
-class CerberusDataClearRequest(BaseModel):
+class HydraDataClearRequest(BaseModel):
     platform: str = "all"
     mode: str = "all"
 
@@ -1965,13 +1968,13 @@ def _load_chat_job_history_rows(max_items: int = 5000) -> List[Dict[str, Any]]:
     max_rows = max(200, min(int(max_items or 0), 20000))
     keys: List[str] = []
     try:
-        if redis_client.exists("tater:cerberus:ledger"):
-            keys = ["tater:cerberus:ledger"]
+        if redis_client.exists("tater:hydra:ledger"):
+            keys = ["tater:hydra:ledger"]
     except Exception:
         keys = []
     if not keys:
         try:
-            keys = sorted(str(k) for k in redis_client.scan_iter(match="tater:cerberus:ledger:*"))
+            keys = sorted(str(k) for k in redis_client.scan_iter(match="tater:hydra:ledger:*"))
         except Exception:
             keys = []
 
@@ -2473,7 +2476,7 @@ def list_core_tabs() -> Dict[str, Any]:
         label = str(tab.get("label") or "").strip()
         if not label:
             continue
-        if label.lower() == "cerberus":
+        if label.lower() == "hydra":
             continue
         dynamic_tabs.append(
             {
@@ -3071,14 +3074,14 @@ def remove_portal(payload: ShopRemoveRequest) -> Dict[str, Any]:
     }
 
 
-_CERBERUS_METRIC_NAMES = (
+_HYDRA_METRIC_NAMES = (
     "total_turns",
     "total_tools_called",
     "total_repairs",
     "validation_failures",
     "tool_failures",
 )
-_CERBERUS_METRIC_PLATFORMS = (
+_HYDRA_METRIC_PLATFORMS = (
     "webui",
     "discord",
     "irc",
@@ -3100,7 +3103,7 @@ def _coerce_redis_counter(value: Any) -> int:
         return 0
 
 
-def _cerberus_platform_display_label(platform: str) -> str:
+def _hydra_platform_display_label(platform: str) -> str:
     labels = {
         "all": "All",
         "webui": "WebUI",
@@ -3113,17 +3116,17 @@ def _cerberus_platform_display_label(platform: str) -> str:
     return labels.get(token, token.title())
 
 
-def _cerberus_ledger_keys_for_platform(platform: str) -> List[str]:
+def _hydra_ledger_keys_for_platform(platform: str) -> List[str]:
     plat = str(platform or "all").strip().lower() or "all"
     if plat == "all":
         keys: List[str] = []
         try:
-            if redis_client.exists("tater:cerberus:ledger"):
-                keys.append("tater:cerberus:ledger")
+            if redis_client.exists("tater:hydra:ledger"):
+                keys.append("tater:hydra:ledger")
         except Exception:
             pass
         try:
-            keys.extend(sorted(str(k) for k in redis_client.scan_iter(match="tater:cerberus:ledger:*")))
+            keys.extend(sorted(str(k) for k in redis_client.scan_iter(match="tater:hydra:ledger:*")))
         except Exception:
             pass
         deduped: List[str] = []
@@ -3135,13 +3138,13 @@ def _cerberus_ledger_keys_for_platform(platform: str) -> List[str]:
             seen.add(key)
         return deduped
     normalized = normalize_platform(plat or "webui")
-    return [f"tater:cerberus:ledger:{normalized}"]
+    return [f"tater:hydra:ledger:{normalized}"]
 
 
-def _load_cerberus_ledger_entries(platform: str, limit: int) -> List[Dict[str, Any]]:
+def _load_hydra_ledger_entries(platform: str, limit: int) -> List[Dict[str, Any]]:
     max_limit = max(10, min(int(limit or 50), 300))
     rows: List[Dict[str, Any]] = []
-    for key in _cerberus_ledger_keys_for_platform(platform):
+    for key in _hydra_ledger_keys_for_platform(platform):
         try:
             raw_items = redis_client.lrange(key, -max_limit, -1) or []
         except Exception:
@@ -3160,7 +3163,7 @@ def _load_cerberus_ledger_entries(platform: str, limit: int) -> List[Dict[str, A
     return rows[:max_limit]
 
 
-def _normalize_cerberus_validation_for_view(
+def _normalize_hydra_validation_for_view(
     validation: Any,
     *,
     planned_tool: Optional[Dict[str, Any]] = None,
@@ -3212,7 +3215,7 @@ def _safe_rate(numerator: int, denominator: int) -> float:
     return float(numerator or 0) / float(denom)
 
 
-def _cerberus_rate_rows(metrics: Dict[str, int]) -> List[Dict[str, Any]]:
+def _hydra_rate_rows(metrics: Dict[str, int]) -> List[Dict[str, Any]]:
     turns = int(metrics.get("total_turns", 0) or 0)
     tools = int(metrics.get("total_tools_called", 0) or 0)
     repairs = int(metrics.get("total_repairs", 0) or 0)
@@ -3226,51 +3229,51 @@ def _cerberus_rate_rows(metrics: Dict[str, int]) -> List[Dict[str, Any]]:
     ]
 
 
-def _load_cerberus_metrics(platform: str) -> Tuple[str, Dict[str, int], Dict[str, int]]:
+def _load_hydra_metrics(platform: str) -> Tuple[str, Dict[str, int], Dict[str, int]]:
     selected = str(platform or "").strip().lower()
     metric_platform = normalize_platform(selected if selected and selected != "all" else "webui")
     global_metrics: Dict[str, int] = {}
     platform_metrics: Dict[str, int] = {}
-    for name in _CERBERUS_METRIC_NAMES:
-        global_metrics[name] = _coerce_redis_counter(redis_client.get(f"tater:cerberus:metrics:{name}"))
+    for name in _HYDRA_METRIC_NAMES:
+        global_metrics[name] = _coerce_redis_counter(redis_client.get(f"tater:hydra:metrics:{name}"))
         if selected == "all":
             platform_metrics[name] = global_metrics[name]
         else:
             platform_metrics[name] = _coerce_redis_counter(
-                redis_client.get(f"tater:cerberus:metrics:{name}:{metric_platform}")
+                redis_client.get(f"tater:hydra:metrics:{name}:{metric_platform}")
             )
     return metric_platform, global_metrics, platform_metrics
 
 
-def _load_cerberus_platform_metric_rows() -> List[Dict[str, Any]]:
+def _load_hydra_platform_metric_rows() -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
-    for platform in _CERBERUS_METRIC_PLATFORMS:
+    for platform in _HYDRA_METRIC_PLATFORMS:
         row: Dict[str, Any] = {
             "platform": platform,
-            "platform_label": _cerberus_platform_display_label(platform),
+            "platform_label": _hydra_platform_display_label(platform),
         }
-        for name in _CERBERUS_METRIC_NAMES:
-            row[name] = _coerce_redis_counter(redis_client.get(f"tater:cerberus:metrics:{name}:{platform}"))
-        rates = _cerberus_rate_rows(row)
+        for name in _HYDRA_METRIC_NAMES:
+            row[name] = _coerce_redis_counter(redis_client.get(f"tater:hydra:metrics:{name}:{platform}"))
+        rates = _hydra_rate_rows(row)
         for rate_row in rates:
             row[str(rate_row.get("metric") or "")] = float(rate_row.get("value") or 0.0)
         rows.append(row)
     return rows
 
 
-def _reset_cerberus_metrics(platform: str) -> int:
+def _reset_hydra_metrics(platform: str) -> int:
     plat = str(platform or "").strip().lower()
     keys: List[str] = []
     if plat == "all":
         try:
-            keys = [str(k) for k in redis_client.scan_iter(match="tater:cerberus:metrics:*")]
+            keys = [str(k) for k in redis_client.scan_iter(match="tater:hydra:metrics:*")]
         except Exception:
             keys = []
     else:
         metric_platform = normalize_platform(plat or "webui")
-        for name in _CERBERUS_METRIC_NAMES:
-            keys.append(f"tater:cerberus:metrics:{name}")
-            keys.append(f"tater:cerberus:metrics:{name}:{metric_platform}")
+        for name in _HYDRA_METRIC_NAMES:
+            keys.append(f"tater:hydra:metrics:{name}")
+            keys.append(f"tater:hydra:metrics:{name}:{metric_platform}")
 
     deleted = 0
     for key in keys:
@@ -3281,9 +3284,9 @@ def _reset_cerberus_metrics(platform: str) -> int:
     return deleted
 
 
-def _clear_cerberus_ledger(platform: str) -> int:
+def _clear_hydra_ledger(platform: str) -> int:
     deleted = 0
-    for key in _cerberus_ledger_keys_for_platform(platform):
+    for key in _hydra_ledger_keys_for_platform(platform):
         try:
             deleted += int(redis_client.delete(key) or 0)
         except Exception:
@@ -3291,8 +3294,8 @@ def _clear_cerberus_ledger(platform: str) -> int:
     return deleted
 
 
-@app.get("/api/settings/cerberus/metrics")
-def get_cerberus_metrics(
+@app.get("/api/settings/hydra/metrics")
+def get_hydra_metrics(
     platform: str = "webui",
     limit: int = 50,
     outcome: str = "all",
@@ -3312,8 +3315,8 @@ def get_cerberus_metrics(
     selected_tool_cmp = selected_tool.lower() or "all"
     max_limit = max(10, min(int(limit or 50), 300))
 
-    metric_platform, global_metrics, platform_metrics = _load_cerberus_metrics(selected_platform)
-    ledger_rows = _load_cerberus_ledger_entries(selected_platform, max_limit)
+    metric_platform, global_metrics, platform_metrics = _load_hydra_metrics(selected_platform)
+    ledger_rows = _load_hydra_ledger_entries(selected_platform, max_limit)
 
     tool_options = sorted(
         {
@@ -3345,7 +3348,7 @@ def get_cerberus_metrics(
             continue
 
         filtered_rows.append(row)
-        validation = _normalize_cerberus_validation_for_view(row.get("validation"), planned_tool=planned_tool)
+        validation = _normalize_hydra_validation_for_view(row.get("validation"), planned_tool=planned_tool)
         tool_result = row.get("tool_result") if isinstance(row.get("tool_result"), dict) else {}
         tool_result_summary = str(tool_result.get("summary") or row.get("tool_result_summary") or "").strip()
         ts = float(row.get("timestamp") or 0.0)
@@ -3402,15 +3405,15 @@ def get_cerberus_metrics(
 
     return {
         "selected_platform": selected_platform,
-        "selected_platform_label": _cerberus_platform_display_label(selected_platform),
+        "selected_platform_label": _hydra_platform_display_label(selected_platform),
         "metric_platform": metric_platform,
-        "platform_options": ["all", *_CERBERUS_METRIC_PLATFORMS],
-        "metric_names": list(_CERBERUS_METRIC_NAMES),
+        "platform_options": ["all", *_HYDRA_METRIC_PLATFORMS],
+        "metric_names": list(_HYDRA_METRIC_NAMES),
         "global_metrics": global_metrics,
-        "global_rates": _cerberus_rate_rows(global_metrics),
+        "global_rates": _hydra_rate_rows(global_metrics),
         "platform_metrics": platform_metrics,
-        "platform_rates": _cerberus_rate_rows(platform_metrics),
-        "platform_rows": _load_cerberus_platform_metric_rows(),
+        "platform_rates": _hydra_rate_rows(platform_metrics),
+        "platform_rows": _load_hydra_platform_metric_rows(),
         "ledger_limit": max_limit,
         "ledger_total": len(ledger_rows),
         "ledger_filtered": len(summary_rows),
@@ -3424,32 +3427,32 @@ def get_cerberus_metrics(
     }
 
 
-@app.get("/api/settings/cerberus/data")
-def get_cerberus_data() -> Dict[str, Any]:
+@app.get("/api/settings/hydra/data")
+def get_hydra_data() -> Dict[str, Any]:
     metric_keys: List[str] = []
     try:
-        metric_keys = [str(k) for k in redis_client.scan_iter(match="tater:cerberus:metrics:*")]
+        metric_keys = [str(k) for k in redis_client.scan_iter(match="tater:hydra:metrics:*")]
     except Exception:
         metric_keys = []
 
     ledger_rows: List[Dict[str, Any]] = []
     ledger_entries_total = 0
-    for key in _cerberus_ledger_keys_for_platform("all"):
+    for key in _hydra_ledger_keys_for_platform("all"):
         count = 0
         try:
             count = int(redis_client.llen(key) or 0)
         except Exception:
             count = 0
         ledger_entries_total += max(0, int(count))
-        if key == "tater:cerberus:ledger":
+        if key == "tater:hydra:ledger":
             platform = "legacy"
         else:
-            suffix = str(key).split("tater:cerberus:ledger:", 1)[-1]
+            suffix = str(key).split("tater:hydra:ledger:", 1)[-1]
             platform = normalize_platform(suffix or "webui")
         ledger_rows.append(
             {
                 "platform": platform,
-                "platform_label": _cerberus_platform_display_label(platform),
+                "platform_label": _hydra_platform_display_label(platform),
                 "ledger_key": key,
                 "entries": int(max(0, count)),
             }
@@ -3457,16 +3460,16 @@ def get_cerberus_data() -> Dict[str, Any]:
     ledger_rows.sort(key=lambda row: (-int(row.get("entries") or 0), str(row.get("platform") or "")))
 
     platform_rows: List[Dict[str, Any]] = []
-    for platform in _CERBERUS_METRIC_PLATFORMS:
-        _, _, platform_metrics = _load_cerberus_metrics(platform)
+    for platform in _HYDRA_METRIC_PLATFORMS:
+        _, _, platform_metrics = _load_hydra_metrics(platform)
         platform_row: Dict[str, Any] = {
             "platform": platform,
-            "platform_label": _cerberus_platform_display_label(platform),
+            "platform_label": _hydra_platform_display_label(platform),
         }
-        for name in _CERBERUS_METRIC_NAMES:
+        for name in _HYDRA_METRIC_NAMES:
             platform_row[name] = int(platform_metrics.get(name) or 0)
         try:
-            platform_row["ledger_entries"] = int(redis_client.llen(f"tater:cerberus:ledger:{platform}") or 0)
+            platform_row["ledger_entries"] = int(redis_client.llen(f"tater:hydra:ledger:{platform}") or 0)
         except Exception:
             platform_row["ledger_entries"] = 0
         platform_rows.append(platform_row)
@@ -3486,7 +3489,7 @@ def get_cerberus_data() -> Dict[str, Any]:
     ledger_chart.sort(key=lambda row: (-int(row.get("value") or 0), str(row.get("label") or "")))
 
     return {
-        "platform_options": list(_CERBERUS_METRIC_PLATFORMS),
+        "platform_options": list(_HYDRA_METRIC_PLATFORMS),
         "summary": {
             "metric_keys": int(len(metric_keys)),
             "ledger_lists": int(len(ledger_rows)),
@@ -3499,8 +3502,8 @@ def get_cerberus_data() -> Dict[str, Any]:
     }
 
 
-@app.post("/api/settings/cerberus/data/clear")
-def clear_cerberus_data(payload: CerberusDataClearRequest) -> Dict[str, Any]:
+@app.post("/api/settings/hydra/data/clear")
+def clear_hydra_data(payload: HydraDataClearRequest) -> Dict[str, Any]:
     mode = str(payload.mode or "all").strip().lower() or "all"
     platform = str(payload.platform or "all").strip().lower() or "all"
     if mode not in {"all", "metrics", "ledger"}:
@@ -3511,9 +3514,9 @@ def clear_cerberus_data(payload: CerberusDataClearRequest) -> Dict[str, Any]:
     metrics_removed = 0
     ledger_removed = 0
     if mode in {"all", "metrics"}:
-        metrics_removed = _reset_cerberus_metrics(platform)
+        metrics_removed = _reset_hydra_metrics(platform)
     if mode in {"all", "ledger"}:
-        ledger_removed = _clear_cerberus_ledger(platform)
+        ledger_removed = _clear_hydra_ledger(platform)
 
     return {
         "ok": True,
@@ -3541,17 +3544,18 @@ def get_settings() -> Dict[str, Any]:
     admin_plugin_options = sorted(str(plugin_id or "").strip() for plugin_id in registry_snapshot.keys() if str(plugin_id or "").strip())
     admin_only_plugins = sorted(get_admin_only_plugins(redis_client))
 
-    cerberus_llm_host = str(redis_client.get(CERBERUS_LLM_HOST_KEY) or "").strip()
-    cerberus_llm_port = str(redis_client.get(CERBERUS_LLM_PORT_KEY) or "").strip()
-    cerberus_llm_model = str(redis_client.get(CERBERUS_LLM_MODEL_KEY) or "").strip()
+    hydra_llm_host = str(redis_client.get(HYDRA_LLM_HOST_KEY) or "").strip()
+    hydra_llm_port = str(redis_client.get(HYDRA_LLM_PORT_KEY) or "").strip()
+    hydra_llm_model = str(redis_client.get(HYDRA_LLM_MODEL_KEY) or "").strip()
 
-    cerberus_defaults = {
-        "cerberus_llm_host": "",
-        "cerberus_llm_port": "",
-        "cerberus_llm_model": "",
-        "cerberus_agent_state_ttl_seconds": int(DEFAULT_AGENT_STATE_TTL_SECONDS),
-        "cerberus_max_ledger_items": int(DEFAULT_MAX_LEDGER_ITEMS),
-        "cerberus_step_retry_limit": int(DEFAULT_STEP_RETRY_LIMIT),
+    hydra_defaults = {
+        "hydra_llm_host": "",
+        "hydra_llm_port": "",
+        "hydra_llm_model": "",
+        "hydra_agent_state_ttl_seconds": int(DEFAULT_AGENT_STATE_TTL_SECONDS),
+        "hydra_max_ledger_items": int(DEFAULT_MAX_LEDGER_ITEMS),
+        "hydra_step_retry_limit": int(DEFAULT_STEP_RETRY_LIMIT),
+        "hydra_astraeus_plan_review_enabled": bool(DEFAULT_ASTRAEUS_PLAN_REVIEW_ENABLED),
     }
 
     return {
@@ -3587,16 +3591,20 @@ def get_settings() -> Dict[str, Any]:
         "emoji_reaction_chain_cooldown_seconds": int(emoji_settings.get("reaction_chain_cooldown_seconds", 30)),
         "emoji_reply_reaction_cooldown_seconds": int(emoji_settings.get("reply_reaction_cooldown_seconds", 120)),
         "emoji_min_message_length": int(emoji_settings.get("min_message_length", 4)),
-        "cerberus_llm_host": cerberus_llm_host,
-        "cerberus_llm_port": cerberus_llm_port,
-        "cerberus_llm_model": cerberus_llm_model,
-        "cerberus_agent_state_ttl_seconds": _read_non_negative_int(
-            CERBERUS_AGENT_STATE_TTL_SECONDS_KEY,
+        "hydra_llm_host": hydra_llm_host,
+        "hydra_llm_port": hydra_llm_port,
+        "hydra_llm_model": hydra_llm_model,
+        "hydra_agent_state_ttl_seconds": _read_non_negative_int(
+            HYDRA_AGENT_STATE_TTL_SECONDS_KEY,
             DEFAULT_AGENT_STATE_TTL_SECONDS,
         ),
-        "cerberus_max_ledger_items": _read_positive_int(CERBERUS_MAX_LEDGER_ITEMS_KEY, DEFAULT_MAX_LEDGER_ITEMS),
-        "cerberus_step_retry_limit": _read_positive_int(CERBERUS_STEP_RETRY_LIMIT_KEY, DEFAULT_STEP_RETRY_LIMIT),
-        "cerberus_defaults": cerberus_defaults,
+        "hydra_max_ledger_items": _read_positive_int(HYDRA_MAX_LEDGER_ITEMS_KEY, DEFAULT_MAX_LEDGER_ITEMS),
+        "hydra_step_retry_limit": _read_positive_int(HYDRA_STEP_RETRY_LIMIT_KEY, DEFAULT_STEP_RETRY_LIMIT),
+        "hydra_astraeus_plan_review_enabled": _as_bool_flag(
+            redis_client.get(HYDRA_ASTRAEUS_PLAN_REVIEW_ENABLED_KEY),
+            default=DEFAULT_ASTRAEUS_PLAN_REVIEW_ENABLED,
+        ),
+        "hydra_defaults": hydra_defaults,
         "admin_plugin_options": admin_plugin_options,
         "admin_only_plugins": admin_only_plugins,
         "admin_only_plugins_defaults": sorted(DEFAULT_ADMIN_ONLY_PLUGINS),
@@ -3775,51 +3783,51 @@ def update_settings(payload: AppSettingsRequest) -> Dict[str, Any]:
             }
         )
 
-    current_llm_host = str(redis_client.get(CERBERUS_LLM_HOST_KEY) or "").strip()
-    current_llm_port = str(redis_client.get(CERBERUS_LLM_PORT_KEY) or "").strip()
+    current_llm_host = str(redis_client.get(HYDRA_LLM_HOST_KEY) or "").strip()
+    current_llm_port = str(redis_client.get(HYDRA_LLM_PORT_KEY) or "").strip()
 
-    if "cerberus_llm_host" in updates:
-        current_llm_host = str(updates.get("cerberus_llm_host") or "").strip()
+    if "hydra_llm_host" in updates:
+        current_llm_host = str(updates.get("hydra_llm_host") or "").strip()
 
-    if "cerberus_llm_port" in updates:
-        current_llm_port = str(updates.get("cerberus_llm_port") or "").strip()
+    if "hydra_llm_port" in updates:
+        current_llm_port = str(updates.get("hydra_llm_port") or "").strip()
 
     if current_llm_host:
-        redis_client.set(CERBERUS_LLM_HOST_KEY, current_llm_host)
+        redis_client.set(HYDRA_LLM_HOST_KEY, current_llm_host)
     else:
-        redis_client.delete(CERBERUS_LLM_HOST_KEY)
+        redis_client.delete(HYDRA_LLM_HOST_KEY)
 
     if current_llm_port:
         if not str(current_llm_port).isdigit():
-            raise HTTPException(status_code=400, detail="cerberus_llm_port must be an integer between 1 and 65535")
+            raise HTTPException(status_code=400, detail="hydra_llm_port must be an integer between 1 and 65535")
         parsed_port = int(current_llm_port)
         if parsed_port < 1 or parsed_port > 65535:
-            raise HTTPException(status_code=400, detail="cerberus_llm_port must be an integer between 1 and 65535")
+            raise HTTPException(status_code=400, detail="hydra_llm_port must be an integer between 1 and 65535")
         current_llm_port = str(parsed_port)
-        redis_client.set(CERBERUS_LLM_PORT_KEY, current_llm_port)
+        redis_client.set(HYDRA_LLM_PORT_KEY, current_llm_port)
     else:
-        redis_client.delete(CERBERUS_LLM_PORT_KEY)
+        redis_client.delete(HYDRA_LLM_PORT_KEY)
     # Remove deprecated legacy key if it exists.
-    redis_client.delete("tater:cerberus:llm_url")
+    redis_client.delete("tater:hydra:llm_url")
 
-    if "cerberus_llm_model" in updates:
-        value = str(updates.get("cerberus_llm_model") or "").strip()
+    if "hydra_llm_model" in updates:
+        value = str(updates.get("hydra_llm_model") or "").strip()
         if value:
-            redis_client.set(CERBERUS_LLM_MODEL_KEY, value)
+            redis_client.set(HYDRA_LLM_MODEL_KEY, value)
         else:
-            redis_client.delete(CERBERUS_LLM_MODEL_KEY)
+            redis_client.delete(HYDRA_LLM_MODEL_KEY)
 
-    cerberus_mappings = {
-        "cerberus_agent_state_ttl_seconds": (
-            CERBERUS_AGENT_STATE_TTL_SECONDS_KEY,
+    hydra_mappings = {
+        "hydra_agent_state_ttl_seconds": (
+            HYDRA_AGENT_STATE_TTL_SECONDS_KEY,
             DEFAULT_AGENT_STATE_TTL_SECONDS,
             0,
             None,
         ),
-        "cerberus_max_ledger_items": (CERBERUS_MAX_LEDGER_ITEMS_KEY, DEFAULT_MAX_LEDGER_ITEMS, 1, None),
-        "cerberus_step_retry_limit": (CERBERUS_STEP_RETRY_LIMIT_KEY, DEFAULT_STEP_RETRY_LIMIT, 1, 10),
+        "hydra_max_ledger_items": (HYDRA_MAX_LEDGER_ITEMS_KEY, DEFAULT_MAX_LEDGER_ITEMS, 1, None),
+        "hydra_step_retry_limit": (HYDRA_STEP_RETRY_LIMIT_KEY, DEFAULT_STEP_RETRY_LIMIT, 1, 10),
     }
-    for payload_key, (redis_key, default, min_value, max_value) in cerberus_mappings.items():
+    for payload_key, (redis_key, default, min_value, max_value) in hydra_mappings.items():
         if payload_key not in updates:
             continue
         normalized = _bounded_int(
@@ -3829,6 +3837,16 @@ def update_settings(payload: AppSettingsRequest) -> Dict[str, Any]:
             max_value=max_value,
         )
         redis_client.set(redis_key, int(normalized))
+
+    if "hydra_astraeus_plan_review_enabled" in updates:
+        enabled_value = _as_bool_flag(
+            updates.get("hydra_astraeus_plan_review_enabled"),
+            default=DEFAULT_ASTRAEUS_PLAN_REVIEW_ENABLED,
+        )
+        redis_client.set(
+            HYDRA_ASTRAEUS_PLAN_REVIEW_ENABLED_KEY,
+            "true" if enabled_value else "false",
+        )
 
     if "admin_only_plugins" in updates:
         values = [str(item).strip().lower() for item in (updates.get("admin_only_plugins") or []) if str(item).strip()]

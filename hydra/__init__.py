@@ -7,27 +7,27 @@ import uuid
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
-from . import cerberus_checker as minos
-from . import cerberus_doer_state as thanatos_state
-from . import cerberus_execution as execution
-from . import cerberus_common_helpers as common_helpers
-from . import cerberus_ledger as ledger
-from . import cerberus_limits as limits_helpers
-from . import cerberus_memory_context as memory_context_helpers
-from . import cerberus_origin_attach as origin_attach_helpers
-from . import cerberus_preamble_utils as preamble_utils
-from . import cerberus_prompts as prompts
-from . import cerberus_retry_helpers as retry_helpers
-from . import cerberus_runtime_config as runtime_config
-from . import cerberus_scope as scope_helpers
-from . import cerberus_state_core as state_core_helpers
-from . import cerberus_state_store as state_store
-from . import cerberus_toolcall_utils as toolcall_utils
-from . import cerberus_tool_index as tool_index_helpers
-from . import cerberus_turn_utils as turn_utils
-from . import cerberus_validation as validation
-from . import cerberus_validation_flow as validation_flow
-from . import cerberus_web_research as web_research_helpers
+from . import hydra_checker as minos
+from . import hydra_doer_state as thanatos_state
+from . import hydra_execution as execution
+from . import hydra_common_helpers as common_helpers
+from . import hydra_ledger as ledger
+from . import hydra_limits as limits_helpers
+from . import hydra_memory_context as memory_context_helpers
+from . import hydra_origin_attach as origin_attach_helpers
+from . import hydra_preamble_utils as preamble_utils
+from . import hydra_prompts as prompts
+from . import hydra_retry_helpers as retry_helpers
+from . import hydra_runtime_config as runtime_config
+from . import hydra_scope as scope_helpers
+from . import hydra_state_core as state_core_helpers
+from . import hydra_state_store as state_store
+from . import hydra_toolcall_utils as toolcall_utils
+from . import hydra_tool_index as tool_index_helpers
+from . import hydra_turn_utils as turn_utils
+from . import hydra_validation as validation
+from . import hydra_validation_flow as validation_flow
+from . import hydra_web_research as web_research_helpers
 from helpers import (
     TOOL_MARKUP_REPAIR_PROMPT,
     get_tater_name,
@@ -125,21 +125,24 @@ DEFAULT_MAX_LEDGER_ITEMS = 1500
 DEFAULT_RESULT_MEMORY_MAX_SETS = 6
 DEFAULT_RESULT_MEMORY_MAX_ITEMS = 8
 DEFAULT_STEP_RETRY_LIMIT = 1
+DEFAULT_ASTRAEUS_PLAN_REVIEW_ENABLED = False
 DEFAULT_IDENTICAL_FAILED_TOOL_CALL_LIMIT = 1
-CERBERUS_AGENT_STATE_TTL_SECONDS_KEY = "tater:cerberus:agent_state_ttl_seconds"
-CERBERUS_MAX_LEDGER_ITEMS_KEY = "tater:cerberus:max_ledger_items"
-CERBERUS_STEP_RETRY_LIMIT_KEY = "tater:cerberus:step_retry_limit"
-CERBERUS_RESULT_MEMORY_MAX_SETS_KEY = "tater:cerberus:result_memory_max_sets"
-CERBERUS_RESULT_MEMORY_MAX_ITEMS_KEY = "tater:cerberus:result_memory_max_items"
+HYDRA_AGENT_STATE_TTL_SECONDS_KEY = "tater:hydra:agent_state_ttl_seconds"
+HYDRA_MAX_LEDGER_ITEMS_KEY = "tater:hydra:max_ledger_items"
+HYDRA_STEP_RETRY_LIMIT_KEY = "tater:hydra:step_retry_limit"
+HYDRA_ASTRAEUS_PLAN_REVIEW_ENABLED_KEY = "tater:hydra:astraeus_plan_review_enabled"
+HYDRA_RESULT_MEMORY_MAX_SETS_KEY = "tater:hydra:result_memory_max_sets"
+HYDRA_RESULT_MEMORY_MAX_ITEMS_KEY = "tater:hydra:result_memory_max_items"
 AGENT_STATE_PROMPT_MAX_CHARS = 800
 AGENT_STATE_LEDGER_MAX_CHARS = 900
-AGENT_STATE_KEY_PREFIX = "tater:cerberus:state:"
-DEFAULT_AGENT_STATE_TTL_SECONDS = 7 * 24 * 60 * 60
+AGENT_STATE_KEY_PREFIX = "tater:hydra:state:"
+DEFAULT_AGENT_STATE_TTL_SECONDS = 20 * 60
 AGENT_STATE_TTL_SECONDS = DEFAULT_AGENT_STATE_TTL_SECONDS
 RESULT_MEMORY_MAX_SETS = DEFAULT_RESULT_MEMORY_MAX_SETS
 RESULT_MEMORY_MAX_ITEMS = DEFAULT_RESULT_MEMORY_MAX_ITEMS
 STEP_RETRY_LIMIT = DEFAULT_STEP_RETRY_LIMIT
-CERBERUS_LEDGER_SCHEMA_VERSION = "2"
+ASTRAEUS_PLAN_REVIEW_ENABLED = DEFAULT_ASTRAEUS_PLAN_REVIEW_ENABLED
+HYDRA_LEDGER_SCHEMA_VERSION = "2"
 
 _PLATFORM_DISPLAY = {
     "webui": "WebUI",
@@ -291,11 +294,31 @@ def _redis_config_positive_int(
     )
 
 
+def _redis_config_bool(
+    key: str,
+    default: bool,
+    *,
+    redis_client: Any = None,
+) -> bool:
+    try:
+        raw = (redis_client or default_redis).get(key)
+    except Exception:
+        return bool(default)
+    if raw is None:
+        return bool(default)
+    token = str(raw).strip().lower()
+    if token in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if token in {"0", "false", "no", "off", "disabled"}:
+        return False
+    return bool(default)
+
+
 def _configured_agent_state_ttl_seconds(redis_client: Any = None) -> int:
     global AGENT_STATE_TTL_SECONDS
     AGENT_STATE_TTL_SECONDS = runtime_config.configured_agent_state_ttl_seconds(
         redis_client=(redis_client or default_redis),
-        key=CERBERUS_AGENT_STATE_TTL_SECONDS_KEY,
+        key=HYDRA_AGENT_STATE_TTL_SECONDS_KEY,
         default=DEFAULT_AGENT_STATE_TTL_SECONDS,
         redis_config_non_negative_int_fn=_redis_config_non_negative_int,
     )
@@ -305,7 +328,7 @@ def _configured_agent_state_ttl_seconds(redis_client: Any = None) -> int:
 def _configured_max_ledger_items(redis_client: Any = None) -> int:
     return runtime_config.configured_positive_int(
         redis_client=(redis_client or default_redis),
-        key=CERBERUS_MAX_LEDGER_ITEMS_KEY,
+        key=HYDRA_MAX_LEDGER_ITEMS_KEY,
         default=DEFAULT_MAX_LEDGER_ITEMS,
         redis_config_positive_int_fn=_redis_config_positive_int,
     )
@@ -315,12 +338,22 @@ def _configured_step_retry_limit(redis_client: Any = None) -> int:
     global STEP_RETRY_LIMIT
     value = runtime_config.configured_positive_int(
         redis_client=(redis_client or default_redis),
-        key=CERBERUS_STEP_RETRY_LIMIT_KEY,
+        key=HYDRA_STEP_RETRY_LIMIT_KEY,
         default=DEFAULT_STEP_RETRY_LIMIT,
         redis_config_positive_int_fn=_redis_config_positive_int,
     )
     STEP_RETRY_LIMIT = max(1, min(10, int(value)))
     return STEP_RETRY_LIMIT
+
+
+def _configured_astraeus_plan_review_enabled(redis_client: Any = None) -> bool:
+    global ASTRAEUS_PLAN_REVIEW_ENABLED
+    ASTRAEUS_PLAN_REVIEW_ENABLED = _redis_config_bool(
+        HYDRA_ASTRAEUS_PLAN_REVIEW_ENABLED_KEY,
+        DEFAULT_ASTRAEUS_PLAN_REVIEW_ENABLED,
+        redis_client=(redis_client or default_redis),
+    )
+    return bool(ASTRAEUS_PLAN_REVIEW_ENABLED)
 
 
 def _configured_astraeus_max_tokens(redis_client: Any = None) -> Optional[int]:
@@ -411,7 +444,7 @@ def _configured_result_memory_max_sets(redis_client: Any = None) -> int:
     global RESULT_MEMORY_MAX_SETS
     value = runtime_config.configured_positive_int(
         redis_client=(redis_client or default_redis),
-        key=CERBERUS_RESULT_MEMORY_MAX_SETS_KEY,
+        key=HYDRA_RESULT_MEMORY_MAX_SETS_KEY,
         default=DEFAULT_RESULT_MEMORY_MAX_SETS,
         redis_config_positive_int_fn=_redis_config_positive_int,
     )
@@ -423,7 +456,7 @@ def _configured_result_memory_max_items(redis_client: Any = None) -> int:
     global RESULT_MEMORY_MAX_ITEMS
     value = runtime_config.configured_positive_int(
         redis_client=(redis_client or default_redis),
-        key=CERBERUS_RESULT_MEMORY_MAX_ITEMS_KEY,
+        key=HYDRA_RESULT_MEMORY_MAX_ITEMS_KEY,
         default=DEFAULT_RESULT_MEMORY_MAX_ITEMS,
         redis_config_positive_int_fn=_redis_config_positive_int,
     )
@@ -494,8 +527,8 @@ def _derive_scope_from_origin(platform: str, origin: Optional[Dict[str, Any]]) -
     )
 
 
-def _resolve_cerberus_scope(platform: str, scope: Any, origin: Optional[Dict[str, Any]]) -> str:
-    return scope_helpers.resolve_cerberus_scope(
+def _resolve_hydra_scope(platform: str, scope: Any, origin: Optional[Dict[str, Any]]) -> str:
+    return scope_helpers.resolve_hydra_scope(
         platform,
         scope,
         origin,
@@ -2106,7 +2139,7 @@ async def _review_execution_plan_for_completeness(
         {
             "role": "system",
             "content": (
-                f"You are Cerberus execution-plan quality review on platform: {platform}.\n"
+                f"You are Hydra execution-plan quality review on platform: {platform}.\n"
                 "Return exactly one strict JSON object with schema:\n"
                 "{\"goal\":\"clear goal\",\"steps\":[{\"step_id\":1,\"intent\":\"atomic intent\",\"nl\":\"single scoped instruction\",\"tool_hint\":\"tool_id\"}]}\n"
                 "Rules:\n"
@@ -2449,8 +2482,9 @@ async def _llm_topic_shift_decision_for_turn(
                 "Rules:\n"
                 "- topic is a concise label for this turn's objective (2-6 words).\n"
                 "- new_topic=true only when the current turn changes objective enough that prior plan/facts should be discarded.\n"
-                "- new_topic=false for follow-ups, clarifications, refinements, corrections, and references to prior work/results.\n"
-                "- If uncertain, choose false.\n"
+                "- new_topic=false only for explicit follow-ups, clarifications, refinements, corrections, or references to prior work/results.\n"
+                "- If the current message introduces a different objective, choose true.\n"
+                "- If uncertain, choose true.\n"
                 "- Do not answer the user.\n"
                 "- Output JSON only.\n"
             ),
@@ -3872,7 +3906,7 @@ def _normalize_outcome(status: str, checker_reason: str) -> tuple[str, str]:
     )
 
 
-def _write_cerberus_metrics(
+def _write_hydra_metrics(
     *,
     redis_client: Any,
     platform: str,
@@ -3881,7 +3915,7 @@ def _write_cerberus_metrics(
     validation_failures: int,
     tool_failures: int,
 ) -> None:
-    return ledger.write_cerberus_metrics(
+    return ledger.write_hydra_metrics(
         redis_client=redis_client,
         platform=platform,
         total_tools_called=total_tools_called,
@@ -3892,7 +3926,7 @@ def _write_cerberus_metrics(
     )
 
 
-def _write_cerberus_ledger(
+def _write_hydra_ledger(
     *,
     redis_client: Any,
     platform: str,
@@ -3921,7 +3955,7 @@ def _write_cerberus_ledger(
     origin_preview: Optional[Dict[str, Any]] = None,
     attempted_tool: str = "",
 ) -> None:
-    return ledger.write_cerberus_ledger(
+    return ledger.write_hydra_ledger(
         redis_client=redis_client,
         platform=platform,
         scope=scope,
@@ -3954,7 +3988,7 @@ def _write_cerberus_ledger(
         compact_agent_state_json_fn=_compact_agent_state_json,
         agent_state_hash_fn=_agent_state_hash,
         configured_max_ledger_items_fn=_configured_max_ledger_items,
-        schema_version=CERBERUS_LEDGER_SCHEMA_VERSION,
+        schema_version=HYDRA_LEDGER_SCHEMA_VERSION,
         agent_state_ledger_max_chars=AGENT_STATE_LEDGER_MAX_CHARS,
         allowed_planner_kinds=("tool", "answer", "repaired_tool", "repaired_answer"),
     )
@@ -3970,7 +4004,7 @@ def _is_tool_candidate(text: str) -> bool:
     )
 
 
-async def _run_cerberus_turn_impl(
+async def _run_hydra_turn_impl(
     *,
     llm_client: Any,
     platform: str,
@@ -3992,7 +4026,7 @@ async def _run_cerberus_turn_impl(
     r = redis_client or default_redis
     platform = normalize_platform(platform)
     origin_payload = dict(origin) if isinstance(origin, dict) else {}
-    scope = _resolve_cerberus_scope(platform, scope, origin_payload)
+    scope = _resolve_hydra_scope(platform, scope, origin_payload)
     input_artifacts = origin_payload.get("input_artifacts") if isinstance(origin_payload.get("input_artifacts"), list) else []
     if input_artifacts:
         try:
@@ -4076,6 +4110,7 @@ async def _run_cerberus_turn_impl(
     result_memory_max_sets = _configured_result_memory_max_sets(r)
     result_memory_max_items = _configured_result_memory_max_items(r)
     step_retry_limit = _configured_step_retry_limit(r)
+    astraeus_plan_review_enabled = _configured_astraeus_plan_review_enabled(r)
     turn_started_at = time.perf_counter()
     astraeus_ms_total = 0.0
     tool_ms_total = 0.0
@@ -4237,7 +4272,7 @@ async def _run_cerberus_turn_impl(
             raw_steps = astraeus_result.get("steps")
             if isinstance(raw_steps, list):
                 structured_plan_queue = [step for step in raw_steps if isinstance(step, dict)]
-        if structured_plan_queue:
+        if structured_plan_queue and astraeus_plan_review_enabled:
             plan_review_started = time.perf_counter()
             reviewed_plan = await _review_execution_plan_for_completeness(
                 llm_client=llm_client,
@@ -4419,7 +4454,7 @@ async def _run_cerberus_turn_impl(
             scope=scope,
             state=agent_state,
         )
-        _write_cerberus_ledger(
+        _write_hydra_ledger(
             redis_client=r,
             platform=platform,
             scope=scope,
@@ -4451,7 +4486,7 @@ async def _run_cerberus_turn_impl(
             origin_preview=origin_preview,
             attempted_tool=attempted_tool_override if attempted_tool_override is not None else attempted_tool_for_ledger,
         )
-        _write_cerberus_metrics(
+        _write_hydra_metrics(
             redis_client=r,
             platform=platform,
             total_tools_called=tool_calls_used,
@@ -5284,7 +5319,7 @@ async def _run_cerberus_turn_impl(
     )
 
 
-async def run_cerberus_turn(
+async def run_hydra_turn(
     *,
     llm_client: Any,
     platform: str,
@@ -5309,7 +5344,7 @@ async def run_cerberus_turn(
         origin=origin,
     )
     try:
-        return await _run_cerberus_turn_impl(
+        return await _run_hydra_turn_impl(
             llm_client=llm_client,
             platform=platform,
             history_messages=history_messages,

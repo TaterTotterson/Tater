@@ -41,8 +41,9 @@ const state = {
   },
   popupEffectStyle: String(safeStorageGet("tater_tateros_popup_effect_style", "flame")).trim().toLowerCase() || "flame",
   sending: false,
-  activeChatJobId: "",
-  chatEventSource: null,
+  activeChatJobs: {},
+  chatEventSources: {},
+  chatPollMeta: {},
   notice: "",
   chatProfile: {
     username: "User",
@@ -653,7 +654,7 @@ function renderSimpleBarChart(points, emptyMessage = "No chart data.") {
   `;
 }
 
-function cerberusPlatformLabel(platform) {
+function hydraPlatformLabel(platform) {
   const token = String(platform || "").trim().toLowerCase();
   const labels = {
     all: "All",
@@ -1290,11 +1291,39 @@ async function refreshHealth() {
   }
 }
 
-function closeChatEventSource() {
-  if (state.chatEventSource) {
-    state.chatEventSource.close();
-    state.chatEventSource = null;
+function closeChatEventSource(jobId = "") {
+  const targetId = String(jobId || "").trim();
+  const sources = state.chatEventSources && typeof state.chatEventSources === "object" ? state.chatEventSources : {};
+
+  if (targetId) {
+    const source = sources[targetId];
+    if (source && typeof source.close === "function") {
+      source.close();
+    }
+    delete sources[targetId];
+    state.chatEventSources = sources;
+    return;
   }
+
+  Object.keys(sources).forEach((id) => {
+    const source = sources[id];
+    if (source && typeof source.close === "function") {
+      source.close();
+    }
+  });
+  state.chatEventSources = {};
+}
+
+function stopAllChatJobPolling() {
+  const pollMeta = state.chatPollMeta && typeof state.chatPollMeta === "object" ? state.chatPollMeta : {};
+  Object.keys(pollMeta).forEach((id) => {
+    const row = pollMeta[id] && typeof pollMeta[id] === "object" ? pollMeta[id] : {};
+    row.token = Number(row.token || 0) + 1;
+    if (row.timer) {
+      window.clearTimeout(row.timer);
+    }
+  });
+  state.chatPollMeta = {};
 }
 
 function _avatarInitial(label, fallback = "?") {
@@ -3890,26 +3919,80 @@ async function loadChatView() {
     }
   }
 
-  let chatPollToken = 0;
-  let chatPollTimer = 0;
-
-  const stopChatJobPolling = () => {
-    chatPollToken += 1;
-    if (chatPollTimer) {
-      window.clearTimeout(chatPollTimer);
-      chatPollTimer = 0;
+  const _getActiveChatJobs = () => {
+    if (!state.activeChatJobs || typeof state.activeChatJobs !== "object") {
+      state.activeChatJobs = {};
     }
+    return state.activeChatJobs;
+  };
+
+  const _getChatPollMeta = () => {
+    if (!state.chatPollMeta || typeof state.chatPollMeta !== "object") {
+      state.chatPollMeta = {};
+    }
+    return state.chatPollMeta;
+  };
+
+  const _activeChatJobCount = () => {
+    const jobs = _getActiveChatJobs();
+    return Object.keys(jobs).filter((jobId) => Boolean(jobs[jobId])).length;
+  };
+
+  const _setChatLiveStatus = (text = "") => {
+    const activeCount = _activeChatJobCount();
+    const normalized = String(text || "").trim();
+    if (activeCount > 1) {
+      status.textContent = normalized ? `${activeCount} jobs running. Latest: ${normalized}` : `${activeCount} jobs running...`;
+      return;
+    }
+    status.textContent = normalized;
+  };
+
+  const stopChatJobPolling = (jobId = "") => {
+    const targetId = String(jobId || "").trim();
+    const pollMeta = _getChatPollMeta();
+
+    if (targetId) {
+      const row = pollMeta[targetId] && typeof pollMeta[targetId] === "object" ? pollMeta[targetId] : {};
+      row.token = Number(row.token || 0) + 1;
+      if (row.timer) {
+        window.clearTimeout(row.timer);
+      }
+      row.timer = 0;
+      pollMeta[targetId] = row;
+      state.chatPollMeta = pollMeta;
+      return;
+    }
+
+    Object.keys(pollMeta).forEach((id) => {
+      const row = pollMeta[id] && typeof pollMeta[id] === "object" ? pollMeta[id] : {};
+      row.token = Number(row.token || 0) + 1;
+      if (row.timer) {
+        window.clearTimeout(row.timer);
+      }
+      row.timer = 0;
+      pollMeta[id] = row;
+    });
+    state.chatPollMeta = pollMeta;
   };
 
   const finalizeChatJob = async ({ jobId, statusText, responses = [] }) => {
-    if (state.activeChatJobId !== jobId) {
+    const id = String(jobId || "").trim();
+    if (!id) {
       return;
     }
-    status.textContent = String(statusText || "");
-    state.sending = false;
-    state.activeChatJobId = "";
-    stopChatJobPolling();
-    closeChatEventSource();
+    const jobs = _getActiveChatJobs();
+    if (!jobs[id]) {
+      return;
+    }
+    delete jobs[id];
+    state.activeChatJobs = jobs;
+    stopChatJobPolling(id);
+    closeChatEventSource(id);
+    const pollMeta = _getChatPollMeta();
+    delete pollMeta[id];
+    state.chatPollMeta = pollMeta;
+
     const inlineRendered = appendAssistantResponses(responses);
     if (inlineRendered) {
       await refreshChatSpeedStats();
@@ -3917,24 +4000,48 @@ async function loadChatView() {
       await refreshChatHistory();
     }
     await refreshHealth();
+
+    const remaining = _activeChatJobCount();
+    if (remaining > 0) {
+      _setChatLiveStatus(String(statusText || "Complete."));
+      return;
+    }
+    _setChatLiveStatus(String(statusText || ""));
   };
 
   const scheduleChatJobPoll = (jobId, delayMs = 1200) => {
-    const token = chatPollToken;
-    chatPollTimer = window.setTimeout(async () => {
-      if (token !== chatPollToken) {
+    const id = String(jobId || "").trim();
+    if (!id) {
+      return;
+    }
+    const jobs = _getActiveChatJobs();
+    if (!jobs[id]) {
+      return;
+    }
+    const pollMeta = _getChatPollMeta();
+    const row = pollMeta[id] && typeof pollMeta[id] === "object" ? pollMeta[id] : {};
+    row.token = Number(row.token || 0) + 1;
+    const token = row.token;
+    if (row.timer) {
+      window.clearTimeout(row.timer);
+    }
+    row.timer = window.setTimeout(async () => {
+      const jobsNow = _getActiveChatJobs();
+      if (!jobsNow[id]) {
         return;
       }
-      if (state.view !== "chat" || state.activeChatJobId !== jobId) {
+      const pollNow = _getChatPollMeta();
+      const current = pollNow[id] && typeof pollNow[id] === "object" ? pollNow[id] : {};
+      if (Number(current.token || 0) !== token) {
         return;
       }
 
       try {
-        const snapshot = await api(`/api/chat/jobs/${encodeURIComponent(jobId)}`);
+        const snapshot = await api(`/api/chat/jobs/${encodeURIComponent(id)}`);
         const snapshotStatus = String(snapshot.status || "").trim().toLowerCase();
         if (snapshotStatus === "done") {
           await finalizeChatJob({
-            jobId,
+            jobId: id,
             statusText: "Complete.",
             responses: Array.isArray(snapshot.responses) ? snapshot.responses : [],
           });
@@ -3942,7 +4049,7 @@ async function loadChatView() {
         }
         if (snapshotStatus === "error") {
           await finalizeChatJob({
-            jobId,
+            jobId: id,
             statusText: `Job failed: ${snapshot.error || "unknown error"}`,
           });
           return;
@@ -3950,48 +4057,60 @@ async function loadChatView() {
 
         const tool = String(snapshot.current_tool || "").trim();
         if (tool) {
-          status.textContent = `Using ${tool}...`;
+          _setChatLiveStatus(`Using ${tool}...`);
         } else if (snapshotStatus) {
-          status.textContent = `Running (${snapshotStatus})...`;
+          _setChatLiveStatus(`Running (${snapshotStatus})...`);
         } else {
-          status.textContent = "Waiting for response...";
+          _setChatLiveStatus("Waiting for response...");
         }
       } catch {
-        status.textContent = "Waiting for response...";
+        _setChatLiveStatus("Waiting for response...");
       }
 
-      scheduleChatJobPoll(jobId, 1200);
+      scheduleChatJobPoll(id, 1200);
     }, Math.max(250, Number(delayMs) || 1200));
+    pollMeta[id] = row;
+    state.chatPollMeta = pollMeta;
   };
 
   function attachJobStream(jobId) {
-    closeChatEventSource();
-    stopChatJobPolling();
-    state.activeChatJobId = jobId;
-    scheduleChatJobPoll(jobId, IS_HA_INGRESS ? 900 : 2000);
+    const id = String(jobId || "").trim();
+    if (!id) {
+      return;
+    }
+    const jobs = _getActiveChatJobs();
+    jobs[id] = true;
+    state.activeChatJobs = jobs;
+
+    closeChatEventSource(id);
+    stopChatJobPolling(id);
+    scheduleChatJobPoll(id, IS_HA_INGRESS ? 900 : 2000);
 
     if (typeof EventSource !== "function") {
       return;
     }
 
-    const eventSource = new EventSource(withBasePath(`/api/chat/jobs/${encodeURIComponent(jobId)}/events`));
-    state.chatEventSource = eventSource;
+    const eventSource = new EventSource(withBasePath(`/api/chat/jobs/${encodeURIComponent(id)}/events`));
+    if (!state.chatEventSources || typeof state.chatEventSources !== "object") {
+      state.chatEventSources = {};
+    }
+    state.chatEventSources[id] = eventSource;
 
     eventSource.addEventListener("status", (event) => {
       const payload = safeJsonParse(event.data) || {};
       const st = String(payload.status || "running");
       const tool = String(payload.current_tool || "").trim();
       if (tool) {
-        status.textContent = `Running (${st}) • ${tool}`;
+        _setChatLiveStatus(`Running (${st}) • ${tool}`);
       } else {
-        status.textContent = `Running (${st})...`;
+        _setChatLiveStatus(`Running (${st})...`);
       }
     });
 
     eventSource.addEventListener("tool", (event) => {
       const payload = safeJsonParse(event.data) || {};
       const tool = String(payload.current_tool || "").trim() || "tool";
-      status.textContent = `Using ${tool}...`;
+      _setChatLiveStatus(`Using ${tool}...`);
     });
 
     eventSource.addEventListener("waiting", async (event) => {
@@ -4006,7 +4125,7 @@ async function loadChatView() {
     eventSource.addEventListener("done", async (event) => {
       const payload = safeJsonParse(event.data) || {};
       await finalizeChatJob({
-        jobId,
+        jobId: id,
         statusText: "Complete.",
         responses: Array.isArray(payload.responses) ? payload.responses : [],
       });
@@ -4015,18 +4134,19 @@ async function loadChatView() {
     eventSource.addEventListener("job_error", async (event) => {
       const payload = safeJsonParse(event.data) || {};
       await finalizeChatJob({
-        jobId,
+        jobId: id,
         statusText: `Job failed: ${payload.error || "unknown error"}`,
       });
     });
 
     eventSource.onerror = () => {
-      if (state.activeChatJobId !== jobId) {
+      const jobsNow = _getActiveChatJobs();
+      if (!jobsNow[id]) {
         return;
       }
       // In some HA ingress/proxy setups SSE is unstable. Keep polling as the source of truth.
-      closeChatEventSource();
-      status.textContent = "Waiting for response...";
+      closeChatEventSource(id);
+      _setChatLiveStatus("Waiting for response...");
     };
   }
 
@@ -4073,7 +4193,7 @@ async function loadChatView() {
     }
 
     state.sending = true;
-    status.textContent = pendingFiles.length ? "Preparing attachments..." : "Queueing chat job...";
+    _setChatLiveStatus(pendingFiles.length ? "Preparing attachments..." : "Queueing chat job...");
 
     try {
       const attachments = [];
@@ -4109,12 +4229,13 @@ async function loadChatView() {
       updatePendingFilesUi();
 
       await refreshChatHistory();
-      status.textContent = "Job queued...";
+      _setChatLiveStatus("Job queued...");
       attachJobStream(jobId);
       await refreshHealth();
     } catch (error) {
+      _setChatLiveStatus(`Chat failed: ${error.message}`);
+    } finally {
       state.sending = false;
-      status.textContent = `Chat failed: ${error.message}`;
     }
   };
 
@@ -4218,13 +4339,13 @@ async function loadSettingsView() {
       .map((value) => String(value || "").trim())
       .filter(Boolean)
   );
-  const cerberusDefaults =
-    settings?.cerberus_defaults && typeof settings.cerberus_defaults === "object" ? settings.cerberus_defaults : {};
+  const hydraDefaults =
+    settings?.hydra_defaults && typeof settings.hydra_defaults === "object" ? settings.hydra_defaults : {};
   const popupEffectStyle = normalizePopupEffectStyle(settings?.popup_effect_style || state.popupEffectStyle);
   applyPopupEffectStyle(popupEffectStyle);
-  const cerberusPlatforms = ["webui", "discord", "irc", "telegram", "matrix", "homeassistant", "homekit", "xbmc", "automation"];
-  const cerberusPlatformOptionsHtml = cerberusPlatforms
-    .map((platform) => `<option value="${escapeHtml(platform)}">${escapeHtml(cerberusPlatformLabel(platform))}</option>`)
+  const hydraPlatforms = ["webui", "discord", "irc", "telegram", "matrix", "homeassistant", "homekit", "xbmc", "automation"];
+  const hydraPlatformOptionsHtml = hydraPlatforms
+    .map((platform) => `<option value="${escapeHtml(platform)}">${escapeHtml(hydraPlatformLabel(platform))}</option>`)
     .join("");
 
   const adminOptionHtml = adminOptions.length
@@ -4241,12 +4362,12 @@ async function loadSettingsView() {
       <div class="card-head">
         <h3 class="card-title">Settings</h3>
       </div>
-      <div class="small">Categories: General, Cerberus, Integrations, Emoji, Compotato, Advanced.</div>
+      <div class="small">Categories: General, Hydra, Integrations, Emoji, Compotato, Advanced.</div>
       <div id="settings-status" class="small" style="margin-top: 6px;"></div>
 
       <div class="settings-tabs">
         <button type="button" class="settings-tab-btn active" data-settings-tab="general">General</button>
-        <button type="button" class="settings-tab-btn" data-settings-tab="cerberus">Cerberus</button>
+        <button type="button" class="settings-tab-btn" data-settings-tab="hydra">Hydra</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="integrations">Integrations</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="emoji">Emoji</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="compozr">Compotato</button>
@@ -4385,31 +4506,16 @@ async function loadSettingsView() {
           </div>
         </section>
 
-        <section class="settings-tab-panel" data-settings-panel="cerberus">
+        <section class="settings-tab-panel" data-settings-panel="hydra">
           <div class="settings-subtabs">
-            <button type="button" class="settings-subtab-btn active" data-cerberus-tab="settings">Cerberus</button>
-            <button type="button" class="settings-subtab-btn" data-cerberus-tab="metrics">Cerberus Metrics</button>
-            <button type="button" class="settings-subtab-btn" data-cerberus-tab="data">Cerberus Data</button>
+            <button type="button" class="settings-subtab-btn active" data-hydra-tab="settings">Hydra</button>
+            <button type="button" class="settings-subtab-btn" data-hydra-tab="metrics">Hydra Metrics</button>
+            <button type="button" class="settings-subtab-btn" data-hydra-tab="data">Hydra Data</button>
           </div>
 
-          <div class="settings-subpanel active" data-cerberus-panel="settings">
+          <div class="settings-subpanel active" data-hydra-panel="settings">
             <div class="form-grid two-col">
-              <label>Cerberus LLM Host / IP
-                <input id="set_cerberus_llm_host" type="text" value="${escapeHtml(
-                  settings.cerberus_llm_host || ""
-                )}" />
-              </label>
-              <label>Cerberus LLM Port
-                <input id="set_cerberus_llm_port" type="number" min="1" max="65535" value="${escapeHtml(
-                  settings.cerberus_llm_port || ""
-                )}" />
-              </label>
-              <label>Cerberus LLM Model
-                <input id="set_cerberus_llm_model" type="text" value="${escapeHtml(
-                  settings.cerberus_llm_model || ""
-                )}" />
-              </label>
-              <div class="settings-section-title">Cerberus General</div>
+              <div class="settings-section-title">Hydra General</div>
               <label>Messages Shown in WebUI
                 <input id="set_max_display" type="number" min="1" value="${escapeHtml(settings.max_display || 8)}" />
               </label>
@@ -4420,33 +4526,61 @@ async function loadSettingsView() {
                 <input id="set_max_llm" type="number" min="1" value="${escapeHtml(settings.max_llm || 8)}" />
               </label>
               <label>Agent State TTL Seconds (0 = no TTL)
-                <input id="set_cerberus_agent_state_ttl_seconds" type="number" min="0" value="${escapeHtml(
-                  settings.cerberus_agent_state_ttl_seconds ?? 604800
+                <input id="set_hydra_agent_state_ttl_seconds" type="number" min="0" value="${escapeHtml(
+                  settings.hydra_agent_state_ttl_seconds ?? 1200
                 )}" />
               </label>
               <label>Max Ledger Items
-                <input id="set_cerberus_max_ledger_items" type="number" min="1" value="${escapeHtml(
-                  settings.cerberus_max_ledger_items ?? 1500
+                <input id="set_hydra_max_ledger_items" type="number" min="1" value="${escapeHtml(
+                  settings.hydra_max_ledger_items ?? 1500
                 )}" />
               </label>
               <label>Step Retry Limit
-                <input id="set_cerberus_step_retry_limit" type="number" min="1" max="10" value="${escapeHtml(
-                  settings.cerberus_step_retry_limit ?? 1
+                <input id="set_hydra_step_retry_limit" type="number" min="1" max="10" value="${escapeHtml(
+                  settings.hydra_step_retry_limit ?? 1
+                )}" />
+              </label>
+              <label>Astraeus Second Plan Check
+                ${renderToggleRow(
+                  `<input id="set_hydra_astraeus_plan_review_enabled" class="toggle-input" type="checkbox" ${
+                    settings.hydra_astraeus_plan_review_enabled ? "checked" : ""
+                  } />`
+                )}
+                <div class="small">May improve planning quality, but slower.</div>
+              </label>
+              <div class="inline-row" style="grid-column: 1 / -1;">
+                <button type="button" id="settings-hydra-defaults" class="inline-btn">Set Default Values</button>
+                <span class="small">Applies default Hydra values to the fields above.</span>
+              </div>
+              <div class="settings-section-title">Hydra Model</div>
+              <label>Hydra LLM Host / IP
+                <input id="set_hydra_llm_host" type="text" value="${escapeHtml(
+                  settings.hydra_llm_host || ""
+                )}" />
+              </label>
+              <label>Hydra LLM Port
+                <input id="set_hydra_llm_port" type="number" min="1" max="65535" value="${escapeHtml(
+                  settings.hydra_llm_port || ""
+                )}" />
+              </label>
+              <label>Hydra LLM Model
+                <input id="set_hydra_llm_model" type="text" value="${escapeHtml(
+                  settings.hydra_llm_model || ""
                 )}" />
               </label>
               <div class="inline-row" style="grid-column: 1 / -1;">
-                <button type="button" id="settings-cerberus-defaults" class="inline-btn">Set Default Values</button>
-                <span class="small">Applies default Cerberus values to the fields above.</span>
+                <button type="button" id="settings-hydra-model-save" class="inline-btn">Save Model</button>
+                <span class="small">Saves only Hydra model host, port, and model name.</span>
               </div>
             </div>
           </div>
 
-          <div class="settings-subpanel" data-cerberus-panel="metrics">
+          <div class="settings-subpanel" data-hydra-panel="metrics">
             <div class="form-grid two-col">
               <label>Portal
                 <select id="set_cerb_metrics_platform">
                   <option value="all">All</option>
-                  ${cerberusPlatformOptionsHtml}
+                  ${hydraPlatformOptionsHtml}
                 </select>
               </label>
               <label>Ledger entries
@@ -4476,17 +4610,17 @@ async function loadSettingsView() {
             <div id="settings-cerb-metrics-content" class="form-grid"></div>
           </div>
 
-          <div class="settings-subpanel" data-cerberus-panel="data">
+          <div class="settings-subpanel" data-hydra-panel="data">
             <div class="form-grid two-col">
               <div class="settings-section-title">All Portals</div>
               <div class="inline-row" style="grid-column: 1 / -1;">
-                <button type="button" id="settings-cerb-clear-all" class="inline-btn danger">Clear All Cerberus Data</button>
+                <button type="button" id="settings-cerb-clear-all" class="inline-btn danger">Clear All Hydra Data</button>
               </div>
 
               <div class="settings-section-title">Per-Portal Data</div>
               <label>Portal
                 <select id="set_cerb_data_platform">
-                  ${cerberusPlatformOptionsHtml}
+                  ${hydraPlatformOptionsHtml}
                 </select>
               </label>
               <div></div>
@@ -4664,42 +4798,63 @@ async function loadSettingsView() {
     }
   });
 
-  document.getElementById("settings-cerberus-defaults").addEventListener("click", () => {
+  document.getElementById("settings-hydra-defaults").addEventListener("click", () => {
     const map = [
-      ["set_cerberus_llm_host", "cerberus_llm_host"],
-      ["set_cerberus_llm_port", "cerberus_llm_port"],
-      ["set_cerberus_llm_model", "cerberus_llm_model"],
-      ["set_cerberus_agent_state_ttl_seconds", "cerberus_agent_state_ttl_seconds"],
-      ["set_cerberus_max_ledger_items", "cerberus_max_ledger_items"],
-      ["set_cerberus_step_retry_limit", "cerberus_step_retry_limit"],
+      ["set_hydra_agent_state_ttl_seconds", "hydra_agent_state_ttl_seconds"],
+      ["set_hydra_max_ledger_items", "hydra_max_ledger_items"],
+      ["set_hydra_step_retry_limit", "hydra_step_retry_limit"],
+      ["set_hydra_astraeus_plan_review_enabled", "hydra_astraeus_plan_review_enabled"],
     ];
     map.forEach(([inputId, primaryKey]) => {
       const input = document.getElementById(inputId);
       if (!input) {
         return;
       }
-      const hasPrimary = Object.prototype.hasOwnProperty.call(cerberusDefaults, primaryKey);
+      const hasPrimary = Object.prototype.hasOwnProperty.call(hydraDefaults, primaryKey);
       if (!hasPrimary) {
         return;
       }
-      const rawValue = cerberusDefaults[primaryKey];
-      input.value = String(rawValue);
+      const rawValue = hydraDefaults[primaryKey];
+      if (input.type === "checkbox") {
+        input.checked = boolFromAny(rawValue, false);
+      } else {
+        input.value = String(rawValue);
+      }
     });
-    statusEl.textContent = "Cerberus defaults loaded into form. Click Save Settings to apply.";
+    statusEl.textContent = "Hydra defaults loaded into form (model settings unchanged). Click Save Settings to apply.";
   });
 
-  const cerberusSubtabButtons = Array.from(root.querySelectorAll(".settings-subtab-btn"));
-  const cerberusSubPanels = Array.from(root.querySelectorAll(".settings-subpanel"));
-  const activateCerberusSubtab = (tabKey) => {
-    cerberusSubtabButtons.forEach((button) => {
-      button.classList.toggle("active", button.dataset.cerberusTab === tabKey);
+  document.getElementById("settings-hydra-model-save").addEventListener("click", async () => {
+    const payload = {
+      hydra_llm_host: document.getElementById("set_hydra_llm_host").value,
+      hydra_llm_port: document.getElementById("set_hydra_llm_port").value,
+      hydra_llm_model: document.getElementById("set_hydra_llm_model").value,
+    };
+    statusEl.textContent = "Saving Hydra model settings...";
+    try {
+      await api("/api/settings", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      statusEl.textContent = "Hydra model settings saved.";
+      showToast("Hydra model settings saved.");
+    } catch (error) {
+      statusEl.textContent = `Model save failed: ${error.message}`;
+    }
+  });
+
+  const hydraSubtabButtons = Array.from(root.querySelectorAll(".settings-subtab-btn"));
+  const hydraSubPanels = Array.from(root.querySelectorAll(".settings-subpanel"));
+  const activateHydraSubtab = (tabKey) => {
+    hydraSubtabButtons.forEach((button) => {
+      button.classList.toggle("active", button.dataset.hydraTab === tabKey);
     });
-    cerberusSubPanels.forEach((panel) => {
-      panel.classList.toggle("active", panel.dataset.cerberusPanel === tabKey);
+    hydraSubPanels.forEach((panel) => {
+      panel.classList.toggle("active", panel.dataset.hydraPanel === tabKey);
     });
   };
-  cerberusSubtabButtons.forEach((button) => {
-    button.addEventListener("click", () => activateCerberusSubtab(button.dataset.cerberusTab));
+  hydraSubtabButtons.forEach((button) => {
+    button.addEventListener("click", () => activateHydraSubtab(button.dataset.hydraTab));
   });
 
   const metricsStatusEl = document.getElementById("settings-cerb-metrics-status");
@@ -4709,13 +4864,13 @@ async function loadSettingsView() {
   const metricsOutcomeEl = document.getElementById("set_cerb_metrics_outcome");
   const metricsToolEl = document.getElementById("set_cerb_metrics_tool");
   const metricsToolsOnlyEl = document.getElementById("set_cerb_metrics_tools_only");
-  let cerberusLedgerRows = [];
+  let hydraLedgerRows = [];
 
   const dataStatusEl = document.getElementById("settings-cerb-data-status");
   const dataContentEl = document.getElementById("settings-cerb-data-content");
   const dataPlatformEl = document.getElementById("set_cerb_data_platform");
 
-  const ensureCerberusLedgerModal = () => {
+  const ensureHydraLedgerModal = () => {
     let modal = document.getElementById("cerb-ledger-modal");
     if (modal) {
       return modal;
@@ -4724,9 +4879,9 @@ async function loadSettingsView() {
       "beforeend",
       `
         <div id="cerb-ledger-modal" class="cerb-modal" aria-hidden="true">
-          <div class="cerb-modal-dialog card" role="dialog" aria-modal="true" aria-label="Cerberus Ledger Entry">
+          <div class="cerb-modal-dialog card" role="dialog" aria-modal="true" aria-label="Hydra Ledger Entry">
             <div class="card-head">
-              <h3 class="card-title">Cerberus Ledger Entry</h3>
+              <h3 class="card-title">Hydra Ledger Entry</h3>
               <div class="inline-row">
                 <button type="button" class="inline-btn" id="cerb-ledger-copy">Copy JSON</button>
                 <button type="button" class="inline-btn" id="cerb-ledger-close">Close</button>
@@ -4780,8 +4935,8 @@ async function loadSettingsView() {
     return modal;
   };
 
-  const openCerberusLedgerModal = (row) => {
-    const modal = ensureCerberusLedgerModal();
+  const openHydraLedgerModal = (row) => {
+    const modal = ensureHydraLedgerModal();
     const preEl = document.getElementById("cerb-ledger-pre");
     const metaEl = document.getElementById("cerb-ledger-meta");
     const rawRow = row?.raw && typeof row.raw === "object" ? row.raw : row;
@@ -4823,7 +4978,7 @@ async function loadSettingsView() {
     `;
   };
 
-  const renderCerberusLedgerTable = (rows, emptyMessage = "No ledger rows for this filter.") => {
+  const renderHydraLedgerTable = (rows, emptyMessage = "No ledger rows for this filter.") => {
     const list = Array.isArray(rows) ? rows : [];
     if (!list.length) {
       return `<div class="small">${escapeHtml(emptyMessage)}</div>`;
@@ -4873,7 +5028,7 @@ async function loadSettingsView() {
     `;
   };
 
-  const renderCerberusMetricsPayload = (payload) => {
+  const renderHydraMetricsPayload = (payload) => {
     const metricNames = Array.isArray(payload?.metric_names) ? payload.metric_names : [];
     const globalRates = (Array.isArray(payload?.global_rates) ? payload.global_rates : []).map((row) => ({
       metric: metricLabel(row?.metric || ""),
@@ -4884,7 +5039,7 @@ async function loadSettingsView() {
       value: toRateText(row?.value),
     }));
     const platformRows = (Array.isArray(payload?.platform_rows) ? payload.platform_rows : []).map((row) => ({
-      platform: row?.platform_label || cerberusPlatformLabel(row?.platform || ""),
+      platform: row?.platform_label || hydraPlatformLabel(row?.platform || ""),
       total_turns: row?.total_turns ?? 0,
       total_tools_called: row?.total_tools_called ?? 0,
       total_repairs: row?.total_repairs ?? 0,
@@ -4912,7 +5067,7 @@ async function loadSettingsView() {
       </section>
 
       ${renderMetricPills(
-        `Selected Portal Counters (${payload?.selected_platform_label || cerberusPlatformLabel(payload?.selected_platform)})`,
+        `Selected Portal Counters (${payload?.selected_platform_label || hydraPlatformLabel(payload?.selected_platform)})`,
         payload?.platform_metrics || {},
         metricNames
       )}
@@ -4950,7 +5105,7 @@ async function loadSettingsView() {
 
       <section class="core-inline-section">
         <div class="small core-inline-section-title">Ledger Rows</div>
-        ${renderCerberusLedgerTable(ledgerRows, "No ledger rows for this filter.")}
+        ${renderHydraLedgerTable(ledgerRows, "No ledger rows for this filter.")}
       </section>
 
       <section class="core-inline-section">
@@ -4962,34 +5117,34 @@ async function loadSettingsView() {
         ${renderSimpleBarChart(payload?.top_reasons || [], "No failure reasons in filtered rows.")}
       </section>
     `;
-    cerberusLedgerRows = ledgerRows;
+    hydraLedgerRows = ledgerRows;
     metricsContentEl.innerHTML = html;
     metricsContentEl.querySelectorAll(".cerb-ledger-open").forEach((button) => {
       button.addEventListener("click", () => {
         const idx = Number(button.dataset.ledgerIndex || "-1");
-        if (!Number.isFinite(idx) || idx < 0 || idx >= cerberusLedgerRows.length) {
+        if (!Number.isFinite(idx) || idx < 0 || idx >= hydraLedgerRows.length) {
           return;
         }
-        openCerberusLedgerModal(cerberusLedgerRows[idx]);
+        openHydraLedgerModal(hydraLedgerRows[idx]);
       });
     });
   };
 
-  const fetchCerberusMetrics = async (toolValue) => {
+  const fetchHydraMetrics = async (toolValue) => {
     const params = new URLSearchParams();
     params.set("platform", String(metricsPlatformEl.value || "webui"));
     params.set("limit", String(Math.max(10, Math.min(300, Number(metricsLimitEl.value || 50)))));
     params.set("outcome", String(metricsOutcomeEl.value || "all"));
     params.set("tool", String(toolValue || "all"));
     params.set("show_only_tool_turns", metricsToolsOnlyEl.checked ? "true" : "false");
-    return api(`/api/settings/cerberus/metrics?${params.toString()}`);
+    return api(`/api/settings/hydra/metrics?${params.toString()}`);
   };
 
-  const refreshCerberusMetrics = async () => {
+  const refreshHydraMetrics = async () => {
     metricsStatusEl.textContent = "Loading metrics...";
     try {
       const currentTool = String(metricsToolEl.value || "all");
-      let payload = await fetchCerberusMetrics(currentTool);
+      let payload = await fetchHydraMetrics(currentTool);
       const toolOptions = ["all", ...(Array.isArray(payload?.tool_options) ? payload.tool_options : [])];
 
       metricsToolEl.innerHTML = toolOptions
@@ -5002,23 +5157,23 @@ async function loadSettingsView() {
       }
       metricsToolEl.value = effectiveTool;
       if (effectiveTool !== currentTool) {
-        payload = await fetchCerberusMetrics(effectiveTool);
+        payload = await fetchHydraMetrics(effectiveTool);
       }
 
-      renderCerberusMetricsPayload(payload);
+      renderHydraMetricsPayload(payload);
       const filtered = Number(payload?.ledger_filtered ?? 0);
       const total = Number(payload?.ledger_total ?? 0);
       metricsStatusEl.textContent = `Loaded ${filtered} of ${total} ledger rows.`;
     } catch (error) {
       metricsStatusEl.textContent = `Metrics load failed: ${error.message}`;
-      metricsContentEl.innerHTML = renderNotice(`Failed to load Cerberus metrics: ${error.message}`);
+      metricsContentEl.innerHTML = renderNotice(`Failed to load Hydra metrics: ${error.message}`);
     }
   };
 
-  const refreshCerberusData = async () => {
+  const refreshHydraData = async () => {
     dataStatusEl.textContent = "Loading data...";
     try {
-      const payload = await api("/api/settings/cerberus/data");
+      const payload = await api("/api/settings/hydra/data");
       const summary = payload?.summary && typeof payload.summary === "object" ? payload.summary : {};
       const platformRows = Array.isArray(payload?.platform_rows) ? payload.platform_rows : [];
       const ledgerRows = Array.isArray(payload?.ledger_rows) ? payload.ledger_rows : [];
@@ -5082,69 +5237,69 @@ async function loadSettingsView() {
         </section>
       `;
 
-      dataStatusEl.textContent = "Cerberus data loaded.";
+      dataStatusEl.textContent = "Hydra data loaded.";
     } catch (error) {
       dataStatusEl.textContent = `Data load failed: ${error.message}`;
-      dataContentEl.innerHTML = renderNotice(`Failed to load Cerberus data: ${error.message}`);
+      dataContentEl.innerHTML = renderNotice(`Failed to load Hydra data: ${error.message}`);
     }
   };
 
-  const clearCerberusData = async ({ mode, platform, label }) => {
+  const clearHydraData = async ({ mode, platform, label }) => {
     if (!window.confirm(`Confirm ${label}?`)) {
       return;
     }
     dataStatusEl.textContent = "Running clear action...";
     try {
-      const result = await api("/api/settings/cerberus/data/clear", {
+      const result = await api("/api/settings/hydra/data/clear", {
         method: "POST",
         body: JSON.stringify({ mode, platform }),
       });
       dataStatusEl.textContent = `Cleared. Metrics removed: ${result.metrics_removed}. Ledger lists removed: ${result.ledger_removed}.`;
-      await Promise.all([refreshCerberusData(), refreshCerberusMetrics()]);
+      await Promise.all([refreshHydraData(), refreshHydraMetrics()]);
     } catch (error) {
       dataStatusEl.textContent = `Clear failed: ${error.message}`;
     }
   };
 
   document.getElementById("settings-cerb-metrics-refresh").addEventListener("click", () => {
-    refreshCerberusMetrics();
+    refreshHydraMetrics();
   });
-  metricsPlatformEl.addEventListener("change", () => refreshCerberusMetrics());
-  metricsOutcomeEl.addEventListener("change", () => refreshCerberusMetrics());
-  metricsToolEl.addEventListener("change", () => refreshCerberusMetrics());
-  metricsToolsOnlyEl.addEventListener("change", () => refreshCerberusMetrics());
-  metricsLimitEl.addEventListener("change", () => refreshCerberusMetrics());
+  metricsPlatformEl.addEventListener("change", () => refreshHydraMetrics());
+  metricsOutcomeEl.addEventListener("change", () => refreshHydraMetrics());
+  metricsToolEl.addEventListener("change", () => refreshHydraMetrics());
+  metricsToolsOnlyEl.addEventListener("change", () => refreshHydraMetrics());
+  metricsLimitEl.addEventListener("change", () => refreshHydraMetrics());
 
   document.getElementById("settings-cerb-clear-all").addEventListener("click", () => {
-    clearCerberusData({
+    clearHydraData({
       mode: "all",
       platform: "all",
-      label: "clearing all Cerberus metrics and ledger data across all portals",
+      label: "clearing all Hydra metrics and ledger data across all portals",
     });
   });
   document.getElementById("settings-cerb-clear-platform-all").addEventListener("click", () => {
-    clearCerberusData({
+    clearHydraData({
       mode: "all",
       platform: String(dataPlatformEl.value || "webui"),
-      label: `clearing all Cerberus data for ${cerberusPlatformLabel(dataPlatformEl.value)}`,
+      label: `clearing all Hydra data for ${hydraPlatformLabel(dataPlatformEl.value)}`,
     });
   });
   document.getElementById("settings-cerb-clear-platform-metrics").addEventListener("click", () => {
-    clearCerberusData({
+    clearHydraData({
       mode: "metrics",
       platform: String(dataPlatformEl.value || "webui"),
-      label: `resetting Cerberus metrics for ${cerberusPlatformLabel(dataPlatformEl.value)}`,
+      label: `resetting Hydra metrics for ${hydraPlatformLabel(dataPlatformEl.value)}`,
     });
   });
   document.getElementById("settings-cerb-clear-platform-ledger").addEventListener("click", () => {
-    clearCerberusData({
+    clearHydraData({
       mode: "ledger",
       platform: String(dataPlatformEl.value || "webui"),
-      label: `clearing Cerberus ledger for ${cerberusPlatformLabel(dataPlatformEl.value)}`,
+      label: `clearing Hydra ledger for ${hydraPlatformLabel(dataPlatformEl.value)}`,
     });
   });
 
-  await Promise.all([refreshCerberusMetrics(), refreshCerberusData()]);
+  await Promise.all([refreshHydraMetrics(), refreshHydraData()]);
 
   document.getElementById("settings-admin-defaults").addEventListener("click", () => {
     const select = document.getElementById("set_admin_only_plugins");
@@ -5193,14 +5348,17 @@ async function loadSettingsView() {
         document.getElementById("set_emoji_reply_reaction_cooldown_seconds").value || 120
       ),
       emoji_min_message_length: Number(document.getElementById("set_emoji_min_message_length").value || 4),
-      cerberus_llm_host: document.getElementById("set_cerberus_llm_host").value,
-      cerberus_llm_port: document.getElementById("set_cerberus_llm_port").value,
-      cerberus_llm_model: document.getElementById("set_cerberus_llm_model").value,
-      cerberus_agent_state_ttl_seconds: Number(
-        document.getElementById("set_cerberus_agent_state_ttl_seconds").value || 604800
+      hydra_llm_host: document.getElementById("set_hydra_llm_host").value,
+      hydra_llm_port: document.getElementById("set_hydra_llm_port").value,
+      hydra_llm_model: document.getElementById("set_hydra_llm_model").value,
+      hydra_agent_state_ttl_seconds: Number(
+        document.getElementById("set_hydra_agent_state_ttl_seconds").value || 1200
       ),
-      cerberus_max_ledger_items: Number(document.getElementById("set_cerberus_max_ledger_items").value || 1500),
-      cerberus_step_retry_limit: Number(document.getElementById("set_cerberus_step_retry_limit").value || 1),
+      hydra_max_ledger_items: Number(document.getElementById("set_hydra_max_ledger_items").value || 1500),
+      hydra_step_retry_limit: Number(document.getElementById("set_hydra_step_retry_limit").value || 1),
+      hydra_astraeus_plan_review_enabled: document.getElementById(
+        "set_hydra_astraeus_plan_review_enabled"
+      ).checked,
       popup_effect_style: normalizePopupEffectStyle(document.getElementById("set_popup_effect_style")?.value || "flame"),
       admin_only_plugins: adminOnlyPlugins,
     };
@@ -5310,6 +5468,7 @@ async function init() {
 
 window.addEventListener("beforeunload", () => {
   closeChatEventSource();
+  stopAllChatJobPolling();
   stopRuntimeBreakdownPolling();
 });
 
