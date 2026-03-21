@@ -13,7 +13,7 @@ Tater is powered by the Cerberus Core, a three-headed execution system:
 
 - Astraeus, the Seer, determines the path ahead
 - Thanatos, the executor, carries out and validates the work
-- Hermes, the renderer, composes the final response
+- Hermes, the messenger, composes the final response
 
 Cerberus operates in a loop: foresight -> execution -> validation -> Hermes render -> respond.
 
