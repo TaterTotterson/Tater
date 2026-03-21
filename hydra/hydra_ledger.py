@@ -131,7 +131,7 @@ def validation_status_for_ledger(
     return out
 
 
-def write_cerberus_metrics(
+def write_hydra_metrics(
     *,
     redis_client: Any,
     platform: str,
@@ -155,8 +155,8 @@ def write_cerberus_metrics(
         if amount <= 0:
             continue
         keys = [
-            f"tater:cerberus:metrics:{name}",
-            f"tater:cerberus:metrics:{name}:{p}",
+            f"tater:hydra:metrics:{name}",
+            f"tater:hydra:metrics:{name}:{p}",
         ]
         for key in keys:
             try:
@@ -165,7 +165,7 @@ def write_cerberus_metrics(
                 continue
 
 
-def write_cerberus_ledger(
+def write_hydra_ledger(
     *,
     redis_client: Any,
     platform: str,
@@ -295,7 +295,7 @@ def write_cerberus_ledger(
             entry["tool_result_summary"] = summary
     payload = json.dumps(entry, ensure_ascii=False)
 
-    keys = ["tater:cerberus:ledger", f"tater:cerberus:ledger:{platform}"]
+    keys = ["tater:hydra:ledger", f"tater:hydra:ledger:{platform}"]
     max_items = configured_max_ledger_items_fn(redis_client)
     for key in keys:
         try:

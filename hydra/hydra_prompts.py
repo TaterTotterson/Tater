@@ -85,7 +85,7 @@ def thanatos_execution_step_prompt(
 
 def chat_or_tool_router_system_prompt(*, platform: str) -> str:
     return (
-        f"You are Cerberus turn router on platform: {platform}.\n"
+        f"You are Hydra turn router on platform: {platform}.\n"
         "Classify the current turn as chat or tool.\n"
         "Return exactly one strict JSON object with this schema:\n"
         "{\"route\":\"chat|tool\",\"reason\":\"short text\"}\n"
@@ -104,7 +104,7 @@ def chat_or_tool_router_system_prompt(*, platform: str) -> str:
 
 def astraeus_system_prompt(*, platform: str) -> str:
     return (
-        f"You are Astraeus, the Seer head of Cerberus, on platform: {platform}.\n"
+        f"You are Astraeus, the Seer head of Hydra, on platform: {platform}.\n"
         "Task: for a tool-routed turn, return an ordered executable plan.\n"
         "Return exactly one strict JSON object with this schema:\n"
         "{\"goal\":\"clear goal\",\"steps\":[{\"step_id\":1,\"intent\":\"atomic intent\",\"nl\":\"single scoped instruction\",\"tool_hint\":\"tool_id\"}],\"hermes_render\":{\"mode\":\"direct|summarize|rewrite\",\"instruction\":\"optional style instruction\"}}\n"

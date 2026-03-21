@@ -56,17 +56,17 @@ def memory_context_max_items(
         return default_items
     settings = memory_context_settings_fn(redis_client)
     configured = coerce_non_negative_int_fn(
-        settings.get("cerberus_max_items"),
+        settings.get("hydra_max_items"),
         default_items,
     )
     if configured <= 0:
         configured = default_items
     try:
-        raw = redis_client.get("tater:memory_core:cerberus_max_items")
+        raw = redis_client.get("tater:memory_core:hydra_max_items")
     except Exception:
         raw = None
     legacy = coerce_non_negative_int_fn(raw, configured) if raw is not None else configured
-    out = configured if "cerberus_max_items" in settings else legacy
+    out = configured if "hydra_max_items" in settings else legacy
     if out <= 0:
         out = default_items
     return min(100, out)
@@ -81,7 +81,7 @@ def memory_context_value_max_chars(
 ) -> int:
     settings = memory_context_settings_fn(redis_client)
     out = coerce_non_negative_int_fn(
-        settings.get("cerberus_value_max_chars"),
+        settings.get("hydra_value_max_chars"),
         default_value_max_chars,
     )
     if out <= 0:
@@ -100,7 +100,7 @@ def memory_context_summary_max_chars(
 ) -> int:
     settings = memory_context_settings_fn(redis_client)
     out = coerce_non_negative_int_fn(
-        settings.get("cerberus_summary_max_chars"),
+        settings.get("hydra_summary_max_chars"),
         default_summary_max_chars,
     )
     if out <= 0:

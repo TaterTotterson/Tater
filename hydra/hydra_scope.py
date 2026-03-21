@@ -137,7 +137,7 @@ def derive_scope_from_origin(
     return unknown_scope_fn(normalized_platform, src)
 
 
-def resolve_cerberus_scope(
+def resolve_hydra_scope(
     platform: str,
     scope: Any,
     origin: Optional[Dict[str, Any]],

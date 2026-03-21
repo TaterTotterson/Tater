@@ -1,26 +1,28 @@
 <div align="center">
-  <img src="images/tater-new-logo.png" alt="Tater AI Assistant" width="300"/>
+  <img src="images/tater_hydra_logo.png" alt="Tater AI Assistant" width="300"/>
 </div>
 
-**Tater** is a local AI assistant powered by Cerberus and local AI models, giving you a powerful set of AI-driven tools. It includes a WebUI for setup and private chats, and works across **Discord**, **Home Assistant**, **HomeKit**, **IRC**, **macOS**, **Matrix**, **Telegram**, and even the **OG Xbox via XBMC4Xbox**
+**Tater** is a local AI assistant powered by Hydra and local AI models, giving you a powerful set of AI-driven tools. It includes a WebUI for setup and private chats, and works across **Discord**, **Home Assistant**, **HomeKit**, **IRC**, **macOS**, **Matrix**, **Telegram**, and even the **OG Xbox via XBMC4Xbox**
 
 Main website: [taterassistant.com](https://taterassistant.com)
 
 ---
 
-## Cerberus
-Tater is powered by the Cerberus Core, a three-headed execution system:
+## Hydra
+Tater is powered by the Hydra Core, a four-headed execution system:
 
-- Astraeus, the Seer, determines the path ahead
-- Thanatos, the executor, carries out and validates the work
-- Hermes, the messenger, composes the final response
+- Astraeus - sees
+- Thanatos - exacute
+- Minos - judges
+- Hermes - speaks
 
-Cerberus operates in a loop: foresight -> execution -> validation -> Hermes render -> respond.
+Hydra operates in a loop: foresight -> execution -> judgment -> Hermes render -> respond.
 
 Chat path:
 
 - Astraeus speaks with awareness
 - Thanatos stands down
+- Minos stands down
 - Hermes is not invoked unless execution occurs
 
 ---
@@ -193,11 +195,11 @@ REDIS_PORT=6379
 ---
 
 After starting TaterOS, configure your local LLM endpoint in **Settings**:
-- `Cerberus LLM Host`
-- `Cerberus LLM Port`
-- `Cerberus LLM Model`
+- `Hydra LLM Host`
+- `Hydra LLM Port`
+- `Hydra LLM Model`
 
-Those values are stored in Redis and used by Cerberus at runtime.
+Those values are stored in Redis and used by Hydra at runtime.
 
 5. **Run the Web UI**
 
@@ -268,9 +270,9 @@ docker run -d --name tater_webui \
 ---
 
 After the container is running, open TaterOS and configure local LLM endpoint/model in **Settings**:
-- `Cerberus LLM Host`
-- `Cerberus LLM Port`
-- `Cerberus LLM Model`
+- `Hydra LLM Host`
+- `Hydra LLM Port`
+- `Hydra LLM Model`
 
 Tip: The runtime data lives in `/app/agent_lab` inside the container.  
 If you don’t mount it to the host, `/agent_lab` data can be lost when the container is rebuilt or updated.
