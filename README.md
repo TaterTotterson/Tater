@@ -9,35 +9,24 @@ Main website: [taterassistant.com](https://taterassistant.com)
 ---
 
 ## Hydra
-Tater is powered by the Hydra Core, a four-headed execution system:
+Tater is powered by Hydra, a four-head system:
 
 - Astraeus - sees
-- Thanatos - execute
+- Thanatos - executes
 - Minos - judges
 - Hermes - speaks
 
-Hydra operates in a loop: foresight -> execution -> judgment -> Hermes render -> respond.
+Loop: plan -> execute -> judge -> respond.
 
-Chat path:
+Chat turns stay lightweight: Astraeus handles conversational awareness, while Thanatos/Minos/Hermes only engage when execution is needed.
 
-- Astraeus speaks with awareness
-- Thanatos stands down
-- Minos stands down
-- Hermes is not invoked unless execution occurs
+Model routing:
 
-Hydra model routing:
-
-- Base model keys (`Hydra LLM Host`, `Hydra LLM Port`, `Hydra LLM Model`) define the primary AI Calls server.
-- You can add additional Base servers; regular AI calls rotate round-robin across all configured Base servers.
-- With Beast Mode off, Hydra uses the Base server pool for all heads.
-- With Beast Mode on, Hydra still uses the Base server pool for AI Calls, and uses per-head models for:
-  - Chat (normal conversation replies)
-  - Astraeus (planning)
-  - Thanatos (execution)
-  - Minos (judging)
-  - Hermes (final response)
-- In WebUI Settings -> Hydra -> Hydra Models, Beast Mode toggles an animated panel swap between Base model settings and Beast head model settings.
-- If required model settings are missing, Hydra returns the setup message and does not fall back to another model.
+- Base model settings (`Hydra LLM Host`, `Hydra LLM Port`, `Hydra LLM Model`) define AI Calls.
+- You can add multiple Base servers; regular AI calls rotate round-robin.
+- Beast Mode off: all heads use the Base server pool.
+- Beast Mode on: AI Calls still use the Base pool, while Chat/Astraeus/Thanatos/Minos/Hermes each use their own model settings.
+- If required model settings are missing, Hydra returns the setup message and does not fall back.
 
 ---
 
