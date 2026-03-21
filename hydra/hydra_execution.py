@@ -189,14 +189,16 @@ async def execute_tool_call(
         runtime_context.setdefault("bot", runtime_context.get("irc_bot"))
 
     if is_meta_tool_fn(func):
-        payload = run_meta_tool_fn(
+        meta_result = run_meta_tool_fn(
             func=func,
             args=args,
             platform=platform,
             registry=registry,
             enabled_predicate=enabled_predicate,
             origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
+            llm_client=llm_client,
         )
+        payload = await meta_result if _is_awaitable(meta_result) else meta_result
         normalize_source = payload
         if func == "get_verba_help" and isinstance(payload, dict) and "ok" not in payload:
             normalize_source = dict(payload)

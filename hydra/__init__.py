@@ -6,6 +6,7 @@ import time
 import uuid
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
+from urllib.parse import urlparse, urlunparse
 
 from . import hydra_checker as minos
 from . import hydra_doer_state as thanatos_state
@@ -13,7 +14,6 @@ from . import hydra_execution as execution
 from . import hydra_common_helpers as common_helpers
 from . import hydra_ledger as ledger
 from . import hydra_limits as limits_helpers
-from . import hydra_memory_context as memory_context_helpers
 from . import hydra_origin_attach as origin_attach_helpers
 from . import hydra_preamble_utils as preamble_utils
 from . import hydra_prompts as prompts
@@ -30,6 +30,7 @@ from . import hydra_validation_flow as validation_flow
 from . import hydra_web_research as web_research_helpers
 from helpers import (
     TOOL_MARKUP_REPAIR_PROMPT,
+    get_llm_client_from_env,
     get_tater_name,
     get_tater_personality,
     looks_like_tool_markup,
@@ -48,14 +49,17 @@ from verba_kernel import (
     verba_when_to_use,
 )
 from verba_result import action_failure, narrate_result, normalize_verba_result, result_for_llm
-from tool_runtime import META_TOOLS, execute_plugin_call, is_meta_tool, run_meta_tool
-from memory_core_store import (
-    load_doc as load_memory_core_doc,
-    resolve_user_doc_key as resolve_memory_user_doc_key,
-    room_doc_key as memory_room_doc_key,
-    summarize_doc as summarize_memory_core_doc,
-    user_doc_key as memory_user_doc_key,
-    value_to_text as memory_value_to_text,
+from hydra_core_extensions import (
+    collect_hydra_system_prompt_fragments,
+    get_hydra_memory_context_payload,
+)
+from tool_runtime import (
+    execute_plugin_call,
+    is_meta_tool,
+    kernel_tool_ids as runtime_kernel_tool_ids,
+    kernel_tool_purpose_hint as runtime_kernel_tool_purpose_hint,
+    kernel_tool_usage_hint as runtime_kernel_tool_usage_hint,
+    run_meta_tool,
 )
 
 TOOL_NAME_ALIASES = {
@@ -65,6 +69,12 @@ TOOL_NAME_ALIASES = {
     "inspect_page": "inspect_webpage",
     "inspect_website": "inspect_webpage",
 }
+
+HERMES_RENDER_TOOL_ID = "hermes_render"
+HERMES_RENDER_TOOL_DESCRIPTION = (
+    "final response wording/rendering instruction for Hermes "
+    "(for summarize/reword/rewrite style requests); renderer-only and never executed by Thanatos"
+)
 
 _KERNEL_TOOL_PURPOSE_HINTS = {
     "list_tools": "list kernel and enabled verba tools for current platform",
@@ -82,11 +92,6 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
     "extract_archive": "extract archives to a target directory",
     "write_workspace_note": "append a workspace note",
     "list_workspace": "list workspace notes",
-    "memory_get": "read saved memory (auto-checks legacy + durable profiles by default)",
-    "memory_set": "save memory entries",
-    "memory_list": "list saved memory keys",
-    "memory_explain": "explain memory value/source",
-    "memory_search": "search saved memory",
     "image_describe": "describe an explicit image using an artifact_id, URL, blob, or local path",
     "attach_file": "attach an available artifact or local file to the current conversation",
     "send_message": "queue a cross-portal notification/message only when the user explicitly asks to notify or message a destination (never for normal chat replies)",
@@ -107,11 +112,6 @@ _KERNEL_TOOL_USAGE_HINTS = {
     "extract_archive": '{"function":"extract_archive","arguments":{"path":"<archive_path>","destination":"<dest_path>"}}',
     "write_workspace_note": '{"function":"write_workspace_note","arguments":{"content":"<note_text>"}}',
     "list_workspace": '{"function":"list_workspace","arguments":{}}',
-    "memory_get": '{"function":"memory_get","arguments":{"keys":["<key>"]}}',
-    "memory_set": '{"function":"memory_set","arguments":{"entries":{"<key>":"<value>"}}}',
-    "memory_list": '{"function":"memory_list","arguments":{}}',
-    "memory_explain": '{"function":"memory_explain","arguments":{"key":"<key>"}}',
-    "memory_search": '{"function":"memory_search","arguments":{"query":"<query>"}}',
     "image_describe": '{"function":"image_describe","arguments":{"artifact_id":"<artifact_id>","query":"Describe this image."}}',
     "attach_file": '{"function":"attach_file","arguments":{"artifact_id":"<artifact_id>"}}',
     "send_message": '{"function":"send_message","arguments":{"message":"<message>","platform":"discord","targets":{"channel":"#channel"}}}',
@@ -127,6 +127,26 @@ DEFAULT_RESULT_MEMORY_MAX_ITEMS = 8
 DEFAULT_STEP_RETRY_LIMIT = 1
 DEFAULT_ASTRAEUS_PLAN_REVIEW_ENABLED = False
 DEFAULT_IDENTICAL_FAILED_TOOL_CALL_LIMIT = 1
+HYDRA_LLM_HOST_KEY = "tater:hydra:llm_host"
+HYDRA_LLM_PORT_KEY = "tater:hydra:llm_port"
+HYDRA_LLM_MODEL_KEY = "tater:hydra:llm_model"
+HYDRA_BEAST_MODE_ENABLED_KEY = "tater:hydra:beast_mode_enabled"
+HYDRA_BEAST_ROLE_IDS = (
+    "ai_calls",
+    "chat",
+    "astraeus",
+    "thanatos",
+    "minos",
+    "hermes",
+)
+HYDRA_BEAST_CONFIG_ROLE_IDS = (
+    "chat",
+    "astraeus",
+    "thanatos",
+    "minos",
+    "hermes",
+)
+HYDRA_ROLE_LLM_KEY_PREFIX = "tater:hydra:llm:"
 HYDRA_AGENT_STATE_TTL_SECONDS_KEY = "tater:hydra:agent_state_ttl_seconds"
 HYDRA_MAX_LEDGER_ITEMS_KEY = "tater:hydra:max_ledger_items"
 HYDRA_STEP_RETRY_LIMIT_KEY = "tater:hydra:step_retry_limit"
@@ -162,12 +182,22 @@ _MINOS_DECISION_PREFIX_RE = re.compile(
     r"^\s*(CONTINUE|RETRY|ASK[\s_-]*USER|FAIL|FINAL|FINAL[\s_-]*ANSWER|RETRY[\s_-]*TOOL|NEED[\s_-]*USER[\s_-]*INFO)\s*:\s*(.*)$",
     flags=re.IGNORECASE | re.DOTALL,
 )
-_MEMORY_CONTEXT_DEFAULT_ITEMS = 12
-_MEMORY_CONTEXT_DEFAULT_VALUE_MAX_CHARS = 288
 _MEMORY_CONTEXT_DEFAULT_SUMMARY_MAX_CHARS = 2100
 _WEB_RESEARCH_MAX_CANDIDATES = 8
 _WEB_RESEARCH_MIN_PREVIEW_CHARS = 260
 _WEB_RESEARCH_MIN_PREVIEW_WORDS = 45
+_CHAT_ESTIMATE_MESSAGE_OVERHEAD_TOKENS = 8
+_CHAT_ESTIMATE_REQUEST_OVERHEAD_TOKENS = 16
+_CHAT_ESTIMATE_STANDARD_WINDOWS = [
+    2048,
+    4096,
+    8192,
+    16384,
+    32768,
+    65536,
+    131072,
+    200000,
+]
 _HERMES_RENDER_MODE_ALIASES = {
     "direct": "direct",
     "default": "direct",
@@ -183,6 +213,136 @@ _HERMES_RENDER_MODE_ALIASES = {
 }
 _ACTIVE_CHAT_JOB_LOCK = threading.RLock()
 _ACTIVE_CHAT_JOBS: Dict[str, Dict[str, Any]] = {}
+
+
+def _hydra_role_llm_key(role: str, field: str) -> str:
+    return f"{HYDRA_ROLE_LLM_KEY_PREFIX}{str(role or '').strip()}:{str(field or '').strip()}"
+
+
+def _build_hydra_llm_endpoint(host: Any, port: Any) -> str:
+    raw_host = str(host or "").strip()
+    raw_port = str(port or "").strip()
+    if not raw_host:
+        return ""
+
+    candidate = raw_host if raw_host.startswith(("http://", "https://")) else f"http://{raw_host}"
+    parsed = urlparse(candidate)
+    hostname = str(parsed.hostname or "").strip()
+    if not hostname:
+        return ""
+
+    resolved_port = raw_port or (str(parsed.port) if parsed.port is not None else "")
+    if resolved_port:
+        try:
+            port_int = int(str(resolved_port).strip())
+        except Exception:
+            return ""
+        if port_int < 1 or port_int > 65535:
+            return ""
+        netloc = f"{hostname}:{port_int}"
+    else:
+        netloc = hostname
+
+    return urlunparse((parsed.scheme or "http", netloc, "", "", "", "")).rstrip("/")
+
+
+class _HydraLLMClientPool:
+    def __init__(self, *, role_clients: Dict[str, Any], owned_clients: List[Any], beast_mode_enabled: bool) -> None:
+        self.role_clients = dict(role_clients or {})
+        self._owned_clients = list(owned_clients or [])
+        self.beast_mode_enabled = bool(beast_mode_enabled)
+
+    def client_for(self, role: str, default: Any) -> Any:
+        client = self.role_clients.get(str(role or "").strip())
+        return client if client is not None else default
+
+    async def aclose(self) -> None:
+        seen: set[int] = set()
+        for client in self._owned_clients:
+            ident = id(client)
+            if ident in seen:
+                continue
+            seen.add(ident)
+            close_fn = getattr(client, "aclose", None)
+            if callable(close_fn):
+                try:
+                    await close_fn()
+                except Exception:
+                    pass
+
+
+async def _build_hydra_llm_client_pool(
+    *,
+    base_llm_client: Any,
+    redis_client: Any,
+) -> _HydraLLMClientPool:
+    role_clients: Dict[str, Any] = {role: base_llm_client for role in HYDRA_BEAST_ROLE_IDS}
+    owned_clients: List[Any] = []
+    r = redis_client or default_redis
+    def _safe_get_text(key: str) -> str:
+        try:
+            return str(r.get(key) or "").strip() if r is not None else ""
+        except Exception:
+            return ""
+
+    beast_mode_enabled = _status_bool(_safe_get_text(HYDRA_BEAST_MODE_ENABLED_KEY), default=False)
+    if not beast_mode_enabled:
+        return _HydraLLMClientPool(
+            role_clients=role_clients,
+            owned_clients=owned_clients,
+            beast_mode_enabled=False,
+        )
+    missing_or_invalid_roles: List[str] = []
+
+    base_client_host = str(getattr(base_llm_client, "host", "") or "").rstrip("/")
+    base_client_model = str(getattr(base_llm_client, "model", "") or "").strip()
+    shared_clients: Dict[tuple[str, str], Any] = {}
+
+    for role in HYDRA_BEAST_CONFIG_ROLE_IDS:
+        raw_host = _safe_get_text(_hydra_role_llm_key(role, "host"))
+        raw_port = _safe_get_text(_hydra_role_llm_key(role, "port"))
+        raw_model = _safe_get_text(_hydra_role_llm_key(role, "model"))
+        endpoint = _build_hydra_llm_endpoint(raw_host, raw_port)
+        if not endpoint or not raw_model:
+            missing_or_invalid_roles.append(role)
+            continue
+
+        endpoint_key = endpoint.rstrip("/")
+        base_host_no_v1 = base_client_host[:-3].rstrip("/") if base_client_host.endswith("/v1") else base_client_host
+        if (
+            base_client_model
+            and raw_model == base_client_model
+            and endpoint_key in {base_client_host, base_host_no_v1}
+        ):
+            role_clients[role] = base_llm_client
+            continue
+
+        signature = (endpoint_key, str(raw_model).strip())
+        existing = shared_clients.get(signature)
+        if existing is not None:
+            role_clients[role] = existing
+            continue
+
+        try:
+            client = get_llm_client_from_env(host=endpoint, model=raw_model)
+        except Exception:
+            missing_or_invalid_roles.append(role)
+            continue
+
+        shared_clients[signature] = client
+        owned_clients.append(client)
+        role_clients[role] = client
+
+    if missing_or_invalid_roles:
+        raise RuntimeError(
+            "Hydra LLM is not configured. Open Settings > Hydra and set Hydra LLM Host/IP, Port, and Model."
+        )
+
+    return _HydraLLMClientPool(
+        role_clients=role_clients,
+        owned_clients=owned_clients,
+        beast_mode_enabled=True,
+    )
 
 
 def _register_active_chat_job(
@@ -539,87 +699,6 @@ def _resolve_hydra_scope(platform: str, scope: Any, origin: Optional[Dict[str, A
     )
 
 
-def _memory_context_settings(redis_client: Any) -> Dict[str, Any]:
-    return memory_context_helpers.memory_context_settings(redis_client)
-
-
-def _memory_context_min_confidence(redis_client: Any) -> float:
-    return memory_context_helpers.memory_context_min_confidence(
-        redis_client,
-        memory_context_settings_fn=_memory_context_settings,
-    )
-
-
-def _memory_context_max_items(redis_client: Any) -> int:
-    return memory_context_helpers.memory_context_max_items(
-        redis_client,
-        memory_context_settings_fn=_memory_context_settings,
-        coerce_non_negative_int_fn=_coerce_non_negative_int,
-        default_items=_MEMORY_CONTEXT_DEFAULT_ITEMS,
-    )
-
-
-def _memory_context_value_max_chars(redis_client: Any) -> int:
-    return memory_context_helpers.memory_context_value_max_chars(
-        redis_client,
-        memory_context_settings_fn=_memory_context_settings,
-        coerce_non_negative_int_fn=_coerce_non_negative_int,
-        default_value_max_chars=_MEMORY_CONTEXT_DEFAULT_VALUE_MAX_CHARS,
-    )
-
-
-def _memory_context_summary_max_chars(redis_client: Any) -> int:
-    return memory_context_helpers.memory_context_summary_max_chars(
-        redis_client,
-        memory_context_settings_fn=_memory_context_settings,
-        coerce_non_negative_int_fn=_coerce_non_negative_int,
-        default_summary_max_chars=_MEMORY_CONTEXT_DEFAULT_SUMMARY_MAX_CHARS,
-    )
-
-
-def _origin_value(origin: Optional[Dict[str, Any]], *keys: str) -> str:
-    return memory_context_helpers.origin_value(
-        origin,
-        *keys,
-        coerce_text_fn=_coerce_text,
-    )
-
-
-def _memory_context_user_id(origin: Optional[Dict[str, Any]]) -> str:
-    return memory_context_helpers.memory_context_user_id(
-        origin,
-        origin_value_fn=_origin_value,
-    )
-
-
-def _memory_context_user_display_name(origin: Optional[Dict[str, Any]]) -> str:
-    return memory_context_helpers.memory_context_user_display_name(
-        origin,
-        origin_value_fn=_origin_value,
-    )
-
-
-def _memory_context_room_id(platform: str, scope: str, origin: Optional[Dict[str, Any]]) -> str:
-    return memory_context_helpers.memory_context_room_id(
-        platform,
-        scope,
-        origin,
-        normalize_platform_fn=normalize_platform,
-        clean_scope_text_fn=_clean_scope_text,
-        scope_is_generic_fn=_scope_is_generic,
-        origin_value_fn=_origin_value,
-    )
-
-
-def _memory_context_summary(items: List[Dict[str, Any]], *, value_max_chars: int) -> str:
-    return memory_context_helpers.memory_context_summary(
-        items,
-        value_max_chars=value_max_chars,
-        short_text_fn=_short_text,
-        memory_value_to_text_fn=memory_value_to_text,
-    )
-
-
 def _memory_context_payload(
     *,
     redis_client: Any,
@@ -627,35 +706,73 @@ def _memory_context_payload(
     scope: str,
     origin: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    return memory_context_helpers.memory_context_payload(
-        redis_client=redis_client,
+    return get_hydra_memory_context_payload(
         platform=platform,
         scope=scope,
         origin=origin,
-        normalize_platform_fn=normalize_platform,
-        memory_context_min_confidence_fn=_memory_context_min_confidence,
-        memory_context_max_items_fn=_memory_context_max_items,
-        memory_context_value_max_chars_fn=_memory_context_value_max_chars,
-        memory_context_summary_max_chars_fn=_memory_context_summary_max_chars,
-        memory_context_user_id_fn=_memory_context_user_id,
-        memory_context_user_display_name_fn=_memory_context_user_display_name,
-        memory_context_room_id_fn=_memory_context_room_id,
-        resolve_memory_user_doc_key_fn=resolve_memory_user_doc_key,
-        memory_user_doc_key_fn=memory_user_doc_key,
-        load_memory_core_doc_fn=load_memory_core_doc,
-        summarize_memory_core_doc_fn=summarize_memory_core_doc,
-        memory_context_summary_fn=_memory_context_summary,
-        memory_room_doc_key_fn=memory_room_doc_key,
+        redis_client=redis_client,
     )
 
 
-def _memory_context_system_message(payload: Dict[str, Any]) -> str:
-    return memory_context_helpers.memory_context_system_message(
-        payload,
-        coerce_non_negative_int_fn=_coerce_non_negative_int,
-        short_text_fn=_short_text,
-        default_summary_max_chars=_MEMORY_CONTEXT_DEFAULT_SUMMARY_MAX_CHARS,
+def _core_system_prompt_fragments(
+    *,
+    role: str,
+    platform: str,
+    scope: str,
+    origin: Optional[Dict[str, Any]],
+    redis_client: Any,
+    memory_context_payload: Optional[Dict[str, Any]],
+) -> List[str]:
+    fragments = collect_hydra_system_prompt_fragments(
+        role=role,
+        platform=platform,
+        scope=scope,
+        origin=origin,
+        redis_client=redis_client,
+        memory_context=memory_context_payload,
     )
+    out: List[str] = []
+    seen: set[str] = set()
+    for item in fragments:
+        text = _coerce_text(item).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
+def _core_system_prompt_message(
+    *,
+    role: str,
+    platform: str,
+    scope: str,
+    origin: Optional[Dict[str, Any]],
+    redis_client: Any,
+    memory_context_payload: Optional[Dict[str, Any]],
+) -> str:
+    merged: List[str] = []
+    for fragment in _core_system_prompt_fragments(
+        role=role,
+        platform=platform,
+        scope=scope,
+        origin=origin,
+        redis_client=redis_client,
+        memory_context_payload=memory_context_payload,
+    ):
+        merged.append(fragment)
+    if role != "memory_context":
+        for fragment in _core_system_prompt_fragments(
+            role="memory_context",
+            platform=platform,
+            scope=scope,
+            origin=origin,
+            redis_client=redis_client,
+            memory_context_payload=memory_context_payload,
+        ):
+            if fragment not in merged:
+                merged.append(fragment)
+    return "\n\n".join(merged).strip()
 
 
 def _coerce_non_negative_int(value: Any, default: int) -> int:
@@ -700,27 +817,44 @@ def _plugin_usage_text(plugin: Any) -> str:
     return '{"function":"","arguments":{}}'
 
 
-def _kernel_tool_purpose(tool_id: str) -> str:
+def _kernel_tool_purpose(tool_id: str, *, platform: str = "") -> str:
+    key = str(tool_id or "").strip()
+    if not key:
+        return "kernel tool"
+    direct = str(_KERNEL_TOOL_PURPOSE_HINTS.get(key) or "").strip()
+    if direct:
+        return direct
+    dynamic = runtime_kernel_tool_purpose_hint(
+        tool_id=key,
+        platform=platform,
+    )
+    if dynamic:
+        return str(dynamic).strip()
     return tool_index_helpers.kernel_tool_purpose(
-        tool_id,
-        kernel_tool_purpose_hints=_KERNEL_TOOL_PURPOSE_HINTS,
+        key,
+        kernel_tool_purpose_hints={},
     )
 
 
-def _kernel_tool_usage(tool_id: str) -> str:
+def _kernel_tool_usage(tool_id: str, *, platform: str = "") -> str:
     key = str(tool_id or "").strip()
     usage = str(_KERNEL_TOOL_USAGE_HINTS.get(key) or "").strip()
     if usage:
         return usage
+    dynamic = runtime_kernel_tool_usage_hint(
+        tool_id=key,
+        platform=platform,
+    )
+    if dynamic:
+        return str(dynamic).strip()
     if key:
         return f'{{"function":"{key}","arguments":{{}}}}'
     return '{"function":"","arguments":{}}'
 
 
-def _ordered_kernel_tool_ids() -> List[str]:
-    return tool_index_helpers.ordered_kernel_tool_ids(
-        meta_tools=META_TOOLS,
-    )
+def _ordered_kernel_tool_ids(*, platform: str) -> List[str]:
+    normalized = normalize_platform(platform) or str(platform or "").strip().lower() or "webui"
+    return sorted(runtime_kernel_tool_ids(platform=normalized))
 
 
 def _enabled_tool_mini_index(
@@ -729,13 +863,16 @@ def _enabled_tool_mini_index(
     registry: Dict[str, Any],
     enabled_predicate: Optional[Callable[[str], bool]],
 ) -> str:
+    ordered_ids_fn = lambda: _ordered_kernel_tool_ids(platform=platform)
+    kernel_purpose_fn = lambda tool_id: _kernel_tool_purpose(tool_id, platform=platform)
+    kernel_usage_fn = lambda tool_id: _kernel_tool_usage(tool_id, platform=platform)
     return tool_index_helpers.enabled_tool_mini_index(
         platform=platform,
         registry=registry,
         enabled_predicate=enabled_predicate,
-        ordered_kernel_tool_ids_fn=_ordered_kernel_tool_ids,
-        kernel_tool_purpose_fn=_kernel_tool_purpose,
-        kernel_tool_usage_fn=_kernel_tool_usage,
+        ordered_kernel_tool_ids_fn=ordered_ids_fn,
+        kernel_tool_purpose_fn=kernel_purpose_fn,
+        kernel_tool_usage_fn=kernel_usage_fn,
         plugin_supports_platform_fn=verba_supports_platform,
         plugin_usage_text_fn=_plugin_usage_text,
         tool_purpose_fn=_tool_purpose,
@@ -750,10 +887,11 @@ def _enabled_execution_tool_ids(
 ) -> set[str]:
     enabled_check = enabled_predicate or (lambda _name: True)
     out: set[str] = set()
-    for tool_id in _ordered_kernel_tool_ids():
+    for tool_id in _ordered_kernel_tool_ids(platform=platform):
         canonical = _canonical_tool_name(tool_id)
         if canonical:
             out.add(canonical)
+    out.add(HERMES_RENDER_TOOL_ID)
     for plugin_id, plugin in sorted((registry or {}).items(), key=lambda kv: str(kv[0]).lower()):
         raw_plugin_id = str(plugin_id or "").strip()
         canonical = _canonical_tool_name(raw_plugin_id)
@@ -775,13 +913,16 @@ def _astraeus_capability_catalog(
 ) -> str:
     enabled_check = enabled_predicate or (lambda _name: True)
     kernel_rows: List[str] = []
-    for tool_id in _ordered_kernel_tool_ids():
+    for tool_id in _ordered_kernel_tool_ids(platform=platform):
         canonical = _canonical_tool_name(tool_id)
         if not canonical:
             continue
-        kernel_rows.append(f"- id: {canonical} | description: {_kernel_tool_purpose(canonical)}")
+        kernel_rows.append(
+            f"- id: {canonical} | description: {_kernel_tool_purpose(canonical, platform=platform)}"
+        )
     if not kernel_rows:
         kernel_rows.append("- (none)")
+    kernel_rows.append(f"- id: {HERMES_RENDER_TOOL_ID} | description: {HERMES_RENDER_TOOL_DESCRIPTION}")
 
     verba_rows: List[str] = []
     for plugin_id, plugin in sorted((registry or {}).items(), key=lambda kv: str(kv[0]).lower()):
@@ -815,11 +956,11 @@ def _tool_contract_row(
     canonical = _canonical_tool_name(tool_id)
     if not canonical:
         return ""
-    kernel_tool_ids = {_canonical_tool_name(item) for item in _ordered_kernel_tool_ids()}
+    kernel_tool_ids = {_canonical_tool_name(item) for item in _ordered_kernel_tool_ids(platform=platform)}
     if canonical in kernel_tool_ids:
         return (
-            f"- id: {canonical} | description: {_kernel_tool_purpose(canonical)} | "
-            f"usage: {_kernel_tool_usage(canonical)}"
+            f"- id: {canonical} | description: {_kernel_tool_purpose(canonical, platform=platform)} | "
+            f"usage: {_kernel_tool_usage(canonical, platform=platform)}"
         )
     plugin = registry.get(canonical)
     if plugin is None:
@@ -861,9 +1002,9 @@ def _thanatos_execution_tool_contract_prompt(
             )
     if fallback_tool_index:
         return (
-            "Execution catalog fallback (only because this step had no valid tool_hint):\n"
-            f"{fallback_tool_index}\n"
-            "Choose one tool and emit one strict JSON tool call."
+            "Execution contract missing for this step (no valid tool_hint resolved).\n"
+            "Do not choose from global catalogs.\n"
+            "Output a short blocker explanation so Astraeus can replan the step."
         )
     return ""
 
@@ -1816,6 +1957,30 @@ def _normalize_hermes_render_candidate(candidate: Any) -> Optional[Dict[str, str
     return out
 
 
+def _split_hermes_render_steps(
+    plan_steps: List[Dict[str, str]],
+) -> tuple[List[Dict[str, str]], str]:
+    execution_steps: List[Dict[str, str]] = []
+    instruction_parts: List[str] = []
+
+    for step in plan_steps:
+        if not isinstance(step, dict):
+            continue
+        tool_hint = _canonical_tool_name(str(step.get("tool_hint") or "").strip())
+        if tool_hint == HERMES_RENDER_TOOL_ID:
+            part = _short_text(step.get("nl") or step.get("intent"), limit=220)
+            if part:
+                instruction_parts.append(part.strip())
+            continue
+        execution_steps.append(step)
+
+    instruction = ""
+    if instruction_parts:
+        collapsed = "; ".join(part.rstrip(".") for part in instruction_parts if part)
+        instruction = _short_text(collapsed, limit=320)
+    return execution_steps, instruction
+
+
 async def _select_hermes_render_plan(
     *,
     llm_client: Any,
@@ -1828,6 +1993,10 @@ async def _select_hermes_render_plan(
     max_tokens: Optional[int],
 ) -> Dict[str, str]:
     fallback: Dict[str, str] = {"mode": "direct"}
+    now_text = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
+    first, last = get_tater_name()
+    personality = (get_tater_personality() or "").strip()
+    personality_line = f"Voice style (tone only): {personality}\n" if personality else ""
     payload_steps: List[Dict[str, str]] = []
     for step in planned_steps[:8]:
         if not isinstance(step, dict):
@@ -1850,6 +2019,9 @@ async def _select_hermes_render_plan(
         {
             "role": "system",
             "content": (
+                f"Current Date and Time: {now_text}\n"
+                f"You are {first} {last}.\n"
+                f"{personality_line}"
                 "Choose Hermes final-render mode for this turn.\n"
                 "Output exactly one strict JSON object:\n"
                 "{\"mode\":\"direct|summarize|rewrite\",\"instruction\":\"optional text\"}\n"
@@ -2225,6 +2397,177 @@ async def _run_thanatos_step(
     except Exception:
         text = ""
     return text, (time.perf_counter() - started) * 1000.0
+
+
+def _estimate_text_tokens_approx(text: Any) -> int:
+    content = _coerce_text(text).strip()
+    if not content:
+        return 0
+    chars = len(content)
+    words = len(re.findall(r"\S+", content))
+    chars_tokens = max(1, (chars + 3) // 4)
+    words_tokens = max(0, (words * 13 + 9) // 10)
+    return max(chars_tokens, words_tokens)
+
+
+def _estimate_message_tokens_approx(content: Any) -> int:
+    return _estimate_text_tokens_approx(content) + _CHAT_ESTIMATE_MESSAGE_OVERHEAD_TOKENS
+
+
+def _suggest_context_window_size(needed_tokens: int) -> int:
+    target = max(1, int(needed_tokens or 0))
+    for size in _CHAT_ESTIMATE_STANDARD_WINDOWS:
+        if target <= size:
+            return int(size)
+    return int(((target + 1023) // 1024) * 1024)
+
+
+def _seed_user_text_for_context_estimate(
+    *,
+    user_text: str,
+    chat_history: List[Dict[str, str]],
+) -> tuple[str, str]:
+    direct = _short_text(_coerce_text(user_text), limit=260).strip()
+    if direct:
+        return direct, "current_user_text"
+
+    for item in reversed(chat_history):
+        if str(item.get("role") or "").strip().lower() != "user":
+            continue
+        content = _short_text(_coerce_text(item.get("content")), limit=260).strip()
+        if content:
+            return content, "recent_user_turn"
+
+    return "Hey Tater, can you help me with this?", "default_seed"
+
+
+def estimate_hydra_chat_context_window(
+    *,
+    platform: str,
+    history_messages: List[Dict[str, Any]],
+    registry: Dict[str, Any],
+    enabled_predicate: Optional[Callable[[str], bool]] = None,
+    redis_client: Any = None,
+    scope: str = "",
+    origin: Optional[Dict[str, Any]] = None,
+    platform_preamble: str = "",
+    user_text: str = "",
+) -> Dict[str, Any]:
+    r = redis_client or default_redis
+    normalized_platform = normalize_platform(platform) or str(platform or "").strip().lower() or "webui"
+    origin_payload = dict(origin) if isinstance(origin, dict) else {}
+    resolved_scope = _resolve_hydra_scope(normalized_platform, scope, origin_payload)
+
+    compact_history = _compact_history(history_messages or [])
+    chat_history = _chat_history_window(compact_history, max_items=0)
+    history_message_count = len(chat_history)
+
+    memory_context_payload = _memory_context_payload(
+        redis_client=r,
+        platform=normalized_platform,
+        scope=resolved_scope,
+        origin=origin_payload,
+    )
+    chat_core_context = _core_system_prompt_message(
+        role="chat",
+        platform=normalized_platform,
+        scope=resolved_scope,
+        origin=origin_payload,
+        redis_client=r,
+        memory_context_payload=memory_context_payload,
+    )
+    chat_system_prompt = _chat_fallback_system_prompt(normalized_platform)
+    status_prompt = _render_tater_system_status_prompt(
+        platform=normalized_platform,
+        registry=registry,
+        enabled_predicate=enabled_predicate,
+        redis_client=r,
+        history=chat_history,
+        max_tokens=None,
+    )
+    clean_preamble = _sanitize_platform_preamble(normalized_platform, platform_preamble)
+    seeded_user_text, seed_source = _seed_user_text_for_context_estimate(
+        user_text=user_text,
+        chat_history=chat_history,
+    )
+
+    base_messages: List[Dict[str, str]] = [{"role": "system", "content": chat_system_prompt}]
+    if status_prompt:
+        base_messages.append({"role": "system", "content": status_prompt})
+    if chat_core_context:
+        base_messages.append({"role": "system", "content": chat_core_context})
+    if clean_preamble:
+        base_messages = _with_platform_preamble(base_messages, platform_preamble=clean_preamble)
+    base_messages.extend(chat_history)
+    base_messages.append({"role": "user", "content": seeded_user_text})
+
+    prompt_tokens = _CHAT_ESTIMATE_REQUEST_OVERHEAD_TOKENS
+    prompt_chars = 0
+    for msg in base_messages:
+        content = _coerce_text(msg.get("content")).strip()
+        prompt_chars += len(content)
+        prompt_tokens += _estimate_message_tokens_approx(content)
+
+    history_tokens = 0
+    history_chars = 0
+    for msg in chat_history:
+        content = _coerce_text(msg.get("content")).strip()
+        history_chars += len(content)
+        history_tokens += _estimate_message_tokens_approx(content)
+
+    user_tokens = _estimate_message_tokens_approx(seeded_user_text)
+    user_chars = len(seeded_user_text)
+    system_tokens = _estimate_message_tokens_approx(chat_system_prompt)
+    status_tokens = _estimate_message_tokens_approx(status_prompt) if status_prompt else 0
+    core_context_tokens = _estimate_message_tokens_approx(chat_core_context) if chat_core_context else 0
+    preamble_tokens = _estimate_message_tokens_approx(clean_preamble) if clean_preamble else 0
+
+    completion_budget_tokens = max(192, min(1400, (prompt_tokens * 35 + 99) // 100))
+    minimum_context_tokens = prompt_tokens + completion_budget_tokens
+    recommended_context_tokens = minimum_context_tokens + max(256, (minimum_context_tokens * 20 + 99) // 100)
+    minimum_context_window = _suggest_context_window_size(minimum_context_tokens)
+    recommended_context_window = _suggest_context_window_size(recommended_context_tokens)
+
+    verbas_rows = _collect_verbas_status_rows(
+        registry=registry,
+        enabled_predicate=enabled_predicate,
+    )
+    portals_rows = _collect_portals_status_rows(
+        redis_client=r,
+        platform=normalized_platform,
+    )
+    cores_rows = _collect_cores_status_rows(redis_client=r)
+    enabled_verbas = len([row for row in verbas_rows if _status_bool(row.get("enabled"), default=False)])
+    connected_portals = len([row for row in portals_rows if _status_bool(row.get("connected"), default=False)])
+    running_cores = len([row for row in cores_rows if _status_bool(row.get("running"), default=False)])
+
+    return {
+        "platform": normalized_platform,
+        "prompt_tokens": int(max(0, prompt_tokens)),
+        "prompt_chars": int(max(0, prompt_chars)),
+        "completion_budget_tokens": int(max(0, completion_budget_tokens)),
+        "minimum_context_tokens": int(max(0, minimum_context_tokens)),
+        "recommended_context_tokens": int(max(0, recommended_context_tokens)),
+        "minimum_context_window": int(max(0, minimum_context_window)),
+        "recommended_context_window": int(max(0, recommended_context_window)),
+        "message_count": int(len(base_messages)),
+        "history_messages": int(history_message_count),
+        "max_history_messages": int(history_message_count),
+        "enabled_verbas": int(enabled_verbas),
+        "connected_portals": int(connected_portals),
+        "running_cores": int(running_cores),
+        "seed_source": seed_source,
+        "breakdown": {
+            "system_tokens": int(max(0, system_tokens)),
+            "status_tokens": int(max(0, status_tokens)),
+            "core_context_tokens": int(max(0, core_context_tokens)),
+            "platform_preamble_tokens": int(max(0, preamble_tokens)),
+            "history_tokens": int(max(0, history_tokens)),
+            "user_tokens": int(max(0, user_tokens)),
+            "history_chars": int(max(0, history_chars)),
+            "user_chars": int(max(0, user_chars)),
+        },
+    }
 
 
 async def _run_chat_fallback_reply(
@@ -3023,11 +3366,10 @@ async def _run_hermes_final_render(
     platform_preamble: str,
     max_tokens: Optional[int],
 ) -> str:
-    render_mode = str(mode or "").strip().lower()
-    if render_mode in {"", "direct"}:
-        return str(base_text or "").strip()
-    if render_mode not in {"summarize", "rewrite"}:
-        return str(base_text or "").strip()
+    render_mode = _HERMES_RENDER_MODE_ALIASES.get(str(mode or "").strip().lower(), "direct")
+    if render_mode not in {"direct", "summarize", "rewrite"}:
+        render_mode = "direct"
+    now_text = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
     first, last = get_tater_name()
     personality = (get_tater_personality() or "").strip()
     personality_line = f"Voice style (tone only): {personality}\n" if personality else ""
@@ -3060,6 +3402,7 @@ async def _run_hermes_final_render(
         {
             "role": "system",
             "content": (
+                f"Current Date and Time: {now_text}\n"
                 f"You are {first} {last}.\n"
                 "You are Hermes, the final rendering head.\n"
                 f"{personality_line}"
@@ -3067,8 +3410,12 @@ async def _run_hermes_final_render(
                 "Rules:\n"
                 "- Keep facts faithful to payload.base_text and payload.findings.\n"
                 "- Do not invent new facts.\n"
+                "- If payload.instruction is provided, apply it as the highest-priority style directive.\n"
+                "- For mode=direct, answer naturally like a normal conversation and lead with the result.\n"
+                "- For mode=direct, rewrite terse fragments into clear user-facing sentences.\n"
                 "- For mode=summarize, produce a concise summary answer.\n"
                 "- For mode=rewrite, preserve meaning while applying payload.instruction.\n"
+                "- Do not include in-progress phrasing like \"I'm checking\" or \"I'm fetching\" in final answers.\n"
                 "- Do not mention internal roles, orchestration, or tool execution.\n"
                 "- Output plain user-facing text only.\n"
                 f"{plain_text_rule}"
@@ -4007,6 +4354,7 @@ def _is_tool_candidate(text: str) -> bool:
 async def _run_hydra_turn_impl(
     *,
     llm_client: Any,
+    llm_clients: Optional[Dict[str, Any]] = None,
     platform: str,
     history_messages: List[Dict[str, Any]],
     registry: Dict[str, Any],
@@ -4086,11 +4434,6 @@ async def _run_hydra_turn_impl(
         denominator=2,
         minimum=128,
     )
-    hermes_mode_select_max_tokens = _scale_token_limit(
-        astraeus_max_tokens,
-        denominator=8,
-        minimum=80,
-    )
     plan_review_max_tokens = _scale_token_limit(
         astraeus_max_tokens,
         denominator=3,
@@ -4119,7 +4462,14 @@ async def _run_hydra_turn_impl(
     validation_failures_count = 0
     tool_failures_count = 0
     turn_id = str(uuid.uuid4())
-    llm_label = _llm_backend_label(llm_client)
+    role_clients = dict(llm_clients) if isinstance(llm_clients, dict) else {}
+    llm_client_ai_calls = role_clients.get("ai_calls") or llm_client
+    llm_client_chat = role_clients.get("chat") or llm_client
+    llm_client_astraeus = role_clients.get("astraeus") or llm_client
+    llm_client_thanatos = role_clients.get("thanatos") or llm_client
+    llm_client_minos = role_clients.get("minos") or llm_client
+    llm_client_hermes = role_clients.get("hermes") or llm_client
+    llm_label = _llm_backend_label(llm_client_ai_calls)
 
     validation_status: Dict[str, Any] = {
         "status": "skipped",
@@ -4150,7 +4500,7 @@ async def _run_hydra_turn_impl(
     history = _compact_history(history_messages)
     current_user_turn_text = _strip_user_sender_prefix(user_text).strip() or str(user_text or "").strip()
     resolved_user_text = await _resolve_user_request_for_turn(
-        llm_client=llm_client,
+        llm_client=llm_client_ai_calls,
         current_user_text=current_user_turn_text,
         history=history,
         platform_preamble=platform_preamble,
@@ -4184,10 +4534,25 @@ async def _run_hydra_turn_impl(
         scope=scope,
         origin=origin_payload,
     )
-    memory_context_message = _memory_context_system_message(memory_context_payload)
+    chat_context_message = _core_system_prompt_message(
+        role="chat",
+        platform=platform,
+        scope=scope,
+        origin=origin_payload,
+        redis_client=r,
+        memory_context_payload=memory_context_payload,
+    )
+    thanatos_context_message = _core_system_prompt_message(
+        role="thanatos",
+        platform=platform,
+        scope=scope,
+        origin=origin_payload,
+        redis_client=r,
+        memory_context_payload=memory_context_payload,
+    )
     route_started = time.perf_counter()
     route_result = await _llm_chat_or_tool_route_for_turn(
-        llm_client=llm_client,
+        llm_client=llm_client_ai_calls,
         platform=platform,
         current_user_text=current_user_turn_text,
         resolved_user_text=resolved_user_text,
@@ -4213,7 +4578,7 @@ async def _run_hydra_turn_impl(
     if turn_route == "tool":
         topic_meta_started = time.perf_counter()
         topic_meta_result = await _llm_topic_shift_decision_for_turn(
-            llm_client=llm_client,
+            llm_client=llm_client_astraeus,
             current_user_text=current_user_turn_text,
             resolved_user_text=resolved_user_text,
             history=history,
@@ -4232,7 +4597,7 @@ async def _run_hydra_turn_impl(
         try:
             astraeus_started = time.perf_counter()
             astraeus_result = await _run_astraeus_plan(
-                llm_client=llm_client,
+                llm_client=llm_client_astraeus,
                 platform=platform,
                 current_user_text=current_user_turn_text,
                 resolved_user_text=resolved_user_text,
@@ -4275,7 +4640,7 @@ async def _run_hydra_turn_impl(
         if structured_plan_queue and astraeus_plan_review_enabled:
             plan_review_started = time.perf_counter()
             reviewed_plan = await _review_execution_plan_for_completeness(
-                llm_client=llm_client,
+                llm_client=llm_client_astraeus,
                 platform=platform,
                 current_user_text=current_user_turn_text,
                 resolved_user_text=resolved_user_text,
@@ -4296,19 +4661,17 @@ async def _run_hydra_turn_impl(
                     reviewed_queue = [step for step in reviewed_steps if isinstance(step, dict)]
                     if reviewed_queue:
                         structured_plan_queue = reviewed_queue
-        if hermes_render_plan is None and structured_plan_queue:
-            hermes_selector_started = time.perf_counter()
-            hermes_render_plan = await _select_hermes_render_plan(
-                llm_client=llm_client,
-                platform=platform,
-                current_user_text=current_user_turn_text,
-                resolved_user_text=resolved_user_text,
-                goal=astraeus_goal or resolved_user_text or current_user_turn_text,
-                planned_steps=structured_plan_queue,
-                platform_preamble=platform_preamble,
-                max_tokens=hermes_mode_select_max_tokens,
-            )
-            astraeus_ms_total += (time.perf_counter() - hermes_selector_started) * 1000.0
+        if structured_plan_queue:
+            execution_queue, hermes_instruction_from_steps = _split_hermes_render_steps(structured_plan_queue)
+            structured_plan_queue = execution_queue
+            if hermes_instruction_from_steps:
+                if not isinstance(hermes_render_plan, dict):
+                    hermes_render_plan = {"mode": "direct", "instruction": hermes_instruction_from_steps}
+                else:
+                    if not str(hermes_render_plan.get("mode") or "").strip():
+                        hermes_render_plan["mode"] = "direct"
+                    if not str(hermes_render_plan.get("instruction") or "").strip():
+                        hermes_render_plan["instruction"] = hermes_instruction_from_steps
     else:
         astraeus_mode = "chat"
     agent_state: Dict[str, Any] = _initial_agent_state_for_turn_from_topic_signal(
@@ -4391,7 +4754,7 @@ async def _run_hydra_turn_impl(
         composed_text = base_text
         if len(completed_tool_steps) >= 2:
             synthesized = await _synthesize_completed_steps_answer(
-                llm_client=llm_client,
+                llm_client=llm_client_ai_calls,
                 platform=platform,
                 user_text=user_request_text,
                 goal=astraeus_goal or resolved_user_text or current_user_turn_text,
@@ -4403,26 +4766,27 @@ async def _run_hydra_turn_impl(
             if synthesized:
                 composed_text = synthesized
 
-        hermes_mode = ""
+        hermes_mode = "direct"
         hermes_instruction = ""
         if isinstance(hermes_render_plan, dict):
-            hermes_mode = _short_text(hermes_render_plan.get("mode"), limit=20).lower()
+            selected_mode = _short_text(hermes_render_plan.get("mode"), limit=20).lower()
+            normalized_mode = _HERMES_RENDER_MODE_ALIASES.get(selected_mode, "direct")
+            hermes_mode = normalized_mode if normalized_mode in {"direct", "summarize", "rewrite"} else "direct"
             hermes_instruction = _short_text(hermes_render_plan.get("instruction"), limit=320)
-        if hermes_mode:
-            hermes_text = await _run_hermes_final_render(
-                llm_client=llm_client,
-                platform=platform,
-                user_text=user_request_text,
-                goal=astraeus_goal or resolved_user_text or current_user_turn_text,
-                mode=hermes_mode,
-                instruction=hermes_instruction,
-                base_text=composed_text,
-                completed_steps=completed_tool_steps,
-                platform_preamble=platform_preamble,
-                max_tokens=chat_reply_max_tokens,
-            )
-            if hermes_text:
-                composed_text = hermes_text
+        hermes_text = await _run_hermes_final_render(
+            llm_client=llm_client_hermes,
+            platform=platform,
+            user_text=user_request_text,
+            goal=astraeus_goal or resolved_user_text or current_user_turn_text,
+            mode=hermes_mode,
+            instruction=hermes_instruction,
+            base_text=composed_text,
+            completed_steps=completed_tool_steps,
+            platform_preamble=platform_preamble,
+            max_tokens=chat_reply_max_tokens,
+        )
+        if hermes_text:
+            composed_text = hermes_text
         return composed_text
 
     def _finish(
@@ -4508,14 +4872,14 @@ async def _run_hydra_turn_impl(
         if astraeus_mode == "chat":
             chat_started = time.perf_counter()
             chat_text = await _run_chat_fallback_reply(
-                llm_client=llm_client,
+                llm_client=llm_client_chat,
                 platform=platform,
                 user_text=current_user_turn_text,
                 history=history,
                 registry=registry,
                 enabled_predicate=enabled_predicate,
                 redis_client=r,
-                memory_context_message=memory_context_message,
+                memory_context_message=chat_context_message,
                 platform_preamble=platform_preamble,
                 max_tokens=chat_reply_max_tokens,
             )
@@ -4636,8 +5000,8 @@ async def _run_hydra_turn_impl(
             )
             if tool_contract_prompt:
                 thanatos_messages.append({"role": "system", "content": tool_contract_prompt})
-        if memory_context_message:
-            thanatos_messages.append({"role": "system", "content": memory_context_message})
+        if thanatos_context_message:
+            thanatos_messages.append({"role": "system", "content": thanatos_context_message})
         thanatos_messages = _with_platform_preamble(
             thanatos_messages,
             platform_preamble=platform_preamble,
@@ -4646,7 +5010,7 @@ async def _run_hydra_turn_impl(
         thanatos_messages.append({"role": "user", "content": round_request_text})
 
         thanatos_text, thanatos_ms = await _run_thanatos_step(
-            llm_client=llm_client,
+            llm_client=llm_client_thanatos,
             thanatos_messages=thanatos_messages,
             max_tokens=thanatos_step_max_tokens,
         )
@@ -4662,7 +5026,7 @@ async def _run_hydra_turn_impl(
             draft_response = str(thanatos_text or "").strip()
             checker_started = time.perf_counter()
             checker_decision = await _run_minos_validation(
-                llm_client=llm_client,
+                llm_client=llm_client_minos,
                 platform=platform,
                 current_user_text=current_user_turn_text,
                 resolved_user_text=resolved_user_text,
@@ -4786,7 +5150,7 @@ async def _run_hydra_turn_impl(
             )
 
         tool_eval = await _validate_or_recover_tool_call(
-            llm_client=llm_client,
+            llm_client=llm_client_ai_calls,
             text=thanatos_text,
             platform=platform,
             registry=registry,
@@ -4914,7 +5278,7 @@ async def _run_hydra_turn_impl(
         tool_used = True
         tool_user_text = round_request_text
         wait_text, wait_payload = await _tool_start_progress(
-            llm_client=llm_client,
+            llm_client=llm_client_ai_calls,
             platform=platform,
             tool_call=planned_tool,
             round_request_text=tool_user_text,
@@ -4926,7 +5290,7 @@ async def _run_hydra_turn_impl(
         )
         tool_started = time.perf_counter()
         doer_exec = await _execute_tool_call(
-            llm_client=llm_client,
+            llm_client=llm_client_ai_calls,
             tool_call=planned_tool,
             platform=platform,
             registry=registry,
@@ -5006,7 +5370,7 @@ async def _run_hydra_turn_impl(
         tool_calls_used += 1
 
         agent_state = await _run_thanatos_state_update(
-            llm_client=llm_client,
+            llm_client=llm_client_thanatos,
             platform=platform,
             user_request=tool_user_text or resolved_user_text,
             prior_state=agent_state,
@@ -5043,7 +5407,7 @@ async def _run_hydra_turn_impl(
             fallback_draft=draft_response,
         )
         checker_decision = await _run_minos_validation(
-            llm_client=llm_client,
+            llm_client=llm_client_minos,
             platform=platform,
             current_user_text=current_user_turn_text,
             resolved_user_text=resolved_user_text,
@@ -5245,7 +5609,7 @@ async def _run_hydra_turn_impl(
     fallback_step_retry_count = max(0, int(step_retry_counts.get(fallback_step_id, 0)))
     checker_started = time.perf_counter()
     checker_decision = await _run_minos_validation(
-        llm_client=llm_client,
+        llm_client=llm_client_minos,
         platform=platform,
         current_user_text=current_user_turn_text,
         resolved_user_text=resolved_user_text,
@@ -5344,23 +5708,32 @@ async def run_hydra_turn(
         origin=origin,
     )
     try:
-        return await _run_hydra_turn_impl(
-            llm_client=llm_client,
-            platform=platform,
-            history_messages=history_messages,
-            registry=registry,
-            enabled_predicate=enabled_predicate,
-            context=context,
-            user_text=user_text,
-            scope=scope,
-            task_id=task_id,
-            origin=origin,
-            wait_callback=wait_callback,
-            admin_guard=admin_guard,
-            redis_client=redis_client,
-            max_rounds=max_rounds,
-            max_tool_calls=max_tool_calls,
-            platform_preamble=platform_preamble,
+        r = redis_client or default_redis
+        llm_pool = await _build_hydra_llm_client_pool(
+            base_llm_client=llm_client,
+            redis_client=r,
         )
+        try:
+            return await _run_hydra_turn_impl(
+                llm_client=llm_client,
+                llm_clients=llm_pool.role_clients,
+                platform=platform,
+                history_messages=history_messages,
+                registry=registry,
+                enabled_predicate=enabled_predicate,
+                context=context,
+                user_text=user_text,
+                scope=scope,
+                task_id=task_id,
+                origin=origin,
+                wait_callback=wait_callback,
+                admin_guard=admin_guard,
+                redis_client=r,
+                max_rounds=max_rounds,
+                max_tool_calls=max_tool_calls,
+                platform_preamble=platform_preamble,
+            )
+        finally:
+            await llm_pool.aclose()
     finally:
         _unregister_active_chat_job(active_job_id)
