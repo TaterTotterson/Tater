@@ -70,14 +70,14 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
     "list_tools": "list kernel and enabled verba tools for current platform",
     "get_verba_help": "show verba usage example and guidance",
     "read_file": "read local file contents",
-    "search_web": "web search for current information",
+    "search_web": "retrieve ranked link candidates with snippet metadata only (no full-page fetch, no authoritative page facts)",
     "search_files": "search text across local files",
     "write_file": "write content to a local file",
     "list_directory": "list files and folders",
     "delete_file": "delete a local file",
-    "read_url": "fetch and read webpage text",
-    "inspect_webpage": "inspect webpage structure, links, and image candidates",
-    "download_file": "download files from URLs",
+    "read_url": "read content text from a specific URL for extraction",
+    "inspect_webpage": "inspect a specific URL for structure, key content, and follow-up links/media",
+    "download_file": "download a file from a concrete file URL after discovery/inspection",
     "list_archive": "inspect archive entries",
     "extract_archive": "extract archives to a target directory",
     "write_workspace_note": "append a workspace note",
@@ -89,7 +89,7 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
     "memory_search": "search saved memory",
     "image_describe": "describe an explicit image using an artifact_id, URL, blob, or local path",
     "attach_file": "attach an available artifact or local file to the current conversation",
-    "send_message": "queue a structured cross-platform notification or message",
+    "send_message": "queue a cross-portal notification/message only when the user explicitly asks to notify or message a destination",
 }
 _KERNEL_TOOL_USAGE_HINTS = {
     "list_tools": '{"function":"list_tools","arguments":{}}',
@@ -125,7 +125,7 @@ DEFAULT_MAX_LEDGER_ITEMS = 1500
 DEFAULT_RESULT_MEMORY_MAX_SETS = 6
 DEFAULT_RESULT_MEMORY_MAX_ITEMS = 8
 DEFAULT_STEP_RETRY_LIMIT = 3
-DEFAULT_IDENTICAL_FAILED_TOOL_CALL_LIMIT = 2
+DEFAULT_IDENTICAL_FAILED_TOOL_CALL_LIMIT = 1
 CERBERUS_AGENT_STATE_TTL_SECONDS_KEY = "tater:cerberus:agent_state_ttl_seconds"
 CERBERUS_MAX_LEDGER_ITEMS_KEY = "tater:cerberus:max_ledger_items"
 CERBERUS_RESULT_MEMORY_MAX_SETS_KEY = "tater:cerberus:result_memory_max_sets"
@@ -163,6 +163,19 @@ _MEMORY_CONTEXT_DEFAULT_SUMMARY_MAX_CHARS = 2100
 _WEB_RESEARCH_MAX_CANDIDATES = 8
 _WEB_RESEARCH_MIN_PREVIEW_CHARS = 260
 _WEB_RESEARCH_MIN_PREVIEW_WORDS = 45
+_HERMES_RENDER_MODE_ALIASES = {
+    "direct": "direct",
+    "default": "direct",
+    "as_is": "direct",
+    "asis": "direct",
+    "summarize": "summarize",
+    "summary": "summarize",
+    "brief": "summarize",
+    "rewrite": "rewrite",
+    "reword": "rewrite",
+    "rename": "rewrite",
+    "rephrase": "rewrite",
+}
 _ACTIVE_CHAT_JOB_LOCK = threading.RLock()
 _ACTIVE_CHAT_JOBS: Dict[str, Dict[str, Any]] = {}
 
@@ -682,11 +695,154 @@ def _enabled_tool_mini_index(
     )
 
 
+def _enabled_execution_tool_ids(
+    *,
+    platform: str,
+    registry: Dict[str, Any],
+    enabled_predicate: Optional[Callable[[str], bool]],
+) -> set[str]:
+    enabled_check = enabled_predicate or (lambda _name: True)
+    out: set[str] = set()
+    for tool_id in _ordered_kernel_tool_ids():
+        canonical = _canonical_tool_name(tool_id)
+        if canonical:
+            out.add(canonical)
+    for plugin_id, plugin in sorted((registry or {}).items(), key=lambda kv: str(kv[0]).lower()):
+        raw_plugin_id = str(plugin_id or "").strip()
+        canonical = _canonical_tool_name(raw_plugin_id)
+        if not canonical:
+            continue
+        if not (enabled_check(canonical) or enabled_check(raw_plugin_id)):
+            continue
+        if not verba_supports_platform(plugin, platform):
+            continue
+        out.add(canonical)
+    return out
+
+
+def _astraeus_capability_catalog(
+    *,
+    platform: str,
+    registry: Dict[str, Any],
+    enabled_predicate: Optional[Callable[[str], bool]],
+) -> str:
+    enabled_check = enabled_predicate or (lambda _name: True)
+    kernel_rows: List[str] = []
+    for tool_id in _ordered_kernel_tool_ids():
+        canonical = _canonical_tool_name(tool_id)
+        if not canonical:
+            continue
+        kernel_rows.append(f"- id: {canonical} | description: {_kernel_tool_purpose(canonical)}")
+    if not kernel_rows:
+        kernel_rows.append("- (none)")
+
+    verba_rows: List[str] = []
+    for plugin_id, plugin in sorted((registry or {}).items(), key=lambda kv: str(kv[0]).lower()):
+        raw_plugin_id = str(plugin_id or "").strip()
+        canonical = _canonical_tool_name(raw_plugin_id)
+        if not canonical:
+            continue
+        if not (enabled_check(canonical) or enabled_check(raw_plugin_id)):
+            continue
+        if not verba_supports_platform(plugin, platform):
+            continue
+        verba_rows.append(f"- id: {canonical} | description: {_tool_purpose(plugin)}")
+    if not verba_rows:
+        verba_rows.append("- (none)")
+
+    return (
+        "Available kernel tools (id | description):\n"
+        + "\n".join(kernel_rows)
+        + "\nAvailable enabled verba tools on this platform (id | description):\n"
+        + "\n".join(verba_rows)
+    )
+
+
+def _tool_contract_row(
+    *,
+    tool_id: str,
+    platform: str,
+    registry: Dict[str, Any],
+    enabled_predicate: Optional[Callable[[str], bool]],
+) -> str:
+    canonical = _canonical_tool_name(tool_id)
+    if not canonical:
+        return ""
+    kernel_tool_ids = {_canonical_tool_name(item) for item in _ordered_kernel_tool_ids()}
+    if canonical in kernel_tool_ids:
+        return (
+            f"- id: {canonical} | description: {_kernel_tool_purpose(canonical)} | "
+            f"usage: {_kernel_tool_usage(canonical)}"
+        )
+    plugin = registry.get(canonical)
+    if plugin is None:
+        return ""
+    enabled_check = enabled_predicate or (lambda _name: True)
+    raw_tool_id = str(tool_id or "").strip()
+    if not (enabled_check(canonical) or (raw_tool_id and enabled_check(raw_tool_id))):
+        return ""
+    if not verba_supports_platform(plugin, platform):
+        return ""
+    return (
+        f"- id: {canonical} | description: {_tool_purpose(plugin)} | "
+        f"usage: {_plugin_usage_text(plugin)}"
+    )
+
+
+def _thanatos_execution_tool_contract_prompt(
+    *,
+    current_plan_step: Optional[Dict[str, Any]],
+    platform: str,
+    registry: Dict[str, Any],
+    enabled_predicate: Optional[Callable[[str], bool]],
+    fallback_tool_index: str,
+) -> str:
+    step = current_plan_step if isinstance(current_plan_step, dict) else {}
+    hinted_tool = _canonical_tool_name(str(step.get("tool_hint") or "").strip())
+    if hinted_tool:
+        contract_row = _tool_contract_row(
+            tool_id=hinted_tool,
+            platform=platform,
+            registry=registry,
+            enabled_predicate=enabled_predicate,
+        )
+        if contract_row:
+            return (
+                "Execution tool contract for this step:\n"
+                f"{contract_row}\n"
+                "Use this tool contract directly for tool id and argument shape."
+            )
+    if fallback_tool_index:
+        return (
+            "Execution catalog fallback (only because this step had no valid tool_hint):\n"
+            f"{fallback_tool_index}\n"
+            "Choose one tool and emit one strict JSON tool call."
+        )
+    return ""
+
+
 def _compact_history(history_messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return common_helpers.compact_history(
         history_messages,
         coerce_text_fn=_coerce_text,
     )
+
+
+def _chat_history_window(history_messages: List[Dict[str, Any]], *, max_items: int = 10) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
+    for msg in (history_messages or []):
+        if not isinstance(msg, dict):
+            continue
+        role = str(msg.get("role") or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = _short_text(_coerce_text(msg.get("content")), limit=260)
+        if not content:
+            continue
+        out.append({"role": role, "content": content})
+    if max_items > 0 and len(out) > max_items:
+        return out[-max_items:]
+    return out
 
 
 def _platform_label(platform: str) -> str:
@@ -698,46 +854,6 @@ def _platform_label(platform: str) -> str:
 
 def _strip_user_sender_prefix(text: str) -> str:
     return common_helpers.strip_user_sender_prefix(text)
-
-
-def _looks_like_social_chat_turn(text: str) -> bool:
-    lowered = " ".join(str(text or "").strip().lower().split())
-    if not lowered:
-        return False
-    if _URL_RE.search(lowered):
-        return False
-    if re.search(
-        r"\b(turn|set|check|find|search|summarize|download|upload|send|post|add|share|inspect|read|run|open|create|make|build|write|delete|list|extract|attach|remind|schedule|notify)\b",
-        lowered,
-    ):
-        return False
-    if lowered in {
-        "ok",
-        "okay",
-        "kk",
-        "got it",
-        "sounds good",
-        "thanks",
-        "thank you",
-        "thx",
-        "cool",
-        "nice",
-        "awesome",
-        "great",
-        "lol",
-        "haha",
-    }:
-        return True
-    if re.match(r"^(hi|hey|hello|yo|sup|howdy)\b", lowered):
-        return True
-    if re.match(r"^(good\s+(morning|afternoon|evening)|good night|gn)\b", lowered):
-        return True
-    if re.search(
-        r"\b(how are you|how's it going|how is it going|what are you up to|what've you been up to|what do you think|tell me about yourself|who are you)\b",
-        lowered,
-    ):
-        return True
-    return False
 
 
 def _web_research_url_key(url: Any) -> str:
@@ -886,24 +1002,27 @@ def _thanatos_round_mode_prompt(*, round_index: int, current_user_text: str) -> 
     )
 
 
-def _thanatos_execution_step_prompt(*, intent: str, nl: str, goal: str = "", repair_hint: str = "") -> str:
+def _thanatos_execution_step_prompt(
+    *,
+    intent: str,
+    nl: str,
+    goal: str = "",
+    repair_hint: str = "",
+    tool_hint: str = "",
+) -> str:
     return prompts.thanatos_execution_step_prompt(
         intent=intent,
         nl=nl,
         goal=goal,
         repair_hint=repair_hint,
+        tool_hint=tool_hint,
     )
 
 
 def _thanatos_system_prompt(platform: str) -> str:
-    first, last = get_tater_name()
     return prompts.thanatos_system_prompt(
         platform=platform,
-        platform_label=_platform_label(platform),
         now_text=datetime.now().strftime("%A, %B %d, %Y at %I:%M %p"),
-        first_name=first,
-        last_name=last,
-        personality=(get_tater_personality() or "").strip(),
         ascii_only_platforms=ASCII_ONLY_PLATFORMS,
     ).strip()
 
@@ -918,6 +1037,10 @@ def _minos_system_prompt(platform: str, retry_allowed: bool) -> str:
 
 def _astraeus_system_prompt(platform: str) -> str:
     return prompts.astraeus_system_prompt(platform=platform)
+
+
+def _chat_or_tool_router_system_prompt(platform: str) -> str:
+    return prompts.chat_or_tool_router_system_prompt(platform=platform)
 
 
 def _chat_fallback_system_prompt(platform: str) -> str:
@@ -1198,7 +1321,7 @@ def _render_tater_system_status_prompt(
     lines.append("- Do NOT mention internal modes, pipelines, or branches unless asked.")
     lines.append("- If the user asks to perform an action, respond naturally as Tater without claiming execution occurred.")
     lines.append("- Keep responses immersive and user-facing, not mechanical.")
-    lines.append("- Chat path alignment: Astraeus speaks with awareness; Thanatos stands down; Minos is inactive unless execution occurs.")
+    lines.append("- Chat path alignment: Astraeus speaks with awareness; Thanatos stands down; Hermes is inactive unless execution occurs.")
     return "\n".join(lines).strip()
 
 
@@ -1579,6 +1702,7 @@ def _normalize_plan_step_candidate(
     candidate: Any,
     *,
     index: int,
+    available_tool_ids: Optional[set[str]] = None,
 ) -> Optional[Dict[str, str]]:
     if not isinstance(candidate, dict):
         return None
@@ -1607,7 +1731,118 @@ def _normalize_plan_step_candidate(
         nl = intent
     raw_id = str(candidate.get("step_id") or candidate.get("id") or f"s{index + 1}").strip()
     step_id = _short_text(raw_id, limit=24) or f"s{index + 1}"
-    return {"id": step_id, "intent": intent, "nl": nl}
+    raw_tool_hint = (
+        candidate.get("tool_hint")
+        or candidate.get("tool")
+        or candidate.get("tool_id")
+        or ""
+    )
+    tool_hint = _canonical_tool_name(str(raw_tool_hint or "").strip())
+    if (
+        tool_hint
+        and isinstance(available_tool_ids, set)
+        and available_tool_ids
+        and tool_hint not in available_tool_ids
+    ):
+        tool_hint = ""
+    step: Dict[str, str] = {"id": step_id, "intent": intent, "nl": nl}
+    if tool_hint:
+        step["tool_hint"] = tool_hint
+    return step
+
+
+def _normalize_hermes_render_candidate(candidate: Any) -> Optional[Dict[str, str]]:
+    if not isinstance(candidate, dict):
+        return None
+    raw_mode = _short_text(candidate.get("mode"), limit=24).lower()
+    mode = _HERMES_RENDER_MODE_ALIASES.get(raw_mode or "", "")
+    if not mode:
+        return None
+    instruction = _short_text(candidate.get("instruction"), limit=320)
+    if mode == "direct":
+        instruction = ""
+    if mode in {"summarize", "rewrite"} and not instruction:
+        instruction = "Use the requested output style from the current user message."
+    out: Dict[str, str] = {"mode": mode}
+    if instruction:
+        out["instruction"] = instruction
+    return out
+
+
+async def _select_hermes_render_plan(
+    *,
+    llm_client: Any,
+    platform: str,
+    current_user_text: str,
+    resolved_user_text: str,
+    goal: str,
+    planned_steps: List[Dict[str, str]],
+    platform_preamble: str,
+    max_tokens: Optional[int],
+) -> Dict[str, str]:
+    fallback: Dict[str, str] = {"mode": "direct"}
+    payload_steps: List[Dict[str, str]] = []
+    for step in planned_steps[:8]:
+        if not isinstance(step, dict):
+            continue
+        payload_steps.append(
+            {
+                "intent": _short_text(step.get("intent"), limit=140),
+                "nl": _short_text(step.get("nl"), limit=180),
+                "tool_hint": _short_text(step.get("tool_hint"), limit=60),
+            }
+        )
+    payload = {
+        "current_user_message": _short_text(current_user_text, limit=420),
+        "resolved_request_for_this_turn": _short_text(resolved_user_text, limit=420),
+        "goal": _short_text(goal, limit=260),
+        "planned_steps": payload_steps,
+        "allowed_modes": ["direct", "summarize", "rewrite"],
+    }
+    messages: List[Dict[str, Any]] = [
+        {
+            "role": "system",
+            "content": (
+                "Choose Hermes final-render mode for this turn.\n"
+                "Output exactly one strict JSON object:\n"
+                "{\"mode\":\"direct|summarize|rewrite\",\"instruction\":\"optional text\"}\n"
+                "Rules:\n"
+                "- Choose summarize when user intent asks for summary/recap/latest updates/news/key points.\n"
+                "- Choose summarize when user asks what something is, asks for purpose/details, or asks to explain identified results.\n"
+                "- Choose rewrite when user intent asks for reword/rephrase/rename/style/tone changes.\n"
+                "- Choose direct when no style transform is requested.\n"
+                "- Keep instruction empty for direct.\n"
+                "- For summarize/rewrite, include concise instruction only when needed.\n"
+                "- Do not mention tools or internal orchestration.\n"
+                "- No markdown fences.\n"
+            ),
+        },
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+    messages = _with_platform_preamble(messages, platform_preamble=platform_preamble)
+    try:
+        resp = await llm_client.chat(
+            messages=messages,
+            temperature=0.0,
+            **_chat_with_optional_max_tokens_kwargs(
+                max_tokens=max_tokens,
+                minimum=80,
+                fallback=180,
+                maximum=280,
+            ),
+        )
+    except Exception:
+        return fallback
+
+    text = _coerce_text((resp.get("message", {}) or {}).get("content", "")).strip()
+    obj = _first_json_object(text)
+    if isinstance(obj, dict):
+        candidate = _normalize_hermes_render_candidate(
+            obj.get("hermes_render") if isinstance(obj.get("hermes_render"), dict) else obj
+        )
+        if isinstance(candidate, dict):
+            return candidate
+    return fallback
 
 
 def _sync_agent_state_with_plan_queue(
@@ -1635,21 +1870,19 @@ async def _run_astraeus_plan(
     platform: str,
     current_user_text: str,
     resolved_user_text: str,
+    topic_seed: str,
+    topic_shift_seed: bool,
     history: List[Dict[str, Any]],
     prior_state: Optional[Dict[str, Any]],
     memory_context: Optional[Dict[str, Any]],
+    capability_catalog: str,
+    available_tool_ids: set[str],
     platform_preamble: str,
     max_tokens: Optional[int],
 ) -> Dict[str, Any]:
     fallback_goal = _short_text(resolved_user_text or current_user_text, limit=220) or "Fulfill the user request."
-    if _looks_like_social_chat_turn(current_user_text):
-        return {
-            "mode": "chat",
-            "topic": "conversation",
-            "topic_shift": False,
-            "goal": fallback_goal,
-            "steps": [],
-        }
+    topic_value = _short_text(topic_seed, limit=90)
+    topic_shift_value = bool(topic_shift_seed)
     recent_history: List[Dict[str, str]] = []
     for msg in (history or []):
         if not isinstance(msg, dict):
@@ -1689,6 +1922,10 @@ async def _run_astraeus_plan(
             "user_memory": _short_text(user_ctx.get("summary"), limit=1200),
             "room_memory": _short_text(room_ctx.get("summary"), limit=1200),
         }
+    if capability_catalog:
+        payload["available_capabilities"] = capability_catalog
+    if available_tool_ids:
+        payload["available_tool_ids"] = sorted(str(item) for item in available_tool_ids if str(item).strip())[:200]
 
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": _astraeus_system_prompt(platform)},
@@ -1706,26 +1943,61 @@ async def _run_astraeus_plan(
             ),
         )
     except Exception:
-        return {"mode": "unknown", "topic": "", "topic_shift": False, "goal": fallback_goal, "steps": []}
+        return {
+            "mode": "unknown",
+            "topic": topic_value,
+            "topic_shift": topic_shift_value,
+            "goal": fallback_goal,
+            "steps": [],
+        }
     raw = _coerce_text((resp.get("message", {}) or {}).get("content", "")).strip()
     obj = _first_json_object(raw)
     if not isinstance(obj, dict):
-        return {"mode": "unknown", "topic": "", "topic_shift": False, "goal": fallback_goal, "steps": []}
+        return {
+            "mode": "unknown",
+            "topic": topic_value,
+            "topic_shift": topic_shift_value,
+            "goal": fallback_goal,
+            "steps": [],
+        }
     mode = str(obj.get("mode") or "").strip().lower()
-    topic = _short_text(obj.get("topic"), limit=90)
+    topic = topic_value or _short_text(obj.get("topic"), limit=90)
     goal = _short_text(obj.get("goal"), limit=220) or fallback_goal
-    topic_shift = bool(obj.get("topic_shift")) if isinstance(obj.get("topic_shift"), bool) else False
+    topic_shift = topic_shift_value
+    hermes_render = _normalize_hermes_render_candidate(
+        obj.get("hermes_render")
+        if isinstance(obj.get("hermes_render"), dict)
+        else obj.get("final_render"),
+    )
     raw_steps = obj.get("steps")
     if mode == "chat":
-        return {"mode": "chat", "topic": topic, "topic_shift": topic_shift, "goal": goal, "steps": []}
+        return {
+            "mode": "chat",
+            "topic": topic,
+            "topic_shift": topic_shift,
+            "goal": goal,
+            "steps": [],
+            "hermes_render": hermes_render,
+        }
     if raw_steps is None:
         raw_steps = []
     if not isinstance(raw_steps, list):
-        return {"mode": "unknown", "topic": topic, "topic_shift": topic_shift, "goal": goal, "steps": []}
+        return {
+            "mode": "unknown",
+            "topic": topic,
+            "topic_shift": topic_shift,
+            "goal": goal,
+            "steps": [],
+            "hermes_render": hermes_render,
+        }
     out: List[Dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for idx, item in enumerate(raw_steps):
-        step = _normalize_plan_step_candidate(item, index=idx)
+        step = _normalize_plan_step_candidate(
+            item,
+            index=idx,
+            available_tool_ids=available_tool_ids,
+        )
         if not isinstance(step, dict):
             continue
         dedupe_key = (step.get("intent", ""), step.get("nl", ""))
@@ -1737,11 +2009,151 @@ async def _run_astraeus_plan(
             break
     if mode == "execute":
         if out:
-            return {"mode": "execute", "topic": topic, "topic_shift": topic_shift, "goal": goal, "steps": out}
-        return {"mode": "unknown", "topic": topic, "topic_shift": topic_shift, "goal": goal, "steps": []}
+            return {
+                "mode": "execute",
+                "topic": topic,
+                "topic_shift": topic_shift,
+                "goal": goal,
+                "steps": out,
+                "hermes_render": hermes_render,
+            }
+        if hermes_render:
+            return {
+                "mode": "execute",
+                "topic": topic,
+                "topic_shift": topic_shift,
+                "goal": goal,
+                "steps": [],
+                "hermes_render": hermes_render,
+            }
+        return {
+            "mode": "unknown",
+            "topic": topic,
+            "topic_shift": topic_shift,
+            "goal": goal,
+            "steps": [],
+            "hermes_render": hermes_render,
+        }
     if out:
-        return {"mode": "execute", "topic": topic, "topic_shift": topic_shift, "goal": goal, "steps": out}
-    return {"mode": "chat", "topic": topic, "topic_shift": topic_shift, "goal": goal, "steps": []}
+        return {
+            "mode": "execute",
+            "topic": topic,
+            "topic_shift": topic_shift,
+            "goal": goal,
+            "steps": out,
+            "hermes_render": hermes_render,
+        }
+    if hermes_render:
+        return {
+            "mode": "execute",
+            "topic": topic,
+            "topic_shift": topic_shift,
+            "goal": goal,
+            "steps": [],
+            "hermes_render": hermes_render,
+        }
+    return {
+        "mode": "chat",
+        "topic": topic,
+        "topic_shift": topic_shift,
+        "goal": goal,
+        "steps": [],
+        "hermes_render": hermes_render,
+    }
+
+
+async def _review_execution_plan_for_completeness(
+    *,
+    llm_client: Any,
+    platform: str,
+    current_user_text: str,
+    resolved_user_text: str,
+    goal: str,
+    steps: List[Dict[str, str]],
+    capability_catalog: str,
+    available_tool_ids: set[str],
+    platform_preamble: str,
+    max_tokens: Optional[int],
+) -> Dict[str, Any]:
+    original_steps = [dict(step) for step in steps if isinstance(step, dict)]
+    original_goal = _short_text(goal, limit=220) or _short_text(resolved_user_text, limit=220) or "Fulfill the user request."
+    if not original_steps:
+        return {"goal": original_goal, "steps": original_steps}
+
+    payload = {
+        "current_user_message": _short_text(current_user_text, limit=420),
+        "resolved_request_for_this_turn": _short_text(resolved_user_text, limit=420),
+        "goal": original_goal,
+        "steps": original_steps[:12],
+        "available_capabilities": capability_catalog,
+        "available_tool_ids": sorted(str(item) for item in available_tool_ids if str(item).strip())[:200],
+    }
+    messages: List[Dict[str, Any]] = [
+        {
+            "role": "system",
+            "content": (
+                f"You are Cerberus execution-plan quality review on platform: {platform}.\n"
+                "Return exactly one strict JSON object with schema:\n"
+                "{\"goal\":\"clear goal\",\"steps\":[{\"step_id\":1,\"intent\":\"atomic intent\",\"nl\":\"single scoped instruction\",\"tool_hint\":\"tool_id\"}]}\n"
+                "Rules:\n"
+                "- Keep the same user objective; improve plan only when needed.\n"
+                "- Keep steps executable one tool call at a time.\n"
+                "- Add missing prerequisite discovery/inspection/retrieval steps when downstream completion depends on intermediate data.\n"
+                "- For download/install/grab requests, link discovery alone is insufficient; plan must reach concrete retrieval completion.\n"
+                "- search_web is discovery-only; use inspect/read on selected sources before synthesis or retrieval decisions.\n"
+                "- For identify/explain/what-is requests about a specific repo/project/entity, search result snippets alone are insufficient; add inspect/read step on a selected primary source before completion.\n"
+                "- Use only tool ids from payload.available_tool_ids.\n"
+                "- Preserve user-requested order where possible.\n"
+                "- Output JSON only.\n"
+            ),
+        },
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+    messages = _with_platform_preamble(messages, platform_preamble=platform_preamble)
+    try:
+        resp = await llm_client.chat(
+            messages=messages,
+            temperature=0.0,
+            **_chat_with_optional_max_tokens_kwargs(
+                max_tokens=max_tokens,
+                minimum=120,
+                fallback=260,
+                maximum=520,
+            ),
+        )
+    except Exception:
+        return {"goal": original_goal, "steps": original_steps}
+
+    raw = _coerce_text((resp.get("message", {}) or {}).get("content", "")).strip()
+    obj = _first_json_object(raw)
+    if not isinstance(obj, dict):
+        return {"goal": original_goal, "steps": original_steps}
+
+    revised_goal = _short_text(obj.get("goal"), limit=220) or original_goal
+    raw_steps = obj.get("steps")
+    if not isinstance(raw_steps, list):
+        return {"goal": revised_goal, "steps": original_steps}
+
+    out: List[Dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for idx, item in enumerate(raw_steps):
+        step = _normalize_plan_step_candidate(
+            item,
+            index=idx,
+            available_tool_ids=available_tool_ids,
+        )
+        if not isinstance(step, dict):
+            continue
+        dedupe_key = (step.get("intent", ""), step.get("nl", ""))
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        out.append(step)
+        if len(out) >= 12:
+            break
+    if not out:
+        out = original_steps
+    return {"goal": revised_goal, "steps": out}
 
 
 async def _run_thanatos_step(
@@ -1781,6 +2193,8 @@ async def _run_chat_fallback_reply(
     platform_preamble: str,
     max_tokens: Optional[int],
 ) -> str:
+    # Use the full upstream history window (already bounded by general max_llm setting).
+    chat_history = _chat_history_window(history, max_items=0)
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": _chat_fallback_system_prompt(platform)},
     ]
@@ -1789,7 +2203,7 @@ async def _run_chat_fallback_reply(
         registry=registry,
         enabled_predicate=enabled_predicate,
         redis_client=redis_client,
-        history=history,
+        history=chat_history,
         max_tokens=max_tokens,
     )
     if status_prompt:
@@ -1797,7 +2211,7 @@ async def _run_chat_fallback_reply(
     if memory_context_message:
         messages.append({"role": "system", "content": memory_context_message})
     messages = _with_platform_preamble(messages, platform_preamble=platform_preamble)
-    messages.extend(history)
+    messages.extend(chat_history)
     messages.append({"role": "user", "content": str(user_text or "")})
     try:
         resp = await llm_client.chat(
@@ -1855,6 +2269,7 @@ async def _resolve_user_request_for_turn(
                 "- Preserve requested time windows and area/entity constraints when the follow-up implies them.\n"
                 "- If the current message is standalone, keep it unchanged.\n"
                 "- Never continue a prior objective unless the current message explicitly asks to continue/retry/repeat.\n"
+                "- If the current message is social chatter, reaction, tone feedback, or stop/cancel without a new executable ask, return it unchanged.\n"
                 "- If the current message only shares context/logs/content without a clear ask, return it unchanged.\n"
                 "- Do not answer the request.\n"
                 "- Do not invent facts, entities, or outcomes.\n"
@@ -1885,6 +2300,83 @@ async def _resolve_user_request_for_turn(
     if not resolved:
         return current
     return _short_text(" ".join(resolved.split()), limit=420) or current
+
+
+async def _llm_chat_or_tool_route_for_turn(
+    *,
+    llm_client: Any,
+    platform: str,
+    current_user_text: str,
+    resolved_user_text: str,
+    history: List[Dict[str, Any]],
+    prior_state: Optional[Dict[str, Any]],
+    platform_preamble: str,
+    max_tokens: Optional[int],
+) -> Dict[str, Any]:
+    current = str(current_user_text or "").strip()
+    if not current:
+        return {"route": "chat", "reason": "empty"}
+
+    resolved = str(resolved_user_text or current).strip() or current
+    recent_history: List[Dict[str, str]] = []
+    for msg in (history or []):
+        if not isinstance(msg, dict):
+            continue
+        role = str(msg.get("role") or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = _coerce_text(msg.get("content")).strip()
+        if not content:
+            continue
+        recent_history.append({"role": role, "content": content})
+
+    prior_snapshot = {}
+    if isinstance(prior_state, dict) and prior_state:
+        normalized = _normalize_agent_state(prior_state, fallback_goal=resolved)
+        prior_snapshot = {
+            "goal": _short_text(normalized.get("goal"), limit=180),
+            "next_step": _short_text(normalized.get("next_step"), limit=180),
+            "open_questions": [
+                _short_text(item, limit=140)
+                for item in (normalized.get("open_questions") or [])
+                if _short_text(item, limit=140)
+            ][:4],
+        }
+
+    payload = {
+        "current_user_message": current,
+        "resolved_request_for_turn": resolved,
+        "recent_history": recent_history,
+        "prior_state_snapshot": prior_snapshot,
+    }
+    messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": _chat_or_tool_router_system_prompt(platform)},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+    messages = _with_platform_preamble(messages, platform_preamble=platform_preamble)
+    try:
+        resp = await llm_client.chat(
+            messages=messages,
+            temperature=0.0,
+            **_chat_with_optional_max_tokens_kwargs(
+                max_tokens=max_tokens,
+                minimum=80,
+                fallback=160,
+            ),
+        )
+    except Exception:
+        return {"route": "chat", "reason": "router_error"}
+
+    raw = _coerce_text((resp.get("message", {}) or {}).get("content", "")).strip()
+    parsed = _first_json_object(raw)
+    if not isinstance(parsed, dict):
+        return {"route": "chat", "reason": "invalid_json"}
+
+    route = str(parsed.get("route") or "").strip().lower()
+    if route not in {"chat", "tool"}:
+        route = "chat"
+    reason = _short_text(parsed.get("reason"), limit=180) or "ok"
+    return {"route": route, "reason": reason}
 
 
 def _turn_goal_for_state(*, current_user_text: str, resolved_user_text: str) -> str:
@@ -1939,8 +2431,9 @@ async def _llm_topic_shift_decision_for_turn(
             "content": (
                 "You classify whether the user's current turn starts a new topic relative to prior agent state.\n"
                 "Return exactly one strict JSON object with this schema:\n"
-                "{\"new_topic\":true|false,\"confidence\":number,\"reason\":\"short text\"}\n"
+                "{\"topic\":\"short topic\",\"new_topic\":true|false,\"confidence\":number,\"reason\":\"short text\"}\n"
                 "Rules:\n"
+                "- topic is a concise label for this turn's objective (2-6 words).\n"
                 "- new_topic=true only when the current turn changes objective enough that prior plan/facts should be discarded.\n"
                 "- new_topic=false for follow-ups, clarifications, refinements, corrections, and references to prior work/results.\n"
                 "- If uncertain, choose false.\n"
@@ -1974,8 +2467,10 @@ async def _llm_topic_shift_decision_for_turn(
     raw_confidence = parsed.get("confidence")
     if isinstance(raw_confidence, (int, float)):
         confidence = max(0.0, min(1.0, float(raw_confidence)))
+    topic = _short_text(parsed.get("topic"), limit=90)
     reason = _short_text(parsed.get("reason"), limit=180)
     return {
+        "topic": topic or _short_text(resolved, limit=90),
         "new_topic": bool(new_topic),
         "confidence": confidence,
         "reason": reason or "ok",
@@ -2464,6 +2959,94 @@ async def _synthesize_completed_steps_answer(
         return ""
     if looks_like_tool_markup(text) or parse_function_json(text):
         return ""
+    return text
+
+
+async def _run_hermes_final_render(
+    *,
+    llm_client: Any,
+    platform: str,
+    user_text: str,
+    goal: str,
+    mode: str,
+    instruction: str,
+    base_text: str,
+    completed_steps: List[Dict[str, str]],
+    platform_preamble: str,
+    max_tokens: Optional[int],
+) -> str:
+    render_mode = str(mode or "").strip().lower()
+    if render_mode in {"", "direct"}:
+        return str(base_text or "").strip()
+    if render_mode not in {"summarize", "rewrite"}:
+        return str(base_text or "").strip()
+    first, last = get_tater_name()
+    personality = (get_tater_personality() or "").strip()
+    personality_line = f"Voice style (tone only): {personality}\n" if personality else ""
+    plain_text_rule = "Use plain ASCII text only.\n" if platform in ASCII_ONLY_PLATFORMS else ""
+
+    findings: List[Dict[str, str]] = []
+    for step in completed_steps[:8]:
+        if not isinstance(step, dict):
+            continue
+        request_text = _short_text(step.get("request"), limit=200)
+        summary_text = _short_text(step.get("summary"), limit=220)
+        if not summary_text:
+            continue
+        findings.append(
+            {
+                "request": request_text,
+                "summary": summary_text,
+            }
+        )
+
+    payload = {
+        "mode": render_mode,
+        "instruction": _short_text(instruction, limit=320),
+        "user_request": _short_text(user_text, limit=320),
+        "goal": _short_text(goal, limit=260),
+        "base_text": _short_text(base_text, limit=2200),
+        "findings": findings,
+    }
+    messages: List[Dict[str, Any]] = [
+        {
+            "role": "system",
+            "content": (
+                f"You are {first} {last}.\n"
+                "You are Hermes, the final rendering head.\n"
+                f"{personality_line}"
+                "Transform base_text and findings into the final user-facing answer.\n"
+                "Rules:\n"
+                "- Keep facts faithful to payload.base_text and payload.findings.\n"
+                "- Do not invent new facts.\n"
+                "- For mode=summarize, produce a concise summary answer.\n"
+                "- For mode=rewrite, preserve meaning while applying payload.instruction.\n"
+                "- Do not mention internal roles, orchestration, or tool execution.\n"
+                "- Output plain user-facing text only.\n"
+                f"{plain_text_rule}"
+            ),
+        },
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+    messages = _with_platform_preamble(messages, platform_preamble=platform_preamble)
+    try:
+        resp = await llm_client.chat(
+            messages=messages,
+            temperature=0.2,
+            **_chat_with_optional_max_tokens_kwargs(
+                max_tokens=max_tokens,
+                minimum=120,
+                fallback=420,
+            ),
+        )
+    except Exception:
+        return str(base_text or "").strip()
+
+    text = _coerce_text((resp.get("message", {}) or {}).get("content", "")).strip()
+    if not text:
+        return str(base_text or "").strip()
+    if looks_like_tool_markup(text) or parse_function_json(text):
+        return str(base_text or "").strip()
     return text
 
 
@@ -3440,6 +4023,11 @@ async def _run_cerberus_turn_impl(
         denominator=6,
         minimum=120,
     )
+    chat_tool_router_max_tokens = _scale_token_limit(
+        astraeus_max_tokens,
+        denominator=8,
+        minimum=80,
+    )
     astraeus_plan_max_tokens = _scale_token_limit(
         astraeus_max_tokens,
         denominator=2,
@@ -3449,6 +4037,21 @@ async def _run_cerberus_turn_impl(
         astraeus_max_tokens,
         denominator=2,
         minimum=128,
+    )
+    hermes_mode_select_max_tokens = _scale_token_limit(
+        astraeus_max_tokens,
+        denominator=8,
+        minimum=80,
+    )
+    plan_review_max_tokens = _scale_token_limit(
+        astraeus_max_tokens,
+        denominator=3,
+        minimum=180,
+    )
+    topic_meta_max_tokens = _scale_token_limit(
+        astraeus_max_tokens,
+        denominator=8,
+        minimum=80,
     )
     thanatos_step_max_tokens = _normalize_token_limit(
         thanatos_max_tokens,
@@ -3510,6 +4113,16 @@ async def _run_cerberus_turn_impl(
         registry=registry,
         enabled_predicate=enabled_predicate,
     )
+    astraeus_capability_catalog = _astraeus_capability_catalog(
+        platform=platform,
+        registry=registry,
+        enabled_predicate=enabled_predicate,
+    )
+    available_execution_tool_ids = _enabled_execution_tool_ids(
+        platform=platform,
+        registry=registry,
+        enabled_predicate=enabled_predicate,
+    )
     prior_state = _load_persistent_agent_state(
         redis_client=r,
         platform=platform,
@@ -3522,38 +4135,132 @@ async def _run_cerberus_turn_impl(
         origin=origin_payload,
     )
     memory_context_message = _memory_context_system_message(memory_context_payload)
+    route_started = time.perf_counter()
+    route_result = await _llm_chat_or_tool_route_for_turn(
+        llm_client=llm_client,
+        platform=platform,
+        current_user_text=current_user_turn_text,
+        resolved_user_text=resolved_user_text,
+        history=history,
+        prior_state=prior_state,
+        platform_preamble=platform_preamble,
+        max_tokens=chat_tool_router_max_tokens,
+    )
+    astraeus_ms_total += (time.perf_counter() - route_started) * 1000.0
+    turn_route = str((route_result or {}).get("route") or "").strip().lower()
+    if turn_route not in {"chat", "tool"}:
+        turn_route = "chat"
     queued_retry_tool_for_ledger: Optional[Dict[str, Any]] = None
     repair_returned_no_tool_retries = 0
     structured_plan_queue: List[Dict[str, str]] = []
     structured_plan_total_steps = 0
     astraeus_mode = "unknown"
+    astraeus_topic = _short_text(resolved_user_text or current_user_turn_text, limit=90) or "request"
     astraeus_goal = _short_text(resolved_user_text or current_user_turn_text, limit=220) or "Fulfill the user request."
     astraeus_topic_shift = False
+    hermes_render_plan: Optional[Dict[str, str]] = None
     completed_tool_steps: List[Dict[str, str]] = []
-    try:
-        astraeus_started = time.perf_counter()
-        astraeus_result = await _run_astraeus_plan(
+    if turn_route == "tool":
+        topic_meta_started = time.perf_counter()
+        topic_meta_result = await _llm_topic_shift_decision_for_turn(
             llm_client=llm_client,
-            platform=platform,
             current_user_text=current_user_turn_text,
             resolved_user_text=resolved_user_text,
             history=history,
             prior_state=prior_state,
-            memory_context=memory_context_payload,
             platform_preamble=platform_preamble,
-            max_tokens=astraeus_plan_max_tokens,
+            max_tokens=topic_meta_max_tokens,
         )
-        astraeus_ms_total += (time.perf_counter() - astraeus_started) * 1000.0
-    except Exception:
-        astraeus_result = {"mode": "unknown", "topic_shift": False, "goal": astraeus_goal, "steps": []}
-    if isinstance(astraeus_result, dict):
-        astraeus_mode = str(astraeus_result.get("mode") or "unknown").strip().lower() or "unknown"
-        astraeus_goal = _short_text(astraeus_result.get("goal"), limit=220) or astraeus_goal
-        if isinstance(astraeus_result.get("topic_shift"), bool):
-            astraeus_topic_shift = bool(astraeus_result.get("topic_shift"))
-        raw_steps = astraeus_result.get("steps")
-        if isinstance(raw_steps, list):
-            structured_plan_queue = [step for step in raw_steps if isinstance(step, dict)]
+        astraeus_ms_total += (time.perf_counter() - topic_meta_started) * 1000.0
+        if isinstance(topic_meta_result, dict):
+            astraeus_topic = (
+                _short_text(topic_meta_result.get("topic"), limit=90)
+                or astraeus_topic
+            )
+            if isinstance(topic_meta_result.get("new_topic"), bool):
+                astraeus_topic_shift = bool(topic_meta_result.get("new_topic"))
+        try:
+            astraeus_started = time.perf_counter()
+            astraeus_result = await _run_astraeus_plan(
+                llm_client=llm_client,
+                platform=platform,
+                current_user_text=current_user_turn_text,
+                resolved_user_text=resolved_user_text,
+                topic_seed=astraeus_topic,
+                topic_shift_seed=astraeus_topic_shift,
+                history=history,
+                prior_state=prior_state,
+                memory_context=memory_context_payload,
+                capability_catalog=astraeus_capability_catalog,
+                available_tool_ids=available_execution_tool_ids,
+                platform_preamble=platform_preamble,
+                max_tokens=astraeus_plan_max_tokens,
+            )
+            astraeus_ms_total += (time.perf_counter() - astraeus_started) * 1000.0
+        except Exception:
+            astraeus_result = {
+                "mode": "unknown",
+                "topic_shift": False,
+                "goal": astraeus_goal,
+                "steps": [],
+                "hermes_render": None,
+            }
+        if isinstance(astraeus_result, dict):
+            astraeus_mode = str(astraeus_result.get("mode") or "unknown").strip().lower() or "unknown"
+            if astraeus_mode == "chat":
+                astraeus_mode = "unknown"
+            astraeus_topic = _short_text(astraeus_result.get("topic"), limit=90) or astraeus_topic
+            astraeus_goal = _short_text(astraeus_result.get("goal"), limit=220) or astraeus_goal
+            parsed_hermes = astraeus_result.get("hermes_render")
+            if isinstance(parsed_hermes, dict):
+                hermes_render_plan = {
+                    "mode": _short_text(parsed_hermes.get("mode"), limit=16),
+                    "instruction": _short_text(parsed_hermes.get("instruction"), limit=320),
+                }
+                if not str(hermes_render_plan.get("mode") or "").strip():
+                    hermes_render_plan = None
+            raw_steps = astraeus_result.get("steps")
+            if isinstance(raw_steps, list):
+                structured_plan_queue = [step for step in raw_steps if isinstance(step, dict)]
+        if structured_plan_queue:
+            plan_review_started = time.perf_counter()
+            reviewed_plan = await _review_execution_plan_for_completeness(
+                llm_client=llm_client,
+                platform=platform,
+                current_user_text=current_user_turn_text,
+                resolved_user_text=resolved_user_text,
+                goal=astraeus_goal or resolved_user_text or current_user_turn_text,
+                steps=structured_plan_queue,
+                capability_catalog=astraeus_capability_catalog,
+                available_tool_ids=available_execution_tool_ids,
+                platform_preamble=platform_preamble,
+                max_tokens=plan_review_max_tokens,
+            )
+            astraeus_ms_total += (time.perf_counter() - plan_review_started) * 1000.0
+            if isinstance(reviewed_plan, dict):
+                reviewed_goal = _short_text(reviewed_plan.get("goal"), limit=220)
+                if reviewed_goal:
+                    astraeus_goal = reviewed_goal
+                reviewed_steps = reviewed_plan.get("steps")
+                if isinstance(reviewed_steps, list):
+                    reviewed_queue = [step for step in reviewed_steps if isinstance(step, dict)]
+                    if reviewed_queue:
+                        structured_plan_queue = reviewed_queue
+        if hermes_render_plan is None and structured_plan_queue:
+            hermes_selector_started = time.perf_counter()
+            hermes_render_plan = await _select_hermes_render_plan(
+                llm_client=llm_client,
+                platform=platform,
+                current_user_text=current_user_turn_text,
+                resolved_user_text=resolved_user_text,
+                goal=astraeus_goal or resolved_user_text or current_user_turn_text,
+                planned_steps=structured_plan_queue,
+                platform_preamble=platform_preamble,
+                max_tokens=hermes_mode_select_max_tokens,
+            )
+            astraeus_ms_total += (time.perf_counter() - hermes_selector_started) * 1000.0
+    else:
+        astraeus_mode = "chat"
     agent_state: Dict[str, Any] = _initial_agent_state_for_turn_from_topic_signal(
         prior_state=prior_state,
         current_user_text=current_user_turn_text,
@@ -3631,21 +4338,42 @@ async def _run_cerberus_turn_impl(
             user_text=user_request_text,
             tool_result=tool_result_payload,
         )
-        if len(completed_tool_steps) < 2:
-            return base_text
-        synthesized = await _synthesize_completed_steps_answer(
-            llm_client=llm_client,
-            platform=platform,
-            user_text=user_request_text,
-            goal=astraeus_goal or resolved_user_text or current_user_turn_text,
-            completed_steps=completed_tool_steps,
-            draft_response=base_text,
-            platform_preamble=platform_preamble,
-            max_tokens=chat_reply_max_tokens,
-        )
-        if synthesized:
-            return synthesized
-        return base_text
+        composed_text = base_text
+        if len(completed_tool_steps) >= 2:
+            synthesized = await _synthesize_completed_steps_answer(
+                llm_client=llm_client,
+                platform=platform,
+                user_text=user_request_text,
+                goal=astraeus_goal or resolved_user_text or current_user_turn_text,
+                completed_steps=completed_tool_steps,
+                draft_response=base_text,
+                platform_preamble=platform_preamble,
+                max_tokens=chat_reply_max_tokens,
+            )
+            if synthesized:
+                composed_text = synthesized
+
+        hermes_mode = ""
+        hermes_instruction = ""
+        if isinstance(hermes_render_plan, dict):
+            hermes_mode = _short_text(hermes_render_plan.get("mode"), limit=20).lower()
+            hermes_instruction = _short_text(hermes_render_plan.get("instruction"), limit=320)
+        if hermes_mode:
+            hermes_text = await _run_hermes_final_render(
+                llm_client=llm_client,
+                platform=platform,
+                user_text=user_request_text,
+                goal=astraeus_goal or resolved_user_text or current_user_turn_text,
+                mode=hermes_mode,
+                instruction=hermes_instruction,
+                base_text=composed_text,
+                completed_steps=completed_tool_steps,
+                platform_preamble=platform_preamble,
+                max_tokens=chat_reply_max_tokens,
+            )
+            if hermes_text:
+                composed_text = hermes_text
+        return composed_text
 
     def _finish(
         *,
@@ -3751,6 +4479,25 @@ async def _run_cerberus_turn_impl(
                 checker_action_value="FINAL_ANSWER",
                 checker_reason_value=checker_reason,
             )
+        if isinstance(hermes_render_plan, dict):
+            hermes_seed = _state_best_effort_answer(
+                state=agent_state,
+                draft_response="",
+                tool_result=tool_result_for_checker,
+            )
+            hermes_text = await _compose_final_answer_text(
+                checker_decision=None,
+                draft_response_text=hermes_seed,
+                user_request_text=resolved_user_text or user_text,
+                tool_result_payload=tool_result_for_checker,
+            )
+            checker_reason = "complete"
+            return _finish(
+                text=hermes_text or hermes_seed or DEFAULT_CLARIFICATION,
+                status="done",
+                checker_action_value="FINAL_ANSWER",
+                checker_reason_value=checker_reason,
+            )
         checker_reason = "needs_user_input"
         return _finish(
             text="I need a specific request for this turn. Tell me exactly what you want me to do next.",
@@ -3787,14 +4534,6 @@ async def _run_cerberus_turn_impl(
         )
         thanatos_messages: List[Dict[str, Any]] = [
             {"role": "system", "content": _thanatos_system_prompt(platform)},
-            {
-                "role": "system",
-                "content": (
-                    "Tool catalog for this turn (kernel + enabled verba tools on this platform):\n"
-                    f"{tool_index}\n\n"
-                    "Use this catalog directly for tool selection and argument shape."
-                ),
-            },
         ]
         thanatos_messages.extend([
             {
@@ -3834,9 +4573,19 @@ async def _run_cerberus_turn_impl(
                         nl=str(current_plan_step.get("nl") or ""),
                         goal=astraeus_goal or resolved_user_text or current_user_turn_text,
                         repair_hint=current_step_retry_hint,
+                        tool_hint=str(current_plan_step.get("tool_hint") or ""),
                     ),
                 }
             )
+            tool_contract_prompt = _thanatos_execution_tool_contract_prompt(
+                current_plan_step=current_plan_step,
+                platform=platform,
+                registry=registry,
+                enabled_predicate=enabled_predicate,
+                fallback_tool_index=tool_index,
+            )
+            if tool_contract_prompt:
+                thanatos_messages.append({"role": "system", "content": tool_contract_prompt})
         if memory_context_message:
             thanatos_messages.append({"role": "system", "content": memory_context_message})
         thanatos_messages = _with_platform_preamble(

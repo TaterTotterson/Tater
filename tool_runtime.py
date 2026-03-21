@@ -96,7 +96,7 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
     "memory_search": "search saved memory",
     "image_describe": "describe an explicit image using an artifact_id, URL, blob, or local path",
     "attach_file": "attach an available artifact or local file to the current conversation",
-    "send_message": "queue a structured cross-platform notification or message",
+    "send_message": "queue a cross-portal notification/message only when the user explicitly asks to notify or message a destination",
 }
 
 def _to_int(value: Any, default: int) -> int:
