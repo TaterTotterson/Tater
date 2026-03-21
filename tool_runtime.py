@@ -77,14 +77,14 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
     "list_tools": "list kernel and enabled verba tools for current platform",
     "get_verba_help": "show verba usage example and guidance",
     "read_file": "read local file contents",
-    "search_web": "web search for current information",
+    "search_web": "retrieve ranked link candidates with snippet metadata only (discovery-only; no full-page fetch and no file retrieval)",
     "search_files": "search text across local files",
     "write_file": "write content to a local file",
     "list_directory": "list files and folders",
     "delete_file": "delete a local file",
-    "read_url": "fetch and read webpage text",
+    "read_url": "read content text from a specific URL for extraction/summarization (not file download)",
     "inspect_webpage": "inspect webpage structure, links, and image candidates",
-    "download_file": "download files from URLs",
+    "download_file": "download a file from a concrete file URL after discovery/inspection (actual file retrieval)",
     "list_archive": "inspect archive entries",
     "extract_archive": "extract archives to a target directory",
     "write_workspace_note": "append a workspace note",
@@ -96,7 +96,7 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
     "memory_search": "search saved memory",
     "image_describe": "describe an explicit image using an artifact_id, URL, blob, or local path",
     "attach_file": "attach an available artifact or local file to the current conversation",
-    "send_message": "queue a cross-portal notification/message only when the user explicitly asks to notify or message a destination",
+    "send_message": "queue a cross-portal notification/message only when the user explicitly asks to notify or message a destination (never for normal chat replies)",
 }
 
 def _to_int(value: Any, default: int) -> int:
