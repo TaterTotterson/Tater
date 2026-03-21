@@ -31,7 +31,7 @@ Model routing:
 
 ## 🛒 Tater Shop (Unified Catalog)
 
-Tater uses **Tater Shop** as the source of truth for:
+Tater uses **Tater Shop** to manage:
 
 - **Verbas**
 - **Portals**
