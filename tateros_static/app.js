@@ -4259,18 +4259,8 @@ async function loadSettingsView() {
             <label>WebUI Username
               <input id="set_username" type="text" value="${escapeHtml(settings.username || "User")}" />
             </label>
-            <label>Messages Shown in WebUI
-              <input id="set_max_display" type="number" min="1" value="${escapeHtml(settings.max_display || 8)}" />
-            </label>
             <label>Show tokens/sec stats
               ${renderToggleRow(`<input id="set_show_speed_stats" class="toggle-input" type="checkbox" ${settings.show_speed_stats ? "checked" : ""} />`)}
-            </label>
-            <div></div>
-            <label>Max Stored Messages <span class="small">(0 = infinite)</span>
-              <input id="set_max_store" type="number" min="0" value="${escapeHtml(settings.max_store || 20)}" />
-            </label>
-            <label>Messages Sent To LLM
-              <input id="set_max_llm" type="number" min="1" value="${escapeHtml(settings.max_llm || 8)}" />
             </label>
             <label>Tater First Name
               <input id="set_tater_first_name" type="text" value="${escapeHtml(settings.tater_first_name || "Tater")}" />
@@ -4419,6 +4409,16 @@ async function loadSettingsView() {
                   settings.cerberus_llm_model || ""
                 )}" />
               </label>
+              <div class="settings-section-title">Cerberus General</div>
+              <label>Messages Shown in WebUI
+                <input id="set_max_display" type="number" min="1" value="${escapeHtml(settings.max_display || 8)}" />
+              </label>
+              <label>Max Stored Messages <span class="small">(0 = infinite)</span>
+                <input id="set_max_store" type="number" min="0" value="${escapeHtml(settings.max_store || 20)}" />
+              </label>
+              <label>Messages Sent To LLM
+                <input id="set_max_llm" type="number" min="1" value="${escapeHtml(settings.max_llm || 8)}" />
+              </label>
               <label>Agent State TTL Seconds (0 = no TTL)
                 <input id="set_cerberus_agent_state_ttl_seconds" type="number" min="0" value="${escapeHtml(
                   settings.cerberus_agent_state_ttl_seconds ?? 604800
@@ -4427,6 +4427,11 @@ async function loadSettingsView() {
               <label>Max Ledger Items
                 <input id="set_cerberus_max_ledger_items" type="number" min="1" value="${escapeHtml(
                   settings.cerberus_max_ledger_items ?? 1500
+                )}" />
+              </label>
+              <label>Step Retry Limit
+                <input id="set_cerberus_step_retry_limit" type="number" min="1" max="10" value="${escapeHtml(
+                  settings.cerberus_step_retry_limit ?? 1
                 )}" />
               </label>
               <div class="inline-row" style="grid-column: 1 / -1;">
@@ -4666,6 +4671,7 @@ async function loadSettingsView() {
       ["set_cerberus_llm_model", "cerberus_llm_model"],
       ["set_cerberus_agent_state_ttl_seconds", "cerberus_agent_state_ttl_seconds"],
       ["set_cerberus_max_ledger_items", "cerberus_max_ledger_items"],
+      ["set_cerberus_step_retry_limit", "cerberus_step_retry_limit"],
     ];
     map.forEach(([inputId, primaryKey]) => {
       const input = document.getElementById(inputId);
@@ -5194,6 +5200,7 @@ async function loadSettingsView() {
         document.getElementById("set_cerberus_agent_state_ttl_seconds").value || 604800
       ),
       cerberus_max_ledger_items: Number(document.getElementById("set_cerberus_max_ledger_items").value || 1500),
+      cerberus_step_retry_limit: Number(document.getElementById("set_cerberus_step_retry_limit").value || 1),
       popup_effect_style: normalizePopupEffectStyle(document.getElementById("set_popup_effect_style")?.value || "flame"),
       admin_only_plugins: adminOnlyPlugins,
     };
