@@ -23,27 +23,18 @@ from kernel_tools import (
     extract_archive,
     write_workspace_note,
     list_workspace,
-    memory_get,
-    memory_set,
-    memory_list,
-    memory_delete,
-    memory_explain,
-    memory_search,
     image_describe,
     attach_file,
     send_message,
 )
 from verba_result import action_failure, normalize_verba_result
 from helpers import redis_client as default_redis
-from memory_core_store import (
-    forget_fact_keys,
-    load_doc as load_memory_doc,
-    resolve_user_doc_key as resolve_memory_user_doc_key,
-    room_doc_key,
-    save_doc as save_memory_doc,
-    summarize_doc,
-    user_doc_key,
-    value_to_text,
+from hydra_core_extensions import (
+    get_hydra_kernel_tools,
+    has_hydra_kernel_tool,
+    hydra_kernel_tool_purpose,
+    hydra_kernel_tool_usage,
+    run_hydra_kernel_tool,
 )
 
 
@@ -63,11 +54,6 @@ META_TOOLS = {
     "extract_archive",
     "write_workspace_note",
     "list_workspace",
-    "memory_get",
-    "memory_set",
-    "memory_list",
-    "memory_explain",
-    "memory_search",
     "image_describe",
     "attach_file",
     "send_message",
@@ -89,88 +75,109 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
     "extract_archive": "extract archives to a target directory",
     "write_workspace_note": "append a workspace note",
     "list_workspace": "list workspace notes",
-    "memory_get": "read saved memory",
-    "memory_set": "save memory entries",
-    "memory_list": "list saved memory keys",
-    "memory_explain": "explain memory value/source",
-    "memory_search": "search saved memory",
     "image_describe": "describe an explicit image using an artifact_id, URL, blob, or local path",
     "attach_file": "attach an available artifact or local file to the current conversation",
     "send_message": "queue a cross-portal notification/message only when the user explicitly asks to notify or message a destination (never for normal chat replies)",
 }
 
-def _to_int(value: Any, default: int) -> int:
-    try:
-        return int(value)
-    except Exception:
-        return int(default)
+_KERNEL_TOOL_USAGE_HINTS = {
+    "list_tools": '{"function":"list_tools","arguments":{}}',
+    "get_verba_help": '{"function":"get_verba_help","arguments":{"verba_id":"<verba_id>"}}',
+    "read_file": '{"function":"read_file","arguments":{"path":"<path>"}}',
+    "search_web": '{"function":"search_web","arguments":{"query":"<query>"}}',
+    "search_files": '{"function":"search_files","arguments":{"query":"<query>","path":"/"}}',
+    "write_file": '{"function":"write_file","arguments":{"path":"<path>","content":"<content>"}}',
+    "list_directory": '{"function":"list_directory","arguments":{"path":"<path>"}}',
+    "delete_file": '{"function":"delete_file","arguments":{"path":"<path>"}}',
+    "read_url": '{"function":"read_url","arguments":{"url":"https://example.com"}}',
+    "inspect_webpage": '{"function":"inspect_webpage","arguments":{"url":"https://example.com"}}',
+    "download_file": '{"function":"download_file","arguments":{"url":"https://example.com/file"}}',
+    "list_archive": '{"function":"list_archive","arguments":{"path":"<archive_path>"}}',
+    "extract_archive": '{"function":"extract_archive","arguments":{"path":"<archive_path>","destination":"<dest_path>"}}',
+    "write_workspace_note": '{"function":"write_workspace_note","arguments":{"content":"<note_text>"}}',
+    "list_workspace": '{"function":"list_workspace","arguments":{}}',
+    "image_describe": '{"function":"image_describe","arguments":{"artifact_id":"<artifact_id>","query":"Describe this image."}}',
+    "attach_file": '{"function":"attach_file","arguments":{"artifact_id":"<artifact_id>"}}',
+    "send_message": '{"function":"send_message","arguments":{"message":"<message>","platform":"discord","targets":{"channel":"#channel"}}}',
+}
 
 
-def _coerce_memory_entries(args: Dict[str, Any]) -> Dict[str, Any]:
-    if not isinstance(args, dict):
-        return {}
+def _kernel_tool_rows(*, platform: str) -> list[Dict[str, str]]:
+    rows: list[Dict[str, str]] = []
+    for tool_id in sorted(META_TOOLS):
+        token = str(tool_id or "").strip()
+        if not token:
+            continue
+        rows.append(
+            {
+                "id": token,
+                "description": str(_KERNEL_TOOL_PURPOSE_HINTS.get(token) or "").strip(),
+                "usage": str(_KERNEL_TOOL_USAGE_HINTS.get(token) or "").strip(),
+            }
+        )
 
-    direct_entries = args.get("entries")
-    if isinstance(direct_entries, dict) and direct_entries:
-        return dict(direct_entries)
+    core_rows = get_hydra_kernel_tools(platform=platform, redis_client=default_redis)
+    for row in core_rows:
+        if not isinstance(row, dict):
+            continue
+        token = str(row.get("id") or "").strip()
+        if not token:
+            continue
+        rows.append(
+            {
+                "id": token,
+                "description": str(row.get("description") or "").strip(),
+                "usage": str(row.get("usage") or "").strip(),
+            }
+        )
 
-    values = args.get("values")
-    if isinstance(values, dict) and values:
-        return dict(values)
-
-    memory_obj = args.get("memory")
-    if isinstance(memory_obj, dict) and memory_obj:
-        return dict(memory_obj)
-
-    entry_obj = args.get("entry")
-    if isinstance(entry_obj, dict) and entry_obj:
-        entry_key = str(entry_obj.get("key") or "").strip()
-        if entry_key:
-            return {entry_key: entry_obj.get("value")}
-        # If no explicit key/value shape, accept dict payload directly.
-        return dict(entry_obj)
-
-    out: Dict[str, Any] = {}
-    items = args.get("items")
-    if isinstance(items, list):
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            item_key = str(item.get("key") or "").strip()
-            if not item_key:
-                continue
-            out[item_key] = item.get("value")
-    if out:
-        return out
-
-    key_name = str(args.get("key") or args.get("memory_key") or "").strip()
-    if key_name:
-        if "value" in args:
-            return {key_name: args.get("value")}
-        if "memory_value" in args:
-            return {key_name: args.get("memory_value")}
-
-    return {}
+    out: list[Dict[str, str]] = []
+    seen: set[str] = set()
+    for row in rows:
+        token = str(row.get("id") or "").strip()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        out.append(row)
+    return out
 
 
-_MEMORY_SCOPE_GLOBAL_HINTS = (
-    "for everyone",
-    "for all users",
-    "all users",
-    "global",
-)
-_MEMORY_SCOPE_ROOM_HINTS = (
-    "this room",
-    "this channel",
-    "this chat",
-    "in this room",
-    "in this channel",
-    "in this chat",
-    "for this room",
-    "for this channel",
-    "for this chat",
-)
+def kernel_tool_ids(*, platform: str) -> list[str]:
+    return [str(row.get("id") or "").strip() for row in _kernel_tool_rows(platform=platform) if str(row.get("id") or "").strip()]
 
+
+def kernel_tool_purpose_hint(*, tool_id: str, platform: str) -> str:
+    key = str(tool_id or "").strip()
+    if not key:
+        return ""
+    direct = str(_KERNEL_TOOL_PURPOSE_HINTS.get(key) or "").strip()
+    if direct:
+        return direct
+    core_hint = hydra_kernel_tool_purpose(
+        key,
+        platform=platform,
+        redis_client=default_redis,
+    )
+    if core_hint:
+        return str(core_hint).strip()
+    return ""
+
+
+def kernel_tool_usage_hint(*, tool_id: str, platform: str) -> str:
+    key = str(tool_id or "").strip()
+    if not key:
+        return ""
+    direct = str(_KERNEL_TOOL_USAGE_HINTS.get(key) or "").strip()
+    if direct:
+        return direct
+    core_hint = hydra_kernel_tool_usage(
+        key,
+        platform=platform,
+        redis_client=default_redis,
+    )
+    if core_hint:
+        return str(core_hint).strip()
+    return ""
 
 def _verba_enabled_from_settings(verba_id: str) -> bool:
     vid = str(verba_id or "").strip()
@@ -198,325 +205,17 @@ def _effective_enabled_predicate(
     return _verba_enabled_from_settings
 
 
-def _memory_core_key_list(args: Dict[str, Any]) -> list[str]:
-    key_value = args.get("key")
-    keys_value = args.get("keys")
-    raw_items: list[str] = []
-    if isinstance(keys_value, list):
-        for item in keys_value:
-            text = str(item or "").strip()
-            if text:
-                raw_items.append(text)
-    elif isinstance(keys_value, str):
-        for part in keys_value.split(","):
-            text = str(part or "").strip()
-            if text:
-                raw_items.append(text)
-    if isinstance(key_value, str) and key_value.strip():
-        raw_items.append(key_value.strip())
-
-    out: list[str] = []
-    seen = set()
-    for item in raw_items:
-        if item in seen:
-            continue
-        out.append(item)
-        seen.add(item)
-    return out
-
-
-def _memory_core_user_id(args: Dict[str, Any], origin: Optional[Dict[str, Any]]) -> str:
-    explicit = str(args.get("user_id") or "").strip()
-    if explicit:
-        return explicit
-    merged = dict(origin or {})
-    if isinstance(args.get("origin"), dict):
-        merged.update(args.get("origin") or {})
-    return (
-        _origin_text(merged, "user_id", "user", "username", "sender")
-        or ""
-    ).strip()
-
-
-def _memory_core_user_display_name(args: Dict[str, Any], origin: Optional[Dict[str, Any]]) -> str:
-    explicit = str(args.get("display_name") or "").strip()
-    if explicit:
-        return explicit
-    explicit_user = str(args.get("user_id") or "").strip()
-    if explicit_user:
-        return explicit_user
-    merged = dict(origin or {})
-    if isinstance(args.get("origin"), dict):
-        merged.update(args.get("origin") or {})
-    return (
-        _origin_text(merged, "username", "user", "sender", "display_name", "nick", "nickname")
-        or ""
-    ).strip()
-
-
-def _memory_core_room_id(args: Dict[str, Any], origin: Optional[Dict[str, Any]]) -> str:
-    explicit = str(args.get("room_id") or args.get("scope") or "").strip()
-    if not explicit:
-        merged = dict(origin or {})
-        if isinstance(args.get("origin"), dict):
-            merged.update(args.get("origin") or {})
-        explicit = _origin_text(
-            merged,
-            "room_id",
-            "room",
-            "channel_id",
-            "channel",
-            "chat_id",
-            "scope",
-        )
-    explicit = str(explicit or "").strip()
-    if ":" in explicit:
-        prefix, _, suffix = explicit.partition(":")
-        if prefix.lower() in {"room", "channel", "chat", "session", "dm", "chan", "pm", "device", "area"} and suffix:
-            explicit = suffix
-    return explicit.strip()
-
-
-def _memory_show_user(args: Dict[str, Any], platform: str, origin: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    p = str(args.get("platform") or platform or "webui").strip().lower() or "webui"
-    user_id = _memory_core_user_id(args, origin)
-    if not user_id:
-        return {"tool": "memory_show", "ok": False, "error": "user_id is required for memory_show."}
-
-    limit = _to_int(args.get("limit") or 20, 20)
-    try:
-        min_confidence = float(args.get("min_confidence") or 0.0)
-    except Exception:
-        min_confidence = 0.0
-    display_name = _memory_core_user_display_name(args, origin) or user_id
-    redis_key = resolve_memory_user_doc_key(
-        default_redis,
-        p,
-        user_id,
-        create=False,
-        display_name=display_name,
-        auto_link_name=True,
-    ) or user_doc_key(p, user_id)
-    doc = load_memory_doc(default_redis, redis_key)
-    items = summarize_doc(doc, max_items=max(1, limit), min_confidence=max(0.0, min(1.0, min_confidence)))
-    return {
-        "tool": "memory_show",
-        "ok": True,
-        "platform": p,
-        "scope": "user",
-        "user_id": user_id,
-        "redis_key": redis_key,
-        "count": len(items),
-        "items": [
-            {
-                "key": item.get("key"),
-                "value": item.get("value"),
-                "confidence": item.get("confidence"),
-                "ttl_sec": item.get("ttl_sec"),
-                "evidence": item.get("evidence"),
-            }
-            for item in items
-        ],
-        "summary": "; ".join(
-            [
-                f"{str(item.get('key') or '')}={value_to_text(item.get('value'), max_chars=80)} ({float(item.get('confidence') or 0.0):.2f})"
-                for item in items
-            ]
-        ),
-    }
-
-
-def _memory_show_room(args: Dict[str, Any], platform: str, origin: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    p = str(args.get("platform") or platform or "webui").strip().lower() or "webui"
-    room_id = _memory_core_room_id(args, origin)
-    explicit_room = str(args.get("room_id") or "").strip()
-    if p == "webui" and not explicit_room:
-        room_id = "chat"
-    if not room_id:
-        return {"tool": "memory_show_room", "ok": False, "error": "room_id is required for memory_show_room."}
-
-    limit = _to_int(args.get("limit") or 20, 20)
-    try:
-        min_confidence = float(args.get("min_confidence") or 0.0)
-    except Exception:
-        min_confidence = 0.0
-    redis_key = room_doc_key(p, room_id)
-    doc = load_memory_doc(default_redis, redis_key)
-    items = summarize_doc(doc, max_items=max(1, limit), min_confidence=max(0.0, min(1.0, min_confidence)))
-    return {
-        "tool": "memory_show_room",
-        "ok": True,
-        "platform": p,
-        "scope": "room",
-        "room_id": room_id,
-        "redis_key": redis_key,
-        "count": len(items),
-        "items": [
-            {
-                "key": item.get("key"),
-                "value": item.get("value"),
-                "confidence": item.get("confidence"),
-                "ttl_sec": item.get("ttl_sec"),
-                "evidence": item.get("evidence"),
-            }
-            for item in items
-        ],
-        "summary": "; ".join(
-            [
-                f"{str(item.get('key') or '')}={value_to_text(item.get('value'), max_chars=80)} ({float(item.get('confidence') or 0.0):.2f})"
-                for item in items
-            ]
-        ),
-    }
-
-
-def _memory_forget_key(args: Dict[str, Any], platform: str, origin: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    scope = str(args.get("scope") or "user").strip().lower() or "user"
-    p = str(args.get("platform") or platform or "webui").strip().lower() or "webui"
-    keys = _memory_core_key_list(args)
-    if not keys:
-        return {"tool": "memory_forget_key", "ok": False, "error": "key or keys is required."}
-
-    if scope == "room":
-        room_id = _memory_core_room_id(args, origin)
-        explicit_room = str(args.get("room_id") or "").strip()
-        if p == "webui" and not explicit_room:
-            room_id = "chat"
-        if not room_id:
-            return {"tool": "memory_forget_key", "ok": False, "error": "room_id is required for room scope."}
-        redis_key = room_doc_key(p, room_id)
-        identity: Dict[str, Any] = {"room_id": room_id}
-    else:
-        scope = "user"
-        user_id = _memory_core_user_id(args, origin)
-        if not user_id:
-            return {"tool": "memory_forget_key", "ok": False, "error": "user_id is required for user scope."}
-        display_name = _memory_core_user_display_name(args, origin) or user_id
-        redis_key = resolve_memory_user_doc_key(
-            default_redis,
-            p,
-            user_id,
-            create=False,
-            display_name=display_name,
-            auto_link_name=True,
-        ) or user_doc_key(p, user_id)
-        identity = {"user_id": user_id}
-
-    doc = load_memory_doc(default_redis, redis_key)
-    deleted = forget_fact_keys(doc, keys)
-    if deleted > 0:
-        save_memory_doc(default_redis, redis_key, doc)
-    return {
-        "tool": "memory_forget_key",
-        "ok": True,
-        "scope": scope,
-        "platform": p,
-        "redis_key": redis_key,
-        "deleted": deleted,
-        **identity,
-    }
-
-
-def _memory_forget_all(args: Dict[str, Any], platform: str, origin: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    scope = str(args.get("scope") or "user").strip().lower() or "user"
-    p = str(args.get("platform") or platform or "webui").strip().lower() or "webui"
-
-    if scope == "room":
-        room_id = _memory_core_room_id(args, origin)
-        explicit_room = str(args.get("room_id") or "").strip()
-        if p == "webui" and not explicit_room:
-            room_id = "chat"
-        if not room_id:
-            return {"tool": "memory_forget_all", "ok": False, "error": "room_id is required for room scope."}
-        redis_key = room_doc_key(p, room_id)
-        identity: Dict[str, Any] = {"room_id": room_id}
-    else:
-        scope = "user"
-        user_id = _memory_core_user_id(args, origin)
-        if not user_id:
-            return {"tool": "memory_forget_all", "ok": False, "error": "user_id is required for user scope."}
-        display_name = _memory_core_user_display_name(args, origin) or user_id
-        redis_key = resolve_memory_user_doc_key(
-            default_redis,
-            p,
-            user_id,
-            create=False,
-            display_name=display_name,
-            auto_link_name=True,
-        ) or user_doc_key(p, user_id)
-        identity = {"user_id": user_id}
-
-    deleted = 0
-    try:
-        deleted = int(default_redis.delete(redis_key) or 0)
-    except Exception:
-        deleted = 0
-
-    if deleted <= 0:
-        try:
-            save_memory_doc(default_redis, redis_key, {"schema_version": 1, "last_updated": 0, "facts": {}})
-        except Exception:
-            pass
-
-    return {
-        "tool": "memory_forget_all",
-        "ok": True,
-        "scope": scope,
-        "platform": p,
-        "redis_key": redis_key,
-        "deleted": deleted,
-        **identity,
-    }
-
-
-def _origin_text(origin: Any, *keys: str) -> str:
-    if not isinstance(origin, dict):
-        return ""
-    for key in keys:
-        value = str(origin.get(key) or "").strip()
-        if value:
-            return value
-    return ""
-
-
-def _resolve_memory_scope(args: Dict[str, Any], origin: Optional[Dict[str, Any]]) -> str:
-    raw_scope = str(args.get("scope") or "").strip().lower()
-    if raw_scope in {"global", "user", "room"}:
-        return raw_scope
-    if raw_scope:
-        # Preserve invalid explicit values so kernel validation can return a useful error.
-        return raw_scope
-
-    args_origin = args.get("origin") if isinstance(args.get("origin"), dict) else None
-    merged_origin = dict(origin or {})
-    if isinstance(args_origin, dict):
-        merged_origin.update(args_origin)
-
-    request_text = str(
-        args.get("request_text")
-        or merged_origin.get("request_text")
-        or ""
-    ).strip().lower()
-    if request_text:
-        if any(marker in request_text for marker in _MEMORY_SCOPE_GLOBAL_HINTS):
-            return "global"
-        if any(marker in request_text for marker in _MEMORY_SCOPE_ROOM_HINTS):
-            return "room"
-
-    if str(args.get("user_id") or "").strip():
-        return "user"
-    if str(args.get("room_id") or "").strip():
-        return "room"
-
-    if _origin_text(merged_origin, "user_id", "user", "username", "sender"):
-        return "user"
-    if _origin_text(merged_origin, "room_id", "room", "channel_id", "channel", "chat_id", "scope"):
-        return "room"
-    return "global"
-
-
 def is_meta_tool(name: Optional[str]) -> bool:
-    return (name or "").strip() in META_TOOLS
+    token = str(name or "").strip()
+    if not token:
+        return False
+    if token in META_TOOLS:
+        return True
+    return has_hydra_kernel_tool(
+        token,
+        platform="",
+        redis_client=default_redis,
+    )
 
 
 def list_tools(
@@ -527,11 +226,7 @@ def list_tools(
 ) -> Dict[str, Any]:
     normalized_platform = normalize_platform(platform) or str(platform or "").strip().lower() or "webui"
 
-    kernel_tools: list[str] = []
-    for tool_id in sorted(META_TOOLS):
-        token = str(tool_id or "").strip()
-        if token:
-            kernel_tools.append(token)
+    kernel_tools = kernel_tool_ids(platform=normalized_platform)
 
     enabled_check = _effective_enabled_predicate(enabled_predicate)
     verba_tools: list[Dict[str, str]] = []
@@ -567,7 +262,7 @@ def list_tools(
     }
 
 
-def run_meta_tool(
+async def run_meta_tool(
     *,
     func: str,
     args: Dict[str, Any],
@@ -575,6 +270,7 @@ def run_meta_tool(
     registry: Dict[str, Any],
     enabled_predicate: Optional[Callable[[str], bool]] = None,
     origin: Optional[Dict[str, Any]] = None,
+    llm_client: Any = None,
 ) -> Dict[str, Any]:
     if func == "list_tools":
         return list_tools(
@@ -738,113 +434,28 @@ def run_meta_tool(
             api_notification=args.get("api_notification"),
             chat_id=args.get("chat_id"),
         )
-    if func == "memory_get":
-        raw_include = args.get("include_meta", True)
-        include_meta = (
-            raw_include.strip().lower() in {"1", "true", "yes", "on"}
-            if isinstance(raw_include, str)
-            else bool(raw_include)
+
+    core_scope = str(
+        args.get("scope")
+        or (
+            (args.get("origin") or {}).get("scope")
+            if isinstance(args.get("origin"), dict)
+            else ""
         )
-        try:
-            min_confidence = float(args.get("min_confidence") or 0.0)
-        except Exception:
-            min_confidence = 0.0
-        scope_value = _resolve_memory_scope(args, origin)
-        return memory_get(
-            keys=args.get("keys"),
-            prefix=args.get("prefix"),
-            scope=scope_value,
-            user_id=args.get("user_id"),
-            room_id=args.get("room_id"),
-            platform=args.get("platform") or platform,
-            store=args.get("store") or "auto",
-            limit=_to_int(args.get("limit") or 50, 50),
-            min_confidence=min_confidence,
-            include_meta=include_meta,
-            origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
-        )
-    if func == "memory_set":
-        entries = _coerce_memory_entries(args)
-        raw_confirmed = args.get("confirmed", False)
-        confirmed = (
-            raw_confirmed.strip().lower() in {"1", "true", "yes", "on"}
-            if isinstance(raw_confirmed, str)
-            else bool(raw_confirmed)
-        )
-        request_text = args.get("request_text")
-        if not str(request_text or "").strip():
-            if isinstance(args.get("origin"), dict):
-                request_text = args["origin"].get("request_text")
-            if (not str(request_text or "").strip()) and isinstance(origin, dict):
-                request_text = origin.get("request_text")
-        scope_value = _resolve_memory_scope(args, origin)
-        return memory_set(
-            entries=entries,
-            scope=scope_value,
-            user_id=args.get("user_id"),
-            room_id=args.get("room_id"),
-            platform=args.get("platform") or platform,
-            ttl_sec=args.get("ttl_sec"),
-            source=args.get("source"),
-            request_text=request_text,
-            confirmed=confirmed,
-            origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
-        )
-    if func == "memory_list":
-        scope_value = _resolve_memory_scope(args, origin)
-        return memory_list(
-            prefix=args.get("prefix"),
-            scope=scope_value,
-            user_id=args.get("user_id"),
-            room_id=args.get("room_id"),
-            platform=args.get("platform") or platform,
-            limit=_to_int(args.get("limit") or 50, 50),
-            origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
-        )
-    if func == "memory_delete":
-        scope_value = _resolve_memory_scope(args, origin)
-        return memory_delete(
-            keys=args.get("keys"),
-            scope=scope_value,
-            user_id=args.get("user_id"),
-            room_id=args.get("room_id"),
-            platform=args.get("platform") or platform,
-            origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
-        )
-    if func == "memory_explain":
-        key = args.get("key")
-        if not key and args.get("keys"):
-            if isinstance(args.get("keys"), list) and args.get("keys"):
-                key = args.get("keys")[0]
-            elif isinstance(args.get("keys"), str):
-                key = args.get("keys").split(",", 1)[0]
-        return memory_explain(
-            str(key or ""),
-            scope=str(args.get("scope") or "auto"),
-            user_id=args.get("user_id"),
-            room_id=args.get("room_id"),
-            platform=args.get("platform") or platform,
-            origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
-        )
-    if func == "memory_search":
-        return memory_search(
-            str(args.get("query") or ""),
-            scope=str(args.get("scope") or "auto"),
-            user_id=args.get("user_id"),
-            room_id=args.get("room_id"),
-            platform=args.get("platform") or platform,
-            limit=_to_int(args.get("limit") or 8, 8),
-            min_score=_to_int(args.get("min_score") or 1, 1),
-            origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
-        )
-    if func == "memory_show":
-        return _memory_show_user(args, platform, origin)
-    if func == "memory_show_room":
-        return _memory_show_room(args, platform, origin)
-    if func == "memory_forget_key":
-        return _memory_forget_key(args, platform, origin)
-    if func == "memory_forget_all":
-        return _memory_forget_all(args, platform, origin)
+        or (origin or {}).get("scope")
+        or ""
+    ).strip()
+    core_result = await run_hydra_kernel_tool(
+        tool_id=func,
+        args=args,
+        platform=platform,
+        scope=core_scope,
+        origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
+        llm_client=llm_client,
+        redis_client=default_redis,
+    )
+    if isinstance(core_result, dict):
+        return core_result
 
     return {"ok": False, "error": {"code": "unknown_meta_tool", "message": f"Unknown meta tool: {func}"}}
 

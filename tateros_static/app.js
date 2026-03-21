@@ -997,8 +997,9 @@ function formatRuntimeSummary(health) {
   const verbasEnabled = Number(health?.verbas_enabled ?? 0);
   const portalsRunning = Number(health?.portals_running ?? 0);
   const coresRunning = Number(health?.cores_running ?? 0);
-  const chatJobsActive = Number(health?.chat_jobs_active ?? 0);
-  return `${verbasEnabled} verba enabled • ${portalsRunning} portals running • ${coresRunning} cores running • ${chatJobsActive} chat jobs`;
+  const hydraJobsActive = Number(health?.hydra_jobs_active ?? health?.chat_jobs_active ?? 0);
+  const llmCallsActive = Number(health?.llm_calls_active ?? 0);
+  return `${verbasEnabled} verba enabled • ${portalsRunning} portals running • ${coresRunning} cores running • ${hydraJobsActive} hydra jobs • ${llmCallsActive} llm calls`;
 }
 
 function setRuntimeSummaryText(text, tone = "normal") {
@@ -1026,10 +1027,10 @@ function _runtimeAgeLabel(secondsRaw) {
   return `${hours}h ${remMinutes}m`;
 }
 
-function _renderRuntimeChatJobRows(chatJobs) {
-  const byPlatform = Array.isArray(chatJobs?.by_platform) ? chatJobs.by_platform : [];
-  const activeTurns = Array.isArray(chatJobs?.active_turns) ? chatJobs.active_turns : [];
-  const history = chatJobs?.history && typeof chatJobs.history === "object" ? chatJobs.history : {};
+function _renderRuntimeHydraJobRows(hydraJobs) {
+  const byPlatform = Array.isArray(hydraJobs?.by_platform) ? hydraJobs.by_platform : [];
+  const activeTurns = Array.isArray(hydraJobs?.active_turns) ? hydraJobs.active_turns : [];
+  const history = hydraJobs?.history && typeof hydraJobs.history === "object" ? hydraJobs.history : {};
   const historyWindows = Array.isArray(history?.windows) ? history.windows : [];
   const platformRowsHtml = byPlatform.length
     ? `
@@ -1074,7 +1075,7 @@ function _renderRuntimeChatJobRows(chatJobs) {
             .join("")}
         </div>
       `
-    : `<div class="small muted">No active chat turns right now.</div>`;
+    : `<div class="small muted">No active Hydra turns right now.</div>`;
 
   const historyHtml = historyWindows.length
     ? `
@@ -1124,17 +1125,308 @@ function _renderRuntimeChatJobRows(chatJobs) {
   `;
 }
 
-function renderRuntimeBreakdown(payload) {
-  const chatJobs = payload?.chat_jobs && typeof payload.chat_jobs === "object" ? payload.chat_jobs : {};
-  const summary = `${Number(chatJobs.total ?? 0)} total • WebUI queue ${Number(chatJobs.webui_jobs ?? 0)} • Surface turns ${Number(chatJobs.surface_running_turns ?? 0)}`;
+function _renderRuntimeLlmCallRows(llmCalls) {
+  const totals = llmCalls?.totals && typeof llmCalls.totals === "object" ? llmCalls.totals : {};
+  const byKind = Array.isArray(llmCalls?.active_by_kind) ? llmCalls.active_by_kind : [];
+  const bySource = Array.isArray(llmCalls?.active_by_source) ? llmCalls.active_by_source : [];
+  const activeCalls = Array.isArray(llmCalls?.active_calls) ? llmCalls.active_calls : [];
+  const history = llmCalls?.history && typeof llmCalls.history === "object" ? llmCalls.history : {};
+  const historyWindows = Array.isArray(history?.windows) ? history.windows : [];
+
+  const byKindHtml = byKind.length
+    ? `
+        <div class="runtime-breakdown-list">
+          ${byKind
+            .map((row) => {
+              const calls = Number(row?.calls ?? 0);
+              return `
+                <div class="runtime-breakdown-row compact">
+                  <div class="runtime-breakdown-main">
+                    <div class="runtime-breakdown-name">${escapeHtml(String(row?.label || row?.kind || "Unknown"))}</div>
+                  </div>
+                  <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(`${calls} active`)}</span></div>
+                </div>
+              `;
+            })
+            .join("")}
+        </div>
+      `
+    : `<div class="small muted">No active LLM calls.</div>`;
+
+  const bySourceHtml = bySource.length
+    ? `
+        <div class="runtime-breakdown-list">
+          ${bySource
+            .map((row) => {
+              const calls = Number(row?.calls ?? 0);
+              return `
+                <div class="runtime-breakdown-row compact">
+                  <div class="runtime-breakdown-main">
+                    <div class="runtime-breakdown-name">${escapeHtml(String(row?.label || "Unknown source"))}</div>
+                  </div>
+                  <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(`${calls} active`)}</span></div>
+                </div>
+              `;
+            })
+            .join("")}
+        </div>
+      `
+    : `<div class="small muted">No active source rows.</div>`;
+
+  const activeCallsHtml = activeCalls.length
+    ? `
+        <div class="runtime-breakdown-list">
+          ${activeCalls
+            .map((row) => {
+              const sourceLabel = String(row?.source_label || row?.label || "Unknown source");
+              const model = String(row?.model || "model");
+              const host = String(row?.host || "").trim();
+              const functionName = String(row?.function || "").trim();
+              const messageCount = Number(row?.message_count ?? 0);
+              const detailLineParts = [`Model ${model}`];
+              if (host) {
+                detailLineParts.push(host);
+              }
+              const extraLineParts = [];
+              if (functionName) {
+                extraLineParts.push(`Fn ${functionName}`);
+              }
+              if (messageCount > 0) {
+                extraLineParts.push(`${messageCount} msgs`);
+              }
+              const age = _runtimeAgeLabel(row?.age_seconds);
+              return `
+                <div class="runtime-breakdown-row">
+                  <div class="runtime-breakdown-main">
+                    <div class="runtime-breakdown-name">${escapeHtml(sourceLabel)}</div>
+                    <div class="small muted">${escapeHtml(detailLineParts.join(" • "))}</div>
+                    ${extraLineParts.length ? `<div class="small muted">${escapeHtml(extraLineParts.join(" • "))}</div>` : ""}
+                  </div>
+                  <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(age)}</span></div>
+                </div>
+              `;
+            })
+            .join("")}
+        </div>
+      `
+    : `<div class="small muted">No active LLM calls right now.</div>`;
+
+  const historyHtml = historyWindows.length
+    ? `
+        <div class="runtime-breakdown-list">
+          ${historyWindows
+            .map((windowRow) => {
+              const calls = Number(windowRow?.calls ?? 0);
+              const completed = Number(windowRow?.completed ?? 0);
+              const failed = Number(windowRow?.failed ?? 0);
+              const avgMs = Number(windowRow?.avg_ms ?? 0);
+              const topSources = Array.isArray(windowRow?.top_sources) ? windowRow.top_sources : [];
+              const sourceLine = topSources.length
+                ? topSources
+                    .map((row) => `${String(row?.label || row?.source || "Unknown")}: ${Number(row?.calls ?? 0)}`)
+                    .join(" • ")
+                : "No calls in this period.";
+              return `
+                <div class="runtime-breakdown-row">
+                  <div class="runtime-breakdown-main">
+                    <div class="runtime-breakdown-name">${escapeHtml(String(windowRow?.label || "Window"))}</div>
+                    <div class="small muted">Done ${completed} • Failed ${failed} • Avg ${avgMs.toFixed(1)} ms</div>
+                    <div class="small muted">${escapeHtml(sourceLine)}</div>
+                  </div>
+                  <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(`${calls} calls`)}</span></div>
+                </div>
+              `;
+            })
+            .join("")}
+        </div>
+      `
+    : `<div class="small muted">No LLM call history available yet.</div>`;
+
   return `
-    <section class="runtime-breakdown-card">
-      <div class="runtime-breakdown-head">
-        <h4 class="runtime-breakdown-title">Chat Jobs</h4>
-        <div class="small muted">${escapeHtml(summary)}</div>
+    <div class="runtime-breakdown-block">
+      <div class="runtime-breakdown-subtitle">By Type</div>
+      ${byKindHtml}
+    </div>
+    <div class="runtime-breakdown-block">
+      <div class="runtime-breakdown-subtitle">By Source</div>
+      ${bySourceHtml}
+    </div>
+    <div class="runtime-breakdown-block">
+      <div class="runtime-breakdown-subtitle">Active Calls</div>
+      ${activeCallsHtml}
+    </div>
+    <div class="runtime-breakdown-block">
+      <div class="runtime-breakdown-subtitle">History</div>
+      ${historyHtml}
+      <div class="small muted">Sample size: ${escapeHtml(String(Number(history?.sample_size ?? 0)))} completed calls</div>
+    </div>
+    <div class="runtime-breakdown-block">
+      <div class="small muted">
+        Totals since boot: Started ${escapeHtml(String(Number(totals?.started ?? 0)))} • Completed ${escapeHtml(
+          String(Number(totals?.completed ?? 0))
+        )} • Failed ${escapeHtml(String(Number(totals?.failed ?? 0)))}
       </div>
-      ${_renderRuntimeChatJobRows(chatJobs)}
+    </div>
+  `;
+}
+
+function _runtimeInt(value, fallback = 0) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return Number(fallback || 0);
+  }
+  return Math.max(0, Math.round(parsed));
+}
+
+function _runtimeFmtInt(value) {
+  return _runtimeInt(value, 0).toLocaleString();
+}
+
+function _renderRuntimeContextWindowCard(estimate) {
+  const payload = estimate && typeof estimate === "object" ? estimate : {};
+  const error = String(payload?.error || "").trim();
+  if (error) {
+    return `
+      <section class="runtime-breakdown-card runtime-breakdown-card-wide">
+        <div class="runtime-breakdown-head">
+          <h4 class="runtime-breakdown-title">Estimated Chat Context Window</h4>
+          <div class="small muted">Estimator unavailable</div>
+        </div>
+        <div class="runtime-breakdown-block">
+          <div class="small muted">${escapeHtml(error)}</div>
+        </div>
+      </section>
+    `;
+  }
+
+  const promptTokens = _runtimeInt(payload?.prompt_tokens);
+  const completionBudget = _runtimeInt(payload?.completion_budget_tokens);
+  const minimumWindow = _runtimeInt(payload?.minimum_context_window);
+  const recommendedWindow = _runtimeInt(payload?.recommended_context_window);
+  const historyMessages = _runtimeInt(payload?.history_messages);
+  const maxHistoryMessages = _runtimeInt(payload?.max_history_messages);
+  const enabledVerbas = _runtimeInt(payload?.enabled_verbas);
+  const connectedPortals = _runtimeInt(payload?.connected_portals);
+  const runningCores = _runtimeInt(payload?.running_cores);
+  const breakdown = payload?.breakdown && typeof payload.breakdown === "object" ? payload.breakdown : {};
+  const systemTokens = _runtimeInt(breakdown?.system_tokens);
+  const statusTokens = _runtimeInt(breakdown?.status_tokens);
+  const coreTokens = _runtimeInt(breakdown?.core_context_tokens);
+  const preambleTokens = _runtimeInt(breakdown?.platform_preamble_tokens);
+  const historyTokens = _runtimeInt(breakdown?.history_tokens);
+  const userTokens = _runtimeInt(breakdown?.user_tokens);
+
+  if (promptTokens <= 0 && minimumWindow <= 0 && recommendedWindow <= 0) {
+    return `
+      <section class="runtime-breakdown-card runtime-breakdown-card-wide">
+        <div class="runtime-breakdown-head">
+          <h4 class="runtime-breakdown-title">Estimated Chat Context Window</h4>
+          <div class="small muted">No estimate available yet</div>
+        </div>
+        <div class="runtime-breakdown-block">
+          <div class="small muted">Send a chat message so Hydra can sample the active chat prompt stack.</div>
+        </div>
+      </section>
+    `;
+  }
+
+  const summaryParts = [
+    `Prompt ${_runtimeFmtInt(promptTokens)} tok`,
+    `Reply budget ${_runtimeFmtInt(completionBudget)} tok`,
+    `Min window ${_runtimeFmtInt(minimumWindow)}`,
+    `Recommended ${_runtimeFmtInt(recommendedWindow)}`,
+  ];
+
+  return `
+    <section class="runtime-breakdown-card runtime-breakdown-card-wide">
+      <div class="runtime-breakdown-head">
+        <h4 class="runtime-breakdown-title">Estimated Chat Context Window</h4>
+        <div class="small muted">${escapeHtml(summaryParts.join(" • "))}</div>
+      </div>
+      <div class="runtime-breakdown-block">
+        <div class="runtime-breakdown-subtitle">Prompt Composition</div>
+        <div class="runtime-breakdown-list">
+          <div class="runtime-breakdown-row compact">
+            <div class="runtime-breakdown-main">
+              <div class="runtime-breakdown-name">System prompt</div>
+              <div class="small muted">Chat fallback instructions</div>
+            </div>
+            <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(_runtimeFmtInt(systemTokens))}</span></div>
+          </div>
+          <div class="runtime-breakdown-row compact">
+            <div class="runtime-breakdown-main">
+              <div class="runtime-breakdown-name">Runtime status block</div>
+              <div class="small muted">Enabled verbas, portals, and cores</div>
+            </div>
+            <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(_runtimeFmtInt(statusTokens))}</span></div>
+          </div>
+          <div class="runtime-breakdown-row compact">
+            <div class="runtime-breakdown-main">
+              <div class="runtime-breakdown-name">Core context blocks</div>
+              <div class="small muted">Memory/core-injected chat context</div>
+            </div>
+            <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(_runtimeFmtInt(coreTokens + preambleTokens))}</span></div>
+          </div>
+          <div class="runtime-breakdown-row compact">
+            <div class="runtime-breakdown-main">
+              <div class="runtime-breakdown-name">Chat history</div>
+              <div class="small muted">${escapeHtml(`${historyMessages}/${maxHistoryMessages || historyMessages} messages sent to LLM`)}</div>
+            </div>
+            <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(_runtimeFmtInt(historyTokens))}</span></div>
+          </div>
+          <div class="runtime-breakdown-row compact">
+            <div class="runtime-breakdown-main">
+              <div class="runtime-breakdown-name">Current user turn</div>
+              <div class="small muted">Estimated next user input</div>
+            </div>
+            <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(_runtimeFmtInt(userTokens))}</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="runtime-breakdown-block">
+        <div class="small muted">
+          Active stack: ${escapeHtml(`${enabledVerbas} verbas enabled • ${connectedPortals} portals connected • ${runningCores} cores running`)}
+        </div>
+      </div>
     </section>
+  `;
+}
+
+function renderRuntimeBreakdown(payload) {
+  const hydraJobs =
+    payload?.hydra_jobs && typeof payload.hydra_jobs === "object"
+      ? payload.hydra_jobs
+      : payload?.chat_jobs && typeof payload.chat_jobs === "object"
+        ? payload.chat_jobs
+        : {};
+  const llmCalls = payload?.llm_calls && typeof payload.llm_calls === "object" ? payload.llm_calls : {};
+  const contextEstimate = payload?.chat_context_window && typeof payload.chat_context_window === "object"
+    ? payload.chat_context_window
+    : {};
+  const hydraSummary = `${Number(hydraJobs.total ?? 0)} total • WebUI queue ${Number(
+    hydraJobs.webui_jobs ?? 0
+  )} • Surface turns ${Number(hydraJobs.surface_running_turns ?? 0)}`;
+  const llmSummary = `${Number(llmCalls.active_total ?? 0)} active • Started ${Number(
+    llmCalls?.totals?.started ?? 0
+  )} • Completed ${Number(llmCalls?.totals?.completed ?? 0)} • Failed ${Number(llmCalls?.totals?.failed ?? 0)}`;
+  return `
+    <div class="runtime-breakdown-grid">
+      <section class="runtime-breakdown-card">
+        <div class="runtime-breakdown-head">
+          <h4 class="runtime-breakdown-title">Hydra Jobs</h4>
+          <div class="small muted">${escapeHtml(hydraSummary)}</div>
+        </div>
+        ${_renderRuntimeHydraJobRows(hydraJobs)}
+      </section>
+      <section class="runtime-breakdown-card">
+        <div class="runtime-breakdown-head">
+          <h4 class="runtime-breakdown-title">LLM Calls</h4>
+          <div class="small muted">${escapeHtml(llmSummary)}</div>
+        </div>
+        ${_renderRuntimeLlmCallRows(llmCalls)}
+      </section>
+      ${_renderRuntimeContextWindowCard(contextEstimate)}
+    </div>
   `;
 }
 
@@ -1148,9 +1440,9 @@ function ensureRuntimeBreakdownModal() {
     "beforeend",
     `
       <div id="runtime-breakdown-modal" class="cerb-modal" aria-hidden="true">
-        <div class="cerb-modal-dialog card runtime-breakdown-dialog" role="dialog" aria-modal="true" aria-label="Chat Jobs">
+        <div class="cerb-modal-dialog card runtime-breakdown-dialog" role="dialog" aria-modal="true" aria-label="Hydra Jobs and LLM Calls">
           <div class="card-head">
-            <h3 class="card-title">Live Chat Jobs</h3>
+            <h3 class="card-title">Live Hydra Jobs + LLM Calls</h3>
             <div class="inline-row">
               <span id="runtime-breakdown-updated" class="small"></span>
               <button type="button" class="inline-btn" id="runtime-breakdown-refresh">Refresh</button>
@@ -1265,7 +1557,7 @@ function bindRuntimeSummary() {
   summary.dataset.bound = "1";
   summary.setAttribute("role", "button");
   summary.setAttribute("tabindex", "0");
-  summary.title = "Open live chat jobs";
+  summary.title = "Open live Hydra jobs and LLM calls";
   summary.classList.add("interactive");
   summary.addEventListener("click", () => {
     openRuntimeBreakdownModal();
@@ -4341,6 +4633,70 @@ async function loadSettingsView() {
   );
   const hydraDefaults =
     settings?.hydra_defaults && typeof settings.hydra_defaults === "object" ? settings.hydra_defaults : {};
+  const normalizeHydraBaseRow = (row) => ({
+    host: String(row?.host || "").trim(),
+    port: String(row?.port || "").trim(),
+    model: String(row?.model || "").trim(),
+  });
+  const configuredHydraBaseRows = Array.isArray(settings?.hydra_base_servers)
+    ? settings.hydra_base_servers.map((row) => normalizeHydraBaseRow(row))
+    : [];
+  const normalizedHydraBaseRows = [];
+  const normalizedHydraBaseSeen = new Set();
+  const appendHydraBaseRow = (row) => {
+    const normalized = normalizeHydraBaseRow(row);
+    if (!normalized.host || !normalized.model) {
+      return;
+    }
+    const signature = `${normalized.host}|${normalized.port}|${normalized.model}`;
+    if (normalizedHydraBaseSeen.has(signature)) {
+      return;
+    }
+    normalizedHydraBaseSeen.add(signature);
+    normalizedHydraBaseRows.push(normalized);
+  };
+  if (configuredHydraBaseRows.length) {
+    configuredHydraBaseRows.forEach((row) => appendHydraBaseRow(row));
+  } else {
+    appendHydraBaseRow({
+      host: settings.hydra_llm_host || "",
+      port: settings.hydra_llm_port || "",
+      model: settings.hydra_llm_model || "",
+    });
+  }
+  if (!normalizedHydraBaseRows.length) {
+    normalizedHydraBaseRows.push(
+      normalizeHydraBaseRow({
+        host: settings.hydra_llm_host || "",
+        port: settings.hydra_llm_port || "",
+        model: settings.hydra_llm_model || "",
+      })
+    );
+  }
+  const hydraPrimaryBaseRow = normalizedHydraBaseRows[0] || normalizeHydraBaseRow({});
+  const hydraAdditionalBaseRows = normalizedHydraBaseRows.slice(1);
+  const hydraAdditionalBaseRowsHtml = hydraAdditionalBaseRows.length
+    ? hydraAdditionalBaseRows
+        .map(
+          (row, index) => `
+            <div class="hydra-base-server-row" data-hydra-base-index="${index}">
+              <label>Host / IP
+                <input type="text" data-hydra-base-field="host" value="${escapeHtml(row.host)}" />
+              </label>
+              <label>Port
+                <input type="number" min="1" max="65535" data-hydra-base-field="port" value="${escapeHtml(row.port)}" />
+              </label>
+              <label>Model
+                <input type="text" data-hydra-base-field="model" value="${escapeHtml(row.model)}" />
+              </label>
+              <div class="hydra-base-server-actions">
+                <button type="button" class="inline-btn danger" data-hydra-base-remove="${index}">Remove</button>
+              </div>
+            </div>
+          `
+        )
+        .join("")
+    : `<div class="small hydra-base-server-empty">No additional base servers configured.</div>`;
   const popupEffectStyle = normalizePopupEffectStyle(settings?.popup_effect_style || state.popupEffectStyle);
   applyPopupEffectStyle(popupEffectStyle);
   const hydraPlatforms = ["webui", "discord", "irc", "telegram", "matrix", "homeassistant", "homekit", "xbmc", "automation"];
@@ -4509,6 +4865,7 @@ async function loadSettingsView() {
         <section class="settings-tab-panel" data-settings-panel="hydra">
           <div class="settings-subtabs">
             <button type="button" class="settings-subtab-btn active" data-hydra-tab="settings">Hydra</button>
+            <button type="button" class="settings-subtab-btn" data-hydra-tab="models">Hydra Models</button>
             <button type="button" class="settings-subtab-btn" data-hydra-tab="metrics">Hydra Metrics</button>
             <button type="button" class="settings-subtab-btn" data-hydra-tab="data">Hydra Data</button>
           </div>
@@ -4552,25 +4909,150 @@ async function loadSettingsView() {
                 <button type="button" id="settings-hydra-defaults" class="inline-btn">Set Default Values</button>
                 <span class="small">Applies default Hydra values to the fields above.</span>
               </div>
-              <div class="settings-section-title">Hydra Model</div>
-              <label>Hydra LLM Host / IP
-                <input id="set_hydra_llm_host" type="text" value="${escapeHtml(
-                  settings.hydra_llm_host || ""
-                )}" />
-              </label>
-              <label>Hydra LLM Port
-                <input id="set_hydra_llm_port" type="number" min="1" max="65535" value="${escapeHtml(
-                  settings.hydra_llm_port || ""
-                )}" />
-              </label>
-              <label>Hydra LLM Model
-                <input id="set_hydra_llm_model" type="text" value="${escapeHtml(
-                  settings.hydra_llm_model || ""
-                )}" />
-              </label>
               <div class="inline-row" style="grid-column: 1 / -1;">
-                <button type="button" id="settings-hydra-model-save" class="inline-btn">Save Model</button>
-                <span class="small">Saves only Hydra model host, port, and model name.</span>
+                <button type="button" id="settings-save" class="action-btn">Save Settings</button>
+                <span class="small">Saves non-model settings. Use the Hydra Models tab for model routing settings.</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-subpanel" data-hydra-panel="models">
+            <div class="form-grid two-col">
+              <div class="settings-section-title">Hydra Models</div>
+              <div class="hydra-model-mode" style="grid-column: 1 / -1;">
+                <div class="small hydra-model-mode-label">Beast Mode Routing</div>
+                ${renderToggleRow(
+                  `<input id="set_hydra_beast_mode_enabled" class="toggle-input" type="checkbox" ${
+                    settings.hydra_beast_mode_enabled ? "checked" : ""
+                  } />`
+                )}
+                <div class="small">Off: regular calls use Base model servers. On: dedicated models per head, while AI Calls still uses Base model servers.</div>
+              </div>
+              <div id="settings-hydra-model-stack" class="hydra-model-stack">
+                <div id="settings-hydra-base-fields" class="hydra-model-panel is-active">
+                  <div id="settings-hydra-base-title" class="hydra-model-panel-title">${
+                    settings.hydra_beast_mode_enabled ? "AI Calls" : "Base Model"
+                  }</div>
+                  <div class="small hydra-model-panel-note">Used for regular AI calls. Multiple base servers rotate in round-robin order.</div>
+                  <label>Base Host / IP
+                    <input id="set_hydra_llm_host" type="text" value="${escapeHtml(
+                      hydraPrimaryBaseRow.host || ""
+                    )}" />
+                  </label>
+                  <label>Base Port
+                    <input id="set_hydra_llm_port" type="number" min="1" max="65535" value="${escapeHtml(
+                      hydraPrimaryBaseRow.port || ""
+                    )}" />
+                  </label>
+                  <label style="grid-column: 1 / -1;">Base Model
+                    <input id="set_hydra_llm_model" type="text" value="${escapeHtml(
+                      hydraPrimaryBaseRow.model || ""
+                    )}" />
+                  </label>
+                  <div class="hydra-base-server-block">
+                    <div class="hydra-role-title">Additional Base Servers</div>
+                    <div class="small hydra-model-panel-note">Add more base servers to alternate regular AI calls across them.</div>
+                    <div id="settings-hydra-base-servers" class="hydra-base-server-list">${hydraAdditionalBaseRowsHtml}</div>
+                    <div class="inline-row">
+                      <button type="button" id="settings-hydra-base-server-add" class="inline-btn">Add Server</button>
+                    </div>
+                  </div>
+                </div>
+                <div id="settings-hydra-beast-fields" class="hydra-model-panel ${
+                  settings.hydra_beast_mode_enabled ? "is-active" : ""
+                }">
+                  <div class="hydra-model-panel-title">Beast Head Models</div>
+                  <div class="small hydra-model-panel-note">Used only in Beast Mode. AI Calls still uses Base model keys.</div>
+
+                  <div class="hydra-role-title">Chat (normal conversation replies)</div>
+                  <label>Chat Host / IP
+                    <input id="set_hydra_llm_chat_host" type="text" value="${escapeHtml(
+                      settings.hydra_llm_chat_host || ""
+                    )}" />
+                  </label>
+                  <label>Chat Port
+                    <input id="set_hydra_llm_chat_port" type="number" min="1" max="65535" value="${escapeHtml(
+                      settings.hydra_llm_chat_port || ""
+                    )}" />
+                  </label>
+                  <label style="grid-column: 1 / -1;">Chat Model
+                    <input id="set_hydra_llm_chat_model" type="text" value="${escapeHtml(
+                      settings.hydra_llm_chat_model || ""
+                    )}" />
+                  </label>
+
+                  <div class="hydra-role-title">Astraeus (planning)</div>
+                  <label>Astraeus Host / IP
+                    <input id="set_hydra_llm_astraeus_host" type="text" value="${escapeHtml(
+                      settings.hydra_llm_astraeus_host || ""
+                    )}" />
+                  </label>
+                  <label>Astraeus Port
+                    <input id="set_hydra_llm_astraeus_port" type="number" min="1" max="65535" value="${escapeHtml(
+                      settings.hydra_llm_astraeus_port || ""
+                    )}" />
+                  </label>
+                  <label style="grid-column: 1 / -1;">Astraeus Model
+                    <input id="set_hydra_llm_astraeus_model" type="text" value="${escapeHtml(
+                      settings.hydra_llm_astraeus_model || ""
+                    )}" />
+                  </label>
+
+                  <div class="hydra-role-title">Thanatos (execution)</div>
+                  <label>Thanatos Host / IP
+                    <input id="set_hydra_llm_thanatos_host" type="text" value="${escapeHtml(
+                      settings.hydra_llm_thanatos_host || ""
+                    )}" />
+                  </label>
+                  <label>Thanatos Port
+                    <input id="set_hydra_llm_thanatos_port" type="number" min="1" max="65535" value="${escapeHtml(
+                      settings.hydra_llm_thanatos_port || ""
+                    )}" />
+                  </label>
+                  <label style="grid-column: 1 / -1;">Thanatos Model
+                    <input id="set_hydra_llm_thanatos_model" type="text" value="${escapeHtml(
+                      settings.hydra_llm_thanatos_model || ""
+                    )}" />
+                  </label>
+
+                  <div class="hydra-role-title">Minos (judging)</div>
+                  <label>Minos Host / IP
+                    <input id="set_hydra_llm_minos_host" type="text" value="${escapeHtml(
+                      settings.hydra_llm_minos_host || ""
+                    )}" />
+                  </label>
+                  <label>Minos Port
+                    <input id="set_hydra_llm_minos_port" type="number" min="1" max="65535" value="${escapeHtml(
+                      settings.hydra_llm_minos_port || ""
+                    )}" />
+                  </label>
+                  <label style="grid-column: 1 / -1;">Minos Model
+                    <input id="set_hydra_llm_minos_model" type="text" value="${escapeHtml(
+                      settings.hydra_llm_minos_model || ""
+                    )}" />
+                  </label>
+
+                  <div class="hydra-role-title">Hermes (final response)</div>
+                  <label>Hermes Host / IP
+                    <input id="set_hydra_llm_hermes_host" type="text" value="${escapeHtml(
+                      settings.hydra_llm_hermes_host || ""
+                    )}" />
+                  </label>
+                  <label>Hermes Port
+                    <input id="set_hydra_llm_hermes_port" type="number" min="1" max="65535" value="${escapeHtml(
+                      settings.hydra_llm_hermes_port || ""
+                    )}" />
+                  </label>
+                  <label style="grid-column: 1 / -1;">Hermes Model
+                    <input id="set_hydra_llm_hermes_model" type="text" value="${escapeHtml(
+                      settings.hydra_llm_hermes_model || ""
+                    )}" />
+                  </label>
+                </div>
+              </div>
+              <div class="inline-row" style="grid-column: 1 / -1;">
+                <button type="button" id="settings-hydra-model-save" class="action-btn">Save Model</button>
+              <span class="small">Saves Hydra model settings only (base model + Beast Mode role models).</span>
               </div>
             </div>
           </div>
@@ -4677,10 +5159,6 @@ async function loadSettingsView() {
           </div>
         </section>
 
-        <div class="inline-row settings-actions">
-          <button class="action-btn" type="submit">Save Settings</button>
-          <span class="small">All tab values are saved together.</span>
-        </div>
       </form>
     </div>
   `;
@@ -4824,12 +5302,124 @@ async function loadSettingsView() {
     statusEl.textContent = "Hydra defaults loaded into form (model settings unchanged). Click Save Settings to apply.";
   });
 
+  const hydraBeastToggleEl = document.getElementById("set_hydra_beast_mode_enabled");
+  const hydraBaseFieldsEl = document.getElementById("settings-hydra-base-fields");
+  const hydraBaseTitleEl = document.getElementById("settings-hydra-base-title");
+  const hydraBeastFieldsEl = document.getElementById("settings-hydra-beast-fields");
+  const applyHydraBeastVisibility = () => {
+    if (!hydraBaseFieldsEl || !hydraBeastFieldsEl || !hydraBeastToggleEl) {
+      return;
+    }
+    const beastEnabled = Boolean(hydraBeastToggleEl.checked);
+    hydraBaseFieldsEl.classList.add("is-active");
+    hydraBeastFieldsEl.classList.toggle("is-active", beastEnabled);
+    if (hydraBaseTitleEl) {
+      hydraBaseTitleEl.textContent = beastEnabled ? "AI Calls" : "Base Model";
+    }
+  };
+  if (hydraBeastToggleEl) {
+    hydraBeastToggleEl.addEventListener("change", applyHydraBeastVisibility);
+    applyHydraBeastVisibility();
+  }
+
+  const hydraBaseServersEl = document.getElementById("settings-hydra-base-servers");
+  const hydraBaseServerAddEl = document.getElementById("settings-hydra-base-server-add");
+  const normalizeHydraBaseRowInput = (row) => ({
+    host: String(row?.host || "").trim(),
+    port: String(row?.port || "").trim(),
+    model: String(row?.model || "").trim(),
+  });
+  const readHydraAdditionalBaseRows = () => {
+    if (!hydraBaseServersEl) {
+      return [];
+    }
+    return Array.from(hydraBaseServersEl.querySelectorAll(".hydra-base-server-row")).map((rowEl) => {
+      const hostEl = rowEl.querySelector('[data-hydra-base-field="host"]');
+      const portEl = rowEl.querySelector('[data-hydra-base-field="port"]');
+      const modelEl = rowEl.querySelector('[data-hydra-base-field="model"]');
+      return normalizeHydraBaseRowInput({
+        host: hostEl ? hostEl.value : "",
+        port: portEl ? portEl.value : "",
+        model: modelEl ? modelEl.value : "",
+      });
+    });
+  };
+  const renderHydraAdditionalBaseRows = (rows) => {
+    if (!hydraBaseServersEl) {
+      return;
+    }
+    const safeRows = Array.isArray(rows) ? rows.map((row) => normalizeHydraBaseRowInput(row)) : [];
+    if (!safeRows.length) {
+      hydraBaseServersEl.innerHTML = `<div class="small hydra-base-server-empty">No additional base servers configured.</div>`;
+      return;
+    }
+    hydraBaseServersEl.innerHTML = safeRows
+      .map(
+        (row, index) => `
+          <div class="hydra-base-server-row" data-hydra-base-index="${index}">
+            <label>Host / IP
+              <input type="text" data-hydra-base-field="host" value="${escapeHtml(row.host)}" />
+            </label>
+            <label>Port
+              <input type="number" min="1" max="65535" data-hydra-base-field="port" value="${escapeHtml(row.port)}" />
+            </label>
+            <label>Model
+              <input type="text" data-hydra-base-field="model" value="${escapeHtml(row.model)}" />
+            </label>
+            <div class="hydra-base-server-actions">
+              <button type="button" class="inline-btn danger" data-hydra-base-remove="${index}">Remove</button>
+            </div>
+          </div>
+        `
+      )
+      .join("");
+  };
+  let hydraAdditionalBaseRowsState = Array.isArray(hydraAdditionalBaseRows)
+    ? hydraAdditionalBaseRows.map((row) => normalizeHydraBaseRowInput(row))
+    : [];
+  renderHydraAdditionalBaseRows(hydraAdditionalBaseRowsState);
+  hydraBaseServerAddEl?.addEventListener("click", () => {
+    hydraAdditionalBaseRowsState = readHydraAdditionalBaseRows();
+    hydraAdditionalBaseRowsState.push(normalizeHydraBaseRowInput({ host: "", port: "", model: "" }));
+    renderHydraAdditionalBaseRows(hydraAdditionalBaseRowsState);
+  });
+  hydraBaseServersEl?.addEventListener("click", (event) => {
+    const button = event.target instanceof Element ? event.target.closest("[data-hydra-base-remove]") : null;
+    if (!button) {
+      return;
+    }
+    const removeIndex = Number(button.getAttribute("data-hydra-base-remove"));
+    if (!Number.isFinite(removeIndex) || removeIndex < 0) {
+      return;
+    }
+    hydraAdditionalBaseRowsState = readHydraAdditionalBaseRows();
+    hydraAdditionalBaseRowsState.splice(removeIndex, 1);
+    renderHydraAdditionalBaseRows(hydraAdditionalBaseRowsState);
+  });
+
   document.getElementById("settings-hydra-model-save").addEventListener("click", async () => {
+    const baseHost = String(document.getElementById("set_hydra_llm_host")?.value || "").trim();
+    const basePort = String(document.getElementById("set_hydra_llm_port")?.value || "").trim();
+    const baseModel = String(document.getElementById("set_hydra_llm_model")?.value || "").trim();
+    const additionalBaseRows = readHydraAdditionalBaseRows();
+    const hydraBaseServersPayload = [normalizeHydraBaseRowInput({ host: baseHost, port: basePort, model: baseModel })];
+    additionalBaseRows.forEach((row) => hydraBaseServersPayload.push(normalizeHydraBaseRowInput(row)));
     const payload = {
-      hydra_llm_host: document.getElementById("set_hydra_llm_host").value,
-      hydra_llm_port: document.getElementById("set_hydra_llm_port").value,
-      hydra_llm_model: document.getElementById("set_hydra_llm_model").value,
+      hydra_llm_host: baseHost,
+      hydra_llm_port: basePort,
+      hydra_llm_model: baseModel,
+      hydra_base_servers: hydraBaseServersPayload,
+      hydra_beast_mode_enabled: Boolean(document.getElementById("set_hydra_beast_mode_enabled")?.checked),
     };
+    const hydraRoleIds = ["chat", "astraeus", "thanatos", "minos", "hermes"];
+    hydraRoleIds.forEach((role) => {
+      const hostEl = document.getElementById(`set_hydra_llm_${role}_host`);
+      const portEl = document.getElementById(`set_hydra_llm_${role}_port`);
+      const modelEl = document.getElementById(`set_hydra_llm_${role}_model`);
+      payload[`hydra_llm_${role}_host`] = hostEl ? String(hostEl.value || "").trim() : "";
+      payload[`hydra_llm_${role}_port`] = portEl ? String(portEl.value || "").trim() : "";
+      payload[`hydra_llm_${role}_model`] = modelEl ? String(modelEl.value || "").trim() : "";
+    });
     statusEl.textContent = "Saving Hydra model settings...";
     try {
       await api("/api/settings", {
@@ -5310,8 +5900,11 @@ async function loadSettingsView() {
     statusEl.textContent = "Default admin tool list loaded. Click Save Settings to apply.";
   });
 
-  document.getElementById("settings-form").addEventListener("submit", async (event) => {
+  document.getElementById("settings-form").addEventListener("submit", (event) => {
     event.preventDefault();
+  });
+
+  document.getElementById("settings-save").addEventListener("click", async () => {
     const adminSelect = document.getElementById("set_admin_only_plugins");
     const adminOnlyPlugins = Array.from(adminSelect.selectedOptions)
       .map((option) => String(option.value || "").trim())
@@ -5348,9 +5941,6 @@ async function loadSettingsView() {
         document.getElementById("set_emoji_reply_reaction_cooldown_seconds").value || 120
       ),
       emoji_min_message_length: Number(document.getElementById("set_emoji_min_message_length").value || 4),
-      hydra_llm_host: document.getElementById("set_hydra_llm_host").value,
-      hydra_llm_port: document.getElementById("set_hydra_llm_port").value,
-      hydra_llm_model: document.getElementById("set_hydra_llm_model").value,
       hydra_agent_state_ttl_seconds: Number(
         document.getElementById("set_hydra_agent_state_ttl_seconds").value || 1200
       ),

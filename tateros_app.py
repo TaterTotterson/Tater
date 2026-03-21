@@ -27,11 +27,17 @@ import core_registry as core_registry_module
 import verba_registry as verba_registry_module
 import portal_registry as portal_registry_module
 from admin_gate import DEFAULT_ADMIN_ONLY_PLUGINS, REDIS_KEY as ADMIN_GATE_KEY, get_admin_only_plugins
-from hydra import get_active_chat_jobs_snapshot, run_hydra_turn
+from hydra import estimate_hydra_chat_context_window, get_active_chat_jobs_snapshot, run_hydra_turn
 from hydra import (
     HYDRA_AGENT_STATE_TTL_SECONDS_KEY,
     HYDRA_ASTRAEUS_PLAN_REVIEW_ENABLED_KEY,
+    HYDRA_BEAST_CONFIG_ROLE_IDS,
+    HYDRA_BEAST_MODE_ENABLED_KEY,
+    HYDRA_LLM_HOST_KEY,
+    HYDRA_LLM_MODEL_KEY,
+    HYDRA_LLM_PORT_KEY,
     HYDRA_MAX_LEDGER_ITEMS_KEY,
+    HYDRA_ROLE_LLM_KEY_PREFIX,
     HYDRA_STEP_RETRY_LIMIT_KEY,
     DEFAULT_AGENT_STATE_TTL_SECONDS,
     DEFAULT_ASTRAEUS_PLAN_REVIEW_ENABLED,
@@ -39,7 +45,13 @@ from hydra import (
     DEFAULT_STEP_RETRY_LIMIT,
 )
 from emoji_responder import get_emoji_settings as get_core_emoji_settings, save_emoji_settings as save_core_emoji_settings
-from helpers import get_llm_client_from_env, set_main_loop
+from helpers import (
+    HYDRA_LLM_BASE_SERVERS_KEY,
+    get_llm_call_runtime_summary,
+    get_llm_client_from_env,
+    resolve_hydra_base_servers,
+    set_main_loop,
+)
 from verba_settings import (
     get_verba_enabled,
     get_verba_settings,
@@ -93,9 +105,8 @@ LAST_LLM_STATS_KEY = "webui:last_llm_stats"
 WEBUI_POPUP_EFFECT_STYLE_KEY = "tater:webui:popup_effect_style"
 DEFAULT_WEBUI_POPUP_EFFECT_STYLE = "flame"
 WEBUI_POPUP_EFFECT_STYLE_CHOICES = {"disabled", "flame", "dust", "glitch", "portal", "melt"}
-HYDRA_LLM_HOST_KEY = "tater:hydra:llm_host"
-HYDRA_LLM_PORT_KEY = "tater:hydra:llm_port"
-HYDRA_LLM_MODEL_KEY = "tater:hydra:llm_model"
+RUNTIME_CONTEXT_ESTIMATE_TTL_SECONDS = 20
+runtime_context_estimate_cache: Dict[str, Any] = {"updated_at": 0.0, "payload": {}}
 
 
 bootstrap_state: Dict[str, Any] = {
@@ -365,6 +376,90 @@ def _build_hydra_llm_endpoint(host: Any, port: Any) -> str:
     return urlunparse((parsed.scheme or "http", netloc, "", "", "", "")).rstrip("/")
 
 
+def _normalize_hydra_base_server_rows(rows: Any) -> List[Dict[str, str]]:
+    if rows is None:
+        return []
+    if not isinstance(rows, list):
+        raise HTTPException(status_code=400, detail="hydra_base_servers must be a list")
+
+    normalized: List[Dict[str, str]] = []
+    seen: set[Tuple[str, str]] = set()
+
+    for idx, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise HTTPException(status_code=400, detail=f"hydra_base_servers[{idx}] must be an object")
+
+        host = str(row.get("host") or "").strip()
+        port = str(row.get("port") or "").strip()
+        model = str(row.get("model") or "").strip()
+
+        if not host and not port and not model:
+            continue
+        if not host:
+            raise HTTPException(status_code=400, detail=f"hydra_base_servers[{idx}].host is required")
+        if not model:
+            raise HTTPException(status_code=400, detail=f"hydra_base_servers[{idx}].model is required")
+
+        endpoint = _build_hydra_llm_endpoint(host, port)
+        if not endpoint:
+            raise HTTPException(status_code=400, detail=f"hydra_base_servers[{idx}] host/port is invalid")
+
+        parsed = urlparse(endpoint)
+        hostname = str(parsed.hostname or "").strip()
+        if not hostname:
+            raise HTTPException(status_code=400, detail=f"hydra_base_servers[{idx}] host is invalid")
+
+        host_with_scheme = host.startswith(("http://", "https://"))
+        canonical_host = f"{parsed.scheme}://{hostname}" if host_with_scheme else hostname
+        canonical_port = str(parsed.port) if parsed.port is not None else ""
+        signature = (endpoint, model)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        normalized.append(
+            {
+                "host": canonical_host,
+                "port": canonical_port,
+                "model": model,
+            }
+        )
+
+    return normalized
+
+
+def _set_hydra_legacy_base_keys(base_rows: List[Dict[str, str]]) -> None:
+    rows = [row for row in (base_rows or []) if isinstance(row, dict)]
+    if not rows:
+        redis_client.delete(HYDRA_LLM_HOST_KEY)
+        redis_client.delete(HYDRA_LLM_PORT_KEY)
+        redis_client.delete(HYDRA_LLM_MODEL_KEY)
+        return
+
+    first = rows[0]
+    first_host = str(first.get("host") or "").strip()
+    first_port = str(first.get("port") or "").strip()
+    first_model = str(first.get("model") or "").strip()
+
+    if first_host:
+        redis_client.set(HYDRA_LLM_HOST_KEY, first_host)
+    else:
+        redis_client.delete(HYDRA_LLM_HOST_KEY)
+
+    if first_port:
+        redis_client.set(HYDRA_LLM_PORT_KEY, first_port)
+    else:
+        redis_client.delete(HYDRA_LLM_PORT_KEY)
+
+    if first_model:
+        redis_client.set(HYDRA_LLM_MODEL_KEY, first_model)
+    else:
+        redis_client.delete(HYDRA_LLM_MODEL_KEY)
+
+
+def _hydra_role_llm_key(role: str, field: str) -> str:
+    return f"{HYDRA_ROLE_LLM_KEY_PREFIX}{str(role or '').strip()}:{str(field or '').strip()}"
+
+
 def _discover_core_webui_tabs(core_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     discovered: List[Dict[str, Any]] = []
     seen_labels = set()
@@ -573,6 +668,23 @@ def _load_chat_history() -> List[Dict[str, Any]]:
         except Exception:
             continue
     return out
+
+
+def _loop_messages_from_history_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    loop_messages: List[Dict[str, Any]] = []
+    for msg in rows:
+        role = str(msg.get("role") or "assistant")
+        if role not in {"user", "assistant"}:
+            role = "assistant"
+        templ = _to_template_msg(role, msg.get("content"))
+        if templ is not None:
+            loop_messages.append(templ)
+    return _enforce_user_assistant_alternation(loop_messages)
+
+
+def _load_loop_messages_for_hydra(max_llm: int) -> List[Dict[str, Any]]:
+    history_tail = _load_chat_history_tail(max_llm)
+    return _loop_messages_from_history_rows(history_tail)
 
 
 def _bytes_to_mb(byte_count: int) -> float:
@@ -909,17 +1021,7 @@ async def _process_message(
     wait_callback: Optional[Callable[..., None]] = None,
 ) -> Dict[str, Any]:
     max_llm = _read_positive_int("tater:max_llm", DEFAULT_MAX_LLM)
-    history = _load_chat_history_tail(max_llm)
-
-    loop_messages: List[Dict[str, Any]] = []
-    for msg in history:
-        role = str(msg.get("role") or "assistant")
-        if role not in {"user", "assistant"}:
-            role = "assistant"
-        templ = _to_template_msg(role, msg.get("content"))
-        if templ is not None:
-            loop_messages.append(templ)
-    loop_messages = _enforce_user_assistant_alternation(loop_messages)
+    loop_messages = _load_loop_messages_for_hydra(max_llm)
 
     verba_registry_module.ensure_verbas_loaded()
     merged_registry = dict(verba_registry_module.get_verba_registry() or {})
@@ -932,16 +1034,8 @@ async def _process_message(
     }
     if isinstance(input_artifacts, list) and input_artifacts:
         origin["input_artifacts"] = [dict(item) for item in input_artifacts if isinstance(item, dict)]
-    hydra_llm_host = str(redis_client.get(HYDRA_LLM_HOST_KEY) or "").strip()
-    hydra_llm_port = str(redis_client.get(HYDRA_LLM_PORT_KEY) or "").strip()
-    hydra_llm_url = _build_hydra_llm_endpoint(hydra_llm_host, hydra_llm_port)
-    hydra_llm_model = str(redis_client.get(HYDRA_LLM_MODEL_KEY) or "").strip()
-    if not hydra_llm_url or not hydra_llm_model:
-        raise RuntimeError(
-            "Hydra LLM is not configured. Open Settings > Hydra and set Hydra LLM Host/IP, Port, and Model."
-        )
 
-    async with get_llm_client_from_env(host=hydra_llm_url, model=hydra_llm_model) as llm_client:
+    async with get_llm_client_from_env(redis_conn=redis_client) as llm_client:
         async def _wait(
             func_name: str,
             plugin_obj: Any,
@@ -1854,6 +1948,23 @@ class AppSettingsRequest(BaseModel):
     hydra_llm_host: Optional[str] = None
     hydra_llm_port: Optional[str] = None
     hydra_llm_model: Optional[str] = None
+    hydra_base_servers: Optional[List[Dict[str, Any]]] = None
+    hydra_beast_mode_enabled: Optional[bool] = None
+    hydra_llm_chat_host: Optional[str] = None
+    hydra_llm_chat_port: Optional[str] = None
+    hydra_llm_chat_model: Optional[str] = None
+    hydra_llm_astraeus_host: Optional[str] = None
+    hydra_llm_astraeus_port: Optional[str] = None
+    hydra_llm_astraeus_model: Optional[str] = None
+    hydra_llm_thanatos_host: Optional[str] = None
+    hydra_llm_thanatos_port: Optional[str] = None
+    hydra_llm_thanatos_model: Optional[str] = None
+    hydra_llm_minos_host: Optional[str] = None
+    hydra_llm_minos_port: Optional[str] = None
+    hydra_llm_minos_model: Optional[str] = None
+    hydra_llm_hermes_host: Optional[str] = None
+    hydra_llm_hermes_port: Optional[str] = None
+    hydra_llm_hermes_model: Optional[str] = None
     hydra_agent_state_ttl_seconds: Optional[int] = None
     hydra_max_ledger_items: Optional[int] = None
     hydra_step_retry_limit: Optional[int] = None
@@ -2140,9 +2251,77 @@ def _chat_job_counts_with_breakdown(*, include_history: bool = False) -> Dict[st
     return out
 
 
+def _latest_webui_user_name(history_rows: List[Dict[str, Any]]) -> str:
+    for row in reversed(history_rows or []):
+        role = str(row.get("role") or "").strip().lower()
+        if role != "user":
+            continue
+        username = str(row.get("username") or "").strip()
+        if username:
+            return username
+
+    settings = redis_client.hgetall("chat_settings") or {}
+    fallback = str(settings.get("username") or "User").strip()
+    return fallback or "User"
+
+
+def _estimate_webui_chat_context_window(*, force_refresh: bool = False) -> Dict[str, Any]:
+    now = time.time()
+    cached_at = float(runtime_context_estimate_cache.get("updated_at") or 0.0)
+    cached_payload = runtime_context_estimate_cache.get("payload")
+    if (
+        not force_refresh
+        and isinstance(cached_payload, dict)
+        and cached_payload
+        and (now - cached_at) < float(RUNTIME_CONTEXT_ESTIMATE_TTL_SECONDS)
+    ):
+        return dict(cached_payload)
+
+    payload: Dict[str, Any] = {}
+    try:
+        max_llm = _read_positive_int("tater:max_llm", DEFAULT_MAX_LLM)
+        history_tail = _load_chat_history_tail(max_llm)
+        loop_messages = _loop_messages_from_history_rows(history_tail)
+        user_name = _latest_webui_user_name(history_tail)
+
+        verba_registry_module.ensure_verbas_loaded()
+        merged_registry = dict(verba_registry_module.get_verba_registry() or {})
+
+        payload = estimate_hydra_chat_context_window(
+            platform="webui",
+            history_messages=loop_messages,
+            registry=merged_registry,
+            enabled_predicate=get_verba_enabled,
+            redis_client=redis_client,
+            scope="session:webui:context_estimate",
+            origin={
+                "platform": "webui",
+                "user": user_name,
+                "user_id": user_name,
+                "session_id": "context_estimate",
+            },
+            user_text="",
+            platform_preamble="",
+        )
+        if isinstance(payload, dict):
+            payload["max_history_messages"] = int(max_llm)
+    except Exception as exc:
+        payload = {"error": str(exc)}
+
+    runtime_context_estimate_cache["updated_at"] = now
+    runtime_context_estimate_cache["payload"] = dict(payload) if isinstance(payload, dict) else {}
+    return dict(runtime_context_estimate_cache.get("payload") or {})
+
+
 def _runtime_breakdown_payload() -> Dict[str, Any]:
+    hydra_jobs = _chat_job_counts_with_breakdown(include_history=True)
+    llm_calls = get_llm_call_runtime_summary(include_history=True)
+    context_estimate = _estimate_webui_chat_context_window()
     return {
-        "chat_jobs": _chat_job_counts_with_breakdown(include_history=True),
+        "hydra_jobs": hydra_jobs,
+        "chat_jobs": hydra_jobs,  # Backward-compatible key for older clients.
+        "llm_calls": llm_calls,
+        "chat_context_window": context_estimate,
     }
 
 
@@ -2166,7 +2345,8 @@ def health() -> Dict[str, Any]:
     except Exception:
         verbas_enabled = 0
 
-    chat_job_counts = _chat_job_counts_with_breakdown()
+    hydra_job_counts = _chat_job_counts_with_breakdown()
+    llm_call_counts = get_llm_call_runtime_summary(include_history=False)
 
     return {
         "ok": redis_ok,
@@ -2174,7 +2354,9 @@ def health() -> Dict[str, Any]:
         "verbas_enabled": int(verbas_enabled),
         "cores_running": len([k for k in core_runtime.threads if core_runtime.is_running(k)]),
         "portals_running": len([k for k in portal_runtime.threads if portal_runtime.is_running(k)]),
-        "chat_jobs_active": int(chat_job_counts.get("total") or 0),
+        "hydra_jobs_active": int(hydra_job_counts.get("total") or 0),
+        "chat_jobs_active": int(hydra_job_counts.get("total") or 0),  # Backward-compatible key for older clients.
+        "llm_calls_active": int(llm_call_counts.get("active_total") or 0),
         "bootstrap": {
             "restore_enabled": bool(bootstrap_state.get("restore_enabled")),
             "autostart_enabled": bool(bootstrap_state.get("autostart_enabled")),
@@ -3544,14 +3726,35 @@ def get_settings() -> Dict[str, Any]:
     admin_plugin_options = sorted(str(plugin_id or "").strip() for plugin_id in registry_snapshot.keys() if str(plugin_id or "").strip())
     admin_only_plugins = sorted(get_admin_only_plugins(redis_client))
 
-    hydra_llm_host = str(redis_client.get(HYDRA_LLM_HOST_KEY) or "").strip()
-    hydra_llm_port = str(redis_client.get(HYDRA_LLM_PORT_KEY) or "").strip()
-    hydra_llm_model = str(redis_client.get(HYDRA_LLM_MODEL_KEY) or "").strip()
+    hydra_base_servers_raw = resolve_hydra_base_servers(redis_conn=redis_client, include_legacy=True)
+    hydra_base_servers: List[Dict[str, str]] = [
+        {
+            "host": str(row.get("host") or "").strip(),
+            "port": str(row.get("port") or "").strip(),
+            "model": str(row.get("model") or "").strip(),
+        }
+        for row in hydra_base_servers_raw
+        if isinstance(row, dict)
+    ]
+    first_hydra_base = hydra_base_servers[0] if hydra_base_servers else {}
+    hydra_llm_host = str(first_hydra_base.get("host") or redis_client.get(HYDRA_LLM_HOST_KEY) or "").strip()
+    hydra_llm_port = str(first_hydra_base.get("port") or redis_client.get(HYDRA_LLM_PORT_KEY) or "").strip()
+    hydra_llm_model = str(first_hydra_base.get("model") or redis_client.get(HYDRA_LLM_MODEL_KEY) or "").strip()
+    hydra_beast_mode_enabled = _as_bool_flag(redis_client.get(HYDRA_BEAST_MODE_ENABLED_KEY), default=False)
+    hydra_role_model_values: Dict[str, str] = {}
+    for role in HYDRA_BEAST_CONFIG_ROLE_IDS:
+        role_host = str(redis_client.get(_hydra_role_llm_key(role, "host")) or "").strip()
+        role_port = str(redis_client.get(_hydra_role_llm_key(role, "port")) or "").strip()
+        role_model = str(redis_client.get(_hydra_role_llm_key(role, "model")) or "").strip()
+        hydra_role_model_values[f"hydra_llm_{role}_host"] = role_host
+        hydra_role_model_values[f"hydra_llm_{role}_port"] = role_port
+        hydra_role_model_values[f"hydra_llm_{role}_model"] = role_model
 
     hydra_defaults = {
         "hydra_llm_host": "",
         "hydra_llm_port": "",
         "hydra_llm_model": "",
+        "hydra_beast_mode_enabled": False,
         "hydra_agent_state_ttl_seconds": int(DEFAULT_AGENT_STATE_TTL_SECONDS),
         "hydra_max_ledger_items": int(DEFAULT_MAX_LEDGER_ITEMS),
         "hydra_step_retry_limit": int(DEFAULT_STEP_RETRY_LIMIT),
@@ -3594,6 +3797,8 @@ def get_settings() -> Dict[str, Any]:
         "hydra_llm_host": hydra_llm_host,
         "hydra_llm_port": hydra_llm_port,
         "hydra_llm_model": hydra_llm_model,
+        "hydra_base_servers": hydra_base_servers,
+        "hydra_beast_mode_enabled": hydra_beast_mode_enabled,
         "hydra_agent_state_ttl_seconds": _read_non_negative_int(
             HYDRA_AGENT_STATE_TTL_SECONDS_KEY,
             DEFAULT_AGENT_STATE_TTL_SECONDS,
@@ -3604,6 +3809,7 @@ def get_settings() -> Dict[str, Any]:
             redis_client.get(HYDRA_ASTRAEUS_PLAN_REVIEW_ENABLED_KEY),
             default=DEFAULT_ASTRAEUS_PLAN_REVIEW_ENABLED,
         ),
+        **hydra_role_model_values,
         "hydra_defaults": hydra_defaults,
         "admin_plugin_options": admin_plugin_options,
         "admin_only_plugins": admin_only_plugins,
@@ -3785,17 +3991,14 @@ def update_settings(payload: AppSettingsRequest) -> Dict[str, Any]:
 
     current_llm_host = str(redis_client.get(HYDRA_LLM_HOST_KEY) or "").strip()
     current_llm_port = str(redis_client.get(HYDRA_LLM_PORT_KEY) or "").strip()
+    current_llm_model = str(redis_client.get(HYDRA_LLM_MODEL_KEY) or "").strip()
 
     if "hydra_llm_host" in updates:
         current_llm_host = str(updates.get("hydra_llm_host") or "").strip()
-
     if "hydra_llm_port" in updates:
         current_llm_port = str(updates.get("hydra_llm_port") or "").strip()
-
-    if current_llm_host:
-        redis_client.set(HYDRA_LLM_HOST_KEY, current_llm_host)
-    else:
-        redis_client.delete(HYDRA_LLM_HOST_KEY)
+    if "hydra_llm_model" in updates:
+        current_llm_model = str(updates.get("hydra_llm_model") or "").strip()
 
     if current_llm_port:
         if not str(current_llm_port).isdigit():
@@ -3804,18 +4007,76 @@ def update_settings(payload: AppSettingsRequest) -> Dict[str, Any]:
         if parsed_port < 1 or parsed_port > 65535:
             raise HTTPException(status_code=400, detail="hydra_llm_port must be an integer between 1 and 65535")
         current_llm_port = str(parsed_port)
-        redis_client.set(HYDRA_LLM_PORT_KEY, current_llm_port)
-    else:
-        redis_client.delete(HYDRA_LLM_PORT_KEY)
+
+    base_settings_keys = {
+        "hydra_llm_host",
+        "hydra_llm_port",
+        "hydra_llm_model",
+        "hydra_base_servers",
+    }
+    if any(key in updates for key in base_settings_keys):
+        normalized_base_rows: List[Dict[str, str]] = []
+        if "hydra_base_servers" in updates:
+            normalized_base_rows = _normalize_hydra_base_server_rows(updates.get("hydra_base_servers"))
+        elif current_llm_host and current_llm_model:
+            endpoint = _build_hydra_llm_endpoint(current_llm_host, current_llm_port)
+            if endpoint:
+                parsed = urlparse(endpoint)
+                hostname = str(parsed.hostname or "").strip()
+                if hostname:
+                    host_with_scheme = current_llm_host.startswith(("http://", "https://"))
+                    normalized_base_rows = [
+                        {
+                            "host": f"{parsed.scheme}://{hostname}" if host_with_scheme else hostname,
+                            "port": str(parsed.port) if parsed.port is not None else "",
+                            "model": current_llm_model,
+                        }
+                    ]
+
+        if normalized_base_rows:
+            redis_client.set(HYDRA_LLM_BASE_SERVERS_KEY, json.dumps(normalized_base_rows))
+        else:
+            redis_client.delete(HYDRA_LLM_BASE_SERVERS_KEY)
+        _set_hydra_legacy_base_keys(normalized_base_rows)
+
     # Remove deprecated legacy key if it exists.
     redis_client.delete("tater:hydra:llm_url")
 
-    if "hydra_llm_model" in updates:
-        value = str(updates.get("hydra_llm_model") or "").strip()
-        if value:
-            redis_client.set(HYDRA_LLM_MODEL_KEY, value)
-        else:
-            redis_client.delete(HYDRA_LLM_MODEL_KEY)
+    beast_mode_enabled_value: Optional[bool] = None
+    if "hydra_beast_mode_enabled" in updates:
+        beast_mode_enabled_value = _as_bool_flag(
+            updates.get("hydra_beast_mode_enabled"),
+            default=False,
+        )
+        redis_client.set(
+            HYDRA_BEAST_MODE_ENABLED_KEY,
+            "true" if beast_mode_enabled_value else "false",
+        )
+
+    for role in HYDRA_BEAST_CONFIG_ROLE_IDS:
+        for field in ("host", "port", "model"):
+            payload_key = f"hydra_llm_{role}_{field}"
+            if payload_key not in updates:
+                continue
+            raw_value = str(updates.get(payload_key) or "").strip()
+            redis_key = _hydra_role_llm_key(role, field)
+            if field == "port" and raw_value:
+                if not raw_value.isdigit():
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{payload_key} must be an integer between 1 and 65535",
+                    )
+                port_int = int(raw_value)
+                if port_int < 1 or port_int > 65535:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{payload_key} must be an integer between 1 and 65535",
+                    )
+                raw_value = str(port_int)
+            if raw_value:
+                redis_client.set(redis_key, raw_value)
+            else:
+                redis_client.delete(redis_key)
 
     hydra_mappings = {
         "hydra_agent_state_ttl_seconds": (

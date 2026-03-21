@@ -8,7 +8,6 @@ from helpers import redis_client as _redis_client
 REDIS_KEY = "tater:admin_only_plugins"
 
 DEFAULT_ADMIN_ONLY_PLUGINS = {
-    "ai_tasks",
     "broadcast",
     "discord_admin",
     "events_query",

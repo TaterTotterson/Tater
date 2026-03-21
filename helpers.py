@@ -1,5 +1,7 @@
 import os
 import asyncio
+import threading
+import inspect
 from openai import AsyncOpenAI
 import requests
 import nest_asyncio
@@ -9,8 +11,9 @@ import re
 import json
 import base64
 import uuid
+import time
 import websocket
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
 load_dotenv()
@@ -66,6 +69,31 @@ def run_async(coro):
 # ---------------------------------------------------------
 # LLM client wrapper (OpenAI-compatible /v1/chat/completions)
 # ---------------------------------------------------------
+HYDRA_LLM_HOST_KEY = "tater:hydra:llm_host"
+HYDRA_LLM_PORT_KEY = "tater:hydra:llm_port"
+HYDRA_LLM_MODEL_KEY = "tater:hydra:llm_model"
+HYDRA_LLM_BASE_SERVERS_KEY = "tater:hydra:llm_base_servers"
+HYDRA_LLM_SETUP_ERROR = (
+    "Hydra LLM is not configured. Open Settings > Hydra and set Hydra LLM Host/IP, Port, and Model."
+)
+_HYDRA_BASE_RR_LOCK = threading.Lock()
+_HYDRA_BASE_RR_INDEX: Dict[str, int] = {}
+_ACTIVE_LLM_CALLS_LOCK = threading.RLock()
+_ACTIVE_LLM_CALLS: Dict[str, Dict[str, Any]] = {}
+_LLM_CALL_HISTORY: List[Dict[str, Any]] = []
+_LLM_CALL_HISTORY_MAX = 5000
+_LLM_CALL_COUNTERS: Dict[str, int] = {"started": 0, "completed": 0, "failed": 0}
+
+_LLM_ORIGIN_KIND_LABELS = {
+    "hydra": "Hydra",
+    "webui": "WebUI",
+    "verba": "Verba",
+    "portal": "Portal",
+    "core": "Core",
+    "other": "Other",
+}
+
+
 def _normalize_base_url(host: str) -> str:
     """
     Ensure base_url ends with /v1 and includes scheme.
@@ -158,47 +186,535 @@ def _coerce_content_to_text(content) -> str:
 
     return "" if content is None else str(content)
 
+
+def _safe_redis_text_get(key: str, *, redis_conn: Any = None) -> str:
+    client = redis_conn or redis_client
+    try:
+        return str(client.get(key) or "").strip()
+    except Exception:
+        return ""
+
+
+def _build_hydra_llm_endpoint(host: Any, port: Any) -> str:
+    raw_host = str(host or "").strip()
+    raw_port = str(port or "").strip()
+    if not raw_host:
+        return ""
+
+    candidate = raw_host if raw_host.startswith(("http://", "https://")) else f"http://{raw_host}"
+    parsed = urlparse(candidate)
+    hostname = str(parsed.hostname or "").strip()
+    if not hostname:
+        return ""
+
+    resolved_port = raw_port or (str(parsed.port) if parsed.port is not None else "")
+    if resolved_port:
+        try:
+            port_int = int(str(resolved_port).strip())
+        except Exception:
+            return ""
+        if port_int < 1 or port_int > 65535:
+            return ""
+        netloc = f"{hostname}:{port_int}"
+    else:
+        netloc = hostname
+
+    return urlunparse((parsed.scheme or "http", netloc, "", "", "", "")).rstrip("/")
+
+
+def _resolve_hydra_llm_defaults(*, redis_conn: Any = None) -> tuple[str, str]:
+    host = _safe_redis_text_get(HYDRA_LLM_HOST_KEY, redis_conn=redis_conn)
+    port = _safe_redis_text_get(HYDRA_LLM_PORT_KEY, redis_conn=redis_conn)
+    model = _safe_redis_text_get(HYDRA_LLM_MODEL_KEY, redis_conn=redis_conn)
+    endpoint = _build_hydra_llm_endpoint(host, port)
+    return endpoint, model
+
+
+def _normalize_hydra_base_server_row(row: Any) -> Optional[Dict[str, str]]:
+    if not isinstance(row, dict):
+        return None
+
+    raw_host = str(row.get("host") or "").strip()
+    raw_port = str(row.get("port") or "").strip()
+    raw_model = str(row.get("model") or "").strip()
+    if not raw_host and not raw_port and not raw_model:
+        return None
+
+    endpoint = _build_hydra_llm_endpoint(raw_host, raw_port)
+    if not endpoint or not raw_model:
+        return None
+
+    parsed = urlparse(endpoint)
+    hostname = str(parsed.hostname or "").strip()
+    if not hostname:
+        return None
+
+    host_with_scheme = raw_host.startswith(("http://", "https://"))
+    canonical_host = f"{parsed.scheme}://{hostname}" if host_with_scheme else hostname
+    canonical_port = str(parsed.port) if parsed.port is not None else ""
+
+    return {
+        "host": canonical_host,
+        "port": canonical_port,
+        "model": raw_model,
+        "endpoint": endpoint,
+    }
+
+
+def resolve_hydra_base_servers(*, redis_conn: Any = None, include_legacy: bool = True) -> List[Dict[str, str]]:
+    client = redis_conn or redis_client
+    rows: List[Dict[str, str]] = []
+    seen: set[Tuple[str, str]] = set()
+
+    raw_payload = _safe_redis_text_get(HYDRA_LLM_BASE_SERVERS_KEY, redis_conn=client)
+    parsed_payload: Any = []
+    if raw_payload:
+        try:
+            parsed_payload = json.loads(raw_payload)
+        except Exception:
+            parsed_payload = []
+
+    if isinstance(parsed_payload, list):
+        for item in parsed_payload:
+            normalized = _normalize_hydra_base_server_row(item)
+            if not normalized:
+                continue
+            signature = (normalized["endpoint"], normalized["model"])
+            if signature in seen:
+                continue
+            seen.add(signature)
+            rows.append(normalized)
+
+    if rows or not include_legacy:
+        return rows
+
+    legacy_host = _safe_redis_text_get(HYDRA_LLM_HOST_KEY, redis_conn=client)
+    legacy_port = _safe_redis_text_get(HYDRA_LLM_PORT_KEY, redis_conn=client)
+    legacy_model = _safe_redis_text_get(HYDRA_LLM_MODEL_KEY, redis_conn=client)
+    legacy_row = _normalize_hydra_base_server_row(
+        {"host": legacy_host, "port": legacy_port, "model": legacy_model}
+    )
+    if legacy_row:
+        signature = (legacy_row["endpoint"], legacy_row["model"])
+        if signature not in seen:
+            rows.append(legacy_row)
+    return rows
+
+
+def _next_hydra_base_rr_index(pool_key: str, size: int) -> int:
+    if size <= 1:
+        return 0
+    key = str(pool_key or "").strip() or "__default__"
+    with _HYDRA_BASE_RR_LOCK:
+        next_index = int(_HYDRA_BASE_RR_INDEX.get(key, 0))
+        selected = next_index % int(size)
+        _HYDRA_BASE_RR_INDEX[key] = (selected + 1) % int(size)
+    return selected
+
+
+def _llm_origin_kind_label(kind: Any) -> str:
+    token = str(kind or "").strip().lower() or "other"
+    return _LLM_ORIGIN_KIND_LABELS.get(token, token.capitalize() or "Other")
+
+
+def _classify_llm_call_origin(filename: str, module_name: str) -> Dict[str, str]:
+    raw_path = str(filename or "").strip()
+    normalized = raw_path.replace("\\", "/")
+    lowered = normalized.lower()
+    stem = os.path.splitext(os.path.basename(normalized))[0].strip().lower()
+    module_token = str(module_name or "").strip()
+    source = stem or module_token or "unknown"
+    kind = "other"
+
+    if "/hydra/" in lowered:
+        kind = "hydra"
+        source = "hydra"
+    elif "/verba/" in lowered or "/verbas/" in lowered:
+        kind = "verba"
+        source = source.removesuffix("_verba")
+    elif "/portals/" in lowered:
+        kind = "portal"
+        source = source.removesuffix("_portal")
+    elif "/cores/" in lowered:
+        kind = "core"
+        source = source.removesuffix("_core")
+    elif stem == "tateros_app":
+        kind = "webui"
+        source = "webui"
+    elif stem.endswith("_core"):
+        kind = "core"
+        source = stem.removesuffix("_core")
+    elif stem.endswith("_portal"):
+        kind = "portal"
+        source = stem.removesuffix("_portal")
+    elif stem.endswith("_verba"):
+        kind = "verba"
+        source = stem.removesuffix("_verba")
+
+    source = str(source or "unknown").strip() or "unknown"
+    rel_path = normalized
+    try:
+        cwd = os.getcwd()
+        rel_candidate = os.path.relpath(raw_path, cwd)
+        if rel_candidate and not rel_candidate.startswith(".."):
+            rel_path = rel_candidate.replace("\\", "/")
+    except Exception:
+        pass
+
+    return {
+        "kind": kind,
+        "source": source,
+        "module": module_token or source,
+        "path": rel_path,
+    }
+
+
+def _infer_llm_call_origin(max_depth: int = 48) -> Dict[str, str]:
+    frame = inspect.currentframe()
+    try:
+        if frame is not None:
+            frame = frame.f_back
+        depth = 0
+        while frame is not None and depth < int(max_depth):
+            code = frame.f_code
+            filename = str(getattr(code, "co_filename", "") or "")
+            function_name = str(getattr(code, "co_name", "") or "").strip()
+            module_name = str(frame.f_globals.get("__name__") or "").strip()
+            depth += 1
+            frame = frame.f_back
+
+            if not filename:
+                continue
+            normalized = filename.replace("\\", "/").lower()
+            if normalized.endswith("/helpers.py"):
+                continue
+
+            info = _classify_llm_call_origin(filename, module_name)
+            info["function"] = function_name
+            return info
+    finally:
+        # Explicitly clear frame references.
+        del frame
+
+    return {
+        "kind": "other",
+        "source": "unknown",
+        "module": "",
+        "path": "",
+        "function": "",
+    }
+
+
+def _register_active_llm_call(
+    *,
+    host: str,
+    model: str,
+    stream: bool,
+    message_count: int,
+) -> str:
+    origin = _infer_llm_call_origin()
+    call_id = str(uuid.uuid4())
+    started_at = time.time()
+    row = {
+        "id": call_id,
+        "host": str(host or "").strip(),
+        "model": str(model or "").strip(),
+        "stream": bool(stream),
+        "message_count": max(0, int(message_count)),
+        "started_at": started_at,
+        "kind": str(origin.get("kind") or "other"),
+        "source": str(origin.get("source") or "unknown"),
+        "module": str(origin.get("module") or ""),
+        "path": str(origin.get("path") or ""),
+        "function": str(origin.get("function") or ""),
+    }
+    with _ACTIVE_LLM_CALLS_LOCK:
+        _ACTIVE_LLM_CALLS[call_id] = row
+        _LLM_CALL_COUNTERS["started"] = int(_LLM_CALL_COUNTERS.get("started") or 0) + 1
+    return call_id
+
+
+def _finish_active_llm_call(
+    call_id: str,
+    *,
+    error: Optional[Exception] = None,
+    response_model: str = "",
+) -> None:
+    call_token = str(call_id or "").strip()
+    if not call_token:
+        return
+
+    finished_at = time.time()
+    with _ACTIVE_LLM_CALLS_LOCK:
+        row = _ACTIVE_LLM_CALLS.pop(call_token, None)
+        if not isinstance(row, dict):
+            return
+
+        started_at = float(row.get("started_at") or 0.0)
+        duration_ms = max(0.0, (finished_at - started_at) * 1000.0) if started_at > 0.0 else 0.0
+        ok = error is None
+
+        if ok:
+            _LLM_CALL_COUNTERS["completed"] = int(_LLM_CALL_COUNTERS.get("completed") or 0) + 1
+        else:
+            _LLM_CALL_COUNTERS["failed"] = int(_LLM_CALL_COUNTERS.get("failed") or 0) + 1
+
+        history_row = {
+            "id": call_token,
+            "finished_at": finished_at,
+            "started_at": started_at,
+            "duration_ms": duration_ms,
+            "ok": bool(ok),
+            "error": str(error) if error is not None else "",
+            "kind": str(row.get("kind") or "other"),
+            "source": str(row.get("source") or "unknown"),
+            "module": str(row.get("module") or ""),
+            "path": str(row.get("path") or ""),
+            "function": str(row.get("function") or ""),
+            "host": str(row.get("host") or ""),
+            "model": str(response_model or row.get("model") or "").strip(),
+            "stream": bool(row.get("stream")),
+            "message_count": max(0, int(row.get("message_count") or 0)),
+        }
+        _LLM_CALL_HISTORY.append(history_row)
+        overflow = len(_LLM_CALL_HISTORY) - int(_LLM_CALL_HISTORY_MAX)
+        if overflow > 0:
+            del _LLM_CALL_HISTORY[:overflow]
+
+
+def get_active_llm_calls_snapshot(*, limit: int = 100) -> List[Dict[str, Any]]:
+    max_items = max(1, min(int(limit or 0), 500))
+    now = time.time()
+
+    with _ACTIVE_LLM_CALLS_LOCK:
+        rows = [dict(item) for item in _ACTIVE_LLM_CALLS.values() if isinstance(item, dict)]
+
+    rows.sort(key=lambda row: float(row.get("started_at") or 0.0))
+    out: List[Dict[str, Any]] = []
+    for row in rows[-max_items:]:
+        started_at = float(row.get("started_at") or 0.0)
+        age_seconds = max(0, int(now - started_at)) if started_at > 0 else 0
+        kind = str(row.get("kind") or "other")
+        source = str(row.get("source") or "unknown")
+        out.append(
+            {
+                "id": str(row.get("id") or ""),
+                "kind": kind,
+                "kind_label": _llm_origin_kind_label(kind),
+                "source": source,
+                "source_label": f"{_llm_origin_kind_label(kind)} - {source}",
+                "module": str(row.get("module") or ""),
+                "path": str(row.get("path") or ""),
+                "function": str(row.get("function") or ""),
+                "host": str(row.get("host") or ""),
+                "model": str(row.get("model") or ""),
+                "stream": bool(row.get("stream")),
+                "message_count": max(0, int(row.get("message_count") or 0)),
+                "started_at": started_at,
+                "age_seconds": age_seconds,
+            }
+        )
+    return out
+
+
+def _llm_call_history_windows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    now = time.time()
+    windows = [
+        ("24h", "Last 24 hours", 24 * 60 * 60),
+        ("7d", "Last 7 days", 7 * 24 * 60 * 60),
+        ("30d", "Last 30 days", 30 * 24 * 60 * 60),
+    ]
+    buckets: Dict[str, Dict[str, Any]] = {
+        key: {
+            "key": key,
+            "label": label,
+            "calls": 0,
+            "completed": 0,
+            "failed": 0,
+            "duration_ms_total": 0.0,
+            "source_counts": {},
+        }
+        for key, label, _ in windows
+    }
+
+    for row in rows:
+        finished_at = float(row.get("finished_at") or 0.0)
+        if finished_at <= 0.0:
+            continue
+        age = max(0.0, now - finished_at)
+        ok = bool(row.get("ok"))
+        duration_ms = max(0.0, float(row.get("duration_ms") or 0.0))
+        kind = str(row.get("kind") or "other")
+        source = str(row.get("source") or "unknown")
+        source_key = f"{kind}:{source}"
+
+        for key, _label, seconds in windows:
+            if age > float(seconds):
+                continue
+            bucket = buckets[key]
+            bucket["calls"] = int(bucket.get("calls") or 0) + 1
+            if ok:
+                bucket["completed"] = int(bucket.get("completed") or 0) + 1
+            else:
+                bucket["failed"] = int(bucket.get("failed") or 0) + 1
+            bucket["duration_ms_total"] = float(bucket.get("duration_ms_total") or 0.0) + duration_ms
+            source_counts = bucket.get("source_counts")
+            if isinstance(source_counts, dict):
+                source_counts[source_key] = int(source_counts.get(source_key) or 0) + 1
+
+    window_rows: List[Dict[str, Any]] = []
+    for key, label, _seconds in windows:
+        bucket = buckets.get(key) or {"key": key, "label": label}
+        calls = int(bucket.get("calls") or 0)
+        duration_ms_total = float(bucket.get("duration_ms_total") or 0.0)
+        avg_ms = (duration_ms_total / calls) if calls > 0 else 0.0
+
+        source_rows: List[Dict[str, Any]] = []
+        raw_source_counts = bucket.get("source_counts") if isinstance(bucket.get("source_counts"), dict) else {}
+        for source_key, count in raw_source_counts.items():
+            kind, _sep, source = str(source_key or "").partition(":")
+            source_rows.append(
+                {
+                    "kind": kind or "other",
+                    "source": source or "unknown",
+                    "label": f"{_llm_origin_kind_label(kind or 'other')} - {source or 'unknown'}",
+                    "calls": int(count),
+                }
+            )
+        source_rows.sort(key=lambda row: (-int(row.get("calls") or 0), str(row.get("label") or "")))
+
+        window_rows.append(
+            {
+                "key": key,
+                "label": label,
+                "calls": calls,
+                "completed": int(bucket.get("completed") or 0),
+                "failed": int(bucket.get("failed") or 0),
+                "avg_ms": round(avg_ms, 2),
+                "top_sources": source_rows[:4],
+            }
+        )
+
+    return {
+        "windows": window_rows,
+        "sample_size": int(len(rows)),
+    }
+
+
+def get_llm_call_runtime_summary(*, include_history: bool = False) -> Dict[str, Any]:
+    active_calls = get_active_llm_calls_snapshot(limit=120)
+    by_kind_counts: Dict[str, int] = {}
+    by_source_counts: Dict[str, int] = {}
+
+    for row in active_calls:
+        kind = str(row.get("kind") or "other")
+        source = str(row.get("source") or "unknown")
+        by_kind_counts[kind] = int(by_kind_counts.get(kind) or 0) + 1
+        source_key = f"{kind}:{source}"
+        by_source_counts[source_key] = int(by_source_counts.get(source_key) or 0) + 1
+
+    by_kind = [
+        {
+            "kind": kind,
+            "label": _llm_origin_kind_label(kind),
+            "calls": int(count),
+        }
+        for kind, count in by_kind_counts.items()
+    ]
+    by_kind.sort(key=lambda row: (-int(row.get("calls") or 0), str(row.get("label") or "")))
+
+    by_source = []
+    for source_key, count in by_source_counts.items():
+        kind, _sep, source = str(source_key or "").partition(":")
+        by_source.append(
+            {
+                "kind": kind or "other",
+                "source": source or "unknown",
+                "label": f"{_llm_origin_kind_label(kind or 'other')} - {source or 'unknown'}",
+                "calls": int(count),
+            }
+        )
+    by_source.sort(key=lambda row: (-int(row.get("calls") or 0), str(row.get("label") or "")))
+
+    with _ACTIVE_LLM_CALLS_LOCK:
+        totals = {
+            "started": int(_LLM_CALL_COUNTERS.get("started") or 0),
+            "completed": int(_LLM_CALL_COUNTERS.get("completed") or 0),
+            "failed": int(_LLM_CALL_COUNTERS.get("failed") or 0),
+        }
+        history_rows = [dict(item) for item in _LLM_CALL_HISTORY] if include_history else []
+
+    out = {
+        "active_total": int(len(active_calls)),
+        "totals": totals,
+        "active_by_kind": by_kind,
+        "active_by_source": by_source,
+        "active_calls": active_calls,
+    }
+    if include_history:
+        out["history"] = _llm_call_history_windows(history_rows)
+    return out
+
+
 def build_llm_host_from_env(default_host="127.0.0.1", default_port="11434") -> str:
     """
-    Build a usable host string for LLMClientWrapper from env vars.
-
-    Supports:
-      - LLM_HOST=192.168.1.50, LLM_PORT=11434 -> http://192.168.1.50:11434
-      - LLM_HOST=http://192.168.1.50, LLM_PORT=11434 -> http://192.168.1.50:11434
-      - LLM_HOST=http://192.168.1.50:11434, LLM_PORT=11434 -> http://192.168.1.50:11434
-      - LLM_HOST=https://example.com/v1, LLM_PORT= -> https://example.com/v1
+    Legacy helper name kept for compatibility.
+    Returns Hydra Base LLM endpoint from Redis settings.
     """
-    llm_host = (os.getenv("LLM_HOST", default_host) or "").strip()
-    llm_port = (os.getenv("LLM_PORT", default_port) or "").strip()
-
-    # If the user included scheme, don't prepend http://
-    if llm_host.startswith("http://") or llm_host.startswith("https://"):
-        # If a port is specified and the URL doesn't already end with that port, append it.
-        # This is mainly for "http://host" + LLM_PORT=11434 style configs.
-        if llm_port:
-            # Parse to see if port already present
-            p = urlparse(llm_host)
-            if p.port is None:
-                # No port present -> append
-                return f"{llm_host.rstrip('/') }:{llm_port}"
-        return llm_host.rstrip("/")
-
-    # No scheme provided -> assume http:// and append port
-    return f"http://{llm_host}:{llm_port}"
+    endpoint, _ = _resolve_hydra_llm_defaults()
+    return endpoint
 
 def get_llm_client_from_env(host: Optional[str] = None, model: Optional[str] = None, **kwargs) -> "LLMClientWrapper":
     """
     Construct an LLMClientWrapper using explicit host/model overrides,
-    with LLM_HOST/LLM_PORT and LLM_MODEL env fallback.
+    with Hydra Base LLM settings fallback from Redis.
+    No .env host/model fallback is used.
     """
-    resolved_host = str(host or "").strip() or build_llm_host_from_env()
-    resolved_model = str(model or "").strip() or None
+    redis_conn = kwargs.pop("redis_conn", None)
+    explicit_host = str(host or "").strip()
+    explicit_model = str(model or "").strip()
+
+    base_servers = resolve_hydra_base_servers(redis_conn=redis_conn, include_legacy=True)
+    default_host = str(base_servers[0]["endpoint"]).strip() if base_servers else ""
+    default_model = str(base_servers[0]["model"]).strip() if base_servers else ""
+    if not default_host or not default_model:
+        fallback_host, fallback_model = _resolve_hydra_llm_defaults(redis_conn=redis_conn)
+        if not default_host:
+            default_host = fallback_host
+        if not default_model:
+            default_model = fallback_model
+
+    resolved_host = explicit_host or default_host
+    resolved_model = explicit_model or default_model
+    if not resolved_host or not resolved_model:
+        raise RuntimeError(HYDRA_LLM_SETUP_ERROR)
+
+    if not explicit_host and not explicit_model and len(base_servers) > 1:
+        clients: List[LLMClientWrapper] = []
+        signature_parts: List[str] = []
+        for row in base_servers:
+            endpoint = str(row.get("endpoint") or "").strip()
+            row_model = str(row.get("model") or "").strip()
+            if not endpoint or not row_model:
+                continue
+            clients.append(LLMClientWrapper(host=endpoint, model=row_model, **kwargs))
+            signature_parts.append(f"{endpoint}|{row_model}")
+        if len(clients) > 1:
+            pool_key = "||".join(signature_parts)
+            return RoundRobinLLMClientWrapper(clients=clients, pool_key=pool_key)
+        if len(clients) == 1:
+            return clients[0]
+
     return LLMClientWrapper(host=resolved_host, model=resolved_model, **kwargs)
 
 class LLMClientWrapper:
     def __init__(self, host, model=None, **kwargs):
-        model = model or os.getenv("LLM_MODEL", "gemma-3-27b-it-abliterated")
-        base_url = _normalize_base_url(host)
+        resolved_host = str(host or "").strip()
+        resolved_model = str(model or "").strip()
+        if not resolved_host or not resolved_model:
+            raise RuntimeError(HYDRA_LLM_SETUP_ERROR)
+
+        base_url = _normalize_base_url(resolved_host)
 
         self.client = AsyncOpenAI(
             base_url=base_url,
@@ -207,7 +723,7 @@ class LLMClientWrapper:
         )
 
         self.host = base_url.rstrip("/")
-        self.model = model
+        self.model = resolved_model
 
         # Common generation defaults (caller can override per-call)
         self.max_tokens = int(os.getenv("LLM_MAX_TOKENS", "1024"))
@@ -219,7 +735,7 @@ class LLMClientWrapper:
         self._llm_prompt_tokens = 0
         self._llm_completion_tokens = 0
         self._llm_total_tokens = 0
-        self._llm_model_last = str(model or "").strip() or "LLM"
+        self._llm_model_last = str(resolved_model or "").strip() or "LLM"
 
     async def aclose(self):
         client = getattr(self, "client", None)
@@ -313,61 +829,181 @@ class LLMClientWrapper:
             # fail open: at least avoid crashing
             messages = messages if isinstance(messages, list) else []
 
-        started_at = asyncio.get_running_loop().time()
-        response = await self.client.chat.completions.create(
-            model=model,
-            messages=messages,
-            stream=stream,
-            timeout=timeout,
-            **kwargs,
+        call_id = _register_active_llm_call(
+            host=str(self.host or "").strip(),
+            model=str(model or "").strip(),
+            stream=bool(stream),
+            message_count=(len(messages) if isinstance(messages, list) else 0),
         )
-        elapsed = max(0.0, float(asyncio.get_running_loop().time() - started_at))
-        self._llm_calls += 1
-        self._llm_elapsed_sec += elapsed
+        call_error: Optional[Exception] = None
+        final_model = str(model or "").strip()
 
-        response_model = getattr(response, "model", model)
-        if response_model:
-            self._llm_model_last = str(response_model)
-
-        usage = getattr(response, "usage", None)
-        prompt_tokens = 0
-        completion_tokens = 0
-        total_tokens = 0
         try:
-            if isinstance(usage, dict):
-                prompt_tokens = int(usage.get("prompt_tokens") or 0)
-                completion_tokens = int(usage.get("completion_tokens") or 0)
-                total_tokens = int(usage.get("total_tokens") or 0)
-            elif usage is not None:
-                prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
-                completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
-                total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
-        except Exception:
+            started_at = asyncio.get_running_loop().time()
+            response = await self.client.chat.completions.create(
+                model=model,
+                messages=messages,
+                stream=stream,
+                timeout=timeout,
+                **kwargs,
+            )
+            elapsed = max(0.0, float(asyncio.get_running_loop().time() - started_at))
+            self._llm_calls += 1
+            self._llm_elapsed_sec += elapsed
+
+            response_model = getattr(response, "model", model)
+            if response_model:
+                self._llm_model_last = str(response_model)
+            final_model = str(response_model or final_model or "").strip()
+
+            usage = getattr(response, "usage", None)
             prompt_tokens = 0
             completion_tokens = 0
             total_tokens = 0
-        if total_tokens <= 0:
-            total_tokens = max(0, prompt_tokens + completion_tokens)
+            try:
+                if isinstance(usage, dict):
+                    prompt_tokens = int(usage.get("prompt_tokens") or 0)
+                    completion_tokens = int(usage.get("completion_tokens") or 0)
+                    total_tokens = int(usage.get("total_tokens") or 0)
+                elif usage is not None:
+                    prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+                    completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+                    total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
+            except Exception:
+                prompt_tokens = 0
+                completion_tokens = 0
+                total_tokens = 0
+            if total_tokens <= 0:
+                total_tokens = max(0, prompt_tokens + completion_tokens)
 
-        self._llm_prompt_tokens += max(0, prompt_tokens)
-        self._llm_completion_tokens += max(0, completion_tokens)
-        self._llm_total_tokens += max(0, total_tokens)
+            self._llm_prompt_tokens += max(0, prompt_tokens)
+            self._llm_completion_tokens += max(0, completion_tokens)
+            self._llm_total_tokens += max(0, total_tokens)
 
-        if stream:
-            return response
+            if stream:
+                return response
 
-        # Defensive: choices can be empty in edge cases / errors
-        if not getattr(response, "choices", None):
-            return {"model": getattr(response, "model", model),
-                    "message": {"role": "assistant", "content": ""}}
+            # Defensive: choices can be empty in edge cases / errors
+            if not getattr(response, "choices", None):
+                return {
+                    "model": getattr(response, "model", model),
+                    "message": {"role": "assistant", "content": ""},
+                }
 
-        choice = response.choices[0].message or {}
-        raw_content = getattr(choice, "content", "") if hasattr(choice, "content") else choice.get("content", "")
-        content_text = _coerce_content_to_text(raw_content)
+            choice = response.choices[0].message or {}
+            raw_content = getattr(choice, "content", "") if hasattr(choice, "content") else choice.get("content", "")
+            content_text = _coerce_content_to_text(raw_content)
+
+            return {
+                "model": getattr(response, "model", model),
+                "message": {"role": getattr(choice, "role", "assistant"), "content": content_text},
+            }
+        except Exception as exc:
+            call_error = exc
+            raise
+        finally:
+            _finish_active_llm_call(
+                call_id,
+                error=call_error,
+                response_model=final_model,
+            )
+
+
+class RoundRobinLLMClientWrapper:
+    def __init__(self, *, clients: List[LLMClientWrapper], pool_key: str = ""):
+        self._clients = [client for client in (clients or []) if client is not None]
+        if not self._clients:
+            raise RuntimeError(HYDRA_LLM_SETUP_ERROR)
+        self._pool_key = str(pool_key or "").strip()
+        self.host = str(getattr(self._clients[0], "host", "") or "")
+        self.model = str(getattr(self._clients[0], "model", "") or "")
+
+    def _select_client(self) -> LLMClientWrapper:
+        if len(self._clients) == 1:
+            return self._clients[0]
+        idx = _next_hydra_base_rr_index(self._pool_key, len(self._clients))
+        return self._clients[idx]
+
+    async def chat(self, messages, **kwargs):
+        client = self._select_client()
+        return await client.chat(messages, **kwargs)
+
+    async def aclose(self):
+        seen: set[int] = set()
+        for client in self._clients:
+            ident = id(client)
+            if ident in seen:
+                continue
+            seen.add(ident)
+            close_async = getattr(client, "aclose", None)
+            if callable(close_async):
+                try:
+                    await close_async()
+                except RuntimeError as exc:
+                    if "Event loop is closed" not in str(exc):
+                        raise
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self.aclose()
+
+    def get_perf_stats(self, *, reset: bool = False) -> Dict[str, Any]:
+        elapsed_total = 0.0
+        prompt_tokens_total = 0
+        completion_tokens_total = 0
+        total_tokens_total = 0
+        calls_total = 0
+        model_names: List[str] = []
+
+        for client in self._clients:
+            getter = getattr(client, "get_perf_stats", None)
+            if not callable(getter):
+                continue
+            stats = getter(reset=reset)
+            if not isinstance(stats, dict):
+                continue
+            elapsed_total += max(0.0, float(stats.get("elapsed") or 0.0))
+            prompt_tokens_total += max(0, int(stats.get("prompt_tokens") or 0))
+            completion_tokens_total += max(0, int(stats.get("completion_tokens") or 0))
+            total_tokens_total += max(0, int(stats.get("total_tokens") or 0))
+            calls_total += max(0, int(stats.get("calls") or 0))
+            model_name = str(stats.get("model") or "").strip()
+            if model_name and model_name not in model_names:
+                model_names.append(model_name)
+
+        if total_tokens_total <= 0:
+            total_tokens_total = max(0, prompt_tokens_total + completion_tokens_total)
+
+        tps_total = (
+            float(total_tokens_total) / float(elapsed_total)
+            if elapsed_total > 0.0 and total_tokens_total > 0
+            else 0.0
+        )
+        tps_comp = (
+            float(completion_tokens_total) / float(elapsed_total)
+            if elapsed_total > 0.0 and completion_tokens_total > 0
+            else 0.0
+        )
+
+        model_label = ", ".join(model_names[:4]).strip()
+        if len(model_names) > 4:
+            model_label = f"{model_label}, +{len(model_names) - 4}"
+        if model_label:
+            model_label = f"round_robin({model_label})"
+        else:
+            model_label = "round_robin"
 
         return {
-            "model": getattr(response, "model", model),
-            "message": {"role": getattr(choice, "role", "assistant"), "content": content_text}
+            "model": model_label,
+            "elapsed": round(elapsed_total, 6),
+            "prompt_tokens": prompt_tokens_total,
+            "completion_tokens": completion_tokens_total,
+            "total_tokens": total_tokens_total,
+            "tps_total": round(tps_total, 4),
+            "tps_comp": round(tps_comp, 4),
+            "calls": calls_total,
         }
 
 # ---------------------------------------------------------

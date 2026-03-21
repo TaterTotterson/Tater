@@ -25,6 +25,20 @@ Chat path:
 - Minos stands down
 - Hermes is not invoked unless execution occurs
 
+Hydra model routing:
+
+- Base model keys (`Hydra LLM Host`, `Hydra LLM Port`, `Hydra LLM Model`) define the primary AI Calls server.
+- You can add additional Base servers; regular AI calls rotate round-robin across all configured Base servers.
+- With Beast Mode off, Hydra uses the Base server pool for all heads.
+- With Beast Mode on, Hydra still uses the Base server pool for AI Calls, and uses per-head models for:
+  - Chat (normal conversation replies)
+  - Astraeus (planning)
+  - Thanatos (execution)
+  - Minos (judging)
+  - Hermes (final response)
+- In WebUI Settings -> Hydra -> Hydra Models, Beast Mode toggles an animated panel swap between Base model settings and Beast head model settings.
+- If required model settings are missing, Hydra returns the setup message and does not fall back to another model.
+
 ---
 
 ## 🛒 Tater Shop (Unified Catalog)
@@ -198,6 +212,8 @@ After starting TaterOS, configure your local LLM endpoint in **Settings**:
 - `Hydra LLM Host`
 - `Hydra LLM Port`
 - `Hydra LLM Model`
+- Optional: add more Base servers for round-robin regular AI calls.
+- Optional: enable `Beast Mode` and set per-head model settings for Chat/Astraeus/Thanatos/Minos/Hermes.
 
 Those values are stored in Redis and used by Hydra at runtime.
 
@@ -273,6 +289,8 @@ After the container is running, open TaterOS and configure local LLM endpoint/mo
 - `Hydra LLM Host`
 - `Hydra LLM Port`
 - `Hydra LLM Model`
+- Optional: add more Base servers for round-robin regular AI calls.
+- Optional: enable `Beast Mode` and set per-head model settings for Chat/Astraeus/Thanatos/Minos/Hermes.
 
 Tip: The runtime data lives in `/app/agent_lab` inside the container.  
 If you don’t mount it to the host, `/agent_lab` data can be lost when the container is rebuilt or updated.
