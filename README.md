@@ -225,20 +225,6 @@ Then open:
 http://127.0.0.1:8501
 ```
 
-HTML UI now includes:
-- Live chat job streaming with tool-status updates
-- Verba/Core/Portal shop install, update, remove, and repo management
-- Core top tabs built from each core's `CORE_WEBUI_TAB` metadata (`Manage` + dynamic core tabs)
-- Startup restore of missing enabled verbas/cores/portals, then autostart of enabled cores/portals
-
-Core HTMLUI tab payload contract:
-- Optional per-core function: `get_htmlui_tab_data(redis_client=..., core_key=..., core_tab=...) -> dict`
-- Payload keys used by HTMLUI: `summary`, `stats`, `items`, `empty_message`
-
-Startup behavior env toggles (optional):
-- `HTMLUI_RESTORE_ENABLED_SURFACES_ON_STARTUP=true|false` (default `true`)
-- `HTMLUI_AUTOSTART_ENABLED_SURFACES_ON_STARTUP=true|false` (default `true`)
-
 ## Docker
 
 ### 1. Pull the Image
