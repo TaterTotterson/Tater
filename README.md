@@ -12,7 +12,7 @@ Main website: [taterassistant.com](https://taterassistant.com)
 Tater is powered by the Hydra Core, a four-headed execution system:
 
 - Astraeus - sees
-- Thanatos - exacute
+- Thanatos - execute
 - Minos - judges
 - Hermes - speaks
 
