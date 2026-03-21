@@ -120,7 +120,7 @@ async def run_thanatos_state_update(
         "tool_result": compact_tool_result_for_thanatos(tool_result, short_text_fn=short_text_fn),
     }
     prompt = (
-        "You are Thanatos, the Reaper head in the Astraeus/Thanatos/Minos loop.\n"
+        "You are Thanatos, the Reaper head in the Astraeus/Thanatos/Hermes loop.\n"
         "Update only the agent state.\n"
         "Return exactly one compact JSON object with keys:\n"
         "goal, plan, facts, open_questions, next_step, tool_history\n"

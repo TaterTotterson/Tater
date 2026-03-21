@@ -125,7 +125,7 @@ def sanitize_user_text(
         out = str(match.group(2) or "").strip()
 
     if re.search(
-        r"\b(planner head|doer head|critic head|astraeus|thanatos|minos|seer head|reaper head|arbiter head|internal orchestration|tool runtime|repair prompt|orchestration roles?)\b",
+        r"\b(planner head|doer head|critic head|astraeus|thanatos|hermes|minos|seer head|reaper head|renderer head|arbiter head|internal orchestration|tool runtime|repair prompt|orchestration roles?)\b",
         out,
         flags=re.IGNORECASE,
     ):

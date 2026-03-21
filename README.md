@@ -2,7 +2,7 @@
   <img src="images/tater-new-logo.png" alt="Tater AI Assistant" width="300"/>
 </div>
 
-**Tater** is an AI assistant that connects to any OpenAI-compatible LLM, giving you a powerful set of AI-driven tools. It includes a WebUI for setup and private chats, and works across **Discord**, **Home Assistant**, **HomeKit**, **IRC**, **macOS**, **Matrix**, **Telegram**, and even the **OG Xbox via XBMC4Xbox**
+**Tater** is a local-first AI assistant powered by local LLM runtimes, giving you a powerful set of AI-driven tools. It includes a WebUI for setup and private chats, and works across **Discord**, **Home Assistant**, **HomeKit**, **IRC**, **macOS**, **Matrix**, **Telegram**, and even the **OG Xbox via XBMC4Xbox**
 
 Main website: [taterassistant.com](https://taterassistant.com)
 
@@ -12,16 +12,16 @@ Main website: [taterassistant.com](https://taterassistant.com)
 Tater is powered by the Cerberus Core, a three-headed execution system:
 
 - Astraeus, the Seer, determines the path ahead
-- Thanatos, the executor, carries out the work
-- Minos, the Arbiter, judges the outcome
+- Thanatos, the executor, carries out and validates the work
+- Hermes, the renderer, composes the final response
 
-Cerberus operates in a loop: foresight -> execution -> judgment -> repeat -> respond.
+Cerberus operates in a loop: foresight -> execution -> validation -> Hermes render -> respond.
 
 Chat path:
 
 - Astraeus speaks with awareness
 - Thanatos stands down
-- Minos is not invoked unless execution occurs
+- Hermes is not invoked unless execution occurs
 
 ---
 
@@ -116,7 +116,7 @@ This is the recommended setup for most users and provides the smoothest experien
 ### Prerequisites
 - Python 3.11
 - **[Redis-Stack](https://hub.docker.com/r/redis/redis-stack)**
-- OpenAI API–compatible LLM app (such as **Ollama**, **LocalAI**, **LM Studio**, **Lemonade**, or **OpenAI API**)
+- A local LLM runtime (such as **Ollama**, **LocalAI**, **LM Studio**, or **Lemonade**)
 - Docker (optional, for containerized deployment)
 
 ### Install Redis Stack (Required)
@@ -181,31 +181,23 @@ pip install -r requirements.txt
 4. **Configure Environment Variables**
 
 Create a `.env` file in the root directory.  
-Below are example configurations for local LLM backends (Ollama, LM Studio, LocalAI) and ChatGPT (GPT-4o, etc.).
+Only Redis connection settings are required in `.env`.
 
 ---
 
-Example: Local backend (Ollama, LM Studio, LocalAI)
+Example: `.env`
 ```
-LLM_HOST=127.0.0.1  
-LLM_PORT=11434  
-LLM_MODEL=gemma3-27b-abliterated  
 REDIS_HOST=127.0.0.1  
 REDIS_PORT=6379  
 ```
 ---
 
-Example: ChatGPT (GPT-4o, etc.)
-```
-LLM_HOST=https://api.openai.com  
-LLM_PORT=  
-LLM_MODEL=gpt-4o  
-LLM_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxx  
-REDIS_HOST=127.0.0.1  
-REDIS_PORT=6379  
-```
-Note: When using ChatGPT, leave LLM_PORT blank.  
-Tater will automatically connect using HTTPS without appending a port number.
+After starting TaterOS, configure your local LLM endpoint in **Settings**:
+- `Cerberus LLM Host`
+- `Cerberus LLM Port`
+- `Cerberus LLM Model`
+
+Those values are stored in Redis and used by Cerberus at runtime.
 
 5. **Run the Web UI**
 
@@ -253,11 +245,11 @@ docker pull ghcr.io/tatertotterson/tater:latest
 
 ### 2. Configuring Environment Variables
 
-Ensure you supply the required environment variables. You can pass these using the `-e` flag when starting the container.
+Ensure Redis settings are supplied when starting the container.
 
 ---
 
-Example: Local backend (Ollama, LM Studio, LocalAI)
+Example: local setup
 ```
 docker run -d --name tater_webui \
   -p 8501:8501 \
@@ -268,9 +260,6 @@ docker run -d --name tater_webui \
   -e TZ=America/Chicago \
   -v /etc/localtime:/etc/localtime:ro \
   -v /etc/timezone:/etc/timezone:ro \
-  -e LLM_HOST=127.0.0.1 \
-  -e LLM_PORT=11434 \
-  -e LLM_MODEL=gemma3-27b-abliterated \
   -e REDIS_HOST=127.0.0.1 \
   -e REDIS_PORT=6379 \
   -v /agent_lab:/app/agent_lab \
@@ -278,28 +267,10 @@ docker run -d --name tater_webui \
 ```
 ---
 
-Example: ChatGPT (GPT-4o, etc.)
-```
-docker run -d --name tater_webui \
-  -p 8501:8501 \
-  -p 8787:8787 \
-  -p 8788:8788 \
-  -p 8789:8789 \
-  -p 8790:8790 \
-  -e TZ=America/Chicago \
-  -v /etc/localtime:/etc/localtime:ro \
-  -v /etc/timezone:/etc/timezone:ro \
-  -e LLM_HOST=https://api.openai.com \
-  -e LLM_PORT= \
-  -e LLM_MODEL=gpt-4o \
-  -e LLM_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxx \
-  -e REDIS_HOST=127.0.0.1 \
-  -e REDIS_PORT=6379 \
-  -v /agent_lab:/app/agent_lab \
-  ghcr.io/tatertotterson/tater:latest
-```
-Note: When using ChatGPT, leave LLM_PORT blank.  
-Tater will automatically connect using HTTPS without appending a port number.
+After the container is running, open TaterOS and configure local LLM endpoint/model in **Settings**:
+- `Cerberus LLM Host`
+- `Cerberus LLM Port`
+- `Cerberus LLM Model`
 
 Tip: The runtime data lives in `/app/agent_lab` inside the container.  
 If you don’t mount it to the host, `/agent_lab` data can be lost when the container is rebuilt or updated.
