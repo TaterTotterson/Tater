@@ -1343,6 +1343,188 @@ function _chatFileUrl(fileId, mimetype = "") {
   return withBasePath(withQuery);
 }
 
+function _sanitizeMarkdownHref(rawHref) {
+  const href = String(rawHref || "").trim();
+  if (!href) {
+    return "";
+  }
+  const lowered = href.toLowerCase();
+  if (
+    lowered.startsWith("http://") ||
+    lowered.startsWith("https://") ||
+    lowered.startsWith("mailto:") ||
+    lowered.startsWith("tel:") ||
+    lowered.startsWith("/") ||
+    lowered.startsWith("#")
+  ) {
+    return href;
+  }
+  return "";
+}
+
+function _renderMarkdownInline(rawText) {
+  const source = String(rawText ?? "");
+  if (!source) {
+    return "";
+  }
+
+  const placeholders = [];
+  let working = source;
+
+  // Protect inline code first so emphasis/link transforms do not affect it.
+  working = working.replace(/`([^`\n]+)`/g, (_match, codeText) => {
+    const token = `@@MD_TOKEN_${placeholders.length}@@`;
+    placeholders.push(`<code>${escapeHtml(codeText)}</code>`);
+    return token;
+  });
+
+  // Convert markdown links to safe anchors.
+  working = working.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (_match, label, href) => {
+    const safeHref = _sanitizeMarkdownHref(href);
+    const token = `@@MD_TOKEN_${placeholders.length}@@`;
+    if (!safeHref) {
+      placeholders.push(`${escapeHtml(label)} (${escapeHtml(href)})`);
+      return token;
+    }
+    placeholders.push(
+      `<a href="${escapeHtml(safeHref)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>`
+    );
+    return token;
+  });
+
+  working = escapeHtml(working);
+  working = working.replace(/\*\*([^*\n][^*\n]*?)\*\*/g, "<strong>$1</strong>");
+  working = working.replace(/\*([^*\n][^*\n]*?)\*/g, "<em>$1</em>");
+
+  // Restore protected inline code and links.
+  placeholders.forEach((html, index) => {
+    const token = `@@MD_TOKEN_${index}@@`;
+    working = working.replaceAll(token, html);
+  });
+
+  return working;
+}
+
+function _renderAssistantMarkdownBubble(rawText) {
+  const source = String(rawText ?? "").replace(/\r\n?/g, "\n");
+  const lines = source.split("\n");
+  const chunks = [];
+  let paragraphLines = [];
+  let listType = "";
+  let listItems = [];
+  let inCodeBlock = false;
+  let codeLines = [];
+  let codeLang = "";
+
+  const flushParagraph = () => {
+    if (!paragraphLines.length) {
+      return;
+    }
+    const rendered = paragraphLines
+      .map((line) => _renderMarkdownInline(line.trim()))
+      .join("<br />");
+    chunks.push(`<p>${rendered}</p>`);
+    paragraphLines = [];
+  };
+
+  const flushList = () => {
+    if (!listType || !listItems.length) {
+      listType = "";
+      listItems = [];
+      return;
+    }
+    const itemsHtml = listItems.map((item) => `<li>${_renderMarkdownInline(item)}</li>`).join("");
+    chunks.push(`<${listType}>${itemsHtml}</${listType}>`);
+    listType = "";
+    listItems = [];
+  };
+
+  const flushCodeBlock = () => {
+    if (!inCodeBlock) {
+      return;
+    }
+    const langClass = codeLang ? ` class="language-${escapeHtml(codeLang)}"` : "";
+    chunks.push(`<pre><code${langClass}>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+    inCodeBlock = false;
+    codeLines = [];
+    codeLang = "";
+  };
+
+  for (const rawLine of lines) {
+    const line = String(rawLine ?? "");
+    const fenceMatch = line.match(/^```(?:\s*([A-Za-z0-9_+\-]+))?\s*$/);
+    if (fenceMatch) {
+      flushParagraph();
+      flushList();
+      if (inCodeBlock) {
+        flushCodeBlock();
+      } else {
+        inCodeBlock = true;
+        codeLang = String(fenceMatch[1] || "").trim();
+        codeLines = [];
+      }
+      continue;
+    }
+
+    if (inCodeBlock) {
+      codeLines.push(line);
+      continue;
+    }
+
+    const trimmed = line.trim();
+    if (!trimmed) {
+      flushParagraph();
+      flushList();
+      continue;
+    }
+
+    const headingMatch = trimmed.match(/^(#{1,6})\s+(.*)$/);
+    if (headingMatch) {
+      flushParagraph();
+      flushList();
+      const level = Math.min(6, Math.max(1, headingMatch[1].length));
+      chunks.push(`<h${level}>${_renderMarkdownInline(headingMatch[2].trim())}</h${level}>`);
+      continue;
+    }
+
+    const orderedMatch = trimmed.match(/^\d+\.\s+(.*)$/);
+    if (orderedMatch) {
+      flushParagraph();
+      if (listType && listType !== "ol") {
+        flushList();
+      }
+      listType = "ol";
+      listItems.push(String(orderedMatch[1] || "").trim());
+      continue;
+    }
+
+    const bulletMatch = trimmed.match(/^[-*+]\s+(.*)$/);
+    if (bulletMatch) {
+      flushParagraph();
+      if (listType && listType !== "ul") {
+        flushList();
+      }
+      listType = "ul";
+      listItems.push(String(bulletMatch[1] || "").trim());
+      continue;
+    }
+
+    if (listType) {
+      flushList();
+    }
+    paragraphLines.push(trimmed);
+  }
+
+  flushParagraph();
+  flushList();
+  flushCodeBlock();
+
+  if (!chunks.length) {
+    return `<div class="bubble-body markdown">${_renderMarkdownInline(source)}</div>`;
+  }
+  return `<div class="bubble-body markdown">${chunks.join("")}</div>`;
+}
+
 function renderChatMessage(message) {
   const role = String(message.role || "assistant").toLowerCase();
   const roleClass = role === "user" ? "user" : "assistant";
@@ -1355,7 +1537,10 @@ function renderChatMessage(message) {
   let bodyHtml = "";
 
   if (typeof content === "string") {
-    bodyHtml = `<div class="bubble-body">${escapeHtml(content)}</div>`;
+    bodyHtml =
+      roleClass === "assistant"
+        ? _renderAssistantMarkdownBubble(content)
+        : `<div class="bubble-body">${escapeHtml(content)}</div>`;
   } else if (content && typeof content === "object") {
     const marker = String(content.marker || "").trim().toLowerCase();
     if (marker === "plugin_wait") {
