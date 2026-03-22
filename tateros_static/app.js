@@ -3476,6 +3476,7 @@ async function refreshShopManagerInPlace(kind, preferredTab = "") {
     const managerHtml = renderShopTabbedManager("verbas", shopData, {
       runtimeHtml,
       runtimeTitle: "Verba Runtime",
+      runtimeCard: false,
     });
     if (!replaceShopManagerInPlace("verbas", managerHtml)) {
       return false;
@@ -3495,7 +3496,7 @@ async function refreshShopManagerInPlace(kind, preferredTab = "") {
     const managerHtml = renderShopTabbedManager(kind, shopData, {
       runtimeHtml,
       runtimeTitle: kind === "cores" ? "Core Runtime" : "Portal Runtime",
-      runtimeCard: kind !== "portals",
+      runtimeCard: false,
     });
     if (!replaceShopManagerInPlace(kind, managerHtml)) {
       return false;
@@ -5495,6 +5496,7 @@ async function loadVerbasView() {
     ${renderShopTabbedManager("verbas", shopData, {
       runtimeHtml,
       runtimeTitle: "Verba Runtime",
+      runtimeCard: false,
     })}
   `;
   bindVerbaRuntimeActions(root);
@@ -5529,6 +5531,7 @@ async function loadSurfaceView(kind) {
     const manageHtml = renderShopTabbedManager("cores", shopData, {
       runtimeHtml,
       runtimeTitle: "Core Runtime",
+      runtimeCard: false,
     });
     const dynamicTabs = Array.isArray(coreTabsData?.tabs) ? coreTabsData.tabs : [];
     const manageLabel = String(coreTabsData?.manage_label || "Manage");
