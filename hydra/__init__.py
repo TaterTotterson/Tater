@@ -1397,6 +1397,25 @@ def _collect_cores_status_rows(*, redis_client: Any) -> List[Dict[str, Any]]:
     return rows
 
 
+def _collect_kernel_tools_status_rows(*, platform: str) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for tool_id in _ordered_kernel_tool_ids(platform=platform):
+        token = str(tool_id or "").strip()
+        if not token:
+            continue
+        rows.append(
+            {
+                "name": token,
+                "description": _status_desc(
+                    _kernel_tool_purpose(token, platform=platform),
+                    fallback="kernel tool",
+                ),
+                "enabled": True,
+            }
+        )
+    return rows
+
+
 def _filter_status_rows(
     rows: List[Dict[str, Any]],
     *,
@@ -1434,12 +1453,13 @@ def _render_tater_system_status_prompt(
     max_tokens: Optional[int],
 ) -> str:
     verbas = _collect_verbas_status_rows(registry=registry, enabled_predicate=enabled_predicate)
+    kernel_tools = _collect_kernel_tools_status_rows(platform=platform)
     portals = _collect_portals_status_rows(redis_client=redis_client, platform=platform)
     cores = _collect_cores_status_rows(redis_client=redis_client)
     compact_mode = _chat_status_compact_mode(
         history=history,
         max_tokens=max_tokens,
-        total_rows=len(verbas) + len(portals) + len(cores),
+        total_rows=len(verbas) + len(kernel_tools) + len(portals) + len(cores),
     )
     verbas_rows = _filter_status_rows(
         verbas,
@@ -1448,6 +1468,14 @@ def _render_tater_system_status_prompt(
         max_compact=6,
         max_full=12,
         inactive_tail=3,
+    )
+    kernel_tool_rows = _filter_status_rows(
+        kernel_tools,
+        active_key="enabled",
+        compact_mode=compact_mode,
+        max_compact=10,
+        max_full=30,
+        inactive_tail=0,
     )
     portals_rows = _filter_status_rows(
         portals,
@@ -1479,6 +1507,15 @@ def _render_tater_system_status_prompt(
         lines.append("- none detected")
 
     lines.append("")
+    lines.append("Kernel Tools (Built-ins)")
+    lines.append("These are kernel tools currently available for direct execution.")
+    if kernel_tool_rows:
+        for row in kernel_tool_rows:
+            lines.append(f"- {row.get('name')}: {row.get('description')}")
+    else:
+        lines.append("- none detected")
+
+    lines.append("")
     lines.append("Portals (Platforms)")
     lines.append("These are the Portals you are currently running or connected through.")
     if portals_rows:
@@ -1503,8 +1540,8 @@ def _render_tater_system_status_prompt(
     lines.append("")
     lines.append("Rules:")
     lines.append("- Use this information for awareness of current capability and system status.")
-    lines.append("- You may reference these Verba tools, Portals, and Cores when relevant.")
-    lines.append("- Do NOT simulate calling Verba tools in this response.")
+    lines.append("- You may reference these Verba tools, Kernel tools, Portals, and Cores when relevant.")
+    lines.append("- Do NOT simulate calling Verba or Kernel tools in this response.")
     lines.append("- Do NOT pretend to execute actions in chat mode.")
     lines.append("- Do NOT mention internal modes, pipelines, or branches unless asked.")
     lines.append("- If the user asks to perform an action, respond naturally as Tater without claiming execution occurred.")
