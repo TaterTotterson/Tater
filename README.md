@@ -81,9 +81,9 @@ You can install both:
 
 directly from the Unraid App Store with a one-click template.
 
-Important for Docker/Unraid persistence:
-- Add a path mapping for `/app/agent_lab` (container) -> `/mnt/user/appdata/tater/agent_lab` (host example).
-- Without this mapping, data in `/agent_lab` (logs/downloads/documents/workspace) can be lost on container rebuilds/updates.
+Unraid note:
+- Add container path mappings for `/app/agent_lab` and `/app/.runtime` to persistent shares (for example `/mnt/user/appdata/tater/agent_lab` and `/mnt/user/appdata/tater/runtime`) so you don’t lose Agent Lab data or Redis setup config during container updates.
+- Also set `TZ` and map `/etc/localtime` + `/etc/timezone` if you want local time inside the container.
 
 ## 🏠 Home Assistant
 
@@ -182,19 +182,18 @@ Using pip, run:
 pip install -r requirements.txt
 ```
 
-4. **Configure Environment Variables**
+4. **First-Run Redis Setup**
 
-Create a `.env` file in the root directory.  
-Only Redis connection settings are required in `.env`.
+You no longer configure Redis in `.env`.
 
----
+Start TaterOS, open the WebUI, and a **Redis Setup** popup will appear automatically if Redis is not configured yet.
+Enter:
+- Redis host
+- Redis port
+- Optional auth (`username` / `password`)
+- Optional TLS settings
 
-Example: `.env`
-```
-REDIS_HOST=127.0.0.1  
-REDIS_PORT=6379  
-```
----
+Those connection settings are saved locally by TaterOS for future boots.
 
 After starting TaterOS, configure your local LLM endpoint in **Settings**:
 - `Hydra LLM Host`
@@ -235,9 +234,15 @@ Pull the prebuilt image with the following command:
 docker pull ghcr.io/tatertotterson/tater:latest
 ```
 
-### 2. Configuring Environment Variables
+### 2. Run Container
 
-Ensure Redis settings are supplied when starting the container.
+Redis settings are configured in the WebUI setup popup (not via `.env`).
+
+Important for Docker persistence:
+- Add a path mapping for `/app/agent_lab` (container) -> `/mnt/user/appdata/tater/agent_lab` (host example).
+- Without this mapping, data in `/agent_lab` (logs/downloads/documents/workspace) can be lost on container rebuilds/updates.
+- Add a path mapping for `/app/.runtime` (container) -> `/mnt/user/appdata/tater/runtime` (host example).
+- Without this mapping, Redis setup popup settings can be lost on container rebuilds/updates.
 
 ---
 
@@ -252,27 +257,24 @@ docker run -d --name tater_webui \
   -e TZ=America/Chicago \
   -v /etc/localtime:/etc/localtime:ro \
   -v /etc/timezone:/etc/timezone:ro \
-  -e REDIS_HOST=127.0.0.1 \
-  -e REDIS_PORT=6379 \
   -v /agent_lab:/app/agent_lab \
+  -v /tater_runtime:/app/.runtime \
   ghcr.io/tatertotterson/tater:latest
 ```
 ---
 
-After the container is running, open TaterOS and configure local LLM endpoint/model in **Settings**:
+After the container is running, open TaterOS, complete the Redis setup popup, then configure local LLM endpoint/model in **Settings**:
 - `Hydra LLM Host`
 - `Hydra LLM Port`
 - `Hydra LLM Model`
 - Optional: add more Base servers for round-robin regular AI calls.
 - Optional: enable `Beast Mode` and set per-head model settings for Chat/Astraeus/Thanatos/Minos/Hermes.
 
-Tip: The runtime data lives in `/app/agent_lab` inside the container.  
-If you don’t mount it to the host, `/agent_lab` data can be lost when the container is rebuilt or updated.
+Tip: Redis setup popup config is stored at `/app/.runtime/redis_connection.json` inside the container.
+
+Optional: if you want a custom config file location, set `TATER_REDIS_CONFIG_PATH` and mount that target path from the host.
 
 Access-log note: `run_ui.sh` now starts Uvicorn with `--no-access-log` to suppress per-request lines.
-
-Unraid note: add a container path mapping for `/app/agent_lab` to a persistent share (e.g., `/mnt/user/appdata/tater/agent_lab`) so you don’t lose Agent Lab data during container updates.
-Unraid note: also set `TZ` and map `/etc/localtime` + `/etc/timezone` if you want local time inside the container.
 
 ### 3. Access the Web UI
 

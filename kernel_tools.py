@@ -26,7 +26,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from helpers import redis_client
+from helpers import redis_blob_client, redis_client
 from verba_loader import load_verbas_from_directory
 from verba_registry import reload_verbas
 from verba_result import action_failure, action_success
@@ -1289,9 +1289,7 @@ def attach_file(
 
 
 def _image_describe_blob_client() -> redis.Redis:
-    host = os.getenv("REDIS_HOST", "127.0.0.1")
-    port = int(os.getenv("REDIS_PORT", "6379"))
-    return redis.Redis(host=host, port=port, db=0, decode_responses=False)
+    return redis_blob_client
 
 
 def _image_describe_blob_key_candidates(*, blob_key: Any = None, file_id: Any = None) -> List[str]:

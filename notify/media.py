@@ -9,7 +9,7 @@ import urllib.request
 import uuid
 from typing import Any, Dict, List, Optional
 
-import redis
+from helpers import redis_blob_client
 
 MEDIA_TYPES = {"image", "audio", "video", "file"}
 MEDIA_REF_PREFIX = "notifyq:media"
@@ -19,21 +19,8 @@ DEFAULT_URL_FETCH_MAX_BYTES = int(os.getenv("TATER_NOTIFY_MEDIA_URL_MAX_BYTES", 
 DEFAULT_URL_FETCH_TIMEOUT_SEC = int(os.getenv("TATER_NOTIFY_MEDIA_URL_TIMEOUT_SEC", "20"))
 
 
-def _redis_host() -> str:
-    return os.getenv("REDIS_HOST", "127.0.0.1")
-
-
-def _redis_port() -> int:
-    return int(os.getenv("REDIS_PORT", 6379))
-
-
 def _blob_client():
-    return redis.Redis(
-        host=_redis_host(),
-        port=_redis_port(),
-        db=0,
-        decode_responses=False,
-    )
+    return redis_blob_client
 
 
 def _blob_key() -> str:

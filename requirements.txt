@@ -1,6 +1,7 @@
 aiohttp
 beautifulsoup4
 bencodepy
+cryptography
 discord.py
 feedparser
 openai

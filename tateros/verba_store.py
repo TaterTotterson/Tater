@@ -5,10 +5,10 @@ import os
 import re as _re
 from urllib.parse import urljoin, urlparse
 
-import redis
 import requests
 
 import verba_registry as verba_registry_mod
+from helpers import redis_client
 from verba_kernel import expand_verba_platforms
 
 VERBA_DIR = os.getenv("TATER_VERBA_DIR", "verba")
@@ -30,11 +30,6 @@ RETIRED_PLUGIN_IDS = {
     "notify_telegram",
     "notify_wordpress",
 }
-redis_host = os.getenv("REDIS_HOST", "127.0.0.1")
-redis_port = int(os.getenv("REDIS_PORT", 6379))
-redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
-
-
 def get_verba_registry():
     return verba_registry_mod.get_verba_registry()
 

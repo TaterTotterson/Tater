@@ -5,7 +5,6 @@ import inspect
 from openai import AsyncOpenAI
 import requests
 import nest_asyncio
-import redis
 from dotenv import load_dotenv
 import re
 import json
@@ -15,17 +14,253 @@ import time
 import websocket
 from typing import List, Dict, Any, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
+try:
+    import httpx
+except Exception:  # pragma: no cover - optional dependency guard
+    httpx = None
+from redis_runtime import (
+    decrypt_current_redis_snapshot,
+    encrypt_current_redis_snapshot,
+    ensure_redis_encryption_key,
+    get_redis_client,
+    get_redis_encryption_status,
+    get_redis_connection_config,
+    get_redis_connection_status,
+    redis_blob_client,
+    redis_client,
+    save_redis_connection_settings,
+    test_redis_connection_settings,
+)
 
 load_dotenv()
 nest_asyncio.apply()
 
-# Redis setup
-redis_client = redis.Redis(
-    host=os.getenv('REDIS_HOST', '127.0.0.1'),
-    port=int(os.getenv('REDIS_PORT', 6379)),
-    db=0,
-    decode_responses=True
+_INTERNAL_PORTAL_LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
+_INTERNAL_PORTAL_AUTH_TARGETS = (
+    ("homeassistant_portal_settings", 8787, "/tater-ha/v1", None),
+    ("ha_automations_portal_settings", 8788, "/tater-ha/v1", None),
+    ("homekit_portal_settings", 8789, "/tater-homekit/v1", "AUTH_TOKEN"),
+    ("xbmc_portal_settings", 8790, "/tater-xbmc/v1", None),
+    ("macos_portal_settings", 8791, "/macos", "AUTH_TOKEN"),
 )
+_INTERNAL_PORTAL_AUTH_CACHE_TTL_SECONDS = max(
+    1.0,
+    float(os.getenv("TATER_INTERNAL_PORTAL_AUTH_CACHE_TTL_SECONDS", "5")),
+)
+_INTERNAL_PORTAL_AUTH_CACHE: Dict[str, Any] = {"expires_at": 0.0, "rows": []}
+_INTERNAL_PORTAL_AUTH_LOCK = threading.RLock()
+_INTERNAL_PORTAL_HTTP_PATCHED = False
+_ORIG_REQUESTS_SESSION_REQUEST = None
+_ORIG_HTTPX_CLIENT_REQUEST = None
+_ORIG_HTTPX_ASYNC_CLIENT_REQUEST = None
+
+
+def _text(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _boolish(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    token = _text(value).strip().lower()
+    if token in {"1", "true", "yes", "y", "on", "enabled"}:
+        return True
+    if token in {"0", "false", "no", "n", "off", "disabled"}:
+        return False
+    return bool(default)
+
+
+def _port_or_default(value: Any, default: int) -> int:
+    try:
+        port = int(_text(value).strip())
+    except Exception:
+        port = int(default)
+    if port < 1 or port > 65535:
+        return int(default)
+    return port
+
+
+def _default_port_for_scheme(scheme: str) -> int:
+    token = _text(scheme).strip().lower()
+    if token == "https":
+        return 443
+    return 80
+
+
+def _effective_api_auth_enabled(settings: Dict[str, Any], key_value: str) -> bool:
+    raw_enabled = settings.get("API_AUTH_ENABLED")
+    if raw_enabled is None or _text(raw_enabled).strip() == "":
+        return bool(_text(key_value).strip())
+    return _boolish(raw_enabled, False)
+
+
+def _load_internal_portal_auth_rows() -> List[Dict[str, Any]]:
+    now = time.time()
+    with _INTERNAL_PORTAL_AUTH_LOCK:
+        cached_rows = _INTERNAL_PORTAL_AUTH_CACHE.get("rows")
+        cached_until = float(_INTERNAL_PORTAL_AUTH_CACHE.get("expires_at") or 0.0)
+        if now < cached_until and isinstance(cached_rows, list):
+            return [dict(row) for row in cached_rows if isinstance(row, dict)]
+
+    rows: List[Dict[str, Any]] = []
+    try:
+        for settings_key, default_port, path_prefix, legacy_key in _INTERNAL_PORTAL_AUTH_TARGETS:
+            settings = redis_client.hgetall(settings_key) or {}
+            if not isinstance(settings, dict):
+                settings = {}
+
+            port = _port_or_default(settings.get("bind_port"), default_port)
+            key_value = _text(settings.get("API_AUTH_KEY")).strip()
+            if not key_value and legacy_key:
+                key_value = _text(settings.get(legacy_key)).strip()
+            enabled = _effective_api_auth_enabled(settings, key_value)
+            rows.append(
+                {
+                    "settings_key": settings_key,
+                    "port": int(port),
+                    "path_prefix": _text(path_prefix).strip() or "/",
+                    "key": key_value,
+                    "enabled": bool(enabled),
+                }
+            )
+    except Exception:
+        with _INTERNAL_PORTAL_AUTH_LOCK:
+            _INTERNAL_PORTAL_AUTH_CACHE["rows"] = []
+            _INTERNAL_PORTAL_AUTH_CACHE["expires_at"] = now + 2.0
+        return []
+
+    with _INTERNAL_PORTAL_AUTH_LOCK:
+        _INTERNAL_PORTAL_AUTH_CACHE["rows"] = [dict(row) for row in rows]
+        _INTERNAL_PORTAL_AUTH_CACHE["expires_at"] = now + _INTERNAL_PORTAL_AUTH_CACHE_TTL_SECONDS
+    return rows
+
+
+def _maybe_portal_token_for_url(url: Any) -> str:
+    parsed = urlparse(_text(url).strip())
+    host = _text(parsed.hostname).strip().lower().strip("[]")
+    if not host or host not in _INTERNAL_PORTAL_LOCAL_HOSTS:
+        return ""
+
+    path = _text(parsed.path).strip() or "/"
+    port = int(parsed.port or _default_port_for_scheme(parsed.scheme))
+    rows = _load_internal_portal_auth_rows()
+    for row in rows:
+        try:
+            row_port = int(row.get("port") or 0)
+            row_path = _text(row.get("path_prefix")).strip() or "/"
+            key_value = _text(row.get("key")).strip()
+            enabled = bool(row.get("enabled"))
+        except Exception:
+            continue
+        if row_port != port:
+            continue
+        if not path.startswith(row_path):
+            continue
+        if not enabled or not key_value:
+            return ""
+        return key_value
+    return ""
+
+
+def _headers_have_tater_token(headers: Dict[str, Any]) -> bool:
+    for key in (headers or {}).keys():
+        if _text(key).strip().lower() == "x-tater-token":
+            return True
+    return False
+
+
+def _inject_tater_token_header(url: Any, headers: Any) -> Any:
+    token = _maybe_portal_token_for_url(url)
+    if not token:
+        return headers
+
+    if isinstance(headers, dict):
+        merged_headers = dict(headers)
+    elif headers is None:
+        merged_headers = {}
+    else:
+        try:
+            merged_headers = dict(headers)
+        except Exception:
+            merged_headers = {}
+            for key, value in getattr(headers, "items", lambda: [])():
+                merged_headers[key] = value
+
+    if _headers_have_tater_token(merged_headers):
+        return headers
+
+    merged_headers["X-Tater-Token"] = token
+    return merged_headers
+
+
+def _httpx_effective_url(client: Any, url: Any) -> str:
+    raw = _text(url).strip()
+    parsed = urlparse(raw)
+    if parsed.scheme and parsed.netloc:
+        return raw
+    if httpx is None:
+        return raw
+    try:
+        base_url = getattr(client, "base_url", None)
+        if base_url is None:
+            return raw
+        return str(base_url.join(raw))
+    except Exception:
+        return raw
+
+
+def _patch_internal_portal_http_auth() -> None:
+    global _INTERNAL_PORTAL_HTTP_PATCHED
+    global _ORIG_REQUESTS_SESSION_REQUEST
+    global _ORIG_HTTPX_CLIENT_REQUEST
+    global _ORIG_HTTPX_ASYNC_CLIENT_REQUEST
+
+    if _INTERNAL_PORTAL_HTTP_PATCHED:
+        return
+
+    _ORIG_REQUESTS_SESSION_REQUEST = requests.sessions.Session.request
+
+    def _requests_session_request_with_portal_auth(self, method, url, **kwargs):
+        try:
+            kwargs["headers"] = _inject_tater_token_header(url, kwargs.get("headers"))
+        except Exception:
+            pass
+        return _ORIG_REQUESTS_SESSION_REQUEST(self, method, url, **kwargs)
+
+    requests.sessions.Session.request = _requests_session_request_with_portal_auth
+
+    if httpx is not None:
+        _ORIG_HTTPX_CLIENT_REQUEST = httpx.Client.request
+        _ORIG_HTTPX_ASYNC_CLIENT_REQUEST = httpx.AsyncClient.request
+
+        def _httpx_client_request_with_portal_auth(self, method, url, *args, **kwargs):
+            try:
+                effective_url = _httpx_effective_url(self, url)
+                kwargs["headers"] = _inject_tater_token_header(effective_url, kwargs.get("headers"))
+            except Exception:
+                pass
+            return _ORIG_HTTPX_CLIENT_REQUEST(self, method, url, *args, **kwargs)
+
+        async def _httpx_async_client_request_with_portal_auth(self, method, url, *args, **kwargs):
+            try:
+                effective_url = _httpx_effective_url(self, url)
+                kwargs["headers"] = _inject_tater_token_header(effective_url, kwargs.get("headers"))
+            except Exception:
+                pass
+            return await _ORIG_HTTPX_ASYNC_CLIENT_REQUEST(self, method, url, *args, **kwargs)
+
+        httpx.Client.request = _httpx_client_request_with_portal_auth
+        httpx.AsyncClient.request = _httpx_async_client_request_with_portal_auth
+
+    _INTERNAL_PORTAL_HTTP_PATCHED = True
+
+
+_patch_internal_portal_http_auth()
+
 
 def get_tater_name():
     """Return the assistant's first and last name from Redis."""

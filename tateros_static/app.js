@@ -45,6 +45,19 @@ const state = {
   chatEventSources: {},
   chatPollMeta: {},
   notice: "",
+  redisStatus: {
+    configured: false,
+    connected: false,
+    host: "",
+    port: 6379,
+    db: 0,
+    username: "",
+    use_tls: false,
+    verify_tls: true,
+    ca_cert_path: "",
+    password_set: false,
+    error: "",
+  },
   chatProfile: {
     username: "User",
     userAvatar: "",
@@ -69,6 +82,7 @@ const APP_BASE_PATH = (() => {
   return normalized;
 })();
 const IS_HA_INGRESS = APP_BASE_PATH.includes("/api/hassio_ingress/");
+const REDIS_PASSWORD_MASK = "********";
 
 function withBasePath(path) {
   const raw = String(path || "").trim();
@@ -350,6 +364,434 @@ function closePopupModal(modal) {
   syncPopupBodyScrollLock();
 }
 
+let redisSetupPromise = null;
+let redisSetupResolve = null;
+let redisRecoveryPromptInFlight = false;
+let redisRecoveryPromptLastAt = 0;
+
+function _setRedisStatus(status) {
+  const next = status && typeof status === "object" ? status : {};
+  state.redisStatus = {
+    configured: Boolean(next.configured),
+    connected: Boolean(next.connected),
+    host: String(next.host || ""),
+    port: Number(next.port || 6379),
+    db: Number(next.db || 0),
+    username: String(next.username || ""),
+    use_tls: Boolean(next.use_tls),
+    verify_tls: Boolean(next.verify_tls),
+    ca_cert_path: String(next.ca_cert_path || ""),
+    password_set: Boolean(next.password_set),
+    error: String(next.error || ""),
+    source: String(next.source || ""),
+    config_path: String(next.config_path || ""),
+  };
+  return state.redisStatus;
+}
+
+function _redisSetupMessage(status) {
+  if (!status?.configured) {
+    return "Redis is not configured yet. Enter the server details and save to continue.";
+  }
+  if (!status?.connected) {
+    const reason = String(status?.error || "").trim();
+    return reason ? `Redis is configured but unavailable: ${reason}` : "Redis is configured but currently unavailable.";
+  }
+  return "Redis is connected.";
+}
+
+function _showRedisSetupModal(status) {
+  const modal = ensureRedisSetupModal();
+  if (typeof modal._applyRedisStatus === "function") {
+    modal._applyRedisStatus(status || state.redisStatus || {});
+  }
+  openPopupModal(modal);
+  // Defensive hard-open guard in case a stale closing class lingers.
+  modal.classList.remove("closing");
+  modal.classList.add("active");
+  modal.setAttribute("aria-hidden", "false");
+  syncPopupBodyScrollLock();
+  if (!redisSetupPromise) {
+    redisSetupPromise = new Promise((resolve) => {
+      redisSetupResolve = resolve;
+    });
+  }
+  return modal;
+}
+
+function ensureRedisSetupModal() {
+  let modal = document.getElementById("redis-setup-modal");
+  if (modal) {
+    return modal;
+  }
+
+  document.body.insertAdjacentHTML(
+    "beforeend",
+    `
+      <div id="redis-setup-modal" class="cerb-modal redis-setup-modal" aria-hidden="true">
+        <div class="cerb-modal-dialog card redis-setup-dialog" role="dialog" aria-modal="true" aria-label="Redis Setup Required">
+          <div class="card-head">
+            <h3 class="card-title">Redis Setup Required</h3>
+          </div>
+          <div id="redis-setup-status" class="small"></div>
+          <form id="redis-setup-form" class="form-grid two-col redis-setup-form">
+            <label>Host
+              <input id="redis_host" type="text" placeholder="127.0.0.1" />
+            </label>
+            <label>Port
+              <input id="redis_port" type="number" min="1" max="65535" value="6379" />
+            </label>
+            <label>DB
+              <input id="redis_db" type="number" min="0" value="0" />
+            </label>
+            <label>Username (optional)
+              <input id="redis_username" type="text" />
+            </label>
+            <label>Password (optional)
+              <input id="redis_password" type="password" autocomplete="new-password" />
+            </label>
+            <label>CA Cert Path (optional)
+              <input id="redis_ca_cert_path" type="text" placeholder="/path/to/ca.pem" />
+            </label>
+            <label class="toggle-row">Use TLS
+              <input id="redis_use_tls" type="checkbox" />
+            </label>
+            <label class="toggle-row">Verify TLS Cert
+              <input id="redis_verify_tls" type="checkbox" checked />
+            </label>
+            <div class="inline-actions" style="grid-column: 1 / -1;">
+              <button type="button" id="redis_test_btn" class="inline-btn">Test Connection</button>
+              <button type="submit" id="redis_save_btn" class="action-btn">Save and Connect</button>
+              <button type="button" id="redis_refresh_btn" class="inline-btn">Refresh Status</button>
+            </div>
+          </form>
+          <div id="redis-setup-extra" class="small"></div>
+        </div>
+      </div>
+    `
+  );
+
+  modal = document.getElementById("redis-setup-modal");
+  const form = document.getElementById("redis-setup-form");
+  const statusEl = document.getElementById("redis-setup-status");
+  const extraEl = document.getElementById("redis-setup-extra");
+  const saveBtn = document.getElementById("redis_save_btn");
+  const testBtn = document.getElementById("redis_test_btn");
+  const refreshBtn = document.getElementById("redis_refresh_btn");
+  const useTlsEl = document.getElementById("redis_use_tls");
+  const verifyTlsEl = document.getElementById("redis_verify_tls");
+  const caCertEl = document.getElementById("redis_ca_cert_path");
+  const passwordEl = document.getElementById("redis_password");
+
+  const setBusy = (busy) => {
+    const disabled = Boolean(busy);
+    if (saveBtn) {
+      saveBtn.disabled = disabled;
+      saveBtn.textContent = disabled ? "Saving..." : "Save and Connect";
+    }
+    if (testBtn) {
+      testBtn.disabled = disabled;
+    }
+    if (refreshBtn) {
+      refreshBtn.disabled = disabled;
+    }
+  };
+
+  const syncTlsUi = () => {
+    const enabled = Boolean(useTlsEl?.checked);
+    if (verifyTlsEl) {
+      verifyTlsEl.disabled = !enabled;
+    }
+    if (caCertEl) {
+      caCertEl.disabled = !enabled;
+      if (!enabled) {
+        caCertEl.value = "";
+      }
+    }
+  };
+
+  const formPayload = (status, testOnly) => {
+    const maskedPassword = String(passwordEl?.dataset?.masked || "") === "1";
+    const passwordRaw = maskedPassword ? "" : String(passwordEl?.value || "");
+    const keepExistingPassword = (maskedPassword || !passwordRaw) && Boolean(status?.password_set);
+    return {
+      host: String(document.getElementById("redis_host")?.value || "").trim(),
+      port: Number(document.getElementById("redis_port")?.value || 6379),
+      db: Number(document.getElementById("redis_db")?.value || 0),
+      username: String(document.getElementById("redis_username")?.value || "").trim(),
+      password: passwordRaw,
+      use_tls: Boolean(useTlsEl?.checked),
+      verify_tls: Boolean(verifyTlsEl?.checked),
+      ca_cert_path: String(caCertEl?.value || "").trim(),
+      keep_existing_password: keepExistingPassword,
+      test_only: Boolean(testOnly),
+    };
+  };
+
+  const applyStatus = (raw, options = {}) => {
+    const preserveInputs = Boolean(options?.preserveInputs);
+    const currentInputs = preserveInputs
+      ? {
+          host: String(document.getElementById("redis_host")?.value || ""),
+          port: String(document.getElementById("redis_port")?.value || "6379"),
+          db: String(document.getElementById("redis_db")?.value || "0"),
+          username: String(document.getElementById("redis_username")?.value || ""),
+          password: String(passwordEl?.value || ""),
+          password_masked: String(passwordEl?.dataset?.masked || "") === "1",
+          use_tls: Boolean(useTlsEl?.checked),
+          verify_tls: Boolean(verifyTlsEl?.checked),
+          ca_cert_path: String(caCertEl?.value || ""),
+        }
+      : null;
+    const status = _setRedisStatus(raw);
+    if (document.getElementById("redis_host")) {
+      document.getElementById("redis_host").value = preserveInputs ? String(currentInputs?.host || "") : String(status.host || "");
+    }
+    if (document.getElementById("redis_port")) {
+      document.getElementById("redis_port").value = preserveInputs ? String(currentInputs?.port || "6379") : String(status.port || 6379);
+    }
+    if (document.getElementById("redis_db")) {
+      document.getElementById("redis_db").value = preserveInputs ? String(currentInputs?.db || "0") : String(status.db || 0);
+    }
+    if (document.getElementById("redis_username")) {
+      document.getElementById("redis_username").value = preserveInputs
+        ? String(currentInputs?.username || "")
+        : String(status.username || "");
+    }
+    if (useTlsEl) {
+      useTlsEl.checked = preserveInputs ? Boolean(currentInputs?.use_tls) : Boolean(status.use_tls);
+    }
+    if (verifyTlsEl) {
+      verifyTlsEl.checked = preserveInputs ? Boolean(currentInputs?.verify_tls) : Boolean(status.verify_tls);
+    }
+    if (caCertEl) {
+      caCertEl.value = preserveInputs ? String(currentInputs?.ca_cert_path || "") : String(status.ca_cert_path || "");
+    }
+    if (passwordEl) {
+      if (preserveInputs) {
+        passwordEl.value = String(currentInputs?.password || "");
+        if (currentInputs?.password_masked) {
+          passwordEl.dataset.masked = "1";
+        } else {
+          delete passwordEl.dataset.masked;
+        }
+      } else if (status.password_set) {
+        passwordEl.value = REDIS_PASSWORD_MASK;
+        passwordEl.dataset.masked = "1";
+      } else {
+        passwordEl.value = "";
+        delete passwordEl.dataset.masked;
+      }
+      passwordEl.placeholder = status.password_set ? "Leave blank to keep saved password" : "";
+    }
+    syncTlsUi();
+    if (statusEl) {
+      statusEl.textContent = _redisSetupMessage(status);
+      statusEl.classList.toggle("error", !status.connected);
+      statusEl.classList.toggle("success", Boolean(status.connected));
+    }
+    if (extraEl) {
+      const source = status.source ? `Source: ${status.source}` : "";
+      const path = status.config_path ? `Config: ${status.config_path}` : "";
+      extraEl.textContent = [source, path].filter(Boolean).join(" • ");
+    }
+  };
+
+  useTlsEl?.addEventListener("change", syncTlsUi);
+  passwordEl?.addEventListener("focus", () => {
+    if (String(passwordEl?.dataset?.masked || "") === "1") {
+      passwordEl.value = "";
+      delete passwordEl.dataset.masked;
+    }
+  });
+  passwordEl?.addEventListener("input", () => {
+    if (String(passwordEl?.dataset?.masked || "") === "1" && String(passwordEl.value || "") !== REDIS_PASSWORD_MASK) {
+      delete passwordEl.dataset.masked;
+    }
+  });
+
+  refreshBtn?.addEventListener("click", async () => {
+    setBusy(true);
+    try {
+      const status = await api("/api/redis/status");
+      applyStatus(status);
+    } catch (error) {
+      if (statusEl) {
+        statusEl.textContent = `Failed to refresh Redis status: ${error.message}`;
+        statusEl.classList.add("error");
+      }
+    } finally {
+      setBusy(false);
+    }
+  });
+
+  testBtn?.addEventListener("click", async () => {
+    const current = state.redisStatus || {};
+    const payload = formPayload(current, true);
+    setBusy(true);
+    try {
+      const status = await api("/api/redis/configure", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      applyStatus(status, { preserveInputs: true });
+      if (statusEl) {
+        statusEl.textContent = "Redis connection test succeeded.";
+        statusEl.classList.remove("error");
+        statusEl.classList.add("success");
+      }
+    } catch (error) {
+      if (statusEl) {
+        statusEl.textContent = String(error?.message || "Redis connection test failed.");
+        statusEl.classList.remove("success");
+        statusEl.classList.add("error");
+      }
+    } finally {
+      setBusy(false);
+    }
+  });
+
+  form?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const current = state.redisStatus || {};
+    const shouldReloadAfterSave = !Boolean(current?.configured);
+    const payload = formPayload(current, false);
+    setBusy(true);
+    try {
+      const status = await api("/api/redis/configure", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      applyStatus(status);
+      if (!status.connected) {
+        throw new Error("Redis settings were saved but the connection is still unavailable.");
+      }
+      if (shouldReloadAfterSave) {
+        window.location.reload();
+        return;
+      }
+      closePopupModal(modal);
+      if (typeof redisSetupResolve === "function") {
+        redisSetupResolve(status);
+      }
+      redisSetupPromise = null;
+      redisSetupResolve = null;
+    } catch (error) {
+      if (statusEl) {
+        statusEl.textContent = String(error?.message || "Redis setup failed.");
+        statusEl.classList.remove("success");
+        statusEl.classList.add("error");
+      }
+    } finally {
+      setBusy(false);
+    }
+  });
+
+  modal._applyRedisStatus = applyStatus;
+  return modal;
+}
+
+async function ensureRedisSetup() {
+  let status = state.redisStatus || {};
+  try {
+    status = _setRedisStatus(await api("/api/redis/status", { _skipRedisRecovery: true, _timeoutMs: 2500 }));
+  } catch (error) {
+    const message = String(error?.message || "Failed to load Redis status.");
+    status = _setRedisStatus({
+      ...(status || {}),
+      connected: false,
+      error: message,
+    });
+  }
+  if (status.connected) {
+    return status;
+  }
+
+  _showRedisSetupModal(status);
+  return redisSetupPromise;
+}
+
+function _isRedisSetupApiPath(path) {
+  const target = String(path || "").trim().toLowerCase();
+  return target.startsWith("/api/redis/");
+}
+
+function _isLikelyRedisFailureDetail(detail) {
+  const message = String(detail || "").toLowerCase();
+  if (!message) {
+    return false;
+  }
+  return (
+    message.includes("redis") ||
+    message.includes("authentication required") ||
+    message.includes("noauth") ||
+    message.includes("wrongpass")
+  );
+}
+
+function _shouldTriggerRedisRecovery(path, statusCode, detail) {
+  const status = Number(statusCode || 0);
+  if (_isRedisSetupApiPath(path) && status >= 500) {
+    return true;
+  }
+  if (status === 503 && _isLikelyRedisFailureDetail(detail)) {
+    return true;
+  }
+  return false;
+}
+
+async function promptRedisSetupRecovery(reason = "", { force = false } = {}) {
+  const now = Date.now();
+  const existingModal = document.getElementById("redis-setup-modal");
+  if (!force && existingModal?.classList.contains("active")) {
+    return;
+  }
+  if (!force) {
+    if (redisRecoveryPromptInFlight) {
+      return;
+    }
+    if (now - redisRecoveryPromptLastAt < 2500) {
+      return;
+    }
+  }
+  redisRecoveryPromptInFlight = true;
+  redisRecoveryPromptLastAt = now;
+
+  try {
+    let status = state.redisStatus || {};
+    const fallbackError = String(reason || status?.error || "Redis is unavailable.").trim() || "Redis is unavailable.";
+    status = _setRedisStatus({
+      ...(status || {}),
+      connected: false,
+      error: fallbackError,
+    });
+    _showRedisSetupModal(status);
+
+    try {
+      status = _setRedisStatus(await api("/api/redis/status", { _skipRedisRecovery: true, _timeoutMs: 2500 }));
+    } catch (error) {
+      const nextError = String(reason || error?.message || status?.error || "Redis is unavailable.");
+      status = _setRedisStatus({
+        ...(status || {}),
+        connected: false,
+        error: nextError,
+      });
+    }
+
+    if (status.connected) {
+      const modal = document.getElementById("redis-setup-modal");
+      if (modal?.classList?.contains("active")) {
+        closePopupModal(modal);
+      }
+      return;
+    }
+
+    _showRedisSetupModal(status);
+  } finally {
+    redisRecoveryPromptInFlight = false;
+  }
+}
+
 function ensureActionProgressModal() {
   let modal = document.getElementById("action-progress-modal");
   if (modal) {
@@ -498,10 +940,45 @@ async function runActionWithProgress(meta, actionFn) {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(withBasePath(path), {
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-    ...options,
-  });
+  const requestOptions = options && typeof options === "object" ? options : {};
+  const skipRedisRecovery = Boolean(requestOptions._skipRedisRecovery);
+  const timeoutMs = Math.max(0, Number(requestOptions._timeoutMs || 0));
+  const { _skipRedisRecovery, _timeoutMs, ...fetchOptions } = requestOptions;
+
+  let timeoutId = 0;
+  let timeoutController = null;
+  let requestSignal = fetchOptions.signal;
+  if (!requestSignal && timeoutMs > 0 && typeof AbortController !== "undefined") {
+    timeoutController = new AbortController();
+    requestSignal = timeoutController.signal;
+    timeoutId = window.setTimeout(() => {
+      try {
+        timeoutController.abort();
+      } catch {
+        // ignore
+      }
+    }, timeoutMs);
+  }
+
+  let response;
+  try {
+    response = await fetch(withBasePath(path), {
+      headers: { "Content-Type": "application/json", ...(fetchOptions.headers || {}) },
+      ...fetchOptions,
+      ...(requestSignal ? { signal: requestSignal } : {}),
+    });
+  } catch (error) {
+    if (timeoutId) {
+      window.clearTimeout(timeoutId);
+    }
+    if (timeoutController && error?.name === "AbortError") {
+      throw new Error(`Request timed out after ${timeoutMs}ms`);
+    }
+    throw error;
+  }
+  if (timeoutId) {
+    window.clearTimeout(timeoutId);
+  }
 
   if (!response.ok) {
     let detail = "Request failed";
@@ -510,6 +987,9 @@ async function api(path, options = {}) {
       detail = body.detail || detail;
     } catch {
       detail = response.statusText || detail;
+    }
+    if (!skipRedisRecovery && _shouldTriggerRedisRecovery(path, response.status, detail)) {
+      void promptRedisSetupRecovery(detail);
     }
     throw new Error(detail);
   }
@@ -667,6 +1147,27 @@ function hydraPlatformLabel(platform) {
   return labels[token] || token || "unknown";
 }
 
+function runtimeSettingKeySupportsGenerator(field) {
+  const key = String(field?.key || "").trim().toUpperCase();
+  if (!key) {
+    return false;
+  }
+  return key === "API_AUTH_KEY" || key === "AUTH_TOKEN";
+}
+
+function generateRuntimeApiKey() {
+  const bytes = new Uint8Array(24);
+  const cryptoObj = window?.crypto;
+  if (cryptoObj && typeof cryptoObj.getRandomValues === "function") {
+    cryptoObj.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < bytes.length; i += 1) {
+      bytes[i] = Math.floor(Math.random() * 256);
+    }
+  }
+  return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+}
+
 function buildSettingInput(field, inputId) {
   const safeLabel = escapeHtml(field.label || field.key);
   const safeKey = escapeHtml(field.key || "");
@@ -709,7 +1210,15 @@ function buildSettingInput(field, inputId) {
           field?.min !== undefined ? ` min="${escapeHtml(field.min)}"` : ""
         }${field?.max !== undefined ? ` max="${escapeHtml(field.max)}"` : ""}`
       : "";
-  return `<label>${safeLabel}<input id="${inputId}" type="${htmlType}"${numberAttrs} value="${escapeHtml(field.value ?? "")}" data-setting-type="${escapeHtml(type)}" data-setting-key="${safeKey}" />${safeDesc}</label>`;
+  const inputHtml = `<input id="${inputId}" type="${htmlType}"${numberAttrs} value="${escapeHtml(
+    field.value ?? ""
+  )}" data-setting-type="${escapeHtml(type)}" data-setting-key="${safeKey}" />`;
+  if (runtimeSettingKeySupportsGenerator(field) && (htmlType === "password" || htmlType === "text")) {
+    return `<label>${safeLabel}<div class="runtime-setting-input-action">${inputHtml}<button type="button" class="inline-btn runtime-generate-key-btn" data-target-input="${escapeHtml(
+      inputId
+    )}">Generate Key</button></div>${safeDesc}</label>`;
+  }
+  return `<label>${safeLabel}${inputHtml}${safeDesc}</label>`;
 }
 
 function getInputValue(input) {
@@ -903,6 +1412,21 @@ function openRuntimeSettingsModal({ title, meta, fields, onSave }) {
           return buildSettingInput(field, inputId);
         })
         .join("");
+      fieldsEl.querySelectorAll(".runtime-generate-key-btn").forEach((button) => {
+        button.addEventListener("click", () => {
+          const targetId = String(button.getAttribute("data-target-input") || "").trim();
+          if (!targetId) {
+            return;
+          }
+          const input = document.getElementById(targetId);
+          if (!input || typeof input.value !== "string") {
+            return;
+          }
+          input.value = generateRuntimeApiKey();
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+        });
+      });
     }
   }
 
@@ -1573,8 +2097,13 @@ function bindRuntimeSummary() {
 async function refreshHealth() {
   try {
     const health = await api("/api/health");
-    if (health.ok === false) {
-      setRuntimeSummaryText("Backend degraded", "degraded");
+    if (health?.redis_status && typeof health.redis_status === "object") {
+      _setRedisStatus(health.redis_status);
+    }
+    const redisConnected = Boolean(health?.redis_status?.connected ?? health?.redis);
+    if (!redisConnected) {
+      setRuntimeSummaryText("Redis setup required", "offline");
+      void promptRedisSetupRecovery(String(health?.redis_status?.error || "Redis connection lost."));
       return;
     }
     setRuntimeSummaryText(formatRuntimeSummary(health), "normal");
@@ -4617,7 +5146,81 @@ async function loadSurfaceView(kind) {
 
 async function loadSettingsView() {
   const root = document.getElementById("view-root");
-  const settings = await api("/api/settings");
+  const [settings, redisStatusPayload, redisEncryptionPayload] = await Promise.all([
+    api("/api/settings"),
+    api("/api/redis/status"),
+    api("/api/redis/encryption/status"),
+  ]);
+  const redisStatus = _setRedisStatus(redisStatusPayload);
+  const normalizeRedisEncryptionStatus = (raw) => {
+    const next = raw && typeof raw === "object" ? raw : {};
+    const liveEnabled = next.live_encryption_enabled;
+    return {
+      encryption_available: Boolean(next.encryption_available !== false),
+      key_exists: Boolean(next.key_exists),
+      key_path: String(next.key_path || ""),
+      key_fingerprint: String(next.key_fingerprint || ""),
+      live_encryption_enabled: liveEnabled === undefined ? Boolean(next.snapshot_exists) : Boolean(liveEnabled),
+      live_encryption_state_path: String(next.live_encryption_state_path || next.snapshot_path || ""),
+      live_encryption_updated: String(next.live_encryption_updated || next.snapshot_modified || ""),
+      // Legacy snapshot fields (for older backends / compatibility).
+      snapshot_exists: Boolean(next.snapshot_exists),
+      snapshot_path: String(next.snapshot_path || ""),
+      snapshot_size_bytes: Number(next.snapshot_size_bytes || 0),
+      snapshot_modified: String(next.snapshot_modified || ""),
+      error: String(next.error || ""),
+    };
+  };
+  const redisEncryptionStatus = normalizeRedisEncryptionStatus(redisEncryptionPayload);
+  const summarizeRedisEncryptionStatus = (entry) => {
+    const status = normalizeRedisEncryptionStatus(entry);
+    if (!status.encryption_available) {
+      return {
+        status,
+        parts: [
+          {
+            text: status.error ? `Encryption unavailable: ${status.error}` : "Encryption unavailable.",
+            tone: "neutral",
+          },
+        ],
+      };
+    }
+    const parts = [];
+    parts.push({ text: status.key_exists ? "Key ready" : "Key not initialized", tone: "neutral" });
+    parts.push({
+      text: status.live_encryption_enabled ? "Live encryption: enabled" : "Live encryption: disabled",
+      tone: status.live_encryption_enabled ? "live-enabled" : "live-disabled",
+    });
+    if (status.key_fingerprint) {
+      parts.push({ text: `Key fingerprint: ${status.key_fingerprint}`, tone: "neutral" });
+    }
+    if (status.live_encryption_updated) {
+      parts.push({ text: `Mode updated: ${status.live_encryption_updated}`, tone: "neutral" });
+    }
+    if (status.error) {
+      parts.push({ text: `Warning: ${status.error}`, tone: "neutral" });
+    }
+    return { status, parts };
+  };
+  const renderRedisEncryptionStatusHtml = (entry) => {
+    const summary = summarizeRedisEncryptionStatus(entry);
+    const parts = Array.isArray(summary?.parts) ? summary.parts : [];
+    if (!parts.length) {
+      return "";
+    }
+    return parts
+      .map((part) => {
+        const text = escapeHtml(String(part?.text || ""));
+        if (part?.tone === "live-enabled") {
+          return `<span class="redis-live-state-enabled">${text}</span>`;
+        }
+        if (part?.tone === "live-disabled") {
+          return `<span class="redis-live-state-disabled">${text}</span>`;
+        }
+        return text;
+      })
+      .join(" • ");
+  };
   const adminOptions = Array.isArray(settings.admin_plugin_options)
     ? settings.admin_plugin_options.map((value) => String(value || "").trim()).filter(Boolean)
     : [];
@@ -4718,7 +5321,7 @@ async function loadSettingsView() {
       <div class="card-head">
         <h3 class="card-title">Settings</h3>
       </div>
-      <div class="small">Categories: General, Hydra, Integrations, Emoji, Compotato, Advanced.</div>
+      <div class="small">Categories: General, Hydra, Integrations, Emoji, Compotato, Redis, Advanced.</div>
       <div id="settings-status" class="small" style="margin-top: 6px;"></div>
 
       <div class="settings-tabs">
@@ -4727,6 +5330,7 @@ async function loadSettingsView() {
         <button type="button" class="settings-tab-btn" data-settings-tab="integrations">Integrations</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="emoji">Emoji</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="compozr">Compotato</button>
+        <button type="button" class="settings-tab-btn" data-settings-tab="redis">Redis</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="advanced">Advanced</button>
       </div>
 
@@ -4815,6 +5419,74 @@ async function loadSettingsView() {
             <label style="grid-column: 1 / -1;">Vision API Key (optional)
               <input id="set_vision_api_key" type="password" value="${escapeHtml(settings.vision_api_key || "")}" />
             </label>
+          </div>
+        </section>
+
+        <section class="settings-tab-panel" data-settings-panel="redis">
+          <div class="form-grid">
+            <section class="core-inline-section">
+              <div class="small core-inline-section-title">Redis Connection</div>
+              <div class="form-grid two-col">
+                <label>Host
+                  <input id="set_redis_host" type="text" value="${escapeHtml(redisStatus.host || "")}" />
+                </label>
+                <label>Port
+                  <input id="set_redis_port" type="number" min="1" max="65535" value="${escapeHtml(redisStatus.port || 6379)}" />
+                </label>
+                <label>DB
+                  <input id="set_redis_db" type="number" min="0" value="${escapeHtml(redisStatus.db || 0)}" />
+                </label>
+                <label>Username (optional)
+                  <input id="set_redis_username" type="text" value="${escapeHtml(redisStatus.username || "")}" />
+                </label>
+                <label>Password (optional)
+                  <input id="set_redis_password" type="password" autocomplete="new-password" />
+                </label>
+                <label>CA Cert Path (optional)
+                  <input id="set_redis_ca_cert_path" type="text" value="${escapeHtml(redisStatus.ca_cert_path || "")}" />
+                </label>
+                <label class="toggle-row">Use TLS
+                  <input id="set_redis_use_tls" type="checkbox" ${redisStatus.use_tls ? "checked" : ""} />
+                </label>
+                <label class="toggle-row">Verify TLS Cert
+                  <input id="set_redis_verify_tls" type="checkbox" ${redisStatus.verify_tls ? "checked" : ""} />
+                </label>
+                <div class="inline-row" style="grid-column: 1 / -1;">
+                  <button type="button" id="settings-redis-refresh" class="inline-btn">Refresh</button>
+                  <button type="button" id="settings-redis-test" class="inline-btn">Test Connection</button>
+                  <button type="button" id="settings-redis-save" class="action-btn">Save Redis</button>
+                </div>
+                <div id="settings-redis-status" class="small" style="grid-column: 1 / -1;">
+                  ${escapeHtml(_redisSetupMessage(redisStatus))}
+                </div>
+              </div>
+            </section>
+
+            <section class="core-inline-section">
+              <div class="small core-inline-section-title">Redis Encryption</div>
+              <div class="form-grid two-col">
+                <label>Key File
+                  <input id="set_redis_encryption_key_path" type="text" value="${escapeHtml(
+                    redisEncryptionStatus.key_path || ""
+                  )}" readonly />
+                </label>
+                <label>Mode State File
+                  <input id="set_redis_encryption_snapshot_path" type="text" value="${escapeHtml(
+                    redisEncryptionStatus.live_encryption_state_path || ""
+                  )}" readonly />
+                </label>
+                <div class="inline-row" style="grid-column: 1 / -1;">
+                  <button type="button" id="settings-redis-encrypt" class="action-btn">Encrypt Live Redis</button>
+                  <button type="button" id="settings-redis-decrypt" class="inline-btn danger">Decrypt Live Redis</button>
+                </div>
+                <div class="small" style="grid-column: 1 / -1;">
+                  Encrypt auto-creates a key if needed, encrypts existing Redis values in place, and keeps future writes encrypted. Decrypt reverses values in place and returns to plaintext writes.
+                </div>
+                <div id="settings-redis-encryption-status" class="small" style="grid-column: 1 / -1;">
+                  ${renderRedisEncryptionStatusHtml(redisEncryptionStatus)}
+                </div>
+              </div>
+            </section>
           </div>
         </section>
 
@@ -5178,6 +5850,276 @@ async function loadSettingsView() {
 
   tabButtons.forEach((button) => {
     button.addEventListener("click", () => activateTab(button.dataset.settingsTab));
+  });
+
+  let redisEncryptionState = normalizeRedisEncryptionStatus(redisEncryptionStatus);
+  const redisHostEl = document.getElementById("set_redis_host");
+  const redisPortEl = document.getElementById("set_redis_port");
+  const redisDbEl = document.getElementById("set_redis_db");
+  const redisUsernameEl = document.getElementById("set_redis_username");
+  const redisPasswordEl = document.getElementById("set_redis_password");
+  const redisUseTlsEl = document.getElementById("set_redis_use_tls");
+  const redisVerifyTlsEl = document.getElementById("set_redis_verify_tls");
+  const redisCaCertPathEl = document.getElementById("set_redis_ca_cert_path");
+  const redisStatusLineEl = document.getElementById("settings-redis-status");
+  const redisRefreshBtnEl = document.getElementById("settings-redis-refresh");
+  const redisTestBtnEl = document.getElementById("settings-redis-test");
+  const redisSaveBtnEl = document.getElementById("settings-redis-save");
+  const redisEncryptionStatusEl = document.getElementById("settings-redis-encryption-status");
+  const redisEncryptionKeyPathEl = document.getElementById("set_redis_encryption_key_path");
+  const redisEncryptionSnapshotPathEl = document.getElementById("set_redis_encryption_snapshot_path");
+  const redisEncryptionEncryptBtnEl = document.getElementById("settings-redis-encrypt");
+  const redisEncryptionDecryptBtnEl = document.getElementById("settings-redis-decrypt");
+
+  const setRedisBusy = (busy) => {
+    const disabled = Boolean(busy);
+    if (disabled) {
+      [redisRefreshBtnEl, redisTestBtnEl, redisSaveBtnEl, redisEncryptionEncryptBtnEl, redisEncryptionDecryptBtnEl]
+        .filter(Boolean)
+        .forEach((button) => {
+          button.disabled = true;
+        });
+      return;
+    }
+    [redisRefreshBtnEl, redisTestBtnEl, redisSaveBtnEl]
+      .filter(Boolean)
+      .forEach((button) => {
+        button.disabled = false;
+      });
+    applyRedisEncryptionStatus(redisEncryptionState);
+  };
+
+  const syncRedisTlsUi = () => {
+    const enabled = Boolean(redisUseTlsEl?.checked);
+    if (redisVerifyTlsEl) {
+      redisVerifyTlsEl.disabled = !enabled;
+    }
+    if (redisCaCertPathEl) {
+      redisCaCertPathEl.disabled = !enabled;
+      if (!enabled) {
+        redisCaCertPathEl.value = "";
+      }
+    }
+  };
+
+  const redisFormPayload = (testOnly) => {
+    const maskedPassword = String(redisPasswordEl?.dataset?.masked || "") === "1";
+    const passwordRaw = maskedPassword ? "" : String(redisPasswordEl?.value || "");
+    const keepExistingPassword = (maskedPassword || !passwordRaw) && Boolean(state.redisStatus?.password_set);
+    return {
+      host: String(redisHostEl?.value || "").trim(),
+      port: Number(redisPortEl?.value || 6379),
+      db: Number(redisDbEl?.value || 0),
+      username: String(redisUsernameEl?.value || "").trim(),
+      password: passwordRaw,
+      use_tls: Boolean(redisUseTlsEl?.checked),
+      verify_tls: Boolean(redisVerifyTlsEl?.checked),
+      ca_cert_path: String(redisCaCertPathEl?.value || "").trim(),
+      keep_existing_password: keepExistingPassword,
+      test_only: Boolean(testOnly),
+    };
+  };
+
+  const applyRedisConnectionStatus = (raw) => {
+    const status = _setRedisStatus(raw);
+    if (redisHostEl) {
+      redisHostEl.value = String(status.host || "");
+    }
+    if (redisPortEl) {
+      redisPortEl.value = String(status.port || 6379);
+    }
+    if (redisDbEl) {
+      redisDbEl.value = String(status.db || 0);
+    }
+    if (redisUsernameEl) {
+      redisUsernameEl.value = String(status.username || "");
+    }
+    if (redisUseTlsEl) {
+      redisUseTlsEl.checked = Boolean(status.use_tls);
+    }
+    if (redisVerifyTlsEl) {
+      redisVerifyTlsEl.checked = Boolean(status.verify_tls);
+    }
+    if (redisCaCertPathEl) {
+      redisCaCertPathEl.value = String(status.ca_cert_path || "");
+    }
+    if (redisPasswordEl) {
+      if (status.password_set) {
+        redisPasswordEl.value = REDIS_PASSWORD_MASK;
+        redisPasswordEl.dataset.masked = "1";
+      } else {
+        redisPasswordEl.value = "";
+        delete redisPasswordEl.dataset.masked;
+      }
+      redisPasswordEl.placeholder = status.password_set ? "Leave blank to keep saved password" : "";
+    }
+    syncRedisTlsUi();
+    if (redisStatusLineEl) {
+      redisStatusLineEl.textContent = _redisSetupMessage(status);
+      redisStatusLineEl.classList.toggle("error", !status.connected);
+      redisStatusLineEl.classList.toggle("success", Boolean(status.connected));
+    }
+    return status;
+  };
+
+  const applyRedisEncryptionStatus = (raw) => {
+    redisEncryptionState = normalizeRedisEncryptionStatus(raw);
+    if (redisEncryptionKeyPathEl) {
+      redisEncryptionKeyPathEl.value = String(redisEncryptionState.key_path || "");
+    }
+    if (redisEncryptionSnapshotPathEl) {
+      redisEncryptionSnapshotPathEl.value = String(redisEncryptionState.live_encryption_state_path || "");
+    }
+    if (redisEncryptionStatusEl) {
+      redisEncryptionStatusEl.innerHTML = renderRedisEncryptionStatusHtml(redisEncryptionState);
+      const hasError = Boolean(redisEncryptionState.error) || !Boolean(redisEncryptionState.encryption_available);
+      redisEncryptionStatusEl.classList.toggle("error", hasError);
+      redisEncryptionStatusEl.classList.toggle("success", !hasError);
+    }
+    if (redisEncryptionEncryptBtnEl) {
+      const encryptDisabled =
+        !redisEncryptionState.encryption_available || Boolean(redisEncryptionState.live_encryption_enabled);
+      redisEncryptionEncryptBtnEl.disabled = encryptDisabled;
+      redisEncryptionEncryptBtnEl.title = redisEncryptionState.live_encryption_enabled
+        ? "Live encryption is already enabled."
+        : "";
+    }
+    if (redisEncryptionDecryptBtnEl) {
+      redisEncryptionDecryptBtnEl.disabled = !redisEncryptionState.encryption_available || !redisEncryptionState.live_encryption_enabled;
+    }
+    return redisEncryptionState;
+  };
+
+  const refreshRedisSection = async () => {
+    const [nextStatus, nextEncryption] = await Promise.all([api("/api/redis/status"), api("/api/redis/encryption/status")]);
+    applyRedisConnectionStatus(nextStatus);
+    applyRedisEncryptionStatus(nextEncryption);
+  };
+
+  applyRedisConnectionStatus(redisStatus);
+  applyRedisEncryptionStatus(redisEncryptionState);
+  redisUseTlsEl?.addEventListener("change", syncRedisTlsUi);
+  redisPasswordEl?.addEventListener("focus", () => {
+    if (String(redisPasswordEl?.dataset?.masked || "") === "1") {
+      redisPasswordEl.value = "";
+      delete redisPasswordEl.dataset.masked;
+    }
+  });
+  redisPasswordEl?.addEventListener("input", () => {
+    if (String(redisPasswordEl?.dataset?.masked || "") === "1" && String(redisPasswordEl.value || "") !== REDIS_PASSWORD_MASK) {
+      delete redisPasswordEl.dataset.masked;
+    }
+  });
+  redisRefreshBtnEl?.addEventListener("click", async () => {
+    setRedisBusy(true);
+    statusEl.textContent = "Refreshing Redis status...";
+    try {
+      await refreshRedisSection();
+      statusEl.textContent = "Redis status refreshed.";
+    } catch (error) {
+      statusEl.textContent = `Redis refresh failed: ${error.message}`;
+    } finally {
+      setRedisBusy(false);
+    }
+  });
+  redisTestBtnEl?.addEventListener("click", async () => {
+    setRedisBusy(true);
+    statusEl.textContent = "Testing Redis connection...";
+    try {
+      const result = await api("/api/redis/configure", {
+        method: "POST",
+        body: JSON.stringify(redisFormPayload(true)),
+      });
+      applyRedisConnectionStatus(result);
+      statusEl.textContent = "Redis connection test succeeded.";
+    } catch (error) {
+      statusEl.textContent = `Redis test failed: ${error.message}`;
+    } finally {
+      setRedisBusy(false);
+    }
+  });
+  redisSaveBtnEl?.addEventListener("click", async () => {
+    setRedisBusy(true);
+    statusEl.textContent = "Saving Redis settings...";
+    try {
+      const result = await api("/api/redis/configure", {
+        method: "POST",
+        body: JSON.stringify(redisFormPayload(false)),
+      });
+      applyRedisConnectionStatus(result);
+      const replay = result?.bootstrap_replay && typeof result.bootstrap_replay === "object" ? result.bootstrap_replay : null;
+      if (replay && replay.ok === false) {
+        statusEl.textContent = `Redis saved, but startup replay failed: ${String(replay.error || "unknown error")}`;
+      } else if (replay) {
+        statusEl.textContent = `Redis saved. Startup replay complete (restore: ${
+          replay.ran_restore ? "ran" : "skipped"
+        }, autostart: ${replay.ran_autostart ? "ran" : "skipped"}).`;
+      } else {
+        statusEl.textContent = "Redis settings saved.";
+      }
+      await refreshHealth();
+    } catch (error) {
+      statusEl.textContent = `Redis save failed: ${error.message}`;
+    } finally {
+      setRedisBusy(false);
+    }
+  });
+  redisEncryptionEncryptBtnEl?.addEventListener("click", async () => {
+    setRedisBusy(true);
+    statusEl.textContent = "Encrypting live Redis values (auto-creating key if needed)...";
+    try {
+      const result = await runActionWithProgress(
+        {
+          title: "Encrypting Redis",
+          detail: "Pausing active runtimes and encrypting Redis values in place",
+          workingText: "Encrypting live Redis values...",
+          successText: "Redis encryption complete.",
+          errorPrefix: "Redis encryption failed",
+        },
+        () => api("/api/redis/encryption/encrypt", { method: "POST" })
+      );
+      applyRedisEncryptionStatus(result?.encryption_status || (await api("/api/redis/encryption/status")));
+      const keySuffix = result?.key_created ? " New encryption key generated." : "";
+      statusEl.textContent = `Encrypted ${Number(result?.keys_encrypted || 0)} Redis value(s); live encryption enabled.${keySuffix}`;
+    } catch (error) {
+      statusEl.textContent = `Redis encryption failed: ${error.message}`;
+    } finally {
+      setRedisBusy(false);
+    }
+  });
+  redisEncryptionDecryptBtnEl?.addEventListener("click", async () => {
+    if (!window.confirm("Decrypt live Redis values now? This switches future writes back to plaintext.")) {
+      return;
+    }
+    setRedisBusy(true);
+    statusEl.textContent = "Decrypting live Redis values...";
+    try {
+      const result = await runActionWithProgress(
+        {
+          title: "Decrypting Redis",
+          detail: "Pausing active runtimes and decrypting Redis values in place",
+          workingText: "Decrypting live Redis values...",
+          successText: "Redis decryption complete.",
+          errorPrefix: "Redis decrypt failed",
+        },
+        () => api("/api/redis/encryption/decrypt", { method: "POST" })
+      );
+      applyRedisEncryptionStatus(result?.encryption_status || (await api("/api/redis/encryption/status")));
+      await refreshRedisSection();
+      await refreshHealth();
+      const replay = result?.bootstrap_replay && typeof result.bootstrap_replay === "object" ? result.bootstrap_replay : null;
+      if (replay && replay.ok === false) {
+        statusEl.textContent = `Decrypted ${Number(result?.restored_keys || 0)} Redis value(s), but startup replay failed: ${
+          replay.error || "unknown error"
+        }`;
+      } else {
+        statusEl.textContent = `Decrypted ${Number(result?.restored_keys || 0)} Redis value(s); live encryption disabled.`;
+      }
+    } catch (error) {
+      statusEl.textContent = `Redis decrypt failed: ${error.message}`;
+    } finally {
+      setRedisBusy(false);
+    }
   });
 
   let clearUserAvatarRequested = false;
@@ -6049,6 +6991,7 @@ async function init() {
   bindSidebarControls();
   bindNav();
   bindRuntimeSummary();
+  await ensureRedisSetup();
   await refreshBranding();
   await refreshHealth();
   await loadView(state.view);

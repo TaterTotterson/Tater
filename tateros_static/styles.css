@@ -881,6 +881,26 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   border-color: var(--accent-soft);
 }
 
+.nav-btn:disabled,
+.action-btn:disabled,
+.inline-btn:disabled {
+  color: rgba(168, 160, 150, 0.68);
+  background: rgba(255, 255, 255, 0.01);
+  border-color: rgba(95, 99, 106, 0.46);
+  box-shadow: none;
+  opacity: 0.52;
+  filter: saturate(0.2);
+  cursor: not-allowed;
+  transform: none;
+}
+
+.nav-btn:disabled:hover,
+.action-btn:disabled:hover,
+.inline-btn:disabled:hover {
+  transform: none;
+  border-color: rgba(95, 99, 106, 0.46);
+}
+
 .nav-btn.active {
   background: linear-gradient(135deg, rgba(214, 90, 31, 0.24), rgba(214, 90, 31, 0.08));
   border-color: rgba(214, 90, 31, 0.52);
@@ -1030,6 +1050,16 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 .inline-btn.danger {
   border-color: rgba(255, 92, 92, 0.5);
   color: #ffd2d2;
+}
+
+.redis-live-state-enabled {
+  color: var(--ok);
+  font-weight: 700;
+}
+
+.redis-live-state-disabled {
+  color: var(--danger);
+  font-weight: 700;
 }
 
 .action-btn {
@@ -1746,6 +1776,36 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   line-height: 1.34;
 }
 
+.small.error {
+  color: #ffb3b3;
+}
+
+.small.success {
+  color: #8ae7a8;
+}
+
+.redis-setup-dialog {
+  width: min(760px, 96vw);
+  gap: 10px;
+}
+
+.redis-setup-form {
+  margin-top: 6px;
+}
+
+.redis-setup-form .inline-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.redis-setup-form .toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
 .action-progress-dialog {
   width: min(620px, 94vw);
   gap: 10px;
@@ -1816,6 +1876,21 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   min-height: 0;
   overflow: auto;
   padding-right: 4px;
+}
+
+.runtime-setting-input-action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.runtime-setting-input-action input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.runtime-generate-key-btn {
+  white-space: nowrap;
 }
 
 .runtime-breakdown-content {
