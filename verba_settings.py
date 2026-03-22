@@ -1,16 +1,7 @@
-import os
-
 import dotenv
-import redis
+from helpers import redis_client
 
 dotenv.load_dotenv()
-
-redis_client = redis.Redis(
-    host=os.getenv("REDIS_HOST", "127.0.0.1"),
-    port=int(os.getenv("REDIS_PORT", 6379)),
-    db=0,
-    decode_responses=True,
-)
 
 VERBA_ENABLED_HASH = "verba_enabled"
 VERBA_SETTINGS_PREFIX = "verba_settings:"

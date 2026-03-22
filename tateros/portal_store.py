@@ -5,8 +5,8 @@ import os
 import re as _re
 from urllib.parse import urljoin, urlparse
 
-import redis
 import requests
+from helpers import redis_client
 
 PORTAL_DIR = os.getenv("TATER_PORTAL_DIR", "portals")
 
@@ -16,11 +16,6 @@ PORTAL_SHOP_MANIFEST_URL_DEFAULT = os.getenv(
 )
 PORTAL_SHOP_MANIFEST_URLS_KEY = "tater:portal_shop_manifest_urls"
 DEFAULT_PORTAL_SHOP_LABEL = "Tater Portal Shop"
-
-redis_host = os.getenv("REDIS_HOST", "127.0.0.1")
-redis_port = int(os.getenv("REDIS_PORT", 6379))
-redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
-
 
 def _normalize_manifest_url(url: str | None) -> str:
     return str(url or "").strip()
@@ -615,5 +610,4 @@ def _build_installed_portal_entries(catalog_items: list[dict]) -> list[dict]:
 
     entries.sort(key=lambda item: item["display_name"].lower())
     return entries
-
 

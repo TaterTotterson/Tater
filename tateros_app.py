@@ -16,7 +16,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
 import dotenv
-import redis
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -47,10 +46,20 @@ from hydra import (
 from emoji_responder import get_emoji_settings as get_core_emoji_settings, save_emoji_settings as save_core_emoji_settings
 from helpers import (
     HYDRA_LLM_BASE_SERVERS_KEY,
+    decrypt_current_redis_snapshot,
+    encrypt_current_redis_snapshot,
+    ensure_redis_encryption_key,
+    get_redis_connection_config,
+    get_redis_encryption_status,
+    get_redis_connection_status,
     get_llm_call_runtime_summary,
     get_llm_client_from_env,
+    redis_blob_client as shared_redis_blob_client,
+    redis_client as shared_redis_client,
     resolve_hydra_base_servers,
+    save_redis_connection_settings,
     set_main_loop,
+    test_redis_connection_settings,
 )
 from verba_settings import (
     get_verba_enabled,
@@ -73,22 +82,8 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)-8s %(name)-20s %(message)s",
 )
 
-REDIS_HOST = os.getenv("REDIS_HOST", "127.0.0.1")
-REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
-
-redis_client = redis.Redis(
-    host=REDIS_HOST,
-    port=REDIS_PORT,
-    db=0,
-    decode_responses=True,
-)
-
-redis_blob_client = redis.Redis(
-    host=REDIS_HOST,
-    port=REDIS_PORT,
-    db=0,
-    decode_responses=False,
-)
+redis_client = shared_redis_client
+redis_blob_client = shared_redis_blob_client
 
 CHAT_HISTORY_KEY = "webui:chat_history"
 DEFAULT_MAX_STORE = 20
@@ -118,6 +113,7 @@ bootstrap_state: Dict[str, Any] = {
     "autostart_enabled": True,
     "redis_migration": {},
 }
+redis_maintenance_lock = threading.RLock()
 
 
 class SurfaceRuntimeManager:
@@ -1878,6 +1874,363 @@ def _restore_enabled_surfaces() -> Dict[str, Any]:
     return summary
 
 
+def _replay_startup_after_redis_configure() -> Dict[str, Any]:
+    """
+    Re-run startup restore/autostart flow after Redis is configured at runtime.
+    This lets first-run setups recover missing enabled surfaces without requiring
+    a manual backend restart.
+    """
+    result: Dict[str, Any] = {
+        "ok": True,
+        "ran_restore": False,
+        "ran_autostart": False,
+        "error": "",
+        "restore_summary": {},
+        "redis_migration": {},
+    }
+
+    bootstrap_state["restore_in_progress"] = True
+    bootstrap_state["restore_complete"] = False
+    bootstrap_state["restore_error"] = ""
+
+    try:
+        migration_summary = _migrate_legacy_plugin_redis_keys()
+        bootstrap_state["redis_migration"] = migration_summary
+        result["redis_migration"] = dict(migration_summary or {})
+
+        if bool(bootstrap_state.get("restore_enabled")):
+            summary = _restore_enabled_surfaces()
+            bootstrap_state["restore_summary"] = summary
+            result["restore_summary"] = dict(summary or {})
+            result["ran_restore"] = True
+            logger.info("[runtime-restore] summary: %s", summary)
+        else:
+            logger.info("[runtime-restore] skipped (HTMLUI_RESTORE_ENABLED_SURFACES_ON_STARTUP=false)")
+
+        if bool(bootstrap_state.get("autostart_enabled")):
+            _autostart_enabled_surfaces()
+            result["ran_autostart"] = True
+        else:
+            logger.info("[runtime-autostart] skipped (HTMLUI_AUTOSTART_ENABLED_SURFACES_ON_STARTUP=false)")
+    except Exception as exc:
+        err = str(exc)
+        bootstrap_state["restore_error"] = err
+        result["ok"] = False
+        result["error"] = err
+        logger.warning("[runtime-bootstrap] failed after redis configure: %s", exc)
+    finally:
+        bootstrap_state["restore_in_progress"] = False
+        bootstrap_state["restore_complete"] = True
+
+    return result
+
+
+def _running_surface_keys(runtime: SurfaceRuntimeManager) -> List[str]:
+    with runtime.lock:
+        keys = list(runtime.threads.keys())
+    running = [str(key).strip() for key in keys if str(key).strip() and runtime.is_running(key)]
+    return sorted(set(running))
+
+
+def _read_positive_float_env(key: str, default: float) -> float:
+    raw = str(os.getenv(key, "") or "").strip()
+    if not raw:
+        return float(default)
+    try:
+        value = float(raw)
+    except Exception:
+        return float(default)
+    return value if value > 0 else float(default)
+
+
+def _stop_surface_keys(
+    runtime: SurfaceRuntimeManager,
+    keys: List[str],
+    *,
+    timeout: float,
+    late_grace_seconds: float = 8.0,
+) -> Dict[str, Any]:
+    requested = [str(key).strip() for key in (keys or []) if str(key).strip()]
+    stopped: List[str] = []
+    failed: List[Dict[str, str]] = []
+
+    for key in requested:
+        try:
+            status = runtime.stop(key, timeout=timeout)
+        except Exception as exc:
+            failed.append({"key": key, "error": str(exc)})
+            continue
+
+        if bool(status.get("running")):
+            failed.append({"key": key, "error": str(status.get("reason") or "stop-timeout")})
+        else:
+            stopped.append(key)
+
+    stopped_late: List[str] = []
+    if failed and late_grace_seconds > 0:
+        deadline = time.time() + float(late_grace_seconds)
+        pending = [row for row in failed if isinstance(row, dict)]
+        while pending and time.time() < deadline:
+            still_running: List[Dict[str, str]] = []
+            for row in pending:
+                key = str(row.get("key") or "").strip()
+                if not key:
+                    continue
+                if runtime.is_running(key):
+                    still_running.append(row)
+                else:
+                    stopped_late.append(key)
+            pending = still_running
+            if pending:
+                time.sleep(0.25)
+
+        if stopped_late:
+            seen_late = set(stopped_late)
+            failed = [row for row in failed if str((row or {}).get("key") or "").strip() not in seen_late]
+            stopped.extend(stopped_late)
+
+    return {
+        "requested": requested,
+        "stopped": stopped,
+        "stopped_late": sorted(set(stopped_late)),
+        "failed": failed,
+    }
+
+
+def _resume_surface_keys(runtime: SurfaceRuntimeManager, keys: List[str]) -> Dict[str, Any]:
+    requested = [str(key).strip() for key in (keys or []) if str(key).strip()]
+    resumed: List[str] = []
+    already_running: List[str] = []
+    failed: List[Dict[str, str]] = []
+
+    for key in requested:
+        if runtime.is_running(key):
+            already_running.append(key)
+            continue
+        try:
+            status = runtime.start(key)
+        except Exception as exc:
+            failed.append({"key": key, "error": str(exc)})
+            continue
+        if bool(status.get("running")):
+            resumed.append(key)
+        else:
+            failed.append({"key": key, "error": str(status.get("reason") or "start-failed")})
+
+    return {
+        "requested": requested,
+        "resumed": resumed,
+        "already_running": already_running,
+        "failed": failed,
+    }
+
+
+def _quiesce_surfaces_for_redis_maintenance(
+    *,
+    action: str,
+    stop_timeout: float,
+    late_grace_seconds: float,
+) -> Dict[str, Any]:
+    core_keys = _running_surface_keys(core_runtime)
+    portal_keys = _running_surface_keys(portal_runtime)
+
+    logger.info(
+        "[%s] pausing runtimes before Redis maintenance (cores=%d portals=%d)",
+        action,
+        len(core_keys),
+        len(portal_keys),
+    )
+
+    # Stop portals first to reduce inbound chatter, then cores.
+    stopped_portals = _stop_surface_keys(
+        portal_runtime,
+        portal_keys,
+        timeout=stop_timeout,
+        late_grace_seconds=late_grace_seconds,
+    )
+    stopped_cores = _stop_surface_keys(
+        core_runtime,
+        core_keys,
+        timeout=stop_timeout,
+        late_grace_seconds=late_grace_seconds,
+    )
+
+    portal_late = list(stopped_portals.get("stopped_late") or [])
+    core_late = list(stopped_cores.get("stopped_late") or [])
+    if portal_late or core_late:
+        logger.info(
+            "[%s] runtimes stopped during grace window (cores=%s portals=%s)",
+            action,
+            ",".join(core_late) if core_late else "-",
+            ",".join(portal_late) if portal_late else "-",
+        )
+
+    stop_failures: List[str] = []
+    for row in stopped_portals.get("failed") or []:
+        stop_failures.append(f"portal:{str(row.get('key') or '').strip()}")
+    for row in stopped_cores.get("failed") or []:
+        stop_failures.append(f"core:{str(row.get('key') or '').strip()}")
+
+    return {
+        "action": action,
+        "active_before": {
+            "cores": core_keys,
+            "portals": portal_keys,
+        },
+        "stopped": {
+            "cores": stopped_cores,
+            "portals": stopped_portals,
+        },
+        "stop_failures": stop_failures,
+    }
+
+
+def _resume_surfaces_after_redis_maintenance(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    active_before = snapshot.get("active_before") if isinstance(snapshot, dict) else {}
+    if not isinstance(active_before, dict):
+        active_before = {}
+
+    core_keys = [str(key).strip() for key in (active_before.get("cores") or []) if str(key).strip()]
+    portal_keys = [str(key).strip() for key in (active_before.get("portals") or []) if str(key).strip()]
+
+    # Start cores first, then portals.
+    resumed_cores = _resume_surface_keys(core_runtime, core_keys)
+    resumed_portals = _resume_surface_keys(portal_runtime, portal_keys)
+
+    return {
+        "cores": resumed_cores,
+        "portals": resumed_portals,
+    }
+
+
+def _wait_for_surface_failures_to_stop(
+    failures: List[str],
+    *,
+    timeout_seconds: float,
+    poll_interval_seconds: float = 0.25,
+) -> Dict[str, List[str]]:
+    pending = [str(item).strip() for item in (failures or []) if str(item).strip()]
+    if not pending or timeout_seconds <= 0:
+        return {"resolved": [], "pending": pending}
+
+    deadline = time.time() + float(timeout_seconds)
+    resolved: List[str] = []
+    unresolved = list(pending)
+
+    while unresolved and time.time() < deadline:
+        still_pending: List[str] = []
+        for item in unresolved:
+            kind, sep, key = item.partition(":")
+            runtime: Optional[SurfaceRuntimeManager] = None
+            if sep and kind == "core":
+                runtime = core_runtime
+            elif sep and kind == "portal":
+                runtime = portal_runtime
+
+            if runtime is None or not key:
+                still_pending.append(item)
+                continue
+            if runtime.is_running(key):
+                still_pending.append(item)
+            else:
+                resolved.append(item)
+
+        unresolved = still_pending
+        if unresolved:
+            time.sleep(max(0.05, float(poll_interval_seconds)))
+
+    return {
+        "resolved": sorted(set(resolved)),
+        "pending": unresolved,
+    }
+
+
+def _run_redis_maintenance_with_runtime_pause(
+    *,
+    action: str,
+    operation: Callable[[], Dict[str, Any]],
+    stop_timeout: float = 6.0,
+) -> Dict[str, Any]:
+    effective_stop_timeout = _read_positive_float_env(
+        "REDIS_MAINTENANCE_STOP_TIMEOUT_SECONDS",
+        stop_timeout,
+    )
+    effective_late_grace_seconds = _read_positive_float_env(
+        "REDIS_MAINTENANCE_LATE_GRACE_SECONDS",
+        8.0,
+    )
+    effective_final_wait_seconds = _read_positive_float_env(
+        "REDIS_MAINTENANCE_FINAL_WAIT_SECONDS",
+        60.0,
+    )
+    with redis_maintenance_lock:
+        quiesce_snapshot = _quiesce_surfaces_for_redis_maintenance(
+            action=action,
+            stop_timeout=effective_stop_timeout,
+            late_grace_seconds=effective_late_grace_seconds,
+        )
+        stop_failures = [str(item).strip() for item in (quiesce_snapshot.get("stop_failures") or []) if str(item).strip()]
+        late_wait_report = {"resolved": [], "pending": stop_failures}
+        if stop_failures:
+            late_wait_report = _wait_for_surface_failures_to_stop(
+                stop_failures,
+                timeout_seconds=effective_final_wait_seconds,
+            )
+            resolved_late = [str(item).strip() for item in (late_wait_report.get("resolved") or []) if str(item).strip()]
+            if resolved_late:
+                logger.info(
+                    "[%s] runtimes stopped during final wait window: %s",
+                    action,
+                    ", ".join(resolved_late),
+                )
+            stop_failures = [str(item).strip() for item in (late_wait_report.get("pending") or []) if str(item).strip()]
+
+        if stop_failures:
+            _resume_surfaces_after_redis_maintenance(quiesce_snapshot)
+            logger.warning(
+                "[%s] aborting Redis maintenance; failed to pause runtimes: %s",
+                action,
+                ", ".join(stop_failures),
+            )
+            raise RuntimeError(
+                "Failed to pause running cores/portals before Redis maintenance: "
+                + ", ".join(stop_failures)
+                + ". Retry after stopping those runtimes."
+            )
+
+        operation_payload: Dict[str, Any] = {}
+        try:
+            raw_payload = operation()
+            operation_payload = raw_payload if isinstance(raw_payload, dict) else {"result": raw_payload}
+        finally:
+            resume_report = _resume_surfaces_after_redis_maintenance(quiesce_snapshot)
+
+        resume_failures = []
+        for row in (resume_report.get("cores", {}).get("failed") or []):
+            key = str(row.get("key") or "").strip()
+            if key:
+                resume_failures.append(f"core:{key}")
+        for row in (resume_report.get("portals", {}).get("failed") or []):
+            key = str(row.get("key") or "").strip()
+            if key:
+                resume_failures.append(f"portal:{key}")
+        if resume_failures:
+            logger.warning("[%s] failed to resume some runtimes: %s", action, ", ".join(resume_failures))
+
+        operation_payload["runtime_quiesce"] = {
+            "action": action,
+            "stop_timeout_seconds": effective_stop_timeout,
+            "late_grace_seconds": effective_late_grace_seconds,
+            "final_wait_seconds": effective_final_wait_seconds,
+            "active_before": quiesce_snapshot.get("active_before", {}),
+            "stopped": quiesce_snapshot.get("stopped", {}),
+            "stop_failures": stop_failures,
+            "late_wait_resolved": late_wait_report.get("resolved", []),
+            "resumed": resume_report,
+        }
+        return operation_payload
+
+
 class PluginToggleRequest(BaseModel):
     enabled: bool
 
@@ -1971,6 +2324,19 @@ class AppSettingsRequest(BaseModel):
     hydra_astraeus_plan_review_enabled: Optional[bool] = None
     popup_effect_style: Optional[str] = None
     admin_only_plugins: Optional[List[str]] = None
+
+
+class RedisSetupRequest(BaseModel):
+    host: Optional[str] = ""
+    port: Optional[int] = 6379
+    db: Optional[int] = 0
+    username: Optional[str] = ""
+    password: Optional[str] = ""
+    use_tls: Optional[bool] = False
+    verify_tls: Optional[bool] = True
+    ca_cert_path: Optional[str] = ""
+    keep_existing_password: Optional[bool] = False
+    test_only: Optional[bool] = False
 
 
 class HydraDataClearRequest(BaseModel):
@@ -2325,13 +2691,131 @@ def _runtime_breakdown_payload() -> Dict[str, Any]:
     }
 
 
+def _redis_setup_payload(payload: RedisSetupRequest) -> Dict[str, Any]:
+    raw_password = payload.password
+    password = "" if raw_password is None else str(raw_password)
+    keep_existing = bool(payload.keep_existing_password)
+    if keep_existing and not password:
+        existing = get_redis_connection_config(include_secret=True)
+        password = str(existing.get("password") or "")
+    return {
+        "host": str(payload.host or "").strip(),
+        "port": int(payload.port if payload.port is not None else 6379),
+        "db": int(payload.db if payload.db is not None else 0),
+        "username": str(payload.username or "").strip(),
+        "password": password,
+        "use_tls": bool(payload.use_tls),
+        "verify_tls": bool(payload.verify_tls),
+        "ca_cert_path": str(payload.ca_cert_path or "").strip(),
+    }
+
+
+@app.get("/api/redis/status")
+def redis_status() -> Dict[str, Any]:
+    return get_redis_connection_status()
+
+
+@app.post("/api/redis/configure")
+def redis_configure(payload: RedisSetupRequest) -> Dict[str, Any]:
+    config_payload = _redis_setup_payload(payload)
+    ok, error = test_redis_connection_settings(config_payload)
+    if not ok:
+        raise HTTPException(status_code=400, detail=f"Redis connection failed: {error}")
+    if bool(payload.test_only):
+        # In test-only mode, echo the tested values so the UI doesn't overwrite
+        # in-progress form edits with the last saved Redis config.
+        status = get_redis_connection_status()
+        status.update(
+            {
+                "configured": bool(str(config_payload.get("host") or "").strip()),
+                "connected": True,
+                "error": "",
+                "host": str(config_payload.get("host") or ""),
+                "port": int(config_payload.get("port") or 6379),
+                "db": int(config_payload.get("db") or 0),
+                "username": str(config_payload.get("username") or ""),
+                "use_tls": bool(config_payload.get("use_tls")),
+                "verify_tls": bool(config_payload.get("verify_tls")),
+                "ca_cert_path": str(config_payload.get("ca_cert_path") or ""),
+                "password_set": bool(str(config_payload.get("password") or "")),
+            }
+        )
+        return {
+            **status,
+            "saved": False,
+        }
+
+    save_redis_connection_settings(config_payload)
+    bootstrap_replay = _replay_startup_after_redis_configure()
+    status = get_redis_connection_status()
+    return {
+        **status,
+        "saved": True,
+        "bootstrap_replay": bootstrap_replay,
+    }
+
+
+@app.get("/api/redis/encryption/status")
+def redis_encryption_status() -> Dict[str, Any]:
+    try:
+        return get_redis_encryption_status()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to read Redis encryption status: {exc}")
+
+
+@app.post("/api/redis/encryption/key")
+def redis_encryption_key() -> Dict[str, Any]:
+    try:
+        return ensure_redis_encryption_key()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to initialize Redis encryption key: {exc}")
+
+
+@app.post("/api/redis/encryption/encrypt")
+def redis_encryption_encrypt() -> Dict[str, Any]:
+    try:
+        payload = _run_redis_maintenance_with_runtime_pause(
+            action="redis-encrypt",
+            operation=encrypt_current_redis_snapshot,
+        )
+        payload["encryption_status"] = get_redis_encryption_status()
+        return payload
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=f"Redis encryption blocked: {exc}")
+    except RedisError as exc:
+        raise HTTPException(status_code=503, detail=f"Redis encryption failed: {exc}")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Redis encryption failed: {exc}")
+
+
+@app.post("/api/redis/encryption/decrypt")
+def redis_encryption_decrypt() -> Dict[str, Any]:
+    try:
+        payload = _run_redis_maintenance_with_runtime_pause(
+            action="redis-decrypt",
+            operation=lambda: decrypt_current_redis_snapshot(flush_before_restore=True),
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=f"Redis decryption blocked: {exc}")
+    except RedisError as exc:
+        raise HTTPException(status_code=503, detail=f"Redis decryption failed: {exc}")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Redis decryption failed: {exc}")
+
+    bootstrap_replay = _replay_startup_after_redis_configure()
+    return {
+        **payload,
+        "bootstrap_replay": bootstrap_replay,
+        "encryption_status": get_redis_encryption_status(),
+    }
+
+
 @app.get("/api/health")
 def health() -> Dict[str, Any]:
-    try:
-        redis_client.ping()
-        redis_ok = True
-    except Exception:
-        redis_ok = False
+    redis_status_payload = get_redis_connection_status()
+    redis_ok = bool(redis_status_payload.get("connected"))
 
     verbas_enabled = 0
     try:
@@ -2351,6 +2835,7 @@ def health() -> Dict[str, Any]:
     return {
         "ok": redis_ok,
         "redis": redis_ok,
+        "redis_status": redis_status_payload,
         "verbas_enabled": int(verbas_enabled),
         "cores_running": len([k for k in core_runtime.threads if core_runtime.is_running(k)]),
         "portals_running": len([k for k in portal_runtime.threads if portal_runtime.is_running(k)]),

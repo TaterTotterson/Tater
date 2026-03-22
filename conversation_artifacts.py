@@ -7,7 +7,7 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
-import redis
+from helpers import redis_blob_client
 
 
 CONVERSATION_ARTIFACT_PREFIX = "tater:conversation_artifacts"
@@ -44,13 +44,8 @@ def artifact_seq_key(platform: Any, scope: Any) -> str:
     return f"{CONVERSATION_ARTIFACT_SEQ_PREFIX}:{_platform_token(platform)}:{_scope_token(scope)}"
 
 
-def _blob_client() -> redis.Redis:
-    return redis.Redis(
-        host=os.getenv("REDIS_HOST", "127.0.0.1"),
-        port=int(os.getenv("REDIS_PORT", 6379)),
-        db=0,
-        decode_responses=False,
-    )
+def _blob_client():
+    return redis_blob_client
 
 
 def _blob_key() -> str:
