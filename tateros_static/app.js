@@ -5865,6 +5865,10 @@ async function loadSettingsView() {
             <label style="grid-column: 1 / -1;">Vision API Key (optional)
               <input id="set_vision_api_key" type="password" value="${escapeHtml(settings.vision_api_key || "")}" />
             </label>
+            <div class="inline-row" style="grid-column: 1 / -1;">
+              <button type="button" id="settings-save-integrations" class="action-btn">Save Settings</button>
+              <span class="small">Saves Integrations and non-model settings.</span>
+            </div>
           </div>
         </section>
 
@@ -5977,6 +5981,10 @@ async function loadSettingsView() {
                 settings.emoji_min_message_length ?? 4
               )}" />
             </label>
+            <div class="inline-row" style="grid-column: 1 / -1;">
+              <button type="button" id="settings-save-emoji" class="action-btn">Save Settings</button>
+              <span class="small">Saves Emoji and non-model settings.</span>
+            </div>
           </div>
         </section>
 
@@ -6249,6 +6257,10 @@ async function loadSettingsView() {
               </select>
             </label>
             <div class="small">Applies to modal popups and toast popups when they appear and close.</div>
+            <div class="inline-row" style="grid-column: 1 / -1;">
+              <button type="button" id="settings-save-compozr" class="action-btn">Save Settings</button>
+              <span class="small">Saves Compotato and non-model settings.</span>
+            </div>
           </div>
         </section>
 
@@ -6273,6 +6285,10 @@ async function loadSettingsView() {
                 <button type="button" id="settings-clear-chat" class="inline-btn danger">Clear Chat History</button>
                 <span class="small">Deletes all messages in the WebUI chat history.</span>
               </div>
+            </div>
+            <div class="inline-row">
+              <button type="button" id="settings-save-advanced" class="action-btn">Save Settings</button>
+              <span class="small">Saves Advanced and non-model settings.</span>
             </div>
           </div>
         </section>
@@ -7482,8 +7498,16 @@ async function loadSettingsView() {
     }
   };
 
-  document.getElementById("settings-save")?.addEventListener("click", runSettingsSave);
-  document.getElementById("settings-save-general")?.addEventListener("click", runSettingsSave);
+  [
+    "settings-save",
+    "settings-save-general",
+    "settings-save-integrations",
+    "settings-save-emoji",
+    "settings-save-compozr",
+    "settings-save-advanced",
+  ].forEach((buttonId) => {
+    document.getElementById(buttonId)?.addEventListener("click", runSettingsSave);
+  });
 }
 
 async function loadView(viewName) {
