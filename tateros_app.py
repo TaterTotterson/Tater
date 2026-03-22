@@ -1,10 +1,13 @@
 import asyncio
 import base64
+import hashlib
+import hmac
 import importlib
 import json
 import logging
 import os
 import queue
+import secrets
 import sys
 import threading
 import time
@@ -16,7 +19,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
 import dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Cookie, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -100,6 +103,12 @@ LAST_LLM_STATS_KEY = "webui:last_llm_stats"
 WEBUI_POPUP_EFFECT_STYLE_KEY = "tater:webui:popup_effect_style"
 DEFAULT_WEBUI_POPUP_EFFECT_STYLE = "flame"
 WEBUI_POPUP_EFFECT_STYLE_CHOICES = {"disabled", "flame", "dust", "glitch", "portal", "melt"}
+WEBUI_AUTH_PASSWORD_HASH_KEY = "tater:webui_auth:password_hash"
+WEBUI_AUTH_SESSIONS_KEY = "tater:webui_auth:sessions"
+WEBUI_AUTH_COOKIE_NAME = "tater_webui_session"
+WEBUI_AUTH_PASSWORD_MIN_LENGTH = 4
+WEBUI_AUTH_PBKDF2_ITERATIONS = 260_000
+WEBUI_AUTH_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 365 * 5
 RUNTIME_CONTEXT_ESTIMATE_TTL_SECONDS = 20
 runtime_context_estimate_cache: Dict[str, Any] = {"updated_at": 0.0, "payload": {}}
 
@@ -968,6 +977,109 @@ def _read_tater_avatar_data_url() -> str:
     mimetype = _guess_image_mimetype(raw_default)
     encoded = base64.b64encode(raw_default).decode("utf-8")
     return f"data:{mimetype};base64,{encoded}"
+
+
+def _b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("utf-8").rstrip("=")
+
+
+def _b64url_decode(text: str) -> bytes:
+    compact = str(text or "").strip()
+    if not compact:
+        return b""
+    padding = "=" * ((4 - (len(compact) % 4)) % 4)
+    return base64.urlsafe_b64decode((compact + padding).encode("utf-8"))
+
+
+def _load_webui_password_hash() -> str:
+    return str(redis_client.get(WEBUI_AUTH_PASSWORD_HASH_KEY) or "").strip()
+
+
+def _webui_password_is_set() -> bool:
+    return bool(_load_webui_password_hash())
+
+
+def _hash_webui_password(password: str, *, salt: bytes, iterations: int = WEBUI_AUTH_PBKDF2_ITERATIONS) -> str:
+    rounds = max(100_000, int(iterations or WEBUI_AUTH_PBKDF2_ITERATIONS))
+    digest = hashlib.pbkdf2_hmac("sha256", str(password or "").encode("utf-8"), salt, rounds)
+    return f"pbkdf2_sha256${rounds}${_b64url_encode(salt)}${_b64url_encode(digest)}"
+
+
+def _verify_webui_password(password: str, stored_hash: str) -> bool:
+    text = str(stored_hash or "").strip()
+    if not text:
+        return False
+    try:
+        algo, rounds_raw, salt_b64, digest_b64 = text.split("$", 3)
+        if algo != "pbkdf2_sha256":
+            return False
+        rounds = max(1, int(rounds_raw))
+        salt = _b64url_decode(salt_b64)
+        expected = _b64url_decode(digest_b64)
+        if not salt or not expected:
+            return False
+        computed = hashlib.pbkdf2_hmac("sha256", str(password or "").encode("utf-8"), salt, rounds)
+        return hmac.compare_digest(computed, expected)
+    except Exception:
+        return False
+
+
+def _new_webui_session_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def _webui_session_digest(token: str) -> str:
+    return hashlib.sha256(str(token or "").encode("utf-8")).hexdigest()
+
+
+def _store_webui_session(token: str) -> None:
+    digest = _webui_session_digest(token)
+    if not digest:
+        return
+    redis_client.hset(WEBUI_AUTH_SESSIONS_KEY, digest, int(time.time()))
+
+
+def _clear_webui_sessions() -> None:
+    redis_client.delete(WEBUI_AUTH_SESSIONS_KEY)
+
+
+def _webui_session_is_valid(token: Optional[str]) -> bool:
+    digest = _webui_session_digest(str(token or "").strip())
+    if not digest:
+        return False
+    return bool(redis_client.hexists(WEBUI_AUTH_SESSIONS_KEY, digest))
+
+
+def _issue_webui_auth_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key=WEBUI_AUTH_COOKIE_NAME,
+        value=str(token or ""),
+        max_age=WEBUI_AUTH_COOKIE_MAX_AGE_SECONDS,
+        httponly=True,
+        samesite="lax",
+        secure=False,
+        path="/",
+    )
+
+
+def _clear_webui_auth_cookie(response: Response) -> None:
+    response.delete_cookie(key=WEBUI_AUTH_COOKIE_NAME, path="/")
+
+
+def _webui_auth_profile_payload(
+    *,
+    authenticated: bool,
+) -> Dict[str, Any]:
+    chat_settings = redis_client.hgetall("chat_settings") or {}
+    password_set = _webui_password_is_set()
+    mode = "ready" if bool(authenticated) or not password_set else "login"
+    return {
+        "password_set": bool(password_set),
+        "authenticated": bool(authenticated),
+        "mode": mode,
+        "username": str(chat_settings.get("username") or "User"),
+        "user_avatar": _read_user_avatar_data_url(chat_settings),
+    }
 
 
 def _save_chat_message(role: str, username: str, content: Any) -> None:
@@ -2324,6 +2436,9 @@ class AppSettingsRequest(BaseModel):
     hydra_astraeus_plan_review_enabled: Optional[bool] = None
     popup_effect_style: Optional[str] = None
     admin_only_plugins: Optional[List[str]] = None
+    webui_password: Optional[str] = None
+    webui_password_confirm: Optional[str] = None
+    clear_webui_password: Optional[bool] = None
 
 
 class RedisSetupRequest(BaseModel):
@@ -2342,6 +2457,15 @@ class RedisSetupRequest(BaseModel):
 class HydraDataClearRequest(BaseModel):
     platform: str = "all"
     mode: str = "all"
+
+
+class WebUiAuthSetupRequest(BaseModel):
+    password: Optional[str] = ""
+    confirm_password: Optional[str] = ""
+
+
+class WebUiAuthLoginRequest(BaseModel):
+    password: Optional[str] = ""
 
 
 app = FastAPI(title="TaterOS", version="0.2.0")
@@ -2417,6 +2541,104 @@ async def _redis_error_handler(_request: Request, exc: RedisError):
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.middleware("http")
+async def _webui_auth_middleware(request: Request, call_next):
+    path = str(request.url.path or "")
+    if not path.startswith("/api/") or path.startswith("/api/auth/"):
+        return await call_next(request)
+
+    try:
+        password_set = _webui_password_is_set()
+    except RedisError:
+        # Let existing Redis error handling/reporting flows run when Redis is unavailable.
+        return await call_next(request)
+    except Exception:
+        password_set = False
+
+    if not password_set:
+        return await call_next(request)
+
+    token = request.cookies.get(WEBUI_AUTH_COOKIE_NAME)
+    try:
+        authenticated = _webui_session_is_valid(token)
+    except RedisError:
+        return await call_next(request)
+    except Exception:
+        authenticated = False
+
+    if not authenticated:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "WebUI login required.", "code": "webui_login_required"},
+        )
+
+    return await call_next(request)
+
+
+@app.get("/api/auth/status")
+def webui_auth_status(
+    webui_session: Optional[str] = Cookie(default=None, alias=WEBUI_AUTH_COOKIE_NAME),
+) -> Dict[str, Any]:
+    authenticated = False
+    if _webui_password_is_set():
+        authenticated = _webui_session_is_valid(webui_session)
+    return _webui_auth_profile_payload(authenticated=authenticated)
+
+
+@app.post("/api/auth/setup")
+def webui_auth_setup(payload: WebUiAuthSetupRequest, response: Response) -> Dict[str, Any]:
+    if _webui_password_is_set():
+        raise HTTPException(status_code=409, detail="WebUI password is already configured.")
+
+    password = str(payload.password or "")
+    confirm_password = str(payload.confirm_password or "")
+    if len(password) < int(WEBUI_AUTH_PASSWORD_MIN_LENGTH):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Password must be at least {WEBUI_AUTH_PASSWORD_MIN_LENGTH} characters.",
+        )
+    if password != confirm_password:
+        raise HTTPException(status_code=400, detail="Passwords do not match.")
+
+    salt = secrets.token_bytes(16)
+    password_hash = _hash_webui_password(password, salt=salt)
+    redis_client.set(WEBUI_AUTH_PASSWORD_HASH_KEY, password_hash)
+    _clear_webui_sessions()
+
+    session_token = _new_webui_session_token()
+    _store_webui_session(session_token)
+    _issue_webui_auth_cookie(response, session_token)
+    return _webui_auth_profile_payload(authenticated=True)
+
+
+@app.post("/api/auth/login")
+def webui_auth_login(payload: WebUiAuthLoginRequest, response: Response) -> Dict[str, Any]:
+    stored_hash = _load_webui_password_hash()
+    if not stored_hash:
+        raise HTTPException(status_code=409, detail="WebUI password has not been configured yet.")
+
+    password = str(payload.password or "")
+    if not _verify_webui_password(password, stored_hash):
+        raise HTTPException(status_code=401, detail="Invalid password.")
+
+    session_token = _new_webui_session_token()
+    _store_webui_session(session_token)
+    _issue_webui_auth_cookie(response, session_token)
+    return _webui_auth_profile_payload(authenticated=True)
+
+
+@app.post("/api/auth/logout")
+def webui_auth_logout(
+    response: Response,
+    webui_session: Optional[str] = Cookie(default=None, alias=WEBUI_AUTH_COOKIE_NAME),
+) -> Dict[str, Any]:
+    token = str(webui_session or "").strip()
+    if token:
+        redis_client.hdel(WEBUI_AUTH_SESSIONS_KEY, _webui_session_digest(token))
+    _clear_webui_auth_cookie(response)
+    return _webui_auth_profile_payload(authenticated=False)
 
 
 _RUNTIME_PLATFORM_LABELS: Dict[str, str] = {
@@ -4299,11 +4521,12 @@ def get_settings() -> Dict[str, Any]:
         "admin_plugin_options": admin_plugin_options,
         "admin_only_plugins": admin_only_plugins,
         "admin_only_plugins_defaults": sorted(DEFAULT_ADMIN_ONLY_PLUGINS),
+        "webui_password_set": _webui_password_is_set(),
     }
 
 
 @app.post("/api/settings")
-def update_settings(payload: AppSettingsRequest) -> Dict[str, Any]:
+def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str, Any]:
     updates = payload.model_dump(exclude_none=True)
 
     def _bounded_int(
@@ -4326,6 +4549,42 @@ def update_settings(payload: AppSettingsRequest) -> Dict[str, Any]:
     username = updates.get("username")
     if isinstance(username, str):
         redis_client.hset("chat_settings", "username", username.strip() or "User")
+
+    clear_webui_password = bool(updates.get("clear_webui_password"))
+    webui_password_raw = str(updates.get("webui_password") or "")
+    webui_password_present = "webui_password" in updates
+    webui_password_confirm = str(updates.get("webui_password_confirm") or "")
+    if not webui_password_present:
+        updates.pop("webui_password_confirm", None)
+
+    if clear_webui_password and webui_password_raw.strip():
+        raise HTTPException(status_code=400, detail="Set a WebUI password or clear it, not both.")
+
+    if clear_webui_password:
+        updates.pop("webui_password", None)
+        updates.pop("webui_password_confirm", None)
+        redis_client.delete(WEBUI_AUTH_PASSWORD_HASH_KEY)
+        _clear_webui_sessions()
+        _clear_webui_auth_cookie(response)
+    elif webui_password_present:
+        if webui_password_raw:
+            if len(webui_password_raw) < int(WEBUI_AUTH_PASSWORD_MIN_LENGTH):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"WebUI password must be at least {WEBUI_AUTH_PASSWORD_MIN_LENGTH} characters.",
+                )
+            if webui_password_raw != webui_password_confirm:
+                raise HTTPException(status_code=400, detail="WebUI password confirmation does not match.")
+            salt = secrets.token_bytes(16)
+            password_hash = _hash_webui_password(webui_password_raw, salt=salt)
+            redis_client.set(WEBUI_AUTH_PASSWORD_HASH_KEY, password_hash)
+            _clear_webui_sessions()
+            session_token = _new_webui_session_token()
+            _store_webui_session(session_token)
+            _issue_webui_auth_cookie(response, session_token)
+        else:
+            updates.pop("webui_password", None)
+            updates.pop("webui_password_confirm", None)
 
     if bool(updates.get("clear_user_avatar")):
         redis_client.hdel("chat_settings", "avatar")
