@@ -58,6 +58,14 @@ const state = {
     password_set: false,
     error: "",
   },
+  auth: {
+    checked: false,
+    passwordSet: false,
+    authenticated: false,
+    mode: "ready",
+    username: "User",
+    userAvatar: "",
+  },
   chatProfile: {
     username: "User",
     userAvatar: "",
@@ -368,6 +376,324 @@ let redisSetupPromise = null;
 let redisSetupResolve = null;
 let redisRecoveryPromptInFlight = false;
 let redisRecoveryPromptLastAt = 0;
+let webuiAuthPromise = null;
+let webuiAuthResolve = null;
+let webuiAuthRecoveryInFlight = false;
+let webuiAuthRecoveryLastAt = 0;
+
+function _setWebuiAuthStatus(raw) {
+  const next = raw && typeof raw === "object" ? raw : {};
+  const passwordSet = Boolean(next.password_set);
+  const authenticated = Boolean(next.authenticated);
+  const modeToken = String(next.mode || "").trim().toLowerCase();
+  const mode = modeToken || (authenticated || !passwordSet ? "ready" : "login");
+  state.auth = {
+    checked: true,
+    passwordSet,
+    authenticated,
+    mode,
+    username: String(next.username || "User"),
+    userAvatar: String(next.user_avatar || ""),
+  };
+  return state.auth;
+}
+
+function _setWebuiAuthLock(locked) {
+  const isLocked = Boolean(locked);
+  document.body?.classList.toggle("webui-auth-locked", isLocked);
+  if (isLocked) {
+    document.body?.classList.remove("modal-open");
+  }
+}
+
+function _hideWebuiAuthModal() {
+  const modal = document.getElementById("webui-auth-modal");
+  if (!modal) {
+    return;
+  }
+  modal.classList.remove("active");
+  modal.setAttribute("aria-hidden", "true");
+  _setWebuiAuthLock(false);
+}
+
+function ensureWebuiAuthModal() {
+  let modal = document.getElementById("webui-auth-modal");
+  if (modal) {
+    return modal;
+  }
+
+  document.body.insertAdjacentHTML(
+    "beforeend",
+    `
+      <div id="webui-auth-modal" class="webui-auth-overlay" aria-hidden="true">
+        <div class="card webui-auth-card" role="dialog" aria-modal="true" aria-label="WebUI Login">
+          <div id="webui-auth-avatar" class="webui-auth-avatar-wrap"></div>
+          <h3 id="webui-auth-title" class="card-title">WebUI Login</h3>
+          <div id="webui-auth-subtitle" class="small"></div>
+          <form id="webui-auth-form" class="form-grid webui-auth-form">
+            <label>Password
+              <input id="webui-auth-password" type="password" autocomplete="current-password" />
+            </label>
+            <label id="webui-auth-confirm-row">Repeat Password
+              <input id="webui-auth-confirm" type="password" autocomplete="new-password" />
+            </label>
+            <button type="submit" id="webui-auth-submit" class="action-btn">Unlock</button>
+          </form>
+          <div id="webui-auth-status" class="small"></div>
+        </div>
+      </div>
+    `
+  );
+
+  modal = document.getElementById("webui-auth-modal");
+  const form = document.getElementById("webui-auth-form");
+  const submitBtn = document.getElementById("webui-auth-submit");
+  const statusEl = document.getElementById("webui-auth-status");
+  const passwordEl = document.getElementById("webui-auth-password");
+  const confirmEl = document.getElementById("webui-auth-confirm");
+  const confirmRowEl = document.getElementById("webui-auth-confirm-row");
+  const titleEl = document.getElementById("webui-auth-title");
+  const subtitleEl = document.getElementById("webui-auth-subtitle");
+  const avatarWrapEl = document.getElementById("webui-auth-avatar");
+
+  const setBusy = (busy) => {
+    const disabled = Boolean(busy);
+    if (submitBtn) {
+      submitBtn.disabled = disabled;
+    }
+    if (passwordEl) {
+      passwordEl.disabled = disabled;
+    }
+    if (confirmEl) {
+      confirmEl.disabled = disabled;
+    }
+  };
+
+  const applyState = (auth, options = {}) => {
+    const profile = auth && typeof auth === "object" ? auth : state.auth || {};
+    const mode = String(profile.mode || (profile.passwordSet ? "login" : "setup")).trim().toLowerCase();
+    const passwordSet = Boolean(profile.passwordSet);
+    const userName = String(profile.username || "User").trim() || "User";
+    const avatarUrl = String(profile.userAvatar || "").trim();
+    const message = String(options.message || "").trim();
+    const tone = String(options.tone || "").trim().toLowerCase();
+    const preserveInputs = Boolean(options.preserveInputs);
+
+    if (titleEl) {
+      titleEl.textContent = passwordSet ? "WebUI Login" : "Create WebUI Password";
+    }
+    if (subtitleEl) {
+      subtitleEl.textContent = passwordSet
+        ? `${userName}, enter your password to unlock TaterOS.`
+        : `${userName}, set a password to protect this WebUI.`;
+    }
+    if (avatarWrapEl) {
+      if (avatarUrl) {
+        avatarWrapEl.innerHTML = `<img class="webui-auth-avatar-img" src="${escapeHtml(avatarUrl)}" alt="User avatar" />`;
+      } else {
+        avatarWrapEl.innerHTML = `<div class="webui-auth-avatar-fallback">${escapeHtml(_avatarInitial(userName, "U"))}</div>`;
+      }
+    }
+
+    const setupMode = !passwordSet || mode === "setup";
+    if (confirmRowEl) {
+      confirmRowEl.classList.toggle("hidden", !setupMode);
+    }
+    if (passwordEl) {
+      passwordEl.setAttribute("autocomplete", setupMode ? "new-password" : "current-password");
+      if (!preserveInputs) {
+        passwordEl.value = "";
+      }
+    }
+    if (confirmEl) {
+      confirmEl.setAttribute("autocomplete", setupMode ? "new-password" : "off");
+      if (!preserveInputs) {
+        confirmEl.value = "";
+      }
+    }
+    if (submitBtn) {
+      submitBtn.textContent = setupMode ? "Save Password" : "Login";
+    }
+    if (statusEl) {
+      if (!message) {
+        statusEl.textContent = setupMode
+          ? "Create a password and repeat it to save."
+          : "Enter your password to continue.";
+        statusEl.classList.remove("error");
+        statusEl.classList.remove("success");
+      } else {
+        statusEl.textContent = message;
+        statusEl.classList.toggle("error", tone === "error");
+        statusEl.classList.toggle("success", tone === "success");
+      }
+    }
+  };
+
+  form?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const auth = state.auth || {};
+    const setupMode = !Boolean(auth.passwordSet);
+    const password = String(passwordEl?.value || "");
+    const confirmPassword = String(confirmEl?.value || "");
+
+    if (!password) {
+      applyState(auth, { message: "Password is required.", tone: "error", preserveInputs: true });
+      return;
+    }
+
+    if (setupMode) {
+      if (password.length < 4) {
+        applyState(auth, { message: "Password must be at least 4 characters.", tone: "error", preserveInputs: true });
+        return;
+      }
+      if (password !== confirmPassword) {
+        applyState(auth, { message: "Passwords do not match.", tone: "error", preserveInputs: true });
+        return;
+      }
+    }
+
+    setBusy(true);
+    try {
+      const route = setupMode ? "/api/auth/setup" : "/api/auth/login";
+      const body = setupMode
+        ? { password, confirm_password: confirmPassword }
+        : { password };
+      const status = await api(route, {
+        method: "POST",
+        body: JSON.stringify(body),
+        _skipRedisRecovery: true,
+        _skipAuthRecovery: true,
+      });
+      const next = _setWebuiAuthStatus(status);
+      applyState(next, { message: "Login successful.", tone: "success" });
+      if (next.authenticated) {
+        _hideWebuiAuthModal();
+        if (typeof webuiAuthResolve === "function") {
+          webuiAuthResolve(next);
+        }
+        webuiAuthPromise = null;
+        webuiAuthResolve = null;
+      }
+    } catch (error) {
+      applyState(auth, {
+        message: String(error?.message || "Authentication failed."),
+        tone: "error",
+        preserveInputs: true,
+      });
+    } finally {
+      setBusy(false);
+    }
+  });
+
+  modal._applyAuthState = applyState;
+  return modal;
+}
+
+function _showWebuiAuthModal(authState, options = {}) {
+  const modal = ensureWebuiAuthModal();
+  if (typeof modal._applyAuthState === "function") {
+    modal._applyAuthState(authState || state.auth || {}, options);
+  }
+  modal.classList.add("active");
+  modal.setAttribute("aria-hidden", "false");
+  _setWebuiAuthLock(true);
+  return modal;
+}
+
+async function fetchWebuiAuthStatus() {
+  const raw = await api("/api/auth/status", {
+    _skipRedisRecovery: true,
+    _skipAuthRecovery: true,
+    _timeoutMs: 2500,
+  });
+  return _setWebuiAuthStatus(raw);
+}
+
+async function ensureWebuiAuth() {
+  let auth = state.auth || {};
+  try {
+    auth = await fetchWebuiAuthStatus();
+  } catch (error) {
+    if (_isLikelyRedisFailureDetail(error?.message || "")) {
+      await ensureRedisSetup();
+      auth = await fetchWebuiAuthStatus();
+    } else {
+      throw error;
+    }
+  }
+
+  if (!auth.passwordSet || auth.authenticated) {
+    _hideWebuiAuthModal();
+    if (typeof webuiAuthResolve === "function") {
+      webuiAuthResolve(auth);
+    }
+    webuiAuthPromise = null;
+    webuiAuthResolve = null;
+    return auth;
+  }
+
+  _showWebuiAuthModal(auth);
+  if (!webuiAuthPromise) {
+    webuiAuthPromise = new Promise((resolve) => {
+      webuiAuthResolve = resolve;
+    });
+  }
+  return webuiAuthPromise;
+}
+
+function _isWebuiAuthApiPath(path) {
+  const target = String(path || "").trim().toLowerCase();
+  return target.startsWith("/api/auth/");
+}
+
+function _shouldTriggerWebuiAuthRecovery(path, statusCode) {
+  const status = Number(statusCode || 0);
+  return status === 401 && !_isWebuiAuthApiPath(path);
+}
+
+async function promptWebuiAuthRecovery(reason = "", { force = false } = {}) {
+  const now = Date.now();
+  if (!force) {
+    if (webuiAuthRecoveryInFlight) {
+      return;
+    }
+    if (now - webuiAuthRecoveryLastAt < 1200) {
+      return;
+    }
+  }
+  webuiAuthRecoveryInFlight = true;
+  webuiAuthRecoveryLastAt = now;
+
+  try {
+    let auth = state.auth || {};
+    try {
+      auth = await fetchWebuiAuthStatus();
+    } catch {
+      // Fall back to current state if status refresh fails.
+    }
+    if (!auth.passwordSet || auth.authenticated) {
+      _hideWebuiAuthModal();
+      if (typeof webuiAuthResolve === "function") {
+        webuiAuthResolve(auth);
+      }
+      webuiAuthPromise = null;
+      webuiAuthResolve = null;
+      return;
+    }
+    _showWebuiAuthModal(auth, {
+      message: String(reason || "Session expired. Please log in again."),
+      tone: "error",
+      preserveInputs: false,
+    });
+    if (!webuiAuthPromise) {
+      webuiAuthPromise = new Promise((resolve) => {
+        webuiAuthResolve = resolve;
+      });
+    }
+  } finally {
+    webuiAuthRecoveryInFlight = false;
+  }
+}
 
 function _setRedisStatus(status) {
   const next = status && typeof status === "object" ? status : {};
@@ -942,8 +1268,9 @@ async function runActionWithProgress(meta, actionFn) {
 async function api(path, options = {}) {
   const requestOptions = options && typeof options === "object" ? options : {};
   const skipRedisRecovery = Boolean(requestOptions._skipRedisRecovery);
+  const skipAuthRecovery = Boolean(requestOptions._skipAuthRecovery);
   const timeoutMs = Math.max(0, Number(requestOptions._timeoutMs || 0));
-  const { _skipRedisRecovery, _timeoutMs, ...fetchOptions } = requestOptions;
+  const { _skipRedisRecovery, _skipAuthRecovery, _timeoutMs, ...fetchOptions } = requestOptions;
 
   let timeoutId = 0;
   let timeoutController = null;
@@ -987,6 +1314,9 @@ async function api(path, options = {}) {
       detail = body.detail || detail;
     } catch {
       detail = response.statusText || detail;
+    }
+    if (!skipAuthRecovery && _shouldTriggerWebuiAuthRecovery(path, response.status)) {
+      void promptWebuiAuthRecovery(detail);
     }
     if (!skipRedisRecovery && _shouldTriggerRedisRecovery(path, response.status, detail)) {
       void promptRedisSetupRecovery(detail);
@@ -1168,6 +1498,37 @@ function generateRuntimeApiKey() {
   return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
 }
 
+async function copyTextToClipboard(value) {
+  const source = String(value || "");
+  if (!source) {
+    return false;
+  }
+  if (navigator?.clipboard && typeof navigator.clipboard.writeText === "function") {
+    try {
+      await navigator.clipboard.writeText(source);
+      return true;
+    } catch {
+      // Fall through to legacy copy path.
+    }
+  }
+  try {
+    const temp = document.createElement("textarea");
+    temp.value = source;
+    temp.setAttribute("readonly", "readonly");
+    temp.style.position = "fixed";
+    temp.style.opacity = "0";
+    temp.style.pointerEvents = "none";
+    document.body.appendChild(temp);
+    temp.focus();
+    temp.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(temp);
+    return Boolean(ok);
+  } catch {
+    return false;
+  }
+}
+
 function buildSettingInput(field, inputId) {
   const safeLabel = escapeHtml(field.label || field.key);
   const safeKey = escapeHtml(field.key || "");
@@ -1214,7 +1575,9 @@ function buildSettingInput(field, inputId) {
     field.value ?? ""
   )}" data-setting-type="${escapeHtml(type)}" data-setting-key="${safeKey}" />`;
   if (runtimeSettingKeySupportsGenerator(field) && (htmlType === "password" || htmlType === "text")) {
-    return `<label>${safeLabel}<div class="runtime-setting-input-action">${inputHtml}<button type="button" class="inline-btn runtime-generate-key-btn" data-target-input="${escapeHtml(
+    return `<label>${safeLabel}<div class="runtime-setting-input-action">${inputHtml}<button type="button" class="inline-btn runtime-copy-key-btn" data-target-input="${escapeHtml(
+      inputId
+    )}">Copy Key</button><button type="button" class="inline-btn runtime-generate-key-btn" data-target-input="${escapeHtml(
       inputId
     )}">Generate Key</button></div>${safeDesc}</label>`;
   }
@@ -1283,6 +1646,11 @@ function getRuntimeSettingsEntry(kind, key) {
     return null;
   }
   return group[entryKey] || null;
+}
+
+function formatRuntimeSettingsTitle(label) {
+  const base = String(label || "").trim() || "Settings";
+  return /settings$/i.test(base) ? base : `${base} Settings`;
 }
 
 function ensureRuntimeSettingsModal() {
@@ -1425,6 +1793,38 @@ function openRuntimeSettingsModal({ title, meta, fields, onSave }) {
           input.value = generateRuntimeApiKey();
           input.dispatchEvent(new Event("input", { bubbles: true }));
           input.dispatchEvent(new Event("change", { bubbles: true }));
+        });
+      });
+      fieldsEl.querySelectorAll(".runtime-copy-key-btn").forEach((button) => {
+        button.addEventListener("click", async () => {
+          const targetId = String(button.getAttribute("data-target-input") || "").trim();
+          if (!targetId) {
+            return;
+          }
+          const input = document.getElementById(targetId);
+          const source = String(input?.value || "");
+          if (!source) {
+            showToast("No key to copy.", "error", 2000);
+            return;
+          }
+          const original = String(button.textContent || "Copy Key");
+          button.disabled = true;
+          try {
+            const copied = await copyTextToClipboard(source);
+            if (!copied) {
+              throw new Error("clipboard unavailable");
+            }
+            button.textContent = "Copied";
+            showToast("API key copied.");
+          } catch (error) {
+            button.textContent = "Copy failed";
+            showToast(`Copy failed: ${String(error?.message || "clipboard unavailable")}`, "error", 2600);
+          } finally {
+            window.setTimeout(() => {
+              button.textContent = original;
+              button.disabled = false;
+            }, 1200);
+          }
         });
       });
     }
@@ -2731,6 +3131,7 @@ function renderShopTabbedManager(kind, data, options = {}) {
   const updatesAvailable = Number(data?.updates_available || updates.length || 0);
   const runtimeHtml = String(options.runtimeHtml || "").trim();
   const runtimeTitle = String(options.runtimeTitle || `${noun} Runtime`).trim();
+  const runtimeCard = options.runtimeCard !== false;
 
   const warningsHtml = errors.map((entry) => renderNotice(`${noun} shop: ${entry}`)).join("");
 
@@ -2808,12 +3209,14 @@ function renderShopTabbedManager(kind, data, options = {}) {
     : renderNotice(`No installed ${noun.toLowerCase()} modules found.`);
 
   const runtimeSection = runtimeHtml
-    ? `
+    ? runtimeCard
+      ? `
       <div class="card">
         <div class="card-head"><h3 class="card-title">${escapeHtml(runtimeTitle)}</h3></div>
         <div class="form-grid shop-grid">${runtimeHtml}</div>
       </div>
     `
+      : `<div class="form-grid shop-grid">${runtimeHtml}</div>`
     : "";
   const installedPanelHtml = runtimeSection
     ? runtimeSection
@@ -3092,6 +3495,7 @@ async function refreshShopManagerInPlace(kind, preferredTab = "") {
     const managerHtml = renderShopTabbedManager(kind, shopData, {
       runtimeHtml,
       runtimeTitle: kind === "cores" ? "Core Runtime" : "Portal Runtime",
+      runtimeCard: kind !== "portals",
     });
     if (!replaceShopManagerInPlace(kind, managerHtml)) {
       return false;
@@ -4391,7 +4795,7 @@ function bindVerbaRuntimeActions(root = document) {
         return;
       }
       openRuntimeSettingsModal({
-        title: `${entry.label} Settings`,
+        title: formatRuntimeSettingsTitle(entry.label),
         meta: pluginId,
         fields: entry.settings,
         onSave: async (values) => {
@@ -4457,7 +4861,7 @@ function bindSurfaceRuntimeActions(kind, endpoint, root = document) {
         return;
       }
       openRuntimeSettingsModal({
-        title: `${entry.label} Settings`,
+        title: formatRuntimeSettingsTitle(entry.label),
         meta: surfaceKey,
         fields: entry.settings,
         onSave: async (values) => {
@@ -5118,6 +5522,7 @@ async function loadSurfaceView(kind) {
       ${renderShopTabbedManager("portals", shopData, {
         runtimeHtml,
         runtimeTitle: "Portal Runtime",
+        runtimeCard: false,
       })}
     `;
   } else {
@@ -5172,6 +5577,7 @@ async function loadSettingsView() {
     };
   };
   const redisEncryptionStatus = normalizeRedisEncryptionStatus(redisEncryptionPayload);
+  let webuiPasswordIsSet = Boolean(settings?.webui_password_set);
   const summarizeRedisEncryptionStatus = (entry) => {
     const status = normalizeRedisEncryptionStatus(entry);
     if (!status.encryption_available) {
@@ -5353,6 +5759,39 @@ async function loadSettingsView() {
               <textarea id="set_tater_personality">${escapeHtml(settings.tater_personality || "")}</textarea>
             </label>
 
+            <div class="settings-section-title">WebUI Login</div>
+            <label>WebUI Password
+              <input
+                id="set_webui_password"
+                type="password"
+                autocomplete="new-password"
+                placeholder="Leave blank to keep current password"
+              />
+            </label>
+            <label>Repeat WebUI Password
+              <input
+                id="set_webui_password_confirm"
+                type="password"
+                autocomplete="new-password"
+                placeholder="Repeat new password"
+              />
+            </label>
+            <div class="inline-row" style="grid-column: 1 / -1;">
+              <button
+                type="button"
+                id="settings-webui-password-clear"
+                class="inline-btn danger"
+                ${webuiPasswordIsSet ? "" : "disabled"}
+              >
+                Remove WebUI Password
+              </button>
+              <span id="settings-webui-password-status" class="small">${
+                webuiPasswordIsSet
+                  ? "WebUI password is enabled. Login is required."
+                  : "No WebUI password set. Login is not required."
+              }</span>
+            </div>
+
             <div class="settings-section-title">Chat Avatars</div>
             <div class="settings-avatar-grid" style="grid-column: 1 / -1;">
               <div class="settings-avatar-card">
@@ -5387,6 +5826,10 @@ async function loadSettingsView() {
                   <button type="button" id="set_tater_avatar_clear" class="inline-btn danger">Clear Tater Avatar</button>
                 </div>
               </div>
+            </div>
+            <div class="inline-row" style="grid-column: 1 / -1;">
+              <button type="button" id="settings-save-general" class="action-btn">Save Settings</button>
+              <span class="small">Saves General and non-model settings.</span>
             </div>
           </div>
         </section>
@@ -5836,6 +6279,56 @@ async function loadSettingsView() {
   `;
 
   const statusEl = document.getElementById("settings-status");
+  const webuiPasswordEl = document.getElementById("set_webui_password");
+  const webuiPasswordConfirmEl = document.getElementById("set_webui_password_confirm");
+  const webuiPasswordClearBtnEl = document.getElementById("settings-webui-password-clear");
+  const webuiPasswordStatusEl = document.getElementById("settings-webui-password-status");
+  let clearWebuiPasswordRequested = false;
+
+  const refreshWebuiPasswordUi = () => {
+    const hasPasswordInput = Boolean(String(webuiPasswordEl?.value || "").trim());
+    const hasConfirmInput = Boolean(String(webuiPasswordConfirmEl?.value || "").trim());
+    if (webuiPasswordClearBtnEl) {
+      webuiPasswordClearBtnEl.disabled = !webuiPasswordIsSet || hasPasswordInput || hasConfirmInput;
+    }
+    if (!webuiPasswordStatusEl) {
+      return;
+    }
+    if (clearWebuiPasswordRequested) {
+      webuiPasswordStatusEl.textContent = "WebUI password will be removed on save. Login will not be required.";
+      return;
+    }
+    if (hasPasswordInput || hasConfirmInput) {
+      webuiPasswordStatusEl.textContent = "New WebUI password will be saved when you click Save Settings.";
+      return;
+    }
+    webuiPasswordStatusEl.textContent = webuiPasswordIsSet
+      ? "WebUI password is enabled. Login is required."
+      : "No WebUI password set. Login is not required.";
+  };
+
+  const onWebuiPasswordInput = () => {
+    if (String(webuiPasswordEl?.value || "").trim() || String(webuiPasswordConfirmEl?.value || "").trim()) {
+      clearWebuiPasswordRequested = false;
+    }
+    refreshWebuiPasswordUi();
+  };
+
+  webuiPasswordEl?.addEventListener("input", onWebuiPasswordInput);
+  webuiPasswordConfirmEl?.addEventListener("input", onWebuiPasswordInput);
+  webuiPasswordClearBtnEl?.addEventListener("click", () => {
+    clearWebuiPasswordRequested = true;
+    if (webuiPasswordEl) {
+      webuiPasswordEl.value = "";
+    }
+    if (webuiPasswordConfirmEl) {
+      webuiPasswordConfirmEl.value = "";
+    }
+    refreshWebuiPasswordUi();
+    statusEl.textContent = "WebUI password removal queued. Click Save Settings to apply.";
+  });
+  refreshWebuiPasswordUi();
+
   const tabButtons = Array.from(root.querySelectorAll(".settings-tab-btn"));
   const tabPanels = Array.from(root.querySelectorAll(".settings-tab-panel"));
 
@@ -6846,11 +7339,38 @@ async function loadSettingsView() {
     event.preventDefault();
   });
 
-  document.getElementById("settings-save").addEventListener("click", async () => {
+  const runSettingsSave = async () => {
     const adminSelect = document.getElementById("set_admin_only_plugins");
     const adminOnlyPlugins = Array.from(adminSelect.selectedOptions)
       .map((option) => String(option.value || "").trim())
       .filter(Boolean);
+    const webuiPassword = String(webuiPasswordEl?.value || "");
+    const webuiPasswordConfirm = String(webuiPasswordConfirmEl?.value || "");
+    const hasWebuiPasswordInput = Boolean(webuiPassword || webuiPasswordConfirm);
+
+    if (clearWebuiPasswordRequested && hasWebuiPasswordInput) {
+      statusEl.textContent = "Choose either a new WebUI password or remove the current one.";
+      showToast("Choose either a new WebUI password or remove the current one.", "error", 3600);
+      return;
+    }
+
+    if (hasWebuiPasswordInput) {
+      if (!webuiPassword) {
+        statusEl.textContent = "Enter a WebUI password.";
+        showToast("Enter a WebUI password.", "error", 3600);
+        return;
+      }
+      if (webuiPassword.length < 4) {
+        statusEl.textContent = "WebUI password must be at least 4 characters.";
+        showToast("WebUI password must be at least 4 characters.", "error", 3600);
+        return;
+      }
+      if (webuiPassword !== webuiPasswordConfirm) {
+        statusEl.textContent = "WebUI passwords do not match.";
+        showToast("WebUI passwords do not match.", "error", 3600);
+        return;
+      }
+    }
 
     const payload = {
       username: document.getElementById("set_username").value,
@@ -6894,6 +7414,12 @@ async function loadSettingsView() {
       popup_effect_style: normalizePopupEffectStyle(document.getElementById("set_popup_effect_style")?.value || "flame"),
       admin_only_plugins: adminOnlyPlugins,
     };
+    if (clearWebuiPasswordRequested) {
+      payload.clear_webui_password = true;
+    } else if (hasWebuiPasswordInput) {
+      payload.webui_password = webuiPassword;
+      payload.webui_password_confirm = webuiPasswordConfirm;
+    }
 
     statusEl.textContent = "Saving...";
     try {
@@ -6917,6 +7443,25 @@ async function loadSettingsView() {
         body: JSON.stringify(payload),
       });
       applyPopupEffectStyle(payload.popup_effect_style);
+      if (webuiPasswordEl) {
+        webuiPasswordEl.value = "";
+      }
+      if (webuiPasswordConfirmEl) {
+        webuiPasswordConfirmEl.value = "";
+      }
+      clearWebuiPasswordRequested = false;
+      if (payload.clear_webui_password) {
+        webuiPasswordIsSet = false;
+      } else if (payload.webui_password) {
+        webuiPasswordIsSet = true;
+      }
+      try {
+        const authStatus = await fetchWebuiAuthStatus();
+        webuiPasswordIsSet = Boolean(authStatus?.passwordSet);
+      } catch {
+        // Keep local status if auth refresh fails.
+      }
+      refreshWebuiPasswordUi();
       await refreshBranding();
       clearUserAvatarRequested = false;
       clearTaterAvatarRequested = false;
@@ -6932,7 +7477,10 @@ async function loadSettingsView() {
       statusEl.textContent = `Save failed: ${error.message}`;
       showToast(`Save failed: ${error.message}`, "error", 3600);
     }
-  });
+  };
+
+  document.getElementById("settings-save")?.addEventListener("click", runSettingsSave);
+  document.getElementById("settings-save-general")?.addEventListener("click", runSettingsSave);
 }
 
 async function loadView(viewName) {
@@ -6991,6 +7539,7 @@ async function init() {
   bindSidebarControls();
   bindNav();
   bindRuntimeSummary();
+  await ensureWebuiAuth();
   await ensureRedisSetup();
   await refreshBranding();
   await refreshHealth();

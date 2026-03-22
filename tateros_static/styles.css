@@ -37,6 +37,18 @@ body.modal-open {
   overscroll-behavior: none;
 }
 
+body.webui-auth-locked {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+body.webui-auth-locked #app-shell,
+body.webui-auth-locked #sidebar-expand-btn {
+  filter: blur(12px);
+  pointer-events: none;
+  user-select: none;
+}
+
 .bg-shape {
   position: fixed;
   border-radius: 999px;
@@ -1661,6 +1673,67 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   word-break: break-word;
 }
 
+.webui-auth-overlay {
+  position: fixed;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: linear-gradient(180deg, rgba(7, 8, 10, 0.56), rgba(10, 11, 13, 0.72));
+  z-index: 2800;
+}
+
+.webui-auth-overlay.active {
+  display: flex;
+}
+
+.webui-auth-card {
+  width: min(460px, 94vw);
+  display: grid;
+  gap: 10px;
+  text-align: center;
+  border: 1px solid rgba(214, 90, 31, 0.45);
+  box-shadow: 0 28px 56px rgba(0, 0, 0, 0.46);
+}
+
+.webui-auth-avatar-wrap {
+  width: 76px;
+  height: 76px;
+  border-radius: 50%;
+  margin: 2px auto 0;
+  border: 1px solid var(--line);
+  background: rgba(0, 0, 0, 0.28);
+  overflow: hidden;
+}
+
+.webui-auth-avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.webui-auth-avatar-fallback {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  color: var(--accent-soft);
+  font-size: 1.2rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.webui-auth-form {
+  margin-top: 2px;
+  text-align: left;
+}
+
+.webui-auth-form .hidden {
+  display: none;
+}
+
 .cerb-modal {
   position: fixed;
   inset: 0;
@@ -1872,14 +1945,33 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 .runtime-settings-fields {
   display: grid;
   gap: 10px;
+  grid-template-columns: minmax(0, 1fr);
+  grid-auto-rows: max-content;
+  align-content: start;
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
   padding-right: 4px;
 }
 
+.runtime-settings-fields > label {
+  min-width: 0;
+}
+
+.runtime-settings-fields input,
+.runtime-settings-fields select,
+.runtime-settings-fields textarea {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.runtime-settings-fields .small {
+  overflow-wrap: anywhere;
+}
+
 .runtime-setting-input-action {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 8px;
 }
@@ -1891,6 +1983,16 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 
 .runtime-generate-key-btn {
   white-space: nowrap;
+}
+
+.runtime-copy-key-btn {
+  white-space: nowrap;
+}
+
+@media (max-width: 780px) {
+  .runtime-setting-input-action {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .runtime-breakdown-content {
