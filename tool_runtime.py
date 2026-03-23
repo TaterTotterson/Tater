@@ -77,7 +77,7 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
     "list_workspace": "list workspace notes",
     "image_describe": "describe an explicit image using an artifact_id, URL, blob, or local path",
     "attach_file": "attach an available artifact or local file to the current conversation",
-    "send_message": "queue a cross-portal notification/message only when the user explicitly asks to notify or message a destination (never for normal chat replies)",
+    "send_message": "queue a cross-portal notification/message (with optional attachments) only when the user explicitly asks to notify or message a destination (never for normal chat replies)",
 }
 
 _KERNEL_TOOL_USAGE_HINTS = {
@@ -98,7 +98,7 @@ _KERNEL_TOOL_USAGE_HINTS = {
     "list_workspace": '{"function":"list_workspace","arguments":{}}',
     "image_describe": '{"function":"image_describe","arguments":{"artifact_id":"<artifact_id>","query":"Describe this image."}}',
     "attach_file": '{"function":"attach_file","arguments":{"artifact_id":"<artifact_id>"}}',
-    "send_message": '{"function":"send_message","arguments":{"message":"<message>","platform":"discord","targets":{"channel":"#channel"}}}',
+    "send_message": '{"function":"send_message","arguments":{"message":"<message>","platform":"discord","targets":{"guild_name":"<guild>","channel":"#<channel>"},"attachments":[{"artifact_id":"<artifact_id>"}]}}',
 }
 
 
@@ -426,13 +426,20 @@ async def run_meta_tool(
             origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
             channel_id=args.get("channel_id"),
             channel=args.get("channel"),
+            channel_name=args.get("channel_name"),
             guild_id=args.get("guild_id"),
+            guild_name=args.get("guild_name"),
+            guild=args.get("guild"),
+            room=args.get("room"),
+            room_name=args.get("room_name"),
             room_id=args.get("room_id"),
             room_alias=args.get("room_alias"),
             device_service=args.get("device_service"),
             persistent=args.get("persistent"),
             api_notification=args.get("api_notification"),
             chat_id=args.get("chat_id"),
+            device_id=args.get("device_id"),
+            scope=args.get("scope"),
         )
 
     core_scope = str(
