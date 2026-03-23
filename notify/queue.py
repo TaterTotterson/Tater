@@ -1,6 +1,5 @@
 import time
 import uuid
-import re
 from typing import Any, Dict, Optional, Tuple
 
 ALLOWED_PLATFORMS = ("discord", "irc", "matrix", "homeassistant", "ntfy", "telegram", "macos")
@@ -20,6 +19,9 @@ _DEFAULT_SETTINGS = {
         "category": "Discord Notifier",
         "fields": {
             "channel_id": "DEFAULT_CHANNEL_ID",
+            "channel": "DEFAULT_CHANNEL",
+            "guild_id": "DEFAULT_GUILD_ID",
+            "guild_name": "DEFAULT_GUILD_NAME",
         },
     },
     "irc": {
@@ -134,8 +136,30 @@ def _coerce_targets(targets: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return {k: v for k, v in targets.items() if v not in (None, "")}
 
 
-_HASHTAG_TOKEN_RE = re.compile(r"#([A-Za-z0-9][A-Za-z0-9._-]{0,99})")
-_AT_TOKEN_RE = re.compile(r"@([A-Za-z0-9_]{1,64})")
+_TARGET_ALIASES = {
+    "room": "channel",
+    "room_name": "channel",
+    "channel_name": "channel",
+    "guild": "guild_name",
+    "server": "guild_name",
+    "server_name": "guild_name",
+}
+
+
+def _apply_target_aliases(raw_targets: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(raw_targets, dict):
+        return {}
+    out: Dict[str, Any] = {}
+    for raw_key, value in raw_targets.items():
+        if value in (None, ""):
+            continue
+        key_text = str(raw_key or "").strip()
+        if not key_text:
+            continue
+        normalized_key = _TARGET_ALIASES.get(key_text.lower(), key_text)
+        if normalized_key not in out or out.get(normalized_key) in (None, ""):
+            out[normalized_key] = value
+    return out
 
 
 def _cleanup_room_ref(raw: Any) -> str:
@@ -148,13 +172,16 @@ def _cleanup_room_ref(raw: Any) -> str:
     return text
 
 
-def _extract_channel_name(raw: Any) -> str:
+def _normalize_channel_name(raw: Any, *, force_hash: bool = False) -> str:
     text = _cleanup_room_ref(raw)
     if not text:
         return ""
-    match = _HASHTAG_TOKEN_RE.search(text)
-    if match:
-        return f"#{match.group(1)}"
+    if text.isdigit():
+        return text
+    if text.startswith("#"):
+        return text
+    if force_hash and " " not in text:
+        return f"#{text}"
     return text
 
 
@@ -162,12 +189,10 @@ def _extract_chat_ref(raw: Any) -> str:
     text = _cleanup_room_ref(raw)
     if not text:
         return ""
-    match = _AT_TOKEN_RE.search(text)
-    if match:
-        return f"@{match.group(1)}"
-    match = _HASHTAG_TOKEN_RE.search(text)
-    if match:
-        return match.group(1)
+    if text.startswith("@"):
+        return text
+    if text.startswith("#"):
+        return text[1:]
     if text.startswith("-") and text[1:].isdigit():
         return text
     if text.isdigit():
@@ -185,9 +210,9 @@ def resolve_targets(
     defaults: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     platform = normalize_platform(platform)
-    resolved = _coerce_targets(targets)
-    defaults = defaults or {}
-    origin = normalize_origin(origin)
+    resolved = _apply_target_aliases(_coerce_targets(targets))
+    defaults = _apply_target_aliases(defaults or {})
+    origin = _apply_target_aliases(normalize_origin(origin))
 
     if platform == "discord":
         # Tolerate non-numeric channel_id values and treat them as channel names.
@@ -203,6 +228,8 @@ def resolve_targets(
                     resolved["channel_id"] = origin.get("channel_id")
                 elif origin.get("channel"):
                     resolved["channel"] = origin.get("channel")
+                elif origin.get("channel_name"):
+                    resolved["channel"] = origin.get("channel_name")
             elif defaults.get("channel_id"):
                 resolved["channel_id"] = defaults["channel_id"]
             elif defaults.get("channel"):
@@ -212,9 +239,10 @@ def resolve_targets(
             return None, "Cannot queue: missing target channel/room"
 
         if resolved.get("channel"):
-            channel = _extract_channel_name(resolved.get("channel"))
-            if channel and not channel.startswith("#"):
-                resolved["channel"] = f"#{channel}"
+            channel = _normalize_channel_name(resolved.get("channel"), force_hash=True)
+            if channel and channel.isdigit():
+                resolved["channel_id"] = channel
+                resolved.pop("channel", None)
             elif channel:
                 resolved["channel"] = channel
 
@@ -223,6 +251,14 @@ def resolve_targets(
                 resolved["guild_id"] = origin.get("guild_id")
             elif defaults.get("guild_id"):
                 resolved["guild_id"] = defaults["guild_id"]
+
+        if not resolved.get("guild_name"):
+            if origin.get("platform") == "discord" and origin.get("guild_name"):
+                resolved["guild_name"] = _cleanup_room_ref(origin.get("guild_name"))
+            elif defaults.get("guild_name"):
+                resolved["guild_name"] = _cleanup_room_ref(defaults.get("guild_name"))
+        elif resolved.get("guild_name"):
+            resolved["guild_name"] = _cleanup_room_ref(resolved.get("guild_name"))
 
     elif platform == "irc":
         if not resolved.get("channel"):
@@ -234,7 +270,7 @@ def resolve_targets(
         if not resolved.get("channel"):
             return None, "Cannot queue: missing target channel/room"
 
-        channel = _extract_channel_name(resolved.get("channel"))
+        channel = _normalize_channel_name(resolved.get("channel"), force_hash=True)
         if channel and not channel.startswith("#"):
             resolved["channel"] = f"#{channel}"
         elif channel:
