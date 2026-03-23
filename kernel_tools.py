@@ -96,8 +96,6 @@ VISION_DEFAULT_PROMPT = (
     "and any visible text."
 )
 WEBUI_FILE_BLOB_KEY_PREFIX = "webui:file:"
-ATTACH_FILE_BLOB_KEY_PREFIX = "tater:blob:attach:"
-ATTACH_FILE_BLOB_TTL_SECONDS = 60 * 60 * 24 * 7
 
 AI_TASKS_KEY_PREFIX = "reminders:"
 AI_TASKS_DUE_ZSET = "reminders:due"
@@ -922,154 +920,42 @@ def _send_message_normalize_matrix_room_ref(room_ref: Any) -> str:
     return ref
 
 
-def _send_message_clean_target_value(raw: Any) -> str:
+def _send_message_extract_target_hint(raw: Any) -> str:
     text = str(raw or "").strip()
     if not text:
         return ""
-    if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
-        text = text[1:-1].strip()
-    return " ".join(text.split())
-
-
-_SEND_MESSAGE_TARGET_ALIASES = {
-    "room": "channel",
-    "room_name": "channel",
-    "channel_name": "channel",
-    "guild": "guild_name",
-    "guild_name": "guild_name",
-    "server": "guild_name",
-    "server_name": "guild_name",
-}
-
-
-def _send_message_apply_target_aliases(payload: Dict[str, Any]) -> Dict[str, Any]:
-    raw_map = dict(payload or {}) if isinstance(payload, dict) else {}
-    out: Dict[str, Any] = {}
-    for raw_key, value in raw_map.items():
-        if value in (None, ""):
-            continue
-        key_text = str(raw_key or "").strip()
-        if not key_text:
-            continue
-        key = _SEND_MESSAGE_TARGET_ALIASES.get(key_text.lower(), key_text)
-        if key in {"channel", "guild_name", "room_alias", "room_id", "chat_id", "device_id", "scope", "device_service"}:
-            normalized = _send_message_clean_target_value(value)
-            if not normalized:
-                continue
-            value = normalized
-        if key not in out or out.get(key) in (None, ""):
-            out[key] = value
-    return out
+    for pattern in (r"![^\s]+", r"#[A-Za-z0-9][A-Za-z0-9._:-]*", r"@[A-Za-z0-9_]+"):
+        match = re.search(pattern, text)
+        if match:
+            return match.group(0)
+    text = re.sub(r"^(?:room|channel|chat)\s+", "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"\s+(?:in|on)\s+(?:discord|irc|matrix|telegram|home\s*assistant|homeassistant|ntfy)\b.*$",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return text.strip(" .")
 
 
 def _send_message_coerce_targets(payload: Any) -> Dict[str, Any]:
     if isinstance(payload, dict):
-        return _send_message_apply_target_aliases(payload)
+        return dict(payload)
     if isinstance(payload, str):
-        hint = _send_message_clean_target_value(payload)
+        hint = _send_message_extract_target_hint(payload)
         if hint:
             return {"channel": hint}
     return {}
 
 
-def _send_message_clean_attachment_payload(payload: Any) -> List[Any]:
+def _send_message_clean_attachment_payload(payload: Any) -> List[Dict[str, Any]]:
     if not isinstance(payload, list):
         return []
-    out: List[Any] = []
+    out: List[Dict[str, Any]] = []
     for item in payload:
         if isinstance(item, dict):
             out.append(dict(item))
-        elif isinstance(item, str):
-            text = str(item).strip()
-            if text:
-                out.append(text)
     return out
-
-
-def _send_message_resolve_attachment_item(
-    raw_item: Any,
-    *,
-    origin: Optional[Dict[str, Any]],
-) -> Optional[Dict[str, Any]]:
-    if isinstance(raw_item, str):
-        item: Dict[str, Any] = {"artifact_id": str(raw_item).strip()}
-    elif isinstance(raw_item, dict):
-        item = dict(raw_item)
-    else:
-        return None
-
-    artifact_id = str(item.get("artifact_id") or item.get("id") or "").strip()
-    source_payload = dict(item)
-    has_inline_data = any(
-        source_payload.get(key) not in (None, "")
-        for key in ("bytes", "data", "path", "blob_key", "file_id", "id", "url")
-    )
-
-    if artifact_id and not has_inline_data:
-        matched = _find_available_artifact(origin=origin, artifact_id=artifact_id)
-        if matched is None:
-            return None
-        source_payload = dict(matched)
-        source_payload.setdefault("artifact_id", artifact_id)
-
-    binary, filename, mimetype, _error_message = _read_artifact_bytes(source_payload)
-    fallback_name = (
-        str(filename or "").strip()
-        or _artifact_name_from_path(source_payload.get("path"))
-        or _artifact_name_from_path(source_payload.get("url"))
-        or str(source_payload.get("name") or "").strip()
-        or "file.bin"
-    )
-    final_mime = _artifact_mimetype(fallback_name, mimetype or source_payload.get("mimetype"))
-    final_type = _artifact_type(fallback_name, final_mime, source_payload.get("type"))
-    out: Dict[str, Any] = {
-        "type": final_type,
-        "name": fallback_name,
-        "mimetype": final_mime,
-    }
-    if binary is not None:
-        out["bytes"] = binary
-        out["size"] = len(binary)
-    else:
-        for key in ("path", "blob_key", "file_id", "url", "data"):
-            if source_payload.get(key) not in (None, ""):
-                out[key] = source_payload.get(key)
-        try:
-            size_value = int(source_payload.get("size"))
-        except Exception:
-            size_value = -1
-        if size_value >= 0:
-            out["size"] = size_value
-        if not any(out.get(key) not in (None, "") for key in ("path", "blob_key", "file_id", "url", "data")):
-            return None
-
-    if artifact_id:
-        out["artifact_id"] = artifact_id
-    return out
-
-
-def _send_message_resolve_attachments(
-    payload: Any,
-    *,
-    origin: Optional[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    raw_items = _send_message_clean_attachment_payload(payload)
-    out: List[Dict[str, Any]] = []
-    for item in raw_items:
-        resolved = _send_message_resolve_attachment_item(item, origin=origin)
-        if isinstance(resolved, dict):
-            out.append(resolved)
-    return out
-
-
-def _send_message_auto_single_origin_attachment(origin: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    artifacts = _origin_available_artifacts(origin)
-    if len(artifacts) != 1:
-        return None
-    first = dict(artifacts[0])
-    artifact_id = str(first.get("artifact_id") or "").strip()
-    probe: Any = {"artifact_id": artifact_id} if artifact_id else first
-    return _send_message_resolve_attachment_item(probe, origin=origin)
 
 
 def _send_message_attachment_kind(mimetype: Any, fallback_type: Any = None) -> str:
@@ -1202,12 +1088,7 @@ def send_message(
     origin: Optional[Dict[str, Any]] = None,
     channel_id: Any = None,
     channel: Any = None,
-    channel_name: Any = None,
     guild_id: Any = None,
-    guild_name: Any = None,
-    guild: Any = None,
-    room: Any = None,
-    room_name: Any = None,
     room_id: Any = None,
     room_alias: Any = None,
     device_service: Any = None,
@@ -1223,12 +1104,7 @@ def send_message(
     for key, value in (
         ("channel_id", channel_id),
         ("channel", channel),
-        ("channel_name", channel_name),
         ("guild_id", guild_id),
-        ("guild_name", guild_name),
-        ("guild", guild),
-        ("room", room),
-        ("room_name", room_name),
         ("room_id", room_id),
         ("room_alias", room_alias),
         ("device_service", device_service),
@@ -1240,13 +1116,8 @@ def send_message(
     ):
         if value not in (None, "") and key not in target_map:
             target_map[key] = value
-    target_map = _send_message_apply_target_aliases(target_map)
 
-    attachment_items = _send_message_resolve_attachments(attachments, origin=origin)
-    if not text_message and not attachment_items:
-        auto_attachment = _send_message_auto_single_origin_attachment(origin)
-        if isinstance(auto_attachment, dict):
-            attachment_items = [auto_attachment]
+    attachment_items = _send_message_clean_attachment_payload(attachments)
 
     if not text_message and not attachment_items:
         return action_failure(
@@ -1388,43 +1259,25 @@ def attach_file(
     final_name = str(filename or _artifact_name_from_path(explicit_path) or "file.bin").strip() or "file.bin"
     final_mime = _artifact_mimetype(final_name, mimetype)
     final_type = _artifact_type(final_name, final_mime, artifact_payload.get("type") if isinstance(artifact_payload, dict) else None)
-    effective_artifact_id = chosen_artifact_id or str((artifact_payload or {}).get("artifact_id") or "").strip()
-    reference_blob_key = ""
-    if isinstance(artifact_payload, dict):
-        reference_blob_key = str(artifact_payload.get("blob_key") or "").strip()
-    if not reference_blob_key:
-        reference_blob_key = f"{ATTACH_FILE_BLOB_KEY_PREFIX}{uuid.uuid4().hex}"
-        try:
-            redis_blob_client.set(reference_blob_key, binary)
-            redis_blob_client.expire(reference_blob_key, ATTACH_FILE_BLOB_TTL_SECONDS)
-        except Exception:
-            reference_blob_key = ""
     artifact_out = {
         "type": final_type,
         "name": final_name,
         "mimetype": final_mime,
+        "bytes": binary,
         "size": len(binary),
     }
-    if reference_blob_key:
-        artifact_out["blob_key"] = reference_blob_key
-    if effective_artifact_id:
-        artifact_out["artifact_id"] = effective_artifact_id
-    if isinstance(artifact_payload, dict):
-        for key in ("path", "file_id", "url"):
-            value = str(artifact_payload.get(key) or "").strip()
-            if value:
-                artifact_out[key] = value
-    if explicit_path and "path" not in artifact_out:
-        artifact_out["path"] = explicit_path
+
+    if chosen_artifact_id:
+        artifact_out["artifact_id"] = chosen_artifact_id
 
     return action_success(
         facts={
-            "artifact_id": effective_artifact_id,
+            "artifact_id": chosen_artifact_id,
             "name": final_name,
             "size": len(binary),
         },
         data={
-            "artifact_id": effective_artifact_id,
+            "artifact_id": chosen_artifact_id,
             "name": final_name,
             "mimetype": final_mime,
             "size": len(binary),
