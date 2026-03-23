@@ -94,7 +94,7 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
     "list_workspace": "list workspace notes",
     "image_describe": "describe an explicit image using an artifact_id, URL, blob, or local path",
     "attach_file": "attach an available artifact or local file to the current conversation",
-    "send_message": "queue a cross-portal notification/message (with optional attachments) only when the user explicitly asks to notify or message a destination (never for normal chat replies)",
+    "send_message": "queue a cross-portal notification/message only when the user explicitly asks to notify or message a destination (never for normal chat replies)",
 }
 _KERNEL_TOOL_USAGE_HINTS = {
     "list_tools": '{"function":"list_tools","arguments":{}}',
@@ -114,7 +114,7 @@ _KERNEL_TOOL_USAGE_HINTS = {
     "list_workspace": '{"function":"list_workspace","arguments":{}}',
     "image_describe": '{"function":"image_describe","arguments":{"artifact_id":"<artifact_id>","query":"Describe this image."}}',
     "attach_file": '{"function":"attach_file","arguments":{"artifact_id":"<artifact_id>"}}',
-    "send_message": '{"function":"send_message","arguments":{"message":"<message>","platform":"discord","targets":{"guild_name":"<guild>","channel":"#<channel>"},"attachments":[{"artifact_id":"<artifact_id>"}]}}',
+    "send_message": '{"function":"send_message","arguments":{"message":"<message>","platform":"discord","targets":{"channel":"#channel"}}}',
 }
 
 ASCII_ONLY_PLATFORMS = {"irc", "homeassistant", "homekit", "xbmc"}
