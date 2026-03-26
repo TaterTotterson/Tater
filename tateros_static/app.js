@@ -5003,7 +5003,7 @@ async function loadChatView() {
               <span class="chat-composer-icon chat-composer-send-arrow" aria-hidden="true">➤</span>
             </button>
           </div>
-          <div id="chat-files-meta" class="small chat-files-meta">No files selected.</div>
+          <div id="chat-files-meta" class="small chat-files-meta" style="display:none;"></div>
         </div>
       </div>
     </div>
@@ -5073,7 +5073,8 @@ async function loadChatView() {
       return;
     }
     if (!pendingFiles.length) {
-      chatFilesMetaEl.textContent = "No files selected.";
+      chatFilesMetaEl.textContent = "";
+      chatFilesMetaEl.style.display = "none";
       if (clearChatFilesBtn) {
         clearChatFilesBtn.style.display = "none";
       }
@@ -5085,6 +5086,7 @@ async function loadChatView() {
       .filter(Boolean);
     const extra = pendingFiles.length > names.length ? ` +${pendingFiles.length - names.length} more` : "";
     chatFilesMetaEl.textContent = `${pendingFiles.length} file(s): ${names.join(", ")}${extra}`;
+    chatFilesMetaEl.style.display = "block";
     if (clearChatFilesBtn) {
       clearChatFilesBtn.style.display = "inline-flex";
     }
