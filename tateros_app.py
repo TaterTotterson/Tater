@@ -93,8 +93,8 @@ DEFAULT_MAX_STORE = 20
 DEFAULT_MAX_DISPLAY = 8
 DEFAULT_MAX_LLM = 8
 DEFAULT_TATER_AVATAR_PATH = Path(__file__).resolve().parent / "images" / "tater.png"
-WEBUI_ATTACH_MAX_MB_EACH = int(os.getenv("WEBUI_ATTACH_MAX_MB_EACH", "25"))
-WEBUI_ATTACH_MAX_MB_TOTAL = int(os.getenv("WEBUI_ATTACH_MAX_MB_TOTAL", "50"))
+WEBUI_ATTACH_MAX_MB_EACH = int(os.getenv("WEBUI_ATTACH_MAX_MB_EACH", "0"))
+WEBUI_ATTACH_MAX_MB_TOTAL = int(os.getenv("WEBUI_ATTACH_MAX_MB_TOTAL", "0"))
 WEBUI_ATTACH_TTL_SECONDS = int(os.getenv("WEBUI_ATTACH_TTL_SECONDS", "0"))
 WEBUI_ATTACH_INDEX_MAX = int(os.getenv("WEBUI_ATTACH_INDEX_MAX", "500"))
 FILE_BLOB_KEY_PREFIX = "webui:file:"
@@ -817,8 +817,10 @@ def _normalize_chat_attachment_payloads(attachments_raw: Any) -> Tuple[List[Dict
     input_artifacts: List[Dict[str, Any]] = []
     stored_ids: List[str] = []
     total_bytes = 0
-    per_file_limit = max(1, int(WEBUI_ATTACH_MAX_MB_EACH)) * 1024 * 1024
-    total_limit = max(1, int(WEBUI_ATTACH_MAX_MB_TOTAL)) * 1024 * 1024
+    per_file_limit_mb = max(0, int(WEBUI_ATTACH_MAX_MB_EACH))
+    total_limit_mb = max(0, int(WEBUI_ATTACH_MAX_MB_TOTAL))
+    per_file_limit = per_file_limit_mb * 1024 * 1024
+    total_limit = total_limit_mb * 1024 * 1024
 
     try:
         for idx, item in enumerate(attachments_raw):
@@ -831,14 +833,14 @@ def _normalize_chat_attachment_payloads(attachments_raw: Any) -> Tuple[List[Dict
             raw = _decode_attachment_data(payload_raw)
 
             size = len(raw)
-            if size > per_file_limit:
+            if per_file_limit > 0 and size > per_file_limit:
                 raise ValueError(
                     f"attachment '{str(item.get('name') or f'attachment-{idx + 1}').strip()}' "
-                    f"exceeds {WEBUI_ATTACH_MAX_MB_EACH}MB per-file limit"
+                    f"exceeds {per_file_limit_mb}MB per-file limit"
                 )
             total_bytes += size
-            if total_bytes > total_limit:
-                raise ValueError(f"combined attachment size exceeds {WEBUI_ATTACH_MAX_MB_TOTAL}MB limit")
+            if total_limit > 0 and total_bytes > total_limit:
+                raise ValueError(f"combined attachment size exceeds {total_limit_mb}MB limit")
 
             name = str(item.get("name") or f"attachment-{idx + 1}").strip() or f"attachment-{idx + 1}"
             mimetype = str(item.get("mimetype") or "application/octet-stream").strip() or "application/octet-stream"

@@ -77,8 +77,8 @@ const state = {
     taterFirstName: "Tater",
     taterLastName: "Totterson",
     taterFullName: "Tater Totterson",
-    attachMaxMbEach: 25,
-    attachMaxMbTotal: 50,
+    attachMaxMbEach: 0,
+    attachMaxMbTotal: 0,
   },
 };
 
@@ -1894,8 +1894,8 @@ async function refreshBranding() {
     state.chatProfile.taterFirstName = firstName;
     state.chatProfile.taterLastName = lastName;
     state.chatProfile.taterFullName = fullName;
-    state.chatProfile.attachMaxMbEach = Number(profile.attach_max_mb_each || state.chatProfile.attachMaxMbEach || 25);
-    state.chatProfile.attachMaxMbTotal = Number(profile.attach_max_mb_total || state.chatProfile.attachMaxMbTotal || 50);
+    state.chatProfile.attachMaxMbEach = Number(profile.attach_max_mb_each ?? state.chatProfile.attachMaxMbEach ?? 0);
+    state.chatProfile.attachMaxMbTotal = Number(profile.attach_max_mb_total ?? state.chatProfile.attachMaxMbTotal ?? 0);
     if (profile && Object.prototype.hasOwnProperty.call(profile, "popup_effect_style")) {
       applyPopupEffectStyle(profile.popup_effect_style);
     }
@@ -5073,9 +5073,7 @@ async function loadChatView() {
       return;
     }
     if (!pendingFiles.length) {
-      const eachMb = Number(state.chatProfile.attachMaxMbEach || 25);
-      const totalMb = Number(state.chatProfile.attachMaxMbTotal || 50);
-      chatFilesMetaEl.textContent = `No files selected. Limits: ${eachMb}MB each, ${totalMb}MB total.`;
+      chatFilesMetaEl.textContent = "No files selected.";
       if (clearChatFilesBtn) {
         clearChatFilesBtn.style.display = "none";
       }
@@ -5106,8 +5104,8 @@ async function loadChatView() {
         taterFirstName: firstName,
         taterLastName: lastName,
         taterFullName: fullName,
-        attachMaxMbEach: Number(profile.attach_max_mb_each || state.chatProfile.attachMaxMbEach || 25),
-        attachMaxMbTotal: Number(profile.attach_max_mb_total || state.chatProfile.attachMaxMbTotal || 50),
+        attachMaxMbEach: Number(profile.attach_max_mb_each ?? state.chatProfile.attachMaxMbEach ?? 0),
+        attachMaxMbTotal: Number(profile.attach_max_mb_total ?? state.chatProfile.attachMaxMbTotal ?? 0),
       };
       applyBranding(firstName);
       syncChatCopy();
@@ -5121,8 +5119,8 @@ async function loadChatView() {
         taterFirstName: "Tater",
         taterLastName: "Totterson",
         taterFullName: "Tater Totterson",
-        attachMaxMbEach: Number(state.chatProfile.attachMaxMbEach || 25),
-        attachMaxMbTotal: Number(state.chatProfile.attachMaxMbTotal || 50),
+        attachMaxMbEach: Number(state.chatProfile.attachMaxMbEach ?? 0),
+        attachMaxMbTotal: Number(state.chatProfile.attachMaxMbTotal ?? 0),
       };
       syncChatCopy();
       updatePendingFilesUi();
