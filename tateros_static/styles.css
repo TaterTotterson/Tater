@@ -986,6 +986,14 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   max-width: var(--content-max);
   margin: 0 auto;
   animation: reveal-up 340ms ease-out both;
+  min-height: 0;
+}
+
+.view-root[data-view="chat"] {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .card {
@@ -2043,12 +2051,55 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   letter-spacing: 0.04em;
 }
 
+.runtime-breakdown-subtitle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.runtime-history-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.runtime-history-tab-btn {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.24);
+  color: var(--muted);
+  font-size: 0.74rem;
+  line-height: 1.1;
+  padding: 4px 9px;
+  cursor: pointer;
+}
+
+.runtime-history-tab-btn:hover,
+.runtime-history-tab-btn:focus-visible {
+  border-color: rgba(240, 131, 69, 0.65);
+  color: var(--text);
+}
+
+.runtime-history-tab-btn.active {
+  border-color: rgba(240, 131, 69, 0.75);
+  background: rgba(214, 90, 31, 0.2);
+  color: #ffd7bb;
+}
+
 .runtime-breakdown-list {
   border: 1px solid var(--line);
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.02);
   overflow: auto;
   max-height: 220px;
+}
+
+.runtime-breakdown-list-static {
+  overflow: visible;
+  max-height: none;
 }
 
 .runtime-breakdown-row {
@@ -2082,6 +2133,56 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 
 .runtime-breakdown-status {
   flex: 0 0 auto;
+}
+
+.runtime-hydra-turn-list {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+.runtime-hydra-turn-card {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  padding: 9px 10px;
+  display: grid;
+  gap: 7px;
+}
+
+.runtime-hydra-turn-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.runtime-hydra-turn-name {
+  font-weight: 700;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.runtime-hydra-turn-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.runtime-hydra-turn-pill {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.2);
+  color: var(--muted);
+  font-size: 0.73rem;
+  line-height: 1.2;
+  padding: 2px 7px;
+}
+
+.runtime-hydra-turn-scope {
+  overflow-wrap: anywhere;
 }
 
 .core-bar-chart {
@@ -2249,6 +2350,19 @@ textarea {
 .chat-feed-card {
   display: grid;
   gap: 8px;
+}
+
+.view-root[data-view="chat"] .chat-feed-card {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.view-root[data-view="chat"] .chat-log {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
 }
 
 .chat-live-status {
@@ -3559,6 +3673,11 @@ body[data-popup-effect="melt"] .toast-item.flame-out::after {
 
   .runtime-breakdown-grid {
     grid-template-columns: 1fr;
+  }
+
+  .runtime-hydra-turn-head {
+    flex-direction: column;
+    align-items: flex-start;
   }
 
   .runtime-breakdown-dialog {

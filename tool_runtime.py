@@ -16,7 +16,6 @@ from kernel_tools import (
     write_file,
     list_directory,
     delete_file,
-    read_url,
     inspect_webpage,
     download_file,
     list_archive,
@@ -47,7 +46,6 @@ META_TOOLS = {
     "write_file",
     "list_directory",
     "delete_file",
-    "read_url",
     "inspect_webpage",
     "download_file",
     "list_archive",
@@ -68,8 +66,7 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
     "write_file": "write content to a local file",
     "list_directory": "list files and folders",
     "delete_file": "delete a local file",
-    "read_url": "read content text from a specific URL for extraction/summarization (not file download)",
-    "inspect_webpage": "inspect webpage structure, links, and image candidates",
+    "inspect_webpage": "inspect and extract content from a specific webpage URL (title, summary text, links, images)",
     "download_file": "download a file from a concrete file URL after discovery/inspection (actual file retrieval)",
     "list_archive": "inspect archive entries",
     "extract_archive": "extract archives to a target directory",
@@ -89,7 +86,6 @@ _KERNEL_TOOL_USAGE_HINTS = {
     "write_file": '{"function":"write_file","arguments":{"path":"<path>","content":"<content>"}}',
     "list_directory": '{"function":"list_directory","arguments":{"path":"<path>"}}',
     "delete_file": '{"function":"delete_file","arguments":{"path":"<path>"}}',
-    "read_url": '{"function":"read_url","arguments":{"url":"https://example.com"}}',
     "inspect_webpage": '{"function":"inspect_webpage","arguments":{"url":"https://example.com"}}',
     "download_file": '{"function":"download_file","arguments":{"url":"https://example.com/file"}}',
     "list_archive": '{"function":"list_archive","arguments":{"path":"<archive_path>"}}',
@@ -342,11 +338,6 @@ async def run_meta_tool(
         return list_directory(str(args.get("path") or ""))
     if func == "delete_file":
         return delete_file(str(args.get("path") or ""))
-    if func == "read_url":
-        return read_url(
-            str(args.get("url") or ""),
-            timeout_sec=int(args.get("timeout_sec") or 15),
-        )
     if func == "inspect_webpage":
         return inspect_webpage(
             str(args.get("url") or ""),

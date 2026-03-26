@@ -2,6 +2,7 @@ import base64
 import codecs
 import csv
 import fnmatch
+import html as html_lib
 import io
 import json
 import logging
@@ -82,6 +83,30 @@ WEB_SEARCH_TIMEOUT_SEC = int(os.getenv("TATER_WEB_SEARCH_TIMEOUT_SEC", "15"))
 WEB_SEARCH_MAX_RESULTS = int(os.getenv("TATER_WEB_SEARCH_MAX_RESULTS", "10"))
 WEB_SEARCH_MAX_RESPONSE_BYTES = int(os.getenv("TATER_WEB_SEARCH_MAX_RESPONSE_BYTES", "2000000"))
 WEB_SEARCH_MAX_SNIPPET_CHARS = int(os.getenv("TATER_WEB_SEARCH_MAX_SNIPPET_CHARS", "600"))
+WEBPAGE_TIMEOUT_SEC = int(os.getenv("TATER_WEBPAGE_TIMEOUT_SEC", "20"))
+WEBPAGE_MAX_RESPONSE_BYTES = int(os.getenv("TATER_WEBPAGE_MAX_RESPONSE_BYTES", "4000000"))
+WEBPAGE_MAX_TEXT_CHARS = int(os.getenv("TATER_WEBPAGE_MAX_TEXT_CHARS", "180000"))
+WEBPAGE_MAX_PREVIEW_CHARS = int(os.getenv("TATER_WEBPAGE_MAX_PREVIEW_CHARS", "1400"))
+WEBPAGE_BLOCK_STATUS_CODES = {403, 406, 409, 412, 418, 425, 429, 451, 503}
+WEBPAGE_BOT_BLOCK_MARKERS = (
+    "access denied",
+    "attention required",
+    "verify you are human",
+    "verification required",
+    "captcha",
+    "cloudflare",
+    "request blocked",
+    "bot detection",
+    "checking your browser",
+)
+WEBPAGE_USER_AGENTS = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) "
+    "Version/17.5 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36",
+)
 VISION_ALLOWED_MIMETYPES = {
     "image/png",
     "image/jpeg",
@@ -666,6 +691,232 @@ def _normalize_url_input(url: Any) -> str:
     if re.match(r"^(?:www\.)?[A-Za-z0-9][A-Za-z0-9.-]+\.[A-Za-z]{2,}(?:[/:?#].*)?$", raw):
         return f"https://{raw}"
     return raw
+
+
+def _webpage_request_headers(user_agent: str) -> Dict[str, str]:
+    ua = str(user_agent or "").strip() or WEBPAGE_USER_AGENTS[0]
+    return {
+        "User-Agent": ua,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "DNT": "1",
+        "Upgrade-Insecure-Requests": "1",
+    }
+
+
+def _webpage_is_textual_content_type(content_type: str) -> bool:
+    token = str(content_type or "").split(";", 1)[0].strip().lower()
+    if not token:
+        return True
+    return (
+        token.startswith("text/")
+        or token in {"application/xhtml+xml", "application/json", "application/xml"}
+        or token.endswith("+json")
+        or token.endswith("+xml")
+    )
+
+
+def _webpage_decode_text(raw: bytes, *, content_type: str, response_encoding: str = "") -> str:
+    encoding = ""
+    ct = str(content_type or "")
+    match = re.search(r"charset=([A-Za-z0-9._:-]+)", ct, flags=re.IGNORECASE)
+    if match:
+        encoding = str(match.group(1) or "").strip().strip(";")
+    if not encoding:
+        encoding = str(response_encoding or "").strip()
+    if not encoding:
+        encoding = "utf-8"
+    try:
+        return raw.decode(encoding, errors="replace")
+    except Exception:
+        try:
+            return raw.decode("utf-8", errors="replace")
+        except Exception:
+            return raw.decode("latin-1", errors="replace")
+
+
+def _webpage_text_from_html(html: str, *, max_chars: int) -> str:
+    text = str(html or "")
+    if not text:
+        return ""
+
+    # Remove heavy non-content regions before stripping tags.
+    text = re.sub(r"(?is)<(script|style|noscript|template|svg).*?>.*?</\1>", " ", text)
+    text = re.sub(r"(?is)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?is)</(p|div|section|article|aside|main|li|tr|td|th|h1|h2|h3|h4|h5|h6)>", "\n", text)
+    text = re.sub(r"(?is)<[^>]+>", " ", text)
+    text = html_lib.unescape(text)
+    text = re.sub(r"\r\n?", "\n", text)
+    text = re.sub(r"[ \t\f\v]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = "\n".join(part.strip() for part in text.split("\n"))
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    if not text:
+        return ""
+    if len(text) > max_chars:
+        clipped = text[:max_chars]
+        if " " in clipped[1200:]:
+            clipped = clipped[: clipped.rfind(" ")]
+        text = clipped.rstrip(" .,;:") + "..."
+    return text
+
+
+def _webpage_preview(text: str, *, max_chars: int = WEBPAGE_MAX_PREVIEW_CHARS) -> str:
+    out = " ".join(str(text or "").split()).strip()
+    if len(out) <= max_chars:
+        return out
+    clipped = out[:max_chars]
+    if " " in clipped[300:]:
+        clipped = clipped[: clipped.rfind(" ")]
+    return clipped.rstrip(" .,;:") + "..."
+
+
+def _webpage_looks_bot_blocked(*, status_code: int, title: str, description: str, preview: str) -> bool:
+    if int(status_code or 0) in WEBPAGE_BLOCK_STATUS_CODES:
+        return True
+    text = " ".join(
+        [
+            str(title or "").strip().lower(),
+            str(description or "").strip().lower(),
+            str(preview or "").strip().lower(),
+        ]
+    ).strip()
+    if not text:
+        return False
+    return any(marker in text for marker in WEBPAGE_BOT_BLOCK_MARKERS)
+
+
+def _fetch_webpage(
+    normalized_url: str,
+    *,
+    timeout_sec: int,
+    max_bytes: int,
+) -> Dict[str, Any]:
+    timeout_val = _coerce_int(timeout_sec, default=WEBPAGE_TIMEOUT_SEC, min_value=3, max_value=60)
+    byte_limit = _coerce_int(max_bytes, default=WEBPAGE_MAX_RESPONSE_BYTES, min_value=65_536, max_value=25_000_000)
+
+    attempts: List[Dict[str, Any]] = []
+    selected: Optional[Dict[str, Any]] = None
+    last_error = ""
+
+    for user_agent in WEBPAGE_USER_AGENTS:
+        session = requests.Session()
+        response = None
+        attempt: Dict[str, Any] = {
+            "user_agent": user_agent,
+            "status_code": 0,
+            "blocked": False,
+            "error": "",
+        }
+        try:
+            response = session.get(
+                normalized_url,
+                headers=_webpage_request_headers(user_agent),
+                timeout=(8, timeout_val),
+                allow_redirects=True,
+                stream=True,
+            )
+            attempt["status_code"] = int(response.status_code or 0)
+            content_type = str(response.headers.get("Content-Type") or "")
+            final_url = str(response.url or normalized_url)
+
+            chunks: List[bytes] = []
+            total = 0
+            truncated = False
+            for chunk in response.iter_content(chunk_size=64 * 1024):
+                if not chunk:
+                    continue
+                next_total = total + len(chunk)
+                if next_total > byte_limit:
+                    keep = byte_limit - total
+                    if keep > 0:
+                        chunks.append(bytes(chunk[:keep]))
+                        total += keep
+                    truncated = True
+                    break
+                chunks.append(bytes(chunk))
+                total = next_total
+            raw = b"".join(chunks)
+
+            if not _webpage_is_textual_content_type(content_type):
+                selected = {
+                    "ok": False,
+                    "error": f"Non-text content type ({content_type or 'unknown'}). Use download_file instead.",
+                    "url": final_url,
+                    "content_type": content_type,
+                    "status_code": int(response.status_code or 0),
+                    "bytes": int(total),
+                    "truncated": bool(truncated),
+                    "attempts": attempts + [attempt],
+                }
+                break
+
+            text = _webpage_decode_text(
+                raw,
+                content_type=content_type,
+                response_encoding=str(response.encoding or ""),
+            )
+            text_preview = _webpage_preview(text)
+            blocked = _webpage_looks_bot_blocked(
+                status_code=int(response.status_code or 0),
+                title="",
+                description="",
+                preview=text_preview,
+            )
+            attempt["blocked"] = bool(blocked)
+
+            row = {
+                "ok": True,
+                "url": final_url,
+                "content_type": content_type,
+                "status_code": int(response.status_code or 0),
+                "bytes": int(total),
+                "truncated": bool(truncated),
+                "raw_text": text,
+                "attempts": attempts + [attempt],
+            }
+
+            if blocked:
+                selected = row
+                attempts.append(attempt)
+                continue
+
+            selected = row
+            break
+        except requests.RequestException as exc:
+            message = str(exc).strip() or exc.__class__.__name__
+            last_error = message
+            attempt["error"] = message
+            attempts.append(attempt)
+            continue
+        except Exception as exc:
+            message = str(exc).strip() or exc.__class__.__name__
+            last_error = message
+            attempt["error"] = message
+            attempts.append(attempt)
+            continue
+        finally:
+            try:
+                if response is not None:
+                    response.close()
+            except Exception:
+                pass
+            try:
+                session.close()
+            except Exception:
+                pass
+
+    if selected is None:
+        return {
+            "ok": False,
+            "error": last_error or "Unable to fetch webpage.",
+            "url": normalized_url,
+            "attempts": attempts,
+        }
+    return selected
 
 
 def _clean_redis_str(value: Any) -> str:
@@ -2143,57 +2394,6 @@ def _ai_tasks_default_title(task_prompt: str, recurrence: Dict[str, Any], interv
         return f"{cadence_prefix} AI task"
     return "Scheduled AI task"
 
-
-def read_url(
-    url: str,
-    *,
-    max_bytes: Optional[int] = None,
-    timeout_sec: int = 15,
-) -> Dict[str, Any]:
-    normalized_url = _normalize_url_input(url)
-    err = _validate_url(normalized_url)
-    if err:
-        return {"tool": "read_url", "ok": False, "error": err}
-    try:
-        req = urllib.request.Request(
-            normalized_url,
-            headers={"User-Agent": "Tater-AgentLab/1.0"},
-        )
-        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
-            content_type = resp.headers.get("Content-Type", "") or ""
-            final_url = resp.geturl() or normalized_url
-            raw = resp.read()
-            truncated = False
-        # Only allow textual content.
-        if not (
-            content_type.startswith("text/")
-            or "json" in content_type
-            or "xml" in content_type
-            or "yaml" in content_type
-            or "yml" in content_type
-        ):
-            return {
-                "tool": "read_url",
-                "ok": False,
-                "error": f"Non-text content type ({content_type or 'unknown'}). Use download_file instead.",
-            }
-        try:
-            content = raw.decode("utf-8")
-        except Exception:
-            content = raw.decode("utf-8", errors="replace")
-        return {
-            "tool": "read_url",
-            "ok": True,
-            "url": final_url,
-            "content_type": content_type,
-            "bytes": len(raw),
-            "truncated": truncated,
-            "content": content,
-        }
-    except Exception as e:
-        return {"tool": "read_url", "ok": False, "error": str(e)}
-
-
 class _WebpageInspectorParser(HTMLParser):
     def __init__(self, *, base_url: str, max_links: int, max_images: int):
         super().__init__(convert_charrefs=True)
@@ -2377,52 +2577,106 @@ def inspect_webpage(
     platform: Optional[str] = None,
     origin: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    del platform, origin
     normalized_url = _normalize_url_input(url)
     err = _validate_url(normalized_url)
     if err:
         return {"tool": "inspect_webpage", "ok": False, "error": err}
-    try:
-        req = urllib.request.Request(
-            normalized_url,
-            headers={"User-Agent": "Tater-AgentLab/1.0"},
-        )
-        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
-            content_type = _as_text(resp.headers.get("Content-Type") or "")
-            final_url = resp.geturl() or normalized_url
-            raw = resp.read()
-            truncated = False
-    except Exception as e:
-        return {"tool": "inspect_webpage", "ok": False, "error": str(e)}
+    fetch_payload = _fetch_webpage(
+        normalized_url,
+        timeout_sec=int(timeout_sec or WEBPAGE_TIMEOUT_SEC),
+        max_bytes=_coerce_int(
+            max_bytes if max_bytes is not None else WEBPAGE_MAX_RESPONSE_BYTES,
+            default=WEBPAGE_MAX_RESPONSE_BYTES,
+            min_value=65_536,
+            max_value=25_000_000,
+        ),
+    )
 
-    content_type_norm = content_type.split(";", 1)[0].strip().lower()
-    if content_type_norm and not (
-        content_type_norm.startswith("text/html")
-        or content_type_norm.startswith("application/xhtml+xml")
-        or content_type_norm.startswith("text/")
-    ):
+    fetch_attempts = fetch_payload.get("attempts") if isinstance(fetch_payload, dict) else []
+    attempts_out: List[Dict[str, Any]] = []
+    for row in fetch_attempts if isinstance(fetch_attempts, list) else []:
+        if not isinstance(row, dict):
+            continue
+        attempts_out.append(
+            {
+                "status_code": int(row.get("status_code") or 0),
+                "blocked": bool(row.get("blocked")),
+                "error": str(row.get("error") or "").strip(),
+            }
+        )
+
+    if not bool(fetch_payload.get("ok")):
         return {
             "tool": "inspect_webpage",
             "ok": False,
-            "url": final_url,
-            "content_type": content_type,
-            "error": f"Non-HTML content type ({content_type_norm or 'unknown'}).",
+            "url": str(fetch_payload.get("url") or normalized_url),
+            "error": str(fetch_payload.get("error") or "Unable to fetch webpage."),
+            "fetch_attempts": attempts_out,
         }
 
-    try:
-        html = raw.decode("utf-8")
-    except Exception:
-        html = raw.decode("utf-8", errors="replace")
+    final_url = str(fetch_payload.get("url") or normalized_url)
+    content_type = str(fetch_payload.get("content_type") or "")
+    status_code = int(fetch_payload.get("status_code") or 0)
+    raw_text = str(fetch_payload.get("raw_text") or "")
+    truncated = bool(fetch_payload.get("truncated"))
+    byte_count = int(fetch_payload.get("bytes") or len(raw_text.encode("utf-8", errors="ignore")))
+
+    content_type_norm = content_type.split(";", 1)[0].strip().lower()
+    is_html = (
+        content_type_norm.startswith("text/html")
+        or content_type_norm.startswith("application/xhtml+xml")
+        or ("<html" in raw_text[:1200].lower())
+    )
 
     parser = _WebpageInspectorParser(
         base_url=final_url,
         max_links=max_links,
         max_images=max_images,
     )
-    try:
-        parser.feed(html)
-    except Exception:
-        pass
-    parser.close()
+    if is_html:
+        try:
+            parser.feed(raw_text)
+        except Exception:
+            pass
+        try:
+            parser.close()
+        except Exception:
+            pass
+
+    title_text = _as_text(parser.title).strip()
+    description_text = _as_text(parser.description).strip()
+    if is_html:
+        content_text = _webpage_text_from_html(raw_text, max_chars=WEBPAGE_MAX_TEXT_CHARS)
+    else:
+        content_text = " ".join(raw_text.split()).strip()
+    if not content_text and is_html:
+        content_text = parser.visible_text(max_chars=WEBPAGE_MAX_TEXT_CHARS)
+
+    text_preview = _webpage_preview(content_text, max_chars=WEBPAGE_MAX_PREVIEW_CHARS)
+    bot_blocked = _webpage_looks_bot_blocked(
+        status_code=status_code,
+        title=title_text,
+        description=description_text,
+        preview=text_preview,
+    )
+
+    if bot_blocked and len(content_text) < 220:
+        return {
+            "tool": "inspect_webpage",
+            "ok": False,
+            "url": final_url,
+            "status_code": status_code,
+            "content_type": content_type,
+            "bytes": byte_count,
+            "truncated": truncated,
+            "blocked_by_bot": True,
+            "error": (
+                "Webpage appears to be protected by anti-bot checks and no readable content was extracted. "
+                "Try another source URL."
+            ),
+            "fetch_attempts": attempts_out,
+        }
 
     unique_links: List[Dict[str, Any]] = []
     seen_links = set()
@@ -2455,27 +2709,28 @@ def inspect_webpage(
         )
         best_image_url = _as_text(ranked[0][1].get("url")).strip()
 
-    if best_image_url:
-        path_name = Path(urllib.parse.urlparse(best_image_url).path).name or "image.png"
-        guessed_mime = _as_text(mimetypes.guess_type(path_name)[0]).strip().lower()
-        if not guessed_mime.startswith("image/"):
-            guessed_mime = "image/png"
+    content_chunk, content_meta = _slice_content(content_text, start=0, max_chars=WEBPAGE_MAX_TEXT_CHARS)
 
     return {
         "tool": "inspect_webpage",
         "ok": True,
         "url": final_url,
+        "status_code": status_code,
         "content_type": content_type,
-        "bytes": len(raw),
+        "bytes": byte_count,
         "truncated": truncated,
-        "title": _as_text(parser.title).strip(),
-        "description": _as_text(parser.description).strip(),
-        "text_preview": parser.visible_text(),
+        "blocked_by_bot": bool(bot_blocked),
+        "title": title_text,
+        "description": description_text,
+        "text_preview": text_preview,
+        "content": content_chunk,
+        "content_meta": content_meta,
         "links": unique_links,
         "link_count": len(unique_links),
         "images": unique_images,
         "image_count": len(unique_images),
         "best_image_url": best_image_url or None,
+        "fetch_attempts": attempts_out,
     }
 
 
