@@ -179,22 +179,6 @@ def constrain_args_from_plugin_help(
     return out
 
 
-def tool_call_signature(
-    tool_call: Optional[Dict[str, Any]],
-    *,
-    canonical_tool_name_fn: Callable[[Any], str],
-    hash_tool_args_fn: Callable[[Any], str],
-) -> str:
-    if not isinstance(tool_call, dict):
-        return ""
-    func = canonical_tool_name_fn(tool_call.get("function"))
-    if not func:
-        return ""
-    args = tool_call.get("arguments") if isinstance(tool_call.get("arguments"), dict) else {}
-    args_hash = hash_tool_args_fn(args)
-    return f"{func}:{args_hash}" if args_hash else func
-
-
 def build_help_constrained_retry_tool_call(
     *,
     failed_tool_call: Optional[Dict[str, Any]],

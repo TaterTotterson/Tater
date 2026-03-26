@@ -33,6 +33,8 @@ const state = {
   sidebarCollapsed: String(safeStorageGet("tater_tateros_sidebar_collapsed", "false")).trim().toLowerCase() === "true",
   sidebarCollapseTimer: 0,
   runtimeBreakdownPollTimer: 0,
+  runtimeBreakdownPayload: null,
+  runtimeHistoryWindow: "24h",
   runtimeSettingsSaveHandler: null,
   runtimeSettingsCatalog: {
     verbas: {},
@@ -41,6 +43,7 @@ const state = {
   },
   popupEffectStyle: String(safeStorageGet("tater_tateros_popup_effect_style", "flame")).trim().toLowerCase() || "flame",
   sending: false,
+  chatSendInFlight: 0,
   activeChatJobs: {},
   chatEventSources: {},
   chatPollMeta: {},
@@ -1951,6 +1954,57 @@ function _runtimeAgeLabel(secondsRaw) {
   return `${hours}h ${remMinutes}m`;
 }
 
+function _runtimeStartedLabel(epochSecondsRaw) {
+  const epoch = Number(epochSecondsRaw);
+  if (!Number.isFinite(epoch) || epoch <= 0) {
+    return "";
+  }
+  try {
+    return new Date(epoch * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  } catch {
+    return "";
+  }
+}
+
+function _runtimeHistoryWindowKey(valueRaw, fallback = "24h") {
+  const value = String(valueRaw || "").trim().toLowerCase();
+  if (value === "24h" || value === "7d" || value === "30d") {
+    return value;
+  }
+  return String(fallback || "").trim().toLowerCase();
+}
+
+function _runtimeHistoryWindowLabel(row) {
+  const key = _runtimeHistoryWindowKey(row?.key, "");
+  if (key) {
+    return key;
+  }
+  return String(row?.label || "window").trim() || "window";
+}
+
+function _renderRuntimeHistoryWindowTabs(historyWindows, selectedKey, ariaLabel = "History window") {
+  const rows = Array.isArray(historyWindows) ? historyWindows.filter((row) => row && typeof row === "object") : [];
+  if (rows.length <= 1) {
+    return "";
+  }
+  return `
+    <div class="runtime-history-tabs" role="tablist" aria-label="${escapeHtml(ariaLabel)}">
+      ${rows
+        .map((row) => {
+          const key = _runtimeHistoryWindowKey(row?.key, "");
+          if (!key) {
+            return "";
+          }
+          const active = key === _runtimeHistoryWindowKey(selectedKey, "24h");
+          return `<button type="button" class="runtime-history-tab-btn${active ? " active" : ""}" data-runtime-history-window="${escapeHtml(
+            key
+          )}">${escapeHtml(_runtimeHistoryWindowLabel(row))}</button>`;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
 function _renderRuntimeHydraJobRows(hydraJobs) {
   const byPlatform = Array.isArray(hydraJobs?.by_platform) ? hydraJobs.by_platform : [];
   const activeTurns = Array.isArray(hydraJobs?.active_turns) ? hydraJobs.active_turns : [];
@@ -1978,21 +2032,28 @@ function _renderRuntimeHydraJobRows(hydraJobs) {
 
   const activeTurnsHtml = activeTurns.length
     ? `
-        <div class="runtime-breakdown-list">
+        <div class="runtime-breakdown-list runtime-hydra-turn-list">
           ${activeTurns
             .map((row) => {
+              const turnId = String(row?.id || "").trim();
+              const shortId = turnId ? turnId.slice(0, 8) : "";
               const platformLabel = String(row?.platform_label || row?.platform || "Unknown");
+              const taskName = String(row?.task_name || "").trim() || "Hydra task";
               const source = String(row?.source || "").trim();
               const scope = String(row?.scope || "").trim();
               const age = _runtimeAgeLabel(row?.age_seconds);
-              const detailParts = [source, scope].filter(Boolean);
+              const started = _runtimeStartedLabel(row?.started_at);
+              const metaParts = [platformLabel, source, shortId ? `Drop ${shortId}` : "", started ? `Started ${started}` : ""].filter(Boolean);
               return `
-                <div class="runtime-breakdown-row compact">
-                  <div class="runtime-breakdown-main">
-                    <div class="runtime-breakdown-name">${escapeHtml(platformLabel)}</div>
-                    <div class="small muted">${escapeHtml(detailParts.join(" • "))}</div>
+                <div class="runtime-hydra-turn-card">
+                  <div class="runtime-hydra-turn-head">
+                    <div class="runtime-hydra-turn-name">${escapeHtml(taskName)}</div>
+                    <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(`Running ${age}`)}</span></div>
                   </div>
-                  <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(age)}</span></div>
+                  <div class="runtime-hydra-turn-meta">
+                    ${metaParts.map((part) => `<span class="runtime-hydra-turn-pill">${escapeHtml(part)}</span>`).join("")}
+                  </div>
+                  ${scope ? `<div class="small muted runtime-hydra-turn-scope">Scope: ${escapeHtml(scope)}</div>` : ""}
                 </div>
               `;
             })
@@ -2001,48 +2062,50 @@ function _renderRuntimeHydraJobRows(hydraJobs) {
       `
     : `<div class="small muted">No active Hydra turns right now.</div>`;
 
-  const historyHtml = historyWindows.length
-    ? `
-        <div class="runtime-breakdown-list">
-          ${historyWindows
-            .map((windowRow) => {
-              const jobs = Number(windowRow?.jobs ?? 0);
-              const done = Number(windowRow?.done ?? 0);
-              const blocked = Number(windowRow?.blocked ?? 0);
-              const failed = Number(windowRow?.failed ?? 0);
-              const topPlatforms = Array.isArray(windowRow?.top_platforms) ? windowRow.top_platforms : [];
-              const platformLine = topPlatforms.length
-                ? topPlatforms
-                    .map((row) => `${String(row?.label || row?.platform || "Unknown")}: ${Number(row?.jobs ?? 0)}`)
-                    .join(" • ")
-                : "No jobs in this period.";
-              return `
-                <div class="runtime-breakdown-row">
-                  <div class="runtime-breakdown-main">
-                    <div class="runtime-breakdown-name">${escapeHtml(String(windowRow?.label || "Window"))}</div>
-                    <div class="small muted">Done ${done} • Blocked ${blocked} • Failed ${failed}</div>
-                    <div class="small muted">${escapeHtml(platformLine)}</div>
-                  </div>
-                  <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(`${jobs} jobs`)}</span></div>
-                </div>
-              `;
-            })
-            .join("")}
-        </div>
-      `
+  const historyWindowKey = _runtimeHistoryWindowKey(state.runtimeHistoryWindow, "24h");
+  const selectedHistoryWindow =
+    historyWindows.find((row) => _runtimeHistoryWindowKey(row?.key, "") === historyWindowKey) || historyWindows[0] || null;
+  const selectedHistoryKey = _runtimeHistoryWindowKey(selectedHistoryWindow?.key, historyWindowKey);
+  const historyTabsHtml = _renderRuntimeHistoryWindowTabs(historyWindows, selectedHistoryKey, "Hydra history window");
+  const historyHtml = selectedHistoryWindow
+    ? (() => {
+        const jobs = Number(selectedHistoryWindow?.jobs ?? 0);
+        const done = Number(selectedHistoryWindow?.done ?? 0);
+        const blocked = Number(selectedHistoryWindow?.blocked ?? 0);
+        const failed = Number(selectedHistoryWindow?.failed ?? 0);
+        const topPlatforms = Array.isArray(selectedHistoryWindow?.top_platforms) ? selectedHistoryWindow.top_platforms : [];
+        const platformLine = topPlatforms.length
+          ? topPlatforms.map((row) => `${String(row?.label || row?.platform || "Unknown")}: ${Number(row?.jobs ?? 0)}`).join(" • ")
+          : "No jobs in this period.";
+        return `
+          <div class="runtime-breakdown-list runtime-breakdown-list-static">
+            <div class="runtime-breakdown-row">
+              <div class="runtime-breakdown-main">
+                <div class="runtime-breakdown-name">${escapeHtml(String(selectedHistoryWindow?.label || "Window"))}</div>
+                <div class="small muted">Done ${done} • Blocked ${blocked} • Failed ${failed}</div>
+                <div class="small muted">${escapeHtml(platformLine)}</div>
+              </div>
+              <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(`${jobs} jobs`)}</span></div>
+            </div>
+          </div>
+        `;
+      })()
     : `<div class="small muted">No history available yet.</div>`;
 
   return `
-    <div class="runtime-breakdown-block">
-      <div class="runtime-breakdown-subtitle">By Platform</div>
-      ${platformRowsHtml}
-    </div>
     <div class="runtime-breakdown-block">
       <div class="runtime-breakdown-subtitle">Active Turns</div>
       ${activeTurnsHtml}
     </div>
     <div class="runtime-breakdown-block">
-      <div class="runtime-breakdown-subtitle">History</div>
+      <div class="runtime-breakdown-subtitle">By Platform</div>
+      ${platformRowsHtml}
+    </div>
+    <div class="runtime-breakdown-block">
+      <div class="runtime-breakdown-subtitle-row">
+        <div class="runtime-breakdown-subtitle">History</div>
+        ${historyTabsHtml}
+      </div>
       ${historyHtml}
       <div class="small muted">Sample size: ${escapeHtml(String(Number(history?.sample_size ?? 0)))} ledger rows</div>
     </div>
@@ -2135,35 +2198,34 @@ function _renderRuntimeLlmCallRows(llmCalls) {
       `
     : `<div class="small muted">No active LLM calls right now.</div>`;
 
-  const historyHtml = historyWindows.length
-    ? `
-        <div class="runtime-breakdown-list">
-          ${historyWindows
-            .map((windowRow) => {
-              const calls = Number(windowRow?.calls ?? 0);
-              const completed = Number(windowRow?.completed ?? 0);
-              const failed = Number(windowRow?.failed ?? 0);
-              const avgMs = Number(windowRow?.avg_ms ?? 0);
-              const topSources = Array.isArray(windowRow?.top_sources) ? windowRow.top_sources : [];
-              const sourceLine = topSources.length
-                ? topSources
-                    .map((row) => `${String(row?.label || row?.source || "Unknown")}: ${Number(row?.calls ?? 0)}`)
-                    .join(" • ")
-                : "No calls in this period.";
-              return `
-                <div class="runtime-breakdown-row">
-                  <div class="runtime-breakdown-main">
-                    <div class="runtime-breakdown-name">${escapeHtml(String(windowRow?.label || "Window"))}</div>
-                    <div class="small muted">Done ${completed} • Failed ${failed} • Avg ${avgMs.toFixed(1)} ms</div>
-                    <div class="small muted">${escapeHtml(sourceLine)}</div>
-                  </div>
-                  <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(`${calls} calls`)}</span></div>
-                </div>
-              `;
-            })
-            .join("")}
-        </div>
-      `
+  const historyWindowKey = _runtimeHistoryWindowKey(state.runtimeHistoryWindow, "24h");
+  const selectedHistoryWindow =
+    historyWindows.find((row) => _runtimeHistoryWindowKey(row?.key, "") === historyWindowKey) || historyWindows[0] || null;
+  const selectedHistoryKey = _runtimeHistoryWindowKey(selectedHistoryWindow?.key, historyWindowKey);
+  const historyTabsHtml = _renderRuntimeHistoryWindowTabs(historyWindows, selectedHistoryKey, "LLM call history window");
+  const historyHtml = selectedHistoryWindow
+    ? (() => {
+        const calls = Number(selectedHistoryWindow?.calls ?? 0);
+        const completed = Number(selectedHistoryWindow?.completed ?? 0);
+        const failed = Number(selectedHistoryWindow?.failed ?? 0);
+        const avgMs = Number(selectedHistoryWindow?.avg_ms ?? 0);
+        const topSources = Array.isArray(selectedHistoryWindow?.top_sources) ? selectedHistoryWindow.top_sources : [];
+        const sourceLine = topSources.length
+          ? topSources.map((row) => `${String(row?.label || row?.source || "Unknown")}: ${Number(row?.calls ?? 0)}`).join(" • ")
+          : "No calls in this period.";
+        return `
+          <div class="runtime-breakdown-list runtime-breakdown-list-static">
+            <div class="runtime-breakdown-row">
+              <div class="runtime-breakdown-main">
+                <div class="runtime-breakdown-name">${escapeHtml(String(selectedHistoryWindow?.label || "Window"))}</div>
+                <div class="small muted">Done ${completed} • Failed ${failed} • Avg ${avgMs.toFixed(1)} ms</div>
+                <div class="small muted">${escapeHtml(sourceLine)}</div>
+              </div>
+              <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(`${calls} calls`)}</span></div>
+            </div>
+          </div>
+        `;
+      })()
     : `<div class="small muted">No LLM call history available yet.</div>`;
 
   return `
@@ -2180,7 +2242,10 @@ function _renderRuntimeLlmCallRows(llmCalls) {
       ${activeCallsHtml}
     </div>
     <div class="runtime-breakdown-block">
-      <div class="runtime-breakdown-subtitle">History</div>
+      <div class="runtime-breakdown-subtitle-row">
+        <div class="runtime-breakdown-subtitle">History</div>
+        ${historyTabsHtml}
+      </div>
       ${historyHtml}
       <div class="small muted">Sample size: ${escapeHtml(String(Number(history?.sample_size ?? 0)))} completed calls</div>
     </div>
@@ -2327,7 +2392,8 @@ function renderRuntimeBreakdown(payload) {
   const contextEstimate = payload?.chat_context_window && typeof payload.chat_context_window === "object"
     ? payload.chat_context_window
     : {};
-  const hydraSummary = `${Number(hydraJobs.total ?? 0)} total • WebUI queue ${Number(
+  const activeTurnCount = Array.isArray(hydraJobs?.active_turns) ? hydraJobs.active_turns.length : Number(hydraJobs.surface_running_turns ?? 0);
+  const hydraSummary = `${Number(hydraJobs.total ?? 0)} total • Active turns ${activeTurnCount} • WebUI queue ${Number(
     hydraJobs.webui_jobs ?? 0
   )} • Surface turns ${Number(hydraJobs.surface_running_turns ?? 0)}`;
   const llmSummary = `${Number(llmCalls.active_total ?? 0)} active • Started ${Number(
@@ -2393,6 +2459,27 @@ function ensureRuntimeBreakdownModal() {
   refreshBtn?.addEventListener("click", async () => {
     await loadRuntimeBreakdown({ force: true });
   });
+  const contentEl = document.getElementById("runtime-breakdown-content");
+  contentEl?.addEventListener("click", (event) => {
+    const button = event.target instanceof Element ? event.target.closest("[data-runtime-history-window]") : null;
+    if (!button) {
+      return;
+    }
+    const nextKey = _runtimeHistoryWindowKey(button.getAttribute("data-runtime-history-window"), "");
+    if (!nextKey) {
+      return;
+    }
+    if (_runtimeHistoryWindowKey(state.runtimeHistoryWindow, "24h") === nextKey) {
+      return;
+    }
+    state.runtimeHistoryWindow = nextKey;
+    const cachedPayload = state.runtimeBreakdownPayload;
+    if (cachedPayload && typeof cachedPayload === "object") {
+      contentEl.innerHTML = renderRuntimeBreakdown(cachedPayload);
+    } else {
+      void loadRuntimeBreakdown({ force: true, silent: true });
+    }
+  });
   modal.addEventListener("click", (event) => {
     if (event.target === modal) {
       closeModal();
@@ -2445,6 +2532,7 @@ async function loadRuntimeBreakdown({ force = false, silent = false } = {}) {
 
   try {
     const payload = await api("/api/runtime/breakdown");
+    state.runtimeBreakdownPayload = payload;
     if (contentEl) {
       contentEl.innerHTML = renderRuntimeBreakdown(payload);
     }
@@ -5164,11 +5252,98 @@ async function loadChatView() {
     return Object.keys(jobs).filter((jobId) => Boolean(jobs[jobId])).length;
   };
 
+  const _chatJobEntry = (jobId, createIfMissing = true) => {
+    const id = String(jobId || "").trim();
+    if (!id) {
+      return null;
+    }
+    const jobs = _getActiveChatJobs();
+    const existing = jobs[id];
+    if (existing && typeof existing === "object") {
+      return existing;
+    }
+    if (!createIfMissing) {
+      return null;
+    }
+    const next = {
+      status: "queued",
+      current_tool: "",
+      task_name: "",
+      updated_at: Date.now(),
+    };
+    jobs[id] = next;
+    state.activeChatJobs = jobs;
+    return next;
+  };
+
+  const _updateChatJobEntry = (jobId, patch = null) => {
+    const row = _chatJobEntry(jobId, true);
+    if (!row) {
+      return null;
+    }
+    const payload = patch && typeof patch === "object" ? patch : {};
+    if (Object.prototype.hasOwnProperty.call(payload, "status")) {
+      row.status = String(payload.status || "").trim().toLowerCase() || row.status || "queued";
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "current_tool")) {
+      row.current_tool = String(payload.current_tool || "").trim();
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "task_name")) {
+      const maybeTask = String(payload.task_name || "").trim();
+      if (maybeTask) {
+        row.task_name = maybeTask;
+      }
+    }
+    row.updated_at = Date.now();
+    return row;
+  };
+
+  const _normalizedToolBucket = (toolRaw) => {
+    const tool = String(toolRaw || "").trim();
+    if (!tool) {
+      return "";
+    }
+    return tool.toLowerCase();
+  };
+
+  const _aggregateChatToolUsageLine = () => {
+    const jobs = _getActiveChatJobs();
+    const entries = Object.values(jobs).filter((row) => row && typeof row === "object");
+    const toolBuckets = {};
+    entries.forEach((row) => {
+      const tool = String(row.current_tool || "").trim();
+      const bucket = _normalizedToolBucket(tool);
+      if (!bucket) {
+        return;
+      }
+      if (!toolBuckets[bucket]) {
+        toolBuckets[bucket] = { count: 0, display: tool };
+      }
+      toolBuckets[bucket].count += 1;
+      if (!toolBuckets[bucket].display && tool) {
+        toolBuckets[bucket].display = tool;
+      }
+    });
+    const parts = Object.values(toolBuckets)
+      .sort((a, b) => {
+        const diff = Number(b.count || 0) - Number(a.count || 0);
+        if (diff !== 0) {
+          return diff;
+        }
+        return String(a.display || "").localeCompare(String(b.display || ""));
+      })
+      .slice(0, 3)
+      .map((row) => `${Number(row.count || 0)} using ${String(row.display || "tool")}`);
+    return parts.join(" • ");
+  };
+
   const _setChatLiveStatus = (text = "") => {
     const activeCount = _activeChatJobCount();
     const normalized = String(text || "").trim();
-    if (activeCount > 1) {
-      status.textContent = normalized ? `${activeCount} jobs running. Latest: ${normalized}` : `${activeCount} jobs running...`;
+    if (activeCount > 0) {
+      const toolLine = _aggregateChatToolUsageLine();
+      const jobWord = activeCount === 1 ? "job" : "jobs";
+      status.textContent = toolLine ? `${activeCount} ${jobWord} running • ${toolLine}` : `${activeCount} ${jobWord} running`;
       return;
     }
     status.textContent = normalized;
@@ -5282,15 +5457,15 @@ async function loadChatView() {
         }
 
         const tool = String(snapshot.current_tool || "").trim();
-        if (tool) {
-          _setChatLiveStatus(`Using ${tool}...`);
-        } else if (snapshotStatus) {
-          _setChatLiveStatus(`Running (${snapshotStatus})...`);
-        } else {
-          _setChatLiveStatus("Waiting for response...");
-        }
+        const taskName = String(snapshot.task_name || "").trim();
+        _updateChatJobEntry(id, {
+          status: snapshotStatus || "running",
+          current_tool: tool,
+          task_name: taskName,
+        });
+        _setChatLiveStatus();
       } catch {
-        _setChatLiveStatus("Waiting for response...");
+        _setChatLiveStatus();
       }
 
       scheduleChatJobPoll(id, 1200);
@@ -5299,14 +5474,13 @@ async function loadChatView() {
     state.chatPollMeta = pollMeta;
   };
 
-  function attachJobStream(jobId) {
+  function attachJobStream(jobId, initialMeta = null) {
     const id = String(jobId || "").trim();
     if (!id) {
       return;
     }
-    const jobs = _getActiveChatJobs();
-    jobs[id] = true;
-    state.activeChatJobs = jobs;
+    _updateChatJobEntry(id, initialMeta && typeof initialMeta === "object" ? initialMeta : { status: "queued" });
+    _setChatLiveStatus();
 
     closeChatEventSource(id);
     stopChatJobPolling(id);
@@ -5326,17 +5500,25 @@ async function loadChatView() {
       const payload = safeJsonParse(event.data) || {};
       const st = String(payload.status || "running");
       const tool = String(payload.current_tool || "").trim();
-      if (tool) {
-        _setChatLiveStatus(`Running (${st}) • ${tool}`);
-      } else {
-        _setChatLiveStatus(`Running (${st})...`);
-      }
+      const taskName = String(payload.task_name || "").trim();
+      _updateChatJobEntry(id, {
+        status: st,
+        current_tool: tool,
+        task_name: taskName,
+      });
+      _setChatLiveStatus();
     });
 
     eventSource.addEventListener("tool", (event) => {
       const payload = safeJsonParse(event.data) || {};
       const tool = String(payload.current_tool || "").trim() || "tool";
-      _setChatLiveStatus(`Using ${tool}...`);
+      const taskName = String(payload.task_name || "").trim();
+      _updateChatJobEntry(id, {
+        status: "running",
+        current_tool: tool,
+        task_name: taskName,
+      });
+      _setChatLiveStatus();
     });
 
     eventSource.addEventListener("waiting", async (event) => {
@@ -5372,7 +5554,7 @@ async function loadChatView() {
       }
       // In some HA ingress/proxy setups SSE is unstable. Keep polling as the source of truth.
       closeChatEventSource(id);
-      _setChatLiveStatus("Waiting for response...");
+      _setChatLiveStatus();
     };
   }
 
@@ -5408,30 +5590,34 @@ async function loadChatView() {
   }
 
   const sendChatMessage = async () => {
-    if (state.sending) {
-      return;
-    }
-
     const message = String(chatInputEl.value || "").trim();
-    if (!message && !pendingFiles.length) {
+    const filesForSend = Array.from(pendingFiles || []);
+    if (!message && !filesForSend.length) {
       status.textContent = "Enter a message or attach files first.";
       return;
     }
 
-    state.sending = true;
-    _setChatLiveStatus(pendingFiles.length ? "Preparing attachments..." : "Queueing chat job...");
+    pendingFiles = [];
+    if (chatFilesEl) {
+      chatFilesEl.value = "";
+    }
+    updatePendingFilesUi();
+    chatInputEl.value = "";
+    autoSizeChatInput();
+
+    state.chatSendInFlight = Math.max(0, Number(state.chatSendInFlight) || 0) + 1;
+    state.sending = state.chatSendInFlight > 0;
+    _setChatLiveStatus(filesForSend.length ? "Preparing attachments..." : "Queueing chat job...");
 
     try {
       const attachments = [];
-      for (const file of pendingFiles) {
+      for (const file of filesForSend) {
         attachments.push({
           name: String(file?.name || "attachment").trim() || "attachment",
           mimetype: String(file?.type || "application/octet-stream").trim() || "application/octet-stream",
           data_url: await readFileAsDataUrl(file),
         });
       }
-      chatInputEl.value = "";
-      autoSizeChatInput();
       const response = await api("/api/chat/jobs", {
         method: "POST",
         body: JSON.stringify({ message, session_id: state.sessionId, attachments }),
@@ -5444,24 +5630,24 @@ async function loadChatView() {
       }
 
       const jobId = String(response.job_id || "").trim();
+      const taskName = String(response.task_name || "").trim();
       if (!jobId) {
         throw new Error("Backend did not return a job id.");
       }
 
-      pendingFiles = [];
-      if (chatFilesEl) {
-        chatFilesEl.value = "";
-      }
-      updatePendingFilesUi();
-
       await refreshChatHistory();
-      _setChatLiveStatus("Job queued...");
-      attachJobStream(jobId);
+      attachJobStream(jobId, {
+        status: "queued",
+        current_tool: "",
+        task_name: taskName,
+      });
+      _setChatLiveStatus(taskName ? `Job queued: ${taskName}` : "Job queued...");
       await refreshHealth();
     } catch (error) {
       _setChatLiveStatus(`Chat failed: ${error.message}`);
     } finally {
-      state.sending = false;
+      state.chatSendInFlight = Math.max(0, Number(state.chatSendInFlight) - 1);
+      state.sending = state.chatSendInFlight > 0;
     }
   };
 
@@ -6018,10 +6204,11 @@ async function loadSettingsView() {
                   settings.hydra_max_ledger_items ?? 1500
                 )}" />
               </label>
-              <label>Step Retry Limit
+              <label>Retry Depth (Step Retry Limit)
                 <input id="set_hydra_step_retry_limit" type="number" min="1" max="10" value="${escapeHtml(
                   settings.hydra_step_retry_limit ?? 1
                 )}" />
+                <div class="small">Default: 1. Max retry attempts per plan step before Hydra stops and asks/fails.</div>
               </label>
               <label>Astraeus Second Plan Check
                 ${renderToggleRow(
@@ -7516,6 +7703,7 @@ async function loadView(viewName) {
   updateHeader();
 
   const root = document.getElementById("view-root");
+  root.dataset.view = String(viewName || "").trim().toLowerCase();
   root.innerHTML = renderNotice("Loading...");
 
   try {

@@ -56,20 +56,37 @@ def thanatos_execution_step_prompt(
     goal: str = "",
     repair_hint: str = "",
     tool_hint: str = "",
+    blocked_sources: Iterable[str] = (),
 ) -> str:
     step_intent = str(intent or "").strip()
     step_nl = str(nl or "").strip()
     step_goal = str(goal or "").strip()
     step_repair_hint = str(repair_hint or "").strip()
     step_tool_hint = str(tool_hint or "").strip()
+    blocked_items: list[str] = []
+    seen_blocked: set[str] = set()
+    for item in blocked_sources or ():
+        token = str(item or "").strip()
+        if not token or token in seen_blocked:
+            continue
+        seen_blocked.add(token)
+        blocked_items.append(token[:160])
+        if len(blocked_items) >= 6:
+            break
     goal_line = f"- Turn goal: {step_goal}\n" if step_goal else ""
     repair_line = f"- Retry repair hint for this same step: {step_repair_hint}\n" if step_repair_hint else ""
     tool_hint_line = f"- Planned tool hint for this step: {step_tool_hint}\n" if step_tool_hint else ""
+    blocked_line = (
+        f"- Previously failed source URLs to avoid for this step: {' | '.join(blocked_items)}\n"
+        if blocked_items
+        else ""
+    )
     return (
         "Execution step lock (structured plan mode):\n"
         f"{goal_line}"
         f"{repair_line}"
         f"{tool_hint_line}"
+        f"{blocked_line}"
         f"- Current atomic step intent: {step_intent}\n"
         f"- Current atomic step instruction: {step_nl}\n"
         "- You must execute this step only.\n"
@@ -125,7 +142,7 @@ def astraeus_system_prompt(*, platform: str) -> str:
         "- Add prerequisite discovery, retrieval, or inspection steps whenever later steps depend on intermediate data.\n"
         "- A one-step plan is valid only when that single step can directly satisfy the user goal.\n"
         "- For synthesis tasks, gather evidence before summarizing or concluding.\n"
-        "- For web research, search_web discovers candidates; inspect_webpage/read_url selected pages before synthesis.\n"
+        "- For web research, search_web discovers candidates; inspect_webpage selected pages before synthesis.\n"
         "- For download/install/grab requests, discovery links alone are never completion; plan the full chain to actual retrieval.\n"
         "- For software/app installer requests without a concrete URL, plan: discover official source -> inspect/resolve concrete installer URL -> download_file.\n"
         "- Prefer official/vendor sources before community/forum sources unless user explicitly asks otherwise.\n"
@@ -214,7 +231,7 @@ def thanatos_system_prompt(
         "- If Available artifacts are listed, use the exact artifact_id or exact path provided there.\n"
         "- For files, search_files then read_file before acting unless an exact file reference is already provided.\n"
         "- For remote URLs, use a web or URL-capable tool first; do not invent local paths.\n"
-        "- search_web is discovery only; inspect_webpage or read_url selected pages before summarizing facts.\n"
+        "- search_web is discovery only; inspect_webpage selected pages before summarizing facts.\n"
         "- For software/app download requests, prioritize official/vendor domains and avoid forum/community links unless user requested those sources.\n"
         "- Prefer inspect_webpage for summaries.\n"
         "- Use download_file only for actual file retrieval from a concrete URL.\n"

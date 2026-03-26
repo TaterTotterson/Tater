@@ -116,8 +116,8 @@ async def execute_tool_call(
     run_meta_tool_fn: Callable[..., Any],
     execute_plugin_call_fn: Callable[..., Any],
 ) -> Dict[str, Any]:
-    func = str(tool_call.get("function") or "").strip()
-    canonical_tool_name_fn(func)  # keep parity with existing side-effect-free canonicalization step
+    raw_func = str(tool_call.get("function") or "").strip()
+    func = canonical_tool_name_fn(raw_func) or raw_func
     plugin_obj = registry.get(func)
     args = dict(tool_call.get("arguments") or {})
     args = attach_origin_fn(

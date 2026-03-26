@@ -6,7 +6,7 @@ import time
 import uuid
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from . import hydra_checker as minos
 from . import hydra_doer_state as thanatos_state
@@ -27,7 +27,6 @@ from . import hydra_tool_index as tool_index_helpers
 from . import hydra_turn_utils as turn_utils
 from . import hydra_validation as validation
 from . import hydra_validation_flow as validation_flow
-from . import hydra_web_research as web_research_helpers
 from helpers import (
     TOOL_MARKUP_REPAIR_PROMPT,
     get_llm_client_from_env,
@@ -85,8 +84,7 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
     "write_file": "write content to a local file",
     "list_directory": "list files and folders",
     "delete_file": "delete a local file",
-    "read_url": "read content text from a specific URL for extraction/summarization (not file download)",
-    "inspect_webpage": "inspect a specific URL for structure, key content, and follow-up links/media",
+    "inspect_webpage": "inspect and extract content from a specific webpage URL (title, summary text, links, images)",
     "download_file": "download a file from a concrete file URL after discovery/inspection (actual file retrieval)",
     "list_archive": "inspect archive entries",
     "extract_archive": "extract archives to a target directory",
@@ -105,7 +103,6 @@ _KERNEL_TOOL_USAGE_HINTS = {
     "write_file": '{"function":"write_file","arguments":{"path":"<path>","content":"<content>"}}',
     "list_directory": '{"function":"list_directory","arguments":{"path":"<path>"}}',
     "delete_file": '{"function":"delete_file","arguments":{"path":"<path>"}}',
-    "read_url": '{"function":"read_url","arguments":{"url":"https://example.com"}}',
     "inspect_webpage": '{"function":"inspect_webpage","arguments":{"url":"https://example.com"}}',
     "download_file": '{"function":"download_file","arguments":{"url":"https://example.com/file"}}',
     "list_archive": '{"function":"list_archive","arguments":{"path":"<archive_path>"}}',
@@ -126,7 +123,6 @@ DEFAULT_RESULT_MEMORY_MAX_SETS = 6
 DEFAULT_RESULT_MEMORY_MAX_ITEMS = 8
 DEFAULT_STEP_RETRY_LIMIT = 1
 DEFAULT_ASTRAEUS_PLAN_REVIEW_ENABLED = False
-DEFAULT_IDENTICAL_FAILED_TOOL_CALL_LIMIT = 1
 HYDRA_LLM_HOST_KEY = "tater:hydra:llm_host"
 HYDRA_LLM_PORT_KEY = "tater:hydra:llm_port"
 HYDRA_LLM_MODEL_KEY = "tater:hydra:llm_model"
@@ -183,9 +179,6 @@ _MINOS_DECISION_PREFIX_RE = re.compile(
     flags=re.IGNORECASE | re.DOTALL,
 )
 _MEMORY_CONTEXT_DEFAULT_SUMMARY_MAX_CHARS = 2100
-_WEB_RESEARCH_MAX_CANDIDATES = 8
-_WEB_RESEARCH_MIN_PREVIEW_CHARS = 260
-_WEB_RESEARCH_MIN_PREVIEW_WORDS = 45
 _CHAT_ESTIMATE_MESSAGE_OVERHEAD_TOKENS = 8
 _CHAT_ESTIMATE_REQUEST_OVERHEAD_TOKENS = 16
 _CHAT_ESTIMATE_STANDARD_WINDOWS = [
@@ -213,10 +206,104 @@ _HERMES_RENDER_MODE_ALIASES = {
 }
 _ACTIVE_CHAT_JOB_LOCK = threading.RLock()
 _ACTIVE_CHAT_JOBS: Dict[str, Dict[str, Any]] = {}
+_WEB_SOURCE_TOOL_IDS = {"inspect_webpage", "download_file"}
+_WEB_SOURCE_QUERY_KEYS_TO_IGNORE = {
+    "fbclid",
+    "gclid",
+    "igshid",
+    "mc_cid",
+    "mc_eid",
+    "ref",
+    "ref_src",
+    "source",
+}
+
+
+def _canonical_web_source_url(value: Any, *, drop_query: bool = False) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith("//"):
+        raw = f"https:{raw}"
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return ""
+    scheme = str(parsed.scheme or "").strip().lower()
+    if scheme not in {"http", "https"}:
+        return ""
+    host = str(parsed.hostname or "").strip().lower().strip(".")
+    if not host:
+        return ""
+    try:
+        port = parsed.port
+    except Exception:
+        port = None
+    default_port = 80 if scheme == "http" else 443
+    netloc = host if port in (None, default_port) else f"{host}:{int(port)}"
+
+    path = str(parsed.path or "/").strip() or "/"
+    path = re.sub(r"/{2,}", "/", path)
+    if not path.startswith("/"):
+        path = f"/{path}"
+    if len(path) > 1 and path.endswith("/"):
+        path = path.rstrip("/")
+
+    query = ""
+    if not drop_query:
+        try:
+            pairs = parse_qsl(str(parsed.query or ""), keep_blank_values=True)
+        except Exception:
+            pairs = []
+        filtered: List[tuple[str, str]] = []
+        for key, value in pairs:
+            token = str(key or "").strip()
+            if not token:
+                continue
+            lowered = token.lower()
+            if lowered.startswith("utm_") or lowered in _WEB_SOURCE_QUERY_KEYS_TO_IGNORE:
+                continue
+            filtered.append((token, str(value or "").strip()))
+        if filtered:
+            filtered.sort(key=lambda item: (item[0], item[1]))
+            query = urlencode(filtered, doseq=True)
+
+    return urlunparse((scheme, netloc, path, "", query, ""))
+
+
+def _canonical_web_source_page(value: Any) -> str:
+    return _canonical_web_source_url(value, drop_query=True)
+
+
+def _tool_call_primary_web_url(tool_call: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(tool_call, dict):
+        return ""
+    func = _canonical_tool_name(str(tool_call.get("function") or "").strip())
+    if func not in _WEB_SOURCE_TOOL_IDS:
+        return ""
+    args = tool_call.get("arguments") if isinstance(tool_call.get("arguments"), dict) else {}
+    for key in ("url", "source_url", "link"):
+        normalized = _canonical_web_source_url(args.get(key))
+        if normalized:
+            return normalized
+    return ""
 
 
 def _hydra_role_llm_key(role: str, field: str) -> str:
     return f"{HYDRA_ROLE_LLM_KEY_PREFIX}{str(role or '').strip()}:{str(field or '').strip()}"
+
+
+def _task_name_from_text(text: Any, *, fallback: str = "Hydra task") -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return fallback
+    cleaned = re.sub(r"^\s*(?:please\s+)?(?:can you|could you|would you|will you)\s+", "", raw, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
+    if not cleaned:
+        return fallback
+    if len(cleaned) > 72:
+        cleaned = cleaned[:69].rstrip() + "..."
+    return cleaned
 
 
 def _build_hydra_llm_endpoint(host: Any, port: Any) -> str:
@@ -350,6 +437,7 @@ def _register_active_chat_job(
     platform: str,
     scope: str,
     origin: Optional[Dict[str, Any]],
+    task_name: str = "",
 ) -> str:
     job_id = str(uuid.uuid4())
     platform_value = normalize_platform(platform)
@@ -360,12 +448,14 @@ def _register_active_chat_job(
         or origin_payload.get("source")
         or platform_value
     ).strip()
+    task_name_value = _task_name_from_text(task_name, fallback="Hydra task")
     with _ACTIVE_CHAT_JOB_LOCK:
         _ACTIVE_CHAT_JOBS[job_id] = {
             "id": job_id,
             "platform": platform_value,
             "scope": scope_value,
             "source": source_value,
+            "task_name": task_name_value,
             "started_at": time.time(),
         }
     return job_id
@@ -374,6 +464,19 @@ def _register_active_chat_job(
 def _unregister_active_chat_job(job_id: str) -> None:
     with _ACTIVE_CHAT_JOB_LOCK:
         _ACTIVE_CHAT_JOBS.pop(str(job_id or "").strip(), None)
+
+
+def _set_active_chat_job_task_name(job_id: str, task_name: Any) -> None:
+    token = str(job_id or "").strip()
+    if not token:
+        return
+    value = _task_name_from_text(task_name, fallback="")
+    if not value:
+        return
+    with _ACTIVE_CHAT_JOB_LOCK:
+        row = _ACTIVE_CHAT_JOBS.get(token)
+        if isinstance(row, dict):
+            row["task_name"] = value
 
 
 def get_active_chat_jobs_count(*, platform: Optional[str] = None) -> int:
@@ -1044,40 +1147,6 @@ def _strip_user_sender_prefix(text: str) -> str:
     return common_helpers.strip_user_sender_prefix(text)
 
 
-def _web_research_url_key(url: Any) -> str:
-    return web_research_helpers.web_research_url_key(url)
-
-
-def _extract_web_search_candidates(payload: Optional[Dict[str, Any]], *, max_candidates: int) -> List[Dict[str, str]]:
-    return web_research_helpers.extract_web_search_candidates(
-        payload,
-        max_candidates=max_candidates,
-        default_max_candidates=_WEB_RESEARCH_MAX_CANDIDATES,
-        web_research_url_key_fn=_web_research_url_key,
-    )
-
-
-def _next_web_research_tool_call(
-    *,
-    candidates: List[Dict[str, str]],
-    seen_urls: set[str],
-) -> Optional[Dict[str, Any]]:
-    return web_research_helpers.next_web_research_tool_call(
-        candidates=candidates,
-        seen_urls=seen_urls,
-        web_research_url_key_fn=_web_research_url_key,
-    )
-
-
-def _web_inspection_is_sufficient(payload: Optional[Dict[str, Any]]) -> bool:
-    return web_research_helpers.web_inspection_is_sufficient(
-        payload,
-        canonical_tool_name_fn=_canonical_tool_name,
-        min_preview_chars=_WEB_RESEARCH_MIN_PREVIEW_CHARS,
-        min_preview_words=_WEB_RESEARCH_MIN_PREVIEW_WORDS,
-    )
-
-
 _DESTINATION_CONTAINER_KEYS = {
     "destination",
     "destinations",
@@ -1197,6 +1266,7 @@ def _thanatos_execution_step_prompt(
     goal: str = "",
     repair_hint: str = "",
     tool_hint: str = "",
+    blocked_sources: Optional[List[str]] = None,
 ) -> str:
     return prompts.thanatos_execution_step_prompt(
         intent=intent,
@@ -1204,6 +1274,7 @@ def _thanatos_execution_step_prompt(
         goal=goal,
         repair_hint=repair_hint,
         tool_hint=tool_hint,
+        blocked_sources=(blocked_sources or []),
     )
 
 
@@ -2356,8 +2427,8 @@ async def _review_execution_plan_for_completeness(
                 "- Keep steps executable one tool call at a time.\n"
                 "- Add missing prerequisite discovery/inspection/retrieval steps when downstream completion depends on intermediate data.\n"
                 "- For download/install/grab requests, link discovery alone is insufficient; plan must reach concrete retrieval completion.\n"
-                "- search_web is discovery-only; use inspect/read on selected sources before synthesis or retrieval decisions.\n"
-                "- For identify/explain/what-is requests about a specific repo/project/entity, search result snippets alone are insufficient; add inspect/read step on a selected primary source before completion.\n"
+                "- search_web is discovery-only; use inspect_webpage on selected sources before synthesis or retrieval decisions.\n"
+                "- For identify/explain/what-is requests about a specific repo/project/entity, search result snippets alone are insufficient; add an inspect_webpage step on a selected primary source before completion.\n"
                 "- Use only tool ids from payload.available_tool_ids.\n"
                 "- Preserve user-requested order where possible.\n"
                 "- Output JSON only.\n"
@@ -2811,100 +2882,6 @@ def _turn_goal_for_state(*, current_user_text: str, resolved_user_text: str) -> 
     return goal or "Fulfill the user request."
 
 
-async def _llm_topic_shift_decision_for_turn(
-    *,
-    llm_client: Any,
-    current_user_text: str,
-    resolved_user_text: str,
-    history: List[Dict[str, Any]],
-    prior_state: Optional[Dict[str, Any]],
-    platform_preamble: str,
-    max_tokens: Optional[int],
-) -> Dict[str, Any]:
-    current = str(current_user_text or "").strip()
-    if not current:
-        return {"new_topic": False, "confidence": 0.0, "reason": "empty"}
-
-    resolved = str(resolved_user_text or current).strip() or current
-    recent_history: List[Dict[str, str]] = []
-    for msg in (history or []):
-        if not isinstance(msg, dict):
-            continue
-        role = str(msg.get("role") or "").strip().lower()
-        if role not in {"user", "assistant"}:
-            continue
-        content = _coerce_text(msg.get("content")).strip()
-        if not content:
-            continue
-        recent_history.append({"role": role, "content": content})
-
-    prior_state_full = ""
-    if isinstance(prior_state, dict):
-        prior_state_full = _compact_agent_state_json(
-            prior_state,
-            fallback_goal=resolved,
-            limit=0,
-        )
-
-    payload = {
-        "current_user_message": current,
-        "resolved_request_for_turn": resolved,
-        "recent_history": recent_history,
-        "prior_agent_state_full_json": prior_state_full,
-    }
-    messages: List[Dict[str, Any]] = [
-        {
-            "role": "system",
-            "content": (
-                "You classify whether the user's current turn starts a new topic relative to prior agent state.\n"
-                "Return exactly one strict JSON object with this schema:\n"
-                "{\"topic\":\"short topic\",\"new_topic\":true|false,\"confidence\":number,\"reason\":\"short text\"}\n"
-                "Rules:\n"
-                "- topic is a concise label for this turn's objective (2-6 words).\n"
-                "- new_topic=true only when the current turn changes objective enough that prior plan/facts should be discarded.\n"
-                "- new_topic=false only for explicit follow-ups, clarifications, refinements, corrections, or references to prior work/results.\n"
-                "- If the current message introduces a different objective, choose true.\n"
-                "- If uncertain, choose true.\n"
-                "- Do not answer the user.\n"
-                "- Output JSON only.\n"
-            ),
-        },
-        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-    ]
-    messages = _with_platform_preamble(messages, platform_preamble=platform_preamble)
-    try:
-        resp = await llm_client.chat(
-            messages=messages,
-            temperature=0.0,
-            **_chat_with_optional_max_tokens_kwargs(
-                max_tokens=max_tokens,
-                minimum=90,
-                fallback=200,
-            ),
-        )
-    except Exception:
-        return {"new_topic": False, "confidence": 0.0, "reason": "classifier_error"}
-
-    raw = _coerce_text((resp.get("message", {}) or {}).get("content", "")).strip()
-    parsed = _first_json_object(raw)
-    if not isinstance(parsed, dict):
-        return {"new_topic": False, "confidence": 0.0, "reason": "invalid_json"}
-
-    new_topic = parsed.get("new_topic") if isinstance(parsed.get("new_topic"), bool) else False
-    confidence = 0.0
-    raw_confidence = parsed.get("confidence")
-    if isinstance(raw_confidence, (int, float)):
-        confidence = max(0.0, min(1.0, float(raw_confidence)))
-    topic = _short_text(parsed.get("topic"), limit=90)
-    reason = _short_text(parsed.get("reason"), limit=180)
-    return {
-        "topic": topic or _short_text(resolved, limit=90),
-        "new_topic": bool(new_topic),
-        "confidence": confidence,
-        "reason": reason or "ok",
-    }
-
-
 def _state_list(value: Any, *, max_items: int, item_limit: int) -> List[str]:
     return state_core_helpers.state_list(
         value,
@@ -3091,20 +3068,9 @@ def _load_persistent_agent_state(
     platform: str,
     scope: str,
 ) -> Optional[Dict[str, Any]]:
-    return state_store.load_persistent_agent_state(
-        redis_client=redis_client,
-        platform=platform,
-        scope=scope,
-        normalize_platform_fn=normalize_platform,
-        clean_scope_text_fn=_clean_scope_text,
-        scope_is_generic_fn=_scope_is_generic,
-        unknown_scope_fn=_unknown_scope,
-        agent_state_key_prefix=AGENT_STATE_KEY_PREFIX,
-        coerce_text_fn=_coerce_text,
-        first_json_object_fn=_first_json_object,
-        normalize_agent_state_fn=lambda s, fallback_goal: _normalize_agent_state(s, fallback_goal=fallback_goal),
-        required_keys=_AGENT_STATE_REQUIRED_KEYS,
-    )
+    del redis_client, platform, scope
+    # Stateless-by-turn mode: do not carry Hydra state across user turns.
+    return None
 
 
 def _save_persistent_agent_state(
@@ -3114,20 +3080,9 @@ def _save_persistent_agent_state(
     scope: str,
     state: Optional[Dict[str, Any]],
 ) -> None:
-    return state_store.save_persistent_agent_state(
-        redis_client=redis_client,
-        platform=platform,
-        scope=scope,
-        state=state,
-        normalize_platform_fn=normalize_platform,
-        clean_scope_text_fn=_clean_scope_text,
-        scope_is_generic_fn=_scope_is_generic,
-        unknown_scope_fn=_unknown_scope,
-        agent_state_key_prefix=AGENT_STATE_KEY_PREFIX,
-        configured_agent_state_ttl_seconds_fn=_configured_agent_state_ttl_seconds,
-        normalize_agent_state_fn=lambda s, fallback_goal: _normalize_agent_state(s, fallback_goal=fallback_goal),
-        required_keys=_AGENT_STATE_REQUIRED_KEYS,
-    )
+    del redis_client, platform, scope, state
+    # Stateless-by-turn mode: do not persist Hydra state between turns.
+    return None
 
 
 def _new_agent_state(goal: str) -> Dict[str, Any]:
@@ -4209,14 +4164,6 @@ def _constrain_args_from_plugin_help(
     )
 
 
-def _tool_call_signature(tool_call: Optional[Dict[str, Any]]) -> str:
-    return retry_helpers.tool_call_signature(
-        tool_call,
-        canonical_tool_name_fn=_canonical_tool_name,
-        hash_tool_args_fn=_hash_tool_args,
-    )
-
-
 def _build_help_constrained_retry_tool_call(
     *,
     failed_tool_call: Optional[Dict[str, Any]],
@@ -4400,6 +4347,7 @@ async def _run_hydra_turn_impl(
     user_text: str,
     scope: str,
     task_id: Optional[str] = None,
+    active_job_id: str = "",
     origin: Optional[Dict[str, Any]] = None,
     wait_callback: Optional[Callable[..., Any]] = None,
     admin_guard: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
@@ -4476,11 +4424,6 @@ async def _run_hydra_turn_impl(
         denominator=3,
         minimum=180,
     )
-    topic_meta_max_tokens = _scale_token_limit(
-        astraeus_max_tokens,
-        denominator=8,
-        minimum=80,
-    )
     thanatos_step_max_tokens = _normalize_token_limit(
         thanatos_max_tokens,
         minimum=1,
@@ -4526,13 +4469,15 @@ async def _run_hydra_turn_impl(
     critic_continue_count = 0
     step_retry_counts: Dict[str, int] = {}
     step_retry_hints: Dict[str, str] = {}
-    step_last_failed_call_sig: Dict[str, str] = {}
-    step_failed_call_sig_counts: Dict[str, int] = {}
+    step_failed_source_urls: Dict[str, set[str]] = {}
+    step_failed_source_pages: Dict[str, set[str]] = {}
+    turn_failed_source_urls: set[str] = set()
     draft_response = ""
     tool_used = False
     planner_kind = "answer"
     planner_text_is_tool_candidate = False
     attempted_tool_for_ledger = ""
+    task_name = _task_name_from_text(user_text, fallback="Hydra task")
 
     history = _compact_history(history_messages)
     current_user_turn_text = _strip_user_sender_prefix(user_text).strip() or str(user_text or "").strip()
@@ -4545,6 +4490,8 @@ async def _run_hydra_turn_impl(
     )
     if not resolved_user_text:
         resolved_user_text = current_user_turn_text or str(user_text or "").strip()
+    task_name = _task_name_from_text(resolved_user_text or user_text, fallback=task_name)
+    _set_active_chat_job_task_name(active_job_id, task_name)
     tool_index = _enabled_tool_mini_index(
         platform=platform,
         registry=registry,
@@ -4560,11 +4507,7 @@ async def _run_hydra_turn_impl(
         registry=registry,
         enabled_predicate=enabled_predicate,
     )
-    prior_state = _load_persistent_agent_state(
-        redis_client=r,
-        platform=platform,
-        scope=scope,
-    )
+    prior_state = None
     memory_context_payload = _memory_context_payload(
         redis_client=r,
         platform=platform,
@@ -4613,24 +4556,6 @@ async def _run_hydra_turn_impl(
     hermes_render_plan: Optional[Dict[str, str]] = None
     completed_tool_steps: List[Dict[str, str]] = []
     if turn_route == "tool":
-        topic_meta_started = time.perf_counter()
-        topic_meta_result = await _llm_topic_shift_decision_for_turn(
-            llm_client=llm_client_astraeus,
-            current_user_text=current_user_turn_text,
-            resolved_user_text=resolved_user_text,
-            history=history,
-            prior_state=prior_state,
-            platform_preamble=platform_preamble,
-            max_tokens=topic_meta_max_tokens,
-        )
-        astraeus_ms_total += (time.perf_counter() - topic_meta_started) * 1000.0
-        if isinstance(topic_meta_result, dict):
-            astraeus_topic = (
-                _short_text(topic_meta_result.get("topic"), limit=90)
-                or astraeus_topic
-            )
-            if isinstance(topic_meta_result.get("new_topic"), bool):
-                astraeus_topic_shift = bool(topic_meta_result.get("new_topic"))
         try:
             astraeus_started = time.perf_counter()
             astraeus_result = await _run_astraeus_plan(
@@ -4663,6 +4588,8 @@ async def _run_hydra_turn_impl(
                 astraeus_mode = "unknown"
             astraeus_topic = _short_text(astraeus_result.get("topic"), limit=90) or astraeus_topic
             astraeus_goal = _short_text(astraeus_result.get("goal"), limit=220) or astraeus_goal
+            task_name = _task_name_from_text(astraeus_topic or astraeus_goal, fallback=task_name)
+            _set_active_chat_job_task_name(active_job_id, task_name)
             parsed_hermes = astraeus_result.get("hermes_render")
             if isinstance(parsed_hermes, dict):
                 hermes_render_plan = {
@@ -4763,11 +4690,49 @@ async def _run_hydra_turn_impl(
         if hint_text:
             step_retry_hints[step_id] = hint_text
 
+    def _remember_failed_source_for_step(step_id: str, candidate: Any) -> str:
+        normalized = _canonical_web_source_url(candidate)
+        if not normalized:
+            return ""
+        step_failed_source_urls.setdefault(step_id, set()).add(normalized)
+        turn_failed_source_urls.add(normalized)
+        page_key = _canonical_web_source_page(normalized)
+        if page_key:
+            step_failed_source_pages.setdefault(step_id, set()).add(page_key)
+        return normalized
+
+    def _failed_sources_for_step(step_id: str, *, limit: int = 6) -> List[str]:
+        out: List[str] = []
+        seen: set[str] = set()
+        for bucket in (step_failed_source_urls.get(step_id, set()), turn_failed_source_urls):
+            for value in sorted(bucket):
+                token = str(value or "").strip()
+                if not token or token in seen:
+                    continue
+                seen.add(token)
+                out.append(token)
+                if len(out) >= max(1, int(limit or 6)):
+                    return out
+        return out
+
+    def _tool_call_matches_failed_source(step_id: str, tool_call: Optional[Dict[str, Any]]) -> str:
+        candidate = _tool_call_primary_web_url(tool_call)
+        if not candidate:
+            return ""
+        if candidate in step_failed_source_urls.get(step_id, set()):
+            return candidate
+        if candidate in turn_failed_source_urls:
+            return candidate
+        page_key = _canonical_web_source_page(candidate)
+        if page_key and page_key in step_failed_source_pages.get(step_id, set()):
+            return candidate
+        return ""
+
     def _clear_step_retry_state(step_id: str) -> None:
         step_retry_counts.pop(step_id, None)
         step_retry_hints.pop(step_id, None)
-        step_last_failed_call_sig.pop(step_id, None)
-        step_failed_call_sig_counts.pop(step_id, None)
+        step_failed_source_urls.pop(step_id, None)
+        step_failed_source_pages.pop(step_id, None)
 
     def _retry_limit_message(decision: Optional[Dict[str, Any]]) -> str:
         return (
@@ -4899,6 +4864,7 @@ async def _run_hydra_turn_impl(
             "text": final_text,
             "status": final_status,
             "task_id": task_id,
+            "task_name": task_name,
             "artifacts": artifacts_out,
             "raw_tool_payload": raw_tool_payload_out,
             "normalized_minos_result": normalized_minos_result_out,
@@ -5016,6 +4982,7 @@ async def _run_hydra_turn_impl(
         if result_memory_prompt:
             thanatos_messages.append({"role": "system", "content": result_memory_prompt})
         if isinstance(current_plan_step, dict):
+            current_failed_sources = _failed_sources_for_step(current_step_id, limit=6)
             thanatos_messages.append(
                 {
                     "role": "system",
@@ -5025,6 +4992,7 @@ async def _run_hydra_turn_impl(
                         goal=astraeus_goal or resolved_user_text or current_user_turn_text,
                         repair_hint=current_step_retry_hint,
                         tool_hint=str(current_plan_step.get("tool_hint") or ""),
+                        blocked_sources=current_failed_sources,
                     ),
                 }
             )
@@ -5293,25 +5261,30 @@ async def _run_hydra_turn_impl(
             planned_tool,
             turn_available_artifacts,
         )
-        planned_tool_sig = _tool_call_signature(planned_tool)
-        repeated_failed_call_count = max(0, int(step_failed_call_sig_counts.get(current_step_id, 0)))
-        if (
-            current_step_retry_count > 0
-            and planned_tool_sig
-            and step_last_failed_call_sig.get(current_step_id) == planned_tool_sig
-            and repeated_failed_call_count >= int(max(1, DEFAULT_IDENTICAL_FAILED_TOOL_CALL_LIMIT))
-        ):
-            checker_reason = "identical_failed_tool_call_loop"
-            return _finish(
-                text=(
-                    "I hit the same failure repeatedly on the same tool call. "
-                    "Do you want me to try a different source or stop?"
-                ),
-                status="blocked",
-                checker_action_value="NEED_USER_INFO",
-                checker_reason_value=checker_reason,
-                retry_tool=queued_retry_tool_for_ledger,
-            )
+        blocked_source = _tool_call_matches_failed_source(current_step_id, planned_tool)
+        if blocked_source:
+            if not _retry_allowed_for_step(current_step_id, current_step_retry_count):
+                checker_reason = "blocked_failed_source_repeat"
+                return _finish(
+                    text=(
+                        f"I already tried that source and it failed: {blocked_source}. "
+                        "Do you want me to try a different link or stop?"
+                    ),
+                    status="blocked",
+                    checker_action_value="NEED_USER_INFO",
+                    checker_reason_value=checker_reason,
+                    retry_tool=queued_retry_tool_for_ledger,
+                )
+            step_retry_counts[current_step_id] = current_step_retry_count + 1
+            blocked_sources = _failed_sources_for_step(current_step_id, limit=4)
+            if blocked_sources:
+                step_retry_hints[current_step_id] = (
+                    "Use a different source URL than the failed ones: "
+                    + " | ".join(blocked_sources)
+                )
+            checker_reason = "blocked_failed_source_repeat"
+            critic_continue_count += 1
+            continue
         tool_used = True
         tool_user_text = round_request_text
         wait_text, wait_payload = await _tool_start_progress(
@@ -5350,15 +5323,15 @@ async def _run_hydra_turn_impl(
         normalized_minos_result_out = tool_result_for_checker if isinstance(tool_result_for_checker, dict) else None
         if isinstance(tool_result_for_checker, dict) and not bool(tool_result_for_checker.get("ok")):
             tool_failures_count += 1
-            if planned_tool_sig:
-                previous_sig = str(step_last_failed_call_sig.get(current_step_id) or "")
-                if previous_sig == planned_tool_sig:
-                    step_failed_call_sig_counts[current_step_id] = max(
-                        0, int(step_failed_call_sig_counts.get(current_step_id, 0))
-                    ) + 1
-                else:
-                    step_last_failed_call_sig[current_step_id] = planned_tool_sig
-                    step_failed_call_sig_counts[current_step_id] = 1
+            failed_source = _tool_call_primary_web_url(planned_tool)
+            remembered_failed_source = _remember_failed_source_for_step(current_step_id, failed_source)
+            if remembered_failed_source:
+                blocked_sources = _failed_sources_for_step(current_step_id, limit=4)
+                if blocked_sources:
+                    step_retry_hints[current_step_id] = (
+                        "Do not reuse failed source URLs for this step. Try a different source: "
+                        + " | ".join(blocked_sources)
+                    )
         draft_response = str((tool_result_for_checker or {}).get("summary_for_user") or "").strip()
         if isinstance(tool_result_for_checker, dict) and bool(tool_result_for_checker.get("ok")):
             _clear_step_retry_state(current_step_id)
@@ -5743,6 +5716,7 @@ async def run_hydra_turn(
         platform=platform,
         scope=scope,
         origin=origin,
+        task_name=_task_name_from_text(user_text, fallback="Hydra task"),
     )
     try:
         r = redis_client or default_redis
@@ -5762,6 +5736,7 @@ async def run_hydra_turn(
                 user_text=user_text,
                 scope=scope,
                 task_id=task_id,
+                active_job_id=active_job_id,
                 origin=origin,
                 wait_callback=wait_callback,
                 admin_guard=admin_guard,

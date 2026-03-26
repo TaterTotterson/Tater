@@ -1207,7 +1207,10 @@ async def _process_message(
     for item in artifacts or []:
         responses.append(_normalize_plugin_response_item(item))
 
-    return {"responses": responses, "agent": True}
+    task_name = ""
+    if isinstance(result, dict):
+        task_name = str(result.get("task_name") or "").strip()
+    return {"responses": responses, "agent": True, "task_name": task_name}
 
 
 class ChatJobManager:
@@ -1273,7 +1276,15 @@ class ChatJobManager:
             if not isinstance(job, dict):
                 return
             self._set_status_locked(job, status="running")
-            self._emit(job, {"type": "status", "status": "running", "job_id": job_id})
+            self._emit(
+                job,
+                {
+                    "type": "status",
+                    "status": "running",
+                    "job_id": job_id,
+                    "task_name": str(job.get("task_name") or "").strip(),
+                },
+            )
 
         def _on_tool(
             func_name: str,
@@ -1305,6 +1316,7 @@ class ChatJobManager:
                         "status": "running",
                         "current_tool": str(display_name or "").strip(),
                         "job_id": job_id,
+                        "task_name": str(job_local.get("task_name") or "").strip(),
                     },
                 )
                 progress_payload = dict(wait_payload) if isinstance(wait_payload, dict) else {}
@@ -1337,6 +1349,11 @@ class ChatJobManager:
                 )
             )
             responses = list(payload.get("responses") or []) if isinstance(payload, dict) else []
+            task_name = (
+                str(payload.get("task_name") or "").strip()
+                if isinstance(payload, dict)
+                else ""
+            )
 
             for item in responses:
                 _save_chat_message("assistant", "assistant", item)
@@ -1346,6 +1363,8 @@ class ChatJobManager:
                 if not isinstance(job, dict):
                     return
                 self._set_status_locked(job, status="done")
+                if task_name:
+                    job["task_name"] = task_name
                 job["responses"] = responses
                 job["completed_at"] = time.time()
                 self._emit(
@@ -1355,6 +1374,7 @@ class ChatJobManager:
                         "status": "done",
                         "responses": responses,
                         "job_id": job_id,
+                        "task_name": str(job.get("task_name") or "").strip(),
                     },
                 )
         except Exception as exc:
@@ -1373,6 +1393,7 @@ class ChatJobManager:
                         "status": "error",
                         "error": str(exc),
                         "job_id": job_id,
+                        "task_name": str(job.get("task_name") or "").strip(),
                     },
                 )
 
@@ -1392,6 +1413,7 @@ class ChatJobManager:
                 "session_id": str(session_id or ""),
                 "user_name": str(user_name or "User"),
                 "message": str(message or ""),
+                "task_name": (str(message or "").strip()[:72] or "Hydra task"),
                 "input_artifacts": list(input_artifacts or []),
                 "status": "queued",
                 "current_tool": "",
@@ -1404,7 +1426,15 @@ class ChatJobManager:
             self.jobs[job_id] = job
             self.order = [jid for jid in self.order if jid != job_id]
             self.order.append(job_id)
-            self._emit(job, {"type": "status", "status": "queued", "job_id": job_id})
+            self._emit(
+                job,
+                {
+                    "type": "status",
+                    "status": "queued",
+                    "job_id": job_id,
+                    "task_name": str(job.get("task_name") or "").strip(),
+                },
+            )
 
         worker = threading.Thread(
             target=self._worker,
@@ -1424,6 +1454,7 @@ class ChatJobManager:
             "job_id": job_id,
             "status": "queued",
             "session_id": session_id,
+            "task_name": str(job.get("task_name") or "").strip(),
         }
 
     def get_snapshot(self, job_id: str) -> Optional[Dict[str, Any]]:
@@ -1435,6 +1466,7 @@ class ChatJobManager:
                 "job_id": str(job.get("id") or ""),
                 "session_id": str(job.get("session_id") or ""),
                 "status": str(job.get("status") or ""),
+                "task_name": str(job.get("task_name") or "").strip(),
                 "current_tool": str(job.get("current_tool") or ""),
                 "responses": list(job.get("responses") or []),
                 "error": str(job.get("error") or ""),
@@ -2805,6 +2837,7 @@ def _chat_job_counts_with_breakdown(*, include_history: bool = False) -> Dict[st
                 "platform_label": _runtime_platform_label(platform),
                 "source": str(row.get("source") or platform).strip() or platform,
                 "scope": str(row.get("scope") or "").strip(),
+                "task_name": str(row.get("task_name") or "").strip(),
                 "started_at": started_at,
                 "age_seconds": age_seconds,
             }

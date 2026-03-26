@@ -372,25 +372,6 @@ def _tool_result_summary(result: Dict[str, Any]) -> str:
             if lines:
                 return "\n".join(lines[:5]).strip()
 
-    if tool == "read_url":
-        raw_content = str(result.get("content") or "")
-        ctype = str(result.get("content_type") or "")
-        if _looks_like_html(raw_content, ctype):
-            title = _extract_html_title(raw_content)
-            description = _extract_html_description(raw_content)
-            plain = _html_to_plain_text(raw_content, max_chars=420)
-            if title and description:
-                return f"{title}: {description}"
-            if title and plain:
-                return _trim_text(f"{title}. {plain}", max_chars=420)
-            if description:
-                return description
-            if plain:
-                return plain
-        content = _trim_text(raw_content, max_chars=420)
-        if content:
-            return content
-
     if tool == "download_file":
         path = _trim_text(result.get("path"), max_chars=260)
         name = _trim_text(result.get("name"), max_chars=120)
