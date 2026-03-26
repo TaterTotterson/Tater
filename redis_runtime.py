@@ -6,7 +6,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import redis
 from redis.exceptions import RedisError
@@ -301,7 +301,9 @@ def _transform_key_values(client: redis.Redis, key: bytes, *, encrypt_mode: bool
         rebuilt = []
         changed = 0
         for raw_value in members:
-            next_value = _encrypt_value(raw_value, decode_responses=False) if encrypt_mode else _decrypt_value(raw_value, decode_responses=False)
+            # Set members are identity values; keep them plaintext so membership/removal
+            # operations remain stable (legacy encrypted members are normalized here).
+            next_value = _decrypt_value(raw_value, decode_responses=False)
             rebuilt.append(next_value)
             if next_value != raw_value:
                 changed += 1
@@ -322,7 +324,9 @@ def _transform_key_values(client: redis.Redis, key: bytes, *, encrypt_mode: bool
         rebuilt: Dict[bytes, float] = {}
         changed = 0
         for raw_member, score in rows:
-            next_member = _encrypt_value(raw_member, decode_responses=False) if encrypt_mode else _decrypt_value(raw_member, decode_responses=False)
+            # ZSET members are identity values; keep them plaintext so zadd/zrem/zscore/
+            # zincrby stay deterministic (legacy encrypted members are normalized here).
+            next_member = _decrypt_value(raw_member, decode_responses=False)
             if next_member != raw_member:
                 changed += 1
             rebuilt[bytes(next_member)] = float(score)
@@ -764,13 +768,13 @@ class EncryptedRedisPipelineProxy:
         return self
 
     def zadd(self, name: Any, mapping: Dict[Any, Any], *args, **kwargs):
-        encoded = {self._encode(member, name): score for member, score in dict(mapping or {}).items()}
-        self._pipeline.zadd(name, encoded, *args, **kwargs)
+        # Keep ZSET members plaintext (identity semantics for zadd/zrem/zscore/zincrby).
+        self._pipeline.zadd(name, dict(mapping or {}), *args, **kwargs)
         return self
 
     def sadd(self, name: Any, *values: Any):
-        encoded = [self._encode(value, name) for value in values]
-        self._pipeline.sadd(name, *encoded)
+        # Keep SET members plaintext (identity semantics for sadd/srem/sismember).
+        self._pipeline.sadd(name, *values)
         return self
 
     def execute(self, *args, **kwargs):
@@ -795,6 +799,41 @@ class EncryptedRedisClientFacade:
 
     def _decode(self, value: Any) -> Any:
         return _decrypt_value(value, decode_responses=self._decode_responses)
+
+    def _decoded_identity_bytes(self, value: Any) -> bytes:
+        return _value_bytes(_decrypt_value(value, decode_responses=self._decode_responses))
+
+    def _find_legacy_zset_members(self, name: Any, members: List[Any]) -> List[Any]:
+        if not members:
+            return []
+        rows = self._client.zrange(name, 0, -1) or []
+        if not isinstance(rows, list):
+            return []
+        target_bytes = [_value_bytes(member) for member in members]
+        out: List[Any] = []
+        for raw_member in rows:
+            decoded_bytes = self._decoded_identity_bytes(raw_member)
+            for token in target_bytes:
+                if decoded_bytes == token and _value_bytes(raw_member) != token:
+                    out.append(raw_member)
+                    break
+        return out
+
+    def _find_legacy_set_members(self, name: Any, members: List[Any]) -> List[Any]:
+        if not members:
+            return []
+        rows = self._client.smembers(name) or set()
+        if not isinstance(rows, set):
+            return []
+        target_bytes = [_value_bytes(member) for member in members]
+        out: List[Any] = []
+        for raw_member in rows:
+            decoded_bytes = self._decoded_identity_bytes(raw_member)
+            for token in target_bytes:
+                if decoded_bytes == token and _value_bytes(raw_member) != token:
+                    out.append(raw_member)
+                    break
+        return out
 
     def set(self, name: Any, value: Any, *args, **kwargs):
         return self._client.set(name, self._encode(value, name), *args, **kwargs)
@@ -841,8 +880,7 @@ class EncryptedRedisClientFacade:
         return [self._decode(value) for value in rows]
 
     def sadd(self, name: Any, *values: Any):
-        encoded = [self._encode(value, name) for value in values]
-        return self._client.sadd(name, *encoded)
+        return self._client.sadd(name, *values)
 
     def smembers(self, name: Any):
         rows = self._client.smembers(name)
@@ -851,12 +889,35 @@ class EncryptedRedisClientFacade:
         return {self._decode(value) for value in rows}
 
     def srem(self, name: Any, *values: Any):
-        encoded = [self._encode(value, name) for value in values]
-        return self._client.srem(name, *encoded)
+        removed = self._client.srem(name, *values)
+        if int(removed or 0) > 0 or not self._should_encrypt(name):
+            return removed
+        legacy = self._find_legacy_set_members(name, list(values))
+        if not legacy:
+            return removed
+        return int(removed or 0) + int(self._client.srem(name, *legacy) or 0)
+
+    def sismember(self, name: Any, value: Any):
+        if self._client.sismember(name, value):
+            return True
+        if not self._should_encrypt(name):
+            return False
+        rows = self._client.smembers(name) or set()
+        if not isinstance(rows, set):
+            return False
+        target = _value_bytes(value)
+        for raw_member in rows:
+            if self._decoded_identity_bytes(raw_member) == target:
+                return True
+        return False
 
     def zadd(self, name: Any, mapping: Dict[Any, Any], *args, **kwargs):
-        encoded = {self._encode(member, name): score for member, score in dict(mapping or {}).items()}
-        return self._client.zadd(name, encoded, *args, **kwargs)
+        normalized = dict(mapping or {})
+        if self._should_encrypt(name) and normalized:
+            legacy = self._find_legacy_zset_members(name, list(normalized.keys()))
+            if legacy:
+                self._client.zrem(name, *legacy)
+        return self._client.zadd(name, normalized, *args, **kwargs)
 
     def zrange(self, name: Any, start: int, end: int, *args, **kwargs):
         rows = self._client.zrange(name, start, end, *args, **kwargs)
@@ -870,8 +931,60 @@ class EncryptedRedisClientFacade:
         return [self._decode(member) for member in rows]
 
     def zrem(self, name: Any, *members: Any):
-        encoded = [self._encode(member, name) for member in members]
-        return self._client.zrem(name, *encoded)
+        removed = self._client.zrem(name, *members)
+        if int(removed or 0) > 0 or not self._should_encrypt(name):
+            return removed
+        legacy = self._find_legacy_zset_members(name, list(members))
+        if not legacy:
+            return removed
+        return int(removed or 0) + int(self._client.zrem(name, *legacy) or 0)
+
+    def zscore(self, name: Any, value: Any):
+        score = self._client.zscore(name, value)
+        if score is not None or not self._should_encrypt(name):
+            return score
+        rows = self._client.zrange(name, 0, -1, withscores=True) or []
+        if not isinstance(rows, list):
+            return None
+        target = _value_bytes(value)
+        for row in rows:
+            if not (isinstance(row, tuple) and len(row) == 2):
+                continue
+            raw_member, raw_score = row
+            if self._decoded_identity_bytes(raw_member) == target:
+                return raw_score
+        return None
+
+    def zincrby(self, name: Any, amount: Any, value: Any):
+        if not self._should_encrypt(name):
+            return self._client.zincrby(name, amount, value)
+        legacy = self._find_legacy_zset_members(name, [value])
+        if legacy:
+            # If legacy encrypted members exist for this logical value, normalize first.
+            self._client.zrem(name, *legacy)
+        return self._client.zincrby(name, amount, value)
+
+    def zrevrange(self, name: Any, start: int, end: int, *args, **kwargs):
+        rows = self._client.zrevrange(name, start, end, *args, **kwargs)
+        if not isinstance(rows, list):
+            return rows
+        if rows and isinstance(rows[0], tuple):
+            out = []
+            for member, score in rows:
+                out.append((self._decode(member), score))
+            return out
+        return [self._decode(member) for member in rows]
+
+    def zrevrangebyscore(self, name: Any, max_score: Any, min_score: Any, *args, **kwargs):
+        rows = self._client.zrevrangebyscore(name, max_score, min_score, *args, **kwargs)
+        if not isinstance(rows, list):
+            return rows
+        if rows and isinstance(rows[0], tuple):
+            out = []
+            for member, score in rows:
+                out.append((self._decode(member), score))
+            return out
+        return [self._decode(member) for member in rows]
 
     def pipeline(self, *args, **kwargs):
         raw_pipeline = self._client.pipeline(*args, **kwargs)
