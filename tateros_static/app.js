@@ -7699,6 +7699,7 @@ async function loadSettingsView() {
 
 async function loadView(viewName) {
   state.view = viewName;
+  document.body.dataset.view = String(viewName || "").trim().toLowerCase();
   setActiveNav(viewName);
   updateHeader();
 

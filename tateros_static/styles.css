@@ -994,6 +994,7 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   flex-direction: column;
   flex: 1 1 auto;
   min-height: 0;
+  overflow: hidden;
 }
 
 .card {
@@ -2357,12 +2358,30 @@ textarea {
   flex-direction: column;
   flex: 1 1 auto;
   min-height: 0;
+  overflow: hidden;
 }
 
 .view-root[data-view="chat"] .chat-log {
   flex: 1 1 auto;
   min-height: 0;
   max-height: none;
+}
+
+@media (min-width: 981px) {
+  body[data-view="chat"] .app-shell {
+    min-height: 100vh;
+    min-height: 100dvh;
+    height: 100vh;
+    height: 100dvh;
+  }
+
+  body[data-view="chat"] .main-pane {
+    min-height: 0;
+    height: 100vh;
+    height: 100dvh;
+    overflow: hidden;
+    padding-bottom: 14px;
+  }
 }
 
 .chat-live-status {
