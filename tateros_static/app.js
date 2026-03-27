@@ -4308,13 +4308,13 @@ function renderCoreTopTabs(dynamicTabs, manageHtml, manageLabel = "Manage") {
 
   return `
     <div class="core-top-tabs">
-      <button class="core-top-tab-btn active" data-core-tab="manage">${safeManageLabel}</button>
       ${dynamicButtons}
+      <button class="core-top-tab-btn active" data-core-tab="manage">${safeManageLabel}</button>
     </div>
+    ${dynamicPanels}
     <section class="core-top-tab-panel active" data-core-tab-panel="manage">
       ${manageHtml}
     </section>
-    ${dynamicPanels}
   `;
 }
 
