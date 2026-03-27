@@ -527,6 +527,21 @@ _SEND_MESSAGE_TARGET_KEYS: tuple[str, ...] = (
     "device_id",
 )
 
+_SEND_MESSAGE_PLATFORM_ALIASES: Dict[str, str] = {
+    "discord": "discord",
+    "irc": "irc",
+    "matrix": "matrix",
+    "telegram": "telegram",
+    "homeassistant": "homeassistant",
+    "home assistant": "homeassistant",
+    "ntfy": "ntfy",
+    "webui": "webui",
+    "web ui": "webui",
+    "macos": "macos",
+    "mac os": "macos",
+    "my mac": "macos",
+}
+
 
 def _send_message_targets_from_args(args: Dict[str, Any]) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
@@ -544,31 +559,35 @@ def _send_message_targets_from_args(args: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-def _tool_json_object(payload: Any) -> Optional[Dict[str, Any]]:
-    if isinstance(payload, dict):
-        return payload
-    text = _coerce_text(payload)
-    if not text:
-        return None
-    try:
-        parsed = json.loads(text)
-        if isinstance(parsed, dict):
-            return parsed
-    except Exception:
-        pass
-    parsed_call = parse_function_json(text)
-    if isinstance(parsed_call, dict):
-        return parsed_call
-    return None
-
-
-def _send_message_value_in_user_text(value: Any, user_text: str) -> bool:
+def _send_message_normalize_platform_alias(value: Any) -> str:
     token = str(value or "").strip().lower()
-    source = str(user_text or "").strip().lower()
-    if not token or not source:
-        return False
-    return token in source
+    if not token:
+        return ""
+    token = " ".join(token.replace("_", " ").replace("-", " ").split())
+    return _SEND_MESSAGE_PLATFORM_ALIASES.get(token, token)
 
+
+def _send_message_extract_explicit_platform(user_text: Any) -> str:
+    text = str(user_text or "").strip().lower()
+    if not text:
+        return ""
+
+    primary = re.search(
+        r"\b(?:to|in|on|via|through)\s+(discord|irc|matrix|telegram|home\s*assistant|homeassistant|ntfy|web\s*ui|webui|mac\s*os|macos|my\s+mac)\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if primary:
+        return _send_message_normalize_platform_alias(primary.group(1))
+
+    fallback = re.search(
+        r"\b(discord|irc|matrix|telegram|home\s*assistant|homeassistant|ntfy|web\s*ui|webui|mac\s*os|macos|my\s+mac)\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if fallback:
+        return _send_message_normalize_platform_alias(fallback.group(1))
+    return ""
 
 async def _llm_enrich_tool_call_for_user_request(
     *,
@@ -583,7 +602,7 @@ async def _llm_enrich_tool_call_for_user_request(
     platform_preamble: str = "",
     max_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
-    del platform, origin, scope, history_messages, context
+    del llm_client, platform, origin, scope, history_messages, context, platform_preamble, max_tokens
 
     if not isinstance(tool_call, dict):
         return tool_call
@@ -593,74 +612,17 @@ async def _llm_enrich_tool_call_for_user_request(
 
     args = dict(tool_call.get("arguments") or {}) if isinstance(tool_call.get("arguments"), dict) else {}
     user_request = str(user_text or "").strip()
-    if not user_request:
-        return {"function": "send_message", "arguments": args}
-
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "Extract destination details for a send_message tool call.\n"
-                "Return strict JSON only with schema:\n"
-                '{"platform":"","targets":{"channel_id":"","channel":"","guild_id":"","room_id":"","room_alias":"","chat_id":"","scope":"","device_id":""}}\n'
-                "Rules:\n"
-                "- Do not invent IDs or names.\n"
-                "- Copy only explicit values from the user request.\n"
-                "- Leave unknown fields as empty strings.\n"
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                f"User request:\n{user_request}\n\n"
-                f"Current args:\n{json.dumps(args, ensure_ascii=False)}\n\n"
-                "Return JSON now."
-            ),
-        },
-    ]
-    try:
-        resp = await llm_client.chat(
-            messages=_with_platform_preamble(messages, platform_preamble=platform_preamble),
-            **_chat_with_optional_max_tokens_kwargs(
-                max_tokens=max_tokens,
-                minimum=96,
-                fallback=180,
-                maximum=360,
-            ),
-        )
-        content = _coerce_text((resp or {}).get("message", {}).get("content", ""))
-    except Exception:
-        return {"function": "send_message", "arguments": args}
-
-    parsed = _tool_json_object(content)
-    if not isinstance(parsed, dict):
-        return {"function": "send_message", "arguments": args}
-    if isinstance(parsed.get("arguments"), dict):
-        parsed = parsed.get("arguments") or {}
-
-    merged = dict(args)
-    existing_platform_raw = str(merged.get("platform") or "").strip()
-    candidate_platform_raw = str(parsed.get("platform") or "").strip()
-    existing_platform = normalize_platform(existing_platform_raw) or existing_platform_raw
-    candidate_platform = normalize_platform(candidate_platform_raw) or candidate_platform_raw
-    candidate_platform_in_user = bool(candidate_platform) and _send_message_value_in_user_text(candidate_platform, user_request)
-    existing_platform_in_user = bool(existing_platform) and _send_message_value_in_user_text(existing_platform, user_request)
-    if candidate_platform_in_user and (not existing_platform or not existing_platform_in_user):
-        merged["platform"] = candidate_platform
-
+    merged = dict(args or {})
+    explicit_user_platform = _send_message_extract_explicit_platform(user_request)
+    if explicit_user_platform:
+        merged["platform"] = explicit_user_platform
+    else:
+        existing_platform_raw = str(merged.get("platform") or "").strip()
+        if existing_platform_raw:
+            merged["platform"] = _send_message_normalize_platform_alias(
+                normalize_platform(existing_platform_raw) or existing_platform_raw
+            )
     merged_targets = _send_message_targets_from_args(merged)
-    parsed_targets = parsed.get("targets") if isinstance(parsed.get("targets"), dict) else {}
-    if isinstance(parsed_targets, dict):
-        for key in _SEND_MESSAGE_TARGET_KEYS:
-            if str(merged_targets.get(key) or "").strip():
-                continue
-            value = str(parsed_targets.get(key) or "").strip()
-            if not value:
-                continue
-            if key.endswith("_id") and not _send_message_value_in_user_text(value, user_request):
-                continue
-            merged_targets[key] = value
-
     if merged_targets:
         merged["targets"] = merged_targets
 

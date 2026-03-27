@@ -36,7 +36,7 @@ _PLATFORM_META: Dict[str, Dict[str, Any]] = {
     "telegram": {
         "label": "Telegram",
         "requires_target": True,
-        "fields": ("chat_id",),
+        "fields": ("chat_id", "channel"),
     },
     "macos": {
         "label": "macOS",
@@ -148,7 +148,11 @@ def _platform_target_label(platform: str, targets: Dict[str, str]) -> str:
     if platform == "matrix":
         return _to_text(targets.get("room_alias") or targets.get("room_id") or targets.get("channel")) or "Matrix room"
     if platform == "telegram":
-        return _to_text(targets.get("chat_id")) or "Telegram chat"
+        channel = _to_text(targets.get("channel"))
+        chat_id = _to_text(targets.get("chat_id"))
+        if channel and chat_id and channel != chat_id:
+            return f"{channel} • {chat_id}"
+        return channel or chat_id or "Telegram chat"
     if platform == "macos":
         scope = _to_text(targets.get("scope"))
         device = _to_text(targets.get("device_id"))
@@ -372,7 +376,7 @@ def _room_label_targets_for_platform(platform: str, redis_client: Any) -> List[D
     if redis_client is None:
         return []
     normalized = normalize_platform(platform)
-    if normalized not in {"discord", "irc"}:
+    if normalized not in {"discord", "irc", "telegram"}:
         return []
 
     pattern = f"{_ROOM_LABEL_PREFIX}:{normalized}:*"
@@ -398,6 +402,11 @@ def _room_label_targets_for_platform(platform: str, redis_client: Any) -> List[D
                 targets["channel"] = label
             elif room_id.startswith("#"):
                 targets["channel"] = room_id
+        elif normalized == "telegram":
+            if room_id:
+                targets["chat_id"] = room_id
+            if label:
+                targets["channel"] = label
         if targets:
             out.append(targets)
     return out

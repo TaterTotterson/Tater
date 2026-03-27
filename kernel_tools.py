@@ -1300,11 +1300,29 @@ def _send_message_resolve_catalog_destination(
     if not hint_variants:
         return dest, resolved_targets, None
 
+    has_direct_id = False
+    if dest == "discord":
+        has_direct_id = bool(str(resolved_targets.get("channel_id") or "").strip())
+    elif dest == "telegram":
+        has_direct_id = bool(str(resolved_targets.get("chat_id") or "").strip())
+    elif dest == "matrix":
+        has_direct_id = bool(str(resolved_targets.get("room_id") or "").strip())
+
     catalog_rows = _send_message_catalog_platform_rows(platform=None, limit=200)
     if not catalog_rows:
+        if dest in {"discord", "telegram", "matrix"} and target_hint and not has_direct_id:
+            return dest, resolved_targets, {
+                "unresolved": True,
+                "reason": "destination_catalog_empty",
+                "matched_hint": str(target_hint),
+                "platform": str(dest),
+                "choices": [],
+            }
         return dest, resolved_targets, None
 
-    source_rank = {"recent_queue": 6, "room_label": 5, "default": 4, "recent_history": 3}
+    # Prefer live/discovered and historical destinations over queued items.
+    # Recent queue entries may include stale or failed attempts.
+    source_rank = {"room_label": 8, "recent_history": 7, "default": 6, "recent_queue": 1}
     field_rank = {"channel_id": 7, "chat_id": 7, "room_id": 7, "room_alias": 6, "channel": 5}
     platform_priority = {
         "discord": 9,
@@ -1356,6 +1374,29 @@ def _send_message_resolve_catalog_destination(
             matches.append((score, platform_token, row, matched_field))
 
     if not matches:
+        if dest and target_hint and dest in ALLOWED_PLATFORMS:
+            choices: List[Dict[str, Any]] = []
+            platform_rows = _send_message_catalog_platform_rows(platform=dest, limit=80)
+            if platform_rows:
+                destinations = platform_rows[0].get("destinations") if isinstance(platform_rows[0], dict) else []
+                if isinstance(destinations, list):
+                    for row in destinations[:8]:
+                        if not isinstance(row, dict):
+                            continue
+                        row_targets = row.get("targets") if isinstance(row.get("targets"), dict) else {}
+                        choices.append(
+                            {
+                                "label": str(row.get("label") or "").strip(),
+                                "targets": dict(row_targets),
+                            }
+                        )
+            return dest, resolved_targets, {
+                "unresolved": True,
+                "reason": "target_not_found_in_catalog",
+                "matched_hint": str(target_hint),
+                "platform": str(dest),
+                "choices": choices,
+            }
         return dest, resolved_targets, None
 
     explicit_discord_channel_id = str(resolved_targets.get("channel_id") or "").strip()
@@ -1893,6 +1934,28 @@ def send_message(
             needs=needs,
             say_hint="Ask the user which Discord guild/channel to use before sending.",
         )
+    if isinstance(catalog_resolution, dict) and bool(catalog_resolution.get("unresolved")):
+        unresolved_platform = normalize_notify_platform(catalog_resolution.get("platform") or destination)
+        if unresolved_platform in {"discord", "matrix", "telegram"}:
+            matched_hint = str(catalog_resolution.get("matched_hint") or "").strip() or "that destination"
+            choice_labels: List[str] = []
+            for item in list(catalog_resolution.get("choices") or [])[:5]:
+                if not isinstance(item, dict):
+                    continue
+                label = str(item.get("label") or "").strip()
+                if label:
+                    choice_labels.append(label)
+            needs = [
+                f"Provide an exact {unresolved_platform} target id/name for `{matched_hint}` (for example channel_id/chat_id/room_id).",
+            ]
+            if choice_labels:
+                needs.append("Known destinations: " + " | ".join(choice_labels))
+            return action_failure(
+                code="unknown_destination_target",
+                message=f"Cannot queue: `{matched_hint}` was not found in known {unresolved_platform} destinations.",
+                needs=needs,
+                say_hint="Ask the user to pick a known destination or provide an exact destination id.",
+            )
 
     if not destination and isinstance(origin, dict):
         origin_platform = normalize_notify_platform(origin.get("platform"))

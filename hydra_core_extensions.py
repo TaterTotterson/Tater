@@ -80,6 +80,9 @@ def _iter_core_modules(*, redis_client: Any = None) -> List[Tuple[str, Dict[str,
             continue
 
         tools_require_running = _as_bool(entry.get("hydra_tools_require_running"), default=True)
+        if core_key == "memory_core":
+            # Memory kernel tools should remain available as long as the core is installed/enabled.
+            tools_require_running = False
 
         if redis_obj is not None and tools_require_running:
             try:
