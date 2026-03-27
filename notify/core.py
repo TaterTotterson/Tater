@@ -31,6 +31,7 @@ ALWAYS_ON_NOTIFIERS: Tuple[str, ...] = (
     "ntfy",
     "telegram",
     "macos",
+    "webui",
     "wordpress",
 )
 
@@ -38,6 +39,8 @@ _ATTACHMENT_PLATFORMS = {"discord", "matrix", "telegram", "macos"}
 
 _URL_PATTERN = re.compile(r"https?://\S+")
 _BARE_URL_PATTERN = re.compile(r"(?<!\()(?<!\])\bhttps?://\S+\b")
+_WEBUI_CHAT_HISTORY_KEY = "webui:chat_history"
+_WEBUI_DEFAULT_MAX_STORE = 20
 
 
 def core_notifier_platforms() -> Tuple[str, ...]:
@@ -69,6 +72,129 @@ def _coerce_attachments(attachments: Any) -> List[Dict[str, Any]]:
         if isinstance(item, dict):
             out.append(dict(item))
     return out
+
+
+def _coerce_webui_data_b64(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.lower().startswith("data:"):
+        comma = text.find(",")
+        if comma <= 0:
+            return ""
+        header = text[:comma].lower()
+        if ";base64" not in header:
+            return ""
+        text = text[comma + 1 :].strip()
+    return "".join(text.split())
+
+
+def _webui_media_type_from_mimetype(mimetype: Any) -> str:
+    token = str(mimetype or "").strip().lower()
+    if token.startswith("image/"):
+        return "image"
+    if token.startswith("audio/"):
+        return "audio"
+    if token.startswith("video/"):
+        return "video"
+    return "file"
+
+
+def _normalize_webui_attachment(item: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(item, dict):
+        return None
+
+    mimetype = str(item.get("mimetype") or "application/octet-stream").strip() or "application/octet-stream"
+    media_type = str(item.get("type") or "").strip().lower()
+    if media_type not in {"image", "audio", "video", "file"}:
+        media_type = _webui_media_type_from_mimetype(mimetype)
+
+    normalized: Dict[str, Any] = {
+        "type": media_type,
+        "name": str(item.get("name") or f"{media_type}.bin").strip() or f"{media_type}.bin",
+        "mimetype": mimetype,
+    }
+
+    file_id = str(item.get("id") or "").strip()
+    if file_id:
+        normalized["id"] = file_id
+
+    data_b64 = _coerce_webui_data_b64(item.get("data_b64"))
+    if not data_b64:
+        data_b64 = _coerce_webui_data_b64(item.get("data"))
+    if data_b64:
+        normalized["data_b64"] = data_b64
+
+    try:
+        size = int(item.get("size"))
+    except Exception:
+        size = -1
+    if size >= 0:
+        normalized["size"] = size
+
+    if "id" not in normalized and "data_b64" not in normalized:
+        return None
+    return normalized
+
+
+def _webui_max_store() -> int:
+    try:
+        raw = redis_client.get("tater:max_store")
+        value = int(str(raw).strip()) if raw is not None else int(_WEBUI_DEFAULT_MAX_STORE)
+    except Exception:
+        value = int(_WEBUI_DEFAULT_MAX_STORE)
+    return max(0, value)
+
+
+def _save_webui_history_row(content: Any) -> None:
+    payload = {
+        "role": "assistant",
+        "username": "assistant",
+        "content": content,
+    }
+    redis_client.rpush(_WEBUI_CHAT_HISTORY_KEY, json.dumps(payload))
+    max_store = _webui_max_store()
+    if max_store > 0:
+        redis_client.ltrim(_WEBUI_CHAT_HISTORY_KEY, -max_store, -1)
+
+
+def _dispatch_webui(
+    title: Optional[str],
+    content: str,
+    origin: Optional[Dict[str, Any]],
+    meta: Optional[Dict[str, Any]],
+    attachments: Optional[List[Dict[str, Any]]],
+) -> str:
+    del origin, meta
+    message = str(content or "").strip()
+    payload_attachments = _coerce_attachments(attachments)
+    if not message and not payload_attachments:
+        return "Cannot queue: missing message"
+
+    title_text = str(title or "").strip()
+    composed_message = message
+    if title_text and message:
+        composed_message = f"**{title_text}**\n\n{message}"
+    elif title_text and not message:
+        composed_message = f"**{title_text}**"
+
+    if not composed_message and payload_attachments:
+        composed_message = "Attachment"
+
+    if composed_message:
+        _save_webui_history_row(composed_message)
+
+    rendered_attachments = 0
+    for item in payload_attachments:
+        normalized = _normalize_webui_attachment(item)
+        if not isinstance(normalized, dict):
+            continue
+        _save_webui_history_row(normalized)
+        rendered_attachments += 1
+
+    if not composed_message and rendered_attachments <= 0:
+        return "Cannot queue: missing message"
+    return "Queued notification for webui"
 
 
 def _matrix_room_ref(room_ref: Any) -> str:
@@ -578,6 +704,9 @@ def dispatch_notification_sync(
 
     if dest in ("discord", "irc", "matrix", "telegram", "macos"):
         return _enqueue_queue_notification(dest, title, content, targets, origin, meta, attachments=attachments)
+
+    if dest == "webui":
+        return _dispatch_webui(title, content, origin, meta, attachments)
 
     if dest == "homeassistant":
         return _dispatch_homeassistant(title, content, targets, origin, meta)

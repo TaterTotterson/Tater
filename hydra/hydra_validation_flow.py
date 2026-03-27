@@ -23,8 +23,9 @@ async def validate_or_recover_tool_call(
     generate_recovery_text_fn: Callable[..., Awaitable[str]],
     validation_failure_text_fn: Callable[[str, str], str],
     normalize_tool_call_for_user_request_fn: Callable[..., Dict[str, Any]],
+    enrich_tool_call_for_user_request_fn: Optional[Callable[..., Awaitable[Dict[str, Any]]]] = None,
+    resolver_max_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
-    del origin, scope, history_messages, context
     raw = str(text or "").strip()
     if not is_tool_candidate_fn(raw):
         return {
@@ -104,6 +105,24 @@ async def validate_or_recover_tool_call(
         registry=registry,
         user_text=user_text,
     )
+    if callable(enrich_tool_call_for_user_request_fn):
+        try:
+            enriched_tool_call = await enrich_tool_call_for_user_request_fn(
+                llm_client=llm_client,
+                tool_call=tool_call,
+                user_text=user_text,
+                platform=platform,
+                origin=(origin if isinstance(origin, dict) else {}),
+                scope=scope,
+                history_messages=(history_messages if isinstance(history_messages, list) else []),
+                context=(context if isinstance(context, dict) else {}),
+                platform_preamble=platform_preamble,
+                max_tokens=resolver_max_tokens,
+            )
+            if isinstance(enriched_tool_call, dict):
+                tool_call = enriched_tool_call
+        except Exception:
+            pass
     if isinstance(validation_status, dict):
         validation_status["tool_call"] = tool_call
 

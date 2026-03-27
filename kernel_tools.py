@@ -31,7 +31,7 @@ from helpers import redis_blob_client, redis_client
 from verba_loader import load_verbas_from_directory
 from verba_registry import reload_verbas
 from verba_result import action_failure, action_success
-from notify import dispatch_notification_sync
+from notify import dispatch_notification_sync, notifier_destination_catalog
 from notify.queue import ALLOWED_PLATFORMS, normalize_platform as normalize_notify_platform
 from vision_settings import (
     DEFAULT_VISION_API_BASE,
@@ -1181,7 +1181,7 @@ def _send_message_extract_target_hint(raw: Any) -> str:
             return match.group(0)
     text = re.sub(r"^(?:room|channel|chat)\s+", "", text, flags=re.IGNORECASE)
     text = re.sub(
-        r"\s+(?:in|on)\s+(?:discord|irc|matrix|telegram|home\s*assistant|homeassistant|ntfy)\b.*$",
+        r"\s+(?:in|on)\s+(?:discord|irc|matrix|telegram|home\s*assistant|homeassistant|ntfy|web\s*ui|webui)\b.*$",
         "",
         text,
         flags=re.IGNORECASE,
@@ -1199,6 +1199,251 @@ def _send_message_coerce_targets(payload: Any) -> Dict[str, Any]:
     return {}
 
 
+def _send_message_has_explicit_target(target_map: Dict[str, Any]) -> bool:
+    for key in ("channel_id", "channel", "guild_id", "room_id", "room_alias", "chat_id", "scope", "device_id"):
+        if str(target_map.get(key) or "").strip():
+            return True
+    return False
+
+
+def _send_message_extract_destination_hint(raw: Any) -> str:
+    text = str(raw or "").strip().lower()
+    if not text:
+        return ""
+    match = re.search(
+        r"\b(?:to|in|on)\s+(discord|irc|matrix|telegram|home\s*assistant|homeassistant|ntfy|web\s*ui|webui|mac\s*os|macos|my\s+mac)\b",
+        text,
+    )
+    if not match:
+        return ""
+    token = str(match.group(1) or "").strip()
+    return normalize_notify_platform(token)
+
+
+def _send_message_extract_instruction_target(raw: Any) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    match = re.search(r"\bto\s+([#!@][A-Za-z0-9][A-Za-z0-9._:-]*)", text, flags=re.IGNORECASE)
+    if match:
+        return str(match.group(1) or "").strip()
+    return _send_message_extract_target_hint(text)
+
+
+def _send_message_target_hint_from_map(target_map: Dict[str, Any]) -> str:
+    for key in ("channel", "room_alias", "room_id", "chat_id", "channel_id"):
+        token = str(target_map.get(key) or "").strip()
+        if not token:
+            continue
+        extracted = _send_message_extract_target_hint(token)
+        if extracted:
+            return extracted
+        return token
+    return ""
+
+
+def _send_message_target_variants(value: Any) -> set[str]:
+    token = str(value or "").strip().lower().strip(" .,!?:;\"'")
+    if not token:
+        return set()
+    token = re.sub(r"^(?:room|channel|chat)\s+", "", token, flags=re.IGNORECASE).strip()
+    if not token:
+        return set()
+    variants = {token}
+    plain = token.lstrip("#@!")
+    if plain:
+        variants.add(plain)
+        variants.add(f"#{plain}")
+        variants.add(f"@{plain}")
+        variants.add(f"!{plain}")
+    return {item for item in variants if item}
+
+
+def _send_message_catalog_platform_rows(*, platform: Optional[str], limit: int) -> List[Dict[str, Any]]:
+    try:
+        payload = notifier_destination_catalog(
+            redis_client=redis_client,
+            platform=platform,
+            limit=max(1, min(500, int(limit))),
+        )
+    except Exception:
+        return []
+    rows = payload.get("platforms") if isinstance(payload, dict) else []
+    if not isinstance(rows, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for item in rows:
+        if isinstance(item, dict):
+            out.append(item)
+    return out
+
+
+def _send_message_resolve_catalog_destination(
+    *,
+    destination: str,
+    target_map: Dict[str, Any],
+    origin: Optional[Dict[str, Any]],
+) -> Tuple[str, Dict[str, Any], Optional[Dict[str, Any]]]:
+    dest = normalize_notify_platform(destination)
+    resolved_targets = dict(target_map or {})
+    target_hint = _send_message_target_hint_from_map(resolved_targets)
+    if not target_hint:
+        return dest, resolved_targets, None
+    hint_variants = _send_message_target_variants(target_hint)
+    if not hint_variants:
+        return dest, resolved_targets, None
+
+    catalog_rows = _send_message_catalog_platform_rows(platform=None, limit=200)
+    if not catalog_rows:
+        return dest, resolved_targets, None
+
+    source_rank = {"recent_queue": 6, "room_label": 5, "default": 4, "recent_history": 3}
+    field_rank = {"channel_id": 7, "chat_id": 7, "room_id": 7, "room_alias": 6, "channel": 5}
+    platform_priority = {
+        "discord": 9,
+        "matrix": 8,
+        "irc": 7,
+        "telegram": 6,
+        "macos": 5,
+        "homeassistant": 4,
+        "ntfy": 3,
+        "wordpress": 2,
+        "webui": 1,
+    }
+    origin_platform = normalize_notify_platform(origin.get("platform")) if isinstance(origin, dict) else ""
+
+    matches: List[Tuple[int, str, Dict[str, Any], str]] = []
+    for platform_row in catalog_rows:
+        platform_token = normalize_notify_platform(platform_row.get("platform"))
+        if not platform_token:
+            continue
+        if dest and dest not in {"webui"} and platform_token != dest:
+            continue
+
+        destinations = platform_row.get("destinations") if isinstance(platform_row, dict) else []
+        if not isinstance(destinations, list):
+            continue
+        for row in destinations:
+            if not isinstance(row, dict):
+                continue
+            targets = row.get("targets") if isinstance(row.get("targets"), dict) else {}
+            matched_field = ""
+            for field_name in ("channel_id", "channel", "room_id", "room_alias", "chat_id"):
+                value = str(targets.get(field_name) or "").strip()
+                if not value:
+                    continue
+                if hint_variants & _send_message_target_variants(value):
+                    matched_field = field_name
+                    break
+            if not matched_field:
+                continue
+
+            score = int(field_rank.get(matched_field, 0))
+            source = str(row.get("source") or "").strip().lower()
+            score += int(source_rank.get(source, 0))
+            score += int(platform_priority.get(platform_token, 0))
+            if dest and platform_token == dest:
+                score += 30
+            if not dest and origin_platform and platform_token == origin_platform:
+                score += 15
+            matches.append((score, platform_token, row, matched_field))
+
+    if not matches:
+        return dest, resolved_targets, None
+
+    explicit_discord_channel_id = str(resolved_targets.get("channel_id") or "").strip()
+    explicit_discord_guild_id = str(resolved_targets.get("guild_id") or "").strip()
+    if not explicit_discord_channel_id and not explicit_discord_guild_id and (not dest or dest in {"discord", "webui"}):
+        discord_rows_by_channel_id: Dict[str, Dict[str, Any]] = {}
+        discord_rows_by_guild: Dict[str, Dict[str, Any]] = {}
+        for score, platform_token, row, matched_field in matches:
+            del score, matched_field
+            if platform_token != "discord":
+                continue
+            targets = row.get("targets") if isinstance(row.get("targets"), dict) else {}
+            channel_name = str(targets.get("channel") or "").strip()
+            guild_token = str(targets.get("guild_id") or "").strip()
+            channel_id_token = str(targets.get("channel_id") or "").strip()
+            if not channel_name or not guild_token:
+                if not channel_name or not channel_id_token:
+                    continue
+            if not (_send_message_target_variants(channel_name) & hint_variants):
+                continue
+            if channel_id_token and channel_id_token not in discord_rows_by_channel_id:
+                discord_rows_by_channel_id[channel_id_token] = row
+            if guild_token and guild_token not in discord_rows_by_guild:
+                discord_rows_by_guild[guild_token] = row
+
+        ambiguous = len(discord_rows_by_channel_id) > 1 or len(discord_rows_by_guild) > 1
+        if ambiguous:
+            source_rows: Dict[str, Dict[str, Any]]
+            source_rows = discord_rows_by_channel_id if len(discord_rows_by_channel_id) > 1 else discord_rows_by_guild
+            choices: List[Dict[str, Any]] = []
+            for key_token, row in sorted(
+                source_rows.items(),
+                key=lambda item: str((item[1] or {}).get("label") or item[0]).lower(),
+            ):
+                targets = row.get("targets") if isinstance(row.get("targets"), dict) else {}
+                choices.append(
+                    {
+                        "label": str(row.get("label") or key_token).strip() or key_token,
+                        "targets": dict(targets),
+                    }
+                )
+                if len(choices) >= 8:
+                    break
+            return "discord", resolved_targets, {
+                "ambiguous": True,
+                "reason": "discord_channel_name_ambiguous",
+                "matched_hint": str(target_hint),
+                "platform": "discord",
+                "choices": choices,
+            }
+
+    matches.sort(
+        key=lambda item: (
+            -int(item[0]),
+            str(item[1]),
+            str((item[2] or {}).get("label") or ""),
+        )
+    )
+    best_score, best_platform, best_row, best_field = matches[0]
+    del best_score, best_field
+
+    if dest and dest not in {"webui"} and best_platform != dest:
+        return dest, resolved_targets, None
+    if not dest or dest == "webui":
+        dest = best_platform
+
+    best_targets = best_row.get("targets") if isinstance(best_row.get("targets"), dict) else {}
+    for key, value in best_targets.items():
+        if str(resolved_targets.get(key) or "").strip():
+            continue
+        resolved_targets[key] = value
+
+    if dest == "matrix":
+        if not resolved_targets.get("room_id"):
+            alias = resolved_targets.get("room_alias") or resolved_targets.get("channel")
+            if alias:
+                resolved_targets["room_id"] = _send_message_normalize_matrix_room_ref(alias)
+        if resolved_targets.get("room_id"):
+            resolved_targets["room_id"] = _send_message_normalize_matrix_room_ref(resolved_targets.get("room_id"))
+    elif dest == "telegram":
+        if not resolved_targets.get("chat_id"):
+            chat_hint = resolved_targets.get("channel_id") or resolved_targets.get("channel")
+            if chat_hint:
+                resolved_targets["chat_id"] = chat_hint
+
+    resolution = {
+        "matched_hint": str(target_hint),
+        "platform": str(dest),
+        "label": str(best_row.get("label") or "").strip(),
+        "source": str(best_row.get("source") or "").strip(),
+        "targets": dict(best_targets),
+    }
+    return dest, resolved_targets, resolution
+
+
 def _send_message_clean_attachment_payload(payload: Any) -> List[Dict[str, Any]]:
     if not isinstance(payload, list):
         return []
@@ -1207,6 +1452,228 @@ def _send_message_clean_attachment_payload(payload: Any) -> List[Dict[str, Any]]
         if isinstance(item, dict):
             out.append(dict(item))
     return out
+
+
+def _send_message_attachment_has_media_payload(item: Dict[str, Any]) -> bool:
+    if not isinstance(item, dict):
+        return False
+    for key in ("bytes", "data", "path", "blob_key", "url"):
+        value = item.get(key)
+        if isinstance(value, (bytes, bytearray)) and value:
+            return True
+        if isinstance(value, str) and value.strip():
+            return True
+    return False
+
+
+def _send_message_build_attachment_from_payload(
+    payload: Any,
+    *,
+    fallback: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return None
+    binary, filename, mimetype, _ = _read_artifact_bytes(payload)
+    if binary is None:
+        return None
+    fallback_map = dict(fallback or {})
+    fallback_name = str(fallback_map.get("name") or "").strip()
+    final_name = str(fallback_name or filename or _artifact_name_from_path(payload.get("path")) or "file.bin").strip() or "file.bin"
+    final_mime = _artifact_mimetype(final_name, fallback_map.get("mimetype") or mimetype or payload.get("mimetype"))
+    final_type = _artifact_type(final_name, final_mime, fallback_map.get("type") or payload.get("type"))
+    out: Dict[str, Any] = {
+        "type": final_type,
+        "name": final_name,
+        "mimetype": final_mime,
+        "bytes": binary,
+        "size": len(binary),
+    }
+    artifact_id = str(fallback_map.get("artifact_id") or payload.get("artifact_id") or "").strip()
+    if artifact_id:
+        out["artifact_id"] = artifact_id
+    return out
+
+
+def _send_message_materialize_attachment(
+    attachment: Any,
+    *,
+    origin: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(attachment, dict):
+        return None
+    item = dict(attachment)
+    if _send_message_attachment_has_media_payload(item):
+        name = str(item.get("name") or "file.bin").strip() or "file.bin"
+        mimetype = _artifact_mimetype(name, item.get("mimetype"))
+        kind = _artifact_type(name, mimetype, item.get("type"))
+        out: Dict[str, Any] = {
+            "type": kind,
+            "name": name,
+            "mimetype": mimetype,
+        }
+        for key in ("bytes", "data", "path", "blob_key", "url", "size"):
+            value = item.get(key)
+            if value in (None, ""):
+                continue
+            out[key] = value
+        artifact_id = str(item.get("artifact_id") or "").strip()
+        if artifact_id:
+            out["artifact_id"] = artifact_id
+        return out
+
+    artifact_payload: Optional[Dict[str, Any]] = None
+    artifact_id = str(item.get("artifact_id") or "").strip()
+    if artifact_id:
+        artifact_payload = _find_available_artifact(origin=origin, artifact_id=artifact_id)
+
+    if artifact_payload is None:
+        file_id = str(item.get("file_id") or item.get("id") or "").strip()
+        if file_id:
+            artifact_payload = {
+                "file_id": file_id,
+                "name": item.get("name"),
+                "mimetype": item.get("mimetype"),
+                "type": item.get("type"),
+                "artifact_id": artifact_id,
+            }
+
+    if artifact_payload is None:
+        name_hint = str(item.get("name") or "").strip().lower()
+        if name_hint:
+            for candidate in reversed(_origin_available_artifacts(origin)):
+                if str(candidate.get("name") or "").strip().lower() == name_hint:
+                    artifact_payload = candidate
+                    break
+
+    if artifact_payload is None:
+        return None
+    return _send_message_build_attachment_from_payload(
+        artifact_payload,
+        fallback=item,
+    )
+
+
+def _send_message_attachment_requested(raw: Any) -> bool:
+    text = str(raw or "").strip().lower()
+    if not text:
+        return False
+    if re.search(r"\b(?:this|that|the)\s+(?:image|photo|picture|screenshot|file|attachment)\b", text):
+        return True
+    if re.search(r"\b(?:attach|upload|share|send|post)\b", text) and re.search(
+        r"\b(?:image|photo|picture|screenshot|file|attachment|document|doc)\b",
+        text,
+    ):
+        return True
+    return False
+
+
+def _send_message_artifact_is_image(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    artifact_type = str(payload.get("type") or "").strip().lower()
+    if artifact_type == "image":
+        return True
+    mimetype = str(payload.get("mimetype") or "").strip().lower()
+    return mimetype.startswith("image/")
+
+
+def _send_message_select_auto_attachment_payload(
+    *,
+    origin: Optional[Dict[str, Any]],
+    request_text: str,
+) -> Optional[Dict[str, Any]]:
+    requested = _send_message_attachment_requested(request_text)
+    current_turn = []
+    if isinstance(origin, dict):
+        raw_input = origin.get("input_artifacts")
+        if isinstance(raw_input, list):
+            current_turn = [dict(item) for item in raw_input if isinstance(item, dict)]
+
+    available = [dict(item) for item in _origin_available_artifacts(origin) if isinstance(item, dict)]
+    if not requested and len(current_turn) == 1:
+        return current_turn[0]
+    if not requested:
+        return None
+
+    candidate_pool = list(current_turn) + list(available)
+    if not candidate_pool:
+        return None
+
+    text = str(request_text or "").strip().lower()
+    hinted_id_match = re.search(r"\b(att\d+|a\d+)\b", text)
+    if hinted_id_match:
+        hinted_id = str(hinted_id_match.group(1) or "").strip().lower()
+        for item in reversed(candidate_pool):
+            if str(item.get("artifact_id") or "").strip().lower() == hinted_id:
+                return item
+
+    for item in reversed(candidate_pool):
+        name = str(item.get("name") or "").strip().lower()
+        if name and name in text:
+            return item
+
+    if re.search(r"\b(?:image|photo|picture|screenshot)\b", text):
+        for item in reversed(candidate_pool):
+            if _send_message_artifact_is_image(item):
+                return item
+
+    if len(current_turn) == 1:
+        return current_turn[0]
+    if len(candidate_pool) == 1:
+        return candidate_pool[0]
+
+    if "this " in text or text.startswith("this"):
+        return candidate_pool[-1]
+
+    return None
+
+
+def _send_message_prepare_attachments(
+    *,
+    attachments: List[Dict[str, Any]],
+    origin: Optional[Dict[str, Any]],
+    request_text: str,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    resolved: List[Dict[str, Any]] = []
+    resolved_refs = 0
+    dropped_refs = 0
+
+    for item in attachments:
+        normalized = _send_message_materialize_attachment(item, origin=origin)
+        if not isinstance(normalized, dict):
+            dropped_refs += 1
+            continue
+        if str(normalized.get("artifact_id") or "").strip():
+            resolved_refs += 1
+        resolved.append(normalized)
+
+    auto_added = False
+    auto_name = ""
+    auto_id = ""
+    if not resolved:
+        auto_payload = _send_message_select_auto_attachment_payload(
+            origin=origin,
+            request_text=request_text,
+        )
+        if isinstance(auto_payload, dict):
+            auto_attachment = _send_message_build_attachment_from_payload(
+                auto_payload,
+                fallback=auto_payload,
+            )
+            if isinstance(auto_attachment, dict):
+                auto_added = True
+                auto_name = str(auto_attachment.get("name") or "").strip()
+                auto_id = str(auto_attachment.get("artifact_id") or auto_payload.get("artifact_id") or "").strip()
+                resolved.append(auto_attachment)
+
+    meta = {
+        "resolved_attachment_refs": int(resolved_refs),
+        "dropped_attachment_refs": int(dropped_refs),
+        "auto_attachment_added": bool(auto_added),
+        "auto_attachment_name": auto_name,
+        "auto_attachment_id": auto_id,
+    }
+    return resolved, meta
 
 
 def _send_message_attachment_kind(mimetype: Any, fallback_type: Any = None) -> str:
@@ -1352,6 +1819,7 @@ def send_message(
     text_message = str(message or content or "").strip()
     destination = normalize_notify_platform(platform)
     target_map = _send_message_coerce_targets(targets)
+    catalog_resolution: Optional[Dict[str, Any]] = None
     for key, value in (
         ("channel_id", channel_id),
         ("channel", channel),
@@ -1368,7 +1836,12 @@ def send_message(
         if value not in (None, "") and key not in target_map:
             target_map[key] = value
 
-    attachment_items = _send_message_clean_attachment_payload(attachments)
+    attachment_items_raw = _send_message_clean_attachment_payload(attachments)
+    attachment_items, attachment_meta = _send_message_prepare_attachments(
+        attachments=attachment_items_raw,
+        origin=origin,
+        request_text=(message or content or text_message),
+    )
 
     if not text_message and not attachment_items:
         return action_failure(
@@ -1379,6 +1852,40 @@ def send_message(
         )
     if not text_message and attachment_items:
         text_message = "Attachment"
+
+    if not destination:
+        destination_hint = _send_message_extract_destination_hint(message or content or text_message)
+        if destination_hint:
+            destination = destination_hint
+
+    if not _send_message_has_explicit_target(target_map):
+        inline_target_hint = _send_message_extract_instruction_target(message or content or text_message)
+        if inline_target_hint:
+            target_map["channel"] = inline_target_hint
+
+    destination, target_map, catalog_resolution = _send_message_resolve_catalog_destination(
+        destination=destination,
+        target_map=target_map,
+        origin=origin,
+    )
+    if isinstance(catalog_resolution, dict) and bool(catalog_resolution.get("ambiguous")):
+        matched_hint = str(catalog_resolution.get("matched_hint") or target_map.get("channel") or "that channel").strip()
+        choice_labels: List[str] = []
+        for item in list(catalog_resolution.get("choices") or [])[:5]:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or "").strip()
+            if label:
+                choice_labels.append(label)
+        needs = ["Specify targets.guild_id or targets.channel_id for the destination Discord channel."]
+        if choice_labels:
+            needs.append("Matching destinations: " + " | ".join(choice_labels))
+        return action_failure(
+            code="ambiguous_discord_target",
+            message=f"Cannot queue: `{matched_hint}` matches multiple Discord channels across different guilds.",
+            needs=needs,
+            say_hint="Ask the user which Discord guild/channel to use before sending.",
+        )
 
     if not destination and isinstance(origin, dict):
         origin_platform = normalize_notify_platform(origin.get("platform"))
@@ -1397,7 +1904,7 @@ def send_message(
             code="missing_destination_platform",
             message="Cannot queue: missing destination platform",
             needs=[
-                "Specify a destination platform such as discord, matrix, telegram, macos, homeassistant, ntfy, or irc.",
+                "Specify a destination platform such as discord, matrix, telegram, macos, homeassistant, ntfy, irc, or webui.",
                 "For macOS you can also say 'my mac' or 'mac os'.",
             ],
             say_hint="Explain that a destination platform is required.",
@@ -1457,16 +1964,56 @@ def send_message(
             "platform": destination,
             "target_count": len([value for value in target_map.values() if value not in (None, "", False)]),
             "attachment_count": len(attachment_items),
+            "catalog_target_resolved": bool(catalog_resolution),
+            "resolved_attachment_refs": int(attachment_meta.get("resolved_attachment_refs") or 0),
+            "auto_attachment_added": bool(attachment_meta.get("auto_attachment_added")),
         },
         data={
             "result": str(result or "").strip(),
             "platform": destination,
             "targets": target_map,
             "attachment_count": len(attachment_items),
+            "catalog_resolution": (catalog_resolution or {}),
+            "resolved_attachment_refs": int(attachment_meta.get("resolved_attachment_refs") or 0),
+            "dropped_attachment_refs": int(attachment_meta.get("dropped_attachment_refs") or 0),
+            "auto_attachment_added": bool(attachment_meta.get("auto_attachment_added")),
+            "auto_attachment_name": str(attachment_meta.get("auto_attachment_name") or ""),
+            "auto_attachment_id": str(attachment_meta.get("auto_attachment_id") or ""),
         },
         summary_for_user=str(result or "").strip(),
         say_hint="Confirm the queued notification destination and keep it brief.",
     )
+
+
+def _attach_file_notify_suggestions(origin: Optional[Dict[str, Any]], *, limit: int = 5) -> List[Dict[str, Any]]:
+    if not isinstance(origin, dict):
+        return []
+    platform = normalize_notify_platform(origin.get("platform"))
+    if not platform or platform not in ALLOWED_PLATFORMS:
+        return []
+
+    catalog_rows = _send_message_catalog_platform_rows(platform=platform, limit=max(1, min(20, int(limit))))
+    if not catalog_rows:
+        return []
+    platform_row = catalog_rows[0]
+    destinations = platform_row.get("destinations") if isinstance(platform_row, dict) else []
+    if not isinstance(destinations, list):
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for row in destinations[: max(1, min(20, int(limit)))]:
+        if not isinstance(row, dict):
+            continue
+        targets = row.get("targets") if isinstance(row.get("targets"), dict) else {}
+        out.append(
+            {
+                "platform": platform,
+                "label": str(row.get("label") or platform).strip() or platform,
+                "targets": dict(targets),
+                "source": str(row.get("source") or "").strip(),
+            }
+        )
+    return out
 
 
 def attach_file(
@@ -1521,17 +2068,21 @@ def attach_file(
     if chosen_artifact_id:
         artifact_out["artifact_id"] = chosen_artifact_id
 
+    notify_suggestions = _attach_file_notify_suggestions(origin, limit=5)
+
     return action_success(
         facts={
             "artifact_id": chosen_artifact_id,
             "name": final_name,
             "size": len(binary),
+            "notify_suggestion_count": len(notify_suggestions),
         },
         data={
             "artifact_id": chosen_artifact_id,
             "name": final_name,
             "mimetype": final_mime,
             "size": len(binary),
+            "notify_suggestions": notify_suggestions,
         },
         summary_for_user=f"Attached {final_name}.",
         say_hint="Confirm the file attachment briefly.",

@@ -59,11 +59,85 @@ def normalize_tool_call_for_user_request(
             user_text=str(user_text or ""),
             parse_function_json_fn=parse_function_json_fn,
         )
+    if func == "send_message":
+        normalized_args = _normalize_send_message_args(
+            args=normalized_args,
+            user_text=str(user_text or ""),
+        )
 
     return {"function": func, "arguments": normalized_args}
 
 
 _TEXTUAL_ARG_KEYS = {"query", "request", "prompt", "text", "content", "message"}
+_SEND_MESSAGE_TARGET_KEYS = (
+    "channel_id",
+    "channel",
+    "guild_id",
+    "room_id",
+    "room_alias",
+    "chat_id",
+    "scope",
+    "device_id",
+)
+_SEND_MESSAGE_PLATFORM_ALIASES = {
+    "home assistant": "homeassistant",
+    "home-assistant": "homeassistant",
+    "home_assistant": "homeassistant",
+    "web ui": "webui",
+    "web-ui": "webui",
+    "web_ui": "webui",
+    "mac os": "macos",
+    "mac-os": "macos",
+    "mac_os": "macos",
+    "my mac": "macos",
+}
+
+
+def _normalize_send_message_platform(value: Any) -> str:
+    raw = str(value or "").strip().lower().strip(" .,!?:;\"'")
+    if not raw:
+        return ""
+    squashed = " ".join(raw.replace("-", " ").replace("_", " ").split())
+    if raw in _SEND_MESSAGE_PLATFORM_ALIASES:
+        return _SEND_MESSAGE_PLATFORM_ALIASES[raw]
+    if squashed in _SEND_MESSAGE_PLATFORM_ALIASES:
+        return _SEND_MESSAGE_PLATFORM_ALIASES[squashed]
+    return squashed
+
+
+def _send_message_has_target(args: Dict[str, Any]) -> bool:
+    if not isinstance(args, dict):
+        return False
+    targets = args.get("targets")
+    if isinstance(targets, dict):
+        for key in _SEND_MESSAGE_TARGET_KEYS:
+            if str(targets.get(key) or "").strip():
+                return True
+    for key in _SEND_MESSAGE_TARGET_KEYS:
+        if str(args.get(key) or "").strip():
+            return True
+    return False
+
+
+def _normalize_send_message_args(*, args: Dict[str, Any], user_text: str) -> Dict[str, Any]:
+    del user_text
+    normalized = dict(args or {})
+
+    platform = _normalize_send_message_platform(normalized.get("platform"))
+    if platform:
+        normalized["platform"] = platform
+
+    targets = dict(normalized.get("targets") or {}) if isinstance(normalized.get("targets"), dict) else {}
+    for key in _SEND_MESSAGE_TARGET_KEYS:
+        if str(targets.get(key) or "").strip():
+            continue
+        value = normalized.get(key)
+        if value in (None, ""):
+            continue
+        targets[key] = value
+    if targets or _send_message_has_target(normalized):
+        normalized["targets"] = targets
+    return normalized
 
 
 def _required_arg_names(plugin: Any) -> List[str]:

@@ -79,7 +79,9 @@ def _iter_core_modules(*, redis_client: Any = None) -> List[Tuple[str, Dict[str,
         if not enabled_hint:
             continue
 
-        if redis_obj is not None:
+        tools_require_running = _as_bool(entry.get("hydra_tools_require_running"), default=True)
+
+        if redis_obj is not None and tools_require_running:
             try:
                 running_raw = redis_obj.get(f"{core_key}_running")
             except Exception:

@@ -516,6 +516,153 @@ def _normalize_tool_call_for_user_request(
     )
 
 
+_SEND_MESSAGE_TARGET_KEYS: tuple[str, ...] = (
+    "channel_id",
+    "channel",
+    "guild_id",
+    "room_id",
+    "room_alias",
+    "chat_id",
+    "scope",
+    "device_id",
+)
+
+
+def _send_message_targets_from_args(args: Dict[str, Any]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    if not isinstance(args, dict):
+        return out
+    nested = args.get("targets") if isinstance(args.get("targets"), dict) else {}
+    for key in _SEND_MESSAGE_TARGET_KEYS:
+        nested_value = str((nested or {}).get(key) or "").strip()
+        if nested_value:
+            out[key] = nested_value
+            continue
+        direct_value = str(args.get(key) or "").strip()
+        if direct_value:
+            out[key] = direct_value
+    return out
+
+
+def _tool_json_object(payload: Any) -> Optional[Dict[str, Any]]:
+    if isinstance(payload, dict):
+        return payload
+    text = _coerce_text(payload)
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+    parsed_call = parse_function_json(text)
+    if isinstance(parsed_call, dict):
+        return parsed_call
+    return None
+
+
+def _send_message_value_in_user_text(value: Any, user_text: str) -> bool:
+    token = str(value or "").strip().lower()
+    source = str(user_text or "").strip().lower()
+    if not token or not source:
+        return False
+    return token in source
+
+
+async def _llm_enrich_tool_call_for_user_request(
+    *,
+    llm_client: Any,
+    tool_call: Dict[str, Any],
+    user_text: str,
+    platform: str,
+    origin: Optional[Dict[str, Any]] = None,
+    scope: str = "",
+    history_messages: Optional[List[Dict[str, Any]]] = None,
+    context: Optional[Dict[str, Any]] = None,
+    platform_preamble: str = "",
+    max_tokens: Optional[int] = None,
+) -> Dict[str, Any]:
+    del platform, origin, scope, history_messages, context
+
+    if not isinstance(tool_call, dict):
+        return tool_call
+    func = _canonical_tool_name(str(tool_call.get("function") or "").strip())
+    if func != "send_message":
+        return tool_call
+
+    args = dict(tool_call.get("arguments") or {}) if isinstance(tool_call.get("arguments"), dict) else {}
+    user_request = str(user_text or "").strip()
+    if not user_request:
+        return {"function": "send_message", "arguments": args}
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Extract destination details for a send_message tool call.\n"
+                "Return strict JSON only with schema:\n"
+                '{"platform":"","targets":{"channel_id":"","channel":"","guild_id":"","room_id":"","room_alias":"","chat_id":"","scope":"","device_id":""}}\n'
+                "Rules:\n"
+                "- Do not invent IDs or names.\n"
+                "- Copy only explicit values from the user request.\n"
+                "- Leave unknown fields as empty strings.\n"
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"User request:\n{user_request}\n\n"
+                f"Current args:\n{json.dumps(args, ensure_ascii=False)}\n\n"
+                "Return JSON now."
+            ),
+        },
+    ]
+    try:
+        resp = await llm_client.chat(
+            messages=_with_platform_preamble(messages, platform_preamble=platform_preamble),
+            **_chat_with_optional_max_tokens_kwargs(
+                max_tokens=max_tokens,
+                minimum=96,
+                fallback=180,
+                maximum=360,
+            ),
+        )
+        content = _coerce_text((resp or {}).get("message", {}).get("content", ""))
+    except Exception:
+        return {"function": "send_message", "arguments": args}
+
+    parsed = _tool_json_object(content)
+    if not isinstance(parsed, dict):
+        return {"function": "send_message", "arguments": args}
+    if isinstance(parsed.get("arguments"), dict):
+        parsed = parsed.get("arguments") or {}
+
+    merged = dict(args)
+    existing_platform = str(merged.get("platform") or "").strip()
+    candidate_platform = str(parsed.get("platform") or "").strip()
+    if candidate_platform and not existing_platform and _send_message_value_in_user_text(candidate_platform, user_request):
+        merged["platform"] = candidate_platform
+
+    merged_targets = _send_message_targets_from_args(merged)
+    parsed_targets = parsed.get("targets") if isinstance(parsed.get("targets"), dict) else {}
+    if isinstance(parsed_targets, dict):
+        for key in _SEND_MESSAGE_TARGET_KEYS:
+            if str(merged_targets.get(key) or "").strip():
+                continue
+            value = str(parsed_targets.get(key) or "").strip()
+            if not value:
+                continue
+            if key.endswith("_id") and not _send_message_value_in_user_text(value, user_request):
+                continue
+            merged_targets[key] = value
+
+    if merged_targets:
+        merged["targets"] = merged_targets
+
+    return {"function": "send_message", "arguments": merged}
+
+
 def _plugin_tool_id_for_call(tool_call: Optional[Dict[str, Any]], registry: Dict[str, Any]) -> str:
     return toolcall_utils.plugin_tool_id_for_call(
         tool_call,
@@ -1746,6 +1893,7 @@ async def _validate_or_recover_tool_call(
     platform_preamble: str = "",
     repair_max_tokens: Optional[int] = None,
     recovery_max_tokens: Optional[int] = None,
+    resolver_max_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
     return await validation_flow.validate_or_recover_tool_call(
         llm_client=llm_client,
@@ -1768,6 +1916,8 @@ async def _validate_or_recover_tool_call(
         generate_recovery_text_fn=_generate_recovery_text,
         validation_failure_text_fn=_validation_failure_text,
         normalize_tool_call_for_user_request_fn=_normalize_tool_call_for_user_request,
+        enrich_tool_call_for_user_request_fn=_llm_enrich_tool_call_for_user_request,
+        resolver_max_tokens=resolver_max_tokens,
     )
 
 
@@ -5169,6 +5319,7 @@ async def _run_hydra_turn_impl(
             platform_preamble=platform_preamble,
             repair_max_tokens=tool_repair_max_tokens,
             recovery_max_tokens=recovery_max_tokens,
+            resolver_max_tokens=resolver_max_tokens,
         )
         validation_status = (
             tool_eval.get("validation_status")

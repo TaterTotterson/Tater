@@ -47,6 +47,7 @@ from hydra import (
     DEFAULT_STEP_RETRY_LIMIT,
 )
 from emoji_responder import get_emoji_settings as get_core_emoji_settings, save_emoji_settings as save_core_emoji_settings
+from notify import notifier_destination_catalog
 from helpers import (
     HYDRA_LLM_BASE_SERVERS_KEY,
     decrypt_current_redis_snapshot,
@@ -3158,6 +3159,22 @@ def chat_stats() -> Dict[str, Any]:
         "enabled": _show_speed_stats_enabled(default=False),
         "stats": _load_last_llm_stats(),
     }
+
+
+@app.get("/api/notifiers/destinations")
+def notifier_destinations(platform: str = "all", limit: int = 80) -> Dict[str, Any]:
+    raw_platform = str(platform or "all").strip()
+    use_platform: Optional[str] = None
+    if raw_platform.lower() not in {"", "all", "*"}:
+        use_platform = raw_platform
+    payload = notifier_destination_catalog(
+        redis_client=redis_client,
+        platform=use_platform,
+        limit=limit,
+    )
+    if use_platform is not None and not list(payload.get("platforms") or []):
+        raise HTTPException(status_code=400, detail=f"Unknown notifier platform: {use_platform}")
+    return {"ok": True, **payload}
 
 
 @app.get("/api/chat/files/{file_id}")
