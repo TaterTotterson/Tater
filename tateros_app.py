@@ -334,6 +334,53 @@ def _setting_fields(required: Dict[str, Any], current: Dict[str, str]) -> List[D
     return fields
 
 
+def _portal_settings_module(portal_key: str) -> Optional[ModuleType]:
+    key = str(portal_key or "").strip()
+    if not key:
+        return None
+    try:
+        return portal_runtime._import_module(key, reload_module=False)
+    except Exception:
+        return None
+
+
+def _portal_setting_fields(portal_key: str, required: Dict[str, Any], current: Dict[str, str]) -> List[Dict[str, Any]]:
+    fields = _setting_fields(required, current)
+    module = _portal_settings_module(portal_key)
+    if module is None:
+        return fields
+    hook = getattr(module, "webui_settings_fields", None)
+    if not callable(hook):
+        return fields
+    try:
+        updated = hook(
+            fields=[dict(field) if isinstance(field, dict) else field for field in fields],
+            current_settings=dict(current or {}),
+            redis_client=redis_client,
+            notifier_destination_catalog=notifier_destination_catalog,
+        )
+    except Exception:
+        logger.exception("[portals] settings field hook failed for %s", portal_key)
+        return fields
+    return updated if isinstance(updated, list) else fields
+
+
+def _portal_prepare_settings_values(portal_key: str, values: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(values or {})
+    module = _portal_settings_module(portal_key)
+    if module is None:
+        return out
+    hook = getattr(module, "webui_prepare_settings_values", None)
+    if not callable(hook):
+        return out
+    try:
+        prepared = hook(values=dict(out), redis_client=redis_client)
+    except Exception:
+        logger.exception("[portals] settings save hook failed for %s", portal_key)
+        return out
+    return prepared if isinstance(prepared, dict) else out
+
+
 def _as_bool_flag(value: Any, default: bool = True) -> bool:
     if value is None:
         return bool(default)
@@ -3526,7 +3573,7 @@ def list_portals() -> Dict[str, Any]:
                 "label": portal.get("label", key),
                 "desired_running": desired_running,
                 "running": actual_running,
-                "settings": _setting_fields(portal.get("required", {}), current_settings),
+                "settings": _portal_setting_fields(key, portal.get("required", {}), current_settings),
             }
         )
 
@@ -3555,9 +3602,10 @@ def stop_portal(portal_key: str) -> Dict[str, Any]:
 
 @app.post("/api/portals/{portal_key}/settings")
 def save_portal_settings(portal_key: str, payload: SettingsUpdateRequest) -> Dict[str, Any]:
+    values = _portal_prepare_settings_values(portal_key, dict(payload.values or {}))
     mapping = {
         k: json.dumps(v) if isinstance(v, (dict, list, bool)) else str(v)
-        for k, v in (payload.values or {}).items()
+        for k, v in values.items()
     }
     if mapping:
         redis_client.hset(f"{portal_key}_settings", mapping=mapping)
