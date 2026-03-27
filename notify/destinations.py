@@ -21,7 +21,7 @@ _PLATFORM_META: Dict[str, Dict[str, Any]] = {
     "discord": {
         "label": "Discord",
         "requires_target": True,
-        "fields": ("guild_id", "channel_id", "channel"),
+        "fields": ("guild_id", "guild_name", "channel_id", "channel"),
     },
     "irc": {
         "label": "IRC",
@@ -68,6 +68,7 @@ _PLATFORM_META: Dict[str, Dict[str, Any]] = {
 _MAX_RECENT_QUEUE_ITEMS = 250
 _MAX_RECENT_KEYS = 160
 _ROOM_LABEL_PREFIX = "tater:room_label"
+_ROOM_META_PREFIX = "tater:room_meta"
 
 
 def _to_text(value: Any) -> str:
@@ -104,6 +105,43 @@ def _scan_keys(redis_client: Any, pattern: str, *, max_keys: int) -> List[str]:
     return out
 
 
+def _room_meta_key(platform: str, room_id: Any) -> str:
+    normalized = normalize_platform(platform)
+    scope_id = _to_text(room_id)
+    if not normalized or not scope_id:
+        return ""
+    return f"{_ROOM_META_PREFIX}:{normalized}:{scope_id}"
+
+
+def _load_room_meta(redis_client: Any, platform: str, room_id: Any) -> Dict[str, str]:
+    if redis_client is None:
+        return {}
+    key = _room_meta_key(platform, room_id)
+    if not key:
+        return {}
+    try:
+        raw = redis_client.get(key)
+    except Exception:
+        return {}
+    text = _to_text(raw)
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    out: Dict[str, str] = {}
+    for raw_key, raw_value in parsed.items():
+        key_text = _to_text(raw_key)
+        value_text = _to_text(raw_value)
+        if not key_text or not value_text:
+            continue
+        out[key_text] = value_text
+    return out
+
+
 def _targets_key(targets: Dict[str, Any]) -> str:
     clean = {str(k): _to_text(v) for k, v in (targets or {}).items() if _to_text(v)}
     payload = json.dumps(clean, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -131,10 +169,15 @@ def _normalize_targets_for_platform(platform: str, raw: Any) -> Dict[str, str]:
 def _discord_label(targets: Dict[str, str]) -> str:
     channel = _to_text(targets.get("channel") or targets.get("channel_id"))
     guild = _to_text(targets.get("guild_id"))
+    guild_name = _to_text(targets.get("guild_name"))
+    if channel and guild_name:
+        return f"{channel} • {guild_name}"
     if channel and guild:
         return f"{channel} • guild {guild}"
     if channel:
         return channel
+    if guild_name:
+        return guild_name
     if guild:
         return f"guild {guild}"
     return "Discord target"
@@ -186,15 +229,20 @@ def _discord_destination_groups(destinations: List[Dict[str, Any]]) -> List[Dict
         if not guild_id:
             ungrouped.append(row)
             continue
+        guild_name = _to_text(targets.get("guild_name"))
         group = grouped.get(guild_id)
         if not isinstance(group, dict):
             group = {
                 "id": f"guild:{guild_id}",
-                "label": f"Guild {guild_id}",
+                "label": f"{guild_name} ({guild_id})" if guild_name else f"Guild {guild_id}",
                 "guild_id": guild_id,
+                "guild_name": guild_name,
                 "destinations": [],
             }
             grouped[guild_id] = group
+        elif guild_name and not _to_text(group.get("guild_name")):
+            group["guild_name"] = guild_name
+            group["label"] = f"{guild_name} ({guild_id})"
         group["destinations"].append(row)
 
     out = sorted(grouped.values(), key=lambda row: _to_text(row.get("label")).lower())
@@ -393,8 +441,15 @@ def _room_label_targets_for_platform(platform: str, redis_client: Any) -> List[D
         label = _to_text(label_raw)
         targets: Dict[str, str] = {}
         if normalized == "discord":
+            meta = _load_room_meta(redis_client, normalized, room_id)
             if room_id.isdigit():
                 targets["channel_id"] = room_id
+            guild_id = _to_text(meta.get("guild_id"))
+            if guild_id.isdigit():
+                targets["guild_id"] = guild_id
+            guild_name = _to_text(meta.get("guild_name"))
+            if guild_name:
+                targets["guild_name"] = guild_name
             if label.startswith("#"):
                 targets["channel"] = label
         elif normalized == "irc":

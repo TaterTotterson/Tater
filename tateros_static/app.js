@@ -1386,6 +1386,14 @@ function parseSettingValue(raw, type) {
     const parsed = Number(raw);
     return Number.isNaN(parsed) ? 0 : parsed;
   }
+  if (type === "multiselect") {
+    if (Array.isArray(raw)) {
+      return raw
+        .map((item) => String(item || "").trim())
+        .filter(Boolean);
+    }
+    return [];
+  }
   if (type === "checkbox") {
     return Boolean(raw);
   }
@@ -1557,6 +1565,50 @@ function buildSettingInput(field, inputId) {
     return `<label>${safeLabel}<select id="${inputId}" data-setting-type="select" data-setting-key="${safeKey}">${optionRows}</select>${safeDesc}</label>`;
   }
 
+  if (type === "multiselect") {
+    const options = Array.isArray(field.options) ? field.options : [];
+    const selectedValues = (() => {
+      if (Array.isArray(field.value)) {
+        return new Set(field.value.map((item) => String(item ?? "")));
+      }
+      if (typeof field.value === "string") {
+        const text = field.value.trim();
+        if (text.startsWith("[") && text.endsWith("]")) {
+          const parsed = safeJsonParse(text);
+          if (Array.isArray(parsed)) {
+            return new Set(parsed.map((item) => String(item ?? "")));
+          }
+        }
+        if (text) {
+          return new Set(
+            text
+              .split(",")
+              .map((item) => item.trim())
+              .filter(Boolean)
+          );
+        }
+      }
+      return new Set();
+    })();
+
+    const size = Math.max(4, Math.min(14, options.length || 8));
+    const optionRows = options
+      .map((optRaw) => {
+        if (typeof optRaw === "object" && optRaw !== null) {
+          const value = String(optRaw.value ?? optRaw.id ?? optRaw.key ?? optRaw.label ?? "");
+          const label = String(optRaw.label ?? value);
+          const selected = selectedValues.has(value) ? "selected" : "";
+          return `<option value="${escapeHtml(value)}" ${selected}>${escapeHtml(label)}</option>`;
+        }
+        const value = String(optRaw ?? "");
+        const selected = selectedValues.has(value) ? "selected" : "";
+        return `<option value="${escapeHtml(value)}" ${selected}>${escapeHtml(value)}</option>`;
+      })
+      .join("");
+
+    return `<label>${safeLabel}<select id="${inputId}" class="settings-multiselect" multiple size="${size}" data-setting-type="multiselect" data-setting-key="${safeKey}">${optionRows}</select>${safeDesc}</label>`;
+  }
+
   if (type === "checkbox") {
     const checked = boolFromAny(field?.value, false) ? "checked" : "";
     const toggleInput = `<input id="${inputId}" class="toggle-input" type="checkbox" data-setting-type="checkbox" data-setting-key="${safeKey}" ${checked} />`;
@@ -1589,6 +1641,11 @@ function buildSettingInput(field, inputId) {
 
 function getInputValue(input) {
   const type = input.dataset.settingType || input.type;
+  if (type === "multiselect") {
+    return Array.from(input.selectedOptions || [])
+      .map((option) => String(option?.value || "").trim())
+      .filter(Boolean);
+  }
   if (type === "checkbox") {
     return input.checked;
   }
