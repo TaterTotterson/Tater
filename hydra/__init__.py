@@ -639,9 +639,13 @@ async def _llm_enrich_tool_call_for_user_request(
         parsed = parsed.get("arguments") or {}
 
     merged = dict(args)
-    existing_platform = str(merged.get("platform") or "").strip()
-    candidate_platform = str(parsed.get("platform") or "").strip()
-    if candidate_platform and not existing_platform and _send_message_value_in_user_text(candidate_platform, user_request):
+    existing_platform_raw = str(merged.get("platform") or "").strip()
+    candidate_platform_raw = str(parsed.get("platform") or "").strip()
+    existing_platform = normalize_platform(existing_platform_raw) or existing_platform_raw
+    candidate_platform = normalize_platform(candidate_platform_raw) or candidate_platform_raw
+    candidate_platform_in_user = bool(candidate_platform) and _send_message_value_in_user_text(candidate_platform, user_request)
+    existing_platform_in_user = bool(existing_platform) and _send_message_value_in_user_text(existing_platform, user_request)
+    if candidate_platform_in_user and (not existing_platform or not existing_platform_in_user):
         merged["platform"] = candidate_platform
 
     merged_targets = _send_message_targets_from_args(merged)

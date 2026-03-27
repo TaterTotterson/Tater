@@ -1181,12 +1181,19 @@ def _send_message_extract_target_hint(raw: Any) -> str:
             return match.group(0)
     text = re.sub(r"^(?:room|channel|chat)\s+", "", text, flags=re.IGNORECASE)
     text = re.sub(
-        r"\s+(?:in|on)\s+(?:discord|irc|matrix|telegram|home\s*assistant|homeassistant|ntfy|web\s*ui|webui)\b.*$",
+        r"\s+(?:to|in|on)\s+(?:discord|irc|matrix|telegram|home\s*assistant|homeassistant|ntfy|web\s*ui|webui)\b.*$",
         "",
         text,
         flags=re.IGNORECASE,
     )
-    return text.strip(" .")
+    candidate = text.strip(" .")
+    if not candidate:
+        return ""
+    if re.search(r"\s", candidate):
+        return ""
+    if normalize_notify_platform(candidate) in ALLOWED_PLATFORMS:
+        return ""
+    return candidate
 
 
 def _send_message_coerce_targets(payload: Any) -> Dict[str, Any]:
@@ -1317,7 +1324,7 @@ def _send_message_resolve_catalog_destination(
         platform_token = normalize_notify_platform(platform_row.get("platform"))
         if not platform_token:
             continue
-        if dest and dest not in {"webui"} and platform_token != dest:
+        if dest and platform_token != dest:
             continue
 
         destinations = platform_row.get("destinations") if isinstance(platform_row, dict) else []
@@ -1410,9 +1417,9 @@ def _send_message_resolve_catalog_destination(
     best_score, best_platform, best_row, best_field = matches[0]
     del best_score, best_field
 
-    if dest and dest not in {"webui"} and best_platform != dest:
+    if dest and best_platform != dest:
         return dest, resolved_targets, None
-    if not dest or dest == "webui":
+    if not dest:
         dest = best_platform
 
     best_targets = best_row.get("targets") if isinstance(best_row.get("targets"), dict) else {}
