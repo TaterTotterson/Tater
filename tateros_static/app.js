@@ -3803,6 +3803,8 @@ function renderCoreSettingsManager(body, tabSpec) {
   const itemsTabLabel = String(ui?.items_tab_label || "Current").trim() || "Current";
   const itemFieldsDropdown = boolFromAny(ui?.item_fields_dropdown, false);
   const itemFieldsDropdownLabel = String(ui?.item_fields_dropdown_label || "Settings").trim() || "Settings";
+  const itemFieldsPopup = boolFromAny(ui?.item_fields_popup, false);
+  const itemFieldsPopupLabel = String(ui?.item_fields_popup_label || itemFieldsDropdownLabel || "Settings").trim() || "Settings";
   const itemSectionsInDropdown = boolFromAny(ui?.item_sections_in_dropdown, false);
   const addForm = ui?.add_form && typeof ui.add_form === "object" ? ui.add_form : {};
   const addFields = Array.isArray(addForm?.fields) ? addForm.fields : [];
@@ -3851,6 +3853,34 @@ function renderCoreSettingsManager(body, tabSpec) {
     const runConfirm = String(item?.run_confirm || "").trim();
     const removeConfirm = String(item?.remove_confirm || "Remove this item?").trim();
     const itemFieldContent = itemFields.map((field) => renderCoreManagerField(field)).join("");
+    const popupFields = [];
+    if (itemFieldsPopup) {
+      itemFields.forEach((field) => {
+        if (field && typeof field === "object") {
+          popupFields.push({ ...field });
+        }
+      });
+      sections.forEach((section) => {
+        const sectionLabel = String(section?.label || "Section").trim() || "Section";
+        const fields = Array.isArray(section?.fields) ? section.fields : [];
+        fields.forEach((field) => {
+          if (!field || typeof field !== "object") {
+            return;
+          }
+          const nextField = { ...field };
+          const rawLabel = String(nextField.label || nextField.key || "Field").trim() || "Field";
+          nextField.label = `${sectionLabel} • ${rawLabel}`;
+          popupFields.push(nextField);
+        });
+      });
+    }
+    let popupFieldsEncoded = "";
+    try {
+      popupFieldsEncoded = popupFields.length ? encodeURIComponent(JSON.stringify(popupFields)) : "";
+    } catch (_error) {
+      popupFieldsEncoded = "";
+    }
+    const popupTitle = String(item?.settings_title || `${title} Settings`).trim() || `${title} Settings`;
 
           const sectionHtml = sections
             .map((section) => {
@@ -3889,7 +3919,9 @@ function renderCoreSettingsManager(body, tabSpec) {
     }
     const dropdownContentHtml = dropdownContentParts.join("");
 
-    const itemFieldsHtml = itemFieldsDropdown
+    const itemFieldsHtml = itemFieldsPopup
+      ? ""
+      : itemFieldsDropdown
       ? dropdownContentHtml
         ? `
           <details class="settings-dropdown">
@@ -3915,17 +3947,26 @@ function renderCoreSettingsManager(body, tabSpec) {
         data-core-remove-action="${escapeHtml(removeAction)}"
         data-core-run-action="${escapeHtml(runAction)}"
         data-core-run-confirm="${escapeHtml(runConfirm)}"
-        data-core-remove-confirm="${escapeHtml(removeConfirm)}">
+        data-core-remove-confirm="${escapeHtml(removeConfirm)}"
+        data-core-item-popup-fields="${escapeHtml(popupFieldsEncoded)}"
+        data-core-item-popup-title="${escapeHtml(popupTitle)}">
         <div class="card-head">
           <h3 class="card-title">${escapeHtml(title)}</h3>
           <span class="small">${safeCoreKey}</span>
         </div>
         ${subtitle ? `<div class="small">${escapeHtml(subtitle)}</div>` : ""}
         ${itemFieldsHtml}
-        ${itemSectionsInDropdown ? "" : sectionHtml}
+        ${itemFieldsPopup ? "" : itemSectionsInDropdown ? "" : sectionHtml}
         <div class="inline-row" style="margin-top:10px;">
           ${
-            saveAction
+            itemFieldsPopup && saveAction && popupFieldsEncoded
+              ? `<button type="button" class="action-btn core-manager-settings">${escapeHtml(
+                  String(item?.settings_label || itemFieldsPopupLabel)
+                )}</button>`
+              : ""
+          }
+          ${
+            saveAction && (!itemFieldsPopup || !popupFieldsEncoded)
               ? `<button type="button" class="action-btn core-manager-save">${escapeHtml(
                   String(item?.save_label || "Save")
                 )}</button>`
@@ -4552,6 +4593,19 @@ function bindCoreTabManagers() {
   bindCoreManagerTabs();
   bindCoreManagerSubtabs();
   bindCoreManagerSelectors();
+  const decodeCoreManagerPopupFields = (card) => {
+    const encoded = String(card?.dataset?.coreItemPopupFields || "").trim();
+    if (!encoded) {
+      return [];
+    }
+    try {
+      const decoded = decodeURIComponent(encoded);
+      const parsed = JSON.parse(decoded);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (_error) {
+      return [];
+    }
+  };
 
   document.querySelectorAll(".core-manager-add-form[data-core-key][data-core-action]").forEach((form) => {
     if (form.dataset.coreManagerActionBound === "1") {
@@ -4587,6 +4641,50 @@ function bindCoreTabManagers() {
         setCoreManagerStatus(form, `Failed: ${error.message}`);
         showToast(`Failed: ${error.message}`, "error", 3600);
       }
+    });
+  });
+
+  document.querySelectorAll(".core-manager-settings").forEach((button) => {
+    if (button.dataset.coreManagerActionBound === "1") {
+      return;
+    }
+    button.dataset.coreManagerActionBound = "1";
+    button.addEventListener("click", (event) => {
+      const card = event.currentTarget.closest(".core-manager-item");
+      const coreKey = String(card?.dataset?.coreKey || "").trim();
+      const action = String(card?.dataset?.coreSaveAction || "").trim();
+      const itemId = decodeCoreManagerId(card?.dataset?.coreItemId || "");
+      if (!card || !coreKey || !action) {
+        return;
+      }
+      const modalFields = decodeCoreManagerPopupFields(card);
+      if (!modalFields.length) {
+        showToast("No configurable settings found for this item.", "error", 2600);
+        return;
+      }
+      const popupTitle = String(card?.dataset?.coreItemPopupTitle || `${itemId || coreKey} Settings`).trim();
+      openRuntimeSettingsModal({
+        title: popupTitle || "Settings",
+        meta: coreKey,
+        fields: modalFields,
+        onSave: async (values) => {
+          setCoreManagerStatus(card, "Saving...");
+          const activeTab = persistCoreTabFromNode(card);
+          const result = await runActionWithProgress(
+            {
+              title: "Saving core item",
+              detail: itemId || coreKey,
+              workingText: "Saving changes...",
+              successText: "Saved.",
+              errorPrefix: "Core manager save failed",
+            },
+            () => runCoreTabAction(coreKey, action, { id: itemId, values })
+          );
+          await refreshCoreTabInPlace(activeTab);
+          state.notice = String(result?.message || "Saved.");
+          return result;
+        },
+      });
     });
   });
 
