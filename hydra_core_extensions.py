@@ -311,6 +311,7 @@ async def run_hydra_kernel_tool(
                 payload = None
         if isinstance(payload, dict):
             return payload
+
     return None
 
 
