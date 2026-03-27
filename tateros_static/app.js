@@ -3847,6 +3847,8 @@ function renderCoreSettingsManager(body, tabSpec) {
     const sections = Array.isArray(item?.sections) ? item.sections : [];
     const saveAction = String(item?.save_action || "").trim();
     const removeAction = String(item?.remove_action || "").trim();
+    const runAction = String(item?.run_action || "").trim();
+    const runConfirm = String(item?.run_confirm || "").trim();
     const removeConfirm = String(item?.remove_confirm || "Remove this item?").trim();
     const itemFieldContent = itemFields.map((field) => renderCoreManagerField(field)).join("");
 
@@ -3911,6 +3913,8 @@ function renderCoreSettingsManager(body, tabSpec) {
         data-core-item-group="${escapeHtml(itemGroup)}"
         data-core-save-action="${escapeHtml(saveAction)}"
         data-core-remove-action="${escapeHtml(removeAction)}"
+        data-core-run-action="${escapeHtml(runAction)}"
+        data-core-run-confirm="${escapeHtml(runConfirm)}"
         data-core-remove-confirm="${escapeHtml(removeConfirm)}">
         <div class="card-head">
           <h3 class="card-title">${escapeHtml(title)}</h3>
@@ -3931,6 +3935,13 @@ function renderCoreSettingsManager(body, tabSpec) {
             removeAction
               ? `<button type="button" class="inline-btn danger core-manager-remove">${escapeHtml(
                   String(item?.remove_label || "Remove")
+                )}</button>`
+              : ""
+          }
+          ${
+            runAction
+              ? `<button type="button" class="action-btn core-manager-run" style="margin-left:auto;">${escapeHtml(
+                  String(item?.run_label || "Run Now")
                 )}</button>`
               : ""
           }
@@ -4649,6 +4660,47 @@ function bindCoreTabManagers() {
         );
         await refreshCoreTabInPlace(activeTab);
         state.notice = String(result?.message || "Removed.");
+        setCoreManagerStatus(card, state.notice);
+        showToast(state.notice);
+      } catch (error) {
+        setCoreManagerStatus(card, `Failed: ${error.message}`);
+        showToast(`Failed: ${error.message}`, "error", 3600);
+      }
+    });
+  });
+
+  document.querySelectorAll(".core-manager-run").forEach((button) => {
+    if (button.dataset.coreManagerActionBound === "1") {
+      return;
+    }
+    button.dataset.coreManagerActionBound = "1";
+    button.addEventListener("click", async (event) => {
+      const card = event.currentTarget.closest(".core-manager-item");
+      const coreKey = String(card?.dataset?.coreKey || "").trim();
+      const action = String(card?.dataset?.coreRunAction || "").trim();
+      const itemId = decodeCoreManagerId(card?.dataset?.coreItemId || "");
+      const confirmText = String(card?.dataset?.coreRunConfirm || "").trim();
+      if (!card || !coreKey || !action) {
+        return;
+      }
+      if (confirmText && !window.confirm(confirmText)) {
+        return;
+      }
+      setCoreManagerStatus(card, "Queueing...");
+      try {
+        const activeTab = persistCoreTabFromNode(card);
+        const result = await runActionWithProgress(
+          {
+            title: "Running core item",
+            detail: itemId || coreKey,
+            workingText: "Queueing run now...",
+            successText: "Queued.",
+            errorPrefix: "Core manager run failed",
+          },
+          () => runCoreTabAction(coreKey, action, { id: itemId })
+        );
+        await refreshCoreTabInPlace(activeTab);
+        state.notice = String(result?.message || "Queued.");
         setCoreManagerStatus(card, state.notice);
         showToast(state.notice);
       } catch (error) {
