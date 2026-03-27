@@ -295,7 +295,7 @@ def write_hydra_ledger(
             entry["tool_result_summary"] = summary
     payload = json.dumps(entry, ensure_ascii=False)
 
-    keys = ["tater:hydra:ledger", f"tater:hydra:ledger:{platform}"]
+    keys = [f"tater:hydra:ledger:{platform}"]
     max_items = configured_max_ledger_items_fn(redis_client)
     for key in keys:
         try:

@@ -2700,17 +2700,10 @@ def _runtime_platform_label(platform: Any) -> str:
 
 def _load_chat_job_history_rows(max_items: int = 5000) -> List[Dict[str, Any]]:
     max_rows = max(200, min(int(max_items or 0), 20000))
-    keys: List[str] = []
     try:
-        if redis_client.exists("tater:hydra:ledger"):
-            keys = ["tater:hydra:ledger"]
+        keys = sorted(str(k) for k in redis_client.scan_iter(match="tater:hydra:ledger:*"))
     except Exception:
         keys = []
-    if not keys:
-        try:
-            keys = sorted(str(k) for k in redis_client.scan_iter(match="tater:hydra:ledger:*"))
-        except Exception:
-            keys = []
 
     rows: List[Dict[str, Any]] = []
     seen_ids = set()
@@ -4062,11 +4055,6 @@ def _hydra_ledger_keys_for_platform(platform: str) -> List[str]:
     if plat == "all":
         keys: List[str] = []
         try:
-            if redis_client.exists("tater:hydra:ledger"):
-                keys.append("tater:hydra:ledger")
-        except Exception:
-            pass
-        try:
             keys.extend(sorted(str(k) for k in redis_client.scan_iter(match="tater:hydra:ledger:*")))
         except Exception:
             pass
@@ -4385,11 +4373,8 @@ def get_hydra_data() -> Dict[str, Any]:
         except Exception:
             count = 0
         ledger_entries_total += max(0, int(count))
-        if key == "tater:hydra:ledger":
-            platform = "legacy"
-        else:
-            suffix = str(key).split("tater:hydra:ledger:", 1)[-1]
-            platform = normalize_platform(suffix or "webui")
+        suffix = str(key).split("tater:hydra:ledger:", 1)[-1]
+        platform = normalize_platform(suffix or "webui")
         ledger_rows.append(
             {
                 "platform": platform,
