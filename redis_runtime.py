@@ -879,6 +879,36 @@ class EncryptedRedisClientFacade:
             return rows
         return [self._decode(value) for value in rows]
 
+    def lpop(self, name: Any, count: Any = None):
+        if count is None:
+            return self._decode(self._client.lpop(name))
+        rows = self._client.lpop(name, count)
+        if not isinstance(rows, list):
+            return rows
+        return [self._decode(value) for value in rows]
+
+    def rpop(self, name: Any, count: Any = None):
+        if count is None:
+            return self._decode(self._client.rpop(name))
+        rows = self._client.rpop(name, count)
+        if not isinstance(rows, list):
+            return rows
+        return [self._decode(value) for value in rows]
+
+    def blpop(self, keys: Any, timeout: int = 0):
+        row = self._client.blpop(keys, timeout=timeout)
+        if not (isinstance(row, tuple) and len(row) == 2):
+            return row
+        key, value = row
+        return key, self._decode(value)
+
+    def brpop(self, keys: Any, timeout: int = 0):
+        row = self._client.brpop(keys, timeout=timeout)
+        if not (isinstance(row, tuple) and len(row) == 2):
+            return row
+        key, value = row
+        return key, self._decode(value)
+
     def sadd(self, name: Any, *values: Any):
         return self._client.sadd(name, *values)
 
