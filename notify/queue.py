@@ -3,7 +3,7 @@ import uuid
 import re
 from typing import Any, Dict, Optional, Tuple
 
-ALLOWED_PLATFORMS = ("discord", "irc", "matrix", "homeassistant", "ntfy", "telegram", "macos")
+ALLOWED_PLATFORMS = ("discord", "irc", "matrix", "homeassistant", "ntfy", "telegram", "macos", "webui")
 
 QUEUE_KEYS = {
     "discord": "notifyq:discord",
@@ -62,6 +62,9 @@ _PLATFORM_ALIASES = {
     "current macs": "macos",
     "mac": "macos",
     "macs": "macos",
+    "web ui": "webui",
+    "web-ui": "webui",
+    "web_ui": "webui",
 }
 
 
@@ -277,6 +280,9 @@ def resolve_targets(
 
     elif platform == "homeassistant":
         # No required target for persistent notifications
+        pass
+    elif platform == "webui":
+        # No required target; writes directly to WebUI chat history.
         pass
 
     return resolved, None
