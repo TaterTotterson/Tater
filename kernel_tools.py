@@ -2090,6 +2090,25 @@ def attach_file(
     *,
     artifact_id: Any = None,
     path: Any = None,
+    message: Any = None,
+    content: Any = None,
+    title: Any = None,
+    platform: Any = None,
+    targets: Any = None,
+    priority: Any = None,
+    tags: Any = None,
+    ttl_sec: Any = None,
+    channel_id: Any = None,
+    channel: Any = None,
+    guild_id: Any = None,
+    room_id: Any = None,
+    room_alias: Any = None,
+    device_service: Any = None,
+    persistent: Any = None,
+    api_notification: Any = None,
+    chat_id: Any = None,
+    device_id: Any = None,
+    scope: Any = None,
     origin: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     artifact_payload: Optional[Dict[str, Any]] = None
@@ -2138,13 +2157,103 @@ def attach_file(
     if chosen_artifact_id:
         artifact_out["artifact_id"] = chosen_artifact_id
 
+    text_message = str(message or content or "").strip()
+    destination = normalize_notify_platform(platform)
+    target_map = _send_message_coerce_targets(targets)
+    for key, value in (
+        ("channel_id", channel_id),
+        ("channel", channel),
+        ("guild_id", guild_id),
+        ("room_id", room_id),
+        ("room_alias", room_alias),
+        ("device_service", device_service),
+        ("persistent", persistent),
+        ("api_notification", api_notification),
+        ("chat_id", chat_id),
+        ("device_id", device_id),
+        ("scope", scope),
+    ):
+        if value not in (None, "") and key not in target_map:
+            target_map[key] = value
+
+    if not destination:
+        destination_hint = _send_message_extract_destination_hint(text_message)
+        if destination_hint:
+            destination = destination_hint
+    if not _send_message_has_explicit_target(target_map):
+        inline_target_hint = _send_message_extract_instruction_target(text_message)
+        if inline_target_hint:
+            target_map["channel"] = inline_target_hint
+
+    has_delivery_intent = bool(destination or _send_message_has_explicit_target(target_map))
     notify_suggestions = _attach_file_notify_suggestions(origin, limit=5)
+    if has_delivery_intent:
+        try:
+            send_result = send_message(
+                message=(text_message or "Attachment"),
+                title=title,
+                platform=destination,
+                targets=target_map,
+                attachments=[artifact_out],
+                priority=priority,
+                tags=tags,
+                ttl_sec=ttl_sec,
+                origin=origin,
+                channel_id=channel_id,
+                channel=channel,
+                guild_id=guild_id,
+                room_id=room_id,
+                room_alias=room_alias,
+                device_service=device_service,
+                persistent=persistent,
+                api_notification=api_notification,
+                chat_id=chat_id,
+                device_id=device_id,
+                scope=scope,
+            )
+        except Exception as exc:
+            return action_failure(
+                code="attach_file_send_failed",
+                message=f"Failed to send attachment to destination: {str(exc) or 'unknown error'}",
+                say_hint="Explain why the attachment could not be sent.",
+            )
+        if not isinstance(send_result, dict) or not bool(send_result.get("ok")):
+            return send_result if isinstance(send_result, dict) else action_failure(
+                code="attach_file_send_failed",
+                message="Failed to send attachment to destination.",
+                say_hint="Explain why the file could not be sent.",
+            )
+
+        send_data = send_result.get("data") if isinstance(send_result.get("data"), dict) else {}
+        send_summary = str(send_result.get("summary_for_user") or "").strip() or "Queued attachment delivery."
+        return action_success(
+            facts={
+                "artifact_id": chosen_artifact_id,
+                "name": final_name,
+                "size": len(binary),
+                "delivery_requested": True,
+                "platform": str(send_data.get("platform") or destination or "").strip(),
+                "notify_suggestion_count": len(notify_suggestions),
+            },
+            data={
+                "artifact_id": chosen_artifact_id,
+                "name": final_name,
+                "mimetype": final_mime,
+                "size": len(binary),
+                "notify_suggestions": notify_suggestions,
+                "delivery": send_data,
+            },
+            summary_for_user=f"{send_summary} (attached {final_name})",
+            say_hint="Confirm the destination and attached file in one short sentence.",
+            artifacts=[artifact_out],
+        )
 
     return action_success(
         facts={
             "artifact_id": chosen_artifact_id,
             "name": final_name,
             "size": len(binary),
+            "delivery_requested": False,
             "notify_suggestion_count": len(notify_suggestions),
         },
         data={

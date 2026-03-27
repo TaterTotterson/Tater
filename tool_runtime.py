@@ -73,7 +73,7 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
     "write_workspace_note": "append a workspace note",
     "list_workspace": "list workspace notes",
     "image_describe": "describe an explicit image using an artifact_id, URL, blob, or local path",
-    "attach_file": "attach an available artifact or local file to the current conversation",
+    "attach_file": "attach an available artifact/local file and optionally send it to a destination platform/target",
     "send_message": "queue a cross-portal notification/message only when the user explicitly asks to notify or message a destination (never for normal chat replies)",
 }
 
@@ -93,7 +93,7 @@ _KERNEL_TOOL_USAGE_HINTS = {
     "write_workspace_note": '{"function":"write_workspace_note","arguments":{"content":"<note_text>"}}',
     "list_workspace": '{"function":"list_workspace","arguments":{}}',
     "image_describe": '{"function":"image_describe","arguments":{"artifact_id":"<artifact_id>","query":"Describe this image."}}',
-    "attach_file": '{"function":"attach_file","arguments":{"artifact_id":"<artifact_id>"}}',
+    "attach_file": '{"function":"attach_file","arguments":{"artifact_id":"<artifact_id>","platform":"discord","targets":{"channel":"#channel"},"message":"Attachment"}}',
     "send_message": '{"function":"send_message","arguments":{"message":"<message>","platform":"discord","targets":{"channel":"#channel"}}}',
 }
 
@@ -401,6 +401,25 @@ async def run_meta_tool(
         return attach_file(
             artifact_id=args.get("artifact_id"),
             path=args.get("path"),
+            message=args.get("message"),
+            content=args.get("content"),
+            title=args.get("title"),
+            platform=args.get("platform"),
+            targets=args.get("targets"),
+            priority=args.get("priority"),
+            tags=args.get("tags"),
+            ttl_sec=args.get("ttl_sec"),
+            channel_id=args.get("channel_id"),
+            channel=args.get("channel"),
+            guild_id=args.get("guild_id"),
+            room_id=args.get("room_id"),
+            room_alias=args.get("room_alias"),
+            device_service=args.get("device_service"),
+            persistent=args.get("persistent"),
+            api_notification=args.get("api_notification"),
+            chat_id=args.get("chat_id"),
+            device_id=args.get("device_id"),
+            scope=args.get("scope"),
             origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
         )
     if func == "send_message":
