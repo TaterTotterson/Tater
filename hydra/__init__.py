@@ -91,7 +91,7 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
     "write_workspace_note": "append a workspace note",
     "list_workspace": "list workspace notes",
     "image_describe": "describe an explicit image using an artifact_id, URL, blob, or local path",
-    "attach_file": "attach an available artifact or local file to the current conversation",
+    "attach_file": "attach an available artifact or local file, and optionally send it to a destination platform/target",
     "send_message": "queue a cross-portal notification/message only when the user explicitly asks to notify or message a destination (never for normal chat replies)",
 }
 _KERNEL_TOOL_USAGE_HINTS = {
@@ -110,7 +110,7 @@ _KERNEL_TOOL_USAGE_HINTS = {
     "write_workspace_note": '{"function":"write_workspace_note","arguments":{"content":"<note_text>"}}',
     "list_workspace": '{"function":"list_workspace","arguments":{}}',
     "image_describe": '{"function":"image_describe","arguments":{"artifact_id":"<artifact_id>","query":"Describe this image."}}',
-    "attach_file": '{"function":"attach_file","arguments":{"artifact_id":"<artifact_id>"}}',
+    "attach_file": '{"function":"attach_file","arguments":{"artifact_id":"<artifact_id>","platform":"discord","targets":{"channel":"#channel"},"message":"Attachment"}}',
     "send_message": '{"function":"send_message","arguments":{"message":"<message>","platform":"discord","targets":{"channel":"#channel"}}}',
 }
 
@@ -589,6 +589,16 @@ def _send_message_extract_explicit_platform(user_text: Any) -> str:
         return _send_message_normalize_platform_alias(fallback.group(1))
     return ""
 
+
+def _send_message_extract_instruction_target(user_text: Any) -> str:
+    text = str(user_text or "").strip()
+    if not text:
+        return ""
+    match = re.search(r"\bto\s+([#!@][A-Za-z0-9][A-Za-z0-9._:-]*)", text, flags=re.IGNORECASE)
+    if match:
+        return str(match.group(1) or "").strip()
+    return ""
+
 async def _llm_enrich_tool_call_for_user_request(
     *,
     llm_client: Any,
@@ -607,6 +617,33 @@ async def _llm_enrich_tool_call_for_user_request(
     if not isinstance(tool_call, dict):
         return tool_call
     func = _canonical_tool_name(str(tool_call.get("function") or "").strip())
+    if func == "attach_file":
+        args = dict(tool_call.get("arguments") or {}) if isinstance(tool_call.get("arguments"), dict) else {}
+        user_request = str(user_text or "").strip()
+        merged = dict(args or {})
+        explicit_user_platform = _send_message_extract_explicit_platform(user_request)
+        if explicit_user_platform:
+            merged["platform"] = explicit_user_platform
+        else:
+            existing_platform_raw = str(merged.get("platform") or "").strip()
+            if existing_platform_raw:
+                merged["platform"] = _send_message_normalize_platform_alias(
+                    normalize_platform(existing_platform_raw) or existing_platform_raw
+                )
+
+        merged_targets = _send_message_targets_from_args(merged)
+        if not merged_targets:
+            target_hint = _send_message_extract_instruction_target(user_request)
+            if target_hint:
+                merged_targets["channel"] = target_hint
+        if merged_targets:
+            merged["targets"] = merged_targets
+
+        has_delivery_intent = bool(str(merged.get("platform") or "").strip() or merged_targets)
+        if has_delivery_intent and not str(merged.get("message") or merged.get("content") or "").strip():
+            merged["message"] = "Attachment"
+        return {"function": "attach_file", "arguments": merged}
+
     if func != "send_message":
         return tool_call
 
