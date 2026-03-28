@@ -478,7 +478,11 @@ _LLM_CALL_COUNTERS_REDIS_KEY = "tater:llm:runtime:counters"
 _LLM_CALL_HISTORY_REDIS_KEY = "tater:llm:runtime:history"
 _ACTIVE_VISION_CALLS_LOCK = threading.RLock()
 _ACTIVE_VISION_CALLS: Dict[str, Dict[str, Any]] = {}
+_VISION_CALL_HISTORY: List[Dict[str, Any]] = []
+_VISION_CALL_HISTORY_MAX = 5000
 _VISION_CALL_COUNTERS: Dict[str, int] = {"started": 0, "completed": 0, "failed": 0}
+_VISION_CALL_COUNTERS_REDIS_KEY = "tater:vision:runtime:counters"
+_VISION_CALL_HISTORY_REDIS_KEY = "tater:vision:runtime:history"
 
 _LLM_ORIGIN_KIND_LABELS = {
     "hydra": "Hydra",
@@ -616,6 +620,116 @@ def _load_persisted_llm_runtime_state() -> None:
 
 
 _load_persisted_llm_runtime_state()
+
+
+def _normalize_vision_runtime_history_row(row: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(row, dict):
+        return None
+    kind = str(row.get("kind") or "other").strip().lower() or "other"
+    source = str(row.get("source") or "unknown").strip() or "unknown"
+    return {
+        "id": str(row.get("id") or "").strip(),
+        "finished_at": _llm_runtime_as_float(row.get("finished_at"), 0.0, minimum=0.0),
+        "started_at": _llm_runtime_as_float(row.get("started_at"), 0.0, minimum=0.0),
+        "duration_ms": _llm_runtime_as_float(row.get("duration_ms"), 0.0, minimum=0.0),
+        "ok": _boolish(row.get("ok"), default=False),
+        "error": str(row.get("error") or "").strip(),
+        "kind": kind,
+        "source": source,
+        "module": str(row.get("module") or "").strip(),
+        "path": str(row.get("path") or "").strip(),
+        "function": str(row.get("function") or "").strip(),
+        "api_base": str(row.get("api_base") or "").strip(),
+        "model": str(row.get("model") or "").strip(),
+    }
+
+
+def _persist_vision_runtime_counter_delta(*, started: int = 0, completed: int = 0, failed: int = 0) -> None:
+    started_i = _llm_runtime_as_int(started, 0, minimum=0)
+    completed_i = _llm_runtime_as_int(completed, 0, minimum=0)
+    failed_i = _llm_runtime_as_int(failed, 0, minimum=0)
+    if started_i <= 0 and completed_i <= 0 and failed_i <= 0:
+        return
+    try:
+        client = get_redis_client() or redis_client
+        if client is None:
+            return
+        pipe = client.pipeline()
+        if started_i > 0:
+            pipe.hincrby(_VISION_CALL_COUNTERS_REDIS_KEY, "started", started_i)
+        if completed_i > 0:
+            pipe.hincrby(_VISION_CALL_COUNTERS_REDIS_KEY, "completed", completed_i)
+        if failed_i > 0:
+            pipe.hincrby(_VISION_CALL_COUNTERS_REDIS_KEY, "failed", failed_i)
+        pipe.execute()
+    except Exception:
+        return
+
+
+def _persist_vision_runtime_history_row(row: Dict[str, Any]) -> None:
+    normalized = _normalize_vision_runtime_history_row(row)
+    if not isinstance(normalized, dict):
+        return
+    try:
+        client = get_redis_client() or redis_client
+        if client is None:
+            return
+        payload = json.dumps(normalized, separators=(",", ":"), ensure_ascii=False)
+        history_limit = max(100, int(_VISION_CALL_HISTORY_MAX))
+        pipe = client.pipeline()
+        pipe.rpush(_VISION_CALL_HISTORY_REDIS_KEY, payload)
+        pipe.ltrim(_VISION_CALL_HISTORY_REDIS_KEY, -history_limit, -1)
+        pipe.execute()
+    except Exception:
+        return
+
+
+def _load_persisted_vision_runtime_state() -> None:
+    try:
+        client = get_redis_client() or redis_client
+    except Exception:
+        client = redis_client
+    if client is None:
+        return
+
+    counters = {"started": 0, "completed": 0, "failed": 0}
+    history_rows: List[Dict[str, Any]] = []
+    history_limit = max(100, int(_VISION_CALL_HISTORY_MAX))
+
+    try:
+        raw_counters = client.hgetall(_VISION_CALL_COUNTERS_REDIS_KEY) or {}
+    except Exception:
+        raw_counters = {}
+
+    if isinstance(raw_counters, dict):
+        counters["started"] = _llm_runtime_as_int(raw_counters.get("started"), 0, minimum=0)
+        counters["completed"] = _llm_runtime_as_int(raw_counters.get("completed"), 0, minimum=0)
+        counters["failed"] = _llm_runtime_as_int(raw_counters.get("failed"), 0, minimum=0)
+
+    try:
+        raw_history = client.lrange(_VISION_CALL_HISTORY_REDIS_KEY, -history_limit, -1) or []
+    except Exception:
+        raw_history = []
+
+    if isinstance(raw_history, list):
+        for item in raw_history:
+            try:
+                text = item.decode("utf-8", errors="ignore") if isinstance(item, (bytes, bytearray)) else str(item or "")
+                parsed = json.loads(text) if text else None
+                normalized = _normalize_vision_runtime_history_row(parsed)
+                if isinstance(normalized, dict):
+                    history_rows.append(normalized)
+            except Exception:
+                continue
+
+    with _ACTIVE_VISION_CALLS_LOCK:
+        _VISION_CALL_COUNTERS["started"] = counters["started"]
+        _VISION_CALL_COUNTERS["completed"] = counters["completed"]
+        _VISION_CALL_COUNTERS["failed"] = counters["failed"]
+        _VISION_CALL_HISTORY[:] = history_rows[-history_limit:]
+
+
+_load_persisted_vision_runtime_state()
 
 
 def _normalize_base_url(host: str) -> str:
@@ -1231,6 +1345,7 @@ def register_active_vision_call(
     with _ACTIVE_VISION_CALLS_LOCK:
         _ACTIVE_VISION_CALLS[call_id] = row
         _VISION_CALL_COUNTERS["started"] = int(_VISION_CALL_COUNTERS.get("started") or 0) + 1
+    _persist_vision_runtime_counter_delta(started=1)
     return call_id
 
 
@@ -1244,17 +1359,46 @@ def finish_active_vision_call(
     if not call_token:
         return
 
+    finished_at = time.time()
     with _ACTIVE_VISION_CALLS_LOCK:
         row = _ACTIVE_VISION_CALLS.pop(call_token, None)
         if not isinstance(row, dict):
             return
+        started_at = float(row.get("started_at") or 0.0)
+        duration_ms = max(0.0, (finished_at - started_at) * 1000.0) if started_at > 0.0 else 0.0
         ok = not bool(error)
         if ok:
             _VISION_CALL_COUNTERS["completed"] = int(_VISION_CALL_COUNTERS.get("completed") or 0) + 1
         else:
             _VISION_CALL_COUNTERS["failed"] = int(_VISION_CALL_COUNTERS.get("failed") or 0) + 1
-        if response_model:
-            row["model"] = str(response_model).strip()
+        final_model = str(response_model or row.get("model") or "").strip()
+        if final_model:
+            row["model"] = final_model
+        history_row = {
+            "id": call_token,
+            "finished_at": finished_at,
+            "started_at": started_at,
+            "duration_ms": duration_ms,
+            "ok": bool(ok),
+            "error": (str(error).strip() if error else ""),
+            "kind": str(row.get("kind") or "other"),
+            "source": str(row.get("source") or "unknown"),
+            "module": str(row.get("module") or ""),
+            "path": str(row.get("path") or ""),
+            "function": str(row.get("function") or ""),
+            "api_base": str(row.get("api_base") or ""),
+            "model": final_model,
+        }
+        _VISION_CALL_HISTORY.append(history_row)
+        overflow = len(_VISION_CALL_HISTORY) - int(_VISION_CALL_HISTORY_MAX)
+        if overflow > 0:
+            del _VISION_CALL_HISTORY[:overflow]
+
+    if ok:
+        _persist_vision_runtime_counter_delta(completed=1)
+    else:
+        _persist_vision_runtime_counter_delta(failed=1)
+    _persist_vision_runtime_history_row(history_row)
 
 
 def get_active_vision_calls_snapshot(*, limit: int = 100) -> List[Dict[str, Any]]:
@@ -1290,19 +1434,59 @@ def get_active_vision_calls_snapshot(*, limit: int = 100) -> List[Dict[str, Any]
     return out
 
 
-def get_vision_call_runtime_summary() -> Dict[str, Any]:
+def get_vision_call_runtime_summary(*, include_history: bool = False) -> Dict[str, Any]:
     active_calls = get_active_vision_calls_snapshot(limit=120)
+    by_kind_counts: Dict[str, int] = {}
+    by_source_counts: Dict[str, int] = {}
+
+    for row in active_calls:
+        kind = str(row.get("kind") or "other")
+        source = str(row.get("source") or "unknown")
+        by_kind_counts[kind] = int(by_kind_counts.get(kind) or 0) + 1
+        source_key = f"{kind}:{source}"
+        by_source_counts[source_key] = int(by_source_counts.get(source_key) or 0) + 1
+
+    by_kind = [
+        {
+            "kind": kind,
+            "label": _llm_origin_kind_label(kind),
+            "calls": int(count),
+        }
+        for kind, count in by_kind_counts.items()
+    ]
+    by_kind.sort(key=lambda row: (-int(row.get("calls") or 0), str(row.get("label") or "")))
+
+    by_source = []
+    for source_key, count in by_source_counts.items():
+        kind, _sep, source = str(source_key or "").partition(":")
+        by_source.append(
+            {
+                "kind": kind or "other",
+                "source": source or "unknown",
+                "label": f"{_llm_origin_kind_label(kind or 'other')} - {source or 'unknown'}",
+                "calls": int(count),
+            }
+        )
+    by_source.sort(key=lambda row: (-int(row.get("calls") or 0), str(row.get("label") or "")))
+
     with _ACTIVE_VISION_CALLS_LOCK:
         totals = {
             "started": int(_VISION_CALL_COUNTERS.get("started") or 0),
             "completed": int(_VISION_CALL_COUNTERS.get("completed") or 0),
             "failed": int(_VISION_CALL_COUNTERS.get("failed") or 0),
         }
-    return {
+        history_rows = [dict(item) for item in _VISION_CALL_HISTORY] if include_history else []
+
+    out = {
         "active_total": int(len(active_calls)),
         "totals": totals,
+        "active_by_kind": by_kind,
+        "active_by_source": by_source,
         "active_calls": active_calls,
     }
+    if include_history:
+        out["history"] = _llm_call_history_windows(history_rows)
+    return out
 
 
 def build_llm_host_from_env(default_host="127.0.0.1", default_port="11434") -> str:
