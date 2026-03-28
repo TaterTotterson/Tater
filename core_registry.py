@@ -13,12 +13,14 @@ _SAFE_MODULE_RE = re.compile(r"^[A-Za-z0-9_]+_core$")
 
 _DEFAULT_CORE_ORDER = [
     "ai_task_core",
+    "awareness_core",
     "memory_core",
     "rss_core",
 ]
 
 _DEFAULT_CORE_LABELS = {
     "ai_task_core": "AI Task Scheduler Core Settings",
+    "awareness_core": "Awareness Core Settings",
     "memory_core": "Memory Core Settings",
     "rss_core": "RSS Core Settings",
 }

@@ -1515,6 +1515,12 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   margin-top: 10px;
 }
 
+.core-tab-items.core-tab-items-group-event {
+  gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  align-items: start;
+}
+
 .core-tab-item {
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -2248,6 +2254,46 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   overflow-wrap: anywhere;
 }
 
+.core-manager-item-event {
+  padding: 10px;
+}
+
+.core-manager-item-event .card-head {
+  margin-bottom: 2px;
+}
+
+.core-manager-item-event .card-head > .small {
+  display: none;
+}
+
+.core-manager-item-event .card-title {
+  font-size: 0.96rem;
+}
+
+.core-manager-item-event label {
+  font-size: 0.8rem;
+  gap: 4px;
+}
+
+.core-manager-item-event img {
+  max-height: 130px !important;
+  object-fit: cover;
+}
+
+.core-manager-item-event .settings-dropdown {
+  margin-top: 6px;
+}
+
+.core-manager-item-event .core-data-table-wrap {
+  max-height: 150px;
+}
+
+.core-manager-item-event .core-data-table {
+  min-width: 0;
+  table-layout: auto;
+  font-size: 0.74rem;
+}
+
 .form-grid.two-col {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
@@ -2283,6 +2329,17 @@ textarea:disabled {
 textarea {
   min-height: 120px;
   resize: vertical;
+}
+
+.core-readonly-text {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.2);
+  color: var(--text);
+  padding: 8px 10px;
+  line-height: 1.32;
+  max-height: 6.8em;
+  overflow: auto;
 }
 
 .shop-purge {

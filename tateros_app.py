@@ -104,6 +104,12 @@ LAST_LLM_STATS_KEY = "webui:last_llm_stats"
 WEBUI_POPUP_EFFECT_STYLE_KEY = "tater:webui:popup_effect_style"
 DEFAULT_WEBUI_POPUP_EFFECT_STYLE = "flame"
 WEBUI_POPUP_EFFECT_STYLE_CHOICES = {"disabled", "flame", "dust", "glitch", "portal", "melt"}
+UNIFI_NETWORK_BASE_URL_KEY = "tater:unifi_network:base_url"
+UNIFI_NETWORK_API_KEY_KEY = "tater:unifi_network:api_key"
+UNIFI_PROTECT_BASE_URL_KEY = "tater:unifi_protect:base_url"
+UNIFI_PROTECT_API_KEY_KEY = "tater:unifi_protect:api_key"
+UNIFI_NETWORK_DEFAULT_BASE_URL = "https://10.4.20.1"
+UNIFI_PROTECT_DEFAULT_BASE_URL = "https://10.4.20.127"
 WEBUI_AUTH_PASSWORD_HASH_KEY = "tater:webui_auth:password_hash"
 WEBUI_AUTH_SESSIONS_KEY = "tater:webui_auth:sessions"
 WEBUI_AUTH_COOKIE_NAME = "tater_webui_session"
@@ -112,6 +118,10 @@ WEBUI_AUTH_PBKDF2_ITERATIONS = 260_000
 WEBUI_AUTH_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 365 * 5
 RUNTIME_CONTEXT_ESTIMATE_TTL_SECONDS = 20
 runtime_context_estimate_cache: Dict[str, Any] = {"updated_at": 0.0, "payload": {}}
+
+
+def _trim(value: Any) -> str:
+    return str(value or "").strip()
 
 
 bootstrap_state: Dict[str, Any] = {
@@ -244,7 +254,9 @@ class SurfaceRuntimeManager:
             self.threads[key] = thread
             self.stop_flags[key] = stop_flag
 
+        logger.info("[%s] starting %s", self.kind, key)
         thread.start()
+        logger.info("[%s] started %s", self.kind, key)
         return {"started": True, "running": True, "reason": "started"}
 
     def stop(self, module_key: str, *, timeout: float = 3.0) -> Dict[str, Any]:
@@ -256,6 +268,7 @@ class SurfaceRuntimeManager:
             thread = self.threads.get(key)
             stop_flag = self.stop_flags.get(key)
 
+        logger.info("[%s] stopping %s", self.kind, key)
         if stop_flag:
             stop_flag.set()
 
@@ -267,6 +280,9 @@ class SurfaceRuntimeManager:
             if not running:
                 self.threads.pop(key, None)
                 self.stop_flags.pop(key, None)
+                logger.info("[%s] stopped %s", self.kind, key)
+            else:
+                logger.warning("[%s] stop timed out for %s", self.kind, key)
 
         return {
             "stopped": not running,
@@ -2482,6 +2498,10 @@ class AppSettingsRequest(BaseModel):
     web_search_google_cx: Optional[str] = None
     homeassistant_base_url: Optional[str] = None
     homeassistant_token: Optional[str] = None
+    unifi_network_base_url: Optional[str] = None
+    unifi_network_api_key: Optional[str] = None
+    unifi_protect_base_url: Optional[str] = None
+    unifi_protect_api_key: Optional[str] = None
     vision_api_base: Optional[str] = None
     vision_model: Optional[str] = None
     vision_api_key: Optional[str] = None
@@ -4506,6 +4526,10 @@ def get_settings() -> Dict[str, Any]:
     chat_settings = redis_client.hgetall("chat_settings") or {}
     legacy_web_search = redis_client.hgetall("verba_settings:Web Search") or {}
     homeassistant_settings = redis_client.hgetall("homeassistant_settings") or {}
+    unifi_network_base_url = _trim(redis_client.get(UNIFI_NETWORK_BASE_URL_KEY))
+    unifi_network_api_key = _trim(redis_client.get(UNIFI_NETWORK_API_KEY_KEY))
+    unifi_protect_base_url = _trim(redis_client.get(UNIFI_PROTECT_BASE_URL_KEY))
+    unifi_protect_api_key = _trim(redis_client.get(UNIFI_PROTECT_API_KEY_KEY))
 
     vision_settings = get_shared_vision_settings(
         default_api_base="http://127.0.0.1:1234",
@@ -4576,6 +4600,10 @@ def get_settings() -> Dict[str, Any]:
         or "",
         "homeassistant_base_url": homeassistant_settings.get("HA_BASE_URL", "http://homeassistant.local:8123"),
         "homeassistant_token": homeassistant_settings.get("HA_TOKEN", ""),
+        "unifi_network_base_url": unifi_network_base_url or UNIFI_NETWORK_DEFAULT_BASE_URL,
+        "unifi_network_api_key": unifi_network_api_key,
+        "unifi_protect_base_url": unifi_protect_base_url or UNIFI_PROTECT_DEFAULT_BASE_URL,
+        "unifi_protect_api_key": unifi_protect_api_key,
         "vision_api_base": str(vision_settings.get("api_base") or "http://127.0.0.1:1234"),
         "vision_model": str(vision_settings.get("model") or "qwen2.5-vl-7b-instruct"),
         "vision_api_key": str(vision_settings.get("api_key") or ""),
@@ -4739,6 +4767,22 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
                 "HA_TOKEN": token,
             },
         )
+
+    if "unifi_network_base_url" in updates or "unifi_network_api_key" in updates:
+        current_network_base = _trim(redis_client.get(UNIFI_NETWORK_BASE_URL_KEY))
+        current_network_api = _trim(redis_client.get(UNIFI_NETWORK_API_KEY_KEY))
+        next_network_base = _trim(updates.get("unifi_network_base_url", current_network_base)) or UNIFI_NETWORK_DEFAULT_BASE_URL
+        next_network_api = _trim(updates.get("unifi_network_api_key", current_network_api))
+        redis_client.set(UNIFI_NETWORK_BASE_URL_KEY, next_network_base)
+        redis_client.set(UNIFI_NETWORK_API_KEY_KEY, next_network_api)
+
+    if "unifi_protect_base_url" in updates or "unifi_protect_api_key" in updates:
+        current_protect_base = _trim(redis_client.get(UNIFI_PROTECT_BASE_URL_KEY))
+        current_protect_api = _trim(redis_client.get(UNIFI_PROTECT_API_KEY_KEY))
+        next_protect_base = _trim(updates.get("unifi_protect_base_url", current_protect_base)) or UNIFI_PROTECT_DEFAULT_BASE_URL
+        next_protect_api = _trim(updates.get("unifi_protect_api_key", current_protect_api))
+        redis_client.set(UNIFI_PROTECT_BASE_URL_KEY, next_protect_base)
+        redis_client.set(UNIFI_PROTECT_API_KEY_KEY, next_protect_api)
 
     if "vision_api_base" in updates or "vision_model" in updates or "vision_api_key" in updates:
         current_vision = get_shared_vision_settings(
