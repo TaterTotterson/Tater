@@ -57,6 +57,7 @@ from helpers import (
     get_redis_encryption_status,
     get_redis_connection_status,
     get_llm_call_runtime_summary,
+    get_vision_call_runtime_summary,
     get_llm_client_from_env,
     redis_blob_client as shared_redis_blob_client,
     redis_client as shared_redis_client,
@@ -3000,11 +3001,13 @@ def _estimate_webui_chat_context_window(*, force_refresh: bool = False) -> Dict[
 def _runtime_breakdown_payload() -> Dict[str, Any]:
     hydra_jobs = _chat_job_counts_with_breakdown(include_history=True)
     llm_calls = get_llm_call_runtime_summary(include_history=True)
+    vision_calls = get_vision_call_runtime_summary()
     context_estimate = _estimate_webui_chat_context_window()
     return {
         "hydra_jobs": hydra_jobs,
         "chat_jobs": hydra_jobs,  # Backward-compatible key for older clients.
         "llm_calls": llm_calls,
+        "vision_calls": vision_calls,
         "chat_context_window": context_estimate,
     }
 
@@ -3149,6 +3152,7 @@ def health() -> Dict[str, Any]:
 
     hydra_job_counts = _chat_job_counts_with_breakdown()
     llm_call_counts = get_llm_call_runtime_summary(include_history=False)
+    vision_call_counts = get_vision_call_runtime_summary()
 
     return {
         "ok": redis_ok,
@@ -3160,6 +3164,7 @@ def health() -> Dict[str, Any]:
         "hydra_jobs_active": int(hydra_job_counts.get("total") or 0),
         "chat_jobs_active": int(hydra_job_counts.get("total") or 0),  # Backward-compatible key for older clients.
         "llm_calls_active": int(llm_call_counts.get("active_total") or 0),
+        "vision_calls_active": int(vision_call_counts.get("active_total") or 0),
         "bootstrap": {
             "restore_enabled": bool(bootstrap_state.get("restore_enabled")),
             "autostart_enabled": bool(bootstrap_state.get("autostart_enabled")),
