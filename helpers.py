@@ -38,7 +38,6 @@ nest_asyncio.apply()
 _INTERNAL_PORTAL_LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
 _INTERNAL_PORTAL_AUTH_TARGETS = (
     ("homeassistant_portal_settings", 8787, "/tater-ha/v1", None),
-    ("ha_automations_portal_settings", 8788, "/tater-ha/v1", None),
     ("homekit_portal_settings", 8789, "/tater-homekit/v1", "AUTH_TOKEN"),
     ("xbmc_portal_settings", 8790, "/tater-xbmc/v1", None),
     ("macos_portal_settings", 8791, "/macos", "AUTH_TOKEN"),

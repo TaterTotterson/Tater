@@ -11,21 +11,18 @@ def thanatos_focus_prompt(*, current_user_text: str, resolved_user_text: str) ->
             f"- Current user message (highest priority): {current}\n"
             f"- Resolved request for this turn: {resolved}\n"
             "- History is context only; use it only for explicit references (it/that/this/here/again).\n"
-            "- STRICT: Tool use is allowed ONLY when the CURRENT user message explicitly requests an action or data retrieval.\n"
-            "- STRICT: Exception for short explicit follow-ups only: if resolver expanded the current message into an explicit action in this turn's resolved request, tool use is allowed.\n"
-            "- STRICT: Short follow-up questions that shift location/time/subject (for example: what about the backyard, what about last night) still count as explicit data-retrieval requests.\n"
-            "- STRICT: Do NOT call tools for acknowledgements/reactions/chatter/meta discussion.\n"
-            "- STRICT: Do NOT continue prior work unless the CURRENT message explicitly asks to continue.\n"
+            "- This is an execution turn for Thanatos: use tools to progress the resolved request.\n"
+            "- Execute against the resolved request for this turn; do not idle waiting for additional confirmation.\n"
+            "- Use prior state only to complete this turn's goal and resolve references.\n"
+            "- If the current message changes objective, follow the current/resolved request and drop stale objectives.\n"
         )
 
     return (
         "Turn focus:\n"
         f"- Current user message (highest priority): {resolved or current}\n"
-        "- STRICT: Tool use is allowed ONLY when the CURRENT user message explicitly requests an action or data retrieval.\n"
-        "- STRICT: Exception for short explicit follow-ups only: if resolver expanded the current message into an explicit action in this turn's resolved request, tool use is allowed.\n"
-        "- STRICT: Short follow-up questions that shift location/time/subject (for example: what about the backyard, what about last night) still count as explicit data-retrieval requests.\n"
-        "- STRICT: Do NOT call tools for acknowledgements/reactions/chatter/meta discussion.\n"
-        "- STRICT: Do NOT continue prior work unless the CURRENT message explicitly asks to continue.\n"
+        "- This is an execution turn for Thanatos: use tools to progress the request.\n"
+        "- Continue this turn's objective step-by-step until completion signal or concrete blocker.\n"
+        "- Use prior state/history only as context; do not drift to unrelated objectives.\n"
     )
 
 
@@ -34,18 +31,19 @@ def thanatos_round_mode_prompt(*, round_index: int, current_user_text: str) -> s
     current = str(current_user_text or "").strip()
     if round_no <= 1:
         return (
-            "Round mode: FIRST ROUND (user-intent lock).\n"
+            "Round mode: FIRST ROUND (execution start).\n"
             f"- Current message: {current}\n"
-            "- Focus ONLY on the current message's intent.\n"
-            "- Do not continue prior tasks unless the current message explicitly asks to continue/retry/repeat.\n"
-            "- If current message is conversational/chit-chat/ack/meta, answer directly and do not call tools.\n"
+            "- Start execution for this turn immediately using the planned first atomic step.\n"
+            "- Use tools according to the step contract; do not answer with normal chat text.\n"
+            "- Output one valid tool call or a short blocker when execution cannot proceed.\n"
         )
     return (
-        "Round mode: CONTINUATION ROUND (execution lock).\n"
-        "- Focus on completing the current turn plan one step at a time.\n"
-        "- Prioritize state.next_step / first remaining plan item.\n"
+        "Round mode: CONTINUATION ROUND (follow-through).\n"
+        "- Continue executing the current turn plan one atomic step at a time.\n"
+        "- Prioritize state.next_step or the first remaining plan item.\n"
         "- Do not restart from the first action.\n"
         "- Do not add unrelated work.\n"
+        "- Output one valid tool call or a short blocker for this round.\n"
     )
 
 
@@ -112,9 +110,11 @@ def chat_or_tool_router_system_prompt(*, platform: str) -> str:
         "- Use the current user message as highest priority.\n"
         "- Use history only to resolve references and follow-up context.\n"
         "- route=tool when the current turn explicitly asks for execution, retrieval, checking facts, searching, reading, downloading, writing, or running an action.\n"
+        "- route=tool when the current turn asks to set, change, update, configure, enable/disable, save, modify, add, or remove any setting/state/preference.\n"
         "- route=tool for explicit follow-up fragments that continue an active executable objective.\n"
+        "- route=tool when the user asks for system status, diagnostics, logs, capabilities, configuration details, or other system information that should be retrieved via tools/verbas.\n"
         "- route=chat for social conversation, greetings, acknowledgements, reactions, playful banter, or opinion-only questions that do not require tool execution.\n"
-        "- route=chat when the user is discussing system behavior without asking to execute a task.\n"
+        "- route=chat when system-behavior discussion is purely conversational/meta and does not request retrieval, inspection, or execution.\n"
         "- If uncertain, choose chat.\n"
         "- Do not answer the user.\n"
         "- Output JSON only.\n"
@@ -128,13 +128,13 @@ def astraeus_system_prompt(*, platform: str) -> str:
         "Return exactly one strict JSON object with this schema:\n"
         "{\"goal\":\"clear goal\",\"steps\":[{\"step_id\":1,\"intent\":\"atomic intent\",\"nl\":\"single scoped instruction\",\"tool_hint\":\"tool_id\"}]}\n"
         "Rules:\n"
-        "- Stay within payload.available_capabilities and payload.available_tool_ids.\n"
-        "- Every execution step must use one valid tool_hint from payload.available_tool_ids.\n"
-        "- Do not invent tool ids, identifiers, paths, URLs, names, or contents.\n"
         "- This call is already tool-routed; do not reclassify as chat.\n"
+        "- Plan only for this turn's resolved request; ignore stale prior objectives unless the current message explicitly asks to continue/retry/repeat.\n"
+        "- Stay within payload.available_capabilities and payload.available_tool_ids; every step must use one valid tool_hint from payload.available_tool_ids.\n"
+        "- Do not invent tool ids, identifiers, paths, URLs, names, or contents.\n"
         "- Use steps=[] only when required user input is missing and no executable step can run yet.\n"
-        "- Do not continue prior objectives unless the current message explicitly asks to continue/retry/repeat.\n"
-        "- Requests for facts, retrieval, research, observations, time-scoped state, or actions must produce steps, including follow-up fragments that continue those intents.\n"
+        "- Requests for facts, retrieval, research, observations, time-scoped state, actions, or setting changes (set/update/configure/enable-disable/add/remove) must produce steps.\n"
+        "- If the current message is a short explicit follow-up fragment resolved into an actionable request for this turn, still produce steps.\n"
         "- goal is the intended end state for this turn.\n"
         "- Each step must be atomic, concise, rewritten, and executable one tool call at a time by Thanatos.\n"
         "- Preserve user-requested order.\n"
@@ -144,7 +144,7 @@ def astraeus_system_prompt(*, platform: str) -> str:
         "- For synthesis tasks, gather evidence before summarizing or concluding.\n"
         "- For web research, search_web discovers candidates; inspect_webpage selected pages before synthesis.\n"
         "- For download/install/grab requests, discovery links alone are never completion; plan the full chain to actual retrieval.\n"
-        "- For software/app installer requests without a concrete URL, plan: discover official source -> inspect/resolve concrete installer URL -> download_file.\n"
+        "- For software/app installer requests without a concrete URL, plan: discover source -> inspect/resolve concrete installer URL -> download_file.\n"
         "- Prefer official/vendor sources before community/forum sources unless user explicitly asks otherwise.\n"
         "- Use download_file only when user explicitly wants file retrieval and a concrete file URL is available.\n"
         "- Use send_message only when the current user explicitly asks to notify/message a destination on another portal/platform/channel/room/user/device.\n"
@@ -202,7 +202,7 @@ def thanatos_system_prompt(
     ascii_only_platforms: Iterable[str],
 ) -> str:
     plain_text_rule = (
-        "When answering normally, use plain ASCII text only.\n"
+        "For blocker text, use plain ASCII text only.\n"
         if platform in set(ascii_only_platforms or [])
         else ""
     )
@@ -217,6 +217,7 @@ def thanatos_system_prompt(
         "\n"
         "Rules:\n"
         "- Read the Current agent state JSON every round.\n"
+        "- Execute only this turn's planned objective; do not revive stale prior objectives.\n"
         "- If state.plan has items, act only on state.next_step or the first remaining step.\n"
         "- In structured plan mode, execute exactly one atomic step this round.\n"
         "- In structured plan mode, do not output final-answer text.\n"
@@ -270,11 +271,13 @@ def minos_system_prompt(
         "\n"
         "Rules:\n"
         "- Use payload.current_user_message as highest priority.\n"
-        "- Validate tool_result quality and progress toward payload.current_step and payload.goal.\n"
+        "- Validate tool_result quality and progress toward payload.current_step and payload.goal for this turn.\n"
+        "- Evaluate only this turn's resolved objective; ignore stale prior objectives.\n"
         "- You do not select tools and you do not decompose plans.\n"
-        "- CONTINUE means proceed to the next planned step.\n"
-        "- RETRY means the current step should be retried; include a concise repair hint.\n"
-        "- ASK_USER means user input is required; include one short question.\n"
+        "- CONTINUE means proceed to the next planned step in the current run.\n"
+        "- RETRY means the current step should be retried in the current run; include a concise repair hint.\n"
+        "- ASK_USER means user input is required; include one short question and end this run.\n"
+        "- A new user reply starts a fresh run; do not assume pause/resume state across turns.\n"
         "- FAIL means execution cannot continue safely now.\n"
         "- FINAL means all required work is complete for this turn.\n"
         "- If remaining steps exist and current step succeeded, prefer CONTINUE over FINAL.\n"
@@ -284,10 +287,9 @@ def minos_system_prompt(
         "- For identify/explain/what-is goals, search snippets alone are insufficient; require evidence from an inspected/read primary source or a concise synthesized answer grounded in that evidence before FINAL.\n"
         "- If current step failed due to fixable issue and retry is allowed, prefer RETRY.\n"
         "- If retry is disallowed and step is incomplete, prefer ASK_USER or FAIL.\n"
-        "- If the current user message is context-only and does not ask for action/data, prefer ASK_USER with a short question.\n"
+        "- This branch is tool-routed validation; do not downgrade to chat-mode behavior.\n"
         "- If the current user message asks to stop/cancel/abort, do not choose RETRY or CONTINUE; choose FINAL or ASK_USER.\n"
         "- If retries keep repeating the same failed attempt with no meaningful change, choose ASK_USER instead of repeated RETRY.\n"
-        "- Do not continue prior objectives unless the current user message explicitly asks to continue.\n"
         "- Never fabricate completion; require concrete evidence from payload.tool_result.\n"
         "- No markdown fences.\n"
         "- Never mention internal orchestration roles/codenames.\n"

@@ -1828,6 +1828,7 @@ function openRuntimeSettingsModal({ title, meta, fields, onSave }) {
   }
   if (saveBtn) {
     saveBtn.disabled = false;
+    saveBtn.style.display = typeof state.runtimeSettingsSaveHandler === "function" ? "" : "none";
   }
 
   if (fieldsEl) {
@@ -3679,6 +3680,58 @@ function renderCoreManagerField(field) {
   const descHtml = description ? `<div class="small">${escapeHtml(description)}</div>` : "";
   const placeholder = String(field?.placeholder || "").trim();
   const placeholderAttr = placeholder ? `placeholder="${escapeHtml(placeholder)}"` : "";
+  const readOnly = boolFromAny(field?.read_only, false);
+  const hideLabel = boolFromAny(field?.hide_label, false);
+  const readOnlyAttr = readOnly ? " readonly" : "";
+  const showWhen = field?.show_when && typeof field.show_when === "object" ? field.show_when : {};
+  const showWhenAll = Array.isArray(field?.show_when_all)
+    ? field.show_when_all.filter((item) => item && typeof item === "object")
+    : [];
+  const normalizeShowWhen = (condition) => {
+    const sourceKey = String(condition?.source_key ?? condition?.key ?? "").trim();
+    const values = [];
+    const appendShowValue = (raw) => {
+      const token = String(raw ?? "").trim();
+      if (token && !values.includes(token)) {
+        values.push(token);
+      }
+    };
+    if (Array.isArray(condition?.any_of)) {
+      condition.any_of.forEach(appendShowValue);
+    }
+    if (Array.isArray(condition?.values)) {
+      condition.values.forEach(appendShowValue);
+    }
+    if (condition?.equals !== undefined) {
+      appendShowValue(condition.equals);
+    }
+    if (condition?.eq !== undefined) {
+      appendShowValue(condition.eq);
+    }
+    if (condition?.value !== undefined) {
+      appendShowValue(condition.value);
+    }
+    return { sourceKey, values };
+  };
+  const wrapWithCondition = (innerHtml, condition) => {
+    const { sourceKey, values } = normalizeShowWhen(condition || {});
+    if (!sourceKey || !values.length) {
+      return innerHtml;
+    }
+    let encodedValues = "";
+    try {
+      encodedValues = encodeURIComponent(JSON.stringify(values));
+    } catch (_error) {
+      encodedValues = "";
+    }
+    return `<div data-core-show-source-key="${escapeHtml(sourceKey)}" data-core-show-values="${escapeHtml(encodedValues)}">${innerHtml}</div>`;
+  };
+  const wrapField = (innerHtml) => {
+    if (showWhenAll.length) {
+      return showWhenAll.reduce((html, condition) => wrapWithCondition(html, condition), innerHtml);
+    }
+    return wrapWithCondition(innerHtml, showWhen);
+  };
 
   if (type === "table") {
     const rawColumns = Array.isArray(field?.columns) ? field.columns : [];
@@ -3697,12 +3750,12 @@ function renderCoreManagerField(field) {
     const rows = Array.isArray(field?.rows) ? field.rows : [];
 
     if (!columns.length) {
-      return `
+      return wrapField(`
         <label>${escapeHtml(label)}
           <div class="small">No table columns configured.</div>
           ${descHtml}
         </label>
-      `;
+      `);
     }
 
     const headHtml = columns.map((col) => `<th>${escapeHtml(col.label)}</th>`).join("");
@@ -3726,7 +3779,7 @@ function renderCoreManagerField(field) {
           .join("")
       : `<tr><td colspan="${columns.length}" class="small">No rows.</td></tr>`;
 
-    return `
+    return wrapField(`
       <label>${escapeHtml(label)}
         <div class="core-data-table-wrap">
           <table class="core-data-table">
@@ -3736,7 +3789,7 @@ function renderCoreManagerField(field) {
         </div>
         ${descHtml}
       </label>
-    `;
+    `);
   }
 
   if (type === "bar_chart" || type === "bars") {
@@ -3774,17 +3827,55 @@ function renderCoreManagerField(field) {
           .join("")
       : `<div class="small">No chart data.</div>`;
 
-    return `
+    return wrapField(`
       <label>${escapeHtml(label)}
         <div class="core-bar-chart">${chartHtml}</div>
         ${descHtml}
       </label>
-    `;
+    `);
+  }
+
+  if (type === "image") {
+    const src = String(field?.src ?? field?.url ?? "").trim();
+    if (!src) {
+      if (hideLabel) {
+        return wrapField(`
+          <div class="small">No image available.</div>
+          ${descHtml}
+        `);
+      }
+      return wrapField(`
+        <label>${escapeHtml(label)}
+          <div class="small">No image available.</div>
+          ${descHtml}
+        </label>
+      `);
+    }
+    const alt = String(field?.alt || label || "Event image").trim() || "Event image";
+    const imgCaption = String(field?.caption || "").trim();
+    if (hideLabel) {
+      return wrapField(`
+        <div style="margin-top:6px;">
+          <img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}" loading="lazy" style="width:100%; max-height:320px; object-fit:contain; border:1px solid rgba(255,255,255,0.12); border-radius:10px; background:rgba(0,0,0,0.2);" />
+        </div>
+        ${imgCaption ? `<div class="small" style="margin-top:6px;">${escapeHtml(imgCaption)}</div>` : ""}
+        ${descHtml}
+      `);
+    }
+    return wrapField(`
+      <label>${escapeHtml(label)}
+        <div style="margin-top:6px;">
+          <img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}" loading="lazy" style="width:100%; max-height:320px; object-fit:contain; border:1px solid rgba(255,255,255,0.12); border-radius:10px; background:rgba(0,0,0,0.2);" />
+        </div>
+        ${imgCaption ? `<div class="small" style="margin-top:6px;">${escapeHtml(imgCaption)}</div>` : ""}
+        ${descHtml}
+      </label>
+    `);
   }
 
   if (type === "checkbox") {
     const checked = boolFromAny(field?.value, false) ? "checked" : "";
-    return `
+    return wrapField(`
       <label>
         ${escapeHtml(label)}
         ${renderToggleRow(
@@ -3794,12 +3885,93 @@ function renderCoreManagerField(field) {
         )}
         ${descHtml}
       </label>
-    `;
+    `);
+  }
+
+  if (type === "multiselect") {
+    const options = Array.isArray(field?.options) ? field.options : [];
+    const selectedValues = new Set(
+      (Array.isArray(field?.value) ? field.value : [field?.value])
+        .map((item) => String(item ?? "").trim())
+        .filter(Boolean)
+    );
+    const dependent = field?.dependent_options && typeof field.dependent_options === "object" ? field.dependent_options : {};
+    const filterSourceKey = String(dependent?.source_key || "").trim();
+    let filterOptionsMap = "";
+    let filterDefaultOptions = "";
+    let filterPreferredValues = "";
+    if (filterSourceKey) {
+      try {
+        filterOptionsMap = encodeURIComponent(JSON.stringify(dependent?.options_by_source || {}));
+      } catch (_error) {
+        filterOptionsMap = "";
+      }
+      try {
+        const fallbackOptions = Array.isArray(dependent?.default_options) ? dependent.default_options : options;
+        filterDefaultOptions = encodeURIComponent(JSON.stringify(fallbackOptions));
+      } catch (_error) {
+        filterDefaultOptions = "";
+      }
+      try {
+        filterPreferredValues = encodeURIComponent(JSON.stringify(Array.from(selectedValues)));
+      } catch (_error) {
+        filterPreferredValues = "";
+      }
+    }
+    const dependentAttrs = filterSourceKey
+      ? ` data-core-filter-source-key="${escapeHtml(filterSourceKey)}"
+          data-core-filter-options-map="${escapeHtml(filterOptionsMap)}"
+          data-core-filter-default-options="${escapeHtml(filterDefaultOptions)}"
+          data-core-filter-preferred-values="${escapeHtml(filterPreferredValues)}"`
+      : "";
+    const size = Math.max(4, Math.min(10, options.length || 6));
+    const optionsHtml = options
+      .map((raw) => {
+        if (raw && typeof raw === "object") {
+          const optionValue = String(raw.value ?? raw.id ?? raw.key ?? raw.label ?? "");
+          const optionLabel = String(raw.label ?? optionValue);
+          const isSelected = selectedValues.has(optionValue) ? "selected" : "";
+          return `<option value="${escapeHtml(optionValue)}" ${isSelected}>${escapeHtml(optionLabel)}</option>`;
+        }
+        const optionValue = String(raw ?? "");
+        const isSelected = selectedValues.has(optionValue) ? "selected" : "";
+        return `<option value="${escapeHtml(optionValue)}" ${isSelected}>${escapeHtml(optionValue)}</option>`;
+      })
+      .join("");
+    return wrapField(`
+      <label>${escapeHtml(label)}
+        <select multiple size="${size}" data-core-field-key="${escapeHtml(key)}" data-core-field-type="multiselect"${dependentAttrs}>${optionsHtml}</select>
+        ${descHtml}
+      </label>
+    `);
   }
 
   if (type === "select") {
     const options = Array.isArray(field?.options) ? field.options : [];
     const selected = String(field?.value ?? "");
+    const dependent = field?.dependent_options && typeof field.dependent_options === "object" ? field.dependent_options : {};
+    const filterSourceKey = String(dependent?.source_key || "").trim();
+    let filterOptionsMap = "";
+    let filterDefaultOptions = "";
+    if (filterSourceKey) {
+      try {
+        filterOptionsMap = encodeURIComponent(JSON.stringify(dependent?.options_by_source || {}));
+      } catch (_error) {
+        filterOptionsMap = "";
+      }
+      try {
+        const fallbackOptions = Array.isArray(dependent?.default_options) ? dependent.default_options : options;
+        filterDefaultOptions = encodeURIComponent(JSON.stringify(fallbackOptions));
+      } catch (_error) {
+        filterDefaultOptions = "";
+      }
+    }
+    const dependentAttrs = filterSourceKey
+      ? ` data-core-filter-source-key="${escapeHtml(filterSourceKey)}"
+          data-core-filter-options-map="${escapeHtml(filterOptionsMap)}"
+          data-core-filter-default-options="${escapeHtml(filterDefaultOptions)}"
+          data-core-filter-preferred-value="${escapeHtml(selected)}"`
+      : "";
     const optionsHtml = options
       .map((raw) => {
         if (raw && typeof raw === "object") {
@@ -3813,23 +3985,38 @@ function renderCoreManagerField(field) {
         return `<option value="${escapeHtml(optionValue)}" ${isSelected}>${escapeHtml(optionValue)}</option>`;
       })
       .join("");
-    return `
+    return wrapField(`
       <label>${escapeHtml(label)}
-        <select data-core-field-key="${escapeHtml(key)}" data-core-field-type="select">${optionsHtml}</select>
+        <select data-core-field-key="${escapeHtml(key)}" data-core-field-type="select"${dependentAttrs}>${optionsHtml}</select>
         ${descHtml}
       </label>
-    `;
+    `);
   }
 
   if (type === "textarea" || type === "multiline") {
-    return `
+    if (readOnly) {
+      const readonlyText = escapeHtml(String(field?.value ?? "")).replace(/\n/g, "<br>");
+      if (hideLabel) {
+        return wrapField(`
+          <div class="core-readonly-text">${readonlyText}</div>
+          ${descHtml}
+        `);
+      }
+      return wrapField(`
+        <label>${escapeHtml(label)}
+          <div class="core-readonly-text">${readonlyText}</div>
+          ${descHtml}
+        </label>
+      `);
+    }
+    return wrapField(`
       <label>${escapeHtml(label)}
-        <textarea data-core-field-key="${escapeHtml(key)}" data-core-field-type="textarea" ${placeholderAttr}>${escapeHtml(
+        <textarea data-core-field-key="${escapeHtml(key)}" data-core-field-type="textarea"${readOnlyAttr} ${placeholderAttr}>${escapeHtml(
           field?.value ?? ""
         )}</textarea>
         ${descHtml}
       </label>
-    `;
+    `);
   }
 
   const htmlType = type === "password" ? "password" : type === "number" ? "number" : "text";
@@ -3839,14 +4026,14 @@ function renderCoreManagerField(field) {
           field?.min !== undefined ? ` min="${escapeHtml(field.min)}"` : ""
         }${field?.max !== undefined ? ` max="${escapeHtml(field.max)}"` : ""}`
       : "";
-  return `
+  return wrapField(`
     <label>${escapeHtml(label)}
-      <input type="${htmlType}"${numberAttrs} value="${escapeHtml(field?.value ?? "")}" ${placeholderAttr} data-core-field-key="${escapeHtml(
+      <input type="${htmlType}"${numberAttrs}${readOnlyAttr} value="${escapeHtml(field?.value ?? "")}" ${placeholderAttr} data-core-field-key="${escapeHtml(
     key
   )}" data-core-field-type="${escapeHtml(type)}" />
       ${descHtml}
     </label>
-  `;
+  `);
 }
 
 function renderCoreSettingsManager(body, tabSpec) {
@@ -3872,8 +4059,10 @@ function renderCoreSettingsManager(body, tabSpec) {
   const emptyMessage = String(ui?.empty_message || body?.empty_message || "No entries found.").trim();
   const managerTabsRaw = Array.isArray(ui?.manager_tabs) ? ui.manager_tabs : [];
   const defaultManagerTab = String(ui?.default_tab || "").trim();
+  const statsRefreshButton = boolFromAny(ui?.stats_refresh_button, false);
+  const statsRefreshLabel = String(ui?.stats_refresh_label || "Refresh").trim() || "Refresh";
 
-  const statsHtml = stats.length
+  const statsHtml = stats.length || statsRefreshButton
     ? `
       <div class="core-metric-row">
         ${stats
@@ -3892,18 +4081,32 @@ function renderCoreSettingsManager(body, tabSpec) {
             `;
           })
           .join("")}
+        ${
+          statsRefreshButton
+            ? `<button type="button" class="action-btn core-tab-refresh-btn" data-core-tab-refresh="1">${escapeHtml(
+                statsRefreshLabel
+              )}</button>`
+            : ""
+        }
       </div>
     `
     : "";
 
-  function renderCoreManagerItemCard(item) {
+  function renderCoreManagerItemCard(item, renderOptions = {}) {
     const itemId = String(item?.id || "").trim();
     const encodedId = escapeHtml(encodeCoreManagerId(itemId));
     const title = String(item?.title || itemId || "(item)").trim() || "(item)";
     const subtitle = String(item?.subtitle || "").trim();
     const itemGroup = String(item?.group || "").trim().toLowerCase();
+    const itemGroupToken = itemGroup.replace(/[^a-z0-9_-]/g, "");
+    const itemGroupClass = itemGroupToken ? ` core-manager-item-${itemGroupToken}` : "";
     const itemFields = Array.isArray(item?.fields) ? item.fields : [];
     const sections = Array.isArray(item?.sections) ? item.sections : [];
+    const explicitPopupFields = Array.isArray(item?.popup_fields) ? item.popup_fields : [];
+    const itemFieldsPopupEnabled = itemFieldsPopup && boolFromAny(item?.fields_popup, true);
+    const itemFieldsDropdownEnabled = boolFromAny(item?.fields_dropdown, itemFieldsDropdown);
+    const itemFieldsDropdownLabelLocal = String(item?.fields_dropdown_label || itemFieldsDropdownLabel).trim() || "Settings";
+    const itemSectionsInDropdownEnabled = boolFromAny(item?.sections_in_dropdown, itemSectionsInDropdown);
     const saveAction = String(item?.save_action || "").trim();
     const removeAction = String(item?.remove_action || "").trim();
     const runAction = String(item?.run_action || "").trim();
@@ -3911,7 +4114,12 @@ function renderCoreSettingsManager(body, tabSpec) {
     const removeConfirm = String(item?.remove_confirm || "Remove this item?").trim();
     const itemFieldContent = itemFields.map((field) => renderCoreManagerField(field)).join("");
     const popupFields = [];
-    if (itemFieldsPopup) {
+    explicitPopupFields.forEach((field) => {
+      if (field && typeof field === "object") {
+        popupFields.push({ ...field });
+      }
+    });
+    if (itemFieldsPopupEnabled) {
       itemFields.forEach((field) => {
         if (field && typeof field === "object") {
           popupFields.push({ ...field });
@@ -3938,12 +4146,16 @@ function renderCoreSettingsManager(body, tabSpec) {
       popupFieldsEncoded = "";
     }
     const popupTitle = String(item?.settings_title || `${title} Settings`).trim() || `${title} Settings`;
+    const pageIndexRaw = Number(renderOptions?.page_index ?? renderOptions?.pageIndex ?? 0);
+    const pageIndex = Number.isFinite(pageIndexRaw) ? Math.max(0, Math.floor(pageIndexRaw)) : 0;
+    const pageAttr = pageIndex > 0 ? ` data-core-page-index="${pageIndex}"` : "";
+    const pageStyle = pageIndex > 1 ? ` style="display:none;"` : "";
 
           const sectionHtml = sections
             .map((section) => {
               const sectionLabel = String(section?.label || "Section").trim() || "Section";
               const fields = Array.isArray(section?.fields) ? section.fields : [];
-              const inline = itemSectionsInDropdown || boolFromAny(section?.inline, false);
+              const inline = itemSectionsInDropdownEnabled || boolFromAny(section?.inline, false);
               const tone = String(section?.tone || "").trim().toLowerCase();
               const toneClass = tone ? ` ${escapeHtml(`tone-${tone}`)}` : "";
               if (inline) {
@@ -3971,18 +4183,18 @@ function renderCoreSettingsManager(body, tabSpec) {
     if (itemFieldContent) {
       dropdownContentParts.push(`<div class="form-grid">${itemFieldContent}</div>`);
     }
-    if (itemSectionsInDropdown && sectionHtml) {
+    if (itemSectionsInDropdownEnabled && sectionHtml) {
       dropdownContentParts.push(sectionHtml);
     }
     const dropdownContentHtml = dropdownContentParts.join("");
 
-    const itemFieldsHtml = itemFieldsPopup
+    const itemFieldsHtml = itemFieldsPopupEnabled
       ? ""
-      : itemFieldsDropdown
+      : itemFieldsDropdownEnabled
       ? dropdownContentHtml
         ? `
           <details class="settings-dropdown">
-            <summary class="settings-summary">${escapeHtml(itemFieldsDropdownLabel)}</summary>
+            <summary class="settings-summary">${escapeHtml(itemFieldsDropdownLabelLocal)}</summary>
             ${dropdownContentHtml}
           </details>
         `
@@ -3995,35 +4207,21 @@ function renderCoreSettingsManager(body, tabSpec) {
         `
         : "";
 
-    return `
-      <article class="card core-manager-item"
-        data-core-key="${safeCoreKey}"
-        data-core-item-id="${encodedId}"
-        data-core-item-group="${escapeHtml(itemGroup)}"
-        data-core-save-action="${escapeHtml(saveAction)}"
-        data-core-remove-action="${escapeHtml(removeAction)}"
-        data-core-run-action="${escapeHtml(runAction)}"
-        data-core-run-confirm="${escapeHtml(runConfirm)}"
-        data-core-remove-confirm="${escapeHtml(removeConfirm)}"
-        data-core-item-popup-fields="${escapeHtml(popupFieldsEncoded)}"
-        data-core-item-popup-title="${escapeHtml(popupTitle)}">
-        <div class="card-head">
-          <h3 class="card-title">${escapeHtml(title)}</h3>
-          <span class="small">${safeCoreKey}</span>
-        </div>
-        ${subtitle ? `<div class="small">${escapeHtml(subtitle)}</div>` : ""}
-        ${itemFieldsHtml}
-        ${itemFieldsPopup ? "" : itemSectionsInDropdown ? "" : sectionHtml}
+    const hasPopupSettingsBtn = Boolean(popupFieldsEncoded) && (itemFieldsPopupEnabled || explicitPopupFields.length > 0);
+    const hasSaveBtn = saveAction && (!itemFieldsPopupEnabled || !popupFieldsEncoded);
+    const hasAnyAction = Boolean(hasPopupSettingsBtn || hasSaveBtn || removeAction || runAction);
+    const actionRowHtml = hasAnyAction
+      ? `
         <div class="inline-row" style="margin-top:10px;">
           ${
-            itemFieldsPopup && saveAction && popupFieldsEncoded
+            hasPopupSettingsBtn
               ? `<button type="button" class="action-btn core-manager-settings">${escapeHtml(
                   String(item?.settings_label || itemFieldsPopupLabel)
                 )}</button>`
               : ""
           }
           ${
-            saveAction && (!itemFieldsPopup || !popupFieldsEncoded)
+            hasSaveBtn
               ? `<button type="button" class="action-btn core-manager-save">${escapeHtml(
                   String(item?.save_label || "Save")
                 )}</button>`
@@ -4045,6 +4243,29 @@ function renderCoreSettingsManager(body, tabSpec) {
           }
           <span class="small core-manager-status"></span>
         </div>
+      `
+      : "";
+
+    return `
+      <article class="card core-manager-item${itemGroupClass}"
+        data-core-key="${safeCoreKey}"
+        data-core-item-id="${encodedId}"
+        data-core-item-group="${escapeHtml(itemGroup)}"
+        data-core-save-action="${escapeHtml(saveAction)}"
+        data-core-remove-action="${escapeHtml(removeAction)}"
+        data-core-run-action="${escapeHtml(runAction)}"
+        data-core-run-confirm="${escapeHtml(runConfirm)}"
+        data-core-remove-confirm="${escapeHtml(removeConfirm)}"
+        data-core-item-popup-fields="${escapeHtml(popupFieldsEncoded)}"
+        data-core-item-popup-title="${escapeHtml(popupTitle)}"${pageAttr}${pageStyle}>
+        <div class="card-head">
+          <h3 class="card-title">${escapeHtml(title)}</h3>
+          <span class="small">${safeCoreKey}</span>
+        </div>
+        ${subtitle ? `<div class="small">${escapeHtml(subtitle)}</div>` : ""}
+        ${itemFieldsHtml}
+        ${itemFieldsPopupEnabled ? "" : itemSectionsInDropdownEnabled ? "" : sectionHtml}
+        ${actionRowHtml}
       </article>
     `;
   }
@@ -4062,13 +4283,39 @@ function renderCoreSettingsManager(body, tabSpec) {
     const selector = boolFromAny(options?.selector, false);
     const selectorLabel = String(options?.selector_label || "Select Item").trim() || "Select Item";
     const sectionEmptyMessage = String(options?.empty_message || emptyMessage).trim() || emptyMessage;
+    const itemGroup = String(options?.item_group || "").trim().toLowerCase();
+    const groupToken = itemGroup.replace(/[^a-z0-9_-]/g, "");
+    const groupClass = groupToken ? ` core-tab-items-group-${groupToken}` : "";
+    const pageSizeRaw = Number(options?.page_size ?? 0);
+    const pageSize = Number.isFinite(pageSizeRaw) ? Math.max(0, Math.floor(pageSizeRaw)) : 0;
 
     if (!rows.length) {
       return renderNotice(sectionEmptyMessage);
     }
 
+    if (!selector && pageSize > 0 && rows.length > pageSize) {
+      const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
+      const cardsHtml = rows
+        .map((item, index) =>
+          renderCoreManagerItemCard(item, {
+            pageIndex: Math.floor(index / pageSize) + 1,
+          })
+        )
+        .join("");
+      return `
+        <div class="core-manager-pagination" data-core-pagination data-core-page-count="${pageCount}" data-core-current-page="1">
+          <div class="core-tab-items${groupClass}" style="margin-top:10px;">${cardsHtml}</div>
+          <div class="inline-row" style="margin-top:10px;">
+            <button type="button" class="action-btn" data-core-page-prev disabled>Previous</button>
+            <span class="small" data-core-page-label>Page 1 of ${pageCount}</span>
+            <button type="button" class="action-btn" data-core-page-next>Next</button>
+          </div>
+        </div>
+      `;
+    }
+
     if (!selector || rows.length <= 1) {
-      return `<div class="core-tab-items" style="margin-top:10px;">${rows.map((item) => renderCoreManagerItemCard(item)).join("")}</div>`;
+      return `<div class="core-tab-items${groupClass}" style="margin-top:10px;">${rows.map((item) => renderCoreManagerItemCard(item)).join("")}</div>`;
     }
 
     const rowsWithToken = rows.map((item, index) => {
@@ -4148,6 +4395,7 @@ function renderCoreSettingsManager(body, tabSpec) {
         const content = renderCoreManagerItemsContent(groupItems, {
           selector: group.selector,
           selector_label: group.selectorLabel,
+          item_group: group.itemGroup,
           empty_message: group.emptyMessage,
         });
         return `
@@ -4200,6 +4448,10 @@ function renderCoreSettingsManager(body, tabSpec) {
         selector: boolFromAny(raw?.selector, false),
         selectorLabel: String(raw?.selector_label || "Select Item").trim() || "Select Item",
         groups: Array.isArray(raw?.groups) ? raw.groups : [],
+        pageSize: (() => {
+          const parsed = Number(raw?.page_size ?? 0);
+          return Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : 0;
+        })(),
         emptyMessage: String(raw?.empty_message || "").trim(),
       };
     })
@@ -4219,6 +4471,8 @@ function renderCoreSettingsManager(body, tabSpec) {
     return renderCoreManagerItemsContent(rows, {
       selector: tab.selector,
       selector_label: tab.selectorLabel,
+      item_group: tab.itemGroup,
+      page_size: tab.pageSize,
       empty_message: tab.emptyMessage || emptyMessage,
     });
   }
@@ -4571,6 +4825,261 @@ function bindCoreManagerSelectors() {
   });
 }
 
+function bindCoreManagerPagination() {
+  document.querySelectorAll("[data-core-pagination]").forEach((block) => {
+    if (!(block instanceof HTMLElement)) {
+      return;
+    }
+    if (block.dataset.corePaginationBound === "1") {
+      return;
+    }
+    block.dataset.corePaginationBound = "1";
+
+    const cards = Array.from(block.querySelectorAll(".core-manager-item[data-core-page-index]"));
+    if (!cards.length) {
+      return;
+    }
+
+    const pageCountRaw = Number(block.dataset.corePageCount || 1);
+    const pageCount = Number.isFinite(pageCountRaw) ? Math.max(1, Math.floor(pageCountRaw)) : 1;
+    const currentRaw = Number(block.dataset.coreCurrentPage || 1);
+    let currentPage = Number.isFinite(currentRaw) ? Math.max(1, Math.floor(currentRaw)) : 1;
+    currentPage = Math.min(currentPage, pageCount);
+
+    const prevBtn = block.querySelector("[data-core-page-prev]");
+    const nextBtn = block.querySelector("[data-core-page-next]");
+    const label = block.querySelector("[data-core-page-label]");
+
+    const paint = () => {
+      cards.forEach((card) => {
+        const pageRaw = Number((card instanceof HTMLElement ? card.dataset.corePageIndex : "") || 1);
+        const pageIndex = Number.isFinite(pageRaw) ? Math.max(1, Math.floor(pageRaw)) : 1;
+        card.style.display = pageIndex === currentPage ? "" : "none";
+      });
+      if (label instanceof HTMLElement) {
+        label.textContent = `Page ${currentPage} of ${pageCount}`;
+      }
+      if (prevBtn instanceof HTMLButtonElement) {
+        prevBtn.disabled = currentPage <= 1;
+      }
+      if (nextBtn instanceof HTMLButtonElement) {
+        nextBtn.disabled = currentPage >= pageCount;
+      }
+      block.dataset.coreCurrentPage = String(currentPage);
+    };
+
+    if (prevBtn instanceof HTMLButtonElement) {
+      prevBtn.addEventListener("click", () => {
+        if (currentPage <= 1) {
+          return;
+        }
+        currentPage -= 1;
+        paint();
+      });
+    }
+    if (nextBtn instanceof HTMLButtonElement) {
+      nextBtn.addEventListener("click", () => {
+        if (currentPage >= pageCount) {
+          return;
+        }
+        currentPage += 1;
+        paint();
+      });
+    }
+
+    paint();
+  });
+}
+
+function _coreFieldByKey(host, key) {
+  const wanted = String(key || "").trim();
+  if (!wanted || !host) {
+    return null;
+  }
+  const candidates = Array.from(host.querySelectorAll("[data-core-field-key]"));
+  return candidates.find((node) => String(node?.dataset?.coreFieldKey || "").trim() === wanted) || null;
+}
+
+function _coreDecodeDependentJson(raw, fallback) {
+  const token = String(raw || "").trim();
+  if (!token) {
+    return fallback;
+  }
+  try {
+    return JSON.parse(decodeURIComponent(token));
+  } catch (_error) {
+    return fallback;
+  }
+}
+
+function _coreNormalizeOptionRows(raw) {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return raw
+    .map((item) => {
+      if (item && typeof item === "object") {
+        const value = String(item.value ?? item.id ?? item.key ?? item.label ?? "");
+        const label = String(item.label ?? value);
+        return { value, label };
+      }
+      const value = String(item ?? "");
+      return { value, label: value };
+    })
+    .filter((row) => row.value || row.label);
+}
+
+function _coreRenderSelectOptions(selectEl, options, preferredValue = "", preferredValues = null) {
+  if (!(selectEl instanceof HTMLSelectElement)) {
+    return;
+  }
+  const preferred = String(preferredValue || "").trim();
+  const preferredMany = Array.isArray(preferredValues)
+    ? preferredValues.map((item) => String(item ?? "").trim()).filter(Boolean)
+    : [];
+  const current = String(selectEl.value || "").trim();
+  const currentMany = selectEl.multiple
+    ? Array.from(selectEl.selectedOptions || [])
+        .map((option) => String(option?.value || "").trim())
+        .filter(Boolean)
+    : [];
+  const rows = Array.isArray(options) ? options : [];
+  if (!rows.length) {
+    selectEl.innerHTML = "";
+    return;
+  }
+  const html = rows
+    .map((row) => {
+      const value = String(row?.value ?? "");
+      const label = String(row?.label ?? value);
+      return `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`;
+    })
+    .join("");
+  selectEl.innerHTML = html;
+  if (selectEl.multiple) {
+    const selected = new Set([...currentMany, ...preferredMany]);
+    if (!selected.size && preferred) {
+      selected.add(preferred);
+    }
+    Array.from(selectEl.options || []).forEach((option) => {
+      option.selected = selected.has(String(option.value || "").trim());
+    });
+    return;
+  }
+  const hasCurrent = rows.some((row) => String(row?.value ?? "") === current);
+  const hasPreferred = rows.some((row) => String(row?.value ?? "") === preferred);
+  if (hasCurrent) {
+    selectEl.value = current;
+  } else if (hasPreferred) {
+    selectEl.value = preferred;
+  } else {
+    selectEl.selectedIndex = 0;
+  }
+}
+
+function bindCoreManagerConditionalFields() {
+  document.querySelectorAll("[data-core-show-source-key]").forEach((container) => {
+    if (!(container instanceof HTMLElement)) {
+      return;
+    }
+    if (container.dataset.coreShowBound === "1") {
+      return;
+    }
+    const sourceKey = String(container.dataset.coreShowSourceKey || "").trim();
+    if (!sourceKey) {
+      return;
+    }
+    const host =
+      container.closest(".core-manager-add-form, .core-manager-item, .core-manager-tab-panel, .card") || document;
+    const sourceInput = _coreFieldByKey(host, sourceKey);
+    if (!(sourceInput instanceof HTMLInputElement || sourceInput instanceof HTMLSelectElement || sourceInput instanceof HTMLTextAreaElement)) {
+      return;
+    }
+    const allowedRaw = _coreDecodeDependentJson(container.dataset.coreShowValues, []);
+    const allowedValues = Array.isArray(allowedRaw)
+      ? allowedRaw.map((item) => String(item ?? "").trim()).filter(Boolean)
+      : [];
+    if (!allowedValues.length) {
+      return;
+    }
+    const refresh = () => {
+      const sourceValue = String(sourceInput.value || "").trim();
+      const visible = allowedValues.includes(sourceValue);
+      container.style.display = visible ? "" : "none";
+      container.setAttribute("aria-hidden", visible ? "false" : "true");
+      container.querySelectorAll("[data-core-field-key]").forEach((input) => {
+        if (input instanceof HTMLInputElement || input instanceof HTMLSelectElement || input instanceof HTMLTextAreaElement) {
+          input.disabled = !visible;
+        }
+      });
+    };
+
+    sourceInput.addEventListener("change", refresh);
+    sourceInput.addEventListener("input", refresh);
+    container.dataset.coreShowBound = "1";
+    refresh();
+  });
+}
+
+function bindCoreManagerDependentSelects() {
+  document.querySelectorAll("select[data-core-filter-source-key]").forEach((targetSelect) => {
+    if (!(targetSelect instanceof HTMLSelectElement)) {
+      return;
+    }
+    if (targetSelect.dataset.coreDependentBound === "1") {
+      return;
+    }
+    const sourceKey = String(targetSelect.dataset.coreFilterSourceKey || "").trim();
+    if (!sourceKey) {
+      return;
+    }
+    const host =
+      targetSelect.closest(".core-manager-add-form, .core-manager-item, .core-manager-tab-panel, .card") || document;
+    const sourceInput = _coreFieldByKey(host, sourceKey);
+    if (!(sourceInput instanceof HTMLInputElement || sourceInput instanceof HTMLSelectElement || sourceInput instanceof HTMLTextAreaElement)) {
+      return;
+    }
+
+    const optionsBySource = _coreDecodeDependentJson(targetSelect.dataset.coreFilterOptionsMap, {});
+    const defaultOptions = _coreNormalizeOptionRows(
+      _coreDecodeDependentJson(targetSelect.dataset.coreFilterDefaultOptions, [])
+    );
+    const preferredValuesRaw = _coreDecodeDependentJson(targetSelect.dataset.coreFilterPreferredValues, []);
+    const preferredValues = Array.isArray(preferredValuesRaw)
+      ? preferredValuesRaw.map((item) => String(item ?? "").trim()).filter(Boolean)
+      : [];
+    const preferredValue = String(targetSelect.dataset.coreFilterPreferredValue || targetSelect.value || "").trim();
+    const isMulti = targetSelect.multiple || String(targetSelect.dataset.coreFieldType || "").toLowerCase() === "multiselect";
+
+    const refresh = () => {
+      const sourceValue = String(sourceInput.value || "").trim();
+      const sourceRows = optionsBySource && typeof optionsBySource === "object" ? optionsBySource[sourceValue] : [];
+      const narrowed = _coreNormalizeOptionRows(sourceRows);
+      let nextRows = defaultOptions;
+      if (sourceValue) {
+        if (narrowed.length) {
+          nextRows = narrowed;
+        } else if (isMulti) {
+          nextRows = [];
+        } else {
+          nextRows = defaultOptions.filter((row) => String(row?.value ?? "").trim() === "");
+          if (!nextRows.length && defaultOptions.length) {
+            nextRows = [defaultOptions[0]];
+          }
+        }
+      } else if (narrowed.length && !isMulti) {
+        nextRows = narrowed;
+      }
+      _coreRenderSelectOptions(targetSelect, nextRows, preferredValue, preferredValues);
+    };
+
+    sourceInput.addEventListener("change", refresh);
+    sourceInput.addEventListener("input", refresh);
+    targetSelect.dataset.coreDependentBound = "1";
+    refresh();
+  });
+}
+
 function setCoreManagerStatus(host, text) {
   const statusEl = host?.querySelector(".core-manager-status");
   if (statusEl) {
@@ -4581,6 +5090,9 @@ function setCoreManagerStatus(host, text) {
 function collectCoreManagerValues(host) {
   const values = {};
   host.querySelectorAll("[data-core-field-key]").forEach((input) => {
+    if (input.disabled) {
+      return;
+    }
     const key = String(input.dataset.coreFieldKey || "").trim();
     if (!key) {
       return;
@@ -4593,6 +5105,12 @@ function collectCoreManagerValues(host) {
     if (type === "number") {
       const parsed = Number(input.value);
       values[key] = Number.isNaN(parsed) ? 0 : parsed;
+      return;
+    }
+    if (type === "multiselect" && input instanceof HTMLSelectElement) {
+      values[key] = Array.from(input.selectedOptions || [])
+        .map((option) => String(option?.value || "").trim())
+        .filter(Boolean);
       return;
     }
     values[key] = input.value;
@@ -4650,6 +5168,36 @@ function bindCoreTabManagers() {
   bindCoreManagerTabs();
   bindCoreManagerSubtabs();
   bindCoreManagerSelectors();
+  bindCoreManagerPagination();
+  bindCoreManagerConditionalFields();
+  bindCoreManagerDependentSelects();
+  document.querySelectorAll(".core-tab-refresh-btn[data-core-tab-refresh]").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement)) {
+      return;
+    }
+    if (button.dataset.coreTabRefreshBound === "1") {
+      return;
+    }
+    button.dataset.coreTabRefreshBound = "1";
+    button.addEventListener("click", async () => {
+      const targetTab = String(getActiveCoreTopTab() || "").trim();
+      if (!targetTab || targetTab === "manage" || button.disabled) {
+        return;
+      }
+      const originalText = String(button.textContent || "Refresh");
+      button.disabled = true;
+      button.textContent = "Refreshing...";
+      try {
+        await refreshCoreTabInPlace(targetTab);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error || "Refresh failed");
+        state.notice = `Refresh failed: ${message}`;
+        renderNoticeBar();
+        button.disabled = false;
+        button.textContent = originalText;
+      }
+    });
+  });
   const decodeCoreManagerPopupFields = (card) => {
     const encoded = String(card?.dataset?.coreItemPopupFields || "").trim();
     if (!encoded) {
@@ -4711,7 +5259,7 @@ function bindCoreTabManagers() {
       const coreKey = String(card?.dataset?.coreKey || "").trim();
       const action = String(card?.dataset?.coreSaveAction || "").trim();
       const itemId = decodeCoreManagerId(card?.dataset?.coreItemId || "");
-      if (!card || !coreKey || !action) {
+      if (!card || !coreKey) {
         return;
       }
       const modalFields = decodeCoreManagerPopupFields(card);
@@ -4724,23 +5272,25 @@ function bindCoreTabManagers() {
         title: popupTitle || "Settings",
         meta: coreKey,
         fields: modalFields,
-        onSave: async (values) => {
-          setCoreManagerStatus(card, "Saving...");
-          const activeTab = persistCoreTabFromNode(card);
-          const result = await runActionWithProgress(
-            {
-              title: "Saving core item",
-              detail: itemId || coreKey,
-              workingText: "Saving changes...",
-              successText: "Saved.",
-              errorPrefix: "Core manager save failed",
-            },
-            () => runCoreTabAction(coreKey, action, { id: itemId, values })
-          );
-          await refreshCoreTabInPlace(activeTab);
-          state.notice = String(result?.message || "Saved.");
-          return result;
-        },
+        onSave: action
+          ? async (values) => {
+              setCoreManagerStatus(card, "Saving...");
+              const activeTab = persistCoreTabFromNode(card);
+              const result = await runActionWithProgress(
+                {
+                  title: "Saving core item",
+                  detail: itemId || coreKey,
+                  workingText: "Saving changes...",
+                  successText: "Saved.",
+                  errorPrefix: "Core manager save failed",
+                },
+                () => runCoreTabAction(coreKey, action, { id: itemId, values })
+              );
+              await refreshCoreTabInPlace(activeTab);
+              state.notice = String(result?.message || "Saved.");
+              return result;
+            }
+          : undefined,
       });
     });
   });
@@ -6246,6 +6796,22 @@ async function loadSettingsView() {
             </label>
             <label>Long-Lived Access Token
               <input id="set_homeassistant_token" type="password" value="${escapeHtml(settings.homeassistant_token || "")}" />
+            </label>
+
+            <div class="settings-section-title">UniFi Network</div>
+            <label>Console Base URL
+              <input id="set_unifi_network_base_url" type="text" value="${escapeHtml(settings.unifi_network_base_url || "https://10.4.20.1")}" />
+            </label>
+            <label>API Key
+              <input id="set_unifi_network_api_key" type="password" value="${escapeHtml(settings.unifi_network_api_key || "")}" />
+            </label>
+
+            <div class="settings-section-title">UniFi Protect</div>
+            <label>Console Base URL
+              <input id="set_unifi_protect_base_url" type="text" value="${escapeHtml(settings.unifi_protect_base_url || "https://10.4.20.127")}" />
+            </label>
+            <label>API Key
+              <input id="set_unifi_protect_api_key" type="password" value="${escapeHtml(settings.unifi_protect_api_key || "")}" />
             </label>
 
             <div class="settings-section-title">Vision</div>
@@ -7798,6 +8364,10 @@ async function loadSettingsView() {
       web_search_google_cx: document.getElementById("set_web_search_google_cx").value,
       homeassistant_base_url: document.getElementById("set_homeassistant_base_url").value,
       homeassistant_token: document.getElementById("set_homeassistant_token").value,
+      unifi_network_base_url: document.getElementById("set_unifi_network_base_url").value,
+      unifi_network_api_key: document.getElementById("set_unifi_network_api_key").value,
+      unifi_protect_base_url: document.getElementById("set_unifi_protect_base_url").value,
+      unifi_protect_api_key: document.getElementById("set_unifi_protect_api_key").value,
       vision_api_base: document.getElementById("set_vision_api_base").value,
       vision_model: document.getElementById("set_vision_model").value,
       vision_api_key: document.getElementById("set_vision_api_key").value,
