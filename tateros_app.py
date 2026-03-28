@@ -3001,7 +3001,7 @@ def _estimate_webui_chat_context_window(*, force_refresh: bool = False) -> Dict[
 def _runtime_breakdown_payload() -> Dict[str, Any]:
     hydra_jobs = _chat_job_counts_with_breakdown(include_history=True)
     llm_calls = get_llm_call_runtime_summary(include_history=True)
-    vision_calls = get_vision_call_runtime_summary()
+    vision_calls = get_vision_call_runtime_summary(include_history=True)
     context_estimate = _estimate_webui_chat_context_window()
     return {
         "hydra_jobs": hydra_jobs,

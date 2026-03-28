@@ -2318,6 +2318,149 @@ function _renderRuntimeLlmCallRows(llmCalls) {
   `;
 }
 
+function _renderRuntimeVisionCallRows(visionCalls) {
+  const totals = visionCalls?.totals && typeof visionCalls.totals === "object" ? visionCalls.totals : {};
+  const byKind = Array.isArray(visionCalls?.active_by_kind) ? visionCalls.active_by_kind : [];
+  const bySource = Array.isArray(visionCalls?.active_by_source) ? visionCalls.active_by_source : [];
+  const activeCalls = Array.isArray(visionCalls?.active_calls) ? visionCalls.active_calls : [];
+  const history = visionCalls?.history && typeof visionCalls.history === "object" ? visionCalls.history : {};
+  const historyWindows = Array.isArray(history?.windows) ? history.windows : [];
+
+  const byKindHtml = byKind.length
+    ? `
+        <div class="runtime-breakdown-list">
+          ${byKind
+            .map((row) => {
+              const calls = Number(row?.calls ?? 0);
+              return `
+                <div class="runtime-breakdown-row compact">
+                  <div class="runtime-breakdown-main">
+                    <div class="runtime-breakdown-name">${escapeHtml(String(row?.label || row?.kind || "Unknown"))}</div>
+                  </div>
+                  <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(`${calls} active`)}</span></div>
+                </div>
+              `;
+            })
+            .join("")}
+        </div>
+      `
+    : `<div class="small muted">No active vision calls.</div>`;
+
+  const bySourceHtml = bySource.length
+    ? `
+        <div class="runtime-breakdown-list">
+          ${bySource
+            .map((row) => {
+              const calls = Number(row?.calls ?? 0);
+              return `
+                <div class="runtime-breakdown-row compact">
+                  <div class="runtime-breakdown-main">
+                    <div class="runtime-breakdown-name">${escapeHtml(String(row?.label || "Unknown source"))}</div>
+                  </div>
+                  <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(`${calls} active`)}</span></div>
+                </div>
+              `;
+            })
+            .join("")}
+        </div>
+      `
+    : `<div class="small muted">No active source rows.</div>`;
+
+  const activeCallsHtml = activeCalls.length
+    ? `
+        <div class="runtime-breakdown-list">
+          ${activeCalls
+            .map((row) => {
+              const sourceLabel = String(row?.source_label || row?.label || "Unknown source");
+              const model = String(row?.model || "model");
+              const apiBase = String(row?.api_base || "").trim();
+              const functionName = String(row?.function || "").trim();
+              const detailLineParts = [`Model ${model}`];
+              if (apiBase) {
+                detailLineParts.push(apiBase);
+              }
+              const extraLineParts = [];
+              if (functionName) {
+                extraLineParts.push(`Fn ${functionName}`);
+              }
+              const age = _runtimeAgeLabel(row?.age_seconds);
+              return `
+                <div class="runtime-breakdown-row">
+                  <div class="runtime-breakdown-main">
+                    <div class="runtime-breakdown-name">${escapeHtml(sourceLabel)}</div>
+                    <div class="small muted">${escapeHtml(detailLineParts.join(" • "))}</div>
+                    ${extraLineParts.length ? `<div class="small muted">${escapeHtml(extraLineParts.join(" • "))}</div>` : ""}
+                  </div>
+                  <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(age)}</span></div>
+                </div>
+              `;
+            })
+            .join("")}
+        </div>
+      `
+    : `<div class="small muted">No active vision calls right now.</div>`;
+
+  const historyWindowKey = _runtimeHistoryWindowKey(state.runtimeHistoryWindow, "24h");
+  const selectedHistoryWindow =
+    historyWindows.find((row) => _runtimeHistoryWindowKey(row?.key, "") === historyWindowKey) || historyWindows[0] || null;
+  const selectedHistoryKey = _runtimeHistoryWindowKey(selectedHistoryWindow?.key, historyWindowKey);
+  const historyTabsHtml = _renderRuntimeHistoryWindowTabs(historyWindows, selectedHistoryKey, "Vision call history window");
+  const historyHtml = selectedHistoryWindow
+    ? (() => {
+        const calls = Number(selectedHistoryWindow?.calls ?? 0);
+        const completed = Number(selectedHistoryWindow?.completed ?? 0);
+        const failed = Number(selectedHistoryWindow?.failed ?? 0);
+        const avgMs = Number(selectedHistoryWindow?.avg_ms ?? 0);
+        const topSources = Array.isArray(selectedHistoryWindow?.top_sources) ? selectedHistoryWindow.top_sources : [];
+        const sourceLine = topSources.length
+          ? topSources.map((row) => `${String(row?.label || row?.source || "Unknown")}: ${Number(row?.calls ?? 0)}`).join(" • ")
+          : "No calls in this period.";
+        return `
+          <div class="runtime-breakdown-list runtime-breakdown-list-static">
+            <div class="runtime-breakdown-row">
+              <div class="runtime-breakdown-main">
+                <div class="runtime-breakdown-name">${escapeHtml(String(selectedHistoryWindow?.label || "Window"))}</div>
+                <div class="small muted">Done ${completed} • Failed ${failed} • Avg ${avgMs.toFixed(1)} ms</div>
+                <div class="small muted">${escapeHtml(sourceLine)}</div>
+              </div>
+              <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(`${calls} calls`)}</span></div>
+            </div>
+          </div>
+        `;
+      })()
+    : `<div class="small muted">No vision call history available yet.</div>`;
+
+  return `
+    <div class="runtime-breakdown-block">
+      <div class="runtime-breakdown-subtitle">By Type</div>
+      ${byKindHtml}
+    </div>
+    <div class="runtime-breakdown-block">
+      <div class="runtime-breakdown-subtitle">By Source</div>
+      ${bySourceHtml}
+    </div>
+    <div class="runtime-breakdown-block">
+      <div class="runtime-breakdown-subtitle">Active Calls</div>
+      ${activeCallsHtml}
+    </div>
+    <div class="runtime-breakdown-block">
+      <div class="runtime-breakdown-subtitle-row">
+        <div class="runtime-breakdown-subtitle">History</div>
+        ${historyTabsHtml}
+      </div>
+      ${historyHtml}
+      <div class="small muted">Sample size: ${escapeHtml(String(Number(history?.sample_size ?? 0)))} completed calls</div>
+    </div>
+    <div class="runtime-breakdown-block">
+      <div class="small muted">
+        Totals since boot: Started ${escapeHtml(String(Number(totals?.started ?? 0)))} • Completed ${escapeHtml(
+          String(Number(totals?.completed ?? 0))
+        )} • Failed ${escapeHtml(String(Number(totals?.failed ?? 0)))}
+      </div>
+    </div>
+  `;
+}
+
 function _runtimeInt(value, fallback = 0) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) {
@@ -2448,6 +2591,7 @@ function renderRuntimeBreakdown(payload) {
         ? payload.chat_jobs
         : {};
   const llmCalls = payload?.llm_calls && typeof payload.llm_calls === "object" ? payload.llm_calls : {};
+  const visionCalls = payload?.vision_calls && typeof payload.vision_calls === "object" ? payload.vision_calls : {};
   const contextEstimate = payload?.chat_context_window && typeof payload.chat_context_window === "object"
     ? payload.chat_context_window
     : {};
@@ -2458,6 +2602,9 @@ function renderRuntimeBreakdown(payload) {
   const llmSummary = `${Number(llmCalls.active_total ?? 0)} active • Started ${Number(
     llmCalls?.totals?.started ?? 0
   )} • Completed ${Number(llmCalls?.totals?.completed ?? 0)} • Failed ${Number(llmCalls?.totals?.failed ?? 0)}`;
+  const visionSummary = `${Number(visionCalls.active_total ?? 0)} active • Started ${Number(
+    visionCalls?.totals?.started ?? 0
+  )} • Completed ${Number(visionCalls?.totals?.completed ?? 0)} • Failed ${Number(visionCalls?.totals?.failed ?? 0)}`;
   return `
     <div class="runtime-breakdown-grid">
       <section class="runtime-breakdown-card">
@@ -2474,6 +2621,13 @@ function renderRuntimeBreakdown(payload) {
         </div>
         ${_renderRuntimeLlmCallRows(llmCalls)}
       </section>
+      <section class="runtime-breakdown-card">
+        <div class="runtime-breakdown-head">
+          <h4 class="runtime-breakdown-title">Vision Calls</h4>
+          <div class="small muted">${escapeHtml(visionSummary)}</div>
+        </div>
+        ${_renderRuntimeVisionCallRows(visionCalls)}
+      </section>
       ${_renderRuntimeContextWindowCard(contextEstimate)}
     </div>
   `;
@@ -2489,9 +2643,9 @@ function ensureRuntimeBreakdownModal() {
     "beforeend",
     `
       <div id="runtime-breakdown-modal" class="cerb-modal" aria-hidden="true">
-        <div class="cerb-modal-dialog card runtime-breakdown-dialog" role="dialog" aria-modal="true" aria-label="Hydra Jobs and LLM Calls">
+        <div class="cerb-modal-dialog card runtime-breakdown-dialog" role="dialog" aria-modal="true" aria-label="Hydra Jobs, LLM Calls, and Vision Calls">
           <div class="card-head">
-            <h3 class="card-title">Live Hydra Jobs + LLM Calls</h3>
+            <h3 class="card-title">Live Hydra Jobs + LLM Calls + Vision Calls</h3>
             <div class="inline-row">
               <span id="runtime-breakdown-updated" class="small"></span>
               <button type="button" class="inline-btn" id="runtime-breakdown-refresh">Refresh</button>
