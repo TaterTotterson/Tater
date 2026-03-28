@@ -1984,7 +1984,8 @@ function formatRuntimeSummary(health) {
   const coresRunning = Number(health?.cores_running ?? 0);
   const hydraJobsActive = Number(health?.hydra_jobs_active ?? health?.chat_jobs_active ?? 0);
   const llmCallsActive = Number(health?.llm_calls_active ?? 0);
-  return `${verbasEnabled} verba enabled • ${portalsRunning} portals running • ${coresRunning} cores running • ${hydraJobsActive} hydra jobs • ${llmCallsActive} llm calls`;
+  const visionCallsActive = Number(health?.vision_calls_active ?? 0);
+  return `${verbasEnabled} verba enabled • ${portalsRunning} portals running • ${coresRunning} cores running • ${hydraJobsActive} hydra jobs • ${llmCallsActive} llm calls • ${visionCallsActive} vision calls`;
 }
 
 function setRuntimeSummaryText(text, tone = "normal") {
@@ -6813,17 +6814,6 @@ async function loadSettingsView() {
             <label>API Key
               <input id="set_unifi_protect_api_key" type="password" value="${escapeHtml(settings.unifi_protect_api_key || "")}" />
             </label>
-
-            <div class="settings-section-title">Vision</div>
-            <label>Vision API Base URL
-              <input id="set_vision_api_base" type="text" value="${escapeHtml(settings.vision_api_base || "http://127.0.0.1:1234")}" />
-            </label>
-            <label>Vision Model
-              <input id="set_vision_model" type="text" value="${escapeHtml(settings.vision_model || "qwen2.5-vl-7b-instruct")}" />
-            </label>
-            <label style="grid-column: 1 / -1;">Vision API Key (optional)
-              <input id="set_vision_api_key" type="password" value="${escapeHtml(settings.vision_api_key || "")}" />
-            </label>
             <div class="inline-row" style="grid-column: 1 / -1;">
               <button type="button" id="settings-save-integrations" class="action-btn">Save Settings</button>
               <span class="small">Saves Integrations and non-model settings.</span>
@@ -7043,6 +7033,20 @@ async function loadSettingsView() {
                       <button type="button" id="settings-hydra-base-server-add" class="inline-btn">Add Server</button>
                     </div>
                   </div>
+                  <div class="hydra-role-title">Vision Model (Image Tools)</div>
+                  <label>Vision API Base URL
+                    <input id="set_vision_api_base" type="text" value="${escapeHtml(
+                      settings.vision_api_base || "http://127.0.0.1:1234"
+                    )}" />
+                  </label>
+                  <label>Vision Model
+                    <input id="set_vision_model" type="text" value="${escapeHtml(
+                      settings.vision_model || "qwen2.5-vl-7b-instruct"
+                    )}" />
+                  </label>
+                  <label style="grid-column: 1 / -1;">Vision API Key (optional)
+                    <input id="set_vision_api_key" type="password" value="${escapeHtml(settings.vision_api_key || "")}" />
+                  </label>
                 </div>
                 <div id="settings-hydra-beast-fields" class="hydra-model-panel ${
                   settings.hydra_beast_mode_enabled ? "is-active" : ""
@@ -7138,7 +7142,7 @@ async function loadSettingsView() {
               </div>
               <div class="inline-row" style="grid-column: 1 / -1;">
                 <button type="button" id="settings-hydra-model-save" class="action-btn">Save Model</button>
-              <span class="small">Saves Hydra model settings only (base model + Beast Mode role models).</span>
+              <span class="small">Saves Hydra and Vision model settings only.</span>
               </div>
             </div>
           </div>
@@ -7815,6 +7819,9 @@ async function loadSettingsView() {
     const baseHost = String(document.getElementById("set_hydra_llm_host")?.value || "").trim();
     const basePort = String(document.getElementById("set_hydra_llm_port")?.value || "").trim();
     const baseModel = String(document.getElementById("set_hydra_llm_model")?.value || "").trim();
+    const visionApiBase = String(document.getElementById("set_vision_api_base")?.value || "").trim();
+    const visionModel = String(document.getElementById("set_vision_model")?.value || "").trim();
+    const visionApiKey = String(document.getElementById("set_vision_api_key")?.value || "").trim();
     const additionalBaseRows = readHydraAdditionalBaseRows();
     const hydraBaseServersPayload = [normalizeHydraBaseRowInput({ host: baseHost, port: basePort, model: baseModel })];
     additionalBaseRows.forEach((row) => hydraBaseServersPayload.push(normalizeHydraBaseRowInput(row)));
@@ -7824,6 +7831,9 @@ async function loadSettingsView() {
       hydra_llm_model: baseModel,
       hydra_base_servers: hydraBaseServersPayload,
       hydra_beast_mode_enabled: Boolean(document.getElementById("set_hydra_beast_mode_enabled")?.checked),
+      vision_api_base: visionApiBase,
+      vision_model: visionModel,
+      vision_api_key: visionApiKey,
     };
     const hydraRoleIds = ["chat", "astraeus", "thanatos", "minos", "hermes"];
     hydraRoleIds.forEach((role) => {
@@ -7834,14 +7844,14 @@ async function loadSettingsView() {
       payload[`hydra_llm_${role}_port`] = portEl ? String(portEl.value || "").trim() : "";
       payload[`hydra_llm_${role}_model`] = modelEl ? String(modelEl.value || "").trim() : "";
     });
-    statusEl.textContent = "Saving Hydra model settings...";
+    statusEl.textContent = "Saving Hydra and Vision model settings...";
     try {
       await api("/api/settings", {
         method: "POST",
         body: JSON.stringify(payload),
       });
-      statusEl.textContent = "Hydra model settings saved.";
-      showToast("Hydra model settings saved.");
+      statusEl.textContent = "Hydra and Vision model settings saved.";
+      showToast("Hydra and Vision model settings saved.");
     } catch (error) {
       statusEl.textContent = `Model save failed: ${error.message}`;
     }

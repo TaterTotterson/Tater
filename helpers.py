@@ -212,6 +212,74 @@ def _httpx_effective_url(client: Any, url: Any) -> str:
         return raw
 
 
+def _json_like_payload(value: Any) -> Any:
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, bytes):
+        try:
+            value = value.decode("utf-8", errors="ignore")
+        except Exception:
+            return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return json.loads(text)
+        except Exception:
+            return None
+    return None
+
+
+def _vision_payload_has_image_url(payload: Any) -> bool:
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            key_token = str(key or "").strip().lower()
+            if key_token == "type" and str(value or "").strip().lower() == "image_url":
+                return True
+            if key_token == "image_url":
+                return True
+            if _vision_payload_has_image_url(value):
+                return True
+        return False
+    if isinstance(payload, list):
+        for item in payload:
+            if _vision_payload_has_image_url(item):
+                return True
+    return False
+
+
+def _looks_like_tracked_vision_call(url: Any, *, json_payload: Any = None, data_payload: Any = None, content_payload: Any = None) -> Dict[str, str]:
+    raw_url = _text(url).strip()
+    if not raw_url:
+        return {}
+    parsed = urlparse(raw_url)
+    path = _text(parsed.path).strip()
+    suffix = "/v1/chat/completions"
+    if not path.endswith(suffix):
+        return {}
+
+    payload = _json_like_payload(json_payload)
+    if payload is None:
+        payload = _json_like_payload(data_payload)
+    if payload is None:
+        payload = _json_like_payload(content_payload)
+    if payload is None or not _vision_payload_has_image_url(payload):
+        return {}
+
+    model = ""
+    if isinstance(payload, dict):
+        model = _text(payload.get("model")).strip()
+    base_path = path[: -len(suffix)].rstrip("/")
+    api_base = urlunparse(parsed._replace(path=base_path, params="", query="", fragment="")).rstrip("/")
+    if not api_base:
+        api_base = raw_url
+    return {
+        "api_base": api_base,
+        "model": model,
+    }
+
+
 def _patch_internal_portal_http_auth() -> None:
     global _INTERNAL_PORTAL_HTTP_PATCHED
     global _ORIG_REQUESTS_SESSION_REQUEST
@@ -224,11 +292,40 @@ def _patch_internal_portal_http_auth() -> None:
     _ORIG_REQUESTS_SESSION_REQUEST = requests.sessions.Session.request
 
     def _requests_session_request_with_portal_auth(self, method, url, **kwargs):
+        vision_call_id = ""
+        vision_model = ""
         try:
             kwargs["headers"] = _inject_tater_token_header(url, kwargs.get("headers"))
         except Exception:
             pass
-        return _ORIG_REQUESTS_SESSION_REQUEST(self, method, url, **kwargs)
+        try:
+            vision_meta = _looks_like_tracked_vision_call(
+                url,
+                json_payload=kwargs.get("json"),
+                data_payload=kwargs.get("data"),
+                content_payload=kwargs.get("content"),
+            )
+            if vision_meta:
+                vision_model = str(vision_meta.get("model") or "").strip()
+                vision_call_id = register_active_vision_call(
+                    api_base=str(vision_meta.get("api_base") or "").strip(),
+                    model=vision_model,
+                    source="vision_http",
+                )
+        except Exception:
+            vision_call_id = ""
+            vision_model = ""
+        try:
+            response = _ORIG_REQUESTS_SESSION_REQUEST(self, method, url, **kwargs)
+        except Exception as exc:
+            if vision_call_id:
+                finish_active_vision_call(vision_call_id, error=str(exc), response_model=vision_model)
+            raise
+        if vision_call_id:
+            status_code = int(getattr(response, "status_code", 0) or 0)
+            vision_error = f"HTTP {status_code}" if status_code >= 300 else None
+            finish_active_vision_call(vision_call_id, error=vision_error, response_model=vision_model)
+        return response
 
     requests.sessions.Session.request = _requests_session_request_with_portal_auth
 
@@ -237,20 +334,80 @@ def _patch_internal_portal_http_auth() -> None:
         _ORIG_HTTPX_ASYNC_CLIENT_REQUEST = httpx.AsyncClient.request
 
         def _httpx_client_request_with_portal_auth(self, method, url, *args, **kwargs):
+            vision_call_id = ""
+            vision_model = ""
+            effective_url = ""
             try:
                 effective_url = _httpx_effective_url(self, url)
                 kwargs["headers"] = _inject_tater_token_header(effective_url, kwargs.get("headers"))
             except Exception:
                 pass
-            return _ORIG_HTTPX_CLIENT_REQUEST(self, method, url, *args, **kwargs)
+            try:
+                vision_meta = _looks_like_tracked_vision_call(
+                    effective_url or url,
+                    json_payload=kwargs.get("json"),
+                    data_payload=kwargs.get("data"),
+                    content_payload=kwargs.get("content"),
+                )
+                if vision_meta:
+                    vision_model = str(vision_meta.get("model") or "").strip()
+                    vision_call_id = register_active_vision_call(
+                        api_base=str(vision_meta.get("api_base") or "").strip(),
+                        model=vision_model,
+                        source="vision_http",
+                    )
+            except Exception:
+                vision_call_id = ""
+                vision_model = ""
+            try:
+                response = _ORIG_HTTPX_CLIENT_REQUEST(self, method, url, *args, **kwargs)
+            except Exception as exc:
+                if vision_call_id:
+                    finish_active_vision_call(vision_call_id, error=str(exc), response_model=vision_model)
+                raise
+            if vision_call_id:
+                status_code = int(getattr(response, "status_code", 0) or 0)
+                vision_error = f"HTTP {status_code}" if status_code >= 300 else None
+                finish_active_vision_call(vision_call_id, error=vision_error, response_model=vision_model)
+            return response
 
         async def _httpx_async_client_request_with_portal_auth(self, method, url, *args, **kwargs):
+            vision_call_id = ""
+            vision_model = ""
+            effective_url = ""
             try:
                 effective_url = _httpx_effective_url(self, url)
                 kwargs["headers"] = _inject_tater_token_header(effective_url, kwargs.get("headers"))
             except Exception:
                 pass
-            return await _ORIG_HTTPX_ASYNC_CLIENT_REQUEST(self, method, url, *args, **kwargs)
+            try:
+                vision_meta = _looks_like_tracked_vision_call(
+                    effective_url or url,
+                    json_payload=kwargs.get("json"),
+                    data_payload=kwargs.get("data"),
+                    content_payload=kwargs.get("content"),
+                )
+                if vision_meta:
+                    vision_model = str(vision_meta.get("model") or "").strip()
+                    vision_call_id = register_active_vision_call(
+                        api_base=str(vision_meta.get("api_base") or "").strip(),
+                        model=vision_model,
+                        source="vision_http",
+                    )
+            except Exception:
+                vision_call_id = ""
+                vision_model = ""
+            try:
+                response = await _ORIG_HTTPX_ASYNC_CLIENT_REQUEST(self, method, url, *args, **kwargs)
+            except Exception as exc:
+                if vision_call_id:
+                    finish_active_vision_call(vision_call_id, error=str(exc), response_model=vision_model)
+                raise
+            if vision_call_id:
+                status_code = int(getattr(response, "status_code", 0) or 0)
+                vision_error = f"HTTP {status_code}" if status_code >= 300 else None
+                finish_active_vision_call(vision_call_id, error=vision_error, response_model=vision_model)
+            return response
 
         httpx.Client.request = _httpx_client_request_with_portal_auth
         httpx.AsyncClient.request = _httpx_async_client_request_with_portal_auth
@@ -319,6 +476,9 @@ _LLM_CALL_HISTORY_MAX = 5000
 _LLM_CALL_COUNTERS: Dict[str, int] = {"started": 0, "completed": 0, "failed": 0}
 _LLM_CALL_COUNTERS_REDIS_KEY = "tater:llm:runtime:counters"
 _LLM_CALL_HISTORY_REDIS_KEY = "tater:llm:runtime:history"
+_ACTIVE_VISION_CALLS_LOCK = threading.RLock()
+_ACTIVE_VISION_CALLS: Dict[str, Dict[str, Any]] = {}
+_VISION_CALL_COUNTERS: Dict[str, int] = {"started": 0, "completed": 0, "failed": 0}
 
 _LLM_ORIGIN_KIND_LABELS = {
     "hydra": "Hydra",
@@ -1046,6 +1206,103 @@ def get_llm_call_runtime_summary(*, include_history: bool = False) -> Dict[str, 
     if include_history:
         out["history"] = _llm_call_history_windows(history_rows)
     return out
+
+
+def register_active_vision_call(
+    *,
+    api_base: str,
+    model: str,
+    source: str = "",
+) -> str:
+    origin = _infer_llm_call_origin()
+    call_id = str(uuid.uuid4())
+    started_at = time.time()
+    row = {
+        "id": call_id,
+        "api_base": str(api_base or "").strip(),
+        "model": str(model or "").strip(),
+        "started_at": started_at,
+        "kind": str(origin.get("kind") or "other"),
+        "source": str(source or origin.get("source") or "unknown").strip() or "unknown",
+        "module": str(origin.get("module") or ""),
+        "path": str(origin.get("path") or ""),
+        "function": str(origin.get("function") or ""),
+    }
+    with _ACTIVE_VISION_CALLS_LOCK:
+        _ACTIVE_VISION_CALLS[call_id] = row
+        _VISION_CALL_COUNTERS["started"] = int(_VISION_CALL_COUNTERS.get("started") or 0) + 1
+    return call_id
+
+
+def finish_active_vision_call(
+    call_id: str,
+    *,
+    error: Any = None,
+    response_model: str = "",
+) -> None:
+    call_token = str(call_id or "").strip()
+    if not call_token:
+        return
+
+    with _ACTIVE_VISION_CALLS_LOCK:
+        row = _ACTIVE_VISION_CALLS.pop(call_token, None)
+        if not isinstance(row, dict):
+            return
+        ok = not bool(error)
+        if ok:
+            _VISION_CALL_COUNTERS["completed"] = int(_VISION_CALL_COUNTERS.get("completed") or 0) + 1
+        else:
+            _VISION_CALL_COUNTERS["failed"] = int(_VISION_CALL_COUNTERS.get("failed") or 0) + 1
+        if response_model:
+            row["model"] = str(response_model).strip()
+
+
+def get_active_vision_calls_snapshot(*, limit: int = 100) -> List[Dict[str, Any]]:
+    max_items = max(1, min(int(limit or 0), 500))
+    now = time.time()
+
+    with _ACTIVE_VISION_CALLS_LOCK:
+        rows = [dict(item) for item in _ACTIVE_VISION_CALLS.values() if isinstance(item, dict)]
+
+    rows.sort(key=lambda row: float(row.get("started_at") or 0.0))
+    out: List[Dict[str, Any]] = []
+    for row in rows[-max_items:]:
+        started_at = float(row.get("started_at") or 0.0)
+        age_seconds = max(0, int(now - started_at)) if started_at > 0 else 0
+        kind = str(row.get("kind") or "other")
+        source = str(row.get("source") or "unknown")
+        out.append(
+            {
+                "id": str(row.get("id") or ""),
+                "kind": kind,
+                "kind_label": _llm_origin_kind_label(kind),
+                "source": source,
+                "source_label": f"{_llm_origin_kind_label(kind)} - {source}",
+                "module": str(row.get("module") or ""),
+                "path": str(row.get("path") or ""),
+                "function": str(row.get("function") or ""),
+                "api_base": str(row.get("api_base") or ""),
+                "model": str(row.get("model") or ""),
+                "started_at": started_at,
+                "age_seconds": age_seconds,
+            }
+        )
+    return out
+
+
+def get_vision_call_runtime_summary() -> Dict[str, Any]:
+    active_calls = get_active_vision_calls_snapshot(limit=120)
+    with _ACTIVE_VISION_CALLS_LOCK:
+        totals = {
+            "started": int(_VISION_CALL_COUNTERS.get("started") or 0),
+            "completed": int(_VISION_CALL_COUNTERS.get("completed") or 0),
+            "failed": int(_VISION_CALL_COUNTERS.get("failed") or 0),
+        }
+    return {
+        "active_total": int(len(active_calls)),
+        "totals": totals,
+        "active_calls": active_calls,
+    }
 
 
 def build_llm_host_from_env(default_host="127.0.0.1", default_port="11434") -> str:
