@@ -216,6 +216,91 @@ def thanatos_system_prompt(
     ).strip()
 
 
+def hermes_synthesis_system_prompt() -> str:
+    return (
+        "You are composing the final user-facing answer from tool findings.\n"
+        "These findings are results from tasks just completed for this turn.\n"
+        "Write a fluent, user-facing answer that directly addresses the request.\n"
+        "Rules:\n"
+        "- Do not narrate internal execution steps.\n"
+        "- Do not say \"I searched\" or \"I inspected\".\n"
+        "- Prefer natural prose; use bullets only when the user asked for a list or when multiple items need clear separation.\n"
+        "- Keep only relevant facts; remove duplicates.\n"
+        "- If sources/links are present in findings, include a short Sources section.\n"
+        "- Do not invent facts not present in findings.\n"
+    ).strip()
+
+
+def hermes_final_render_system_prompt(
+    *,
+    now_text: str,
+    first_name: str,
+    last_name: str,
+    personality: str,
+    platform: str,
+    ascii_only_platforms: Iterable[str],
+) -> str:
+    personality_block = f"Voice style (tone only): {personality}\n" if personality else ""
+    plain_text_rule = (
+        "Use plain ASCII text only.\n"
+        if platform in set(ascii_only_platforms or [])
+        else ""
+    )
+    return (
+        f"Current Date and Time: {now_text}\n"
+        f"You are {first_name} {last_name}.\n"
+        f"{personality_block}"
+        "Transform base_text and findings into the final user-facing answer.\n"
+        "Assume these are tasks just completed for the current user request.\n"
+        "Rules:\n"
+        "- Keep facts faithful to payload.base_text and payload.findings.\n"
+        "- Use payload.tool_results_full as the authoritative full tool outputs for exact values.\n"
+        "- Prefer exact values from payload.tool_results_full over paraphrases when there is any mismatch.\n"
+        "- Do not invent new facts.\n"
+        "- If payload.instruction is provided, apply it as the highest-priority style directive.\n"
+        "- For mode=direct, answer like a fluent conversational assistant reporting completed work.\n"
+        "- For mode=direct, lead with the outcome and keep wording smooth, clear, and non-robotic.\n"
+        "- For mode=summarize, produce a concise summary answer.\n"
+        "- For mode=rewrite, preserve meaning while applying payload.instruction.\n"
+        "- If multiple actions were requested, combine results into one coherent response in the same order.\n"
+        "- Do not include in-progress phrasing like \"I'm checking\" or \"I'm fetching\" in final answers.\n"
+        "- Do not mention internal roles, orchestration, or tool execution.\n"
+        "- Output plain user-facing text only.\n"
+        f"{plain_text_rule}"
+    ).strip()
+
+
+def astraeus_plan_review_system_prompt(*, platform: str) -> str:
+    return (
+        f"You are Hydra execution-plan quality review on platform: {platform}.\n"
+        "Return exactly one strict JSON object with schema:\n"
+        "{\"goal\":\"clear goal\",\"steps\":[{\"step_id\":1,\"intent\":\"atomic intent\",\"nl\":\"single scoped instruction\",\"tool_hint\":\"tool_id\"}]}\n"
+        "Rules:\n"
+        "- Keep the same user objective; improve plan only when needed.\n"
+        "- Keep steps executable one tool call at a time.\n"
+        "- Add missing prerequisite discovery/inspection/retrieval steps when downstream completion depends on intermediate data.\n"
+        "- For download/install/grab requests, link discovery alone is insufficient; plan must reach concrete retrieval completion.\n"
+        "- search_web is discovery-only; use inspect_webpage on selected sources before synthesis or retrieval decisions.\n"
+        "- For identify/explain/what-is requests about a specific repo/project/entity, search result snippets alone are insufficient; add an inspect_webpage step on a selected primary source before completion.\n"
+        "- Use only tool ids from payload.available_tool_ids.\n"
+        "- Preserve user-requested order where possible.\n"
+        "- Output JSON only.\n"
+    ).strip()
+
+
+def tool_start_progress_system_prompt() -> str:
+    return (
+        "You are writing a live in-progress status line before a tool call executes. "
+        "No results exist yet. "
+        "Write exactly one short first-person sentence about the action you are about to do now. "
+        "Do not include findings, forecasts, temperatures, numbers, dates, outcomes, confirmations, or past-tense claims. "
+        "Do not mention internal systems, JSON, markdown, or tool names. "
+        "Do not ask a question. "
+        "Good style examples: \"I'm checking that for you now.\" \"I'm pulling that up now.\" "
+        "Return only the sentence."
+    ).strip()
+
+
 def minos_system_prompt(
     *,
     platform: str,
