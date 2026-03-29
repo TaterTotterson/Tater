@@ -24,7 +24,7 @@ async def validate_or_recover_tool_call(
     validation_failure_text_fn: Callable[[str, str], str],
     normalize_tool_call_for_user_request_fn: Callable[..., Dict[str, Any]],
     enrich_tool_call_for_user_request_fn: Optional[Callable[..., Awaitable[Dict[str, Any]]]] = None,
-    resolver_max_tokens: Optional[int] = None,
+    enrich_max_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
     raw = str(text or "").strip()
     if not is_tool_candidate_fn(raw):
@@ -117,7 +117,7 @@ async def validate_or_recover_tool_call(
                 history_messages=(history_messages if isinstance(history_messages, list) else []),
                 context=(context if isinstance(context, dict) else {}),
                 platform_preamble=platform_preamble,
-                max_tokens=resolver_max_tokens,
+                max_tokens=enrich_max_tokens,
             )
             if isinstance(enriched_tool_call, dict):
                 tool_call = enriched_tool_call

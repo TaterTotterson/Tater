@@ -1892,7 +1892,7 @@ async def _validate_or_recover_tool_call(
     platform_preamble: str = "",
     repair_max_tokens: Optional[int] = None,
     recovery_max_tokens: Optional[int] = None,
-    resolver_max_tokens: Optional[int] = None,
+    enrich_max_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
     return await validation_flow.validate_or_recover_tool_call(
         llm_client=llm_client,
@@ -1916,7 +1916,7 @@ async def _validate_or_recover_tool_call(
         validation_failure_text_fn=_validation_failure_text,
         normalize_tool_call_for_user_request_fn=_normalize_tool_call_for_user_request,
         enrich_tool_call_for_user_request_fn=_llm_enrich_tool_call_for_user_request,
-        resolver_max_tokens=resolver_max_tokens,
+        enrich_max_tokens=enrich_max_tokens,
     )
 
 
@@ -2873,80 +2873,6 @@ async def _run_chat_fallback_reply(
     except Exception:
         return ""
     return _coerce_text((resp.get("message", {}) or {}).get("content", "")).strip()
-
-
-async def _resolve_user_request_for_turn(
-    *,
-    llm_client: Any,
-    current_user_text: str,
-    history: List[Dict[str, Any]],
-    platform_preamble: str,
-    max_tokens: Optional[int],
-) -> str:
-    current = str(current_user_text or "").strip()
-    if not current:
-        return ""
-
-    recent_history: List[Dict[str, str]] = []
-    for msg in (history or []):
-        if not isinstance(msg, dict):
-            continue
-        role = str(msg.get("role") or "").strip().lower()
-        if role not in {"user", "assistant"}:
-            continue
-        content = _coerce_text(msg.get("content")).strip()
-        if not content:
-            continue
-        recent_history.append({"role": role, "content": content})
-
-    payload = {
-        "current_user_message": current,
-        "recent_history": recent_history,
-    }
-    messages: List[Dict[str, Any]] = [
-        {
-            "role": "system",
-            "content": (
-                "You resolve the current user turn into a standalone request for planning.\n"
-                "Return exactly one strict JSON object: {\"resolved_request\":\"...\"}\n"
-                "Rules:\n"
-                "- Use the current user message as highest priority.\n"
-                "- Use recent history only to resolve references (it/that/this/what about/how about/time shifts).\n"
-                "- Short follow-up questions that shift location/time/subject are still explicit retrieval requests; keep intent from prior turn and update only what changed.\n"
-                "- Preserve requested time windows and area/entity constraints when the follow-up implies them.\n"
-                "- If the current message is standalone, keep it unchanged.\n"
-                "- Never continue a prior objective unless the current message explicitly asks to continue/retry/repeat.\n"
-                "- If the current message is social chatter, reaction, tone feedback, or stop/cancel without a new executable ask, return it unchanged.\n"
-                "- If the current message only shares context/logs/content without a clear ask, return it unchanged.\n"
-                "- Do not answer the request.\n"
-                "- Do not invent facts, entities, or outcomes.\n"
-                "- Keep wording concise and faithful to the user's intent.\n"
-            ),
-        },
-        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-    ]
-    messages = _with_platform_preamble(messages, platform_preamble=platform_preamble)
-    try:
-        resp = await llm_client.chat(
-            messages=messages,
-            temperature=0.0,
-            **_chat_with_optional_max_tokens_kwargs(
-                max_tokens=max_tokens,
-                minimum=80,
-                fallback=180,
-            ),
-        )
-    except Exception:
-        return current
-
-    raw = _coerce_text((resp.get("message", {}) or {}).get("content", "")).strip()
-    parsed = _first_json_object(raw)
-    if not isinstance(parsed, dict):
-        return current
-    resolved = str(parsed.get("resolved_request") or "").strip()
-    if not resolved:
-        return current
-    return _short_text(" ".join(resolved.split()), limit=420) or current
 
 
 def _turn_goal_for_state(*, current_user_text: str, resolved_user_text: str) -> str:
@@ -4471,7 +4397,7 @@ async def _run_hydra_turn_impl(
     thanatos_max_tokens = _configured_thanatos_max_tokens(r)
     tool_repair_max_tokens = _configured_tool_repair_max_tokens(r)
     recovery_max_tokens = _configured_recovery_max_tokens(r)
-    resolver_max_tokens = _scale_token_limit(
+    enrich_max_tokens = _scale_token_limit(
         astraeus_max_tokens,
         denominator=6,
         minimum=120,
@@ -4548,15 +4474,7 @@ async def _run_hydra_turn_impl(
 
     history = _compact_history(history_messages)
     current_user_turn_text = _strip_user_sender_prefix(user_text).strip() or str(user_text or "").strip()
-    resolved_user_text = await _resolve_user_request_for_turn(
-        llm_client=llm_client_ai_calls,
-        current_user_text=current_user_turn_text,
-        history=history,
-        platform_preamble=platform_preamble,
-        max_tokens=resolver_max_tokens,
-    )
-    if not resolved_user_text:
-        resolved_user_text = current_user_turn_text or str(user_text or "").strip()
+    resolved_user_text = current_user_turn_text or str(user_text or "").strip()
     task_name = _task_name_from_text(resolved_user_text or user_text, fallback=task_name)
     _set_active_chat_job_task_name(active_job_id, task_name)
     tool_index = _enabled_tool_mini_index(
@@ -5216,7 +5134,7 @@ async def _run_hydra_turn_impl(
             platform_preamble=platform_preamble,
             repair_max_tokens=tool_repair_max_tokens,
             recovery_max_tokens=recovery_max_tokens,
-            resolver_max_tokens=resolver_max_tokens,
+            enrich_max_tokens=enrich_max_tokens,
         )
         validation_status = (
             tool_eval.get("validation_status")
