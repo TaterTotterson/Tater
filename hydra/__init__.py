@@ -1448,10 +1448,6 @@ def _astraeus_system_prompt(platform: str) -> str:
     return prompts.astraeus_system_prompt(platform=platform)
 
 
-def _chat_or_tool_router_system_prompt(platform: str) -> str:
-    return prompts.chat_or_tool_router_system_prompt(platform=platform)
-
-
 def _chat_fallback_system_prompt(platform: str) -> str:
     first, last = get_tater_name()
     return prompts.chat_fallback_system_prompt(
@@ -2951,83 +2947,6 @@ async def _resolve_user_request_for_turn(
     if not resolved:
         return current
     return _short_text(" ".join(resolved.split()), limit=420) or current
-
-
-async def _llm_chat_or_tool_route_for_turn(
-    *,
-    llm_client: Any,
-    platform: str,
-    current_user_text: str,
-    resolved_user_text: str,
-    history: List[Dict[str, Any]],
-    prior_state: Optional[Dict[str, Any]],
-    platform_preamble: str,
-    max_tokens: Optional[int],
-) -> Dict[str, Any]:
-    current = str(current_user_text or "").strip()
-    if not current:
-        return {"route": "chat", "reason": "empty"}
-
-    resolved = str(resolved_user_text or current).strip() or current
-    recent_history: List[Dict[str, str]] = []
-    for msg in (history or []):
-        if not isinstance(msg, dict):
-            continue
-        role = str(msg.get("role") or "").strip().lower()
-        if role not in {"user", "assistant"}:
-            continue
-        content = _coerce_text(msg.get("content")).strip()
-        if not content:
-            continue
-        recent_history.append({"role": role, "content": content})
-
-    prior_snapshot = {}
-    if isinstance(prior_state, dict) and prior_state:
-        normalized = _normalize_agent_state(prior_state, fallback_goal=resolved)
-        prior_snapshot = {
-            "goal": _short_text(normalized.get("goal"), limit=180),
-            "next_step": _short_text(normalized.get("next_step"), limit=180),
-            "open_questions": [
-                _short_text(item, limit=140)
-                for item in (normalized.get("open_questions") or [])
-                if _short_text(item, limit=140)
-            ][:4],
-        }
-
-    payload = {
-        "current_user_message": current,
-        "resolved_request_for_turn": resolved,
-        "recent_history": recent_history,
-        "prior_state_snapshot": prior_snapshot,
-    }
-    messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": _chat_or_tool_router_system_prompt(platform)},
-        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-    ]
-    messages = _with_platform_preamble(messages, platform_preamble=platform_preamble)
-    try:
-        resp = await llm_client.chat(
-            messages=messages,
-            temperature=0.0,
-            **_chat_with_optional_max_tokens_kwargs(
-                max_tokens=max_tokens,
-                minimum=80,
-                fallback=160,
-            ),
-        )
-    except Exception:
-        return {"route": "chat", "reason": "router_error"}
-
-    raw = _coerce_text((resp.get("message", {}) or {}).get("content", "")).strip()
-    parsed = _first_json_object(raw)
-    if not isinstance(parsed, dict):
-        return {"route": "chat", "reason": "invalid_json"}
-
-    route = str(parsed.get("route") or "").strip().lower()
-    if route not in {"chat", "tool"}:
-        route = "chat"
-    reason = _short_text(parsed.get("reason"), limit=180) or "ok"
-    return {"route": route, "reason": reason}
 
 
 def _turn_goal_for_state(*, current_user_text: str, resolved_user_text: str) -> str:
@@ -4557,11 +4476,6 @@ async def _run_hydra_turn_impl(
         denominator=6,
         minimum=120,
     )
-    chat_tool_router_max_tokens = _scale_token_limit(
-        astraeus_max_tokens,
-        denominator=8,
-        minimum=80,
-    )
     astraeus_plan_max_tokens = _scale_token_limit(
         astraeus_max_tokens,
         denominator=2,
@@ -4683,21 +4597,6 @@ async def _run_hydra_turn_impl(
         redis_client=r,
         memory_context_payload=memory_context_payload,
     )
-    route_started = time.perf_counter()
-    route_result = await _llm_chat_or_tool_route_for_turn(
-        llm_client=llm_client_ai_calls,
-        platform=platform,
-        current_user_text=current_user_turn_text,
-        resolved_user_text=resolved_user_text,
-        history=history,
-        prior_state=prior_state,
-        platform_preamble=platform_preamble,
-        max_tokens=chat_tool_router_max_tokens,
-    )
-    astraeus_ms_total += (time.perf_counter() - route_started) * 1000.0
-    turn_route = str((route_result or {}).get("route") or "").strip().lower()
-    if turn_route not in {"chat", "tool"}:
-        turn_route = "chat"
     queued_retry_tool_for_ledger: Optional[Dict[str, Any]] = None
     repair_returned_no_tool_retries = 0
     structured_plan_queue: List[Dict[str, str]] = []
@@ -4708,89 +4607,84 @@ async def _run_hydra_turn_impl(
     astraeus_topic_shift = False
     hermes_render_plan: Optional[Dict[str, str]] = None
     completed_tool_steps: List[Dict[str, str]] = []
-    if turn_route == "tool":
-        try:
-            astraeus_started = time.perf_counter()
-            astraeus_result = await _run_astraeus_plan(
-                llm_client=llm_client_astraeus,
-                platform=platform,
-                current_user_text=current_user_turn_text,
-                resolved_user_text=resolved_user_text,
-                topic_seed=astraeus_topic,
-                topic_shift_seed=astraeus_topic_shift,
-                history=history,
-                prior_state=prior_state,
-                memory_context=memory_context_payload,
-                capability_catalog=astraeus_capability_catalog,
-                available_tool_ids=available_execution_tool_ids,
-                platform_preamble=platform_preamble,
-                max_tokens=astraeus_plan_max_tokens,
-            )
-            astraeus_ms_total += (time.perf_counter() - astraeus_started) * 1000.0
-        except Exception:
-            astraeus_result = {
-                "mode": "unknown",
-                "topic_shift": False,
-                "goal": astraeus_goal,
-                "steps": [],
-                "hermes_render": None,
+    try:
+        astraeus_started = time.perf_counter()
+        astraeus_result = await _run_astraeus_plan(
+            llm_client=llm_client_astraeus,
+            platform=platform,
+            current_user_text=current_user_turn_text,
+            resolved_user_text=resolved_user_text,
+            topic_seed=astraeus_topic,
+            topic_shift_seed=astraeus_topic_shift,
+            history=history,
+            prior_state=prior_state,
+            memory_context=memory_context_payload,
+            capability_catalog=astraeus_capability_catalog,
+            available_tool_ids=available_execution_tool_ids,
+            platform_preamble=platform_preamble,
+            max_tokens=astraeus_plan_max_tokens,
+        )
+        astraeus_ms_total += (time.perf_counter() - astraeus_started) * 1000.0
+    except Exception:
+        astraeus_result = {
+            "mode": "unknown",
+            "topic_shift": False,
+            "goal": astraeus_goal,
+            "steps": [],
+            "hermes_render": None,
+        }
+    if isinstance(astraeus_result, dict):
+        astraeus_mode = str(astraeus_result.get("mode") or "unknown").strip().lower() or "unknown"
+        astraeus_topic = _short_text(astraeus_result.get("topic"), limit=90) or astraeus_topic
+        astraeus_goal = _short_text(astraeus_result.get("goal"), limit=220) or astraeus_goal
+        task_name = _task_name_from_text(astraeus_topic or astraeus_goal, fallback=task_name)
+        _set_active_chat_job_task_name(active_job_id, task_name)
+        parsed_hermes = astraeus_result.get("hermes_render")
+        if isinstance(parsed_hermes, dict):
+            hermes_render_plan = {
+                "mode": _short_text(parsed_hermes.get("mode"), limit=16),
+                "instruction": _short_text(parsed_hermes.get("instruction"), limit=320),
             }
-        if isinstance(astraeus_result, dict):
-            astraeus_mode = str(astraeus_result.get("mode") or "unknown").strip().lower() or "unknown"
-            if astraeus_mode == "chat":
-                astraeus_mode = "unknown"
-            astraeus_topic = _short_text(astraeus_result.get("topic"), limit=90) or astraeus_topic
-            astraeus_goal = _short_text(astraeus_result.get("goal"), limit=220) or astraeus_goal
-            task_name = _task_name_from_text(astraeus_topic or astraeus_goal, fallback=task_name)
-            _set_active_chat_job_task_name(active_job_id, task_name)
-            parsed_hermes = astraeus_result.get("hermes_render")
-            if isinstance(parsed_hermes, dict):
-                hermes_render_plan = {
-                    "mode": _short_text(parsed_hermes.get("mode"), limit=16),
-                    "instruction": _short_text(parsed_hermes.get("instruction"), limit=320),
-                }
+            if not str(hermes_render_plan.get("mode") or "").strip():
+                hermes_render_plan = None
+        raw_steps = astraeus_result.get("steps")
+        if isinstance(raw_steps, list):
+            structured_plan_queue = [step for step in raw_steps if isinstance(step, dict)]
+    if structured_plan_queue and astraeus_plan_review_enabled:
+        plan_review_started = time.perf_counter()
+        reviewed_plan = await _review_execution_plan_for_completeness(
+            llm_client=llm_client_astraeus,
+            platform=platform,
+            current_user_text=current_user_turn_text,
+            resolved_user_text=resolved_user_text,
+            goal=astraeus_goal or resolved_user_text or current_user_turn_text,
+            steps=structured_plan_queue,
+            capability_catalog=astraeus_capability_catalog,
+            available_tool_ids=available_execution_tool_ids,
+            platform_preamble=platform_preamble,
+            max_tokens=plan_review_max_tokens,
+        )
+        astraeus_ms_total += (time.perf_counter() - plan_review_started) * 1000.0
+        if isinstance(reviewed_plan, dict):
+            reviewed_goal = _short_text(reviewed_plan.get("goal"), limit=220)
+            if reviewed_goal:
+                astraeus_goal = reviewed_goal
+            reviewed_steps = reviewed_plan.get("steps")
+            if isinstance(reviewed_steps, list):
+                reviewed_queue = [step for step in reviewed_steps if isinstance(step, dict)]
+                if reviewed_queue:
+                    structured_plan_queue = reviewed_queue
+    if structured_plan_queue:
+        execution_queue, hermes_instruction_from_steps = _split_hermes_render_steps(structured_plan_queue)
+        structured_plan_queue = execution_queue
+        if hermes_instruction_from_steps:
+            if not isinstance(hermes_render_plan, dict):
+                hermes_render_plan = {"mode": "direct", "instruction": hermes_instruction_from_steps}
+            else:
                 if not str(hermes_render_plan.get("mode") or "").strip():
-                    hermes_render_plan = None
-            raw_steps = astraeus_result.get("steps")
-            if isinstance(raw_steps, list):
-                structured_plan_queue = [step for step in raw_steps if isinstance(step, dict)]
-        if structured_plan_queue and astraeus_plan_review_enabled:
-            plan_review_started = time.perf_counter()
-            reviewed_plan = await _review_execution_plan_for_completeness(
-                llm_client=llm_client_astraeus,
-                platform=platform,
-                current_user_text=current_user_turn_text,
-                resolved_user_text=resolved_user_text,
-                goal=astraeus_goal or resolved_user_text or current_user_turn_text,
-                steps=structured_plan_queue,
-                capability_catalog=astraeus_capability_catalog,
-                available_tool_ids=available_execution_tool_ids,
-                platform_preamble=platform_preamble,
-                max_tokens=plan_review_max_tokens,
-            )
-            astraeus_ms_total += (time.perf_counter() - plan_review_started) * 1000.0
-            if isinstance(reviewed_plan, dict):
-                reviewed_goal = _short_text(reviewed_plan.get("goal"), limit=220)
-                if reviewed_goal:
-                    astraeus_goal = reviewed_goal
-                reviewed_steps = reviewed_plan.get("steps")
-                if isinstance(reviewed_steps, list):
-                    reviewed_queue = [step for step in reviewed_steps if isinstance(step, dict)]
-                    if reviewed_queue:
-                        structured_plan_queue = reviewed_queue
-        if structured_plan_queue:
-            execution_queue, hermes_instruction_from_steps = _split_hermes_render_steps(structured_plan_queue)
-            structured_plan_queue = execution_queue
-            if hermes_instruction_from_steps:
-                if not isinstance(hermes_render_plan, dict):
-                    hermes_render_plan = {"mode": "direct", "instruction": hermes_instruction_from_steps}
-                else:
-                    if not str(hermes_render_plan.get("mode") or "").strip():
-                        hermes_render_plan["mode"] = "direct"
-                    if not str(hermes_render_plan.get("instruction") or "").strip():
-                        hermes_render_plan["instruction"] = hermes_instruction_from_steps
-    else:
-        astraeus_mode = "chat"
+                    hermes_render_plan["mode"] = "direct"
+                if not str(hermes_render_plan.get("instruction") or "").strip():
+                    hermes_render_plan["instruction"] = hermes_instruction_from_steps
     agent_state: Dict[str, Any] = _initial_agent_state_for_turn_from_topic_signal(
         prior_state=prior_state,
         current_user_text=current_user_turn_text,

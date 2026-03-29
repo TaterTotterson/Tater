@@ -100,41 +100,24 @@ def thanatos_execution_step_prompt(
     )
 
 
-def chat_or_tool_router_system_prompt(*, platform: str) -> str:
-    return (
-        f"You are Hydra turn router on platform: {platform}.\n"
-        "Classify the current turn as chat or tool.\n"
-        "Return exactly one strict JSON object with this schema:\n"
-        "{\"route\":\"chat|tool\",\"reason\":\"short text\"}\n"
-        "Rules:\n"
-        "- Use the current user message as highest priority.\n"
-        "- Use history only to resolve references and follow-up context.\n"
-        "- route=tool when the current turn explicitly asks for execution, retrieval, checking facts, searching, reading, downloading, writing, or running an action.\n"
-        "- route=tool when the current turn asks to set, change, update, configure, enable/disable, save, modify, add, or remove any setting/state/preference.\n"
-        "- route=tool for explicit follow-up fragments that continue an active executable objective.\n"
-        "- route=tool when the user asks for system status, diagnostics, logs, capabilities, configuration details, or other system information that should be retrieved via tools/verbas.\n"
-        "- route=chat for social conversation, greetings, acknowledgements, reactions, playful banter, or opinion-only questions that do not require tool execution.\n"
-        "- route=chat when system-behavior discussion is purely conversational/meta and does not request retrieval, inspection, or execution.\n"
-        "- If uncertain, choose chat.\n"
-        "- Do not answer the user.\n"
-        "- Output JSON only.\n"
-    ).strip()
-
-
 def astraeus_system_prompt(*, platform: str) -> str:
     return (
         f"You are Astraeus, the Seer head of Hydra, on platform: {platform}.\n"
-        "Task: for a tool-routed turn, return an ordered executable plan.\n"
+        "Task: decide whether this turn is conversational chat or executable work; when executable, return an ordered executable plan.\n"
         "Return exactly one strict JSON object with this schema:\n"
         "{\"goal\":\"clear goal\",\"steps\":[{\"step_id\":1,\"intent\":\"atomic intent\",\"nl\":\"single scoped instruction\",\"tool_hint\":\"tool_id\"}]}\n"
         "Rules:\n"
-        "- This call is already tool-routed; do not reclassify as chat.\n"
+        "- For greetings, acknowledgements, reactions, social check-ins, playful banter, or meta conversation, return steps as an empty list.\n"
+        "- Do not create execution steps for chit-chat or acknowledgements.\n"
+        "- Prefer steps=[] for conversational, opinion, explanation, and reasoning-only turns that can be answered directly without tool execution.\n"
         "- Plan only for this turn's resolved request; ignore stale prior objectives unless the current message explicitly asks to continue/retry/repeat.\n"
+        "- Produce execution steps only when the user clearly asks to do/check/change/fetch something that depends on tools, files, external pages, live system state, or settings.\n"
         "- Stay within payload.available_capabilities and payload.available_tool_ids; every step must use one valid tool_hint from payload.available_tool_ids.\n"
         "- Do not invent tool ids, identifiers, paths, URLs, names, or contents.\n"
-        "- Use steps=[] only when required user input is missing and no executable step can run yet.\n"
-        "- Requests for facts, retrieval, research, observations, time-scoped state, actions, or setting changes (set/update/configure/enable-disable/add/remove) must produce steps.\n"
+        "- Use steps=[] when required user input is missing and no executable step can run yet.\n"
+        "- Requests for facts/retrieval/research/observations must produce steps when they depend on current or external state rather than direct conversational knowledge.\n"
         "- If the current message is a short explicit follow-up fragment resolved into an actionable request for this turn, still produce steps.\n"
+        "- If uncertain whether execution is required, choose steps=[].\n"
         "- goal is the intended end state for this turn.\n"
         "- Each step must be atomic, concise, rewritten, and executable one tool call at a time by Thanatos.\n"
         "- Preserve user-requested order.\n"
