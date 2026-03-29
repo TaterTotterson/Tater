@@ -1,4 +1,5 @@
 import inspect
+import json
 from typing import Any, Callable, Dict, Optional
 
 from verba_base import ToolVerba
@@ -40,6 +41,7 @@ from hydra_core_extensions import (
 META_TOOLS = {
     "list_tools",
     "get_verba_help",
+    "rewrite_text",
     "read_file",
     "search_web",
     "search_files",
@@ -60,6 +62,7 @@ META_TOOLS = {
 _KERNEL_TOOL_PURPOSE_HINTS = {
     "list_tools": "list kernel and enabled verba tools for current platform",
     "get_verba_help": "show verba usage example and guidance",
+    "rewrite_text": "rewrite provided text according to natural-language instruction for downstream use",
     "read_file": "read local file contents",
     "search_web": "retrieve ranked link candidates with snippet metadata only (discovery-only; no full-page fetch and no file retrieval)",
     "search_files": "search text across local files",
@@ -80,6 +83,7 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
 _KERNEL_TOOL_USAGE_HINTS = {
     "list_tools": '{"function":"list_tools","arguments":{}}',
     "get_verba_help": '{"function":"get_verba_help","arguments":{"verba_id":"<verba_id>"}}',
+    "rewrite_text": '{"function":"rewrite_text","arguments":{"instruction":"rewrite this to be funny","text":"the dog ran over the cow"}}',
     "read_file": '{"function":"read_file","arguments":{"path":"<path>"}}',
     "search_web": '{"function":"search_web","arguments":{"query":"<query>"}}',
     "search_files": '{"function":"search_files","arguments":{"query":"<query>","path":"/"}}',
@@ -258,6 +262,199 @@ def list_tools(
     }
 
 
+def _first_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    return ""
+
+
+def _first_non_empty_text(*values: Any) -> str:
+    for value in values:
+        text = _first_text(value)
+        if text:
+            return text
+    return ""
+
+
+def _strict_json_dict(text: Any) -> Optional[Dict[str, Any]]:
+    raw = _first_text(text)
+    if not raw:
+        return None
+    if not (raw.startswith("{") and raw.endswith("}")):
+        return None
+    try:
+        obj = json.loads(raw)
+    except Exception:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+async def _rewrite_text_source_from_origin_with_llm(
+    *,
+    origin: Optional[Dict[str, Any]],
+    llm_client: Any,
+    instruction: str,
+) -> str:
+    payload = dict(origin) if isinstance(origin, dict) else {}
+    tool_results = payload.get("tool_results_full")
+    if not isinstance(tool_results, list):
+        return ""
+    if llm_client is None or not hasattr(llm_client, "chat"):
+        return ""
+
+    recent_results = [item for item in tool_results[-8:] if isinstance(item, dict)]
+    if not recent_results:
+        return ""
+
+    system_prompt = (
+        "You extract source text for a rewrite step.\n"
+        "Select the single best text snippet from prior tool results that should be rewritten now.\n"
+        "Return exactly one strict JSON object: {\"source_text\":\"...\"}\n"
+        "Rules:\n"
+        "- Do not rewrite content.\n"
+        "- Do not add explanation.\n"
+        "- If no valid source text exists, return {\"source_text\":\"\"}.\n"
+    )
+    extraction_payload = {
+        "instruction": _first_text(instruction),
+        "tool_results_full": recent_results,
+    }
+    try:
+        resp = await llm_client.chat(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps(extraction_payload, ensure_ascii=False, default=str)},
+            ],
+            temperature=0.0,
+        )
+    except Exception:
+        return ""
+
+    obj = _strict_json_dict(((resp.get("message", {}) or {}).get("content", "")))
+    if isinstance(obj, dict):
+        return _first_text(obj.get("source_text"))
+    return ""
+
+
+async def _run_rewrite_text_tool(
+    *,
+    args: Dict[str, Any],
+    llm_client: Any,
+    platform: str,
+    origin: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    instruction = _first_non_empty_text(
+        args.get("instruction"),
+        args.get("query"),
+        args.get("request"),
+        args.get("prompt"),
+        args.get("style"),
+        args.get("nl"),
+    )
+    source_text = _first_non_empty_text(
+        args.get("text"),
+        args.get("source_text"),
+        args.get("source"),
+        args.get("content"),
+        args.get("input"),
+        args.get("base_text"),
+        args.get("original_text"),
+    )
+
+    if not instruction:
+        instruction = "Rewrite the source text clearly while preserving the intended meaning."
+
+    if llm_client is None or not hasattr(llm_client, "chat"):
+        return action_failure(
+            code="rewrite_text_model_unavailable",
+            message="rewrite_text requires an available language model client.",
+            say_hint="Explain rewrite service is unavailable right now and suggest retrying.",
+        )
+
+    if not source_text:
+        source_text = await _rewrite_text_source_from_origin_with_llm(
+            origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
+            llm_client=llm_client,
+            instruction=instruction,
+        )
+
+    if not source_text:
+        return action_failure(
+            code="rewrite_text_missing_source",
+            message="rewrite_text needs source text to rewrite.",
+            needs=[
+                "Provide source text in arguments.text (or source_text/content/input).",
+                "Or ensure prior tool results include concrete text to extract.",
+            ],
+            say_hint="Ask for the exact text to rewrite.",
+        )
+
+    system_prompt = (
+        "You are a text rewriting tool.\n"
+        "Task: rewrite source_text according to instruction.\n"
+        "Rules:\n"
+        "- Return rewritten text only.\n"
+        "- Do not include prefaces, notes, labels, markdown fences, or analysis.\n"
+        "- Preserve factual content unless instruction explicitly asks to transform it.\n"
+        "- Keep names/entities consistent unless instruction asks to change them.\n"
+    )
+    payload = {
+        "platform": str(platform or "").strip(),
+        "instruction": instruction,
+        "source_text": source_text,
+    }
+    try:
+        resp = await llm_client.chat(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            ],
+            temperature=0.2,
+        )
+    except Exception as exc:
+        return action_failure(
+            code="rewrite_text_failed",
+            message=f"rewrite_text failed: {exc}",
+            say_hint="Explain rewriting failed and offer to retry.",
+        )
+
+    rewritten = _first_text(((resp.get("message", {}) or {}).get("content", "")))
+    if rewritten.startswith("{") and rewritten.endswith("}"):
+        try:
+            obj = json.loads(rewritten)
+        except Exception:
+            obj = None
+        if isinstance(obj, dict):
+            rewritten = _first_non_empty_text(
+                obj.get("rewritten_text"),
+                obj.get("text"),
+                obj.get("message"),
+                obj.get("content"),
+            )
+    if not rewritten:
+        return action_failure(
+            code="rewrite_text_empty",
+            message="rewrite_text returned empty output.",
+            say_hint="Explain rewriting returned no text and offer to retry.",
+        )
+
+    return action_success(
+        facts={
+            "action": "rewrite_text",
+            "instruction": instruction,
+            "source_chars": len(source_text),
+            "rewritten_chars": len(rewritten),
+        },
+        data={
+            "instruction": instruction,
+            "source_text": source_text,
+            "rewritten_text": rewritten,
+        },
+        summary_for_user=rewritten,
+        say_hint="Return the rewritten text directly as the result.",
+    )
+
+
 async def run_meta_tool(
     *,
     func: str,
@@ -281,6 +478,13 @@ async def run_meta_tool(
             verba_id=verba_id,
             platform=args.get("platform") or platform,
             registry=registry,
+        )
+    if func == "rewrite_text":
+        return await _run_rewrite_text_tool(
+            args=args,
+            llm_client=llm_client,
+            platform=platform,
+            origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
         )
 
     if func == "read_file":

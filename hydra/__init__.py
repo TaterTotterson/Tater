@@ -69,15 +69,10 @@ TOOL_NAME_ALIASES = {
     "inspect_website": "inspect_webpage",
 }
 
-HERMES_RENDER_TOOL_ID = "hermes_render"
-HERMES_RENDER_TOOL_DESCRIPTION = (
-    "final response wording/rendering instruction for Hermes "
-    "(for summarize/reword/rewrite style requests); renderer-only and never executed by Thanatos"
-)
-
 _KERNEL_TOOL_PURPOSE_HINTS = {
     "list_tools": "list kernel and enabled verba tools for current platform",
     "get_verba_help": "show verba usage example and guidance",
+    "rewrite_text": "rewrite provided text according to natural-language instruction for downstream use",
     "read_file": "read local file contents",
     "search_web": "retrieve ranked link candidates with snippet metadata only (discovery-only; no full-page fetch and no file retrieval)",
     "search_files": "search text across local files",
@@ -97,6 +92,7 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
 _KERNEL_TOOL_USAGE_HINTS = {
     "list_tools": '{"function":"list_tools","arguments":{}}',
     "get_verba_help": '{"function":"get_verba_help","arguments":{"verba_id":"<verba_id>"}}',
+    "rewrite_text": '{"function":"rewrite_text","arguments":{"instruction":"rewrite this to be funny","text":"the dog ran over the cow"}}',
     "read_file": '{"function":"read_file","arguments":{"path":"<path>"}}',
     "search_web": '{"function":"search_web","arguments":{"query":"<query>"}}',
     "search_files": '{"function":"search_files","arguments":{"query":"<query>","path":"/"}}',
@@ -126,6 +122,7 @@ DEFAULT_ASTRAEUS_PLAN_REVIEW_ENABLED = False
 HYDRA_LLM_HOST_KEY = "tater:hydra:llm_host"
 HYDRA_LLM_PORT_KEY = "tater:hydra:llm_port"
 HYDRA_LLM_MODEL_KEY = "tater:hydra:llm_model"
+CHAT_HISTORY_MAX_ITEMS_KEY = "tater:max_llm"
 HYDRA_BEAST_MODE_ENABLED_KEY = "tater:hydra:beast_mode_enabled"
 HYDRA_BEAST_ROLE_IDS = (
     "ai_calls",
@@ -732,6 +729,15 @@ def _configured_max_ledger_items(redis_client: Any = None) -> int:
     )
 
 
+def _configured_chat_history_max_items(redis_client: Any = None) -> int:
+    value = _redis_config_non_negative_int(
+        CHAT_HISTORY_MAX_ITEMS_KEY,
+        0,
+        redis_client=(redis_client or default_redis),
+    )
+    return max(0, min(200, int(value)))
+
+
 def _configured_step_retry_limit(redis_client: Any = None) -> int:
     global STEP_RETRY_LIMIT
     value = runtime_config.configured_positive_int(
@@ -1083,7 +1089,6 @@ def _enabled_execution_tool_ids(
         canonical = _canonical_tool_name(tool_id)
         if canonical:
             out.add(canonical)
-    out.add(HERMES_RENDER_TOOL_ID)
     for plugin_id, plugin in sorted((registry or {}).items(), key=lambda kv: str(kv[0]).lower()):
         raw_plugin_id = str(plugin_id or "").strip()
         canonical = _canonical_tool_name(raw_plugin_id)
@@ -1114,7 +1119,6 @@ def _astraeus_capability_catalog(
         )
     if not kernel_rows:
         kernel_rows.append("- (none)")
-    kernel_rows.append(f"- id: {HERMES_RENDER_TOOL_ID} | description: {HERMES_RENDER_TOOL_DESCRIPTION}")
 
     verba_rows: List[str] = []
     for plugin_id, plugin in sorted((registry or {}).items(), key=lambda kv: str(kv[0]).lower()):
@@ -2124,49 +2128,6 @@ def _normalize_plan_step_candidate(
         step["tool_hint"] = tool_hint
     return step
 
-
-def _normalize_hermes_render_candidate(candidate: Any) -> Optional[Dict[str, str]]:
-    if not isinstance(candidate, dict):
-        return None
-    raw_mode = _short_text(candidate.get("mode"), limit=24).lower()
-    mode = _HERMES_RENDER_MODE_ALIASES.get(raw_mode or "", "")
-    if not mode:
-        return None
-    instruction = _short_text(candidate.get("instruction"), limit=320)
-    if mode == "direct":
-        instruction = ""
-    if mode in {"summarize", "rewrite"} and not instruction:
-        instruction = "Use the requested output style from the current user message."
-    out: Dict[str, str] = {"mode": mode}
-    if instruction:
-        out["instruction"] = instruction
-    return out
-
-
-def _split_hermes_render_steps(
-    plan_steps: List[Dict[str, str]],
-) -> tuple[List[Dict[str, str]], str]:
-    execution_steps: List[Dict[str, str]] = []
-    instruction_parts: List[str] = []
-
-    for step in plan_steps:
-        if not isinstance(step, dict):
-            continue
-        tool_hint = _canonical_tool_name(str(step.get("tool_hint") or "").strip())
-        if tool_hint == HERMES_RENDER_TOOL_ID:
-            part = _short_text(step.get("nl") or step.get("intent"), limit=220)
-            if part:
-                instruction_parts.append(part.strip())
-            continue
-        execution_steps.append(step)
-
-    instruction = ""
-    if instruction_parts:
-        collapsed = "; ".join(part.rstrip(".") for part in instruction_parts if part)
-        instruction = _short_text(collapsed, limit=320)
-    return execution_steps, instruction
-
-
 def _sync_agent_state_with_plan_queue(
     *,
     agent_state: Optional[Dict[str, Any]],
@@ -2284,11 +2245,6 @@ async def _run_astraeus_plan(
     topic = topic_value or _short_text(obj.get("topic"), limit=90)
     goal = _short_text(obj.get("goal"), limit=220) or fallback_goal
     topic_shift = topic_shift_value
-    hermes_render = _normalize_hermes_render_candidate(
-        obj.get("hermes_render")
-        if isinstance(obj.get("hermes_render"), dict)
-        else obj.get("final_render"),
-    )
     raw_steps = obj.get("steps")
     if mode == "chat":
         return {
@@ -2297,7 +2253,6 @@ async def _run_astraeus_plan(
             "topic_shift": topic_shift,
             "goal": goal,
             "steps": [],
-            "hermes_render": hermes_render,
         }
     if raw_steps is None:
         raw_steps = []
@@ -2308,7 +2263,6 @@ async def _run_astraeus_plan(
             "topic_shift": topic_shift,
             "goal": goal,
             "steps": [],
-            "hermes_render": hermes_render,
         }
     out: List[Dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
@@ -2335,16 +2289,6 @@ async def _run_astraeus_plan(
                 "topic_shift": topic_shift,
                 "goal": goal,
                 "steps": out,
-                "hermes_render": hermes_render,
-            }
-        if hermes_render:
-            return {
-                "mode": "execute",
-                "topic": topic,
-                "topic_shift": topic_shift,
-                "goal": goal,
-                "steps": [],
-                "hermes_render": hermes_render,
             }
         return {
             "mode": "unknown",
@@ -2352,7 +2296,6 @@ async def _run_astraeus_plan(
             "topic_shift": topic_shift,
             "goal": goal,
             "steps": [],
-            "hermes_render": hermes_render,
         }
     if out:
         return {
@@ -2361,16 +2304,6 @@ async def _run_astraeus_plan(
             "topic_shift": topic_shift,
             "goal": goal,
             "steps": out,
-            "hermes_render": hermes_render,
-        }
-    if hermes_render:
-        return {
-            "mode": "execute",
-            "topic": topic,
-            "topic_shift": topic_shift,
-            "goal": goal,
-            "steps": [],
-            "hermes_render": hermes_render,
         }
     return {
         "mode": "chat",
@@ -2378,7 +2311,6 @@ async def _run_astraeus_plan(
         "topic_shift": topic_shift,
         "goal": goal,
         "steps": [],
-        "hermes_render": hermes_render,
     }
 
 
@@ -3151,6 +3083,7 @@ async def _run_hermes_final_render(
     base_text: str,
     completed_steps: List[Dict[str, str]],
     full_tool_results: List[Dict[str, Any]],
+    recent_history: List[Dict[str, Any]],
     platform_preamble: str,
     max_tokens: Optional[int],
 ) -> str:
@@ -3180,10 +3113,23 @@ async def _run_hermes_final_render(
         if not isinstance(result, dict):
             continue
         full_results_payload.append(dict(result))
+    history_payload: List[Dict[str, str]] = []
+    for item in recent_history:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = _short_text(item.get("content"), limit=260)
+        if not content:
+            continue
+        history_payload.append({"role": role, "content": content})
 
     payload = {
         "mode": render_mode,
         "instruction": _short_text(instruction, limit=320),
+        "current_user_message": _short_text(user_text, limit=320),
+        "recent_history": history_payload,
         "user_request": _short_text(user_text, limit=320),
         "goal": _short_text(goal, limit=260),
         "base_text": _short_text(base_text, limit=2200),
@@ -4200,6 +4146,7 @@ async def _run_hydra_turn_impl(
     )
     result_memory_max_sets = _configured_result_memory_max_sets(r)
     result_memory_max_items = _configured_result_memory_max_items(r)
+    chat_history_max_items = _configured_chat_history_max_items(r)
     step_retry_limit = _configured_step_retry_limit(r)
     astraeus_plan_review_enabled = _configured_astraeus_plan_review_enabled(r)
     turn_started_at = time.perf_counter()
@@ -4249,6 +4196,7 @@ async def _run_hydra_turn_impl(
     task_name = _task_name_from_text(user_text, fallback="Hydra task")
 
     history = _compact_history(history_messages)
+    hermes_recent_history = _chat_history_window(history, max_items=chat_history_max_items)
     current_user_turn_text = _strip_user_sender_prefix(user_text).strip() or str(user_text or "").strip()
     turn_request_text = current_user_turn_text or str(user_text or "").strip()
     task_name = _task_name_from_text(turn_request_text or user_text, fallback=task_name)
@@ -4299,7 +4247,6 @@ async def _run_hydra_turn_impl(
     astraeus_topic = _short_text(turn_request_text or current_user_turn_text, limit=90) or "request"
     astraeus_goal = _short_text(turn_request_text or current_user_turn_text, limit=220) or "Fulfill the user request."
     astraeus_topic_shift = False
-    hermes_render_plan: Optional[Dict[str, str]] = None
     completed_tool_steps: List[Dict[str, str]] = []
     try:
         astraeus_started = time.perf_counter()
@@ -4325,7 +4272,6 @@ async def _run_hydra_turn_impl(
             "topic_shift": False,
             "goal": astraeus_goal,
             "steps": [],
-            "hermes_render": None,
         }
     if isinstance(astraeus_result, dict):
         astraeus_mode = str(astraeus_result.get("mode") or "unknown").strip().lower() or "unknown"
@@ -4333,14 +4279,6 @@ async def _run_hydra_turn_impl(
         astraeus_goal = _short_text(astraeus_result.get("goal"), limit=220) or astraeus_goal
         task_name = _task_name_from_text(astraeus_topic or astraeus_goal, fallback=task_name)
         _set_active_chat_job_task_name(active_job_id, task_name)
-        parsed_hermes = astraeus_result.get("hermes_render")
-        if isinstance(parsed_hermes, dict):
-            hermes_render_plan = {
-                "mode": _short_text(parsed_hermes.get("mode"), limit=16),
-                "instruction": _short_text(parsed_hermes.get("instruction"), limit=320),
-            }
-            if not str(hermes_render_plan.get("mode") or "").strip():
-                hermes_render_plan = None
         raw_steps = astraeus_result.get("steps")
         if isinstance(raw_steps, list):
             structured_plan_queue = [step for step in raw_steps if isinstance(step, dict)]
@@ -4368,17 +4306,6 @@ async def _run_hydra_turn_impl(
                 reviewed_queue = [step for step in reviewed_steps if isinstance(step, dict)]
                 if reviewed_queue:
                     structured_plan_queue = reviewed_queue
-    if structured_plan_queue:
-        execution_queue, hermes_instruction_from_steps = _split_hermes_render_steps(structured_plan_queue)
-        structured_plan_queue = execution_queue
-        if hermes_instruction_from_steps:
-            if not isinstance(hermes_render_plan, dict):
-                hermes_render_plan = {"mode": "direct", "instruction": hermes_instruction_from_steps}
-            else:
-                if not str(hermes_render_plan.get("mode") or "").strip():
-                    hermes_render_plan["mode"] = "direct"
-                if not str(hermes_render_plan.get("instruction") or "").strip():
-                    hermes_render_plan["instruction"] = hermes_instruction_from_steps
     agent_state: Dict[str, Any] = _initial_agent_state_for_turn_from_topic_signal(
         prior_state=prior_state,
         current_user_text=current_user_turn_text,
@@ -4509,23 +4436,17 @@ async def _run_hydra_turn_impl(
             if synthesized:
                 composed_text = synthesized
 
-        hermes_mode = "direct"
-        hermes_instruction = ""
-        if isinstance(hermes_render_plan, dict):
-            selected_mode = _short_text(hermes_render_plan.get("mode"), limit=20).lower()
-            normalized_mode = _HERMES_RENDER_MODE_ALIASES.get(selected_mode, "direct")
-            hermes_mode = normalized_mode if normalized_mode in {"direct", "summarize", "rewrite"} else "direct"
-            hermes_instruction = _short_text(hermes_render_plan.get("instruction"), limit=320)
         hermes_text = await _run_hermes_final_render(
             llm_client=llm_client_hermes,
             platform=platform,
             user_text=user_request_text,
             goal=astraeus_goal or turn_request_text or current_user_turn_text,
-            mode=hermes_mode,
-            instruction=hermes_instruction,
+            mode="direct",
+            instruction="",
             base_text=composed_text,
             completed_steps=completed_tool_steps,
             full_tool_results=raw_tool_payload_history,
+            recent_history=hermes_recent_history,
             platform_preamble=platform_preamble,
             max_tokens=None,
         )
@@ -4634,25 +4555,6 @@ async def _run_hydra_turn_impl(
             checker_reason = "complete"
             return _finish(
                 text=chat_text or _generic_chat_fallback_text(current_user_turn_text),
-                status="done",
-                checker_action_value="FINAL_ANSWER",
-                checker_reason_value=checker_reason,
-            )
-        if isinstance(hermes_render_plan, dict):
-            hermes_seed = _state_best_effort_answer(
-                state=agent_state,
-                draft_response="",
-                tool_result=tool_result_for_checker,
-            )
-            hermes_text = await _compose_final_answer_text(
-                checker_decision=None,
-                draft_response_text=hermes_seed,
-                user_request_text=turn_request_text or user_text,
-                tool_result_payload=tool_result_for_checker,
-            )
-            checker_reason = "complete"
-            return _finish(
-                text=hermes_text or hermes_seed or DEFAULT_CLARIFICATION,
                 status="done",
                 checker_action_value="FINAL_ANSWER",
                 checker_reason_value=checker_reason,
@@ -5035,6 +4937,13 @@ async def _run_hydra_turn_impl(
             max_tokens=None,
         )
         tool_started = time.perf_counter()
+        tool_origin_payload = dict(origin_payload) if isinstance(origin_payload, dict) else {}
+        if raw_tool_payload_history:
+            tool_origin_payload["tool_results_full"] = [
+                dict(item)
+                for item in raw_tool_payload_history[-8:]
+                if isinstance(item, dict)
+            ]
         doer_exec = await _execute_tool_call(
             llm_client=llm_client_ai_calls,
             tool_call=planned_tool,
@@ -5043,7 +4952,7 @@ async def _run_hydra_turn_impl(
             enabled_predicate=enabled_predicate,
             context=context,
             user_text=tool_user_text,
-            origin=origin_payload,
+            origin=tool_origin_payload,
             scope=scope,
             wait_callback=wait_callback,
             wait_text=wait_text,
