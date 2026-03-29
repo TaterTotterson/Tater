@@ -212,7 +212,7 @@ async def run_minos_validation(
     llm_client: Any,
     platform: str,
     current_user_text: str,
-    resolved_user_text: str,
+    turn_request_text: str,
     agent_state: Optional[Dict[str, Any]],
     memory_context: Optional[Dict[str, Any]],
     available_artifacts: Optional[list[Dict[str, Any]]],
@@ -235,13 +235,12 @@ async def run_minos_validation(
     platform_preamble: str = "",
     max_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
-    normalized_goal = short_text_fn(goal or resolved_user_text, limit=240) or str(resolved_user_text or "").strip()
+    normalized_goal = short_text_fn(goal or turn_request_text, limit=240) or str(turn_request_text or "").strip()
     payload = {
         "current_user_message": current_user_text,
-        "resolved_request_for_this_turn": resolved_user_text,
-        "original_user_request": resolved_user_text,
+        "original_user_request": turn_request_text,
         "goal": normalized_goal,
-        "agent_state": normalize_agent_state_fn(agent_state, resolved_user_text),
+        "agent_state": normalize_agent_state_fn(agent_state, turn_request_text),
         "current_step": current_step if isinstance(current_step, dict) else None,
         "retry_count": int(max(0, retry_count or 0)),
         "retry_allowed": bool(retry_allowed),

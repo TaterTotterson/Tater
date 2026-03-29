@@ -177,13 +177,13 @@ def initial_agent_state_for_turn(
     *,
     prior_state: Optional[Dict[str, Any]],
     current_user_text: str,
-    resolved_user_text: str,
+    turn_request_text: str,
     short_text_fn: Callable[..., str],
     should_reset_state_for_topic_change_fn: Callable[[str], bool],
     new_agent_state_fn: Callable[[str], Dict[str, Any]],
     normalize_agent_state_fn: Callable[..., Dict[str, Any]],
 ) -> Dict[str, Any]:
-    goal = short_text_fn((resolved_user_text or current_user_text or "").strip(), limit=180)
+    goal = short_text_fn((turn_request_text or current_user_text or "").strip(), limit=180)
     goal = goal or "Fulfill the user request."
     if not isinstance(prior_state, dict):
         return new_agent_state_fn(goal)

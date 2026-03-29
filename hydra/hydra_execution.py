@@ -47,23 +47,38 @@ async def normalize_tool_result_for_minos(
     normalized = normalize_plugin_result_fn(result_payload)
     summary = await narrate_result_fn(normalized, llm_client=llm_client, platform=platform)
     summary_hint = str(normalized.get("summary_for_user") or "").strip()
-    flair_hint = str(normalized.get("flair") or "").strip()
     if summary_hint and not summary:
         summary = summary_hint
+
+    safe_data = result_for_llm_fn(normalized) if isinstance(normalized, dict) else {}
+    execution_data: Dict[str, Any] = {}
+    if isinstance(safe_data, dict):
+        # Keep execution-relevant data compact for Thanatos/Minos; drop presentation-only duplicates.
+        core_data = safe_data.get("data")
+        if isinstance(core_data, dict):
+            execution_data.update(core_data)
+        for key, value in safe_data.items():
+            if key in {
+                "ok",
+                "summary_for_user",
+                "flair",
+                "say_hint",
+                "suggested_followups",
+                "artifacts",
+                "data",
+            }:
+                continue
+            if value in (None, "", [], {}):
+                continue
+            execution_data[key] = value
 
     out: Dict[str, Any] = {
         "ok": bool(normalized.get("ok")),
         "summary_for_user": str(summary or "").strip(),
     }
-    say_hint = short_text_fn(normalized.get("say_hint"), limit=320)
-    if say_hint:
-        out["say_hint"] = say_hint
-    if flair_hint:
-        out["flair"] = flair_hint
 
-    safe_data = result_for_llm_fn(normalized) if isinstance(normalized, dict) else {}
-    if isinstance(safe_data, dict):
-        out["data"] = safe_data
+    if execution_data:
+        out["data"] = execution_data
 
     artifacts = normalized.get("artifacts")
     if isinstance(artifacts, list):
