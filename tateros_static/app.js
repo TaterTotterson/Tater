@@ -7111,11 +7111,6 @@ async function loadSettingsView() {
               <label>Messages Sent To LLM
                 <input id="set_max_llm" type="number" min="1" value="${escapeHtml(settings.max_llm || 8)}" />
               </label>
-              <label>Agent State TTL Seconds (0 = no TTL)
-                <input id="set_hydra_agent_state_ttl_seconds" type="number" min="0" value="${escapeHtml(
-                  settings.hydra_agent_state_ttl_seconds ?? 1200
-                )}" />
-              </label>
               <label>Max Ledger Items
                 <input id="set_hydra_max_ledger_items" type="number" min="1" value="${escapeHtml(
                   settings.hydra_max_ledger_items ?? 1500
@@ -7850,7 +7845,6 @@ async function loadSettingsView() {
 
   document.getElementById("settings-hydra-defaults").addEventListener("click", () => {
     const map = [
-      ["set_hydra_agent_state_ttl_seconds", "hydra_agent_state_ttl_seconds"],
       ["set_hydra_max_ledger_items", "hydra_max_ledger_items"],
       ["set_hydra_step_retry_limit", "hydra_step_retry_limit"],
       ["set_hydra_astraeus_plan_review_enabled", "hydra_astraeus_plan_review_enabled"],
@@ -8550,9 +8544,6 @@ async function loadSettingsView() {
         document.getElementById("set_emoji_reply_reaction_cooldown_seconds").value || 120
       ),
       emoji_min_message_length: Number(document.getElementById("set_emoji_min_message_length").value || 4),
-      hydra_agent_state_ttl_seconds: Number(
-        document.getElementById("set_hydra_agent_state_ttl_seconds").value || 1200
-      ),
       hydra_max_ledger_items: Number(document.getElementById("set_hydra_max_ledger_items").value || 1500),
       hydra_step_retry_limit: Number(document.getElementById("set_hydra_step_retry_limit").value || 1),
       hydra_astraeus_plan_review_enabled: document.getElementById(

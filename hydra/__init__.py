@@ -143,7 +143,6 @@ HYDRA_BEAST_CONFIG_ROLE_IDS = (
     "hermes",
 )
 HYDRA_ROLE_LLM_KEY_PREFIX = "tater:hydra:llm:"
-HYDRA_AGENT_STATE_TTL_SECONDS_KEY = "tater:hydra:agent_state_ttl_seconds"
 HYDRA_MAX_LEDGER_ITEMS_KEY = "tater:hydra:max_ledger_items"
 HYDRA_STEP_RETRY_LIMIT_KEY = "tater:hydra:step_retry_limit"
 HYDRA_ASTRAEUS_PLAN_REVIEW_ENABLED_KEY = "tater:hydra:astraeus_plan_review_enabled"
@@ -151,9 +150,6 @@ HYDRA_RESULT_MEMORY_MAX_SETS_KEY = "tater:hydra:result_memory_max_sets"
 HYDRA_RESULT_MEMORY_MAX_ITEMS_KEY = "tater:hydra:result_memory_max_items"
 AGENT_STATE_PROMPT_MAX_CHARS = 800
 AGENT_STATE_LEDGER_MAX_CHARS = 900
-AGENT_STATE_KEY_PREFIX = "tater:hydra:state:"
-DEFAULT_AGENT_STATE_TTL_SECONDS = 20 * 60
-AGENT_STATE_TTL_SECONDS = DEFAULT_AGENT_STATE_TTL_SECONDS
 RESULT_MEMORY_MAX_SETS = DEFAULT_RESULT_MEMORY_MAX_SETS
 RESULT_MEMORY_MAX_ITEMS = DEFAULT_RESULT_MEMORY_MAX_ITEMS
 STEP_RETRY_LIMIT = DEFAULT_STEP_RETRY_LIMIT
@@ -727,17 +723,6 @@ def _redis_config_bool(
     return bool(default)
 
 
-def _configured_agent_state_ttl_seconds(redis_client: Any = None) -> int:
-    global AGENT_STATE_TTL_SECONDS
-    AGENT_STATE_TTL_SECONDS = runtime_config.configured_agent_state_ttl_seconds(
-        redis_client=(redis_client or default_redis),
-        key=HYDRA_AGENT_STATE_TTL_SECONDS_KEY,
-        default=DEFAULT_AGENT_STATE_TTL_SECONDS,
-        redis_config_non_negative_int_fn=_redis_config_non_negative_int,
-    )
-    return AGENT_STATE_TTL_SECONDS
-
-
 def _configured_max_ledger_items(redis_client: Any = None) -> int:
     return runtime_config.configured_positive_int(
         redis_client=(redis_client or default_redis),
@@ -1223,7 +1208,7 @@ def _compact_history(history_messages: List[Dict[str, Any]]) -> List[Dict[str, A
     )
 
 
-def _chat_history_window(history_messages: List[Dict[str, Any]], *, max_items: int = 10) -> List[Dict[str, str]]:
+def _chat_history_window(history_messages: List[Dict[str, Any]], *, max_items: int = 0) -> List[Dict[str, str]]:
     out: List[Dict[str, str]] = []
     for msg in (history_messages or []):
         if not isinstance(msg, dict):
@@ -2220,7 +2205,7 @@ async def _run_astraeus_plan(
     fallback_goal = _short_text(turn_request_text or current_user_text, limit=220) or "Fulfill the user request."
     topic_value = _short_text(topic_seed, limit=90)
     topic_shift_value = bool(topic_shift_seed)
-    recent_history: List[Dict[str, str]] = []
+    recent_history_all: List[Dict[str, str]] = []
     for msg in (history or []):
         if not isinstance(msg, dict):
             continue
@@ -2230,9 +2215,8 @@ async def _run_astraeus_plan(
         content = _short_text(msg.get("content"), limit=240)
         if not content:
             continue
-        recent_history.append({"role": role, "content": content})
-        if len(recent_history) >= 10:
-            break
+        recent_history_all.append({"role": role, "content": content})
+    recent_history = recent_history_all
 
     payload = {
         "current_user_message": str(current_user_text or ""),
@@ -2880,28 +2864,6 @@ def _agent_state_hash(state: Optional[Dict[str, Any]], *, fallback_goal: str) ->
         fallback_goal=fallback_goal,
         ledger_max_chars=AGENT_STATE_LEDGER_MAX_CHARS,
         compact_agent_state_json_fn=_compact_agent_state_json,
-    )
-
-
-def _agent_state_key(*, platform: str, scope: str) -> str:
-    return state_store.agent_state_key(
-        platform=platform,
-        scope=scope,
-        normalize_platform_fn=normalize_platform,
-        clean_scope_text_fn=_clean_scope_text,
-        scope_is_generic_fn=_scope_is_generic,
-        unknown_scope_fn=_unknown_scope,
-        agent_state_key_prefix=AGENT_STATE_KEY_PREFIX,
-    )
-
-
-_AGENT_STATE_REQUIRED_KEYS = ("goal", "plan", "facts", "open_questions", "next_step", "tool_history")
-
-
-def _has_required_agent_state_keys(state: Any) -> bool:
-    return state_store.has_required_agent_state_keys(
-        state,
-        required_keys=_AGENT_STATE_REQUIRED_KEYS,
     )
 
 

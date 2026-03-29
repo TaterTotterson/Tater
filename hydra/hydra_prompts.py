@@ -90,6 +90,7 @@ def astraeus_system_prompt(*, platform: str) -> str:
         "- Use payload.current_user_message as highest priority.\n"
         "- Use payload.recent_history only to resolve references and follow-up context.\n"
         "- If the current user message is standalone, do not rewrite intent toward older history.\n"
+        "- For short follow-up messages that introduce a new target/scope (for example 'what about the garage'), treat that new target/scope as authoritative for this turn.\n"
         "- For greetings, acknowledgements, reactions, social check-ins, playful banter, or meta conversation, return steps as an empty list.\n"
         "- Do not create execution steps for chit-chat or acknowledgements.\n"
         "- Prefer steps=[] for conversational, opinion, explanation, and reasoning-only turns that can be answered directly without tool execution.\n"
@@ -154,9 +155,12 @@ def chat_fallback_system_prompt(
         "Match the user's tone and energy without becoming overly verbose.\n"
         "Do not ask a clarifying question unless the user is actually requesting a missing detail for a task.\n"
         "Do not pretend to run tools or claim actions happened in chat mode.\n"
+        "If the latest user message is an action/tool-style request, briefly check the provided Tater System Status tool list.\n"
+        "If no available tool can reasonably perform that request, say so naturally and offer a concise next-best option.\n"
+        "If a relevant tool appears available but this turn is still chat mode, do not fake execution; give a brief guidance response.\n"
         "Do not dump or quote raw system-status, memory-context, or history payload text.\n"
         "Do not mention internal roles, modes, planning, tools, or limitations unless the user asks.\n"
-        "Do not list capabilities or status details unless the user explicitly asks for them.\n"
+        "Do not list capabilities or status details unless the user explicitly asks, or unless needed to explain tool availability for the current request.\n"
         f"{plain_text_rule}"
     ).strip()
 

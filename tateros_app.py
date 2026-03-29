@@ -31,7 +31,6 @@ import portal_registry as portal_registry_module
 from admin_gate import DEFAULT_ADMIN_ONLY_PLUGINS, REDIS_KEY as ADMIN_GATE_KEY, get_admin_only_plugins
 from hydra import estimate_hydra_chat_context_window, get_active_chat_jobs_snapshot, run_hydra_turn
 from hydra import (
-    HYDRA_AGENT_STATE_TTL_SECONDS_KEY,
     HYDRA_ASTRAEUS_PLAN_REVIEW_ENABLED_KEY,
     HYDRA_BEAST_CONFIG_ROLE_IDS,
     HYDRA_BEAST_MODE_ENABLED_KEY,
@@ -41,7 +40,6 @@ from hydra import (
     HYDRA_MAX_LEDGER_ITEMS_KEY,
     HYDRA_ROLE_LLM_KEY_PREFIX,
     HYDRA_STEP_RETRY_LIMIT_KEY,
-    DEFAULT_AGENT_STATE_TTL_SECONDS,
     DEFAULT_ASTRAEUS_PLAN_REVIEW_ENABLED,
     DEFAULT_MAX_LEDGER_ITEMS,
     DEFAULT_STEP_RETRY_LIMIT,
@@ -2533,7 +2531,6 @@ class AppSettingsRequest(BaseModel):
     hydra_llm_hermes_host: Optional[str] = None
     hydra_llm_hermes_port: Optional[str] = None
     hydra_llm_hermes_model: Optional[str] = None
-    hydra_agent_state_ttl_seconds: Optional[int] = None
     hydra_max_ledger_items: Optional[int] = None
     hydra_step_retry_limit: Optional[int] = None
     hydra_astraeus_plan_review_enabled: Optional[bool] = None
@@ -4576,7 +4573,6 @@ def get_settings() -> Dict[str, Any]:
         "hydra_llm_port": "",
         "hydra_llm_model": "",
         "hydra_beast_mode_enabled": False,
-        "hydra_agent_state_ttl_seconds": int(DEFAULT_AGENT_STATE_TTL_SECONDS),
         "hydra_max_ledger_items": int(DEFAULT_MAX_LEDGER_ITEMS),
         "hydra_step_retry_limit": int(DEFAULT_STEP_RETRY_LIMIT),
         "hydra_astraeus_plan_review_enabled": bool(DEFAULT_ASTRAEUS_PLAN_REVIEW_ENABLED),
@@ -4624,10 +4620,6 @@ def get_settings() -> Dict[str, Any]:
         "hydra_llm_model": hydra_llm_model,
         "hydra_base_servers": hydra_base_servers,
         "hydra_beast_mode_enabled": hydra_beast_mode_enabled,
-        "hydra_agent_state_ttl_seconds": _read_non_negative_int(
-            HYDRA_AGENT_STATE_TTL_SECONDS_KEY,
-            DEFAULT_AGENT_STATE_TTL_SECONDS,
-        ),
         "hydra_max_ledger_items": _read_positive_int(HYDRA_MAX_LEDGER_ITEMS_KEY, DEFAULT_MAX_LEDGER_ITEMS),
         "hydra_step_retry_limit": _read_positive_int(HYDRA_STEP_RETRY_LIMIT_KEY, DEFAULT_STEP_RETRY_LIMIT),
         "hydra_astraeus_plan_review_enabled": _as_bool_flag(
@@ -4957,12 +4949,6 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
                 redis_client.delete(redis_key)
 
     hydra_mappings = {
-        "hydra_agent_state_ttl_seconds": (
-            HYDRA_AGENT_STATE_TTL_SECONDS_KEY,
-            DEFAULT_AGENT_STATE_TTL_SECONDS,
-            0,
-            None,
-        ),
         "hydra_max_ledger_items": (HYDRA_MAX_LEDGER_ITEMS_KEY, DEFAULT_MAX_LEDGER_ITEMS, 1, None),
         "hydra_step_retry_limit": (HYDRA_STEP_RETRY_LIMIT_KEY, DEFAULT_STEP_RETRY_LIMIT, 1, 10),
     }

@@ -39,20 +39,6 @@ def redis_config_positive_int(
     return value
 
 
-def configured_agent_state_ttl_seconds(
-    *,
-    redis_client: Any,
-    key: str,
-    default: int,
-    redis_config_non_negative_int_fn: Callable[..., int],
-) -> int:
-    return redis_config_non_negative_int_fn(
-        key,
-        default,
-        redis_client=redis_client,
-    )
-
-
 def configured_positive_int(
     *,
     redis_client: Any,
