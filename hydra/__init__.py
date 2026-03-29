@@ -2182,88 +2182,6 @@ def _split_hermes_render_steps(
     return execution_steps, instruction
 
 
-async def _select_hermes_render_plan(
-    *,
-    llm_client: Any,
-    platform: str,
-    current_user_text: str,
-    turn_request_text: str,
-    goal: str,
-    planned_steps: List[Dict[str, str]],
-    platform_preamble: str,
-    max_tokens: Optional[int],
-) -> Dict[str, str]:
-    fallback: Dict[str, str] = {"mode": "direct"}
-    now_text = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
-    first, last = get_tater_name()
-    personality = (get_tater_personality() or "").strip()
-    personality_line = f"Voice style (tone only): {personality}\n" if personality else ""
-    payload_steps: List[Dict[str, str]] = []
-    for step in planned_steps[:8]:
-        if not isinstance(step, dict):
-            continue
-        payload_steps.append(
-            {
-                "intent": _short_text(step.get("intent"), limit=140),
-                "nl": _short_text(step.get("nl"), limit=180),
-                "tool_hint": _short_text(step.get("tool_hint"), limit=60),
-            }
-        )
-    payload = {
-        "current_user_message": _short_text(current_user_text, limit=420),
-        "goal": _short_text(goal, limit=260),
-        "planned_steps": payload_steps,
-        "allowed_modes": ["direct", "summarize", "rewrite"],
-    }
-    messages: List[Dict[str, Any]] = [
-        {
-            "role": "system",
-            "content": (
-                f"Current Date and Time: {now_text}\n"
-                f"You are {first} {last}.\n"
-                f"{personality_line}"
-                "Choose Hermes final-render mode for this turn.\n"
-                "Output exactly one strict JSON object:\n"
-                "{\"mode\":\"direct|summarize|rewrite\",\"instruction\":\"optional text\"}\n"
-                "Rules:\n"
-                "- Choose summarize when user intent asks for summary/recap/latest updates/news/key points.\n"
-                "- Choose summarize when user asks what something is, asks for purpose/details, or asks to explain identified results.\n"
-                "- Choose rewrite when user intent asks for reword/rephrase/rename/style/tone changes.\n"
-                "- Choose direct when no style transform is requested.\n"
-                "- Keep instruction empty for direct.\n"
-                "- For summarize/rewrite, include concise instruction only when needed.\n"
-                "- Do not mention tools or internal orchestration.\n"
-                "- No markdown fences.\n"
-            ),
-        },
-        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-    ]
-    messages = _with_platform_preamble(messages, platform_preamble=platform_preamble)
-    try:
-        resp = await llm_client.chat(
-            messages=messages,
-            temperature=0.0,
-            **_chat_with_optional_max_tokens_kwargs(
-                max_tokens=max_tokens,
-                minimum=80,
-                fallback=180,
-                maximum=280,
-            ),
-        )
-    except Exception:
-        return fallback
-
-    text = _coerce_text((resp.get("message", {}) or {}).get("content", "")).strip()
-    obj = _first_json_object(text)
-    if isinstance(obj, dict):
-        candidate = _normalize_hermes_render_candidate(
-            obj.get("hermes_render") if isinstance(obj.get("hermes_render"), dict) else obj
-        )
-        if isinstance(candidate, dict):
-            return candidate
-    return fallback
-
-
 def _sync_agent_state_with_plan_queue(
     *,
     agent_state: Optional[Dict[str, Any]],
@@ -2508,21 +2426,7 @@ async def _review_execution_plan_for_completeness(
     messages: List[Dict[str, Any]] = [
         {
             "role": "system",
-            "content": (
-                f"You are Hydra execution-plan quality review on platform: {platform}.\n"
-                "Return exactly one strict JSON object with schema:\n"
-                "{\"goal\":\"clear goal\",\"steps\":[{\"step_id\":1,\"intent\":\"atomic intent\",\"nl\":\"single scoped instruction\",\"tool_hint\":\"tool_id\"}]}\n"
-                "Rules:\n"
-                "- Keep the same user objective; improve plan only when needed.\n"
-                "- Keep steps executable one tool call at a time.\n"
-                "- Add missing prerequisite discovery/inspection/retrieval steps when downstream completion depends on intermediate data.\n"
-                "- For download/install/grab requests, link discovery alone is insufficient; plan must reach concrete retrieval completion.\n"
-                "- search_web is discovery-only; use inspect_webpage on selected sources before synthesis or retrieval decisions.\n"
-                "- For identify/explain/what-is requests about a specific repo/project/entity, search result snippets alone are insufficient; add an inspect_webpage step on a selected primary source before completion.\n"
-                "- Use only tool ids from payload.available_tool_ids.\n"
-                "- Preserve user-requested order where possible.\n"
-                "- Output JSON only.\n"
-            ),
+            "content": prompts.astraeus_plan_review_system_prompt(platform=platform),
         },
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
     ]
@@ -3248,17 +3152,7 @@ async def _synthesize_completed_steps_answer(
     messages: List[Dict[str, Any]] = [
         {
             "role": "system",
-            "content": (
-                "You are composing the final user-facing answer from tool findings.\n"
-                "Write a clean, informative summary that directly answers the user.\n"
-                "Rules:\n"
-                "- Do not narrate internal execution steps.\n"
-                "- Do not say \"I searched\" or \"I inspected\".\n"
-                "- Use clear sections and bullets when useful.\n"
-                "- Keep only relevant facts; remove duplicates.\n"
-                "- If sources/links are present in findings, include a short Sources section.\n"
-                "- Do not invent facts not present in findings.\n"
-            ),
+            "content": prompts.hermes_synthesis_system_prompt(),
         },
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
     ]
@@ -3294,6 +3188,7 @@ async def _run_hermes_final_render(
     instruction: str,
     base_text: str,
     completed_steps: List[Dict[str, str]],
+    full_tool_results: List[Dict[str, Any]],
     platform_preamble: str,
     max_tokens: Optional[int],
 ) -> str:
@@ -3303,8 +3198,6 @@ async def _run_hermes_final_render(
     now_text = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
     first, last = get_tater_name()
     personality = (get_tater_personality() or "").strip()
-    personality_line = f"Voice style (tone only): {personality}\n" if personality else ""
-    plain_text_rule = "Use plain ASCII text only.\n" if platform in ASCII_ONLY_PLATFORMS else ""
 
     findings: List[Dict[str, str]] = []
     for step in completed_steps[:8]:
@@ -3320,6 +3213,11 @@ async def _run_hermes_final_render(
                 "summary": summary_text,
             }
         )
+    full_results_payload: List[Dict[str, Any]] = []
+    for result in full_tool_results:
+        if not isinstance(result, dict):
+            continue
+        full_results_payload.append(dict(result))
 
     payload = {
         "mode": render_mode,
@@ -3328,31 +3226,21 @@ async def _run_hermes_final_render(
         "goal": _short_text(goal, limit=260),
         "base_text": _short_text(base_text, limit=2200),
         "findings": findings,
+        "tool_results_full": full_results_payload,
     }
     messages: List[Dict[str, Any]] = [
         {
             "role": "system",
-            "content": (
-                f"Current Date and Time: {now_text}\n"
-                f"You are {first} {last}.\n"
-                "You are Hermes, the final rendering head.\n"
-                f"{personality_line}"
-                "Transform base_text and findings into the final user-facing answer.\n"
-                "Rules:\n"
-                "- Keep facts faithful to payload.base_text and payload.findings.\n"
-                "- Do not invent new facts.\n"
-                "- If payload.instruction is provided, apply it as the highest-priority style directive.\n"
-                "- For mode=direct, answer naturally like a normal conversation and lead with the result.\n"
-                "- For mode=direct, rewrite terse fragments into clear user-facing sentences.\n"
-                "- For mode=summarize, produce a concise summary answer.\n"
-                "- For mode=rewrite, preserve meaning while applying payload.instruction.\n"
-                "- Do not include in-progress phrasing like \"I'm checking\" or \"I'm fetching\" in final answers.\n"
-                "- Do not mention internal roles, orchestration, or tool execution.\n"
-                "- Output plain user-facing text only.\n"
-                f"{plain_text_rule}"
+            "content": prompts.hermes_final_render_system_prompt(
+                now_text=now_text,
+                first_name=first,
+                last_name=last,
+                personality=personality,
+                platform=platform,
+                ascii_only_platforms=ASCII_ONLY_PLATFORMS,
             ),
         },
-        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)},
     ]
     messages = _with_platform_preamble(messages, platform_preamble=platform_preamble)
     try:
@@ -3438,16 +3326,7 @@ async def _tool_start_progress(
     progress_messages: List[Dict[str, Any]] = [
         {
             "role": "system",
-            "content": (
-                "You are writing a live in-progress status line before a tool call executes. "
-                "No results exist yet. "
-                "Write exactly one short first-person sentence about the action you are about to do now. "
-                "Do not include findings, forecasts, temperatures, numbers, dates, outcomes, confirmations, or past-tense claims. "
-                "Do not mention internal systems, JSON, markdown, or tool names. "
-                "Do not ask a question. "
-                "Good style examples: \"I'm checking that for you now.\" \"I'm pulling that up now.\" "
-                "Return only the sentence."
-            ),
+            "content": prompts.tool_start_progress_system_prompt(),
         },
         {
             "role": "user",
@@ -4684,6 +4563,7 @@ async def _run_hydra_turn_impl(
             instruction=hermes_instruction,
             base_text=composed_text,
             completed_steps=completed_tool_steps,
+            full_tool_results=raw_tool_payload_history,
             platform_preamble=platform_preamble,
             max_tokens=None,
         )
