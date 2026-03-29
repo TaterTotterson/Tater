@@ -1,49 +1,28 @@
 from typing import Iterable
 
 
-def thanatos_focus_prompt(*, current_user_text: str, resolved_user_text: str) -> str:
+def thanatos_focus_prompt(*, current_user_text: str, turn_request_text: str) -> str:
     current = str(current_user_text or "").strip()
-    resolved = str(resolved_user_text or "").strip() or current
+    turn_request = str(turn_request_text or "").strip() or current
 
-    if resolved and current and resolved != current:
+    if turn_request and current and turn_request != current:
         return (
             "Turn focus:\n"
             f"- Current user message (highest priority): {current}\n"
-            f"- Resolved request for this turn: {resolved}\n"
+            f"- Turn request text: {turn_request}\n"
             "- History is context only; use it only for explicit references (it/that/this/here/again).\n"
-            "- This is an execution turn for Thanatos: use tools to progress the resolved request.\n"
-            "- Execute against the resolved request for this turn; do not idle waiting for additional confirmation.\n"
+            "- This is an execution turn for Thanatos: use tools to progress the turn request.\n"
+            "- Execute against this turn request; do not idle waiting for additional confirmation.\n"
             "- Use prior state only to complete this turn's goal and resolve references.\n"
-            "- If the current message changes objective, follow the current/resolved request and drop stale objectives.\n"
+            "- If the current message changes objective, follow the current turn request and drop stale objectives.\n"
         )
 
     return (
         "Turn focus:\n"
-        f"- Current user message (highest priority): {resolved or current}\n"
+        f"- Current user message (highest priority): {turn_request or current}\n"
         "- This is an execution turn for Thanatos: use tools to progress the request.\n"
         "- Continue this turn's objective step-by-step until completion signal or concrete blocker.\n"
         "- Use prior state/history only as context; do not drift to unrelated objectives.\n"
-    )
-
-
-def thanatos_round_mode_prompt(*, round_index: int, current_user_text: str) -> str:
-    round_no = max(1, int(round_index or 1))
-    current = str(current_user_text or "").strip()
-    if round_no <= 1:
-        return (
-            "Round mode: FIRST ROUND (execution start).\n"
-            f"- Current message: {current}\n"
-            "- Start execution for this turn immediately using the planned first atomic step.\n"
-            "- Use tools according to the step contract; do not answer with normal chat text.\n"
-            "- Output one valid tool call or a short blocker when execution cannot proceed.\n"
-        )
-    return (
-        "Round mode: CONTINUATION ROUND (follow-through).\n"
-        "- Continue executing the current turn plan one atomic step at a time.\n"
-        "- Prioritize state.next_step or the first remaining plan item.\n"
-        "- Do not restart from the first action.\n"
-        "- Do not add unrelated work.\n"
-        "- Output one valid tool call or a short blocker for this round.\n"
     )
 
 
@@ -87,11 +66,12 @@ def thanatos_execution_step_prompt(
         f"{blocked_line}"
         f"- Current atomic step intent: {step_intent}\n"
         f"- Current atomic step instruction: {step_nl}\n"
-        "- You must execute this step only.\n"
-        "- Planned tool hint is authoritative for this step.\n"
-        "- Match the execution tool contract system message for exact tool id and argument shape.\n"
-        "- Build valid arguments for only this step.\n"
-        "- Do not choose alternate tools or replan the step.\n"
+        "- You must execute this locked Astraeus step only.\n"
+        "- Tool selection is already decided for this step.\n"
+        "- Planned tool hint and execution tool contract are authoritative.\n"
+        "- Use exact tool id and argument keys from the execution tool contract.\n"
+        "- Build arguments only for this step instruction.\n"
+        "- Do not choose alternate tools or replan.\n"
         "- If tool contract is missing/invalid, output a short blocker explanation.\n"
         "- If a retry repair hint is present, apply it directly in this attempt.\n"
         "- Do not merge with other actions.\n"
@@ -101,8 +81,8 @@ def thanatos_execution_step_prompt(
 
 
 def astraeus_system_prompt(*, platform: str) -> str:
+    del platform
     return (
-        f"You are Astraeus, the Seer head of Hydra, on platform: {platform}.\n"
         "Task: decide whether this turn is conversational chat or executable work; when executable, return an ordered executable plan.\n"
         "Return exactly one strict JSON object with this schema:\n"
         "{\"goal\":\"clear goal\",\"steps\":[{\"step_id\":1,\"intent\":\"atomic intent\",\"nl\":\"single scoped instruction\",\"tool_hint\":\"tool_id\"}]}\n"
@@ -113,18 +93,18 @@ def astraeus_system_prompt(*, platform: str) -> str:
         "- For greetings, acknowledgements, reactions, social check-ins, playful banter, or meta conversation, return steps as an empty list.\n"
         "- Do not create execution steps for chit-chat or acknowledgements.\n"
         "- Prefer steps=[] for conversational, opinion, explanation, and reasoning-only turns that can be answered directly without tool execution.\n"
-        "- Plan only for this turn's resolved request; ignore stale prior objectives unless the current message explicitly asks to continue/retry/repeat.\n"
+        "- Plan only for this turn's request text; ignore stale prior objectives unless the current message explicitly asks to continue/retry/repeat.\n"
         "- Produce execution steps only when the user clearly asks to do/check/change/fetch something that depends on tools, files, external pages, live system state, or settings.\n"
         "- Stay within payload.available_capabilities and payload.available_tool_ids; every step must use one valid tool_hint from payload.available_tool_ids.\n"
         "- Do not invent tool ids, identifiers, paths, URLs, names, or contents.\n"
         "- Use steps=[] when required user input is missing and no executable step can run yet.\n"
         "- Requests for facts/retrieval/research/observations must produce steps when they depend on current or external state rather than direct conversational knowledge.\n"
-        "- If the current message is a short explicit follow-up fragment resolved into an actionable request for this turn, still produce steps.\n"
+        "- If the current message is a short explicit follow-up fragment that is actionable for this turn, still produce steps.\n"
         "- If uncertain whether execution is required, choose steps=[].\n"
         "- goal is the intended end state for this turn.\n"
         "- Each step must be atomic, concise, rewritten, and executable one tool call at a time by Thanatos.\n"
         "- Preserve user-requested order.\n"
-        "- Split multi-target or multi-action requests into separate steps whenever work is naturally one-target-at-a-time.\n"
+        "- For user-requested operations, split multi-action requests into separate steps so each step has exactly one action.\n"
         "- Add prerequisite discovery, retrieval, or inspection steps whenever later steps depend on intermediate data.\n"
         "- A one-step plan is valid only when that single step can directly satisfy the user goal.\n"
         "- For synthesis tasks, gather evidence before summarizing or concluding.\n"
@@ -197,22 +177,22 @@ def thanatos_system_prompt(
         f"Current Date and Time: {now_text}\n"
         f"Current platform: {platform}\n"
         "Execution role: Thanatos.\n"
-        "Execute exactly ONE already-planned atomic step this round.\n"
+        "Execute exactly ONE locked atomic step from Astraeus.\n"
         "Output either a short blocker explanation OR exactly ONE strict JSON tool call: "
         "{\"function\":\"tool_id\",\"arguments\":{...}}\n"
         "\n"
         "Rules:\n"
-        "- Read the Current agent state JSON every round.\n"
+        "- Read the Current agent state JSON.\n"
         "- Execute only this turn's planned objective; do not revive stale prior objectives.\n"
-        "- If state.plan has items, act only on state.next_step or the first remaining step.\n"
-        "- In structured plan mode, execute exactly one atomic step this round.\n"
+        "- If state.plan has items, execute only state.next_step or the first remaining step.\n"
+        "- Treat the Execution step lock system message as the authoritative Astraeus step.\n"
         "- In structured plan mode, do not output final-answer text.\n"
         "- Do not decompose, replan, reprioritize, or broaden scope.\n"
         "- Do not repeat a successfully completed step unless the user explicitly asks to retry or repeat it.\n"
         "- For schedule/reminder creation requests, prefer ONE scheduling tool call with the full runtime behavior; do not split into multiple schedule creations unless the user explicitly asks for separate schedules.\n"
         "- If the step is non-executable or missing required input, output a short blocker explanation instead of a fake tool call.\n"
         "- Treat step tool_hint and execution tool contract as authoritative.\n"
-        "- Do not select alternate tools unless the contract explicitly allows it.\n"
+        "- Tool selection is not open-ended here; do not select alternate tools unless the contract explicitly allows it.\n"
         "- For observational, scene, event, camera, snapshot, or time-scoped fact questions, use relevant tools when available; do not answer from memory or prior narrative alone.\n"
         "- Never claim completion without a successful tool result this turn.\n"
         "- Use exact tool ids and argument keys from the tool contract.\n"

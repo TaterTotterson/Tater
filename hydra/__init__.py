@@ -769,31 +769,6 @@ def _configured_astraeus_plan_review_enabled(redis_client: Any = None) -> bool:
     return bool(ASTRAEUS_PLAN_REVIEW_ENABLED)
 
 
-def _configured_astraeus_max_tokens(redis_client: Any = None) -> Optional[int]:
-    del redis_client
-    return None
-
-
-def _configured_minos_max_tokens(redis_client: Any = None) -> Optional[int]:
-    del redis_client
-    return None
-
-
-def _configured_thanatos_max_tokens(redis_client: Any = None) -> Optional[int]:
-    del redis_client
-    return None
-
-
-def _configured_tool_repair_max_tokens(redis_client: Any = None) -> Optional[int]:
-    del redis_client
-    return None
-
-
-def _configured_recovery_max_tokens(redis_client: Any = None) -> Optional[int]:
-    del redis_client
-    return None
-
-
 def _normalize_token_limit(
     value: Optional[int],
     *,
@@ -813,27 +788,6 @@ def _normalize_token_limit(
     if maximum is not None:
         parsed = min(int(maximum), parsed)
     return parsed
-
-
-def _scale_token_limit(
-    value: Optional[int],
-    *,
-    numerator: int = 1,
-    denominator: int = 1,
-    minimum: int = 1,
-    maximum: Optional[int] = None,
-) -> Optional[int]:
-    if value is None:
-        return None
-    num = max(1, int(numerator))
-    den = max(1, int(denominator))
-    scaled = (int(value) * num) // den
-    return _normalize_token_limit(
-        scaled,
-        minimum=minimum,
-        maximum=maximum,
-    )
-
 
 def _chat_with_optional_max_tokens_kwargs(
     *,
@@ -1395,17 +1349,10 @@ def _find_concrete_destination(payload: Any, *, _in_destination_context: bool = 
     return _looks_like_destination_scalar(payload, key_hint=_key_hint, in_destination_context=_in_destination_context)
 
 
-def _thanatos_focus_prompt(*, current_user_text: str, resolved_user_text: str) -> str:
+def _thanatos_focus_prompt(*, current_user_text: str, turn_request_text: str) -> str:
     return prompts.thanatos_focus_prompt(
         current_user_text=current_user_text,
-        resolved_user_text=resolved_user_text,
-    )
-
-
-def _thanatos_round_mode_prompt(*, round_index: int, current_user_text: str) -> str:
-    return prompts.thanatos_round_mode_prompt(
-        round_index=round_index,
-        current_user_text=current_user_text,
+        turn_request_text=turn_request_text,
     )
 
 
@@ -1834,7 +1781,7 @@ async def _repair_tool_call_text(
         with_platform_preamble_fn=lambda messages, preamble: _with_platform_preamble(
             messages, platform_preamble=preamble
         ),
-        configured_tool_repair_max_tokens_fn=_configured_tool_repair_max_tokens,
+        configured_tool_repair_max_tokens_fn=(lambda: None),
         coerce_text_fn=_coerce_text,
         user_text=user_text,
         tool_name_hint=tool_name_hint,
@@ -1890,9 +1837,6 @@ async def _validate_or_recover_tool_call(
     history_messages: Optional[List[Dict[str, Any]]] = None,
     context: Optional[Dict[str, Any]] = None,
     platform_preamble: str = "",
-    repair_max_tokens: Optional[int] = None,
-    recovery_max_tokens: Optional[int] = None,
-    enrich_max_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
     return await validation_flow.validate_or_recover_tool_call(
         llm_client=llm_client,
@@ -1907,8 +1851,8 @@ async def _validate_or_recover_tool_call(
         history_messages=history_messages,
         context=context,
         platform_preamble=platform_preamble,
-        repair_max_tokens=repair_max_tokens,
-        recovery_max_tokens=recovery_max_tokens,
+        repair_max_tokens=None,
+        recovery_max_tokens=None,
         is_tool_candidate_fn=_is_tool_candidate,
         validate_tool_contract_fn=_validate_tool_contract,
         short_text_fn=_short_text,
@@ -1916,7 +1860,7 @@ async def _validate_or_recover_tool_call(
         validation_failure_text_fn=_validation_failure_text,
         normalize_tool_call_for_user_request_fn=_normalize_tool_call_for_user_request,
         enrich_tool_call_for_user_request_fn=_llm_enrich_tool_call_for_user_request,
-        enrich_max_tokens=enrich_max_tokens,
+        enrich_max_tokens=None,
     )
 
 
@@ -1945,7 +1889,7 @@ async def _generate_recovery_text(
         with_platform_preamble_fn=lambda messages, preamble: _with_platform_preamble(
             messages, platform_preamble=preamble
         ),
-        configured_recovery_max_tokens_fn=_configured_recovery_max_tokens,
+        configured_recovery_max_tokens_fn=(lambda: None),
         looks_like_tool_markup_fn=looks_like_tool_markup,
         parse_function_json_fn=parse_function_json,
         checker_decision_prefix_re=_MINOS_DECISION_PREFIX_RE,
@@ -2032,7 +1976,7 @@ async def _run_minos_validation(
     llm_client: Any,
     platform: str,
     current_user_text: str,
-    resolved_user_text: str,
+    turn_request_text: str,
     agent_state: Optional[Dict[str, Any]],
     memory_context: Optional[Dict[str, Any]],
     available_artifacts: Optional[List[Dict[str, Any]]],
@@ -2050,7 +1994,7 @@ async def _run_minos_validation(
         llm_client=llm_client,
         platform=platform,
         current_user_text=current_user_text,
-        resolved_user_text=resolved_user_text,
+        turn_request_text=turn_request_text,
         agent_state=agent_state,
         memory_context=memory_context,
         available_artifacts=available_artifacts,
@@ -2065,7 +2009,7 @@ async def _run_minos_validation(
         coerce_non_negative_int_fn=_coerce_non_negative_int,
         short_text_fn=_short_text,
         memory_context_default_summary_max_chars=_MEMORY_CONTEXT_DEFAULT_SUMMARY_MAX_CHARS,
-        configured_minos_max_tokens_fn=_configured_minos_max_tokens,
+        configured_minos_max_tokens_fn=(lambda: None),
         minos_system_prompt_fn=lambda plat, retry: _minos_system_prompt(plat, retry_allowed=retry),
         with_platform_preamble_fn=lambda messages, preamble: _with_platform_preamble(
             messages, platform_preamble=preamble
@@ -2243,7 +2187,7 @@ async def _select_hermes_render_plan(
     llm_client: Any,
     platform: str,
     current_user_text: str,
-    resolved_user_text: str,
+    turn_request_text: str,
     goal: str,
     planned_steps: List[Dict[str, str]],
     platform_preamble: str,
@@ -2267,7 +2211,6 @@ async def _select_hermes_render_plan(
         )
     payload = {
         "current_user_message": _short_text(current_user_text, limit=420),
-        "resolved_request_for_this_turn": _short_text(resolved_user_text, limit=420),
         "goal": _short_text(goal, limit=260),
         "planned_steps": payload_steps,
         "allowed_modes": ["direct", "summarize", "rewrite"],
@@ -2345,7 +2288,7 @@ async def _run_astraeus_plan(
     llm_client: Any,
     platform: str,
     current_user_text: str,
-    resolved_user_text: str,
+    turn_request_text: str,
     topic_seed: str,
     topic_shift_seed: bool,
     history: List[Dict[str, Any]],
@@ -2356,7 +2299,7 @@ async def _run_astraeus_plan(
     platform_preamble: str,
     max_tokens: Optional[int],
 ) -> Dict[str, Any]:
-    fallback_goal = _short_text(resolved_user_text or current_user_text, limit=220) or "Fulfill the user request."
+    fallback_goal = _short_text(turn_request_text or current_user_text, limit=220) or "Fulfill the user request."
     topic_value = _short_text(topic_seed, limit=90)
     topic_shift_value = bool(topic_shift_seed)
     recent_history: List[Dict[str, str]] = []
@@ -2375,7 +2318,6 @@ async def _run_astraeus_plan(
 
     payload = {
         "current_user_message": str(current_user_text or ""),
-        "resolved_request_for_this_turn": str(resolved_user_text or current_user_text or ""),
         "recent_history": recent_history,
     }
     if isinstance(prior_state, dict) and prior_state:
@@ -2543,7 +2485,7 @@ async def _review_execution_plan_for_completeness(
     llm_client: Any,
     platform: str,
     current_user_text: str,
-    resolved_user_text: str,
+    turn_request_text: str,
     goal: str,
     steps: List[Dict[str, str]],
     capability_catalog: str,
@@ -2552,13 +2494,12 @@ async def _review_execution_plan_for_completeness(
     max_tokens: Optional[int],
 ) -> Dict[str, Any]:
     original_steps = [dict(step) for step in steps if isinstance(step, dict)]
-    original_goal = _short_text(goal, limit=220) or _short_text(resolved_user_text, limit=220) or "Fulfill the user request."
+    original_goal = _short_text(goal, limit=220) or _short_text(turn_request_text, limit=220) or "Fulfill the user request."
     if not original_steps:
         return {"goal": original_goal, "steps": original_steps}
 
     payload = {
         "current_user_message": _short_text(current_user_text, limit=420),
-        "resolved_request_for_this_turn": _short_text(resolved_user_text, limit=420),
         "goal": original_goal,
         "steps": original_steps[:12],
         "available_capabilities": capability_catalog,
@@ -2875,8 +2816,8 @@ async def _run_chat_fallback_reply(
     return _coerce_text((resp.get("message", {}) or {}).get("content", "")).strip()
 
 
-def _turn_goal_for_state(*, current_user_text: str, resolved_user_text: str) -> str:
-    goal = _short_text((resolved_user_text or current_user_text or "").strip(), limit=180)
+def _turn_goal_for_state(*, current_user_text: str, turn_request_text: str) -> str:
+    goal = _short_text((turn_request_text or current_user_text or "").strip(), limit=180)
     return goal or "Fulfill the user request."
 
 
@@ -3094,12 +3035,12 @@ def _initial_agent_state_for_turn_from_topic_signal(
     *,
     prior_state: Optional[Dict[str, Any]],
     current_user_text: str,
-    resolved_user_text: str,
+    turn_request_text: str,
     topic_shift_new_topic: bool,
 ) -> Dict[str, Any]:
     goal = _turn_goal_for_state(
         current_user_text=current_user_text,
-        resolved_user_text=resolved_user_text,
+        turn_request_text=turn_request_text,
     )
     if not isinstance(prior_state, dict):
         return _new_agent_state(goal)
@@ -3170,7 +3111,7 @@ async def _run_thanatos_state_update(
         tool_result=tool_result,
         max_tokens=max_tokens,
         normalize_agent_state_fn=lambda s, fallback_goal: _normalize_agent_state(s, fallback_goal=fallback_goal),
-        configured_thanatos_max_tokens_fn=_configured_thanatos_max_tokens,
+        configured_thanatos_max_tokens_fn=(lambda: None),
         coerce_text_fn=_coerce_text,
         first_json_object_fn=_first_json_object,
         state_add_line_fn=lambda items, line, max_items: _state_add_line(items, line, max_items=max_items),
@@ -4009,6 +3950,30 @@ def _result_memory_prompt(result_memory: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _thanatos_previous_step_payloads_prompt(previous_payloads: List[Dict[str, Any]]) -> str:
+    if not isinstance(previous_payloads, list) or not previous_payloads:
+        return ""
+    lines = ["Tool results so far this turn (full payloads, execution order):"]
+    kept = 0
+    for idx, payload in enumerate(previous_payloads, start=1):
+        if not isinstance(payload, dict) or not payload:
+            continue
+        try:
+            payload_json = json.dumps(payload, ensure_ascii=False, default=str)
+        except Exception:
+            payload_json = "{}"
+        if payload_json in {"{}", "null"}:
+            continue
+        lines.append(f"Result {idx} full payload JSON:\n{payload_json}")
+        kept += 1
+    if kept == 0:
+        return ""
+    lines.append(
+        "Use this info if needed for the current step, especially when you need exact links, ids, URIs, or other values."
+    )
+    return "\n".join(lines)
+
+
 def _next_result_set_id(result_memory: List[Dict[str, Any]]) -> str:
     highest = 0
     for entry in result_memory:
@@ -4392,37 +4357,6 @@ async def _run_hydra_turn_impl(
         max_rounds=max_rounds,
         max_tool_calls=max_tool_calls,
     )
-    astraeus_max_tokens = _configured_astraeus_max_tokens(r)
-    minos_max_tokens = _configured_minos_max_tokens(r)
-    thanatos_max_tokens = _configured_thanatos_max_tokens(r)
-    tool_repair_max_tokens = _configured_tool_repair_max_tokens(r)
-    recovery_max_tokens = _configured_recovery_max_tokens(r)
-    enrich_max_tokens = _scale_token_limit(
-        astraeus_max_tokens,
-        denominator=6,
-        minimum=120,
-    )
-    astraeus_plan_max_tokens = _scale_token_limit(
-        astraeus_max_tokens,
-        denominator=2,
-        minimum=400,
-    )
-    chat_reply_max_tokens = _scale_token_limit(
-        astraeus_max_tokens,
-        denominator=2,
-        minimum=128,
-    )
-    plan_review_max_tokens = _scale_token_limit(
-        astraeus_max_tokens,
-        denominator=3,
-        minimum=180,
-    )
-    thanatos_step_max_tokens = _normalize_token_limit(
-        thanatos_max_tokens,
-        minimum=1,
-        fallback=1,
-    )
-    progress_update_max_tokens: Optional[int] = 56 if thanatos_max_tokens is not None else None
     result_memory_max_sets = _configured_result_memory_max_sets(r)
     result_memory_max_items = _configured_result_memory_max_items(r)
     step_retry_limit = _configured_step_retry_limit(r)
@@ -4455,6 +4389,7 @@ async def _run_hydra_turn_impl(
     checker_reason = "complete"
     tool_result_for_checker: Optional[Dict[str, Any]] = None
     raw_tool_payload_out: Optional[Dict[str, Any]] = None
+    raw_tool_payload_history: List[Dict[str, Any]] = []
     normalized_minos_result_out: Optional[Dict[str, Any]] = None
     artifacts_out: List[Dict[str, Any]] = []
     rounds_used = 0
@@ -4474,8 +4409,8 @@ async def _run_hydra_turn_impl(
 
     history = _compact_history(history_messages)
     current_user_turn_text = _strip_user_sender_prefix(user_text).strip() or str(user_text or "").strip()
-    resolved_user_text = current_user_turn_text or str(user_text or "").strip()
-    task_name = _task_name_from_text(resolved_user_text or user_text, fallback=task_name)
+    turn_request_text = current_user_turn_text or str(user_text or "").strip()
+    task_name = _task_name_from_text(turn_request_text or user_text, fallback=task_name)
     _set_active_chat_job_task_name(active_job_id, task_name)
     tool_index = _enabled_tool_mini_index(
         platform=platform,
@@ -4520,8 +4455,8 @@ async def _run_hydra_turn_impl(
     structured_plan_queue: List[Dict[str, str]] = []
     structured_plan_total_steps = 0
     astraeus_mode = "unknown"
-    astraeus_topic = _short_text(resolved_user_text or current_user_turn_text, limit=90) or "request"
-    astraeus_goal = _short_text(resolved_user_text or current_user_turn_text, limit=220) or "Fulfill the user request."
+    astraeus_topic = _short_text(turn_request_text or current_user_turn_text, limit=90) or "request"
+    astraeus_goal = _short_text(turn_request_text or current_user_turn_text, limit=220) or "Fulfill the user request."
     astraeus_topic_shift = False
     hermes_render_plan: Optional[Dict[str, str]] = None
     completed_tool_steps: List[Dict[str, str]] = []
@@ -4531,7 +4466,7 @@ async def _run_hydra_turn_impl(
             llm_client=llm_client_astraeus,
             platform=platform,
             current_user_text=current_user_turn_text,
-            resolved_user_text=resolved_user_text,
+            turn_request_text=turn_request_text,
             topic_seed=astraeus_topic,
             topic_shift_seed=astraeus_topic_shift,
             history=history,
@@ -4540,7 +4475,7 @@ async def _run_hydra_turn_impl(
             capability_catalog=astraeus_capability_catalog,
             available_tool_ids=available_execution_tool_ids,
             platform_preamble=platform_preamble,
-            max_tokens=astraeus_plan_max_tokens,
+            max_tokens=None,
         )
         astraeus_ms_total += (time.perf_counter() - astraeus_started) * 1000.0
     except Exception:
@@ -4574,13 +4509,13 @@ async def _run_hydra_turn_impl(
             llm_client=llm_client_astraeus,
             platform=platform,
             current_user_text=current_user_turn_text,
-            resolved_user_text=resolved_user_text,
-            goal=astraeus_goal or resolved_user_text or current_user_turn_text,
+            turn_request_text=turn_request_text,
+            goal=astraeus_goal or turn_request_text or current_user_turn_text,
             steps=structured_plan_queue,
             capability_catalog=astraeus_capability_catalog,
             available_tool_ids=available_execution_tool_ids,
             platform_preamble=platform_preamble,
-            max_tokens=plan_review_max_tokens,
+            max_tokens=None,
         )
         astraeus_ms_total += (time.perf_counter() - plan_review_started) * 1000.0
         if isinstance(reviewed_plan, dict):
@@ -4606,21 +4541,21 @@ async def _run_hydra_turn_impl(
     agent_state: Dict[str, Any] = _initial_agent_state_for_turn_from_topic_signal(
         prior_state=prior_state,
         current_user_text=current_user_turn_text,
-        resolved_user_text=astraeus_goal or resolved_user_text,
+        turn_request_text=astraeus_goal or turn_request_text,
         topic_shift_new_topic=astraeus_topic_shift,
     )
     agent_state["goal"] = astraeus_goal
     if not structured_plan_queue:
         agent_state = _clear_state_plan_for_new_turn(
             agent_state=agent_state,
-            fallback_goal=astraeus_goal or resolved_user_text or user_text,
+            fallback_goal=astraeus_goal or turn_request_text or user_text,
         )
     structured_plan_total_steps = len(structured_plan_queue)
     if structured_plan_queue:
         agent_state = _sync_agent_state_with_plan_queue(
             agent_state=agent_state,
             plan_queue=structured_plan_queue,
-            fallback_goal=astraeus_goal or resolved_user_text or user_text,
+            fallback_goal=astraeus_goal or turn_request_text or user_text,
         )
         _save_persistent_agent_state(
             redis_client=r,
@@ -4724,11 +4659,11 @@ async def _run_hydra_turn_impl(
                 llm_client=llm_client_ai_calls,
                 platform=platform,
                 user_text=user_request_text,
-                goal=astraeus_goal or resolved_user_text or current_user_turn_text,
+                goal=astraeus_goal or turn_request_text or current_user_turn_text,
                 completed_steps=completed_tool_steps,
                 draft_response=base_text,
                 platform_preamble=platform_preamble,
-                max_tokens=chat_reply_max_tokens,
+                max_tokens=None,
             )
             if synthesized:
                 composed_text = synthesized
@@ -4744,13 +4679,13 @@ async def _run_hydra_turn_impl(
             llm_client=llm_client_hermes,
             platform=platform,
             user_text=user_request_text,
-            goal=astraeus_goal or resolved_user_text or current_user_turn_text,
+            goal=astraeus_goal or turn_request_text or current_user_turn_text,
             mode=hermes_mode,
             instruction=hermes_instruction,
             base_text=composed_text,
             completed_steps=completed_tool_steps,
             platform_preamble=platform_preamble,
-            max_tokens=chat_reply_max_tokens,
+            max_tokens=None,
         )
         if hermes_text:
             composed_text = hermes_text
@@ -4849,7 +4784,7 @@ async def _run_hydra_turn_impl(
                 redis_client=r,
                 memory_context_message=chat_context_message,
                 platform_preamble=platform_preamble,
-                max_tokens=chat_reply_max_tokens,
+                max_tokens=None,
             )
             astraeus_ms_total += (time.perf_counter() - chat_started) * 1000.0
             planner_kind = "answer"
@@ -4870,7 +4805,7 @@ async def _run_hydra_turn_impl(
             hermes_text = await _compose_final_answer_text(
                 checker_decision=None,
                 draft_response_text=hermes_seed,
-                user_request_text=resolved_user_text or user_text,
+                user_request_text=turn_request_text or user_text,
                 tool_result_payload=tool_result_for_checker,
             )
             checker_reason = "complete"
@@ -4901,7 +4836,7 @@ async def _run_hydra_turn_impl(
             str((current_plan_step or {}).get("nl") or "").strip()
             if isinstance(current_plan_step, dict)
             else ""
-        ) or resolved_user_text
+        ) or turn_request_text
         current_step_id = (
             _short_text((current_plan_step or {}).get("id"), limit=24)
             if isinstance(current_plan_step, dict)
@@ -4912,7 +4847,7 @@ async def _run_hydra_turn_impl(
 
         state_message = _agent_state_prompt_message(
             agent_state,
-            fallback_goal=astraeus_goal or resolved_user_text or user_text,
+            fallback_goal=astraeus_goal or turn_request_text or user_text,
         )
         thanatos_messages: List[Dict[str, Any]] = [
             {"role": "system", "content": _thanatos_system_prompt(platform)},
@@ -4922,18 +4857,14 @@ async def _run_hydra_turn_impl(
                 "role": "system",
                 "content": _thanatos_focus_prompt(
                     current_user_text=current_user_turn_text,
-                    resolved_user_text=round_request_text,
-                ),
-            },
-            {
-                "role": "system",
-                "content": _thanatos_round_mode_prompt(
-                    round_index=rounds_used,
-                    current_user_text=current_user_turn_text,
+                    turn_request_text=round_request_text,
                 ),
             },
             {"role": "system", "content": state_message},
         ])
+        previous_step_payload_prompt = _thanatos_previous_step_payloads_prompt(raw_tool_payload_history)
+        if previous_step_payload_prompt:
+            thanatos_messages.append({"role": "system", "content": previous_step_payload_prompt})
         artifact_manifest_prompt = _available_artifacts_prompt(turn_available_artifacts)
         if artifact_manifest_prompt:
             thanatos_messages.append({"role": "system", "content": artifact_manifest_prompt})
@@ -4954,7 +4885,7 @@ async def _run_hydra_turn_impl(
                     "content": _thanatos_execution_step_prompt(
                         intent=str(current_plan_step.get("intent") or ""),
                         nl=str(current_plan_step.get("nl") or ""),
-                        goal=astraeus_goal or resolved_user_text or current_user_turn_text,
+                        goal=astraeus_goal or turn_request_text or current_user_turn_text,
                         repair_hint=current_step_retry_hint,
                         tool_hint=str(current_plan_step.get("tool_hint") or ""),
                         blocked_sources=current_failed_sources,
@@ -4982,7 +4913,7 @@ async def _run_hydra_turn_impl(
         thanatos_text, thanatos_ms = await _run_thanatos_step(
             llm_client=llm_client_thanatos,
             thanatos_messages=thanatos_messages,
-            max_tokens=thanatos_step_max_tokens,
+            max_tokens=None,
         )
         astraeus_ms_total += thanatos_ms
 
@@ -4999,19 +4930,19 @@ async def _run_hydra_turn_impl(
                 llm_client=llm_client_minos,
                 platform=platform,
                 current_user_text=current_user_turn_text,
-                resolved_user_text=resolved_user_text,
+                turn_request_text=turn_request_text,
                 agent_state=agent_state,
                 memory_context=memory_context_payload,
                 available_artifacts=_available_artifacts_payload(turn_available_artifacts),
                 current_step=(current_plan_step if isinstance(current_plan_step, dict) else None),
-                goal=astraeus_goal or resolved_user_text or current_user_turn_text,
+                goal=astraeus_goal or turn_request_text or current_user_turn_text,
                 planned_tool=None,
                 tool_result=tool_result_for_checker,
                 draft_response=draft_response,
                 retry_count=current_step_retry_count,
                 retry_allowed=_retry_allowed_for_step(current_step_id, current_step_retry_count),
                 platform_preamble=platform_preamble,
-                max_tokens=minos_max_tokens,
+                max_tokens=None,
             )
             minos_ms_total += (time.perf_counter() - checker_started) * 1000.0
             checker_action = _checker_decision_value(checker_decision)
@@ -5083,7 +5014,7 @@ async def _run_hydra_turn_impl(
             final_text_candidate = await _compose_final_answer_text(
                 checker_decision=checker_decision,
                 draft_response_text=draft_response,
-                user_request_text=resolved_user_text or user_text,
+                user_request_text=turn_request_text or user_text,
                 tool_result_payload=tool_result_for_checker,
             )
             if structured_plan_queue:
@@ -5101,7 +5032,7 @@ async def _run_hydra_turn_impl(
                 critic_continue_count += 1
                 continue
             if _should_continue_after_incomplete_final_answer(
-                user_text=resolved_user_text or user_text,
+                user_text=turn_request_text or user_text,
                 final_text=final_text_candidate,
                 agent_state=agent_state,
                 retry_allowed=_retry_allowed_for_step(current_step_id, current_step_retry_count),
@@ -5132,9 +5063,6 @@ async def _run_hydra_turn_impl(
             history_messages=history,
             context=context if isinstance(context, dict) else {},
             platform_preamble=platform_preamble,
-            repair_max_tokens=tool_repair_max_tokens,
-            recovery_max_tokens=recovery_max_tokens,
-            enrich_max_tokens=enrich_max_tokens,
         )
         validation_status = (
             tool_eval.get("validation_status")
@@ -5262,7 +5190,7 @@ async def _run_hydra_turn_impl(
             completed_steps_count=len(completed_tool_steps),
             total_plan_steps=structured_plan_total_steps,
             platform_preamble=platform_preamble,
-            max_tokens=progress_update_max_tokens,
+            max_tokens=None,
         )
         tool_started = time.perf_counter()
         doer_exec = await _execute_tool_call(
@@ -5283,6 +5211,8 @@ async def _run_hydra_turn_impl(
         tool_ms_total += (time.perf_counter() - tool_started) * 1000.0
         raw_payload = doer_exec.get("payload")
         raw_tool_payload_out = raw_payload if isinstance(raw_payload, dict) else None
+        if isinstance(raw_tool_payload_out, dict) and raw_tool_payload_out:
+            raw_tool_payload_history.append(raw_tool_payload_out)
         tool_result_for_checker = doer_exec.get("minos_result")
         if not isinstance(tool_result_for_checker, dict):
             tool_result_for_checker = doer_exec.get("checker_result")
@@ -5348,25 +5278,25 @@ async def _run_hydra_turn_impl(
         agent_state = await _run_thanatos_state_update(
             llm_client=llm_client_thanatos,
             platform=platform,
-            user_request=tool_user_text or resolved_user_text,
+            user_request=tool_user_text or turn_request_text,
             prior_state=agent_state,
             tool_call=planned_tool,
             tool_result=tool_result_for_checker,
-            max_tokens=thanatos_max_tokens,
+            max_tokens=None,
         )
         if structured_plan_queue:
             agent_state = _sync_agent_state_with_plan_queue(
                 agent_state=agent_state,
                 plan_queue=structured_plan_queue,
-                fallback_goal=astraeus_goal or resolved_user_text or user_text,
+                fallback_goal=astraeus_goal or turn_request_text or user_text,
             )
         agent_state = _remember_tool_result_in_agent_state(
             agent_state=agent_state,
             tool_call=planned_tool,
             raw_payload=(raw_payload if isinstance(raw_payload, dict) else None),
             tool_result=(tool_result_for_checker if isinstance(tool_result_for_checker, dict) else None),
-            request_text=str(tool_user_text or round_request_text or resolved_user_text or "").strip(),
-            fallback_goal=astraeus_goal or resolved_user_text or user_text,
+            request_text=str(tool_user_text or round_request_text or turn_request_text or "").strip(),
+            fallback_goal=astraeus_goal or turn_request_text or user_text,
             max_sets=result_memory_max_sets,
             max_items=result_memory_max_items,
         )
@@ -5386,19 +5316,19 @@ async def _run_hydra_turn_impl(
             llm_client=llm_client_minos,
             platform=platform,
             current_user_text=current_user_turn_text,
-            resolved_user_text=resolved_user_text,
+            turn_request_text=turn_request_text,
             agent_state=agent_state,
             memory_context=memory_context_payload,
             available_artifacts=_available_artifacts_payload(turn_available_artifacts),
             current_step=(current_plan_step if isinstance(current_plan_step, dict) else None),
-            goal=astraeus_goal or resolved_user_text or current_user_turn_text,
+            goal=astraeus_goal or turn_request_text or current_user_turn_text,
             planned_tool=planned_tool,
             tool_result=tool_result_for_checker,
             draft_response=turn_draft_response,
             retry_count=current_step_retry_count,
             retry_allowed=_retry_allowed_for_step(current_step_id, current_step_retry_count),
             platform_preamble=platform_preamble,
-            max_tokens=minos_max_tokens,
+            max_tokens=None,
         )
         minos_ms_total += (time.perf_counter() - checker_started) * 1000.0
         checker_action = _checker_decision_value(checker_decision)
@@ -5412,7 +5342,7 @@ async def _run_hydra_turn_impl(
                 agent_state = _sync_agent_state_with_plan_queue(
                     agent_state=agent_state,
                     plan_queue=structured_plan_queue,
-                    fallback_goal=astraeus_goal or resolved_user_text or user_text,
+                    fallback_goal=astraeus_goal or turn_request_text or user_text,
                 )
                 _save_persistent_agent_state(
                     redis_client=r,
@@ -5424,7 +5354,7 @@ async def _run_hydra_turn_impl(
                     final_text_candidate = await _compose_final_answer_text(
                         checker_decision=checker_decision,
                         draft_response_text=turn_draft_response,
-                        user_request_text=resolved_user_text or user_text,
+                        user_request_text=turn_request_text or user_text,
                         tool_result_payload=tool_result_for_checker,
                     )
                     checker_reason = _tool_failure_checker_reason(tool_result_for_checker) or "complete"
@@ -5504,7 +5434,7 @@ async def _run_hydra_turn_impl(
             agent_state = _sync_agent_state_with_plan_queue(
                 agent_state=agent_state,
                 plan_queue=structured_plan_queue,
-                fallback_goal=astraeus_goal or resolved_user_text or user_text,
+                fallback_goal=astraeus_goal or turn_request_text or user_text,
             )
             _save_persistent_agent_state(
                 redis_client=r,
@@ -5516,7 +5446,7 @@ async def _run_hydra_turn_impl(
                 final_text_candidate = await _compose_final_answer_text(
                     checker_decision=checker_decision,
                     draft_response_text=turn_draft_response,
-                    user_request_text=resolved_user_text or user_text,
+                    user_request_text=turn_request_text or user_text,
                     tool_result_payload=tool_result_for_checker,
                 )
                 checker_reason = _tool_failure_checker_reason(tool_result_for_checker) or "complete"
@@ -5534,11 +5464,11 @@ async def _run_hydra_turn_impl(
         final_text_candidate = await _compose_final_answer_text(
             checker_decision=checker_decision,
             draft_response_text=turn_draft_response,
-            user_request_text=resolved_user_text or user_text,
+            user_request_text=turn_request_text or user_text,
             tool_result_payload=tool_result_for_checker,
         )
         if _should_continue_after_incomplete_final_answer(
-            user_text=resolved_user_text or user_text,
+            user_text=turn_request_text or user_text,
             final_text=final_text_candidate,
             agent_state=agent_state,
             retry_allowed=_retry_allowed_for_step(current_step_id, current_step_retry_count),
@@ -5588,19 +5518,19 @@ async def _run_hydra_turn_impl(
         llm_client=llm_client_minos,
         platform=platform,
         current_user_text=current_user_turn_text,
-        resolved_user_text=resolved_user_text,
+        turn_request_text=turn_request_text,
         agent_state=agent_state,
         memory_context=memory_context_payload,
         available_artifacts=_available_artifacts_payload(turn_available_artifacts),
         current_step=(fallback_step if isinstance(fallback_step, dict) else None),
-        goal=astraeus_goal or resolved_user_text or current_user_turn_text,
+        goal=astraeus_goal or turn_request_text or current_user_turn_text,
         planned_tool=planned_tool,
         tool_result=tool_result_for_checker,
         draft_response=best_effort,
         retry_count=fallback_step_retry_count,
         retry_allowed=_retry_allowed_for_step(fallback_step_id, fallback_step_retry_count),
         platform_preamble=platform_preamble,
-        max_tokens=minos_max_tokens,
+        max_tokens=None,
     )
     minos_ms_total += (time.perf_counter() - checker_started) * 1000.0
     checker_action = _checker_decision_value(checker_decision)
@@ -5621,7 +5551,7 @@ async def _run_hydra_turn_impl(
         final_text_candidate = await _compose_final_answer_text(
             checker_decision=checker_decision,
             draft_response_text=best_effort,
-            user_request_text=resolved_user_text or user_text,
+            user_request_text=turn_request_text or user_text,
             tool_result_payload=tool_result_for_checker,
         )
         return _finish(
@@ -5647,7 +5577,7 @@ async def _run_hydra_turn_impl(
     final_text_candidate = await _compose_final_answer_text(
         checker_decision=checker_decision,
         draft_response_text=best_effort,
-        user_request_text=resolved_user_text or user_text,
+        user_request_text=turn_request_text or user_text,
         tool_result_payload=tool_result_for_checker,
     )
     return _finish(
