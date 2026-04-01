@@ -4216,8 +4216,52 @@ function renderCoreSettingsManager(body, tabSpec) {
   const defaultManagerTab = String(ui?.default_tab || "").trim();
   const statsRefreshButton = boolFromAny(ui?.stats_refresh_button, false);
   const statsRefreshLabel = String(ui?.stats_refresh_label || "Refresh").trim() || "Refresh";
+  const statsControls = Array.isArray(ui?.stats_controls)
+    ? ui.stats_controls.filter((item) => item && typeof item === "object")
+    : [];
+  const statsControlsAction = String(ui?.stats_controls_action || "").trim();
+  const statsControlsAutoSave = boolFromAny(ui?.stats_controls_auto_save, true);
 
-  const statsHtml = stats.length || statsRefreshButton
+  function renderCoreStatsControlField(field) {
+    const key = String(field?.key || "").trim();
+    if (!key) {
+      return "";
+    }
+    const label = String(field?.label || key).trim() || key;
+    const type = String(field?.type || "checkbox").trim().toLowerCase();
+    if (type === "checkbox") {
+      const checked = boolFromAny(field?.value, false) ? " checked" : "";
+      return `
+        <label class="small core-stats-control-toggle">
+          <input type="checkbox"${checked} data-core-field-key="${escapeHtml(key)}" data-core-field-type="checkbox" />
+          ${escapeHtml(label)}
+        </label>
+      `;
+    }
+    const value = String(field?.value ?? "");
+    return `
+      <label class="small core-stats-control-input">
+        ${escapeHtml(label)}
+        <input type="text" value="${escapeHtml(value)}" data-core-field-key="${escapeHtml(key)}" data-core-field-type="text" />
+      </label>
+    `;
+  }
+
+  const statsControlsHtml =
+    statsControlsAction && statsControls.length
+      ? `
+        <form class="inline-row core-stats-controls-form"
+          data-core-key="${safeCoreKey}"
+          data-core-action="${escapeHtml(statsControlsAction)}"
+          data-core-auto-save="${statsControlsAutoSave ? "1" : "0"}"
+          style="margin-left:auto; gap:10px; align-items:center;">
+          ${statsControls.map((field) => renderCoreStatsControlField(field)).join("")}
+          <span class="small core-manager-status"></span>
+        </form>
+      `
+      : "";
+
+  const statsHtml = stats.length || statsRefreshButton || statsControlsHtml
     ? `
       <div class="core-metric-row">
         ${stats
@@ -4236,6 +4280,7 @@ function renderCoreSettingsManager(body, tabSpec) {
             `;
           })
           .join("")}
+        ${statsControlsHtml}
         ${
           statsRefreshButton
             ? `<button type="button" class="action-btn core-tab-refresh-btn" data-core-tab-refresh="1">${escapeHtml(
@@ -5352,6 +5397,55 @@ function bindCoreTabManagers() {
         button.textContent = originalText;
       }
     });
+  });
+  document.querySelectorAll(".core-stats-controls-form[data-core-key][data-core-action]").forEach((form) => {
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    if (form.dataset.coreStatsControlsBound === "1") {
+      return;
+    }
+    form.dataset.coreStatsControlsBound = "1";
+    const coreKey = String(form.dataset.coreKey || "").trim();
+    const action = String(form.dataset.coreAction || "").trim();
+    if (!coreKey || !action) {
+      return;
+    }
+    let saving = false;
+
+    const saveNow = async () => {
+      if (saving) {
+        return;
+      }
+      saving = true;
+      setCoreManagerStatus(form, "Saving...");
+      try {
+        const activeTab = persistCoreTabFromNode(form);
+        const values = collectCoreManagerValues(form);
+        await runCoreTabAction(coreKey, action, { ...values, values });
+        await refreshCoreTabInPlace(activeTab);
+      } catch (error) {
+        setCoreManagerStatus(form, `Failed: ${error.message}`);
+      } finally {
+        saving = false;
+      }
+    };
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      await saveNow();
+    });
+
+    if (String(form.dataset.coreAutoSave || "1") !== "0") {
+      form.querySelectorAll("[data-core-field-key]").forEach((input) => {
+        if (!(input instanceof HTMLInputElement || input instanceof HTMLSelectElement || input instanceof HTMLTextAreaElement)) {
+          return;
+        }
+        input.addEventListener("change", () => {
+          void saveNow();
+        });
+      });
+    }
   });
   const decodeCoreManagerPopupFields = (card) => {
     const encoded = String(card?.dataset?.coreItemPopupFields || "").trim();
