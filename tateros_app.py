@@ -3004,6 +3004,7 @@ def _runtime_breakdown_payload() -> Dict[str, Any]:
         "hydra_jobs": hydra_jobs,
         "chat_jobs": hydra_jobs,  # Backward-compatible key for older clients.
         "llm_calls": llm_calls,
+        "voice_calls": vision_calls,  # Alias while voice runtime shares the vision-call tracker.
         "vision_calls": vision_calls,
         "chat_context_window": context_estimate,
     }
@@ -3161,6 +3162,7 @@ def health() -> Dict[str, Any]:
         "hydra_jobs_active": int(hydra_job_counts.get("total") or 0),
         "chat_jobs_active": int(hydra_job_counts.get("total") or 0),  # Backward-compatible key for older clients.
         "llm_calls_active": int(llm_call_counts.get("active_total") or 0),
+        "voice_calls_active": int(vision_call_counts.get("active_total") or 0),  # Alias for UI voice wording.
         "vision_calls_active": int(vision_call_counts.get("active_total") or 0),
         "bootstrap": {
             "restore_enabled": bool(bootstrap_state.get("restore_enabled")),
