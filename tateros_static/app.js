@@ -1984,8 +1984,8 @@ function formatRuntimeSummary(health) {
   const coresRunning = Number(health?.cores_running ?? 0);
   const hydraJobsActive = Number(health?.hydra_jobs_active ?? health?.chat_jobs_active ?? 0);
   const llmCallsActive = Number(health?.llm_calls_active ?? 0);
-  const visionCallsActive = Number(health?.vision_calls_active ?? 0);
-  return `${verbasEnabled} verba enabled • ${portalsRunning} portals running • ${coresRunning} cores running • ${hydraJobsActive} hydra jobs • ${llmCallsActive} llm calls • ${visionCallsActive} vision calls`;
+  const voiceCallsActive = Number(health?.voice_calls_active ?? health?.vision_calls_active ?? 0);
+  return `${verbasEnabled} verba enabled • ${portalsRunning} portals running • ${coresRunning} cores running • ${hydraJobsActive} hydra jobs • ${llmCallsActive} llm calls • ${voiceCallsActive} voice calls`;
 }
 
 function setRuntimeSummaryText(text, tone = "normal") {
@@ -2318,12 +2318,12 @@ function _renderRuntimeLlmCallRows(llmCalls) {
   `;
 }
 
-function _renderRuntimeVisionCallRows(visionCalls) {
-  const totals = visionCalls?.totals && typeof visionCalls.totals === "object" ? visionCalls.totals : {};
-  const byKind = Array.isArray(visionCalls?.active_by_kind) ? visionCalls.active_by_kind : [];
-  const bySource = Array.isArray(visionCalls?.active_by_source) ? visionCalls.active_by_source : [];
-  const activeCalls = Array.isArray(visionCalls?.active_calls) ? visionCalls.active_calls : [];
-  const history = visionCalls?.history && typeof visionCalls.history === "object" ? visionCalls.history : {};
+function _renderRuntimeVoiceCallRows(voiceCalls) {
+  const totals = voiceCalls?.totals && typeof voiceCalls.totals === "object" ? voiceCalls.totals : {};
+  const byKind = Array.isArray(voiceCalls?.active_by_kind) ? voiceCalls.active_by_kind : [];
+  const bySource = Array.isArray(voiceCalls?.active_by_source) ? voiceCalls.active_by_source : [];
+  const activeCalls = Array.isArray(voiceCalls?.active_calls) ? voiceCalls.active_calls : [];
+  const history = voiceCalls?.history && typeof voiceCalls.history === "object" ? voiceCalls.history : {};
   const historyWindows = Array.isArray(history?.windows) ? history.windows : [];
 
   const byKindHtml = byKind.length
@@ -2344,7 +2344,7 @@ function _renderRuntimeVisionCallRows(visionCalls) {
             .join("")}
         </div>
       `
-    : `<div class="small muted">No active vision calls.</div>`;
+    : `<div class="small muted">No active voice calls.</div>`;
 
   const bySourceHtml = bySource.length
     ? `
@@ -2398,13 +2398,13 @@ function _renderRuntimeVisionCallRows(visionCalls) {
             .join("")}
         </div>
       `
-    : `<div class="small muted">No active vision calls right now.</div>`;
+    : `<div class="small muted">No active voice calls right now.</div>`;
 
   const historyWindowKey = _runtimeHistoryWindowKey(state.runtimeHistoryWindow, "24h");
   const selectedHistoryWindow =
     historyWindows.find((row) => _runtimeHistoryWindowKey(row?.key, "") === historyWindowKey) || historyWindows[0] || null;
   const selectedHistoryKey = _runtimeHistoryWindowKey(selectedHistoryWindow?.key, historyWindowKey);
-  const historyTabsHtml = _renderRuntimeHistoryWindowTabs(historyWindows, selectedHistoryKey, "Vision call history window");
+  const historyTabsHtml = _renderRuntimeHistoryWindowTabs(historyWindows, selectedHistoryKey, "Voice call history window");
   const historyHtml = selectedHistoryWindow
     ? (() => {
         const calls = Number(selectedHistoryWindow?.calls ?? 0);
@@ -2428,7 +2428,7 @@ function _renderRuntimeVisionCallRows(visionCalls) {
           </div>
         `;
       })()
-    : `<div class="small muted">No vision call history available yet.</div>`;
+    : `<div class="small muted">No voice call history available yet.</div>`;
 
   return `
     <div class="runtime-breakdown-block">
@@ -2591,7 +2591,12 @@ function renderRuntimeBreakdown(payload) {
         ? payload.chat_jobs
         : {};
   const llmCalls = payload?.llm_calls && typeof payload.llm_calls === "object" ? payload.llm_calls : {};
-  const visionCalls = payload?.vision_calls && typeof payload.vision_calls === "object" ? payload.vision_calls : {};
+  const voiceCalls =
+    payload?.voice_calls && typeof payload.voice_calls === "object"
+      ? payload.voice_calls
+      : payload?.vision_calls && typeof payload.vision_calls === "object"
+        ? payload.vision_calls
+        : {};
   const contextEstimate = payload?.chat_context_window && typeof payload.chat_context_window === "object"
     ? payload.chat_context_window
     : {};
@@ -2602,12 +2607,12 @@ function renderRuntimeBreakdown(payload) {
   const llmSummary = `${Number(llmCalls.active_total ?? 0)} active • Started ${Number(
     llmCalls?.totals?.started ?? 0
   )} • Completed ${Number(llmCalls?.totals?.completed ?? 0)} • Failed ${Number(llmCalls?.totals?.failed ?? 0)}`;
-  const visionSummary = `${Number(visionCalls.active_total ?? 0)} active • Started ${Number(
-    visionCalls?.totals?.started ?? 0
-  )} • Completed ${Number(visionCalls?.totals?.completed ?? 0)} • Failed ${Number(visionCalls?.totals?.failed ?? 0)}`;
+  const voiceSummary = `${Number(voiceCalls.active_total ?? 0)} active • Started ${Number(
+    voiceCalls?.totals?.started ?? 0
+  )} • Completed ${Number(voiceCalls?.totals?.completed ?? 0)} • Failed ${Number(voiceCalls?.totals?.failed ?? 0)}`;
   return `
     <div class="runtime-breakdown-grid">
-      <section class="runtime-breakdown-card">
+      <section class="runtime-breakdown-card runtime-breakdown-card-wide">
         <div class="runtime-breakdown-head">
           <h4 class="runtime-breakdown-title">Hydra Jobs</h4>
           <div class="small muted">${escapeHtml(hydraSummary)}</div>
@@ -2623,10 +2628,10 @@ function renderRuntimeBreakdown(payload) {
       </section>
       <section class="runtime-breakdown-card">
         <div class="runtime-breakdown-head">
-          <h4 class="runtime-breakdown-title">Vision Calls</h4>
-          <div class="small muted">${escapeHtml(visionSummary)}</div>
+          <h4 class="runtime-breakdown-title">Voice Calls</h4>
+          <div class="small muted">${escapeHtml(voiceSummary)}</div>
         </div>
-        ${_renderRuntimeVisionCallRows(visionCalls)}
+        ${_renderRuntimeVoiceCallRows(voiceCalls)}
       </section>
       ${_renderRuntimeContextWindowCard(contextEstimate)}
     </div>
@@ -2643,9 +2648,9 @@ function ensureRuntimeBreakdownModal() {
     "beforeend",
     `
       <div id="runtime-breakdown-modal" class="cerb-modal" aria-hidden="true">
-        <div class="cerb-modal-dialog card runtime-breakdown-dialog" role="dialog" aria-modal="true" aria-label="Hydra Jobs, LLM Calls, and Vision Calls">
+        <div class="cerb-modal-dialog card runtime-breakdown-dialog" role="dialog" aria-modal="true" aria-label="Hydra Jobs, LLM Calls, and Voice Calls">
           <div class="card-head">
-            <h3 class="card-title">Live Hydra Jobs + LLM Calls + Vision Calls</h3>
+            <h3 class="card-title">Live Hydra Jobs + LLM Calls + Voice Calls</h3>
             <div class="inline-row">
               <span id="runtime-breakdown-updated" class="small"></span>
               <button type="button" class="inline-btn" id="runtime-breakdown-refresh">Refresh</button>
@@ -2782,7 +2787,7 @@ function bindRuntimeSummary() {
   summary.dataset.bound = "1";
   summary.setAttribute("role", "button");
   summary.setAttribute("tabindex", "0");
-  summary.title = "Open live Hydra jobs and LLM calls";
+  summary.title = "Open live Hydra jobs, LLM calls, and voice calls";
   summary.classList.add("interactive");
   summary.addEventListener("click", () => {
     openRuntimeBreakdownModal();
