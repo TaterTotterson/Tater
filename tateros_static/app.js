@@ -2506,6 +2506,13 @@ function _renderRuntimeContextWindowCard(estimate) {
   const preambleTokens = _runtimeInt(breakdown?.platform_preamble_tokens);
   const historyTokens = _runtimeInt(breakdown?.history_tokens);
   const userTokens = _runtimeInt(breakdown?.user_tokens);
+  const capabilityReserveTokens = _runtimeInt(payload?.capability_context_reserve_tokens ?? breakdown?.capability_reserve_tokens);
+  const burstReserveTokens = _runtimeInt(payload?.burst_context_reserve_tokens ?? breakdown?.burst_reserve_tokens);
+  const highContextVerbas = _runtimeInt(breakdown?.high_context_verbas);
+  const heavyCores = _runtimeInt(breakdown?.heavy_cores);
+  const reserveExamples = Array.isArray(breakdown?.high_context_verba_examples)
+    ? breakdown.high_context_verba_examples.map((item) => String(item || "").trim()).filter(Boolean).slice(0, 4)
+    : [];
 
   if (promptTokens <= 0 && minimumWindow <= 0 && recommendedWindow <= 0) {
     return `
@@ -2524,9 +2531,11 @@ function _renderRuntimeContextWindowCard(estimate) {
   const summaryParts = [
     `Prompt ${_runtimeFmtInt(promptTokens)} tok`,
     `Reply budget ${_runtimeFmtInt(completionBudget)} tok`,
+    capabilityReserveTokens > 0 ? `Capability reserve ${_runtimeFmtInt(capabilityReserveTokens)} tok` : "",
+    burstReserveTokens > 0 ? `Burst reserve ${_runtimeFmtInt(burstReserveTokens)} tok` : "",
     `Min window ${_runtimeFmtInt(minimumWindow)}`,
     `Recommended ${_runtimeFmtInt(recommendedWindow)}`,
-  ];
+  ].filter(Boolean);
 
   return `
     <section class="runtime-breakdown-card runtime-breakdown-card-wide">
@@ -2572,12 +2581,35 @@ function _renderRuntimeContextWindowCard(estimate) {
             </div>
             <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(_runtimeFmtInt(userTokens))}</span></div>
           </div>
+          ${
+            capabilityReserveTokens > 0
+              ? `
+          <div class="runtime-breakdown-row compact">
+            <div class="runtime-breakdown-main">
+              <div class="runtime-breakdown-name">Capability reserve</div>
+              <div class="small muted">Extra prompt room for enabled verbas/cores and tool-result handling</div>
+            </div>
+            <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(_runtimeFmtInt(capabilityReserveTokens))}</span></div>
+          </div>
+          `
+              : ""
+          }
         </div>
       </div>
       <div class="runtime-breakdown-block">
         <div class="small muted">
           Active stack: ${escapeHtml(`${enabledVerbas} verbas enabled • ${connectedPortals} portals connected • ${runningCores} cores running`)}
         </div>
+        ${
+          burstReserveTokens > 0
+            ? `<div class="small muted">Recommended window includes burst reserve: ${escapeHtml(_runtimeFmtInt(burstReserveTokens))} tok for heavy/multi-tool turns.</div>`
+            : ""
+        }
+        ${
+          highContextVerbas > 0 || heavyCores > 0
+            ? `<div class="small muted">High-context signals: ${escapeHtml(`${highContextVerbas} high-context verbas • ${heavyCores} heavy cores`)}${reserveExamples.length ? ` • e.g. ${escapeHtml(reserveExamples.join(", "))}` : ""}</div>`
+            : ""
+        }
       </div>
     </section>
   `;

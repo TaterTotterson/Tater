@@ -184,6 +184,48 @@ _CHAT_ESTIMATE_STANDARD_WINDOWS = [
     131072,
     200000,
 ]
+_CHAT_ESTIMATE_HIGH_CONTEXT_VERBA_KEYWORDS = {
+    "jackett",
+    "search",
+    "crawl",
+    "scrape",
+    "browser",
+    "inspect",
+    "download",
+    "rss",
+    "feed",
+    "news",
+    "reddit",
+    "github",
+    "youtube",
+    "index",
+    "catalog",
+    "query",
+}
+_CHAT_ESTIMATE_MEDIUM_CONTEXT_VERBA_KEYWORDS = {
+    "memory",
+    "calendar",
+    "email",
+    "mail",
+    "task",
+    "todo",
+    "weather",
+    "finance",
+    "stocks",
+    "translate",
+    "automation",
+    "schedule",
+}
+_CHAT_ESTIMATE_HEAVY_CORE_KEYWORDS = {
+    "memory",
+    "context",
+    "history",
+    "rss",
+    "search",
+    "index",
+    "scheduler",
+    "agent",
+}
 _HERMES_RENDER_MODE_ALIASES = {
     "direct": "direct",
     "default": "direct",
@@ -2459,6 +2501,80 @@ def _seed_user_text_for_context_estimate(
     return "Hey Tater, can you help me with this?", "default_seed"
 
 
+def _status_row_profile_text(row: Dict[str, Any]) -> str:
+    name = _coerce_text((row or {}).get("name")).strip().lower()
+    description = _coerce_text((row or {}).get("description")).strip().lower()
+    return " ".join(part for part in [name, description] if part).strip()
+
+
+def _estimate_capability_context_reserve_tokens(
+    *,
+    verbas_rows: List[Dict[str, Any]],
+    cores_rows: List[Dict[str, Any]],
+    portals_rows: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    enabled_verba_rows = [row for row in (verbas_rows or []) if _status_bool((row or {}).get("enabled"), default=False)]
+    running_core_rows = [row for row in (cores_rows or []) if _status_bool((row or {}).get("running"), default=False)]
+    connected_portal_rows = [row for row in (portals_rows or []) if _status_bool((row or {}).get("connected"), default=False)]
+
+    high_context_verba_count = 0
+    medium_context_verba_count = 0
+    high_context_examples: List[str] = []
+    for row in enabled_verba_rows:
+        profile = _status_row_profile_text(row)
+        if any(keyword in profile for keyword in _CHAT_ESTIMATE_HIGH_CONTEXT_VERBA_KEYWORDS):
+            high_context_verba_count += 1
+            if len(high_context_examples) < 4:
+                label = _short_text(_coerce_text((row or {}).get("name")), limit=36).strip()
+                if label:
+                    high_context_examples.append(label)
+            continue
+        if any(keyword in profile for keyword in _CHAT_ESTIMATE_MEDIUM_CONTEXT_VERBA_KEYWORDS):
+            medium_context_verba_count += 1
+
+    heavy_core_count = 0
+    for row in running_core_rows:
+        profile = _status_row_profile_text(row)
+        if any(keyword in profile for keyword in _CHAT_ESTIMATE_HEAVY_CORE_KEYWORDS):
+            heavy_core_count += 1
+
+    enabled_verbas = len(enabled_verba_rows)
+    running_cores = len(running_core_rows)
+    connected_portals = len(connected_portal_rows)
+
+    capability_tokens = 0
+    if enabled_verbas or running_cores or connected_portals:
+        capability_tokens += 128
+    capability_tokens += enabled_verbas * 120
+    capability_tokens += running_cores * 180
+    capability_tokens += connected_portals * 48
+    capability_tokens += high_context_verba_count * 280
+    capability_tokens += medium_context_verba_count * 120
+    capability_tokens += heavy_core_count * 110
+    capability_tokens = max(0, min(16000, int(capability_tokens)))
+
+    burst_tokens = 0
+    burst_tokens += high_context_verba_count * 260
+    burst_tokens += max(0, high_context_verba_count - 1) * 120
+    burst_tokens += medium_context_verba_count * 90
+    burst_tokens += heavy_core_count * 90
+    burst_tokens += max(0, enabled_verbas - 4) * 45
+    burst_tokens += running_cores * 70
+    burst_tokens = max(0, min(12000, int(burst_tokens)))
+
+    return {
+        "capability_tokens": capability_tokens,
+        "burst_tokens": burst_tokens,
+        "enabled_verbas": int(enabled_verbas),
+        "running_cores": int(running_cores),
+        "connected_portals": int(connected_portals),
+        "high_context_verbas": int(high_context_verba_count),
+        "medium_context_verbas": int(medium_context_verba_count),
+        "heavy_cores": int(heavy_core_count),
+        "high_context_verba_examples": high_context_examples,
+    }
+
+
 def estimate_hydra_chat_context_window(
     *,
     platform: str,
@@ -2508,6 +2624,26 @@ def estimate_hydra_chat_context_window(
         user_text=user_text,
         chat_history=chat_history,
     )
+    verbas_rows = _collect_verbas_status_rows(
+        registry=registry,
+        enabled_predicate=enabled_predicate,
+    )
+    portals_rows = _collect_portals_status_rows(
+        redis_client=r,
+        platform=normalized_platform,
+    )
+    cores_rows = _collect_cores_status_rows(redis_client=r)
+    context_reserve = _estimate_capability_context_reserve_tokens(
+        verbas_rows=verbas_rows,
+        cores_rows=cores_rows,
+        portals_rows=portals_rows,
+    )
+    capability_reserve_tokens = int(max(0, context_reserve.get("capability_tokens") or 0))
+    burst_reserve_tokens = int(max(0, context_reserve.get("burst_tokens") or 0))
+    high_context_verba_count = int(max(0, context_reserve.get("high_context_verbas") or 0))
+    medium_context_verba_count = int(max(0, context_reserve.get("medium_context_verbas") or 0))
+    heavy_core_count = int(max(0, context_reserve.get("heavy_cores") or 0))
+    high_context_verba_examples = list(context_reserve.get("high_context_verba_examples") or [])[:4]
 
     base_messages: List[Dict[str, str]] = [{"role": "system", "content": chat_system_prompt}]
     if status_prompt:
@@ -2540,24 +2676,22 @@ def estimate_hydra_chat_context_window(
     core_context_tokens = _estimate_message_tokens_approx(chat_core_context) if chat_core_context else 0
     preamble_tokens = _estimate_message_tokens_approx(clean_preamble) if clean_preamble else 0
 
-    completion_budget_tokens = max(192, min(1400, (prompt_tokens * 35 + 99) // 100))
-    minimum_context_tokens = prompt_tokens + completion_budget_tokens
-    recommended_context_tokens = minimum_context_tokens + max(256, (minimum_context_tokens * 20 + 99) // 100)
+    completion_cap_tokens = 1400 + min(1000, (burst_reserve_tokens + 2) // 3)
+    completion_budget_tokens = max(
+        192,
+        min(
+            int(completion_cap_tokens),
+            ((prompt_tokens * 35 + 99) // 100) + (capability_reserve_tokens // 12),
+        ),
+    )
+    minimum_context_tokens = prompt_tokens + completion_budget_tokens + capability_reserve_tokens
+    recommended_margin_tokens = max(256, (minimum_context_tokens * 20 + 99) // 100)
+    recommended_context_tokens = minimum_context_tokens + recommended_margin_tokens + burst_reserve_tokens
     minimum_context_window = _suggest_context_window_size(minimum_context_tokens)
     recommended_context_window = _suggest_context_window_size(recommended_context_tokens)
-
-    verbas_rows = _collect_verbas_status_rows(
-        registry=registry,
-        enabled_predicate=enabled_predicate,
-    )
-    portals_rows = _collect_portals_status_rows(
-        redis_client=r,
-        platform=normalized_platform,
-    )
-    cores_rows = _collect_cores_status_rows(redis_client=r)
-    enabled_verbas = len([row for row in verbas_rows if _status_bool(row.get("enabled"), default=False)])
-    connected_portals = len([row for row in portals_rows if _status_bool(row.get("connected"), default=False)])
-    running_cores = len([row for row in cores_rows if _status_bool(row.get("running"), default=False)])
+    enabled_verbas = int(max(0, context_reserve.get("enabled_verbas") or 0))
+    connected_portals = int(max(0, context_reserve.get("connected_portals") or 0))
+    running_cores = int(max(0, context_reserve.get("running_cores") or 0))
 
     return {
         "platform": normalized_platform,
@@ -2568,6 +2702,8 @@ def estimate_hydra_chat_context_window(
         "recommended_context_tokens": int(max(0, recommended_context_tokens)),
         "minimum_context_window": int(max(0, minimum_context_window)),
         "recommended_context_window": int(max(0, recommended_context_window)),
+        "capability_context_reserve_tokens": int(max(0, capability_reserve_tokens)),
+        "burst_context_reserve_tokens": int(max(0, burst_reserve_tokens)),
         "message_count": int(len(base_messages)),
         "history_messages": int(history_message_count),
         "max_history_messages": int(history_message_count),
@@ -2582,6 +2718,13 @@ def estimate_hydra_chat_context_window(
             "platform_preamble_tokens": int(max(0, preamble_tokens)),
             "history_tokens": int(max(0, history_tokens)),
             "user_tokens": int(max(0, user_tokens)),
+            "capability_reserve_tokens": int(max(0, capability_reserve_tokens)),
+            "burst_reserve_tokens": int(max(0, burst_reserve_tokens)),
+            "high_context_verbas": int(max(0, high_context_verba_count)),
+            "medium_context_verbas": int(max(0, medium_context_verba_count)),
+            "heavy_cores": int(max(0, heavy_core_count)),
+            "high_context_verba_examples": high_context_verba_examples,
+            "recommended_margin_tokens": int(max(0, recommended_margin_tokens)),
             "history_chars": int(max(0, history_chars)),
             "user_chars": int(max(0, user_chars)),
         },
