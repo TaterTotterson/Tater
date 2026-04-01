@@ -69,6 +69,13 @@ _MAX_RECENT_QUEUE_ITEMS = 250
 _MAX_RECENT_KEYS = 160
 _ROOM_LABEL_PREFIX = "tater:room_label"
 _ROOM_META_PREFIX = "tater:room_meta"
+_SOURCE_PRIORITY: Dict[str, int] = {
+    "room_label": 8,
+    "recent_history": 7,
+    "default": 6,
+    "recent_queue": 1,
+    "inferred": 0,
+}
 
 
 def _to_text(value: Any) -> str:
@@ -146,6 +153,26 @@ def _targets_key(targets: Dict[str, Any]) -> str:
     clean = {str(k): _to_text(v) for k, v in (targets or {}).items() if _to_text(v)}
     payload = json.dumps(clean, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha1(payload.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _candidate_identity_key(platform: str, targets: Dict[str, str]) -> str:
+    if platform == "discord":
+        channel_id = _to_text(targets.get("channel_id"))
+        if channel_id:
+            return f"discord:channel_id:{channel_id}"
+    if platform == "telegram":
+        chat_id = _to_text(targets.get("chat_id"))
+        if chat_id:
+            return f"telegram:chat_id:{chat_id}"
+    if platform == "matrix":
+        room_id = _to_text(targets.get("room_id"))
+        if room_id:
+            return f"matrix:room_id:{room_id}"
+    return _targets_key(targets)
+
+
+def _source_priority(source: str) -> int:
+    return int(_SOURCE_PRIORITY.get(str(source or "").strip().lower(), 0))
 
 
 def _normalize_targets_for_platform(platform: str, raw: Any) -> Dict[str, str]:
@@ -263,17 +290,34 @@ def _append_candidate(
     targets: Dict[str, str],
     source: str,
     out: List[Dict[str, Any]],
-    seen: set[str],
+    seen: Dict[str, int],
 ) -> None:
     clean = _normalize_targets_for_platform(platform, targets)
     if _PLATFORM_META.get(platform, {}).get("requires_target") and not clean:
         return
     if not clean and platform != "webui":
         return
-    key = _targets_key(clean)
-    if key in seen:
+    identity_key = _candidate_identity_key(platform, clean)
+    existing_index = seen.get(identity_key)
+    if existing_index is not None:
+        existing = out[existing_index] if 0 <= existing_index < len(out) else None
+        if isinstance(existing, dict):
+            current_targets = existing.get("targets") if isinstance(existing.get("targets"), dict) else {}
+            merged_targets = dict(current_targets)
+            for field, value in clean.items():
+                if not _to_text(merged_targets.get(field)):
+                    merged_targets[field] = value
+            existing["targets"] = merged_targets
+            existing["id"] = _targets_key(merged_targets)
+            existing["label"] = _platform_target_label(platform, merged_targets)
+            incoming_source = str(source or "inferred")
+            current_source = str(existing.get("source") or "inferred")
+            if _source_priority(incoming_source) > _source_priority(current_source):
+                existing["source"] = incoming_source
         return
-    seen.add(key)
+
+    key = _targets_key(clean)
+    seen[identity_key] = len(out)
     out.append(
         {
             "id": key,
@@ -475,7 +519,7 @@ def _platform_entry(
 ) -> Dict[str, Any]:
     meta = _PLATFORM_META.get(platform, {})
     out_rows: List[Dict[str, Any]] = []
-    seen: set[str] = set()
+    seen: Dict[str, int] = {}
     source_tokens: set[str] = set()
 
     defaults = _default_targets_for_platform(platform, redis_client)
