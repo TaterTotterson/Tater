@@ -492,6 +492,29 @@ _LLM_ORIGIN_KIND_LABELS = {
     "core": "Core",
     "other": "Other",
 }
+_GENERIC_LLM_CALL_FUNCTIONS = {
+    "",
+    "__call__",
+    "_run",
+    "_run_async",
+    "_runner",
+    "_thread_main",
+    "_worker",
+    "main",
+    "run",
+    "runner",
+    "worker",
+}
+_LLM_ACTIVITY_KEYWORDS: List[Tuple[str, Tuple[str, ...]]] = [
+    ("verification", ("verify", "verification", "validate", "validation", "checker", "check")),
+    ("discovery", ("discover", "discovery", "scan", "crawl", "inspect", "search", "lookup")),
+    ("cleanup", ("cleanup", "clean up", "prune", "trim", "purge", "gc", "garbage collect")),
+    ("memory", ("memory", "ledger", "context window", "context", "recall")),
+    ("planning", ("plan", "planning", "astraeus")),
+    ("execution", ("execute", "execution", "run tool", "thanatos")),
+    ("summary", ("summarize", "summary", "brief", "digest")),
+    ("rewrite", ("rewrite", "rephrase", "edit text")),
+]
 
 
 def _llm_runtime_as_int(value: Any, default: int = 0, *, minimum: int = 0) -> int:
@@ -527,6 +550,7 @@ def _normalize_llm_runtime_history_row(row: Any) -> Optional[Dict[str, Any]]:
         "module": str(row.get("module") or "").strip(),
         "path": str(row.get("path") or "").strip(),
         "function": str(row.get("function") or "").strip(),
+        "activity": str(row.get("activity") or "").strip(),
         "host": str(row.get("host") or "").strip(),
         "model": str(row.get("model") or "").strip(),
         "stream": _boolish(row.get("stream"), default=False),
@@ -1064,14 +1088,95 @@ def _infer_llm_call_origin(max_depth: int = 48) -> Dict[str, str]:
     }
 
 
+def _llm_activity_from_text(text: str) -> str:
+    lowered = _text(text).strip().lower()
+    if not lowered:
+        return ""
+    for label, keywords in _LLM_ACTIVITY_KEYWORDS:
+        if any(keyword in lowered for keyword in keywords):
+            return label
+    return ""
+
+
+def _normalize_llm_activity_hint(value: Any) -> str:
+    raw = _text(value).strip()
+    if not raw:
+        return ""
+    by_keyword = _llm_activity_from_text(raw)
+    if by_keyword:
+        return by_keyword
+    cleaned = re.sub(r"[\s_\-]+", " ", raw).strip().lower()
+    cleaned = re.sub(r"[^a-z0-9 ]+", "", cleaned).strip()
+    return cleaned[:48] if cleaned else ""
+
+
+def _llm_activity_from_origin(origin: Dict[str, str]) -> str:
+    function_name = _text((origin or {}).get("function")).strip()
+    normalized_function = function_name.lstrip("_").strip().lower()
+    if normalized_function and normalized_function not in _GENERIC_LLM_CALL_FUNCTIONS:
+        inferred = _llm_activity_from_text(normalized_function.replace("_", " "))
+        if inferred:
+            return inferred
+        cleaned = re.sub(r"[^a-z0-9_]+", "_", normalized_function)
+        cleaned = re.sub(r"_+", "_", cleaned).strip("_")
+        if cleaned:
+            return cleaned.replace("_", " ")
+
+    origin_blob = " ".join(
+        part
+        for part in [
+            _text((origin or {}).get("source")),
+            _text((origin or {}).get("module")),
+            _text((origin or {}).get("path")),
+        ]
+        if _text(part).strip()
+    )
+    return _llm_activity_from_text(origin_blob)
+
+
+def _llm_activity_from_messages(messages: List[Dict[str, Any]]) -> str:
+    if not isinstance(messages, list) or not messages:
+        return ""
+    selected: List[str] = []
+    try:
+        for idx, item in enumerate(messages):
+            if not isinstance(item, dict):
+                continue
+            role = _text(item.get("role")).strip().lower()
+            if role not in {"system", "user"}:
+                continue
+            if idx < 2 or idx >= max(0, len(messages) - 2):
+                content = _coerce_content_to_text(item.get("content")).strip()
+                if content:
+                    selected.append(content[:420])
+    except Exception:
+        selected = []
+    if not selected:
+        return ""
+    return _llm_activity_from_text("\n".join(selected))
+
+
+def _infer_llm_call_activity(*, origin: Dict[str, str], messages: List[Dict[str, Any]]) -> str:
+    by_messages = _llm_activity_from_messages(messages)
+    if by_messages:
+        return by_messages
+    return _llm_activity_from_origin(origin)
+
+
 def _register_active_llm_call(
     *,
     host: str,
     model: str,
     stream: bool,
     message_count: int,
+    messages: List[Dict[str, Any]],
+    activity_hint: str = "",
 ) -> str:
     origin = _infer_llm_call_origin()
+    activity = _normalize_llm_activity_hint(activity_hint) or _infer_llm_call_activity(
+        origin=origin,
+        messages=(messages if isinstance(messages, list) else []),
+    )
     call_id = str(uuid.uuid4())
     started_at = time.time()
     row = {
@@ -1086,6 +1191,7 @@ def _register_active_llm_call(
         "module": str(origin.get("module") or ""),
         "path": str(origin.get("path") or ""),
         "function": str(origin.get("function") or ""),
+        "activity": str(activity or "").strip(),
     }
     with _ACTIVE_LLM_CALLS_LOCK:
         _ACTIVE_LLM_CALLS[call_id] = row
@@ -1131,6 +1237,7 @@ def _finish_active_llm_call(
             "module": str(row.get("module") or ""),
             "path": str(row.get("path") or ""),
             "function": str(row.get("function") or ""),
+            "activity": str(row.get("activity") or "").strip(),
             "host": str(row.get("host") or ""),
             "model": str(response_model or row.get("model") or "").strip(),
             "stream": bool(row.get("stream")),
@@ -1172,6 +1279,7 @@ def get_active_llm_calls_snapshot(*, limit: int = 100) -> List[Dict[str, Any]]:
                 "module": str(row.get("module") or ""),
                 "path": str(row.get("path") or ""),
                 "function": str(row.get("function") or ""),
+                "activity": str(row.get("activity") or "").strip(),
                 "host": str(row.get("host") or ""),
                 "model": str(row.get("model") or ""),
                 "stream": bool(row.get("stream")),
@@ -1644,6 +1752,7 @@ class LLMClientWrapper:
                 timeout = None
 
         stream = kwargs.pop("stream", False)
+        activity_hint = kwargs.pop("activity", "")
         model = kwargs.pop("model", self.model)
 
         # Provide sensible defaults if not supplied. A caller can pass
@@ -1667,6 +1776,8 @@ class LLMClientWrapper:
             model=str(model or "").strip(),
             stream=bool(stream),
             message_count=(len(messages) if isinstance(messages, list) else 0),
+            messages=(messages if isinstance(messages, list) else []),
+            activity_hint=str(activity_hint or ""),
         )
         call_error: Optional[Exception] = None
         final_model = str(model or "").strip()

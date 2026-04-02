@@ -491,6 +491,7 @@ def _register_active_chat_job(
             "scope": scope_value,
             "source": source_value,
             "task_name": task_name_value,
+            "current_tool": "",
             "started_at": time.time(),
         }
     return job_id
@@ -512,6 +513,31 @@ def _set_active_chat_job_task_name(job_id: str, task_name: Any) -> None:
         row = _ACTIVE_CHAT_JOBS.get(token)
         if isinstance(row, dict):
             row["task_name"] = value
+
+
+def _set_active_chat_job_current_tool(job_id: str, tool_name: Any) -> None:
+    token = str(job_id or "").strip()
+    if not token:
+        return
+    value = _short_text(" ".join(str(tool_name or "").split()), limit=96)
+    with _ACTIVE_CHAT_JOB_LOCK:
+        row = _ACTIVE_CHAT_JOBS.get(token)
+        if isinstance(row, dict):
+            row["current_tool"] = value
+
+
+def _active_chat_job_tool_label(*, tool_call: Optional[Dict[str, Any]], registry: Dict[str, Any]) -> str:
+    if not isinstance(tool_call, dict):
+        return ""
+    canonical_name = _canonical_tool_name(str(tool_call.get("function") or "").strip())
+    if not canonical_name:
+        return ""
+    plugin = (registry or {}).get(canonical_name) if isinstance(registry, dict) else None
+    if plugin is not None:
+        pretty = str(verba_display_name(plugin) or "").strip()
+        if pretty:
+            return _short_text(pretty, limit=96)
+    return _short_text(canonical_name, limit=96)
 
 
 def get_active_chat_jobs_count(*, platform: Optional[str] = None) -> int:
@@ -5068,6 +5094,10 @@ async def _run_hydra_turn_impl(
             continue
         tool_used = True
         tool_user_text = round_request_text
+        _set_active_chat_job_current_tool(
+            active_job_id,
+            _active_chat_job_tool_label(tool_call=planned_tool, registry=registry),
+        )
         wait_text, wait_payload = await _tool_start_progress(
             llm_client=llm_client_ai_calls,
             platform=platform,
@@ -5087,21 +5117,24 @@ async def _run_hydra_turn_impl(
                 for item in raw_tool_payload_history[-8:]
                 if isinstance(item, dict)
             ]
-        doer_exec = await _execute_tool_call(
-            llm_client=llm_client_ai_calls,
-            tool_call=planned_tool,
-            platform=platform,
-            registry=registry,
-            enabled_predicate=enabled_predicate,
-            context=context,
-            user_text=tool_user_text,
-            origin=tool_origin_payload,
-            scope=scope,
-            wait_callback=wait_callback,
-            wait_text=wait_text,
-            wait_payload=wait_payload,
-            admin_guard=admin_guard,
-        )
+        try:
+            doer_exec = await _execute_tool_call(
+                llm_client=llm_client_ai_calls,
+                tool_call=planned_tool,
+                platform=platform,
+                registry=registry,
+                enabled_predicate=enabled_predicate,
+                context=context,
+                user_text=tool_user_text,
+                origin=tool_origin_payload,
+                scope=scope,
+                wait_callback=wait_callback,
+                wait_text=wait_text,
+                wait_payload=wait_payload,
+                admin_guard=admin_guard,
+            )
+        finally:
+            _set_active_chat_job_current_tool(active_job_id, "")
         tool_ms_total += (time.perf_counter() - tool_started) * 1000.0
         raw_payload = doer_exec.get("payload")
         raw_tool_payload_out = raw_payload if isinstance(raw_payload, dict) else None
