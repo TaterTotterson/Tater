@@ -1984,8 +1984,8 @@ function formatRuntimeSummary(health) {
   const coresRunning = Number(health?.cores_running ?? 0);
   const hydraJobsActive = Number(health?.hydra_jobs_active ?? health?.chat_jobs_active ?? 0);
   const llmCallsActive = Number(health?.llm_calls_active ?? 0);
-  const voiceCallsActive = Number(health?.voice_calls_active ?? health?.vision_calls_active ?? 0);
-  return `${verbasEnabled} verba enabled • ${portalsRunning} portals running • ${coresRunning} cores running • ${hydraJobsActive} hydra jobs • ${llmCallsActive} llm calls • ${voiceCallsActive} voice calls`;
+  const visionCallsActive = Number(health?.vision_calls_active ?? health?.voice_calls_active ?? 0);
+  return `${verbasEnabled} verba enabled • ${portalsRunning} portals running • ${coresRunning} cores running • ${hydraJobsActive} hydra jobs • ${llmCallsActive} llm calls • ${visionCallsActive} vision calls`;
 }
 
 function setRuntimeSummaryText(text, tone = "normal") {
@@ -2065,29 +2065,7 @@ function _renderRuntimeHistoryWindowTabs(historyWindows, selectedKey, ariaLabel 
 }
 
 function _renderRuntimeHydraJobRows(hydraJobs) {
-  const byPlatform = Array.isArray(hydraJobs?.by_platform) ? hydraJobs.by_platform : [];
   const activeTurns = Array.isArray(hydraJobs?.active_turns) ? hydraJobs.active_turns : [];
-  const history = hydraJobs?.history && typeof hydraJobs.history === "object" ? hydraJobs.history : {};
-  const historyWindows = Array.isArray(history?.windows) ? history.windows : [];
-  const platformRowsHtml = byPlatform.length
-    ? `
-        <div class="runtime-breakdown-list">
-          ${byPlatform
-            .map((row) => {
-              const count = Number(row?.running_turns ?? 0);
-              return `
-                <div class="runtime-breakdown-row compact">
-                  <div class="runtime-breakdown-main">
-                    <div class="runtime-breakdown-name">${escapeHtml(String(row?.label || row?.platform || "Unknown"))}</div>
-                  </div>
-                  <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(`${count} running`)}</span></div>
-                </div>
-              `;
-            })
-            .join("")}
-        </div>
-      `
-    : `<div class="small muted">No active running turns.</div>`;
 
   const activeTurnsHtml = activeTurns.length
     ? `
@@ -2098,6 +2076,7 @@ function _renderRuntimeHydraJobRows(hydraJobs) {
               const shortId = turnId ? turnId.slice(0, 8) : "";
               const platformLabel = String(row?.platform_label || row?.platform || "Unknown");
               const taskName = String(row?.task_name || "").trim() || "Hydra task";
+              const currentTool = String(row?.current_tool || "").trim();
               const source = String(row?.source || "").trim();
               const scope = String(row?.scope || "").trim();
               const age = _runtimeAgeLabel(row?.age_seconds);
@@ -2112,6 +2091,7 @@ function _renderRuntimeHydraJobRows(hydraJobs) {
                   <div class="runtime-hydra-turn-meta">
                     ${metaParts.map((part) => `<span class="runtime-hydra-turn-pill">${escapeHtml(part)}</span>`).join("")}
                   </div>
+                  ${currentTool ? `<div class="small muted runtime-hydra-turn-scope">Current verba/tool: ${escapeHtml(currentTool)}</div>` : ""}
                   ${scope ? `<div class="small muted runtime-hydra-turn-scope">Scope: ${escapeHtml(scope)}</div>` : ""}
                 </div>
               `;
@@ -2121,103 +2101,16 @@ function _renderRuntimeHydraJobRows(hydraJobs) {
       `
     : `<div class="small muted">No active Hydra turns right now.</div>`;
 
-  const historyWindowKey = _runtimeHistoryWindowKey(state.runtimeHistoryWindow, "24h");
-  const selectedHistoryWindow =
-    historyWindows.find((row) => _runtimeHistoryWindowKey(row?.key, "") === historyWindowKey) || historyWindows[0] || null;
-  const selectedHistoryKey = _runtimeHistoryWindowKey(selectedHistoryWindow?.key, historyWindowKey);
-  const historyTabsHtml = _renderRuntimeHistoryWindowTabs(historyWindows, selectedHistoryKey, "Hydra history window");
-  const historyHtml = selectedHistoryWindow
-    ? (() => {
-        const jobs = Number(selectedHistoryWindow?.jobs ?? 0);
-        const done = Number(selectedHistoryWindow?.done ?? 0);
-        const blocked = Number(selectedHistoryWindow?.blocked ?? 0);
-        const failed = Number(selectedHistoryWindow?.failed ?? 0);
-        const topPlatforms = Array.isArray(selectedHistoryWindow?.top_platforms) ? selectedHistoryWindow.top_platforms : [];
-        const platformLine = topPlatforms.length
-          ? topPlatforms.map((row) => `${String(row?.label || row?.platform || "Unknown")}: ${Number(row?.jobs ?? 0)}`).join(" • ")
-          : "No jobs in this period.";
-        return `
-          <div class="runtime-breakdown-list runtime-breakdown-list-static">
-            <div class="runtime-breakdown-row">
-              <div class="runtime-breakdown-main">
-                <div class="runtime-breakdown-name">${escapeHtml(String(selectedHistoryWindow?.label || "Window"))}</div>
-                <div class="small muted">Done ${done} • Blocked ${blocked} • Failed ${failed}</div>
-                <div class="small muted">${escapeHtml(platformLine)}</div>
-              </div>
-              <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(`${jobs} jobs`)}</span></div>
-            </div>
-          </div>
-        `;
-      })()
-    : `<div class="small muted">No history available yet.</div>`;
-
   return `
     <div class="runtime-breakdown-block">
       <div class="runtime-breakdown-subtitle">Active Turns</div>
       ${activeTurnsHtml}
     </div>
-    <div class="runtime-breakdown-block">
-      <div class="runtime-breakdown-subtitle">By Platform</div>
-      ${platformRowsHtml}
-    </div>
-    <div class="runtime-breakdown-block">
-      <div class="runtime-breakdown-subtitle-row">
-        <div class="runtime-breakdown-subtitle">History</div>
-        ${historyTabsHtml}
-      </div>
-      ${historyHtml}
-      <div class="small muted">Sample size: ${escapeHtml(String(Number(history?.sample_size ?? 0)))} ledger rows</div>
-    </div>
   `;
 }
 
 function _renderRuntimeLlmCallRows(llmCalls) {
-  const totals = llmCalls?.totals && typeof llmCalls.totals === "object" ? llmCalls.totals : {};
-  const byKind = Array.isArray(llmCalls?.active_by_kind) ? llmCalls.active_by_kind : [];
-  const bySource = Array.isArray(llmCalls?.active_by_source) ? llmCalls.active_by_source : [];
   const activeCalls = Array.isArray(llmCalls?.active_calls) ? llmCalls.active_calls : [];
-  const history = llmCalls?.history && typeof llmCalls.history === "object" ? llmCalls.history : {};
-  const historyWindows = Array.isArray(history?.windows) ? history.windows : [];
-
-  const byKindHtml = byKind.length
-    ? `
-        <div class="runtime-breakdown-list">
-          ${byKind
-            .map((row) => {
-              const calls = Number(row?.calls ?? 0);
-              return `
-                <div class="runtime-breakdown-row compact">
-                  <div class="runtime-breakdown-main">
-                    <div class="runtime-breakdown-name">${escapeHtml(String(row?.label || row?.kind || "Unknown"))}</div>
-                  </div>
-                  <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(`${calls} active`)}</span></div>
-                </div>
-              `;
-            })
-            .join("")}
-        </div>
-      `
-    : `<div class="small muted">No active LLM calls.</div>`;
-
-  const bySourceHtml = bySource.length
-    ? `
-        <div class="runtime-breakdown-list">
-          ${bySource
-            .map((row) => {
-              const calls = Number(row?.calls ?? 0);
-              return `
-                <div class="runtime-breakdown-row compact">
-                  <div class="runtime-breakdown-main">
-                    <div class="runtime-breakdown-name">${escapeHtml(String(row?.label || "Unknown source"))}</div>
-                  </div>
-                  <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(`${calls} active`)}</span></div>
-                </div>
-              `;
-            })
-            .join("")}
-        </div>
-      `
-    : `<div class="small muted">No active source rows.</div>`;
 
   const activeCallsHtml = activeCalls.length
     ? `
@@ -2228,13 +2121,16 @@ function _renderRuntimeLlmCallRows(llmCalls) {
               const model = String(row?.model || "model");
               const host = String(row?.host || "").trim();
               const functionName = String(row?.function || "").trim();
+              const activity = String(row?.activity || "").trim();
               const messageCount = Number(row?.message_count ?? 0);
               const detailLineParts = [`Model ${model}`];
               if (host) {
                 detailLineParts.push(host);
               }
               const extraLineParts = [];
-              if (functionName) {
+              if (activity) {
+                extraLineParts.push(`Activity ${activity}`);
+              } else if (functionName) {
                 extraLineParts.push(`Fn ${functionName}`);
               }
               if (messageCount > 0) {
@@ -2257,114 +2153,16 @@ function _renderRuntimeLlmCallRows(llmCalls) {
       `
     : `<div class="small muted">No active LLM calls right now.</div>`;
 
-  const historyWindowKey = _runtimeHistoryWindowKey(state.runtimeHistoryWindow, "24h");
-  const selectedHistoryWindow =
-    historyWindows.find((row) => _runtimeHistoryWindowKey(row?.key, "") === historyWindowKey) || historyWindows[0] || null;
-  const selectedHistoryKey = _runtimeHistoryWindowKey(selectedHistoryWindow?.key, historyWindowKey);
-  const historyTabsHtml = _renderRuntimeHistoryWindowTabs(historyWindows, selectedHistoryKey, "LLM call history window");
-  const historyHtml = selectedHistoryWindow
-    ? (() => {
-        const calls = Number(selectedHistoryWindow?.calls ?? 0);
-        const completed = Number(selectedHistoryWindow?.completed ?? 0);
-        const failed = Number(selectedHistoryWindow?.failed ?? 0);
-        const avgMs = Number(selectedHistoryWindow?.avg_ms ?? 0);
-        const topSources = Array.isArray(selectedHistoryWindow?.top_sources) ? selectedHistoryWindow.top_sources : [];
-        const sourceLine = topSources.length
-          ? topSources.map((row) => `${String(row?.label || row?.source || "Unknown")}: ${Number(row?.calls ?? 0)}`).join(" • ")
-          : "No calls in this period.";
-        return `
-          <div class="runtime-breakdown-list runtime-breakdown-list-static">
-            <div class="runtime-breakdown-row">
-              <div class="runtime-breakdown-main">
-                <div class="runtime-breakdown-name">${escapeHtml(String(selectedHistoryWindow?.label || "Window"))}</div>
-                <div class="small muted">Done ${completed} • Failed ${failed} • Avg ${avgMs.toFixed(1)} ms</div>
-                <div class="small muted">${escapeHtml(sourceLine)}</div>
-              </div>
-              <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(`${calls} calls`)}</span></div>
-            </div>
-          </div>
-        `;
-      })()
-    : `<div class="small muted">No LLM call history available yet.</div>`;
-
   return `
-    <div class="runtime-breakdown-block">
-      <div class="runtime-breakdown-subtitle">By Type</div>
-      ${byKindHtml}
-    </div>
-    <div class="runtime-breakdown-block">
-      <div class="runtime-breakdown-subtitle">By Source</div>
-      ${bySourceHtml}
-    </div>
     <div class="runtime-breakdown-block">
       <div class="runtime-breakdown-subtitle">Active Calls</div>
       ${activeCallsHtml}
     </div>
-    <div class="runtime-breakdown-block">
-      <div class="runtime-breakdown-subtitle-row">
-        <div class="runtime-breakdown-subtitle">History</div>
-        ${historyTabsHtml}
-      </div>
-      ${historyHtml}
-      <div class="small muted">Sample size: ${escapeHtml(String(Number(history?.sample_size ?? 0)))} completed calls</div>
-    </div>
-    <div class="runtime-breakdown-block">
-      <div class="small muted">
-        Totals since boot: Started ${escapeHtml(String(Number(totals?.started ?? 0)))} • Completed ${escapeHtml(
-          String(Number(totals?.completed ?? 0))
-        )} • Failed ${escapeHtml(String(Number(totals?.failed ?? 0)))}
-      </div>
-    </div>
   `;
 }
 
-function _renderRuntimeVoiceCallRows(voiceCalls) {
-  const totals = voiceCalls?.totals && typeof voiceCalls.totals === "object" ? voiceCalls.totals : {};
-  const byKind = Array.isArray(voiceCalls?.active_by_kind) ? voiceCalls.active_by_kind : [];
-  const bySource = Array.isArray(voiceCalls?.active_by_source) ? voiceCalls.active_by_source : [];
-  const activeCalls = Array.isArray(voiceCalls?.active_calls) ? voiceCalls.active_calls : [];
-  const history = voiceCalls?.history && typeof voiceCalls.history === "object" ? voiceCalls.history : {};
-  const historyWindows = Array.isArray(history?.windows) ? history.windows : [];
-
-  const byKindHtml = byKind.length
-    ? `
-        <div class="runtime-breakdown-list">
-          ${byKind
-            .map((row) => {
-              const calls = Number(row?.calls ?? 0);
-              return `
-                <div class="runtime-breakdown-row compact">
-                  <div class="runtime-breakdown-main">
-                    <div class="runtime-breakdown-name">${escapeHtml(String(row?.label || row?.kind || "Unknown"))}</div>
-                  </div>
-                  <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(`${calls} active`)}</span></div>
-                </div>
-              `;
-            })
-            .join("")}
-        </div>
-      `
-    : `<div class="small muted">No active voice calls.</div>`;
-
-  const bySourceHtml = bySource.length
-    ? `
-        <div class="runtime-breakdown-list">
-          ${bySource
-            .map((row) => {
-              const calls = Number(row?.calls ?? 0);
-              return `
-                <div class="runtime-breakdown-row compact">
-                  <div class="runtime-breakdown-main">
-                    <div class="runtime-breakdown-name">${escapeHtml(String(row?.label || "Unknown source"))}</div>
-                  </div>
-                  <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(`${calls} active`)}</span></div>
-                </div>
-              `;
-            })
-            .join("")}
-        </div>
-      `
-    : `<div class="small muted">No active source rows.</div>`;
+function _renderRuntimeVisionCallRows(visionCalls) {
+  const activeCalls = Array.isArray(visionCalls?.active_calls) ? visionCalls.active_calls : [];
 
   const activeCallsHtml = activeCalls.length
     ? `
@@ -2398,65 +2196,12 @@ function _renderRuntimeVoiceCallRows(voiceCalls) {
             .join("")}
         </div>
       `
-    : `<div class="small muted">No active voice calls right now.</div>`;
-
-  const historyWindowKey = _runtimeHistoryWindowKey(state.runtimeHistoryWindow, "24h");
-  const selectedHistoryWindow =
-    historyWindows.find((row) => _runtimeHistoryWindowKey(row?.key, "") === historyWindowKey) || historyWindows[0] || null;
-  const selectedHistoryKey = _runtimeHistoryWindowKey(selectedHistoryWindow?.key, historyWindowKey);
-  const historyTabsHtml = _renderRuntimeHistoryWindowTabs(historyWindows, selectedHistoryKey, "Voice call history window");
-  const historyHtml = selectedHistoryWindow
-    ? (() => {
-        const calls = Number(selectedHistoryWindow?.calls ?? 0);
-        const completed = Number(selectedHistoryWindow?.completed ?? 0);
-        const failed = Number(selectedHistoryWindow?.failed ?? 0);
-        const avgMs = Number(selectedHistoryWindow?.avg_ms ?? 0);
-        const topSources = Array.isArray(selectedHistoryWindow?.top_sources) ? selectedHistoryWindow.top_sources : [];
-        const sourceLine = topSources.length
-          ? topSources.map((row) => `${String(row?.label || row?.source || "Unknown")}: ${Number(row?.calls ?? 0)}`).join(" • ")
-          : "No calls in this period.";
-        return `
-          <div class="runtime-breakdown-list runtime-breakdown-list-static">
-            <div class="runtime-breakdown-row">
-              <div class="runtime-breakdown-main">
-                <div class="runtime-breakdown-name">${escapeHtml(String(selectedHistoryWindow?.label || "Window"))}</div>
-                <div class="small muted">Done ${completed} • Failed ${failed} • Avg ${avgMs.toFixed(1)} ms</div>
-                <div class="small muted">${escapeHtml(sourceLine)}</div>
-              </div>
-              <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(`${calls} calls`)}</span></div>
-            </div>
-          </div>
-        `;
-      })()
-    : `<div class="small muted">No voice call history available yet.</div>`;
+    : `<div class="small muted">No active vision calls right now.</div>`;
 
   return `
     <div class="runtime-breakdown-block">
-      <div class="runtime-breakdown-subtitle">By Type</div>
-      ${byKindHtml}
-    </div>
-    <div class="runtime-breakdown-block">
-      <div class="runtime-breakdown-subtitle">By Source</div>
-      ${bySourceHtml}
-    </div>
-    <div class="runtime-breakdown-block">
       <div class="runtime-breakdown-subtitle">Active Calls</div>
       ${activeCallsHtml}
-    </div>
-    <div class="runtime-breakdown-block">
-      <div class="runtime-breakdown-subtitle-row">
-        <div class="runtime-breakdown-subtitle">History</div>
-        ${historyTabsHtml}
-      </div>
-      ${historyHtml}
-      <div class="small muted">Sample size: ${escapeHtml(String(Number(history?.sample_size ?? 0)))} completed calls</div>
-    </div>
-    <div class="runtime-breakdown-block">
-      <div class="small muted">
-        Totals since boot: Started ${escapeHtml(String(Number(totals?.started ?? 0)))} • Completed ${escapeHtml(
-          String(Number(totals?.completed ?? 0))
-        )} • Failed ${escapeHtml(String(Number(totals?.failed ?? 0)))}
-      </div>
     </div>
   `;
 }
@@ -2536,6 +2281,31 @@ function _renderRuntimeContextWindowCard(estimate) {
     `Min window ${_runtimeFmtInt(minimumWindow)}`,
     `Recommended ${_runtimeFmtInt(recommendedWindow)}`,
   ].filter(Boolean);
+  const historyLine = `${historyMessages}/${maxHistoryMessages || historyMessages} msgs`;
+  const promptCompositionRows = [
+    { label: "System prompt", tokens: systemTokens },
+    { label: "Runtime status", tokens: statusTokens },
+    { label: "Core context + preamble", tokens: coreTokens + preambleTokens },
+    { label: `Chat history (${historyLine})`, tokens: historyTokens },
+    { label: "Current user turn", tokens: userTokens },
+  ];
+  if (capabilityReserveTokens > 0) {
+    promptCompositionRows.push({ label: "Capability reserve", tokens: capabilityReserveTokens });
+  }
+  const promptCompositionHtml = promptCompositionRows
+    .map(
+      (row) => `
+          <div class="runtime-breakdown-row runtime-breakdown-row-dense">
+            <div class="runtime-breakdown-main">
+              <div class="runtime-breakdown-name">${escapeHtml(String(row.label || ""))}</div>
+            </div>
+            <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(
+              _runtimeFmtInt(row.tokens)
+            )}</span></div>
+          </div>
+        `
+    )
+    .join("");
 
   return `
     <section class="runtime-breakdown-card runtime-breakdown-card-wide">
@@ -2545,55 +2315,8 @@ function _renderRuntimeContextWindowCard(estimate) {
       </div>
       <div class="runtime-breakdown-block">
         <div class="runtime-breakdown-subtitle">Prompt Composition</div>
-        <div class="runtime-breakdown-list">
-          <div class="runtime-breakdown-row compact">
-            <div class="runtime-breakdown-main">
-              <div class="runtime-breakdown-name">System prompt</div>
-              <div class="small muted">Chat fallback instructions</div>
-            </div>
-            <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(_runtimeFmtInt(systemTokens))}</span></div>
-          </div>
-          <div class="runtime-breakdown-row compact">
-            <div class="runtime-breakdown-main">
-              <div class="runtime-breakdown-name">Runtime status block</div>
-              <div class="small muted">Enabled verbas, portals, and cores</div>
-            </div>
-            <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(_runtimeFmtInt(statusTokens))}</span></div>
-          </div>
-          <div class="runtime-breakdown-row compact">
-            <div class="runtime-breakdown-main">
-              <div class="runtime-breakdown-name">Core context blocks</div>
-              <div class="small muted">Memory/core-injected chat context</div>
-            </div>
-            <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(_runtimeFmtInt(coreTokens + preambleTokens))}</span></div>
-          </div>
-          <div class="runtime-breakdown-row compact">
-            <div class="runtime-breakdown-main">
-              <div class="runtime-breakdown-name">Chat history</div>
-              <div class="small muted">${escapeHtml(`${historyMessages}/${maxHistoryMessages || historyMessages} messages sent to LLM`)}</div>
-            </div>
-            <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(_runtimeFmtInt(historyTokens))}</span></div>
-          </div>
-          <div class="runtime-breakdown-row compact">
-            <div class="runtime-breakdown-main">
-              <div class="runtime-breakdown-name">Current user turn</div>
-              <div class="small muted">Estimated next user input</div>
-            </div>
-            <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(_runtimeFmtInt(userTokens))}</span></div>
-          </div>
-          ${
-            capabilityReserveTokens > 0
-              ? `
-          <div class="runtime-breakdown-row compact">
-            <div class="runtime-breakdown-main">
-              <div class="runtime-breakdown-name">Capability reserve</div>
-              <div class="small muted">Extra prompt room for enabled verbas/cores and tool-result handling</div>
-            </div>
-            <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(_runtimeFmtInt(capabilityReserveTokens))}</span></div>
-          </div>
-          `
-              : ""
-          }
+        <div class="runtime-breakdown-list runtime-breakdown-list-static runtime-breakdown-list-dense">
+          ${promptCompositionHtml}
         </div>
       </div>
       <div class="runtime-breakdown-block">
@@ -2623,11 +2346,11 @@ function renderRuntimeBreakdown(payload) {
         ? payload.chat_jobs
         : {};
   const llmCalls = payload?.llm_calls && typeof payload.llm_calls === "object" ? payload.llm_calls : {};
-  const voiceCalls =
-    payload?.voice_calls && typeof payload.voice_calls === "object"
-      ? payload.voice_calls
-      : payload?.vision_calls && typeof payload.vision_calls === "object"
-        ? payload.vision_calls
+  const visionCalls =
+    payload?.vision_calls && typeof payload.vision_calls === "object"
+      ? payload.vision_calls
+      : payload?.voice_calls && typeof payload.voice_calls === "object"
+        ? payload.voice_calls
         : {};
   const contextEstimate = payload?.chat_context_window && typeof payload.chat_context_window === "object"
     ? payload.chat_context_window
@@ -2639,9 +2362,9 @@ function renderRuntimeBreakdown(payload) {
   const llmSummary = `${Number(llmCalls.active_total ?? 0)} active • Started ${Number(
     llmCalls?.totals?.started ?? 0
   )} • Completed ${Number(llmCalls?.totals?.completed ?? 0)} • Failed ${Number(llmCalls?.totals?.failed ?? 0)}`;
-  const voiceSummary = `${Number(voiceCalls.active_total ?? 0)} active • Started ${Number(
-    voiceCalls?.totals?.started ?? 0
-  )} • Completed ${Number(voiceCalls?.totals?.completed ?? 0)} • Failed ${Number(voiceCalls?.totals?.failed ?? 0)}`;
+  const visionSummary = `${Number(visionCalls.active_total ?? 0)} active • Started ${Number(
+    visionCalls?.totals?.started ?? 0
+  )} • Completed ${Number(visionCalls?.totals?.completed ?? 0)} • Failed ${Number(visionCalls?.totals?.failed ?? 0)}`;
   return `
     <div class="runtime-breakdown-grid">
       <section class="runtime-breakdown-card runtime-breakdown-card-wide">
@@ -2660,10 +2383,10 @@ function renderRuntimeBreakdown(payload) {
       </section>
       <section class="runtime-breakdown-card">
         <div class="runtime-breakdown-head">
-          <h4 class="runtime-breakdown-title">Voice Calls</h4>
-          <div class="small muted">${escapeHtml(voiceSummary)}</div>
+          <h4 class="runtime-breakdown-title">Vision Calls</h4>
+          <div class="small muted">${escapeHtml(visionSummary)}</div>
         </div>
-        ${_renderRuntimeVoiceCallRows(voiceCalls)}
+        ${_renderRuntimeVisionCallRows(visionCalls)}
       </section>
       ${_renderRuntimeContextWindowCard(contextEstimate)}
     </div>
@@ -2680,9 +2403,9 @@ function ensureRuntimeBreakdownModal() {
     "beforeend",
     `
       <div id="runtime-breakdown-modal" class="cerb-modal" aria-hidden="true">
-        <div class="cerb-modal-dialog card runtime-breakdown-dialog" role="dialog" aria-modal="true" aria-label="Hydra Jobs, LLM Calls, and Voice Calls">
+        <div class="cerb-modal-dialog card runtime-breakdown-dialog" role="dialog" aria-modal="true" aria-label="Hydra Jobs, LLM Calls, and Vision Calls">
           <div class="card-head">
-            <h3 class="card-title">Live Hydra Jobs + LLM Calls + Voice Calls</h3>
+            <h3 class="card-title">Live Hydra Jobs + LLM Calls + Vision Calls</h3>
             <div class="inline-row">
               <span id="runtime-breakdown-updated" class="small"></span>
               <button type="button" class="inline-btn" id="runtime-breakdown-refresh">Refresh</button>
@@ -2819,7 +2542,7 @@ function bindRuntimeSummary() {
   summary.dataset.bound = "1";
   summary.setAttribute("role", "button");
   summary.setAttribute("tabindex", "0");
-  summary.title = "Open live Hydra jobs, LLM calls, and voice calls";
+  summary.title = "Open live Hydra jobs, LLM calls, and vision calls";
   summary.classList.add("interactive");
   summary.addEventListener("click", () => {
     openRuntimeBreakdownModal();

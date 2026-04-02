@@ -2899,6 +2899,7 @@ def _chat_job_counts_with_breakdown(*, include_history: bool = False) -> Dict[st
                 "source": str(row.get("source") or platform).strip() or platform,
                 "scope": str(row.get("scope") or "").strip(),
                 "task_name": str(row.get("task_name") or "").strip(),
+                "current_tool": str(row.get("current_tool") or "").strip(),
                 "started_at": started_at,
                 "age_seconds": age_seconds,
             }

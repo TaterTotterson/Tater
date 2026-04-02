@@ -2123,6 +2123,21 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   padding-bottom: 7px;
 }
 
+.runtime-breakdown-list-dense .runtime-breakdown-row-dense {
+  padding: 5px 8px;
+  gap: 8px;
+}
+
+.runtime-breakdown-list-dense .runtime-breakdown-name {
+  font-size: 0.82rem;
+  line-height: 1.25;
+}
+
+.runtime-breakdown-list-dense .status-chip {
+  font-size: 0.72rem;
+  padding: 2px 6px;
+}
+
 .runtime-breakdown-row:last-child {
   border-bottom: none;
 }
