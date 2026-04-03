@@ -1213,30 +1213,6 @@ def _send_message_has_explicit_target(target_map: Dict[str, Any]) -> bool:
     return False
 
 
-def _send_message_extract_destination_hint(raw: Any) -> str:
-    text = str(raw or "").strip().lower()
-    if not text:
-        return ""
-    match = re.search(
-        r"\b(?:to|in|on)\s+(discord|irc|matrix|telegram|home\s*assistant|homeassistant|ntfy|web\s*ui|webui|mac\s*os|macos|my\s+mac)\b",
-        text,
-    )
-    if not match:
-        return ""
-    token = str(match.group(1) or "").strip()
-    return normalize_notify_platform(token)
-
-
-def _send_message_extract_instruction_target(raw: Any) -> str:
-    text = str(raw or "").strip()
-    if not text:
-        return ""
-    match = re.search(r"\bto\s+([#!@][A-Za-z0-9][A-Za-z0-9._:-]*)", text, flags=re.IGNORECASE)
-    if match:
-        return str(match.group(1) or "").strip()
-    return _send_message_extract_target_hint(text)
-
-
 def _send_message_target_hint_from_map(target_map: Dict[str, Any]) -> str:
     for key in ("channel", "room_alias", "room_id", "chat_id", "channel_id"):
         token = str(target_map.get(key) or "").strip()
@@ -1901,16 +1877,6 @@ def send_message(
     if not text_message and attachment_items:
         text_message = "Attachment"
 
-    if not destination:
-        destination_hint = _send_message_extract_destination_hint(message or content or text_message)
-        if destination_hint:
-            destination = destination_hint
-
-    if not _send_message_has_explicit_target(target_map):
-        inline_target_hint = _send_message_extract_instruction_target(message or content or text_message)
-        if inline_target_hint:
-            target_map["channel"] = inline_target_hint
-
     destination, target_map, catalog_resolution = _send_message_resolve_catalog_destination(
         destination=destination,
         target_map=target_map,
@@ -2176,14 +2142,10 @@ def attach_file(
         if value not in (None, "") and key not in target_map:
             target_map[key] = value
 
-    if not destination:
-        destination_hint = _send_message_extract_destination_hint(text_message)
-        if destination_hint:
-            destination = destination_hint
-    if not _send_message_has_explicit_target(target_map):
-        inline_target_hint = _send_message_extract_instruction_target(text_message)
-        if inline_target_hint:
-            target_map["channel"] = inline_target_hint
+    if not destination and isinstance(origin, dict):
+        origin_platform = normalize_notify_platform(origin.get("platform"))
+        if origin_platform in ALLOWED_PLATFORMS:
+            destination = origin_platform
 
     has_delivery_intent = bool(destination or _send_message_has_explicit_target(target_map))
     notify_suggestions = _attach_file_notify_suggestions(origin, limit=5)

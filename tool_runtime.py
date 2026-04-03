@@ -97,8 +97,8 @@ _KERNEL_TOOL_USAGE_HINTS = {
     "write_workspace_note": '{"function":"write_workspace_note","arguments":{"content":"<note_text>"}}',
     "list_workspace": '{"function":"list_workspace","arguments":{}}',
     "image_describe": '{"function":"image_describe","arguments":{"artifact_id":"<artifact_id>","query":"Describe this image."}}',
-    "attach_file": '{"function":"attach_file","arguments":{"artifact_id":"<artifact_id>","platform":"discord","targets":{"channel":"#channel"},"message":"Attachment"}}',
-    "send_message": '{"function":"send_message","arguments":{"message":"<message>","platform":"discord","targets":{"channel":"#channel"}}}',
+    "attach_file": '{"function":"attach_file","arguments":{"artifact_id":"<artifact_id>","message":"Attachment"}}',
+    "send_message": '{"function":"send_message","arguments":{"message":"<message>"}}',
 }
 
 
