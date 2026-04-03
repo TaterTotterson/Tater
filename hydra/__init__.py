@@ -1430,6 +1430,40 @@ def _chat_history_window(history_messages: List[Dict[str, Any]], *, max_items: i
     return out
 
 
+def _normalize_user_turn_text_for_dedupe(value: Any) -> str:
+    text = _strip_user_sender_prefix(_coerce_text(value or ""))
+    return " ".join(text.split()).strip()
+
+
+def _dedupe_trailing_current_user(
+    history_messages: List[Dict[str, Any]],
+    user_text: str,
+) -> List[Dict[str, Any]]:
+    if not isinstance(history_messages, list) or not history_messages:
+        return []
+
+    normalized_current = _normalize_user_turn_text_for_dedupe(user_text)
+    if not normalized_current:
+        return list(history_messages)
+
+    idx = len(history_messages) - 1
+    while idx >= 0 and not isinstance(history_messages[idx], dict):
+        idx -= 1
+    if idx < 0:
+        return list(history_messages)
+
+    last_item = history_messages[idx]
+    role = str(last_item.get("role") or "").strip().lower()
+    if role != "user":
+        return list(history_messages)
+
+    normalized_last = _normalize_user_turn_text_for_dedupe(last_item.get("content"))
+    if not normalized_last or normalized_last != normalized_current:
+        return list(history_messages)
+
+    return history_messages[:idx] + history_messages[idx + 1 :]
+
+
 def _platform_label(platform: str) -> str:
     return common_helpers.platform_label(
         platform,
@@ -4501,6 +4535,7 @@ async def _run_hydra_turn_impl(
     task_name = _task_name_from_text(user_text, fallback="Hydra task")
 
     history = _compact_history(history_messages)
+    history = _dedupe_trailing_current_user(history, user_text)
     hermes_recent_history = _chat_history_window(history, max_items=chat_history_max_items)
     current_user_turn_text = _strip_user_sender_prefix(user_text).strip() or str(user_text or "").strip()
     turn_request_text = current_user_turn_text or str(user_text or "").strip()
