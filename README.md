@@ -68,7 +68,7 @@ Some Portals are paired with companion repos/apps that complete the end-user int
 
 # Installation
 > **Note**:
-> - Tater currently recommends using qwen3-coder-next, qwen3-next-80b or gpt-oss-120b
+> - Tater currently recommends using gemma-4-26b-a4b (disable thinking), qwen/qwen3.5-35b-a3b (disable thinking), qwen3-coder-next, qwen3-next-80b, or gpt-oss-120b (disable thinking)
 
 <img width="100" height="44" alt="unraid_logo_black-339076895" src="https://github.com/user-attachments/assets/87351bed-3321-4a43-924f-fecf2e4e700f" />
 

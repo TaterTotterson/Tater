@@ -60,6 +60,7 @@ from tool_runtime import (
     kernel_tool_usage_hint as runtime_kernel_tool_usage_hint,
     run_meta_tool,
 )
+from notify import notifier_destination_catalog
 
 TOOL_NAME_ALIASES = {
     "web_search": "search_web",
@@ -106,8 +107,8 @@ _KERNEL_TOOL_USAGE_HINTS = {
     "write_workspace_note": '{"function":"write_workspace_note","arguments":{"content":"<note_text>"}}',
     "list_workspace": '{"function":"list_workspace","arguments":{}}',
     "image_describe": '{"function":"image_describe","arguments":{"artifact_id":"<artifact_id>","query":"Describe this image."}}',
-    "attach_file": '{"function":"attach_file","arguments":{"artifact_id":"<artifact_id>","platform":"discord","targets":{"channel":"#channel"},"message":"Attachment"}}',
-    "send_message": '{"function":"send_message","arguments":{"message":"<message>","platform":"discord","targets":{"channel":"#channel"}}}',
+    "attach_file": '{"function":"attach_file","arguments":{"artifact_id":"<artifact_id>","message":"Attachment"}}',
+    "send_message": '{"function":"send_message","arguments":{"message":"<message>"}}',
 }
 
 ASCII_ONLY_PLATFORMS = {"irc", "homeassistant", "homekit", "xbmc"}
@@ -628,37 +629,145 @@ def _send_message_normalize_platform_alias(value: Any) -> str:
     return _SEND_MESSAGE_PLATFORM_ALIASES.get(token, token)
 
 
-def _send_message_extract_explicit_platform(user_text: Any) -> str:
-    text = str(user_text or "").strip().lower()
-    if not text:
-        return ""
+def _send_message_normalize_targets_payload(payload: Any) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    if not isinstance(payload, dict):
+        return out
+    for key in _SEND_MESSAGE_TARGET_KEYS:
+        text = str(payload.get(key) or "").strip()
+        if text:
+            out[key] = text
+    return out
 
-    primary = re.search(
-        r"\b(?:to|in|on|via|through)\s+(discord|irc|matrix|telegram|home\s*assistant|homeassistant|ntfy|web\s*ui|webui|mac\s*os|macos|my\s+mac)\b",
-        text,
-        flags=re.IGNORECASE,
+
+def _delivery_origin_defaults(origin: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    base = origin if isinstance(origin, dict) else {}
+    platform_token = _send_message_normalize_platform_alias(
+        normalize_platform(base.get("platform")) or base.get("platform")
     )
-    if primary:
-        return _send_message_normalize_platform_alias(primary.group(1))
+    targets = _send_message_normalize_targets_payload(base)
+    return {
+        "platform": platform_token,
+        "targets": targets,
+    }
 
-    fallback = re.search(
-        r"\b(discord|irc|matrix|telegram|home\s*assistant|homeassistant|ntfy|web\s*ui|webui|mac\s*os|macos|my\s+mac)\b",
-        text,
-        flags=re.IGNORECASE,
+
+def _delivery_catalog_snapshot(*, limit_per_platform: int = 8) -> List[Dict[str, Any]]:
+    try:
+        payload = notifier_destination_catalog(
+            redis_client=default_redis,
+            platform=None,
+            limit=max(1, min(80, int(limit_per_platform))),
+        )
+    except Exception:
+        payload = {}
+
+    rows = payload.get("platforms") if isinstance(payload.get("platforms"), list) else []
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        platform_token = _send_message_normalize_platform_alias(row.get("platform"))
+        if not platform_token:
+            continue
+        entry: Dict[str, Any] = {
+            "platform": platform_token,
+            "requires_target": bool(row.get("requires_target")),
+            "destinations": [],
+        }
+        destinations = row.get("destinations") if isinstance(row.get("destinations"), list) else []
+        compact_destinations: List[Dict[str, Any]] = []
+        for item in destinations[: max(1, min(16, int(limit_per_platform)))]:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or "").strip()
+            targets = _send_message_normalize_targets_payload(item.get("targets"))
+            if not label and not targets:
+                continue
+            compact: Dict[str, Any] = {}
+            if label:
+                compact["label"] = label
+            if targets:
+                compact["targets"] = targets
+            compact_destinations.append(compact)
+        entry["destinations"] = compact_destinations
+        out.append(entry)
+    return out
+
+
+def _delivery_resolution_from_llm_payload(payload: Any) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    out: Dict[str, Any] = {}
+    platform_token = _send_message_normalize_platform_alias(payload.get("platform"))
+    if platform_token:
+        out["platform"] = platform_token
+    targets = _send_message_normalize_targets_payload(payload.get("targets"))
+    if targets:
+        out["targets"] = targets
+    message = str(payload.get("message") or payload.get("content") or "").strip()
+    if message:
+        out["message"] = message
+    return out
+
+
+async def _llm_resolve_delivery_intent(
+    *,
+    llm_client: Any,
+    func: str,
+    user_text: str,
+    args: Dict[str, Any],
+    origin: Optional[Dict[str, Any]],
+    platform: str,
+    platform_preamble: str,
+    max_tokens: Optional[int],
+) -> Dict[str, Any]:
+    if llm_client is None or not hasattr(llm_client, "chat"):
+        return {}
+
+    payload = {
+        "tool_function": str(func or "").strip(),
+        "current_platform": str(platform or "").strip(),
+        "user_message": str(user_text or "").strip(),
+        "current_arguments": dict(args or {}),
+        "origin_defaults": _delivery_origin_defaults(origin),
+        "known_destinations": _delivery_catalog_snapshot(limit_per_platform=8),
+    }
+    system_prompt = (
+        "You resolve delivery routing for send_message and attach_file.\n"
+        "Return exactly ONE strict JSON object with this shape:\n"
+        "{\"platform\":\"\",\"targets\":{},\"message\":\"\"}\n"
+        "Rules:\n"
+        "- No prose, no markdown, no code fences.\n"
+        "- Use platform only when the user clearly specifies a destination platform/room.\n"
+        "- If destination is unclear, keep platform empty and targets empty.\n"
+        "- Do NOT treat product names as destinations unless explicitly requested as destination.\n"
+        "- Use known destination targets when possible; never invent opaque IDs.\n"
+        "- For send_message, message should be the content to deliver (without routing words).\n"
+        "- For attach_file, message may be empty unless a caption/note is clearly requested."
     )
-    if fallback:
-        return _send_message_normalize_platform_alias(fallback.group(1))
-    return ""
+    messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+    messages = _with_platform_preamble(messages, platform_preamble=platform_preamble)
+    try:
+        resp = await llm_client.chat(
+            messages=messages,
+            temperature=0.0,
+            **_chat_with_optional_max_tokens_kwargs(
+                max_tokens=max_tokens,
+                minimum=120,
+                fallback=320,
+                maximum=700,
+            ),
+        )
+    except Exception:
+        return {}
 
-
-def _send_message_extract_instruction_target(user_text: Any) -> str:
-    text = str(user_text or "").strip()
-    if not text:
-        return ""
-    match = re.search(r"\bto\s+([#!@][A-Za-z0-9][A-Za-z0-9._:-]*)", text, flags=re.IGNORECASE)
-    if match:
-        return str(match.group(1) or "").strip()
-    return ""
+    raw = str((resp.get("message", {}) or {}).get("content", "")).strip()
+    parsed = _first_json_object(raw)
+    return _delivery_resolution_from_llm_payload(parsed)
 
 async def _llm_enrich_tool_call_for_user_request(
     *,
@@ -673,58 +782,82 @@ async def _llm_enrich_tool_call_for_user_request(
     platform_preamble: str = "",
     max_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
-    del llm_client, platform, origin, scope, history_messages, context, platform_preamble, max_tokens
+    del scope, history_messages, context
 
     if not isinstance(tool_call, dict):
         return tool_call
     func = _canonical_tool_name(str(tool_call.get("function") or "").strip())
-    if func == "attach_file":
-        args = dict(tool_call.get("arguments") or {}) if isinstance(tool_call.get("arguments"), dict) else {}
-        user_request = str(user_text or "").strip()
-        merged = dict(args or {})
-        explicit_user_platform = _send_message_extract_explicit_platform(user_request)
-        if explicit_user_platform:
-            merged["platform"] = explicit_user_platform
-        else:
-            existing_platform_raw = str(merged.get("platform") or "").strip()
-            if existing_platform_raw:
-                merged["platform"] = _send_message_normalize_platform_alias(
-                    normalize_platform(existing_platform_raw) or existing_platform_raw
-                )
-
-        merged_targets = _send_message_targets_from_args(merged)
-        if not merged_targets:
-            target_hint = _send_message_extract_instruction_target(user_request)
-            if target_hint:
-                merged_targets["channel"] = target_hint
-        if merged_targets:
-            merged["targets"] = merged_targets
-
-        has_delivery_intent = bool(str(merged.get("platform") or "").strip() or merged_targets)
-        if has_delivery_intent and not str(merged.get("message") or merged.get("content") or "").strip():
-            merged["message"] = "Attachment"
-        return {"function": "attach_file", "arguments": merged}
-
-    if func != "send_message":
+    if func not in {"attach_file", "send_message"}:
         return tool_call
 
     args = dict(tool_call.get("arguments") or {}) if isinstance(tool_call.get("arguments"), dict) else {}
-    user_request = str(user_text or "").strip()
     merged = dict(args or {})
-    explicit_user_platform = _send_message_extract_explicit_platform(user_request)
-    if explicit_user_platform:
-        merged["platform"] = explicit_user_platform
+    existing_platform_raw = str(merged.get("platform") or "").strip()
+    if existing_platform_raw:
+        merged["platform"] = _send_message_normalize_platform_alias(
+            normalize_platform(existing_platform_raw) or existing_platform_raw
+        )
+
+    origin_defaults = _delivery_origin_defaults(origin)
+    llm_resolution = await _llm_resolve_delivery_intent(
+        llm_client=llm_client,
+        func=func,
+        user_text=str(user_text or ""),
+        args=merged,
+        origin=origin,
+        platform=platform,
+        platform_preamble=platform_preamble,
+        max_tokens=max_tokens,
+    )
+
+    existing_targets = _send_message_targets_from_args(merged)
+    existing_platform = str(merged.get("platform") or "").strip()
+    llm_platform = str(llm_resolution.get("platform") or "").strip()
+    origin_platform = str(origin_defaults.get("platform") or "").strip()
+
+    resolved_platform = ""
+    if llm_platform:
+        resolved_platform = llm_platform
+    elif existing_platform and existing_targets:
+        resolved_platform = existing_platform
+    elif origin_platform:
+        resolved_platform = origin_platform
+    elif existing_platform:
+        resolved_platform = existing_platform
+
+    if resolved_platform:
+        merged["platform"] = resolved_platform
     else:
-        existing_platform_raw = str(merged.get("platform") or "").strip()
-        if existing_platform_raw:
-            merged["platform"] = _send_message_normalize_platform_alias(
-                normalize_platform(existing_platform_raw) or existing_platform_raw
-            )
+        merged.pop("platform", None)
+
     merged_targets = _send_message_targets_from_args(merged)
+    if not merged_targets:
+        merged_targets = _send_message_normalize_targets_payload(llm_resolution.get("targets"))
+    if not merged_targets and resolved_platform and resolved_platform == origin_platform:
+        merged_targets = _send_message_normalize_targets_payload(origin_defaults.get("targets"))
+
+    for key in _SEND_MESSAGE_TARGET_KEYS:
+        merged.pop(key, None)
     if merged_targets:
         merged["targets"] = merged_targets
+    else:
+        merged.pop("targets", None)
 
-    return {"function": "send_message", "arguments": merged}
+    llm_message = str(llm_resolution.get("message") or "").strip()
+    existing_message = str(merged.get("message") or merged.get("content") or "").strip()
+    if func == "send_message":
+        if llm_message and (not existing_message or existing_message == str(user_text or "").strip()):
+            merged["message"] = llm_message
+        elif not existing_message:
+            merged["message"] = llm_message or str(user_text or "").strip()
+    else:
+        has_delivery_intent = bool(str(merged.get("platform") or "").strip() or merged_targets)
+        if llm_message and not existing_message:
+            merged["message"] = llm_message
+        if has_delivery_intent and not str(merged.get("message") or merged.get("content") or "").strip():
+            merged["message"] = "Attachment"
+
+    return {"function": func, "arguments": merged}
 
 
 def _plugin_tool_id_for_call(tool_call: Optional[Dict[str, Any]], registry: Dict[str, Any]) -> str:
@@ -3253,6 +3386,7 @@ async def _run_hermes_final_render(
     completed_steps: List[Dict[str, str]],
     full_tool_results: List[Dict[str, Any]],
     recent_history: List[Dict[str, Any]],
+    core_context_message: str,
     platform_preamble: str,
     max_tokens: Optional[int],
 ) -> str:
@@ -3317,8 +3451,10 @@ async def _run_hermes_final_render(
                 ascii_only_platforms=ASCII_ONLY_PLATFORMS,
             ),
         },
-        {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)},
     ]
+    if core_context_message:
+        messages.append({"role": "system", "content": core_context_message})
+    messages.append({"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)})
     messages = _with_platform_preamble(messages, platform_preamble=platform_preamble)
     try:
         resp = await llm_client.chat(
@@ -4400,8 +4536,8 @@ async def _run_hydra_turn_impl(
         redis_client=r,
         memory_context_payload=memory_context_payload,
     )
-    thanatos_context_message = _core_system_prompt_message(
-        role="thanatos",
+    hermes_context_message = _core_system_prompt_message(
+        role="hermes",
         platform=platform,
         scope=scope,
         origin=origin_payload,
@@ -4616,6 +4752,7 @@ async def _run_hydra_turn_impl(
             completed_steps=completed_tool_steps,
             full_tool_results=raw_tool_payload_history,
             recent_history=hermes_recent_history,
+            core_context_message=hermes_context_message,
             platform_preamble=platform_preamble,
             max_tokens=None,
         )
@@ -4814,8 +4951,6 @@ async def _run_hydra_turn_impl(
             )
             if tool_contract_prompt:
                 thanatos_messages.append({"role": "system", "content": tool_contract_prompt})
-        if thanatos_context_message:
-            thanatos_messages.append({"role": "system", "content": thanatos_context_message})
         thanatos_messages = _with_platform_preamble(
             thanatos_messages,
             platform_preamble=platform_preamble,
