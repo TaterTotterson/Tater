@@ -4876,7 +4876,9 @@ async def _run_hydra_turn_impl(
         }
 
     if not structured_plan_queue:
-        if astraeus_mode == "chat":
+        # If planning returns no executable steps and mode is unknown,
+        # prefer conversational fallback over a hard block.
+        if astraeus_mode in {"chat", "unknown"}:
             chat_started = time.perf_counter()
             chat_text = await _run_chat_fallback_reply(
                 llm_client=llm_client_chat,
