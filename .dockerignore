@@ -1,0 +1,19 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+
+agent_lab/logs/*.log
+agent_lab/workspace/extracted_tmp_archive_*
+tests/
+
+# Verba source now lives in the verba store; exclude local verba files from build context.
+verba/*
+!verba/__init__.py
+
+# Portal source now lives in the portal store; exclude local portal files from build context.
+portals/*
+!portals/__init__.py
+
+# Core source now lives in the core store; exclude local core files from build context.
+cores/*
+!cores/__init__.py
