@@ -276,6 +276,8 @@ docker run -d --name tater_webui \
 ```
 ---
 
+### 3. Post-Install Setup
+
 After the container is running, open TaterOS, complete the Redis setup popup, then configure local LLM endpoint/model in **Settings**:
 - `Hydra LLM Host`
 - `Hydra LLM Port`
@@ -289,7 +291,7 @@ Optional: if you want a custom config file location, set `TATER_REDIS_CONFIG_PAT
 
 Access-log note: `run_ui.sh` now starts Uvicorn with `--no-access-log` to suppress per-request lines.
 
-### 3. Access the Web UI
+### 4. Access the Web UI
 
 Once the container is running with host networking, open your browser and navigate to:
 
