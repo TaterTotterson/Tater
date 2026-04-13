@@ -437,6 +437,7 @@ def _platform_display_label(platform_name: str) -> str:
     labels = {
         "webui": "WebUI",
         "homeassistant": "Home Assistant",
+        "voice_core": "Voice Core",
         "homekit": "HomeKit",
         "xbmc": "XBMC",
         "automation": "Automations",

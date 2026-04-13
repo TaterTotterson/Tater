@@ -16,6 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib import request as urllib_request
 from urllib.parse import urlparse, urlunparse
 
 import dotenv
@@ -71,6 +72,13 @@ from verba_settings import (
     set_verba_enabled as set_verba_enabled_flag,
 )
 from verba_kernel import normalize_platform
+from speech_settings import (
+    get_announcement_tts_ui_payload,
+    get_speech_settings as get_shared_speech_settings,
+    get_speech_ui_payload,
+    save_speech_settings as save_shared_speech_settings,
+)
+from speech_tts import fetch_wyoming_tts_voice_options, get_runtime_tts_wav, synthesize_preview_wav
 from vision_settings import get_vision_settings as get_shared_vision_settings, save_vision_settings as save_shared_vision_settings
 from tateros import core_store as core_store_module
 from tateros import verba_store as verba_store_module
@@ -392,6 +400,39 @@ def _portal_prepare_settings_values(portal_key: str, values: Dict[str, Any]) -> 
         prepared = hook(values=dict(out), redis_client=redis_client)
     except Exception:
         logger.exception("[portals] settings save hook failed for %s", portal_key)
+        return out
+    return prepared if isinstance(prepared, dict) else out
+
+
+def _verba_setting_fields(plugin: Any, required: Dict[str, Any], current: Dict[str, str]) -> List[Dict[str, Any]]:
+    fields = _setting_fields(required, current)
+    hook = getattr(plugin, "webui_settings_fields", None)
+    if not callable(hook):
+        return fields
+    plugin_id = str(getattr(plugin, "name", "") or getattr(plugin, "verba_name", "") or "").strip() or "unknown"
+    try:
+        updated = hook(
+            fields=[dict(field) if isinstance(field, dict) else field for field in fields],
+            current_settings=dict(current or {}),
+            redis_client=redis_client,
+            notifier_destination_catalog=notifier_destination_catalog,
+        )
+    except Exception:
+        logger.exception("[verbas] settings field hook failed for %s", plugin_id)
+        return fields
+    return updated if isinstance(updated, list) else fields
+
+
+def _verba_prepare_settings_values(plugin: Any, values: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(values or {})
+    hook = getattr(plugin, "webui_prepare_settings_values", None)
+    if not callable(hook):
+        return out
+    plugin_id = str(getattr(plugin, "name", "") or getattr(plugin, "verba_name", "") or "").strip() or "unknown"
+    try:
+        prepared = hook(values=dict(out), redis_client=redis_client)
+    except Exception:
+        logger.exception("[verbas] settings save hook failed for %s", plugin_id)
         return out
     return prepared if isinstance(prepared, dict) else out
 
@@ -1042,6 +1083,55 @@ def _read_tater_avatar_data_url() -> str:
     mimetype = _guess_image_mimetype(raw_default)
     encoded = base64.b64encode(raw_default).decode("utf-8")
     return f"data:{mimetype};base64,{encoded}"
+
+
+def _fetch_homeassistant_tts_entity_options(
+    base_url: Any,
+    token: Any,
+    *,
+    current_value: Any = "",
+) -> List[Dict[str, str]]:
+    base = str(base_url or "").strip().rstrip("/")
+    bearer = str(token or "").strip()
+    rows: List[Dict[str, str]] = []
+    seen: set[str] = set()
+
+    def add_row(value: Any, label: Any = "") -> None:
+        entity_id = str(value or "").strip()
+        if not entity_id or entity_id in seen:
+            return
+        seen.add(entity_id)
+        rows.append({"value": entity_id, "label": str(label or entity_id).strip() or entity_id})
+
+    if base and bearer:
+        try:
+            request = urllib_request.Request(
+                f"{base}/api/states",
+                headers={
+                    "Authorization": f"Bearer {bearer}",
+                    "Content-Type": "application/json",
+                },
+                method="GET",
+            )
+            with urllib_request.urlopen(request, timeout=10) as response:
+                payload = json.load(response)
+            if isinstance(payload, list):
+                for item in payload:
+                    if not isinstance(item, dict):
+                        continue
+                    entity_id = str(item.get("entity_id") or "").strip()
+                    if not entity_id.lower().startswith("tts."):
+                        continue
+                    attrs = item.get("attributes") if isinstance(item.get("attributes"), dict) else {}
+                    friendly_name = str((attrs or {}).get("friendly_name") or "").strip()
+                    add_row(entity_id, f"{friendly_name} ({entity_id})" if friendly_name else entity_id)
+        except Exception:
+            logger.debug("[tateros] failed to load Home Assistant TTS entities", exc_info=True)
+
+    current = str(current_value or "").strip()
+    if current and current not in seen:
+        add_row(current, f"{current} (saved)")
+    return rows
 
 
 def _b64url_encode(raw: bytes) -> str:
@@ -2504,6 +2594,20 @@ class AppSettingsRequest(BaseModel):
     vision_api_base: Optional[str] = None
     vision_model: Optional[str] = None
     vision_api_key: Optional[str] = None
+    speech_stt_backend: Optional[str] = None
+    speech_wyoming_stt_host: Optional[str] = None
+    speech_wyoming_stt_port: Optional[str] = None
+    speech_tts_backend: Optional[str] = None
+    speech_tts_model: Optional[str] = None
+    speech_tts_voice: Optional[str] = None
+    speech_wyoming_tts_host: Optional[str] = None
+    speech_wyoming_tts_port: Optional[str] = None
+    speech_wyoming_tts_voice: Optional[str] = None
+    speech_announcement_tts_backend: Optional[str] = None
+    speech_announcement_tts_model: Optional[str] = None
+    speech_announcement_tts_voice: Optional[str] = None
+    speech_announcement_tts_entity: Optional[str] = None
+    speech_tts_public_base_url: Optional[str] = None
     emoji_enable_on_reaction_add: Optional[bool] = None
     emoji_enable_auto_reaction_on_reply: Optional[bool] = None
     emoji_reaction_chain_chance_percent: Optional[int] = None
@@ -2539,6 +2643,22 @@ class AppSettingsRequest(BaseModel):
     webui_password: Optional[str] = None
     webui_password_confirm: Optional[str] = None
     clear_webui_password: Optional[bool] = None
+
+
+class SpeechTtsPreviewRequest(BaseModel):
+    backend: Optional[str] = None
+    model: Optional[str] = None
+    voice: Optional[str] = None
+    wyoming_host: Optional[str] = None
+    wyoming_port: Optional[str] = None
+    wyoming_voice: Optional[str] = None
+    text: Optional[str] = None
+
+
+class WyomingTtsVoicesRequest(BaseModel):
+    host: Optional[str] = None
+    port: Optional[str] = None
+    current_voice: Optional[str] = None
 
 
 class RedisSetupRequest(BaseModel):
@@ -2749,6 +2869,7 @@ _RUNTIME_PLATFORM_LABELS: Dict[str, str] = {
     "telegram": "Telegram",
     "matrix": "Matrix",
     "homeassistant": "Home Assistant",
+    "voice_core": "Voice Core",
     "homekit": "HomeKit",
     "xbmc": "XBMC",
     "automation": "Automation",
@@ -3408,7 +3529,7 @@ def list_verbas() -> Dict[str, Any]:
                 "platforms": list(getattr(plugin, "platforms", []) or []),
                 "enabled": get_verba_enabled(plugin_id),
                 "settings_category": settings_category,
-                "settings": _setting_fields(required_settings, current_settings),
+                "settings": _verba_setting_fields(plugin, required_settings, current_settings),
             }
         )
 
@@ -3439,7 +3560,7 @@ def save_verba_settings_endpoint(plugin_id: str, payload: SettingsUpdateRequest)
     if not category:
         raise HTTPException(status_code=400, detail=f"{plugin_id} has no settings category")
 
-    values = dict(payload.values or {})
+    values = _verba_prepare_settings_values(plugin, dict(payload.values or {}))
     save_verba_settings_values(category, values)
     return {"id": plugin_id, "saved": True}
 
@@ -3491,7 +3612,6 @@ def list_core_tabs() -> Dict[str, Any]:
                 "order": int(tab.get("order", 1000)),
                 "requires_running": bool(tab.get("requires_running")),
                 "running": bool(tab.get("running")),
-                "payload": _load_core_htmlui_tab_payload(tab),
             }
         )
 
@@ -3499,6 +3619,21 @@ def list_core_tabs() -> Dict[str, Any]:
         "manage_label": "Manage",
         "tabs": dynamic_tabs,
     }
+
+
+@app.get("/api/cores/{core_key}/tab")
+def get_core_tab_payload(core_key: str) -> Dict[str, Any]:
+    key = str(core_key or "").strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="Missing core key.")
+
+    entries = core_registry_module.refresh_core_registry()
+    tabs = _discover_core_webui_tabs(entries)
+    tab = next((item for item in tabs if str(item.get("core_key") or "").strip() == key), None)
+    if not isinstance(tab, dict):
+        raise HTTPException(status_code=404, detail=f"Unknown or unavailable core tab: {key}")
+
+    return _load_core_htmlui_tab_payload(tab)
 
 
 @app.post("/api/cores/{core_key}/tab-action")
@@ -4095,6 +4230,7 @@ _HYDRA_METRIC_PLATFORMS = (
     "telegram",
     "matrix",
     "homeassistant",
+    "voice_core",
     "homekit",
     "xbmc",
     "automation",
@@ -4115,6 +4251,7 @@ def _hydra_platform_display_label(platform: str) -> str:
         "all": "All",
         "webui": "WebUI",
         "homeassistant": "Home Assistant",
+        "voice_core": "Voice Core",
         "homekit": "HomeKit",
         "xbmc": "XBMC",
         "automation": "Automations",
@@ -4540,6 +4677,21 @@ def get_settings() -> Dict[str, Any]:
         default_api_base="http://127.0.0.1:1234",
         default_model="qwen2.5-vl-7b-instruct",
     )
+    speech_settings = get_shared_speech_settings()
+    speech_ui = get_speech_ui_payload(speech_settings)
+    homeassistant_tts_options = _fetch_homeassistant_tts_entity_options(
+        homeassistant_settings.get("HA_BASE_URL", "http://homeassistant.local:8123"),
+        homeassistant_settings.get("HA_TOKEN", ""),
+        current_value=speech_settings.get("announcement_tts_entity"),
+    )
+    announcement_speech_ui = get_announcement_tts_ui_payload(
+        backend=speech_settings.get("announcement_tts_backend"),
+        model=speech_settings.get("announcement_tts_model"),
+        voice=speech_settings.get("announcement_tts_voice"),
+        homeassistant_tts_entity=speech_settings.get("announcement_tts_entity"),
+        homeassistant_tts_options=homeassistant_tts_options,
+        default_backend=str(speech_settings.get("announcement_tts_backend") or "homeassistant_api"),
+    )
     emoji_settings = get_core_emoji_settings() or {}
 
     verba_registry_module.ensure_verbas_loaded()
@@ -4611,6 +4763,22 @@ def get_settings() -> Dict[str, Any]:
         "vision_api_base": str(vision_settings.get("api_base") or "http://127.0.0.1:1234"),
         "vision_model": str(vision_settings.get("model") or "qwen2.5-vl-7b-instruct"),
         "vision_api_key": str(vision_settings.get("api_key") or ""),
+        "speech_stt_backend": str(speech_settings.get("stt_backend") or ""),
+        "speech_wyoming_stt_host": str(speech_settings.get("wyoming_stt_host") or ""),
+        "speech_wyoming_stt_port": str(speech_settings.get("wyoming_stt_port") or ""),
+        "speech_tts_backend": str(speech_settings.get("tts_backend") or ""),
+        "speech_tts_model": str(speech_settings.get("tts_model") or ""),
+        "speech_tts_voice": str(speech_settings.get("tts_voice") or ""),
+        "speech_wyoming_tts_host": str(speech_settings.get("wyoming_tts_host") or ""),
+        "speech_wyoming_tts_port": str(speech_settings.get("wyoming_tts_port") or ""),
+        "speech_wyoming_tts_voice": str(speech_settings.get("wyoming_tts_voice") or ""),
+        "speech_announcement_tts_backend": str(speech_settings.get("announcement_tts_backend") or ""),
+        "speech_announcement_tts_model": str(speech_settings.get("announcement_tts_model") or ""),
+        "speech_announcement_tts_voice": str(speech_settings.get("announcement_tts_voice") or ""),
+        "speech_announcement_tts_entity": str(speech_settings.get("announcement_tts_entity") or ""),
+        "speech_tts_public_base_url": str(speech_settings.get("tts_public_base_url") or ""),
+        "speech_ui": speech_ui,
+        "announcement_speech_ui": announcement_speech_ui,
         "emoji_enable_on_reaction_add": bool(emoji_settings.get("enable_on_reaction_add", True)),
         "emoji_enable_auto_reaction_on_reply": bool(emoji_settings.get("enable_auto_reaction_on_reply", True)),
         "emoji_reaction_chain_chance_percent": int(emoji_settings.get("reaction_chain_chance_percent", 100)),
@@ -4636,6 +4804,56 @@ def get_settings() -> Dict[str, Any]:
         "admin_only_plugins_defaults": sorted(DEFAULT_ADMIN_ONLY_PLUGINS),
         "webui_password_set": _webui_password_is_set(),
     }
+
+
+@app.post("/api/settings/speech/tts-preview")
+async def preview_speech_tts(payload: SpeechTtsPreviewRequest) -> Response:
+    current_speech = get_shared_speech_settings()
+    preview_text = str(payload.text or "").strip() or "Hello from Tater. This is a voice preview."
+    try:
+        wav_bytes = await synthesize_preview_wav(
+            text=preview_text,
+            backend=str(payload.backend or current_speech.get("tts_backend") or "").strip(),
+            model=str(payload.model or current_speech.get("tts_model") or "").strip(),
+            voice=str(payload.voice or current_speech.get("tts_voice") or "").strip(),
+            wyoming_host=str(payload.wyoming_host or current_speech.get("wyoming_tts_host") or "").strip(),
+            wyoming_port=str(payload.wyoming_port or current_speech.get("wyoming_tts_port") or "").strip(),
+            wyoming_voice=str(payload.wyoming_voice or current_speech.get("wyoming_tts_voice") or "").strip(),
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc) or "TTS preview failed.") from exc
+
+    if not wav_bytes:
+        raise HTTPException(status_code=400, detail="TTS preview produced no audio.")
+    return Response(content=wav_bytes, media_type="audio/wav")
+
+
+@app.post("/api/settings/speech/wyoming-tts-voices")
+async def get_speech_wyoming_tts_voices(payload: WyomingTtsVoicesRequest) -> Dict[str, Any]:
+    current_speech = get_shared_speech_settings()
+    try:
+        return await fetch_wyoming_tts_voice_options(
+            host=str(payload.host or current_speech.get("wyoming_tts_host") or "").strip(),
+            port=str(payload.port or current_speech.get("wyoming_tts_port") or "").strip(),
+            current_value=str(payload.current_voice or current_speech.get("wyoming_tts_voice") or "").strip(),
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc) or "Failed to fetch Wyoming TTS voices.") from exc
+
+
+@app.get("/api/speech/tts/runtime/{asset_id}.wav")
+async def get_runtime_tts_asset(asset_id: str) -> Response:
+    row = get_runtime_tts_wav(asset_id)
+    if not isinstance(row, dict):
+        raise HTTPException(status_code=404, detail="TTS audio not found or expired.")
+    wav_bytes = bytes(row.get("bytes") or b"")
+    if not wav_bytes:
+        raise HTTPException(status_code=404, detail="TTS audio is empty or expired.")
+    return Response(content=wav_bytes, media_type=str(row.get("content_type") or "audio/wav"))
 
 
 @app.post("/api/settings")
@@ -4793,6 +5011,61 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
             api_base=str(updates.get("vision_api_base", current_vision.get("api_base") or "")).strip(),
             model=str(updates.get("vision_model", current_vision.get("model") or "")).strip(),
             api_key=str(updates.get("vision_api_key", current_vision.get("api_key") or "")).strip(),
+        )
+
+    speech_keys = {
+        "speech_stt_backend",
+        "speech_wyoming_stt_host",
+        "speech_wyoming_stt_port",
+        "speech_tts_backend",
+        "speech_tts_model",
+        "speech_tts_voice",
+        "speech_wyoming_tts_host",
+        "speech_wyoming_tts_port",
+        "speech_wyoming_tts_voice",
+        "speech_announcement_tts_backend",
+        "speech_announcement_tts_model",
+        "speech_announcement_tts_voice",
+        "speech_announcement_tts_entity",
+        "speech_tts_public_base_url",
+    }
+    if any(key in updates for key in speech_keys):
+        current_speech = get_shared_speech_settings()
+        save_shared_speech_settings(
+            stt_backend=str(updates.get("speech_stt_backend", current_speech.get("stt_backend") or "")).strip(),
+            wyoming_stt_host=str(
+                updates.get("speech_wyoming_stt_host", current_speech.get("wyoming_stt_host") or "")
+            ).strip(),
+            wyoming_stt_port=str(
+                updates.get("speech_wyoming_stt_port", current_speech.get("wyoming_stt_port") or "")
+            ).strip(),
+            tts_backend=str(updates.get("speech_tts_backend", current_speech.get("tts_backend") or "")).strip(),
+            tts_model=str(updates.get("speech_tts_model", current_speech.get("tts_model") or "")).strip(),
+            tts_voice=str(updates.get("speech_tts_voice", current_speech.get("tts_voice") or "")).strip(),
+            wyoming_tts_host=str(
+                updates.get("speech_wyoming_tts_host", current_speech.get("wyoming_tts_host") or "")
+            ).strip(),
+            wyoming_tts_port=str(
+                updates.get("speech_wyoming_tts_port", current_speech.get("wyoming_tts_port") or "")
+            ).strip(),
+            wyoming_tts_voice=str(
+                updates.get("speech_wyoming_tts_voice", current_speech.get("wyoming_tts_voice") or "")
+            ).strip(),
+            announcement_tts_backend=str(
+                updates.get("speech_announcement_tts_backend", current_speech.get("announcement_tts_backend") or "")
+            ).strip(),
+            announcement_tts_model=str(
+                updates.get("speech_announcement_tts_model", current_speech.get("announcement_tts_model") or "")
+            ).strip(),
+            announcement_tts_voice=str(
+                updates.get("speech_announcement_tts_voice", current_speech.get("announcement_tts_voice") or "")
+            ).strip(),
+            announcement_tts_entity=str(
+                updates.get("speech_announcement_tts_entity", current_speech.get("announcement_tts_entity") or "")
+            ).strip(),
+            tts_public_base_url=str(
+                updates.get("speech_tts_public_base_url", current_speech.get("tts_public_base_url") or "")
+            ).strip(),
         )
 
     emoji_keys = {

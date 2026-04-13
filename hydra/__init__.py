@@ -162,6 +162,7 @@ _PLATFORM_DISPLAY = {
     "telegram": "Telegram",
     "matrix": "Matrix",
     "homeassistant": "Home Assistant",
+    "voice_core": "Voice Core",
     "homekit": "HomeKit",
     "xbmc": "XBMC",
     "automation": "automation",

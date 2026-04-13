@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 
 agent_lab/logs/*.log
+agent_lab/models/
 agent_lab/workspace/extracted_tmp_archive_*
 tests/
 
