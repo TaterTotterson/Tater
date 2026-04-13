@@ -30,12 +30,17 @@ const state = {
   view: "chat",
   sessionId: safeStorageGet("tater_tateros_session_id", "") || createSessionId(),
   coreTopTab: safeStorageGet("tater_tateros_core_tab", "") || "manage",
+  coreTabSpecs: {},
+  coreTabPayloadCache: {},
+  coreTabLoadPromises: {},
   sidebarCollapsed: String(safeStorageGet("tater_tateros_sidebar_collapsed", "false")).trim().toLowerCase() === "true",
   sidebarCollapseTimer: 0,
   runtimeBreakdownPollTimer: 0,
   runtimeBreakdownPayload: null,
   runtimeHistoryWindow: "24h",
   runtimeSettingsSaveHandler: null,
+  runtimeSettingsOpenHandler: null,
+  runtimeSettingsCloseHandler: null,
   runtimeSettingsCatalog: {
     verbas: {},
     portals: {},
@@ -1750,7 +1755,16 @@ function ensureRuntimeSettingsModal() {
   const statusEl = document.getElementById("runtime-settings-status");
 
   const closeModal = () => {
+    if (typeof state.runtimeSettingsCloseHandler === "function") {
+      try {
+        state.runtimeSettingsCloseHandler({ modal, form, statusEl, saveBtn, closeBtn });
+      } catch (_error) {
+        // Ignore modal cleanup errors.
+      }
+    }
     state.runtimeSettingsSaveHandler = null;
+    state.runtimeSettingsOpenHandler = null;
+    state.runtimeSettingsCloseHandler = null;
     closePopupModal(modal);
   };
 
@@ -1806,7 +1820,7 @@ function ensureRuntimeSettingsModal() {
   return modal;
 }
 
-function openRuntimeSettingsModal({ title, meta, fields, onSave }) {
+function openRuntimeSettingsModal({ title, meta, fields, onSave, onOpen, onClose }) {
   const modal = ensureRuntimeSettingsModal();
   const titleEl = document.getElementById("runtime-settings-title");
   const metaEl = document.getElementById("runtime-settings-meta");
@@ -1815,7 +1829,16 @@ function openRuntimeSettingsModal({ title, meta, fields, onSave }) {
   const saveBtn = document.getElementById("runtime-settings-save");
   const normalizedFields = Array.isArray(fields) ? fields : [];
 
+  if (typeof state.runtimeSettingsCloseHandler === "function") {
+    try {
+      state.runtimeSettingsCloseHandler({ modal, fieldsEl, statusEl, saveBtn });
+    } catch (_error) {
+      // Ignore cleanup errors while swapping modal content.
+    }
+  }
   state.runtimeSettingsSaveHandler = typeof onSave === "function" ? onSave : null;
+  state.runtimeSettingsOpenHandler = typeof onOpen === "function" ? onOpen : null;
+  state.runtimeSettingsCloseHandler = typeof onClose === "function" ? onClose : null;
 
   if (titleEl) {
     titleEl.textContent = String(title || "Settings").trim() || "Settings";
@@ -1892,6 +1915,13 @@ function openRuntimeSettingsModal({ title, meta, fields, onSave }) {
   }
 
   openPopupModal(modal);
+  if (typeof state.runtimeSettingsOpenHandler === "function") {
+    try {
+      state.runtimeSettingsOpenHandler({ modal, fieldsEl, statusEl, saveBtn, titleEl, metaEl });
+    } catch (_error) {
+      // Ignore modal setup errors.
+    }
+  }
 }
 
 function _composeName(firstRaw, lastRaw, fallback = "Tater Totterson") {
@@ -4057,6 +4087,7 @@ function renderCoreSettingsManager(body, tabSpec) {
     const encodedId = escapeHtml(encodeCoreManagerId(itemId));
     const title = String(item?.title || itemId || "(item)").trim() || "(item)";
     const subtitle = String(item?.subtitle || "").trim();
+    const detail = String(item?.detail || "").trim();
     const itemGroup = String(item?.group || "").trim().toLowerCase();
     const itemGroupToken = itemGroup.replace(/[^a-z0-9_-]/g, "");
     const itemGroupClass = itemGroupToken ? ` core-manager-item-${itemGroupToken}` : "";
@@ -4105,11 +4136,27 @@ function renderCoreSettingsManager(body, tabSpec) {
     } catch (_error) {
       popupFieldsEncoded = "";
     }
+    const popupMode = String(item?.popup_mode || "").trim();
+    let popupConfigEncoded = "";
+    try {
+      popupConfigEncoded = item?.popup_config ? encodeURIComponent(JSON.stringify(item.popup_config)) : "";
+    } catch (_error) {
+      popupConfigEncoded = "";
+    }
     const popupTitle = String(item?.settings_title || `${title} Settings`).trim() || `${title} Settings`;
     const pageIndexRaw = Number(renderOptions?.page_index ?? renderOptions?.pageIndex ?? 0);
     const pageIndex = Number.isFinite(pageIndexRaw) ? Math.max(0, Math.floor(pageIndexRaw)) : 0;
     const pageAttr = pageIndex > 0 ? ` data-core-page-index="${pageIndex}"` : "";
     const pageStyle = pageIndex > 1 ? ` style="display:none;"` : "";
+    const heroImageSrc = String(item?.hero_image_src || "").trim();
+    const heroImageAlt = String(item?.hero_image_alt || title).trim() || title;
+    const heroBadges = Array.isArray(item?.hero_badges) ? item.hero_badges : [];
+    const summaryRows = Array.isArray(item?.summary_rows) ? item.summary_rows : [];
+    const sensorRows = Array.isArray(item?.sensor_rows) ? item.sensor_rows : [];
+    const sensorTitle = String(item?.sensor_title || "Sensors").trim() || "Sensors";
+    const hasSatelliteSummary = Boolean(
+      heroImageSrc || heroBadges.length || summaryRows.length || sensorRows.length || detail
+    );
 
           const sectionHtml = sections
             .map((section) => {
@@ -4174,13 +4221,6 @@ function renderCoreSettingsManager(body, tabSpec) {
       ? `
         <div class="inline-row" style="margin-top:10px;">
           ${
-            hasPopupSettingsBtn
-              ? `<button type="button" class="action-btn core-manager-settings">${escapeHtml(
-                  String(item?.settings_label || itemFieldsPopupLabel)
-                )}</button>`
-              : ""
-          }
-          ${
             hasSaveBtn
               ? `<button type="button" class="action-btn core-manager-save">${escapeHtml(
                   String(item?.save_label || "Save")
@@ -4191,6 +4231,13 @@ function renderCoreSettingsManager(body, tabSpec) {
             removeAction
               ? `<button type="button" class="inline-btn danger core-manager-remove">${escapeHtml(
                   String(item?.remove_label || "Remove")
+                )}</button>`
+              : ""
+          }
+          ${
+            hasPopupSettingsBtn
+              ? `<button type="button" class="action-btn core-manager-settings">${escapeHtml(
+                  String(item?.settings_label || itemFieldsPopupLabel)
                 )}</button>`
               : ""
           }
@@ -4206,6 +4253,93 @@ function renderCoreSettingsManager(body, tabSpec) {
       `
       : "";
 
+    const heroBadgesHtml = heroBadges.length
+      ? `
+        <div class="core-satellite-badges">
+          ${heroBadges
+            .map((badge) => {
+              const label = String(badge?.label || "").trim();
+              if (!label) {
+                return "";
+              }
+              const tone = String(badge?.tone || "muted").trim().toLowerCase().replace(/[^a-z0-9_-]/g, "");
+              return `<span class="core-satellite-badge tone-${escapeHtml(tone || "muted")}">${escapeHtml(label)}</span>`;
+            })
+            .join("")}
+        </div>
+      `
+      : "";
+
+    const summaryRowsHtml = summaryRows.length
+      ? `
+        <div class="core-satellite-facts">
+          ${summaryRows
+            .map((row) => {
+              const label = String(row?.label || "").trim();
+              const value = String(row?.value ?? "").trim();
+              if (!label || !value) {
+                return "";
+              }
+              return `
+                <div class="core-satellite-fact">
+                  <div class="small core-satellite-fact-label">${escapeHtml(label)}</div>
+                  <div class="core-satellite-fact-value">${escapeHtml(value)}</div>
+                </div>
+              `;
+            })
+            .join("")}
+        </div>
+      `
+      : "";
+
+    const sensorRowsHtml = sensorRows.length
+      ? `
+        <div class="core-satellite-sensors">
+          <div class="small core-satellite-sensors-title">${escapeHtml(sensorTitle)}</div>
+          <div class="core-satellite-sensor-grid">
+            ${sensorRows
+              .map((row) => {
+                const label = String(row?.label || "").trim();
+                const value = String(row?.value ?? "").trim();
+                const meta = String(row?.meta || row?.kind || "").trim();
+                if (!label || !value) {
+                  return "";
+                }
+                return `
+                  <div class="core-satellite-sensor-pill">
+                    <span class="core-satellite-sensor-label">${escapeHtml(label)}</span>
+                    <span class="core-satellite-sensor-value">${escapeHtml(value)}</span>
+                    ${meta ? `<span class="core-satellite-sensor-meta">${escapeHtml(meta)}</span>` : ""}
+                  </div>
+                `;
+              })
+              .join("")}
+          </div>
+        </div>
+      `
+      : "";
+
+    const summaryBlockHtml = hasSatelliteSummary
+      ? `
+        <div class="core-satellite-summary">
+          ${
+            heroImageSrc
+              ? `<div class="core-satellite-image-wrap"><img class="core-satellite-image" src="${escapeHtml(heroImageSrc)}" alt="${escapeHtml(
+                  heroImageAlt
+                )}"></div>`
+              : ""
+          }
+          <div class="core-satellite-summary-main">
+            ${subtitle ? `<div class="small core-satellite-subtitle">${escapeHtml(subtitle)}</div>` : ""}
+            ${heroBadgesHtml}
+            ${detail ? `<div class="small core-satellite-detail">${escapeHtml(detail)}</div>` : ""}
+            ${summaryRowsHtml}
+            ${sensorRowsHtml}
+          </div>
+        </div>
+      `
+      : `${subtitle ? `<div class="small">${escapeHtml(subtitle)}</div>` : ""}`;
+
     return `
       <article class="card core-manager-item${itemGroupClass}"
         data-core-key="${safeCoreKey}"
@@ -4217,12 +4351,14 @@ function renderCoreSettingsManager(body, tabSpec) {
         data-core-run-confirm="${escapeHtml(runConfirm)}"
         data-core-remove-confirm="${escapeHtml(removeConfirm)}"
         data-core-item-popup-fields="${escapeHtml(popupFieldsEncoded)}"
+        data-core-item-popup-mode="${escapeHtml(popupMode)}"
+        data-core-item-popup-config="${escapeHtml(popupConfigEncoded)}"
         data-core-item-popup-title="${escapeHtml(popupTitle)}"${pageAttr}${pageStyle}>
         <div class="card-head">
           <h3 class="card-title">${escapeHtml(title)}</h3>
           <span class="small">${safeCoreKey}</span>
         </div>
-        ${subtitle ? `<div class="small">${escapeHtml(subtitle)}</div>` : ""}
+        ${summaryBlockHtml}
         ${itemFieldsHtml}
         ${itemFieldsPopupEnabled ? "" : itemSectionsInDropdownEnabled ? "" : sectionHtml}
         ${actionRowHtml}
@@ -4595,6 +4731,21 @@ function renderCoreTabPayload(payload, tabSpec) {
   `;
 }
 
+function renderCoreTabPending(tabSpec, message = "Open this tab to load data.") {
+  const safeTabLabel = escapeHtml(tabSpec?.label || tabSpec?.core_key || "Core");
+  const safeCoreKey = escapeHtml(tabSpec?.core_key || "");
+  const text = String(message || "").trim() || "Open this tab to load data.";
+  return `
+    <div class="card">
+      <div class="card-head">
+        <h3 class="card-title">${safeTabLabel}</h3>
+        <span class="small">${safeCoreKey}</span>
+      </div>
+      ${renderNotice(text)}
+    </div>
+  `;
+}
+
 function renderCoreTopTabs(dynamicTabs, manageHtml, manageLabel = "Manage") {
   const tabs = Array.isArray(dynamicTabs) ? dynamicTabs : [];
   const safeManageLabel = escapeHtml(String(manageLabel || "Manage"));
@@ -4611,8 +4762,12 @@ function renderCoreTopTabs(dynamicTabs, manageHtml, manageLabel = "Manage") {
   const dynamicPanels = tabs
     .map(
       (tab) => `
-        <section class="core-top-tab-panel" data-core-tab-panel="${escapeHtml(tab.core_key || "")}">
-          ${renderCoreTabPayload(tab.payload, tab)}
+        <section
+          class="core-top-tab-panel"
+          data-core-tab-panel="${escapeHtml(tab.core_key || "")}"
+          data-core-tab-loaded="0"
+        >
+          ${renderCoreTabPending(tab)}
         </section>
       `
     )
@@ -4635,7 +4790,8 @@ function getActiveCoreTopTab() {
   return String(active?.dataset?.coreTab || "").trim();
 }
 
-function activateCoreTopTab(tabName) {
+function activateCoreTopTab(tabName, options = {}) {
+  const forceReload = Boolean(options && options.forceReload);
   const buttons = Array.from(document.querySelectorAll(".core-top-tab-btn[data-core-tab]"));
   const panels = Array.from(document.querySelectorAll(".core-top-tab-panel[data-core-tab-panel]"));
   if (!buttons.length || !panels.length) {
@@ -4655,6 +4811,9 @@ function activateCoreTopTab(tabName) {
   panels.forEach((panel) => {
     panel.classList.toggle("active", panel.dataset.coreTabPanel === activeTab);
   });
+  if (activeTab && activeTab !== "manage") {
+    void ensureCoreTopTabLoaded(activeTab, { force: forceReload });
+  }
 }
 
 function bindCoreTopTabs() {
@@ -4669,7 +4828,7 @@ function bindCoreTopTabs() {
       return;
     }
     button.dataset.coreTopBound = "1";
-    button.addEventListener("click", () => activateCoreTopTab(button.dataset.coreTab));
+    button.addEventListener("click", () => activateCoreTopTab(button.dataset.coreTab, { forceReload: true }));
   });
 
   const available = new Set(buttons.map((button) => button.dataset.coreTab));
@@ -4924,6 +5083,15 @@ function _coreRenderSelectOptions(selectEl, options, preferredValue = "", prefer
     Array.from(selectEl.options || []).forEach((option) => {
       option.selected = selected.has(String(option.value || "").trim());
     });
+    const nextMany = Array.from(selectEl.selectedOptions || [])
+      .map((option) => String(option?.value || "").trim())
+      .filter(Boolean);
+    const previousToken = currentMany.join("\u0000");
+    const nextToken = nextMany.join("\u0000");
+    if (previousToken !== nextToken) {
+      selectEl.dispatchEvent(new Event("change", { bubbles: true }));
+      selectEl.dispatchEvent(new Event("input", { bubbles: true }));
+    }
     return;
   }
   const hasCurrent = rows.some((row) => String(row?.value ?? "") === current);
@@ -4934,6 +5102,11 @@ function _coreRenderSelectOptions(selectEl, options, preferredValue = "", prefer
     selectEl.value = preferred;
   } else {
     selectEl.selectedIndex = 0;
+  }
+  const nextValue = String(selectEl.value || "").trim();
+  if (nextValue !== current) {
+    selectEl.dispatchEvent(new Event("change", { bubbles: true }));
+    selectEl.dispatchEvent(new Event("input", { bubbles: true }));
   }
 }
 
@@ -5088,6 +5261,76 @@ async function runCoreTabAction(coreKey, action, payload = {}) {
   });
 }
 
+function getCoreTabSpec(tabName = "") {
+  const key = String(tabName || "").trim();
+  if (!key) {
+    return null;
+  }
+  const catalog = state.coreTabSpecs && typeof state.coreTabSpecs === "object" ? state.coreTabSpecs : {};
+  return catalog[key] || null;
+}
+
+async function fetchCoreTabPayload(coreKey, { force = false } = {}) {
+  const key = String(coreKey || "").trim();
+  if (!key) {
+    throw new Error("Missing core tab key.");
+  }
+  if (!force && state.coreTabPayloadCache && Object.prototype.hasOwnProperty.call(state.coreTabPayloadCache, key)) {
+    return state.coreTabPayloadCache[key];
+  }
+  if (state.coreTabLoadPromises?.[key]) {
+    return state.coreTabLoadPromises[key];
+  }
+  if (force && state.coreTabPayloadCache) {
+    delete state.coreTabPayloadCache[key];
+  }
+  const request = api(`/api/cores/${encodeURIComponent(key)}/tab`)
+    .then((payload) => {
+      state.coreTabPayloadCache[key] = payload;
+      return payload;
+    })
+    .finally(() => {
+      if (state.coreTabLoadPromises?.[key] === request) {
+        delete state.coreTabLoadPromises[key];
+      }
+    });
+  state.coreTabLoadPromises[key] = request;
+  return request;
+}
+
+async function ensureCoreTopTabLoaded(tabName = "", { force = false } = {}) {
+  const targetTab = String(tabName || "").trim();
+  if (!targetTab || targetTab === "manage") {
+    return;
+  }
+  const panel = Array.from(document.querySelectorAll(".core-top-tab-panel[data-core-tab-panel]")).find(
+    (entry) => String(entry?.dataset?.coreTabPanel || "").trim() === targetTab
+  );
+  if (!(panel instanceof HTMLElement)) {
+    return;
+  }
+  const tabSpec = getCoreTabSpec(targetTab) || { core_key: targetTab, label: targetTab };
+  const alreadyLoaded = String(panel.dataset.coreTabLoaded || "").trim() === "1";
+  if (!force && alreadyLoaded && Object.prototype.hasOwnProperty.call(state.coreTabPayloadCache || {}, targetTab)) {
+    return;
+  }
+
+  panel.dataset.coreTabLoaded = "loading";
+  panel.innerHTML = renderCoreTabPending(tabSpec, force ? "Refreshing..." : "Loading...");
+
+  try {
+    const payload = await fetchCoreTabPayload(targetTab, { force });
+    panel.innerHTML = renderCoreTabPayload(payload, tabSpec);
+    panel.dataset.coreTabLoaded = "1";
+    bindCoreTabManagers();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error || "Failed to load this core tab.");
+    panel.innerHTML = renderCoreTabPayload({ error: message }, tabSpec);
+    panel.dataset.coreTabLoaded = "error";
+    bindCoreTabManagers();
+  }
+}
+
 function persistCoreTabFromNode(node) {
   const panel = node?.closest("[data-core-tab-panel]");
   const tabName = String(panel?.dataset?.coreTabPanel || "").trim();
@@ -5104,24 +5347,10 @@ async function refreshCoreTabInPlace(tabName = "") {
     activateCoreTopTab("manage");
     return;
   }
-
-  const tabsData = await api("/api/cores/tabs");
-  const tabs = Array.isArray(tabsData?.tabs) ? tabsData.tabs : [];
-  const spec = tabs.find((entry) => String(entry?.core_key || "").trim() === targetTab);
-  const panel = Array.from(document.querySelectorAll(".core-top-tab-panel[data-core-tab-panel]")).find(
-    (entry) => String(entry?.dataset?.coreTabPanel || "").trim() === targetTab
-  );
-  if (!panel) {
-    return;
+  await ensureCoreTopTabLoaded(targetTab, { force: true });
+  if (getActiveCoreTopTab() !== targetTab) {
+    activateCoreTopTab(targetTab);
   }
-  if (!spec) {
-    panel.innerHTML = renderNotice("This core tab is no longer available.");
-    return;
-  }
-
-  panel.innerHTML = renderCoreTabPayload(spec.payload, spec);
-  bindCoreTabManagers();
-  activateCoreTopTab(targetTab);
 }
 
 function bindCoreTabManagers() {
@@ -5221,6 +5450,241 @@ function bindCoreTabManagers() {
     }
   };
 
+  const decodeCoreManagerPopupConfig = (card) => {
+    const encoded = String(card?.dataset?.coreItemPopupConfig || "").trim();
+    if (!encoded) {
+      return {};
+    }
+    try {
+      const decoded = decodeURIComponent(encoded);
+      const parsed = JSON.parse(decoded);
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch (_error) {
+      return {};
+    }
+  };
+
+  const openVoiceSatelliteLogViewer = (card, coreKey, popupTitle, popupFields, popupConfig) => {
+    const selector = String(popupConfig?.selector || decodeCoreManagerId(card?.dataset?.coreItemId || "")).trim();
+    const host = String(popupConfig?.host || "").trim();
+    const name = String(popupConfig?.name || "").trim();
+    if (!selector) {
+      showToast("This satellite does not have a valid selector for log streaming.", "error", 3200);
+      return;
+    }
+
+    let stopped = false;
+    let cursor = 0;
+    let pollTimer = 0;
+    let logArea = null;
+    let logConsole = null;
+    let statusNode = null;
+    let modalDialog = null;
+
+    const deriveLogTone = (entry) => {
+      const explicitLevel = String(entry?.level || "").trim().toLowerCase();
+      if (explicitLevel) {
+        if (["error", "err", "danger"].includes(explicitLevel)) {
+          return "error";
+        }
+        if (["warn", "warning"].includes(explicitLevel)) {
+          return "warn";
+        }
+        if (["debug", "trace", "verbose", "very_verbose"].includes(explicitLevel)) {
+          return "debug";
+        }
+        if (["config", "info"].includes(explicitLevel)) {
+          return "info";
+        }
+      }
+      const text = String(entry?.message || entry?.display || "").trim();
+      const bracketMatch = text.match(/^\[[^\]]+\]\[([A-Z])\]/);
+      const token = bracketMatch?.[1] || "";
+      if (token === "E") {
+        return "error";
+      }
+      if (token === "W") {
+        return "warn";
+      }
+      if (token === "D" || token === "V") {
+        return "debug";
+      }
+      return "info";
+    };
+
+    const renderConsoleLine = (entry) => {
+      if (!(logConsole instanceof HTMLElement)) {
+        return;
+      }
+      const lineEl = document.createElement("div");
+      const tone = deriveLogTone(entry);
+      lineEl.className = `voice-log-line tone-${tone}`;
+      const timeText = String(entry?.time || "").trim();
+      if (timeText) {
+        const timeEl = document.createElement("span");
+        timeEl.className = "voice-log-time";
+        timeEl.textContent = timeText;
+        lineEl.appendChild(timeEl);
+      }
+      const levelToken = (() => {
+        const explicitLevel = String(entry?.level || "").trim().toLowerCase();
+        if (explicitLevel) {
+          return explicitLevel.replace(/_/g, " ").toUpperCase();
+        }
+        return tone.toUpperCase();
+      })();
+      const levelEl = document.createElement("span");
+      levelEl.className = `voice-log-level tone-${tone}`;
+      levelEl.textContent = levelToken;
+      lineEl.appendChild(levelEl);
+
+      const messageEl = document.createElement("span");
+      messageEl.className = "voice-log-message";
+      messageEl.textContent = String(entry?.message || entry?.display || "").trim();
+      lineEl.appendChild(messageEl);
+      logConsole.appendChild(lineEl);
+    };
+
+    const renderEntries = (entries, reset = false) => {
+      if (!(logConsole instanceof HTMLElement)) {
+        return;
+      }
+      const rows = Array.isArray(entries)
+        ? entries.filter((entry) => String(entry?.display || entry?.message || "").trim())
+        : [];
+      const shouldStick =
+        reset ||
+        logConsole.scrollHeight - logConsole.scrollTop - logConsole.clientHeight < 28;
+      if (reset) {
+        logConsole.innerHTML = "";
+      }
+      if (!rows.length && reset) {
+        const emptyEl = document.createElement("div");
+        emptyEl.className = "voice-log-empty";
+        emptyEl.textContent = "Waiting for live ESPHome logs...";
+        logConsole.appendChild(emptyEl);
+      } else if (rows.length) {
+        rows.forEach((entry) => renderConsoleLine(entry));
+      }
+      if (shouldStick) {
+        logConsole.scrollTop = logConsole.scrollHeight;
+      }
+    };
+
+    const stopViewer = async () => {
+      stopped = true;
+      if (pollTimer) {
+        window.clearTimeout(pollTimer);
+        pollTimer = 0;
+      }
+      try {
+        await runCoreTabAction(coreKey, "voice_logs_stop", { id: selector, selector });
+      } catch (_error) {
+        // Ignore cleanup failures while closing the log viewer.
+      }
+    };
+
+    const schedulePoll = (delayMs = 1200) => {
+      if (stopped) {
+        return;
+      }
+      pollTimer = window.setTimeout(async () => {
+        if (stopped) {
+          return;
+        }
+        try {
+          const result = await runCoreTabAction(coreKey, "voice_logs_poll", {
+            id: selector,
+            selector,
+            after_seq: cursor,
+          });
+          const entries = Array.isArray(result?.entries) ? result.entries : [];
+          if (entries.length) {
+            renderEntries(entries, false);
+          }
+          cursor = Number(result?.cursor || cursor || 0);
+          if (statusNode) {
+            const errorText = String(result?.error || "").trim();
+            statusNode.textContent = errorText
+              ? `Log feed warning: ${errorText}`
+              : `Streaming live logs from ${name || selector}.`;
+          }
+          schedulePoll(1200);
+        } catch (error) {
+          if (statusNode) {
+            statusNode.textContent = `Log feed error: ${String(error?.message || "unknown error")}`;
+          }
+          schedulePoll(2500);
+        }
+      }, delayMs);
+    };
+
+    openRuntimeSettingsModal({
+      title: popupTitle || `${name || selector} Live Log`,
+      meta: [name || selector, host || selector].filter(Boolean).join(" • "),
+      fields: popupFields,
+      onOpen: async ({ modal, fieldsEl, statusEl }) => {
+        statusNode = statusEl instanceof HTMLElement ? statusEl : null;
+        logArea = fieldsEl?.querySelector('[data-setting-key="live_log_feed"]') || null;
+        modalDialog = modal?.querySelector(".runtime-settings-dialog") || null;
+        modal?.classList.add("voice-log-modal");
+        modalDialog?.classList.add("runtime-settings-dialog-log");
+        fieldsEl?.classList.add("runtime-settings-fields-log");
+        if (logArea instanceof HTMLTextAreaElement) {
+          logArea.readOnly = true;
+          logArea.spellcheck = false;
+          logArea.classList.add("voice-log-source-textarea");
+          const label = logArea.closest("label");
+          const consoleEl = document.createElement("div");
+          consoleEl.className = "voice-log-console";
+          consoleEl.setAttribute("role", "log");
+          consoleEl.setAttribute("aria-live", "polite");
+          consoleEl.setAttribute("aria-label", `${name || selector} live device log`);
+          logConsole = consoleEl;
+          if (label instanceof HTMLElement) {
+            label.classList.add("voice-log-field");
+            label.appendChild(consoleEl);
+          }
+        }
+        if (statusNode) {
+          statusNode.textContent = "Opening live log feed...";
+          statusNode.classList.add("voice-log-status");
+        }
+        try {
+          const result = await runCoreTabAction(coreKey, "voice_logs_start", { id: selector, selector });
+          const entries = Array.isArray(result?.entries) ? result.entries : [];
+          cursor = Number(result?.cursor || 0);
+          renderEntries(entries, true);
+          if (statusNode) {
+            statusNode.textContent = `Streaming live logs from ${name || selector}.`;
+          }
+          schedulePoll(1000);
+        } catch (error) {
+          renderEntries(
+            [
+              {
+                display: `Failed to open live log feed: ${String(error?.message || "unknown error")}`,
+              },
+            ],
+            true
+          );
+          if (statusNode) {
+            statusNode.textContent = `Log feed failed: ${String(error?.message || "unknown error")}`;
+          }
+        }
+      },
+      onClose: ({ modal, fieldsEl, statusEl }) => {
+        modal?.classList.remove("voice-log-modal");
+        modalDialog?.classList.remove("runtime-settings-dialog-log");
+        fieldsEl?.classList.remove("runtime-settings-fields-log");
+        if (statusEl instanceof HTMLElement) {
+          statusEl.classList.remove("voice-log-status");
+        }
+        void stopViewer();
+      },
+    });
+  };
+
   document.querySelectorAll(".core-manager-add-form[data-core-key][data-core-action]").forEach((form) => {
     if (form.dataset.coreManagerActionBound === "1") {
       return;
@@ -5277,6 +5741,12 @@ function bindCoreTabManagers() {
         return;
       }
       const popupTitle = String(card?.dataset?.coreItemPopupTitle || `${itemId || coreKey} Settings`).trim();
+      const popupMode = String(card?.dataset?.coreItemPopupMode || "").trim();
+      const popupConfig = decodeCoreManagerPopupConfig(card);
+      if (popupMode === "voice-satellite-log") {
+        openVoiceSatelliteLogViewer(card, coreKey, popupTitle, modalFields, popupConfig);
+        return;
+      }
       openRuntimeSettingsModal({
         title: popupTitle || "Settings",
         meta: coreKey,
@@ -5403,6 +5873,7 @@ function bindCoreTabManagers() {
       setCoreManagerStatus(card, "Queueing...");
       try {
         const activeTab = persistCoreTabFromNode(card);
+        const values = collectCoreManagerValues(card);
         const result = await runActionWithProgress(
           {
             title: "Running core item",
@@ -5411,8 +5882,17 @@ function bindCoreTabManagers() {
             successText: "Queued.",
             errorPrefix: "Core manager run failed",
           },
-          () => runCoreTabAction(coreKey, action, { id: itemId })
+          () => runCoreTabAction(coreKey, action, { id: itemId, values })
         );
+        const sampleUrl = String(result?.sample_url || "").trim();
+        if (sampleUrl) {
+          try {
+            const audio = new Audio(sampleUrl);
+            await audio.play();
+          } catch (playError) {
+            showToast(`Sample ready but playback failed: ${playError.message}`, "error", 3600);
+          }
+        }
         await refreshCoreTabInPlace(activeTab);
         state.notice = String(result?.message || "Queued.");
         setCoreManagerStatus(card, state.notice);
@@ -6486,6 +6966,19 @@ async function loadSurfaceView(kind) {
       runtimeCard: false,
     });
     const dynamicTabs = Array.isArray(coreTabsData?.tabs) ? coreTabsData.tabs : [];
+    state.coreTabSpecs = Object.fromEntries(
+      dynamicTabs
+        .map((tab) => {
+          const key = String(tab?.core_key || "").trim();
+          if (!key) {
+            return null;
+          }
+          return [key, tab];
+        })
+        .filter(Boolean)
+    );
+    state.coreTabPayloadCache = {};
+    state.coreTabLoadPromises = {};
     const manageLabel = String(coreTabsData?.manage_label || "Manage");
     root.innerHTML = `${consumeNoticeHtml()}
       ${renderCoreTopTabs(dynamicTabs, manageHtml, manageLabel)}
@@ -6676,6 +7169,75 @@ async function loadSettingsView() {
         })
         .join("")
     : `<option value="" disabled>(No plugin ids available)</option>`;
+  const speechUi = settings?.speech_ui && typeof settings.speech_ui === "object" ? settings.speech_ui : {};
+  const announcementSpeechUi =
+    settings?.announcement_speech_ui && typeof settings.announcement_speech_ui === "object"
+      ? settings.announcement_speech_ui
+      : {};
+  const speechSttBackendOptions = Array.isArray(speechUi.stt_backend_options) ? speechUi.stt_backend_options : [];
+  const speechTtsBackendOptions = Array.isArray(speechUi.tts_backend_options) ? speechUi.tts_backend_options : [];
+  const speechTtsModelOptionsByBackend =
+    speechUi.tts_model_options_by_backend && typeof speechUi.tts_model_options_by_backend === "object"
+      ? speechUi.tts_model_options_by_backend
+      : {};
+  const speechTtsVoiceOptionsByModel =
+    speechUi.tts_voice_options_by_model && typeof speechUi.tts_voice_options_by_model === "object"
+      ? speechUi.tts_voice_options_by_model
+      : {};
+  const announcementTtsBackendOptions = Array.isArray(announcementSpeechUi.tts_backend_options)
+    ? announcementSpeechUi.tts_backend_options
+    : [];
+  const announcementTtsModelOptionsByBackend =
+    announcementSpeechUi.tts_model_options_by_backend && typeof announcementSpeechUi.tts_model_options_by_backend === "object"
+      ? announcementSpeechUi.tts_model_options_by_backend
+      : {};
+  const announcementTtsVoiceOptionsByModel =
+    announcementSpeechUi.tts_voice_options_by_model && typeof announcementSpeechUi.tts_voice_options_by_model === "object"
+      ? announcementSpeechUi.tts_voice_options_by_model
+      : {};
+  const announcementHaTtsEntityOptions = Array.isArray(announcementSpeechUi.homeassistant_tts_entity_options)
+    ? announcementSpeechUi.homeassistant_tts_entity_options
+    : [];
+  const renderSettingsSelectOptions = (options, currentValue, { blankLabel = null } = {}) => {
+    const current = String(currentValue || "").trim();
+    const normalized = Array.isArray(options)
+      ? options
+          .map((row) => ({
+            value: String(row?.value || "").trim(),
+            label: String(row?.label || row?.value || "").trim(),
+          }))
+          .filter((row) => row.value)
+      : [];
+    if (blankLabel !== null && !normalized.some((row) => row.value === "")) {
+      normalized.unshift({ value: "", label: String(blankLabel || "").trim() || "Default" });
+    }
+    if (current && !normalized.some((row) => row.value === current)) {
+      normalized.push({ value: current, label: current });
+    }
+    return normalized
+      .map((row) => {
+        const selected = row.value === current ? "selected" : "";
+        return `<option value="${escapeHtml(row.value)}" ${selected}>${escapeHtml(row.label || row.value)}</option>`;
+      })
+      .join("");
+  };
+  const currentSpeechTtsBackend = String(settings.speech_tts_backend || "wyoming").trim() || "wyoming";
+  const initialSpeechTtsModelOptions = Array.isArray(speechTtsModelOptionsByBackend[currentSpeechTtsBackend])
+    ? speechTtsModelOptionsByBackend[currentSpeechTtsBackend]
+    : [];
+  const currentSpeechTtsModel = String(settings.speech_tts_model || "").trim();
+  const initialSpeechTtsVoiceOptions = Array.isArray(speechTtsVoiceOptionsByModel[currentSpeechTtsModel])
+    ? speechTtsVoiceOptionsByModel[currentSpeechTtsModel]
+    : [];
+  const currentAnnouncementTtsBackend =
+    String(settings.speech_announcement_tts_backend || "homeassistant_api").trim() || "homeassistant_api";
+  const initialAnnouncementTtsModelOptions = Array.isArray(announcementTtsModelOptionsByBackend[currentAnnouncementTtsBackend])
+    ? announcementTtsModelOptionsByBackend[currentAnnouncementTtsBackend]
+    : [];
+  const currentAnnouncementTtsModel = String(settings.speech_announcement_tts_model || "").trim();
+  const initialAnnouncementTtsVoiceOptions = Array.isArray(announcementTtsVoiceOptionsByModel[currentAnnouncementTtsModel])
+    ? announcementTtsVoiceOptionsByModel[currentAnnouncementTtsModel]
+    : [];
 
   root.innerHTML = `${consumeNoticeHtml()}
     <div class="card">
@@ -7009,9 +7571,7 @@ async function loadSettingsView() {
               </div>
               <div id="settings-hydra-model-stack" class="hydra-model-stack">
                 <div id="settings-hydra-base-fields" class="hydra-model-panel is-active">
-                  <div id="settings-hydra-base-title" class="hydra-model-panel-title">${
-                    settings.hydra_beast_mode_enabled ? "AI Calls" : "Base Model"
-                  }</div>
+                  <div class="hydra-model-panel-title">Base Model</div>
                   <div class="small hydra-model-panel-note">Used for regular AI calls. Multiple base servers rotate in round-robin order.</div>
                   <label>Base Host / IP
                     <input id="set_hydra_llm_host" type="text" value="${escapeHtml(
@@ -7036,7 +7596,11 @@ async function loadSettingsView() {
                       <button type="button" id="settings-hydra-base-server-add" class="inline-btn">Add Server</button>
                     </div>
                   </div>
-                  <div class="hydra-role-title">Vision Model (Image Tools)</div>
+                </div>
+
+                <div class="hydra-model-panel is-active">
+                  <div class="hydra-model-panel-title">Vision Model</div>
+                  <div class="small hydra-model-panel-note">Used for image tools and vision-enabled requests.</div>
                   <label>Vision API Base URL
                     <input id="set_vision_api_base" type="text" value="${escapeHtml(
                       settings.vision_api_base || "http://127.0.0.1:1234"
@@ -7050,6 +7614,116 @@ async function loadSettingsView() {
                   <label style="grid-column: 1 / -1;">Vision API Key (optional)
                     <input id="set_vision_api_key" type="password" value="${escapeHtml(settings.vision_api_key || "")}" />
                   </label>
+                </div>
+
+                <div class="hydra-model-panel is-active">
+                  <div class="hydra-model-panel-title">STT</div>
+                  <div class="small hydra-model-panel-note">
+                    Shared globally across Tater, cores, and verbas.
+                  </div>
+                  <label>STT Backend
+                    <select id="set_speech_stt_backend">
+                      ${renderSettingsSelectOptions(speechSttBackendOptions, settings.speech_stt_backend || "faster_whisper")}
+                    </select>
+                  </label>
+                  <label id="speech-wyoming-stt-host-wrap">Wyoming STT Host
+                    <input id="set_speech_wyoming_stt_host" type="text" value="${escapeHtml(
+                      settings.speech_wyoming_stt_host || "127.0.0.1"
+                    )}" />
+                  </label>
+                  <label id="speech-wyoming-stt-port-wrap">Wyoming STT Port
+                    <input id="set_speech_wyoming_stt_port" type="number" min="1" max="65535" value="${escapeHtml(
+                      settings.speech_wyoming_stt_port || "10300"
+                    )}" />
+                  </label>
+                </div>
+
+                <div class="hydra-model-panel is-active">
+                  <div class="hydra-model-panel-title">TTS</div>
+                  <div class="small hydra-model-panel-note">
+                    Shared globally across Tater, cores, and verbas.
+                  </div>
+                  <div class="small core-inline-section-title" style="grid-column: 1 / -1;">Direct TTS</div>
+                  <label>TTS Backend
+                    <select id="set_speech_tts_backend">
+                      ${renderSettingsSelectOptions(speechTtsBackendOptions, currentSpeechTtsBackend)}
+                    </select>
+                  </label>
+                  <label id="speech-tts-model-wrap">TTS Model
+                    <select id="set_speech_tts_model">
+                      ${renderSettingsSelectOptions(initialSpeechTtsModelOptions, settings.speech_tts_model || "")}
+                    </select>
+                  </label>
+                  <label id="speech-tts-voice-wrap">TTS Voice
+                    <select id="set_speech_tts_voice">
+                      ${renderSettingsSelectOptions(initialSpeechTtsVoiceOptions, settings.speech_tts_voice || "")}
+                    </select>
+                  </label>
+                  <label id="speech-wyoming-tts-host-wrap">Wyoming TTS Host
+                    <input id="set_speech_wyoming_tts_host" type="text" value="${escapeHtml(
+                      settings.speech_wyoming_tts_host || "127.0.0.1"
+                    )}" />
+                  </label>
+                  <label id="speech-wyoming-tts-port-wrap">Wyoming TTS Port
+                    <input id="set_speech_wyoming_tts_port" type="number" min="1" max="65535" value="${escapeHtml(
+                      settings.speech_wyoming_tts_port || "10200"
+                    )}" />
+                  </label>
+                  <label id="speech-wyoming-tts-voice-wrap" style="grid-column: 1 / -1;">Wyoming TTS Voice (optional)
+                    <select id="set_speech_wyoming_tts_voice">
+                      <option value="">Default</option>
+                      ${
+                        settings.speech_wyoming_tts_voice
+                          ? `<option value="${escapeHtml(settings.speech_wyoming_tts_voice)}" selected>${escapeHtml(
+                              `${settings.speech_wyoming_tts_voice} (saved)`
+                            )}</option>`
+                          : ""
+                      }
+                    </select>
+                    <div id="speech-wyoming-tts-voice-status" class="small"></div>
+                  </label>
+
+                  <div class="small core-inline-section-title" style="grid-column: 1 / -1; margin-top: 8px;">Announcement TTS</div>
+                  <div class="small hydra-model-panel-note" style="grid-column: 1 / -1;">
+                    Default for cores, verbas, and platforms that speak through Home Assistant media players or announcement flows.
+                  </div>
+                  <label>Announcement Backend
+                    <select id="set_speech_announcement_tts_backend">
+                      ${renderSettingsSelectOptions(announcementTtsBackendOptions, currentAnnouncementTtsBackend)}
+                    </select>
+                  </label>
+                  <label id="speech-announcement-tts-model-wrap">Announcement Model
+                    <select id="set_speech_announcement_tts_model">
+                      ${renderSettingsSelectOptions(initialAnnouncementTtsModelOptions, settings.speech_announcement_tts_model || "")}
+                    </select>
+                  </label>
+                  <label id="speech-announcement-tts-voice-wrap">Announcement Voice
+                    <select id="set_speech_announcement_tts_voice">
+                      ${renderSettingsSelectOptions(initialAnnouncementTtsVoiceOptions, settings.speech_announcement_tts_voice || "")}
+                    </select>
+                  </label>
+                  <label id="speech-announcement-tts-entity-wrap">Home Assistant TTS Entity
+                    <select id="set_speech_announcement_tts_entity">
+                      ${renderSettingsSelectOptions(announcementHaTtsEntityOptions, settings.speech_announcement_tts_entity || "", {
+                        blankLabel: "(Select Home Assistant TTS entity)",
+                      })}
+                    </select>
+                  </label>
+
+                  <label style="grid-column: 1 / -1;">Public Tater Audio URL
+                    <input id="set_speech_tts_public_base_url" type="text" value="${escapeHtml(
+                      settings.speech_tts_public_base_url || ""
+                    )}" placeholder="http://10.4.20.173:8797" />
+                    <div class="small">Used when Home Assistant media players need to fetch audio generated by Tater backends like Wyoming, Kokoro, Pocket TTS, or Piper.</div>
+                  </label>
+                  <label style="grid-column: 1 / -1;">TTS Sample Text
+                    <textarea id="set_speech_tts_sample_text" rows="3">Hello from Tater. This is a voice preview.</textarea>
+                  </label>
+                  <div class="inline-row" style="grid-column: 1 / -1;">
+                    <button type="button" id="settings-speech-tts-preview" class="inline-btn">Test Voice</button>
+                    <button type="button" id="settings-speech-tts-download" class="inline-btn">Download Sample</button>
+                    <span id="settings-speech-tts-preview-status" class="small"></span>
+                  </div>
                 </div>
                 <div id="settings-hydra-beast-fields" class="hydra-model-panel ${
                   settings.hydra_beast_mode_enabled ? "is-active" : ""
@@ -7145,7 +7819,7 @@ async function loadSettingsView() {
               </div>
               <div class="inline-row" style="grid-column: 1 / -1;">
                 <button type="button" id="settings-hydra-model-save" class="action-btn">Save Model</button>
-              <span class="small">Saves Hydra and Vision model settings only.</span>
+              <span class="small">Saves Hydra, Vision, and shared speech model settings.</span>
               </div>
             </div>
           </div>
@@ -7724,7 +8398,6 @@ async function loadSettingsView() {
 
   const hydraBeastToggleEl = document.getElementById("set_hydra_beast_mode_enabled");
   const hydraBaseFieldsEl = document.getElementById("settings-hydra-base-fields");
-  const hydraBaseTitleEl = document.getElementById("settings-hydra-base-title");
   const hydraBeastFieldsEl = document.getElementById("settings-hydra-beast-fields");
   const applyHydraBeastVisibility = () => {
     if (!hydraBaseFieldsEl || !hydraBeastFieldsEl || !hydraBeastToggleEl) {
@@ -7733,9 +8406,6 @@ async function loadSettingsView() {
     const beastEnabled = Boolean(hydraBeastToggleEl.checked);
     hydraBaseFieldsEl.classList.add("is-active");
     hydraBeastFieldsEl.classList.toggle("is-active", beastEnabled);
-    if (hydraBaseTitleEl) {
-      hydraBaseTitleEl.textContent = beastEnabled ? "AI Calls" : "Base Model";
-    }
   };
   if (hydraBeastToggleEl) {
     hydraBeastToggleEl.addEventListener("change", applyHydraBeastVisibility);
@@ -7817,6 +8487,428 @@ async function loadSettingsView() {
     renderHydraAdditionalBaseRows(hydraAdditionalBaseRowsState);
   });
 
+  const speechSttBackendEl = document.getElementById("set_speech_stt_backend");
+  const speechWyomingSttHostWrapEl = document.getElementById("speech-wyoming-stt-host-wrap");
+  const speechWyomingSttPortWrapEl = document.getElementById("speech-wyoming-stt-port-wrap");
+  const speechTtsBackendEl = document.getElementById("set_speech_tts_backend");
+  const speechTtsModelWrapEl = document.getElementById("speech-tts-model-wrap");
+  const speechTtsModelEl = document.getElementById("set_speech_tts_model");
+  const speechTtsVoiceWrapEl = document.getElementById("speech-tts-voice-wrap");
+  const speechTtsVoiceEl = document.getElementById("set_speech_tts_voice");
+  const announcementTtsBackendEl = document.getElementById("set_speech_announcement_tts_backend");
+  const announcementTtsModelWrapEl = document.getElementById("speech-announcement-tts-model-wrap");
+  const announcementTtsModelEl = document.getElementById("set_speech_announcement_tts_model");
+  const announcementTtsVoiceWrapEl = document.getElementById("speech-announcement-tts-voice-wrap");
+  const announcementTtsVoiceEl = document.getElementById("set_speech_announcement_tts_voice");
+  const announcementTtsEntityWrapEl = document.getElementById("speech-announcement-tts-entity-wrap");
+  const announcementTtsEntityEl = document.getElementById("set_speech_announcement_tts_entity");
+  const speechTtsSampleTextEl = document.getElementById("set_speech_tts_sample_text");
+  const speechTtsPreviewBtnEl = document.getElementById("settings-speech-tts-preview");
+  const speechTtsDownloadBtnEl = document.getElementById("settings-speech-tts-download");
+  const speechTtsPreviewStatusEl = document.getElementById("settings-speech-tts-preview-status");
+  const speechWyomingTtsHostWrapEl = document.getElementById("speech-wyoming-tts-host-wrap");
+  const speechWyomingTtsPortWrapEl = document.getElementById("speech-wyoming-tts-port-wrap");
+  const speechWyomingTtsVoiceWrapEl = document.getElementById("speech-wyoming-tts-voice-wrap");
+  const speechWyomingTtsVoiceEl = document.getElementById("set_speech_wyoming_tts_voice");
+  const speechWyomingTtsVoiceStatusEl = document.getElementById("speech-wyoming-tts-voice-status");
+  let speechTtsPreviewUrl = "";
+  let speechTtsPreviewBlob = null;
+  let speechWyomingTtsRefreshSeq = 0;
+  let speechWyomingTtsRefreshTimer = 0;
+
+  const setElementVisible = (element, visible) => {
+    if (!element) {
+      return;
+    }
+    element.style.display = visible ? "" : "none";
+  };
+
+  const syncSpeechTtsModelOptions = ({ forceReset = false } = {}) => {
+    if (!speechTtsBackendEl || !speechTtsModelEl) {
+      return [];
+    }
+    const backend = String(speechTtsBackendEl.value || "").trim();
+    const modelOptions = Array.isArray(speechTtsModelOptionsByBackend[backend]) ? speechTtsModelOptionsByBackend[backend] : [];
+    const currentModel = String(speechTtsModelEl.value || "").trim();
+    const allowedModels = new Set(modelOptions.map((row) => String(row?.value || "").trim()).filter(Boolean));
+    const nextModel = !forceReset && allowedModels.has(currentModel)
+      ? currentModel
+      : String(modelOptions[0]?.value || "").trim();
+    speechTtsModelEl.innerHTML = renderSettingsSelectOptions(modelOptions, nextModel);
+    speechTtsModelEl.value = nextModel;
+    return modelOptions;
+  };
+
+  const syncSpeechTtsVoiceOptions = ({ forceReset = false } = {}) => {
+    if (!speechTtsModelEl || !speechTtsVoiceEl) {
+      return;
+    }
+    const model = String(speechTtsModelEl.value || "").trim();
+    const voiceOptions = Array.isArray(speechTtsVoiceOptionsByModel[model]) ? speechTtsVoiceOptionsByModel[model] : [];
+    const currentVoice = String(speechTtsVoiceEl.value || "").trim();
+    const allowedVoices = new Set(voiceOptions.map((row) => String(row?.value || "").trim()).filter(Boolean));
+    const nextVoice = !forceReset && allowedVoices.has(currentVoice)
+      ? currentVoice
+      : String(voiceOptions[0]?.value || "").trim();
+    speechTtsVoiceEl.innerHTML = renderSettingsSelectOptions(voiceOptions, nextVoice);
+    speechTtsVoiceEl.value = nextVoice;
+  };
+
+  const syncAnnouncementTtsModelOptions = ({ forceReset = false } = {}) => {
+    if (!announcementTtsBackendEl || !announcementTtsModelEl) {
+      return [];
+    }
+    const backend = String(announcementTtsBackendEl.value || "").trim();
+    const modelOptions = Array.isArray(announcementTtsModelOptionsByBackend[backend])
+      ? announcementTtsModelOptionsByBackend[backend]
+      : [];
+    const currentModel = String(announcementTtsModelEl.value || "").trim();
+    const allowedModels = new Set(modelOptions.map((row) => String(row?.value || "").trim()).filter(Boolean));
+    const nextModel = !forceReset && allowedModels.has(currentModel)
+      ? currentModel
+      : String(modelOptions[0]?.value || "").trim();
+    announcementTtsModelEl.innerHTML = renderSettingsSelectOptions(modelOptions, nextModel);
+    announcementTtsModelEl.value = nextModel;
+    return modelOptions;
+  };
+
+  const syncAnnouncementTtsVoiceOptions = ({ forceReset = false } = {}) => {
+    if (!announcementTtsModelEl || !announcementTtsVoiceEl) {
+      return;
+    }
+    const model = String(announcementTtsModelEl.value || "").trim();
+    const voiceOptions = Array.isArray(announcementTtsVoiceOptionsByModel[model])
+      ? announcementTtsVoiceOptionsByModel[model]
+      : [];
+    const currentVoice = String(announcementTtsVoiceEl.value || "").trim();
+    const allowedVoices = new Set(voiceOptions.map((row) => String(row?.value || "").trim()).filter(Boolean));
+    const nextVoice = !forceReset && allowedVoices.has(currentVoice)
+      ? currentVoice
+      : String(voiceOptions[0]?.value || "").trim();
+    announcementTtsVoiceEl.innerHTML = renderSettingsSelectOptions(voiceOptions, nextVoice);
+    announcementTtsVoiceEl.value = nextVoice;
+  };
+
+  const syncAnnouncementTtsEntityOptions = ({ forceReset = false } = {}) => {
+    if (!announcementTtsEntityEl) {
+      return;
+    }
+    const currentEntity = String(announcementTtsEntityEl.value || "").trim();
+    const allowedEntities = new Set(
+      announcementHaTtsEntityOptions.map((row) => String(row?.value || "").trim()).filter(Boolean)
+    );
+    const nextEntity = !forceReset && allowedEntities.has(currentEntity)
+      ? currentEntity
+      : String(announcementHaTtsEntityOptions[0]?.value || "").trim();
+    announcementTtsEntityEl.innerHTML = renderSettingsSelectOptions(
+      announcementHaTtsEntityOptions,
+      nextEntity,
+      { blankLabel: "(Select Home Assistant TTS entity)" }
+    );
+    announcementTtsEntityEl.value = nextEntity;
+  };
+
+  const applySpeechSettingsVisibility = ({ resetTtsSelection = false } = {}) => {
+    const sttBackend = String(speechSttBackendEl?.value || "").trim();
+    const ttsBackend = String(speechTtsBackendEl?.value || "").trim();
+    const announcementTtsBackend = String(announcementTtsBackendEl?.value || "").trim();
+    setElementVisible(speechWyomingSttHostWrapEl, sttBackend === "wyoming");
+    setElementVisible(speechWyomingSttPortWrapEl, sttBackend === "wyoming");
+
+    const showsLocalModel = ["kokoro", "pocket_tts", "piper"].includes(ttsBackend);
+    const showsVoiceSelect = ["kokoro", "pocket_tts"].includes(ttsBackend);
+    const showsWyoming = ttsBackend === "wyoming";
+
+    syncSpeechTtsModelOptions({ forceReset: resetTtsSelection });
+    syncSpeechTtsVoiceOptions({ forceReset: resetTtsSelection });
+
+    setElementVisible(speechTtsModelWrapEl, showsLocalModel);
+    setElementVisible(speechTtsVoiceWrapEl, showsVoiceSelect);
+    setElementVisible(speechWyomingTtsHostWrapEl, showsWyoming);
+    setElementVisible(speechWyomingTtsPortWrapEl, showsWyoming);
+    setElementVisible(speechWyomingTtsVoiceWrapEl, showsWyoming);
+    if (showsWyoming) {
+      queueRefreshSpeechWyomingTtsVoices();
+    } else if (speechWyomingTtsVoiceStatusEl) {
+      speechWyomingTtsVoiceStatusEl.textContent = "";
+    }
+
+    const showsAnnouncementLocalModel = ["kokoro", "pocket_tts", "piper"].includes(announcementTtsBackend);
+    const showsAnnouncementVoiceSelect = ["kokoro", "pocket_tts"].includes(announcementTtsBackend);
+    const showsAnnouncementHaEntity = announcementTtsBackend === "homeassistant_api";
+
+    syncAnnouncementTtsModelOptions({ forceReset: resetTtsSelection });
+    syncAnnouncementTtsVoiceOptions({ forceReset: resetTtsSelection });
+    syncAnnouncementTtsEntityOptions({ forceReset: resetTtsSelection });
+
+    setElementVisible(announcementTtsModelWrapEl, showsAnnouncementLocalModel);
+    setElementVisible(announcementTtsVoiceWrapEl, showsAnnouncementVoiceSelect);
+    setElementVisible(announcementTtsEntityWrapEl, showsAnnouncementHaEntity);
+  };
+
+  const setSpeechTtsDownloadEnabled = (enabled) => {
+    if (!speechTtsDownloadBtnEl) {
+      return;
+    }
+    speechTtsDownloadBtnEl.disabled = !enabled;
+  };
+
+  const renderSpeechWyomingTtsVoiceOptions = (rows, currentValue = "") => {
+    if (!speechWyomingTtsVoiceEl) {
+      return;
+    }
+    const options = [{ value: "", label: "Default" }];
+    const seen = new Set([""]);
+    const inputRows = Array.isArray(rows) ? rows : [];
+    inputRows.forEach((row) => {
+      const value = String(row?.value || "").trim();
+      const label = String(row?.label || value).trim();
+      if (!value || seen.has(value)) {
+        return;
+      }
+      seen.add(value);
+      options.push({ value, label });
+    });
+    const current = String(currentValue || "").trim();
+    if (current && !seen.has(current)) {
+      options.push({ value: current, label: `${current} (saved)` });
+    }
+    speechWyomingTtsVoiceEl.innerHTML = renderSettingsSelectOptions(options, current);
+    speechWyomingTtsVoiceEl.value = current;
+  };
+
+  const refreshSpeechWyomingTtsVoices = async () => {
+    if (!speechWyomingTtsVoiceEl || String(speechTtsBackendEl?.value || "").trim() !== "wyoming") {
+      return;
+    }
+    const host = String(document.getElementById("set_speech_wyoming_tts_host")?.value || "").trim();
+    const port = String(document.getElementById("set_speech_wyoming_tts_port")?.value || "").trim();
+    const currentVoice = String(speechWyomingTtsVoiceEl.value || "").trim();
+    if (!host || !port) {
+      renderSpeechWyomingTtsVoiceOptions([], currentVoice);
+      if (speechWyomingTtsVoiceStatusEl) {
+        speechWyomingTtsVoiceStatusEl.textContent = "Enter Wyoming host and port to load voices.";
+      }
+      return;
+    }
+
+    const requestId = ++speechWyomingTtsRefreshSeq;
+    if (speechWyomingTtsVoiceStatusEl) {
+      speechWyomingTtsVoiceStatusEl.textContent = "Loading Wyoming voices...";
+    }
+    try {
+      const result = await api("/api/settings/speech/wyoming-tts-voices", {
+        method: "POST",
+        body: JSON.stringify({
+          host,
+          port,
+          current_voice: currentVoice,
+        }),
+        _timeoutMs: 15000,
+      });
+      if (requestId !== speechWyomingTtsRefreshSeq) {
+        return;
+      }
+      const voices = Array.isArray(result?.voices) ? result.voices : [];
+      renderSpeechWyomingTtsVoiceOptions(voices, currentVoice);
+      if (speechWyomingTtsVoiceStatusEl) {
+        const count = Math.max(0, Number(result?.count || 0));
+        speechWyomingTtsVoiceStatusEl.textContent = count
+          ? `Loaded ${count} Wyoming voice${count === 1 ? "" : "s"}.`
+          : "No Wyoming voices reported by server.";
+      }
+    } catch (error) {
+      if (requestId !== speechWyomingTtsRefreshSeq) {
+        return;
+      }
+      renderSpeechWyomingTtsVoiceOptions([], currentVoice);
+      if (speechWyomingTtsVoiceStatusEl) {
+        speechWyomingTtsVoiceStatusEl.textContent = error?.message || "Failed to load Wyoming voices.";
+      }
+    }
+  };
+
+  const queueRefreshSpeechWyomingTtsVoices = () => {
+    if (speechWyomingTtsRefreshTimer) {
+      window.clearTimeout(speechWyomingTtsRefreshTimer);
+    }
+    speechWyomingTtsRefreshTimer = window.setTimeout(() => {
+      speechWyomingTtsRefreshTimer = 0;
+      refreshSpeechWyomingTtsVoices();
+    }, 250);
+  };
+
+  const stopSpeechTtsPreviewPlayback = () => {
+    if (speechTtsPreviewUrl) {
+      try {
+        URL.revokeObjectURL(speechTtsPreviewUrl);
+      } catch {
+        // ignore preview cleanup failures
+      }
+      speechTtsPreviewUrl = "";
+    }
+  };
+
+  const clearSpeechTtsPreviewCache = () => {
+    stopSpeechTtsPreviewPlayback();
+    speechTtsPreviewBlob = null;
+    setSpeechTtsDownloadEnabled(false);
+  };
+
+  const buildSpeechTtsPreviewPayload = () => ({
+    backend: String(speechTtsBackendEl?.value || "").trim(),
+    model: String(speechTtsModelEl?.value || "").trim(),
+    voice: String(speechTtsVoiceEl?.value || "").trim(),
+    wyoming_host: String(document.getElementById("set_speech_wyoming_tts_host")?.value || "").trim(),
+    wyoming_port: String(document.getElementById("set_speech_wyoming_tts_port")?.value || "").trim(),
+    wyoming_voice: String(speechWyomingTtsVoiceEl?.value || "").trim(),
+    text: String(speechTtsSampleTextEl?.value || "").trim() || "Hello from Tater. This is a voice preview.",
+  });
+
+  const requestSpeechTtsPreviewBlob = async () => {
+    const response = await fetch(withBasePath("/api/settings/speech/tts-preview"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(buildSpeechTtsPreviewPayload()),
+    });
+    if (!response.ok) {
+      let detail = "TTS preview failed";
+      try {
+        const body = await response.json();
+        detail = String(body?.detail || detail);
+      } catch {
+        // ignore non-JSON errors
+      }
+      throw new Error(detail);
+    }
+    return response.blob();
+  };
+
+  const sanitizeFilenamePart = (value, fallback) => {
+    const token = String(value || "").trim().replace(/[^a-z0-9._-]+/gi, "-").replace(/^-+|-+$/g, "");
+    return token || fallback;
+  };
+
+  const buildSpeechTtsSampleFilename = () => {
+    const backend = sanitizeFilenamePart(speechTtsBackendEl?.value, "tts");
+    const model = sanitizeFilenamePart(speechTtsModelEl?.value, "default-model");
+    const voice = sanitizeFilenamePart(speechTtsVoiceEl?.value || speechWyomingTtsVoiceEl?.value, "default-voice");
+    return `tater-tts-sample-${backend}-${model}-${voice}.wav`;
+  };
+
+  const previewSpeechTts = async () => {
+    if (!speechTtsPreviewBtnEl) {
+      return;
+    }
+    speechTtsPreviewBtnEl.disabled = true;
+    setSpeechTtsDownloadEnabled(false);
+    if (speechTtsPreviewStatusEl) {
+      speechTtsPreviewStatusEl.textContent = "Generating sample...";
+    }
+    clearSpeechTtsPreviewCache();
+    try {
+      speechTtsPreviewBlob = await requestSpeechTtsPreviewBlob();
+      speechTtsPreviewUrl = URL.createObjectURL(speechTtsPreviewBlob);
+      const audio = new Audio(speechTtsPreviewUrl);
+      audio.addEventListener(
+        "ended",
+        () => {
+          stopSpeechTtsPreviewPlayback();
+          if (speechTtsPreviewStatusEl) {
+            speechTtsPreviewStatusEl.textContent = "Sample ready. You can download it too.";
+          }
+        },
+        { once: true }
+      );
+      await audio.play();
+      setSpeechTtsDownloadEnabled(true);
+      if (speechTtsPreviewStatusEl) {
+        speechTtsPreviewStatusEl.textContent = "Playing sample...";
+      }
+    } catch (error) {
+      clearSpeechTtsPreviewCache();
+      const message = error?.message || "TTS preview failed";
+      if (speechTtsPreviewStatusEl) {
+        speechTtsPreviewStatusEl.textContent = message;
+      }
+      showToast(message, "error", 3600);
+    } finally {
+      speechTtsPreviewBtnEl.disabled = false;
+    }
+  };
+
+  const downloadSpeechTtsSample = async () => {
+    if (!speechTtsDownloadBtnEl) {
+      return;
+    }
+    speechTtsDownloadBtnEl.disabled = true;
+    if (speechTtsPreviewStatusEl) {
+      speechTtsPreviewStatusEl.textContent = speechTtsPreviewBlob ? "Preparing download..." : "Generating sample for download...";
+    }
+    try {
+      if (!speechTtsPreviewBlob) {
+        speechTtsPreviewBlob = await requestSpeechTtsPreviewBlob();
+      }
+      const downloadUrl = URL.createObjectURL(speechTtsPreviewBlob);
+      const link = document.createElement("a");
+      link.href = downloadUrl;
+      link.download = buildSpeechTtsSampleFilename();
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => {
+        try {
+          URL.revokeObjectURL(downloadUrl);
+        } catch {
+          // ignore download cleanup failures
+        }
+      }, 1000);
+      if (speechTtsPreviewStatusEl) {
+        speechTtsPreviewStatusEl.textContent = "Sample downloaded.";
+      }
+      setSpeechTtsDownloadEnabled(true);
+    } catch (error) {
+      const message = error?.message || "TTS sample download failed";
+      if (speechTtsPreviewStatusEl) {
+        speechTtsPreviewStatusEl.textContent = message;
+      }
+      showToast(message, "error", 3600);
+    } finally {
+      speechTtsDownloadBtnEl.disabled = false;
+    }
+  };
+
+  speechSttBackendEl?.addEventListener("change", applySpeechSettingsVisibility);
+  speechTtsBackendEl?.addEventListener("change", () => {
+    clearSpeechTtsPreviewCache();
+    applySpeechSettingsVisibility({ resetTtsSelection: true });
+  });
+  speechTtsModelEl?.addEventListener("change", () => {
+    clearSpeechTtsPreviewCache();
+    syncSpeechTtsVoiceOptions({ forceReset: true });
+  });
+  speechTtsVoiceEl?.addEventListener("change", clearSpeechTtsPreviewCache);
+  announcementTtsBackendEl?.addEventListener("change", () => {
+    applySpeechSettingsVisibility({ resetTtsSelection: true });
+  });
+  announcementTtsModelEl?.addEventListener("change", () => {
+    syncAnnouncementTtsVoiceOptions({ forceReset: true });
+  });
+  speechTtsSampleTextEl?.addEventListener("input", clearSpeechTtsPreviewCache);
+  document.getElementById("set_speech_wyoming_tts_host")?.addEventListener("input", () => {
+    clearSpeechTtsPreviewCache();
+    queueRefreshSpeechWyomingTtsVoices();
+  });
+  document.getElementById("set_speech_wyoming_tts_port")?.addEventListener("input", () => {
+    clearSpeechTtsPreviewCache();
+    queueRefreshSpeechWyomingTtsVoices();
+  });
+  speechWyomingTtsVoiceEl?.addEventListener("change", clearSpeechTtsPreviewCache);
+  speechTtsPreviewBtnEl?.addEventListener("click", previewSpeechTts);
+  speechTtsDownloadBtnEl?.addEventListener("click", downloadSpeechTtsSample);
+  setSpeechTtsDownloadEnabled(false);
+  applySpeechSettingsVisibility();
+
   document.getElementById("settings-hydra-model-save").addEventListener("click", async () => {
     const baseHost = String(document.getElementById("set_hydra_llm_host")?.value || "").trim();
     const basePort = String(document.getElementById("set_hydra_llm_port")?.value || "").trim();
@@ -7824,6 +8916,20 @@ async function loadSettingsView() {
     const visionApiBase = String(document.getElementById("set_vision_api_base")?.value || "").trim();
     const visionModel = String(document.getElementById("set_vision_model")?.value || "").trim();
     const visionApiKey = String(document.getElementById("set_vision_api_key")?.value || "").trim();
+    const speechSttBackend = String(document.getElementById("set_speech_stt_backend")?.value || "").trim();
+    const speechWyomingSttHost = String(document.getElementById("set_speech_wyoming_stt_host")?.value || "").trim();
+    const speechWyomingSttPort = String(document.getElementById("set_speech_wyoming_stt_port")?.value || "").trim();
+    const speechTtsBackend = String(document.getElementById("set_speech_tts_backend")?.value || "").trim();
+    const speechTtsModel = String(document.getElementById("set_speech_tts_model")?.value || "").trim();
+    const speechTtsVoice = String(document.getElementById("set_speech_tts_voice")?.value || "").trim();
+    const speechWyomingTtsHost = String(document.getElementById("set_speech_wyoming_tts_host")?.value || "").trim();
+    const speechWyomingTtsPort = String(document.getElementById("set_speech_wyoming_tts_port")?.value || "").trim();
+    const speechWyomingTtsVoice = String(speechWyomingTtsVoiceEl?.value || "").trim();
+    const speechAnnouncementTtsBackend = String(document.getElementById("set_speech_announcement_tts_backend")?.value || "").trim();
+    const speechAnnouncementTtsModel = String(document.getElementById("set_speech_announcement_tts_model")?.value || "").trim();
+    const speechAnnouncementTtsVoice = String(document.getElementById("set_speech_announcement_tts_voice")?.value || "").trim();
+    const speechAnnouncementTtsEntity = String(document.getElementById("set_speech_announcement_tts_entity")?.value || "").trim();
+    const speechTtsPublicBaseUrl = String(document.getElementById("set_speech_tts_public_base_url")?.value || "").trim();
     const additionalBaseRows = readHydraAdditionalBaseRows();
     const hydraBaseServersPayload = [normalizeHydraBaseRowInput({ host: baseHost, port: basePort, model: baseModel })];
     additionalBaseRows.forEach((row) => hydraBaseServersPayload.push(normalizeHydraBaseRowInput(row)));
@@ -7836,6 +8942,20 @@ async function loadSettingsView() {
       vision_api_base: visionApiBase,
       vision_model: visionModel,
       vision_api_key: visionApiKey,
+      speech_stt_backend: speechSttBackend,
+      speech_wyoming_stt_host: speechWyomingSttHost,
+      speech_wyoming_stt_port: speechWyomingSttPort,
+      speech_tts_backend: speechTtsBackend,
+      speech_tts_model: speechTtsModel,
+      speech_tts_voice: speechTtsVoice,
+      speech_wyoming_tts_host: speechWyomingTtsHost,
+      speech_wyoming_tts_port: speechWyomingTtsPort,
+      speech_wyoming_tts_voice: speechWyomingTtsVoice,
+      speech_announcement_tts_backend: speechAnnouncementTtsBackend,
+      speech_announcement_tts_model: speechAnnouncementTtsModel,
+      speech_announcement_tts_voice: speechAnnouncementTtsVoice,
+      speech_announcement_tts_entity: speechAnnouncementTtsEntity,
+      speech_tts_public_base_url: speechTtsPublicBaseUrl,
     };
     const hydraRoleIds = ["chat", "astraeus", "thanatos", "minos", "hermes"];
     hydraRoleIds.forEach((role) => {
@@ -7846,14 +8966,14 @@ async function loadSettingsView() {
       payload[`hydra_llm_${role}_port`] = portEl ? String(portEl.value || "").trim() : "";
       payload[`hydra_llm_${role}_model`] = modelEl ? String(modelEl.value || "").trim() : "";
     });
-    statusEl.textContent = "Saving Hydra and Vision model settings...";
+    statusEl.textContent = "Saving Hydra, Vision, and shared speech model settings...";
     try {
       await api("/api/settings", {
         method: "POST",
         body: JSON.stringify(payload),
       });
-      statusEl.textContent = "Hydra and Vision model settings saved.";
-      showToast("Hydra and Vision model settings saved.");
+      statusEl.textContent = "Hydra, Vision, and shared speech model settings saved.";
+      showToast("Hydra, Vision, and shared speech model settings saved.");
     } catch (error) {
       statusEl.textContent = `Model save failed: ${error.message}`;
     }

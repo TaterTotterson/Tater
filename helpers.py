@@ -41,6 +41,7 @@ _INTERNAL_PORTAL_AUTH_TARGETS = (
     ("homekit_portal_settings", 8789, "/tater-homekit/v1", "AUTH_TOKEN"),
     ("xbmc_portal_settings", 8790, "/tater-xbmc/v1", None),
     ("macos_portal_settings", 8791, "/macos", "AUTH_TOKEN"),
+    ("voice_core_settings", 8502, "/tater-ha/v1/voice", None),
 )
 _INTERNAL_PORTAL_AUTH_CACHE_TTL_SECONDS = max(
     1.0,

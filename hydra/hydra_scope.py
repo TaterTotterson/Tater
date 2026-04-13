@@ -89,7 +89,7 @@ def derive_scope_from_origin(
             if _v("chat_type").lower() in {"pm", "dm", "direct"}:
                 return f"pm:{target}"
             return f"pm:{target}"
-    elif normalized_platform == "homeassistant":
+    elif normalized_platform in {"homeassistant", "voice_core"}:
         device_id = _v("device_id")
         if device_id:
             return f"device:{device_id}"
@@ -178,7 +178,7 @@ def resolve_hydra_scope(
             return raw_scope
         return f"user:{raw_scope}"
 
-    if normalized_platform == "homeassistant":
+    if normalized_platform in {"homeassistant", "voice_core"}:
         if raw_scope.startswith(("device:", "area:", "session:")):
             return raw_scope
         if ":" in raw_scope:

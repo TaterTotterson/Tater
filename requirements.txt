@@ -1,4 +1,6 @@
 aiohttp
+aioesphomeapi
+zeroconf
 beautifulsoup4
 bencodepy
 cryptography
@@ -29,3 +31,11 @@ python-pptx
 py7zr
 rarfile
 pandas
+wyoming
+silero-vad
+torch
+faster-whisper
+vosk
+pykokoro
+pocket-tts
+piper-tts

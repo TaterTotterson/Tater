@@ -9,6 +9,7 @@ KNOWN_PLATFORMS: Tuple[str, ...] = (
     "discord",
     "irc",
     "homeassistant",
+    "voice_core",
     "homekit",
     "matrix",
     "telegram",
