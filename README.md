@@ -125,6 +125,8 @@ Once added, the following add-ons will appear in the Home Assistant Add-on Store
 
 This is the recommended setup for most users and provides the smoothest experience.
 
+Once the add-ons are running, continue to **Post-Install Setup** below.
+
 ---
 
 ## Local Installation
@@ -198,7 +200,7 @@ pip install -r requirements.txt
 
 You no longer configure Redis in `.env`.
 
-Start TaterOS, open the WebUI, and a **Redis Setup** popup will appear automatically if Redis is not configured yet.
+When TaterOS starts and you open the WebUI, a **Redis Setup** popup will appear automatically if Redis is not configured yet.
 Enter:
 - Redis host
 - Redis port
@@ -207,14 +209,7 @@ Enter:
 
 Those connection settings are saved locally by TaterOS for future boots.
 
-After starting TaterOS, configure your local LLM endpoint in **Settings**:
-- `Hydra LLM Host`
-- `Hydra LLM Port`
-- `Hydra LLM Model`
-- Optional: add more Base servers for round-robin regular AI calls.
-- Optional: enable `Beast Mode` and set per-head model settings for Chat/Astraeus/Thanatos/Minos/Hermes.
-
-Those values are stored in Redis and used by Hydra at runtime.
+Then continue to **Post-Install Setup** below for model configuration.
 
 5. **Run the Web UI**
 
@@ -235,6 +230,8 @@ Then open:
 ```text
 http://127.0.0.1:8501
 ```
+
+Once the WebUI is up, continue to **Post-Install Setup** below.
 
 ## Docker
 
@@ -263,7 +260,7 @@ Important for Docker persistence:
 
 ---
 
-Example: local setup
+Example: Docker setup
 ```
 docker run -d --name tater_webui \
   --network host \
@@ -276,29 +273,38 @@ docker run -d --name tater_webui \
 ```
 ---
 
-### 3. Post-Install Setup
-
-After the container is running, open TaterOS, complete the Redis setup popup, then configure local LLM endpoint/model in **Settings**:
-- `Hydra LLM Host`
-- `Hydra LLM Port`
-- `Hydra LLM Model`
-- Optional: add more Base servers for round-robin regular AI calls.
-- Optional: enable `Beast Mode` and set per-head model settings for Chat/Astraeus/Thanatos/Minos/Hermes.
-
-Tip: Redis setup popup config is stored at `/app/.runtime/redis_connection.json` inside the container.
-
-Optional: if you want a custom config file location, set `TATER_REDIS_CONFIG_PATH` and mount that target path from the host.
-
-Access-log note: `run_ui.sh` now starts Uvicorn with `--no-access-log` to suppress per-request lines.
-
-### 4. Access the Web UI
+### 3. Access the Web UI
 
 Once the container is running with host networking, open your browser and navigate to:
 
 - [http://localhost:8501](http://localhost:8501) from the same machine
 - `http://<host-ip>:8501` from another device on your network
 
+Once the WebUI is up, continue to **Post-Install Setup** below.
+
 ---
+
+## Post-Install Setup
+
+After Tater is running, open TaterOS and finish the first-run setup:
+
+1. Complete the **Redis Setup** popup if Tater shows it.
+2. Configure your model endpoint in **Settings**:
+   - `Hydra LLM Host`
+   - `Hydra LLM Port`
+   - `Hydra LLM Model`
+3. Optional:
+   - add more Base servers for round-robin regular AI calls
+   - enable `Beast Mode` and set per-head model settings for Chat/Astraeus/Thanatos/Minos/Hermes
+
+Those values are stored in Redis and used by Hydra at runtime.
+
+Docker note:
+- Redis setup popup config is stored at `/app/.runtime/redis_connection.json` inside the container.
+- If you want a custom config file location, set `TATER_REDIS_CONFIG_PATH` and mount that target path from the host.
+
+Access-log note:
+- `run_ui.sh` starts Uvicorn with `--no-access-log` to suppress per-request lines.
 
 
 https://github.com/user-attachments/assets/9138f485-ccd6-46e0-9295-f5617c079fea
