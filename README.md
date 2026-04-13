@@ -8,6 +8,20 @@ Main website: [taterassistant.com](https://taterassistant.com)
 
 ---
 
+## Cores
+Tater uses always-on cores to power the parts of the assistant that need to keep running in the background. These are the main cores most people will care about:
+
+- **Voice Core** - the native voice runtime for Tater voice devices and ESPHome satellites, with wake/listen/respond loops, shared STT/TTS, room awareness, and direct device playback.
+- **Awareness Core** - event-aware automation for things like doorbells, cameras, entry sensors, and spoken announcements.
+- **Memory Core** - extracts useful facts and long-term memory from chats, activity, and other runtime signals.
+- **Personal Core** - handles personal assistant workflows like email/account checks, follow-ups, and user-facing task support.
+- **RSS Core** - monitors feeds and keeps Tater aware of subscribed external content.
+- **AI Task Core** - runs longer background AI work that should happen outside a normal interactive turn.
+
+For the full installable core catalog, versions, and metadata, use the **Core Manager** in Tater or browse **Tater Shop**.
+
+---
+
 ## Hydra
 Tater is powered by Hydra, a four-head system:
 
@@ -37,8 +51,7 @@ Tater uses **Tater Shop** to manage:
 - **Portals**
 - **Cores**
 
-This repository no longer keeps static lists of those modules in the README.
-Instead, catalogs, versions, metadata, and update paths are managed in:
+Catalogs, versions, metadata, and update paths are managed in:
 
 👉 **https://github.com/TaterTotterson/Tater_Shop**
 
@@ -237,6 +250,11 @@ docker pull ghcr.io/tatertotterson/tater:latest
 
 Redis settings are configured in the WebUI setup popup (not via `.env`).
 
+Recommended Docker networking:
+- Use `--network host` so Tater shares the host network directly.
+- This avoids managing a growing list of `-p` mappings for WebUI, voice, and other runtime surfaces.
+- With host networking, Tater listens on the host directly, so you do not need to publish Tater ports manually.
+
 Important for Docker persistence:
 - Add a path mapping for `/app/agent_lab` (container) -> `/mnt/user/appdata/tater/agent_lab` (host example).
 - Without this mapping, data in `/agent_lab` (logs/downloads/documents/workspace) can be lost on container rebuilds/updates.
@@ -248,11 +266,7 @@ Important for Docker persistence:
 Example: local setup
 ```
 docker run -d --name tater_webui \
-  -p 8501:8501 \
-  -p 8787:8787 \
-  -p 8788:8788 \
-  -p 8789:8789 \
-  -p 8790:8790 \
+  --network host \
   -e TZ=America/Chicago \
   -v /etc/localtime:/etc/localtime:ro \
   -v /etc/timezone:/etc/timezone:ro \
@@ -277,9 +291,10 @@ Access-log note: `run_ui.sh` now starts Uvicorn with `--no-access-log` to suppre
 
 ### 3. Access the Web UI
 
-Once the container is running, open your browser and navigate to:
+Once the container is running with host networking, open your browser and navigate to:
 
-[http://localhost:8501](http://localhost:8501)
+- [http://localhost:8501](http://localhost:8501) from the same machine
+- `http://<host-ip>:8501` from another device on your network
 
 ---
 
