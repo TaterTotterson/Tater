@@ -7,6 +7,7 @@ import importlib
 import io
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -90,8 +91,24 @@ DEFAULT_TTS_MODEL_ROOT = os.path.abspath(
 )
 DEFAULT_KOKORO_PROVIDER = "cpu"
 DEFAULT_WYOMING_TIMEOUT_SECONDS = 45.0
+DEFAULT_PIPER_SENTENCE_PAUSE_SECONDS = 0.24
+DEFAULT_PIPER_PARAGRAPH_PAUSE_SECONDS = 0.46
 DEFAULT_PIPER_TAIL_PAD_SECONDS = 0.18
 DEFAULT_VOICE_CORE_PLAY_TIMEOUT_SECONDS = 180.0
+_PIPER_ABBREVIATIONS = {
+    "dr",
+    "mr",
+    "mrs",
+    "ms",
+    "prof",
+    "sr",
+    "jr",
+    "st",
+    "vs",
+    "etc",
+    "e.g",
+    "i.e",
+}
 
 _kokoro_pipeline_cache: Dict[Tuple[str, str], Any] = {}
 _kokoro_pipeline_lock = threading.Lock()
@@ -156,6 +173,87 @@ def _append_pcm_silence(audio_bytes: bytes, audio_format: Dict[str, Any], *, sec
     frame_bytes = max(1, width * channels)
     silence_frames = max(1, int(round(rate * float(seconds))))
     return pcm + (b"\x00" * (silence_frames * frame_bytes))
+
+
+def _split_piper_sentences(text: str) -> list[str]:
+    prompt = _text(text)
+    if not prompt:
+        return []
+    parts: list[str] = []
+    start = 0
+    length = len(prompt)
+    i = 0
+    while i < length:
+        ch = prompt[i]
+        if ch not in ".!?":
+            i += 1
+            continue
+        if i + 1 < length and prompt[i + 1] in ".!?":
+            i += 1
+            continue
+        if ch == "." and i > 0 and i + 1 < length and prompt[i - 1].isdigit() and prompt[i + 1].isdigit():
+            i += 1
+            continue
+        j = i - 1
+        while j >= start and (prompt[j].isalnum() or prompt[j] in "_-"):
+            j -= 1
+        token = prompt[j + 1 : i].lower()
+        if ch == "." and (token in _PIPER_ABBREVIATIONS or (len(token) == 1 and token.isalpha())):
+            i += 1
+            continue
+        k = i + 1
+        while k < length and prompt[k] in "\"'”’)]}":
+            k += 1
+        if k < length and not prompt[k].isspace():
+            i += 1
+            continue
+        segment = prompt[start:k].strip()
+        if segment:
+            parts.append(segment)
+        while k < length and prompt[k].isspace():
+            k += 1
+        start = k
+        i = k
+    tail = prompt[start:].strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def _build_piper_segment_plan(text: str) -> list[tuple[str, float]]:
+    normalized = re.sub(r"\r\n?", "\n", _text(text))
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", normalized) if _text(part)]
+    if not paragraphs:
+        return []
+    plan: list[tuple[str, float]] = []
+    for paragraph_index, paragraph in enumerate(paragraphs):
+        sentences = _split_piper_sentences(paragraph)
+        if not sentences:
+            continue
+        last_sentence_index = len(sentences) - 1
+        last_paragraph_index = len(paragraphs) - 1
+        for sentence_index, sentence in enumerate(sentences):
+            pause_seconds = 0.0
+            if sentence_index < last_sentence_index:
+                pause_seconds = DEFAULT_PIPER_SENTENCE_PAUSE_SECONDS
+            elif paragraph_index < last_paragraph_index:
+                pause_seconds = DEFAULT_PIPER_PARAGRAPH_PAUSE_SECONDS
+            plan.append((sentence, pause_seconds))
+    return plan
+
+
+def _synthesize_piper_segment_sync(voice: Any, prompt: str) -> Tuple[bytes, Dict[str, Any]]:
+    audio_out = bytearray()
+    sample_rate = 22050
+    sample_width = 2
+    sample_channels = 1
+    syn_config = PiperSynthesisConfig()
+    for chunk in voice.synthesize(prompt, syn_config=syn_config):
+        audio_out.extend(chunk.audio_int16_bytes)
+        sample_rate = int(getattr(chunk, "sample_rate", sample_rate) or sample_rate)
+        sample_width = int(getattr(chunk, "sample_width", sample_width) or sample_width)
+        sample_channels = int(getattr(chunk, "sample_channels", sample_channels) or sample_channels)
+    return bytes(audio_out), {"rate": sample_rate, "width": sample_width, "channels": sample_channels}
 
 
 def _tts_model_root() -> str:
@@ -619,19 +717,18 @@ def _synthesize_piper_sync(text: str, model_id: str) -> Tuple[bytes, Dict[str, A
     if not prompt:
         return b"", {}
     voice = _load_piper_voice_model(model_id)
-    audio_out = bytearray()
-    sample_rate = 22050
-    sample_width = 2
-    sample_channels = 1
-    syn_config = PiperSynthesisConfig()
-    for chunk in voice.synthesize(prompt, syn_config=syn_config):
-        audio_out.extend(chunk.audio_int16_bytes)
-        sample_rate = int(getattr(chunk, "sample_rate", sample_rate) or sample_rate)
-        sample_width = int(getattr(chunk, "sample_width", sample_width) or sample_width)
-        sample_channels = int(getattr(chunk, "sample_channels", sample_channels) or sample_channels)
-    audio_format = {"rate": sample_rate, "width": sample_width, "channels": sample_channels}
+    segment_plan = _build_piper_segment_plan(prompt) or [(prompt, 0.0)]
+    audio_parts: list[bytes] = []
+    audio_format: Dict[str, Any] = {"rate": 22050, "width": 2, "channels": 1}
+    for segment_text, pause_seconds in segment_plan:
+        segment_audio, segment_format = _synthesize_piper_segment_sync(voice, segment_text)
+        if segment_audio:
+            audio_parts.append(segment_audio)
+            audio_format = dict(segment_format)
+        if pause_seconds > 0:
+            audio_parts.append(_append_pcm_silence(b"", audio_format, seconds=pause_seconds))
     padded = _append_pcm_silence(
-        bytes(audio_out),
+        b"".join(audio_parts),
         audio_format,
         seconds=DEFAULT_PIPER_TAIL_PAD_SECONDS,
     )

@@ -97,6 +97,8 @@ Unraid note:
 - Add container path mappings for `/app/agent_lab` and `/app/.runtime` to persistent shares (for example `/mnt/user/appdata/tater/agent_lab` and `/mnt/user/appdata/tater/runtime`) so you don’t lose Agent Lab data or Redis setup config during container updates.
 - Also set `TZ` and map `/etc/localtime` + `/etc/timezone` if you want local time inside the container.
 
+Once the Unraid containers are installed and running, continue to **Post-Install Setup** below.
+
 ## 🏠 Home Assistant
 
 A dedicated Home Assistant add-on repository is available here:
@@ -196,22 +198,7 @@ Using pip, run:
 pip install -r requirements.txt
 ```
 
-4. **First-Run Redis Setup**
-
-You no longer configure Redis in `.env`.
-
-When TaterOS starts and you open the WebUI, a **Redis Setup** popup will appear automatically if Redis is not configured yet.
-Enter:
-- Redis host
-- Redis port
-- Optional auth (`username` / `password`)
-- Optional TLS settings
-
-Those connection settings are saved locally by TaterOS for future boots.
-
-Then continue to **Post-Install Setup** below for model configuration.
-
-5. **Run the Web UI**
+4. **Run the Web UI**
 
 Run the TaterOS backend/frontend (FastAPI + static HTML/CSS/JS):
 
@@ -288,7 +275,11 @@ Once the WebUI is up, continue to **Post-Install Setup** below.
 
 After Tater is running, open TaterOS and finish the first-run setup:
 
-1. Complete the **Redis Setup** popup if Tater shows it.
+1. Complete the **Redis Setup** popup if Tater shows it:
+   - Redis host
+   - Redis port
+   - optional auth (`username` / `password`)
+   - optional TLS settings
 2. Configure your model endpoint in **Settings**:
    - `Hydra LLM Host`
    - `Hydra LLM Port`
@@ -297,7 +288,8 @@ After Tater is running, open TaterOS and finish the first-run setup:
    - add more Base servers for round-robin regular AI calls
    - enable `Beast Mode` and set per-head model settings for Chat/Astraeus/Thanatos/Minos/Hermes
 
-Those values are stored in Redis and used by Hydra at runtime.
+Redis connection settings are saved locally by TaterOS for future boots.
+Hydra model settings are stored in Redis and used at runtime.
 
 Docker note:
 - Redis setup popup config is stored at `/app/.runtime/redis_connection.json` inside the container.
