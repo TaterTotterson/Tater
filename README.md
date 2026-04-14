@@ -8,41 +8,6 @@ Main website: [taterassistant.com](https://taterassistant.com)
 
 ---
 
-## Cores
-Tater uses always-on cores to power the parts of the assistant that need to keep running in the background. These are the main cores most people will care about:
-
-- **Voice Core** - the native voice runtime for **VoicePE** and **Sat1** style devices, giving Tater a direct connection to the hardware for wake/listen/respond loops, shared STT/TTS, room awareness, live sensors/entities, and device-local playback/control.
-- **Awareness Core** - event-aware automation for things like doorbells, cameras, entry sensors, and spoken announcements.
-- **Memory Core** - extracts useful facts and long-term memory from chats, activity, and other runtime signals.
-- **Personal Core** - handles personal assistant workflows like email/account checks, follow-ups, and user-facing task support.
-- **RSS Core** - monitors feeds and keeps Tater aware of subscribed external content.
-- **AI Task Core** - runs scheduled AI tasks more like cron jobs, so recurring or delayed AI work can happen automatically outside a normal interactive turn.
-
-For the full installable core catalog, versions, and metadata, use the **Core Manager** in Tater or browse **Tater Shop**.
-
----
-
-## Hydra
-Tater is powered by Hydra, a four-head system:
-
-- Astraeus - sees
-- Thanatos - executes
-- Minos - judges
-- Hermes - speaks
-
-Loop: plan -> execute -> judge -> respond.
-
-Chat turns stay lightweight: Astraeus handles conversational awareness, while Thanatos/Minos/Hermes only engage when execution is needed.
-
-Model routing:
-
-- Base model settings (`Hydra LLM Host`, `Hydra LLM Port`, `Hydra LLM Model`) define AI Calls.
-- You can add multiple Base servers; regular AI calls rotate round-robin.
-- Beast Mode off: all heads use the Base server pool.
-- Beast Mode on: AI Calls still use the Base pool, while Chat/Astraeus/Thanatos/Minos/Hermes each use their own model settings.
-
----
-
 ## 🛒 Tater Shop (Unified Catalog)
 
 Tater uses **Tater Shop** to manage:
@@ -54,14 +19,6 @@ Tater uses **Tater Shop** to manage:
 Catalogs, versions, metadata, and update paths are managed in:
 
 👉 **https://github.com/TaterTotterson/Tater_Shop**
-
-From the WebUI, use:
-
-- **Verba Manager**
-- **Portal Manager**
-- **Core Manager**
-
-Each manager supports browse/install/update/remove and startup restore for enabled items that are missing on disk.
 
 ---
 
