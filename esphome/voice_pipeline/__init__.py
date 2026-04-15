@@ -7700,6 +7700,7 @@ def _voice_ui_setting_sections() -> List[Dict[str, Any]]:
         (
             "Experimental",
             [
+                "VOICE_EXPERIMENTAL_LIVE_TOOL_PROGRESS_ENABLED",
                 "VOICE_EXPERIMENTAL_PARTIAL_STT_ENABLED",
                 "VOICE_EXPERIMENTAL_TTS_EARLY_START_ENABLED",
             ],
