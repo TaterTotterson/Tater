@@ -1,0 +1,8751 @@
+"""
+Tater Native Voice Pipeline
+
+Clean ESPHome-compatible backend pipeline:
+- ESPHome voice_assistant session handling
+- Server-side EOU strategy
+- Silero VAD backend
+- Wyoming STT/TTS orchestration
+- Hydra turn execution
+- URL-based TTS playback lifecycle (announcement_finished aware)
+- mDNS + manual target discovery/reconcile
+"""
+
+from __future__ import annotations
+
+import asyncio
+try:
+    import audioop as _audioop
+except Exception:  # Python 3.13 removed audioop
+    _audioop = None
+import base64
+import contextlib
+import importlib
+import inspect
+import io
+import json
+import logging
+import math
+import os
+import re
+import shutil
+import socket
+import sys
+import tempfile
+import threading
+import time
+import uuid
+import wave
+import zipfile
+import mimetypes
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib import request as urllib_request
+
+from dotenv import load_dotenv
+from fastapi import APIRouter, Header, HTTPException, Response
+
+from helpers import extract_json, get_llm_client_from_env, redis_client
+from speech_settings import get_speech_settings as get_shared_speech_settings
+import verba_registry
+from verba_settings import get_verba_enabled
+from hydra import run_hydra_turn, resolve_agent_limits
+
+try:
+    from wyoming.client import AsyncTcpClient
+    from wyoming.asr import Transcribe, Transcript
+    from wyoming.tts import Synthesize
+    from wyoming.audio import AudioStart as WyomingAudioStart, AudioChunk as WyomingAudioChunk, AudioStop as WyomingAudioStop
+    from wyoming.error import Error as WyomingError
+    try:
+        from wyoming.tts import SynthesizeVoice
+    except Exception:
+        SynthesizeVoice = None
+    try:
+        from wyoming.info import Describe, Info
+    except Exception:
+        Describe = None
+        Info = None
+    WYOMING_IMPORT_ERROR: Optional[str] = None
+except Exception as exc:  # pragma: no cover - runtime dependency guard
+    AsyncTcpClient = None
+    Transcribe = None
+    Transcript = None
+    Synthesize = None
+    SynthesizeVoice = None
+    Describe = None
+    Info = None
+    WyomingAudioStart = None
+    WyomingAudioChunk = None
+    WyomingAudioStop = None
+    WyomingError = None
+    WYOMING_IMPORT_ERROR = str(exc)
+
+try:
+    from faster_whisper import WhisperModel
+    FASTER_WHISPER_IMPORT_ERROR: Optional[str] = None
+except Exception as exc:  # pragma: no cover - runtime dependency guard
+    WhisperModel = None
+    FASTER_WHISPER_IMPORT_ERROR = str(exc)
+
+try:
+    from vosk import Model as VoskModel, KaldiRecognizer, SetLogLevel as VoskSetLogLevel
+    with contextlib.suppress(Exception):
+        VoskSetLogLevel(-1)
+    VOSK_IMPORT_ERROR: Optional[str] = None
+except Exception as exc:  # pragma: no cover - runtime dependency guard
+    VoskModel = None
+    KaldiRecognizer = None
+    VoskSetLogLevel = None
+    VOSK_IMPORT_ERROR = str(exc)
+
+try:
+    from pykokoro import build_pipeline as build_kokoro_pipeline, PipelineConfig as KokoroPipelineConfig
+    from pykokoro.tokenizer import TokenizerConfig as KokoroTokenizerConfig
+    from pykokoro.onnx_backend import VOICE_NAMES_BY_VARIANT as KOKORO_VOICE_NAMES_BY_VARIANT
+    KOKORO_IMPORT_ERROR: Optional[str] = None
+except Exception as exc:  # pragma: no cover - runtime dependency guard
+    build_kokoro_pipeline = None
+    KokoroPipelineConfig = None
+    KokoroTokenizerConfig = None
+    KOKORO_VOICE_NAMES_BY_VARIANT = {}
+    KOKORO_IMPORT_ERROR = str(exc)
+
+try:
+    from pocket_tts import TTSModel as PocketTTSModel
+    from pocket_tts.utils.utils import PREDEFINED_VOICES as POCKET_TTS_PREDEFINED_VOICES
+    POCKET_TTS_IMPORT_ERROR: Optional[str] = None
+except Exception as exc:  # pragma: no cover - runtime dependency guard
+    PocketTTSModel = None
+    POCKET_TTS_PREDEFINED_VOICES = {}
+    POCKET_TTS_IMPORT_ERROR = str(exc)
+
+try:
+    from piper import PiperVoice
+    from piper.config import SynthesisConfig as PiperSynthesisConfig
+    from piper.download_voices import VOICES_JSON as PIPER_VOICES_CATALOG_URL, download_voice as piper_download_voice
+    PIPER_IMPORT_ERROR: Optional[str] = None
+except Exception as exc:  # pragma: no cover - runtime dependency guard
+    PiperVoice = None
+    PiperSynthesisConfig = None
+    PIPER_VOICES_CATALOG_URL = ""
+    piper_download_voice = None
+    PIPER_IMPORT_ERROR = str(exc)
+
+load_dotenv()
+
+__version__ = "3.0.7"
+
+logger = logging.getLogger("voice_core")
+logger.setLevel(logging.INFO)
+
+# -------------------- Constants --------------------
+VOICE_CORE_SETTINGS_HASH_KEY = "voice_core_settings"
+
+
+def _main_app_port() -> int:
+    raw = str(os.getenv("HTMLUI_PORT", "8501") or "8501").strip()
+    try:
+        port = int(raw)
+    except Exception:
+        port = 8501
+    if port < 1 or port > 65535:
+        port = 8501
+    return int(port)
+
+REDIS_VOICE_SATELLITE_REGISTRY_KEY = "tater:voice:satellites:registry:v1"
+REDIS_WYOMING_TTS_VOICES_KEY = "tater:voice:wyoming:tts_voices:v1"
+REDIS_WYOMING_TTS_VOICES_META_KEY = "tater:voice:wyoming:tts_voices:meta:v1"
+REDIS_PIPER_TTS_MODELS_KEY = "tater:voice:piper:tts_models:v1"
+REDIS_PIPER_TTS_MODELS_META_KEY = "tater:voice:piper:tts_models:meta:v1"
+
+DEFAULT_WYOMING_STT_HOST = "127.0.0.1"
+DEFAULT_WYOMING_STT_PORT = 10300
+DEFAULT_WYOMING_TTS_HOST = "127.0.0.1"
+DEFAULT_WYOMING_TTS_PORT = 10200
+DEFAULT_WYOMING_TTS_VOICE = ""
+DEFAULT_WYOMING_TIMEOUT_SECONDS = 45.0
+DEFAULT_STT_BACKEND = "faster_whisper"
+DEFAULT_TTS_BACKEND = "wyoming"
+DEFAULT_PIPER_SENTENCE_PAUSE_SECONDS = 0.24
+DEFAULT_PIPER_PARAGRAPH_PAUSE_SECONDS = 0.46
+DEFAULT_PIPER_TAIL_PAD_SECONDS = 0.18
+DEFAULT_FASTER_WHISPER_MODEL = "base.en"
+DEFAULT_FASTER_WHISPER_DEVICE = "cpu"
+DEFAULT_FASTER_WHISPER_COMPUTE_TYPE = "int8"
+DEFAULT_VOSK_MODEL_NAME = "vosk-model-small-en-us-0.15"
+DEFAULT_VOSK_MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
+DEFAULT_STT_MODEL_ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "agent_lab", "models", "stt")
+)
+DEFAULT_TTS_MODEL_ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "agent_lab", "models", "tts")
+)
+DEFAULT_KOKORO_MODEL = "v1.0:q8"
+DEFAULT_KOKORO_VOICE = "af_bella"
+DEFAULT_KOKORO_PROVIDER = "cpu"
+DEFAULT_POCKET_TTS_MODEL = "b6369a24"
+DEFAULT_POCKET_TTS_VOICE = "alba"
+DEFAULT_PIPER_MODEL = "en_US-lessac-medium"
+_PIPER_ABBREVIATIONS = {"dr", "mr", "mrs", "ms", "prof", "sr", "jr", "st", "vs", "etc", "e.g", "i.e"}
+
+DEFAULT_VOICE_SAMPLE_RATE_HZ = 16000
+DEFAULT_VOICE_SAMPLE_WIDTH = 2
+DEFAULT_VOICE_CHANNELS = 1
+DEFAULT_MAX_AUDIO_BYTES = 4 * 1024 * 1024
+
+DEFAULT_ESPHOME_API_PORT = 6053
+DEFAULT_ESPHOME_CONNECT_TIMEOUT_S = 12.0
+DEFAULT_ESPHOME_RETRY_SECONDS = 12
+DEFAULT_DISCOVERY_ENABLED = True
+DEFAULT_DISCOVERY_SCAN_SECONDS = 45
+DEFAULT_DISCOVERY_MDNS_TIMEOUT_S = 3.0
+DEFAULT_CONTINUED_CHAT_ENABLED = False
+DEFAULT_CONTINUED_CHAT_REUSE_SECONDS = 30.0
+DEFAULT_CONTINUED_CHAT_CLASSIFY_TIMEOUT_S = 4.0
+DEFAULT_CONTINUED_CHAT_REPLY_TO_CUE_PAUSE_S = 0.60
+DEFAULT_CONTINUED_CHAT_CUE_TO_REOPEN_PAUSE_S = 0.45
+DEFAULT_CONTINUED_CHAT_REOPEN_SILENCE_SECONDS = 0.96
+DEFAULT_CONTINUED_CHAT_REOPEN_TIMEOUT_SECONDS = 11.50
+DEFAULT_CONTINUED_CHAT_REOPEN_NO_SPEECH_TIMEOUT_S = 5.00
+DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_FRAMES = 4
+DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_SHORT_S = 0.66
+DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_LONG_S = 0.82
+DEFAULT_CONTINUED_CHAT_REOPEN_STARTUP_GATE_S = 0.40
+DEFAULT_EXPERIMENTAL_LIVE_TOOL_PROGRESS_ENABLED = False
+DEFAULT_EXPERIMENTAL_PARTIAL_STT_ENABLED = False
+DEFAULT_EXPERIMENTAL_TTS_EARLY_START_ENABLED = False
+DEFAULT_EXPERIMENTAL_PARTIAL_STT_INTERVAL_S = 0.85
+DEFAULT_EXPERIMENTAL_PARTIAL_STT_MIN_AUDIO_S = 0.55
+DEFAULT_EXPERIMENTAL_PARTIAL_STT_MIN_NEW_AUDIO_S = 0.28
+DEFAULT_EXPERIMENTAL_TTS_EARLY_START_MIN_CHARS = 90
+DEFAULT_EXPERIMENTAL_TTS_EARLY_START_MIN_FIRST_CHARS = 28
+DEFAULT_STARTUP_GATE_S = 0.0
+DEFAULT_WAKE_STARTUP_GATE_S = 0.40
+DEFAULT_WAKE_MIN_SPEECH_FRAMES = 3
+DEFAULT_WAKE_MIN_SILENCE_LONG_S = 0.74
+DEFAULT_TTS_URL_TTL_S = 180
+
+DEFAULT_EOU_MODE = "server"
+DEFAULT_VAD_BACKEND = "silero"
+DEFAULT_VAD_SILENCE_SECONDS = 0.78
+DEFAULT_VAD_TIMEOUT_SECONDS = 8.50
+DEFAULT_VAD_NO_SPEECH_TIMEOUT_S = 3.50
+DEFAULT_SILERO_THRESHOLD = 0.24
+DEFAULT_SILERO_NEG_THRESHOLD = 0.18
+DEFAULT_SILERO_FRAME_SAMPLES = 512
+DEFAULT_SILERO_MIN_SPEECH_FRAMES = 2
+DEFAULT_SILERO_MIN_SILENCE_FRAMES = 4
+DEFAULT_VAD_MIN_SILENCE_SHORT_S = 0.50
+DEFAULT_VAD_MIN_SILENCE_LONG_S = 0.62
+DEFAULT_AUDIO_INPUT_GAIN = 1.6
+DEFAULT_AUDIO_STALL_TIMEOUT_S = 1.20
+DEFAULT_AUDIO_STALL_NO_SPEECH_TIMEOUT_S = 6.00
+DEFAULT_BLANK_WAKE_TIMEOUT_S = 3.00
+DEFAULT_AUDIO_STALL_POLL_S = 0.15
+DEFAULT_TRANSCRIPT_COMPLETENESS_EXTENSION_S = 0.60
+
+DEFAULT_SESSION_TTL_SECONDS = 2 * 60 * 60
+DEFAULT_HISTORY_MAX_STORE = 20
+DEFAULT_HISTORY_MAX_LLM = 8
+
+VOICE_STATE_IDLE = "idle"
+VOICE_STATE_LISTENING = "listening"
+VOICE_STATE_THINKING = "thinking"
+VOICE_STATE_SPEAKING = "speaking"
+VOICE_STATE_ERROR = "error"
+
+CORE_SETTINGS = {
+    "category": "Voice Core Settings",
+    # Intentionally empty. Voice settings are managed in the Voice tab UI.
+    "required": {},
+}
+
+CORE_WEBUI_TAB = {
+    "label": "Voice",
+    "order": 40,
+    "requires_running": True,
+}
+
+PLATFORM_SETTINGS = CORE_SETTINGS
+PLATFORM_WEBUI_TAB = CORE_WEBUI_TAB
+
+VOICE_UI_SETTING_SPECS: List[Dict[str, Any]] = [
+    {
+        "key": "VOICE_NATIVE_DEBUG",
+        "label": "Native Voice Debug Logs",
+        "type": "checkbox",
+        "default": False,
+        "description": "Enable verbose voice pipeline logs.",
+    },
+    {
+        "key": "VOICE_CONTINUED_CHAT_ENABLED",
+        "label": "Continued Chat (Auto Reopen Mic)",
+        "type": "checkbox",
+        "default": DEFAULT_CONTINUED_CHAT_ENABLED,
+        "description": "If enabled, Voice Core uses a small AI check to decide whether to reopen the mic for a follow-up reply.",
+    },
+    {
+        "key": "VOICE_EXPERIMENTAL_LIVE_TOOL_PROGRESS_ENABLED",
+        "label": "Experimental Live Tool Progress Speech",
+        "type": "checkbox",
+        "default": DEFAULT_EXPERIMENTAL_LIVE_TOOL_PROGRESS_ENABLED,
+        "description": "If enabled, Voice will briefly stop thinking, speak Hydra's tool-start line, then return to thinking before the tool runs. This is experimental and may add a little latency.",
+    },
+    {
+        "key": "VOICE_EXPERIMENTAL_PARTIAL_STT_ENABLED",
+        "label": "Experimental Partial STT",
+        "type": "checkbox",
+        "default": DEFAULT_EXPERIMENTAL_PARTIAL_STT_ENABLED,
+        "description": "If enabled, Tater will try to build live partial transcripts during capture for all STT backends. This can improve turn-end decisions, but may use more CPU/GPU.",
+    },
+    {
+        "key": "VOICE_EXPERIMENTAL_TTS_EARLY_START_ENABLED",
+        "label": "Experimental Early-Start TTS",
+        "type": "checkbox",
+        "default": DEFAULT_EXPERIMENTAL_TTS_EARLY_START_ENABLED,
+        "description": "If enabled, Tater may start speaking long replies sooner by splitting playback into early chunks. This is experimental and may introduce slightly more audible sentence gaps.",
+    },
+    {
+        "key": "VOICE_ESPHOME_TARGETS",
+        "label": "Manual Target Hosts",
+        "type": "text",
+        "default": "",
+        "description": "Comma-separated host/IP list (for example: 10.4.20.19,10.4.20.139).",
+    },
+    {
+        "key": "VOICE_DISCOVERY_ENABLED",
+        "label": "Enable mDNS Discovery",
+        "type": "checkbox",
+        "default": True,
+        "description": "Discover ESPHome satellites via mDNS.",
+    },
+    {
+        "key": "VOICE_DISCOVERY_SCAN_SECONDS",
+        "label": "Discovery Scan Interval (sec)",
+        "type": "number",
+        "default": DEFAULT_DISCOVERY_SCAN_SECONDS,
+        "min": 5,
+        "max": 600,
+    },
+    {
+        "key": "VOICE_DISCOVERY_MDNS_TIMEOUT_S",
+        "label": "mDNS Listen Window (sec)",
+        "type": "number",
+        "default": DEFAULT_DISCOVERY_MDNS_TIMEOUT_S,
+        "min": 0.5,
+        "max": 20.0,
+        "step": 0.1,
+    },
+    {
+        "key": "VOICE_ESPHOME_API_PORT",
+        "label": "ESPHome API Port",
+        "type": "number",
+        "default": DEFAULT_ESPHOME_API_PORT,
+        "min": 1,
+        "max": 65535,
+    },
+    {
+        "key": "VOICE_ESPHOME_PASSWORD",
+        "label": "ESPHome API Password",
+        "type": "password",
+        "default": "",
+    },
+    {
+        "key": "VOICE_ESPHOME_NOISE_PSK",
+        "label": "ESPHome Noise PSK",
+        "type": "password",
+        "default": "",
+    },
+    {
+        "key": "VOICE_ESPHOME_CONNECT_TIMEOUT_S",
+        "label": "ESPHome Connect Timeout (sec)",
+        "type": "number",
+        "default": DEFAULT_ESPHOME_CONNECT_TIMEOUT_S,
+        "min": 2.0,
+        "max": 60.0,
+        "step": 0.1,
+    },
+    {
+        "key": "VOICE_ESPHOME_RETRY_SECONDS",
+        "label": "ESPHome Retry Seconds",
+        "type": "number",
+        "default": DEFAULT_ESPHOME_RETRY_SECONDS,
+        "min": 2,
+        "max": 300,
+    },
+    {
+        "key": "VOICE_NATIVE_WYOMING_TIMEOUT_S",
+        "label": "Wyoming Timeout (sec)",
+        "type": "number",
+        "default": DEFAULT_WYOMING_TIMEOUT_SECONDS,
+        "min": 5.0,
+        "max": 180.0,
+        "step": 0.1,
+    },
+]
+
+# -------------------- Global Runtime --------------------
+_voice_runtime_lock = asyncio.Lock()
+_voice_selector_runtime: Dict[str, Dict[str, Any]] = {}
+
+_esphome_native_lock = asyncio.Lock()
+_esphome_reconcile_lock = asyncio.Lock()
+_esphome_native_clients: Dict[str, Dict[str, Any]] = {}
+_ESPHOME_LOG_BUFFER_LIMIT = 500
+_ESPHOME_LOG_IDLE_SECONDS = 120.0
+_esphome_native_stats: Dict[str, Any] = {
+    "runs": 0,
+    "last_run_ts": 0.0,
+    "last_success_ts": 0.0,
+    "last_error": "",
+}
+
+_discovery_stats: Dict[str, Any] = {
+    "runs": 0,
+    "last_run_ts": 0.0,
+    "last_success_ts": 0.0,
+    "last_error": "",
+    "last_counts": {},
+}
+
+_background_tasks: Dict[str, asyncio.Task] = {}
+
+_tts_url_store: Dict[str, Dict[str, Any]] = {}
+_tts_url_store_lock = threading.Lock()
+_asset_data_url_cache: Dict[str, str] = {}
+
+_wyoming_tts_voice_catalog_mem: List[Dict[str, str]] = []
+_wyoming_tts_voice_catalog_meta_mem: Dict[str, Any] = {
+    "updated_ts": 0.0,
+    "host": "",
+    "port": 0,
+    "error": "",
+}
+_piper_tts_model_catalog_mem: List[Dict[str, str]] = []
+_piper_tts_model_catalog_meta_mem: Dict[str, Any] = {
+    "updated_ts": 0.0,
+    "source": "",
+    "error": "",
+}
+
+_faster_whisper_model_cache: Dict[Tuple[str, str, str], Any] = {}
+_faster_whisper_model_lock = threading.Lock()
+_vosk_model_cache: Dict[str, Any] = {}
+_vosk_model_lock = threading.Lock()
+_vosk_bootstrap_lock = threading.Lock()
+_kokoro_pipeline_cache: Dict[Tuple[str, str], Any] = {}
+_kokoro_pipeline_lock = threading.Lock()
+_pocket_tts_model_cache: Dict[str, Any] = {}
+_pocket_tts_model_lock = threading.Lock()
+_piper_voice_cache: Dict[str, Any] = {}
+_piper_voice_lock = threading.Lock()
+_kokoro_ssmd_patch_applied = False
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_TRANSCRIPT_COMPLETE_SHORT_COMMANDS = {
+    "yes",
+    "no",
+    "stop",
+    "cancel",
+    "play",
+    "pause",
+    "next",
+    "back",
+    "resume",
+    "thanks",
+    "thank you",
+}
+_TRANSCRIPT_INCOMPLETE_TRAILING_WORDS = {
+    "a",
+    "an",
+    "and",
+    "at",
+    "but",
+    "for",
+    "from",
+    "if",
+    "in",
+    "into",
+    "my",
+    "of",
+    "on",
+    "or",
+    "some",
+    "than",
+    "that",
+    "the",
+    "these",
+    "this",
+    "those",
+    "to",
+    "with",
+    "your",
+}
+_TRANSCRIPT_INCOMPLETE_TRAILING_PHRASES = (
+    "tell me",
+    "show me",
+    "play me",
+    "send me",
+    "call the",
+    "open the",
+    "close the",
+    "turn on the",
+    "turn off the",
+    "set a timer for",
+    "set timer for",
+    "what is the",
+    "what's the",
+)
+_VOICE_OUTCOME_VALID = "valid_turn"
+_VOICE_OUTCOME_FALSE_WAKE = "false_wake"
+_VOICE_OUTCOME_WAKE_NO_SPEECH = "wake_no_speech"
+_VOICE_OUTCOME_LOW_SIGNAL = "low_signal_speech"
+_VOICE_OUTCOME_CLIPPED = "clipped_ambiguous_speech"
+_VOICE_METRICS: Dict[str, Any] = {
+    "sessions_started": 0,
+    "valid_turns": 0,
+    "no_op_turns": 0,
+    "false_wake_count": 0,
+    "wake_no_speech_count": 0,
+    "low_signal_count": 0,
+    "clipped_ambiguous_count": 0,
+    "blank_wake_count": 0,
+    "continued_chat_attempts": 0,
+    "continued_chat_reopens": 0,
+    "stt_fallback_count": 0,
+    "tts_fallback_count": 0,
+    "speech_duration": {"count": 0, "total": 0.0},
+    "silence_duration": {"count": 0, "total": 0.0},
+    "turn_latency_ms": {"count": 0, "total": 0.0},
+    "stt_latency_ms": {"count": 0, "total": 0.0, "by_backend": {}},
+    "tts_latency_ms": {"count": 0, "total": 0.0, "by_backend": {}},
+    "devices": {},
+}
+_VOICE_METRICS_LOCK = threading.Lock()
+
+# -------------------- Utility --------------------
+def _now() -> float:
+    return float(time.time())
+
+
+def _text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _lower(value: Any) -> str:
+    return _text(value).lower()
+
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    token = _lower(value)
+    if token in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if token in {"0", "false", "no", "off", "disabled"}:
+        return False
+    return bool(default)
+
+
+def _as_int(value: Any, default: int, *, minimum: Optional[int] = None, maximum: Optional[int] = None) -> int:
+    try:
+        out = int(float(value))
+    except Exception:
+        out = int(default)
+    if minimum is not None:
+        out = max(minimum, out)
+    if maximum is not None:
+        out = min(maximum, out)
+    return out
+
+
+def _as_float(value: Any, default: float, *, minimum: Optional[float] = None, maximum: Optional[float] = None) -> float:
+    try:
+        out = float(value)
+    except Exception:
+        out = float(default)
+    if minimum is not None:
+        out = max(minimum, out)
+    if maximum is not None:
+        out = min(maximum, out)
+    return out
+
+
+def _pcm_rms(data: bytes, sample_width: int) -> float:
+    if _audioop is not None:
+        with contextlib.suppress(Exception):
+            return float(_audioop.rms(data, sample_width))
+    if not data:
+        return 0.0
+    if sample_width == 2:
+        usable = len(data) - (len(data) % 2)
+        if usable <= 0:
+            return 0.0
+        view = memoryview(data[:usable]).cast("h")
+        if len(view) <= 0:
+            return 0.0
+        total = 0.0
+        for sample in view:
+            value = float(sample)
+            total += value * value
+        return math.sqrt(total / float(len(view)))
+    if sample_width == 1:
+        total = 0.0
+        for b in data:
+            value = float(int(b) - 128)
+            total += value * value
+        return math.sqrt(total / float(len(data)))
+    return 0.0
+
+
+def _native_debug_enabled() -> bool:
+    return _as_bool(_voice_settings().get("VOICE_NATIVE_DEBUG"), False)
+
+
+def _native_debug(message: str) -> None:
+    if _native_debug_enabled():
+        logger.info("[native-voice] %s", message)
+
+
+def _continued_chat_enabled() -> bool:
+    return _get_bool_setting("VOICE_CONTINUED_CHAT_ENABLED", DEFAULT_CONTINUED_CHAT_ENABLED)
+
+
+def _experimental_live_tool_progress_enabled() -> bool:
+    return _get_bool_setting(
+        "VOICE_EXPERIMENTAL_LIVE_TOOL_PROGRESS_ENABLED",
+        DEFAULT_EXPERIMENTAL_LIVE_TOOL_PROGRESS_ENABLED,
+    )
+
+
+def _experimental_partial_stt_enabled() -> bool:
+    return _get_bool_setting(
+        "VOICE_EXPERIMENTAL_PARTIAL_STT_ENABLED",
+        DEFAULT_EXPERIMENTAL_PARTIAL_STT_ENABLED,
+    )
+
+
+def _experimental_tts_early_start_enabled() -> bool:
+    return _get_bool_setting(
+        "VOICE_EXPERIMENTAL_TTS_EARLY_START_ENABLED",
+        DEFAULT_EXPERIMENTAL_TTS_EARLY_START_ENABLED,
+    )
+
+
+def _continued_chat_followup_cue(response_text: str) -> str:
+    cues = (
+        "I'm listening.",
+        "Go ahead.",
+        "Tell me.",
+        "Say it.",
+    )
+    tail = _text(response_text).strip().lower()[-240:]
+    if not tail:
+        return "I'm listening."
+    idx = sum(ord(ch) for ch in tail) % len(cues)
+    return cues[idx]
+
+
+def _sanitize_followup_cue_text(raw_text: str) -> str:
+    cue = _text(raw_text).replace("\n", " ").strip()
+    cue = re.sub(r"^[\s'\"`*#>-]+", "", cue)
+    cue = re.sub(r"[\s'\"`]+$", "", cue)
+    cue = cue.replace("?", "").strip()
+    if not cue:
+        return ""
+
+    words = cue.split()
+    if len(words) > 8:
+        cue = " ".join(words[:8]).strip()
+    if len(cue) > 80:
+        cue = cue[:80].rsplit(" ", 1)[0].strip() or cue[:80].strip()
+    if not cue:
+        return ""
+    if cue[-1:] not in ".!":
+        cue = f"{cue}."
+    return cue
+
+
+def _sanitize_tool_progress_spoken_text(raw_text: str) -> str:
+    cue = _text(raw_text).replace("\n", " ").strip()
+    cue = re.sub(r"\s+", " ", cue)
+    cue = re.sub(r"^[\s'\"`*#>-]+", "", cue)
+    cue = re.sub(r"[\s'\"`]+$", "", cue)
+    if not cue:
+        return ""
+    words = cue.split()
+    if len(words) > 18:
+        cue = " ".join(words[:18]).strip()
+    if len(cue) > 140:
+        cue = cue[:140].rsplit(" ", 1)[0].strip() or cue[:140].strip()
+    if not cue:
+        return ""
+    if cue[-1:] not in ".!?":
+        cue = f"{cue}."
+    return cue
+
+
+async def _generate_followup_cue(user_text: str, assistant_text: str) -> str:
+    transcript = _text(user_text).strip()
+    reply = _text(assistant_text).strip()
+    fallback = _continued_chat_followup_cue(reply)
+    if not reply:
+        return fallback
+
+    prompt = (
+        "You write the tiny spoken cue that plays right after an assistant asks a real follow-up question and just before the microphone reopens.\n"
+        "Write one short, natural cue that invites the user to continue.\n"
+        "Requirements:\n"
+        "- plain text only\n"
+        "- 2 to 6 words\n"
+        "- not a question\n"
+        "- do not repeat the assistant's question\n"
+        "- do not mention microphones, wake words, buttons, or devices\n"
+        "- sound warm and conversational, like 'Go ahead.' or 'Tell me.'\n"
+    )
+    user_prompt = (
+        "User's last spoken request:\n"
+        f"{transcript or '(not available)'}\n\n"
+        "Assistant reply that triggered continued chat:\n"
+        f"{reply}\n\n"
+        "Return only the short spoken cue."
+    )
+
+    try:
+        async with get_llm_client_from_env(redis_conn=redis_client) as llm_client:
+            result = await llm_client.chat(
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.4,
+                max_tokens=20,
+                timeout=DEFAULT_CONTINUED_CHAT_CLASSIFY_TIMEOUT_S,
+                activity="voice_followup_cue",
+            )
+        content = _text(((result or {}).get("message") or {}).get("content"))
+        cue = _sanitize_followup_cue_text(content)
+        if cue:
+            _native_debug(
+                f"continued chat cue generated cue={cue!r} transcript_tail={transcript[-80:]!r} reply_tail={reply[-80:]!r}"
+            )
+            return cue
+        _native_debug(
+            f"continued chat cue empty raw={content[:120]!r} fallback={fallback!r}"
+        )
+    except Exception as exc:
+        _native_debug(f"continued chat cue generation failed error={exc}")
+
+    return fallback
+
+
+def _continued_chat_spoken_reply_text(
+    response_text: str,
+    *,
+    continue_conversation: bool,
+    followup_cue: str = "",
+) -> str:
+    reply = _text(response_text)
+    if not continue_conversation:
+        return reply
+
+    cue = _sanitize_followup_cue_text(followup_cue) or _continued_chat_followup_cue(reply)
+    if not reply:
+        return cue
+    if reply[-1:] in ".!?":
+        return f"{reply} {cue}".strip()
+    return f"{reply}. {cue}".strip()
+
+
+def _merge_text_notes(*parts: str) -> str:
+    seen = set()
+    out: List[str] = []
+    for part in parts:
+        text = _text(part)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return " ".join(out).strip()
+
+
+def _voice_metric_avg(bucket: Dict[str, Any]) -> float:
+    count = int(bucket.get("count") or 0) if isinstance(bucket, dict) else 0
+    total = float(bucket.get("total") or 0.0) if isinstance(bucket, dict) else 0.0
+    if count <= 0:
+        return 0.0
+    return total / float(count)
+
+
+def _voice_metric_backend_avgs(group_bucket: Dict[str, Any]) -> Dict[str, float]:
+    by_backend = group_bucket.get("by_backend") if isinstance(group_bucket, dict) else {}
+    if not isinstance(by_backend, dict):
+        return {}
+    out: Dict[str, float] = {}
+    for backend, bucket in by_backend.items():
+        if not isinstance(bucket, dict):
+            continue
+        avg = round(_voice_metric_avg(bucket), 1)
+        if avg > 0.0:
+            out[_text(backend) or "unknown"] = avg
+    return out
+
+
+def _voice_metric_add(bucket: Dict[str, Any], value: Any) -> None:
+    if not isinstance(bucket, dict):
+        return
+    bucket["count"] = int(bucket.get("count") or 0) + 1
+    bucket["total"] = float(bucket.get("total") or 0.0) + max(0.0, float(value or 0.0))
+
+
+def _voice_backend_bucket(group_name: str, backend: str) -> Dict[str, Any]:
+    metrics = _VOICE_METRICS.get(group_name)
+    if not isinstance(metrics, dict):
+        metrics = {"count": 0, "total": 0.0, "by_backend": {}}
+        _VOICE_METRICS[group_name] = metrics
+    by_backend = metrics.get("by_backend")
+    if not isinstance(by_backend, dict):
+        by_backend = {}
+        metrics["by_backend"] = by_backend
+    token = _text(backend) or "unknown"
+    bucket = by_backend.get(token)
+    if not isinstance(bucket, dict):
+        bucket = {"count": 0, "total": 0.0}
+        by_backend[token] = bucket
+    return bucket
+
+
+def _voice_device_metrics(selector: str) -> Dict[str, Any]:
+    devices = _VOICE_METRICS.get("devices")
+    if not isinstance(devices, dict):
+        devices = {}
+        _VOICE_METRICS["devices"] = devices
+    token = _text(selector) or "unknown"
+    row = devices.get(token)
+    if not isinstance(row, dict):
+        row = {
+            "sessions_started": 0,
+            "valid_turns": 0,
+            "no_op_turns": 0,
+            "false_wake_count": 0,
+            "wake_no_speech_count": 0,
+            "low_signal_count": 0,
+            "clipped_ambiguous_count": 0,
+            "error_count": 0,
+            "disconnect_count": 0,
+            "reconnect_count": 0,
+            "continued_chat_reopens": 0,
+            "speech_duration": {"count": 0, "total": 0.0},
+            "silence_duration": {"count": 0, "total": 0.0},
+            "turn_latency_ms": {"count": 0, "total": 0.0},
+            "stt_latency_ms": {"count": 0, "total": 0.0},
+            "tts_latency_ms": {"count": 0, "total": 0.0},
+            "last_outcome": "",
+            "last_reason": "",
+            "last_seen_ts": 0.0,
+        }
+        devices[token] = row
+    return row
+
+
+def _voice_metrics_record_session_start(
+    *,
+    selector: str,
+    continued_chat_reopen: bool,
+    stt_fallback_used: bool,
+    tts_fallback_used: bool,
+) -> None:
+    with _VOICE_METRICS_LOCK:
+        _VOICE_METRICS["sessions_started"] = int(_VOICE_METRICS.get("sessions_started") or 0) + 1
+        if continued_chat_reopen:
+            _VOICE_METRICS["continued_chat_reopens"] = int(_VOICE_METRICS.get("continued_chat_reopens") or 0) + 1
+        if stt_fallback_used:
+            _VOICE_METRICS["stt_fallback_count"] = int(_VOICE_METRICS.get("stt_fallback_count") or 0) + 1
+        if tts_fallback_used:
+            _VOICE_METRICS["tts_fallback_count"] = int(_VOICE_METRICS.get("tts_fallback_count") or 0) + 1
+        device = _voice_device_metrics(selector)
+        device["sessions_started"] = int(device.get("sessions_started") or 0) + 1
+        if continued_chat_reopen:
+            device["continued_chat_reopens"] = int(device.get("continued_chat_reopens") or 0) + 1
+        device["last_seen_ts"] = _now()
+
+
+def _voice_metrics_record_connection_event(selector: str, *, event: str) -> None:
+    token = _text(event)
+    if token not in {"disconnect", "reconnect", "error"}:
+        return
+    with _VOICE_METRICS_LOCK:
+        device = _voice_device_metrics(selector)
+        if token == "disconnect":
+            device["disconnect_count"] = int(device.get("disconnect_count") or 0) + 1
+        elif token == "reconnect":
+            device["reconnect_count"] = int(device.get("reconnect_count") or 0) + 1
+        else:
+            device["error_count"] = int(device.get("error_count") or 0) + 1
+        device["last_seen_ts"] = _now()
+
+
+def _voice_metrics_record_stt(selector: str, backend: str, latency_ms: float) -> None:
+    with _VOICE_METRICS_LOCK:
+        _voice_metric_add(_VOICE_METRICS.setdefault("stt_latency_ms", {"count": 0, "total": 0.0, "by_backend": {}}), latency_ms)
+        _voice_metric_add(_voice_backend_bucket("stt_latency_ms", backend), latency_ms)
+        device = _voice_device_metrics(selector)
+        _voice_metric_add(device.setdefault("stt_latency_ms", {"count": 0, "total": 0.0}), latency_ms)
+        device["last_seen_ts"] = _now()
+
+
+def _voice_metrics_record_tts(selector: str, backend: str, latency_ms: float) -> None:
+    with _VOICE_METRICS_LOCK:
+        _voice_metric_add(_VOICE_METRICS.setdefault("tts_latency_ms", {"count": 0, "total": 0.0, "by_backend": {}}), latency_ms)
+        _voice_metric_add(_voice_backend_bucket("tts_latency_ms", backend), latency_ms)
+        device = _voice_device_metrics(selector)
+        _voice_metric_add(device.setdefault("tts_latency_ms", {"count": 0, "total": 0.0}), latency_ms)
+        device["last_seen_ts"] = _now()
+
+
+def _voice_metrics_record_turn(
+    *,
+    selector: str,
+    outcome: str,
+    reason: str,
+    speech_s: float,
+    silence_s: float,
+    turn_latency_ms: float,
+) -> None:
+    with _VOICE_METRICS_LOCK:
+        valid = outcome == _VOICE_OUTCOME_VALID
+        if valid:
+            _VOICE_METRICS["valid_turns"] = int(_VOICE_METRICS.get("valid_turns") or 0) + 1
+        else:
+            _VOICE_METRICS["no_op_turns"] = int(_VOICE_METRICS.get("no_op_turns") or 0) + 1
+        if outcome == _VOICE_OUTCOME_FALSE_WAKE:
+            _VOICE_METRICS["false_wake_count"] = int(_VOICE_METRICS.get("false_wake_count") or 0) + 1
+        elif outcome == _VOICE_OUTCOME_WAKE_NO_SPEECH:
+            _VOICE_METRICS["wake_no_speech_count"] = int(_VOICE_METRICS.get("wake_no_speech_count") or 0) + 1
+        elif outcome == _VOICE_OUTCOME_LOW_SIGNAL:
+            _VOICE_METRICS["low_signal_count"] = int(_VOICE_METRICS.get("low_signal_count") or 0) + 1
+        elif outcome == _VOICE_OUTCOME_CLIPPED:
+            _VOICE_METRICS["clipped_ambiguous_count"] = int(_VOICE_METRICS.get("clipped_ambiguous_count") or 0) + 1
+        if _text(reason) == "blank_wake_timeout":
+            _VOICE_METRICS["blank_wake_count"] = int(_VOICE_METRICS.get("blank_wake_count") or 0) + 1
+        _voice_metric_add(_VOICE_METRICS.setdefault("speech_duration", {"count": 0, "total": 0.0}), speech_s)
+        _voice_metric_add(_VOICE_METRICS.setdefault("silence_duration", {"count": 0, "total": 0.0}), silence_s)
+        _voice_metric_add(_VOICE_METRICS.setdefault("turn_latency_ms", {"count": 0, "total": 0.0}), turn_latency_ms)
+
+        device = _voice_device_metrics(selector)
+        if valid:
+            device["valid_turns"] = int(device.get("valid_turns") or 0) + 1
+        else:
+            device["no_op_turns"] = int(device.get("no_op_turns") or 0) + 1
+        if outcome == _VOICE_OUTCOME_FALSE_WAKE:
+            device["false_wake_count"] = int(device.get("false_wake_count") or 0) + 1
+        elif outcome == _VOICE_OUTCOME_WAKE_NO_SPEECH:
+            device["wake_no_speech_count"] = int(device.get("wake_no_speech_count") or 0) + 1
+        elif outcome == _VOICE_OUTCOME_LOW_SIGNAL:
+            device["low_signal_count"] = int(device.get("low_signal_count") or 0) + 1
+        elif outcome == _VOICE_OUTCOME_CLIPPED:
+            device["clipped_ambiguous_count"] = int(device.get("clipped_ambiguous_count") or 0) + 1
+        _voice_metric_add(device.setdefault("speech_duration", {"count": 0, "total": 0.0}), speech_s)
+        _voice_metric_add(device.setdefault("silence_duration", {"count": 0, "total": 0.0}), silence_s)
+        _voice_metric_add(device.setdefault("turn_latency_ms", {"count": 0, "total": 0.0}), turn_latency_ms)
+        device["last_outcome"] = _text(outcome)
+        device["last_reason"] = _text(reason)
+        device["last_seen_ts"] = _now()
+
+
+def _voice_metrics_record_continued_chat_attempt(selector: str) -> None:
+    with _VOICE_METRICS_LOCK:
+        _VOICE_METRICS["continued_chat_attempts"] = int(_VOICE_METRICS.get("continued_chat_attempts") or 0) + 1
+        device = _voice_device_metrics(selector)
+        device["last_seen_ts"] = _now()
+
+
+def _voice_metrics_snapshot() -> Dict[str, Any]:
+    with _VOICE_METRICS_LOCK:
+        metrics = json.loads(json.dumps(_VOICE_METRICS))
+    devices = metrics.get("devices") if isinstance(metrics.get("devices"), dict) else {}
+    for row in devices.values():
+        if not isinstance(row, dict):
+            continue
+        row["avg_turn_latency_ms"] = round(_voice_metric_avg(row.get("turn_latency_ms") if isinstance(row.get("turn_latency_ms"), dict) else {}), 1)
+        row["avg_stt_latency_ms"] = round(_voice_metric_avg(row.get("stt_latency_ms") if isinstance(row.get("stt_latency_ms"), dict) else {}), 1)
+        row["avg_tts_latency_ms"] = round(_voice_metric_avg(row.get("tts_latency_ms") if isinstance(row.get("tts_latency_ms"), dict) else {}), 1)
+        row["avg_speech_s"] = round(_voice_metric_avg(row.get("speech_duration") if isinstance(row.get("speech_duration"), dict) else {}), 2)
+        row["avg_silence_s"] = round(_voice_metric_avg(row.get("silence_duration") if isinstance(row.get("silence_duration"), dict) else {}), 2)
+    metrics["avg_turn_latency_ms"] = round(_voice_metric_avg(metrics.get("turn_latency_ms") if isinstance(metrics.get("turn_latency_ms"), dict) else {}), 1)
+    metrics["avg_stt_latency_ms"] = round(_voice_metric_avg(metrics.get("stt_latency_ms") if isinstance(metrics.get("stt_latency_ms"), dict) else {}), 1)
+    metrics["avg_tts_latency_ms"] = round(_voice_metric_avg(metrics.get("tts_latency_ms") if isinstance(metrics.get("tts_latency_ms"), dict) else {}), 1)
+    metrics["avg_speech_s"] = round(_voice_metric_avg(metrics.get("speech_duration") if isinstance(metrics.get("speech_duration"), dict) else {}), 2)
+    metrics["avg_silence_s"] = round(_voice_metric_avg(metrics.get("silence_duration") if isinstance(metrics.get("silence_duration"), dict) else {}), 2)
+    metrics["avg_stt_latency_by_backend_ms"] = _voice_metric_backend_avgs(
+        metrics.get("stt_latency_ms") if isinstance(metrics.get("stt_latency_ms"), dict) else {}
+    )
+    metrics["avg_tts_latency_by_backend_ms"] = _voice_metric_backend_avgs(
+        metrics.get("tts_latency_ms") if isinstance(metrics.get("tts_latency_ms"), dict) else {}
+    )
+    attempts = int(metrics.get("continued_chat_attempts") or 0)
+    successes = int(metrics.get("continued_chat_reopens") or 0)
+    metrics["continued_chat_reopen_rate"] = round((float(successes) / float(attempts) * 100.0), 1) if attempts > 0 else 0.0
+    return metrics
+
+
+def _transcript_completeness_assessment(text: str) -> Dict[str, Any]:
+    raw = _text(text)
+    if not raw:
+        return {"complete": True, "reason": "empty"}
+    compact = re.sub(r"\s+", " ", raw).strip()
+    lower = compact.lower()
+    words = re.findall(r"[a-z0-9']+", lower)
+    if not words:
+        return {"complete": True, "reason": "no_words"}
+    if lower in _TRANSCRIPT_COMPLETE_SHORT_COMMANDS:
+        return {"complete": True, "reason": "short_command"}
+    if compact.endswith(("...", "…", "-", "—", ":", "/", ",")):
+        return {"complete": False, "reason": "trailing_punctuation"}
+    if words[-1] in _TRANSCRIPT_INCOMPLETE_TRAILING_WORDS:
+        return {"complete": False, "reason": f"trailing_word:{words[-1]}"}
+    for phrase in _TRANSCRIPT_INCOMPLETE_TRAILING_PHRASES:
+        if lower.endswith(phrase):
+            return {"complete": False, "reason": f"trailing_phrase:{phrase}"}
+    return {"complete": True, "reason": "looks_complete"}
+
+
+def _classify_no_op_outcome(
+    session: "VoiceSessionRuntime",
+    *,
+    reason: str,
+    transcript: str = "",
+) -> str:
+    transcript_text = _text(transcript)
+    reason_token = _text(reason)
+    speech_s = max(0.0, float(getattr(session, "speech_duration_s", 0.0) or 0.0))
+    wake_word_session = bool(_text(getattr(session, "wake_word", "")))
+    if reason_token == "low_signal_transcript":
+        return _VOICE_OUTCOME_LOW_SIGNAL
+    if reason_token == "clipped_ambiguous_transcript":
+        return _VOICE_OUTCOME_CLIPPED
+    if reason_token in {"blank_wake_timeout", "audio_stall_no_audio"}:
+        return _VOICE_OUTCOME_FALSE_WAKE if wake_word_session else _VOICE_OUTCOME_WAKE_NO_SPEECH
+    if reason_token in {"audio_stall_no_speech", "server_vad", "empty_transcript"}:
+        if wake_word_session and speech_s < 0.12 and not transcript_text:
+            return _VOICE_OUTCOME_FALSE_WAKE
+        if speech_s < 0.30 and not transcript_text:
+            return _VOICE_OUTCOME_WAKE_NO_SPEECH
+        if transcript_text:
+            assessment = _transcript_completeness_assessment(transcript_text)
+            if not bool(assessment.get("complete")):
+                return _VOICE_OUTCOME_CLIPPED
+        return _VOICE_OUTCOME_WAKE_NO_SPEECH if wake_word_session else _VOICE_OUTCOME_CLIPPED
+    if transcript_text:
+        assessment = _transcript_completeness_assessment(transcript_text)
+        if not bool(assessment.get("complete")):
+            return _VOICE_OUTCOME_CLIPPED
+    return _VOICE_OUTCOME_WAKE_NO_SPEECH if wake_word_session else _VOICE_OUTCOME_CLIPPED
+
+
+def _response_followup_heuristic(text: str) -> bool:
+    tail = _text(text).strip()[-200:]
+    if not tail:
+        return False
+    return "?" in tail and tail.rstrip().endswith("?")
+
+
+async def _response_is_followup_question(text: str) -> bool:
+    reply = _text(text).strip()
+    if not reply:
+        return False
+
+    heuristic = _response_followup_heuristic(reply)
+    prompt = (
+        "You classify whether an assistant reply is genuinely asking the user for another spoken response right now.\n"
+        "Return strict JSON only with exactly this shape: {\"follow_up\": true}\n"
+        "or {\"follow_up\": false}\n\n"
+        "Mark true only when the assistant is explicitly asking a direct follow-up question or inviting an immediate answer.\n"
+        "Mark false for statements, confirmations, explanations, rhetorical questions, quoted questions, or replies that do not need the mic reopened.\n"
+    )
+    user_text = (
+        "Assistant reply:\n"
+        f"{reply}\n\n"
+        f"Heuristic guess: {'true' if heuristic else 'false'}\n"
+        "Return JSON only."
+    )
+
+    try:
+        async with get_llm_client_from_env(redis_conn=redis_client) as llm_client:
+            result = await llm_client.chat(
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": user_text},
+                ],
+                temperature=0,
+                max_tokens=40,
+                timeout=DEFAULT_CONTINUED_CHAT_CLASSIFY_TIMEOUT_S,
+                activity="voice_followup_classifier",
+            )
+        content = _text(((result or {}).get("message") or {}).get("content"))
+        parsed_text = extract_json(content)
+        if parsed_text:
+            parsed = json.loads(parsed_text)
+            if isinstance(parsed, dict) and isinstance(parsed.get("follow_up"), bool):
+                decision = bool(parsed.get("follow_up"))
+                _native_debug(
+                    f"continued chat classifier follow_up={decision} heuristic={heuristic} reply_tail={reply[-120:]!r}"
+                )
+                return decision
+        _native_debug(
+            f"continued chat classifier invalid_json heuristic={heuristic} raw={content[:200]!r}"
+        )
+    except Exception as exc:
+        _native_debug(f"continued chat classifier failed heuristic={heuristic} error={exc}")
+
+    return heuristic
+
+
+def _require_api_auth(x_tater_token: Optional[str]) -> None:
+    settings = _voice_settings()
+    if not _as_bool(settings.get("API_AUTH_ENABLED"), False):
+        return
+    expected = _text(settings.get("API_AUTH_KEY"))
+    if not expected:
+        raise HTTPException(status_code=503, detail="API auth enabled but API_AUTH_KEY is not configured")
+    got = _text(x_tater_token)
+    if got != expected:
+        raise HTTPException(status_code=401, detail="Invalid or missing X-Tater-Token")
+
+
+def _voice_settings() -> Dict[str, Any]:
+    with contextlib.suppress(Exception):
+        row = redis_client.hgetall(VOICE_CORE_SETTINGS_HASH_KEY) or {}
+        if isinstance(row, dict):
+            return row
+    return {}
+
+
+def _shared_speech_voice_settings() -> Dict[str, Any]:
+    shared = get_shared_speech_settings() or {}
+    return {
+        "VOICE_STT_BACKEND": shared.get("stt_backend"),
+        "VOICE_WYOMING_STT_HOST": shared.get("wyoming_stt_host"),
+        "VOICE_WYOMING_STT_PORT": shared.get("wyoming_stt_port"),
+        "VOICE_TTS_BACKEND": shared.get("tts_backend"),
+        "VOICE_TTS_MODEL": shared.get("tts_model"),
+        "VOICE_TTS_VOICE": shared.get("tts_voice"),
+        "VOICE_WYOMING_TTS_HOST": shared.get("wyoming_tts_host"),
+        "VOICE_WYOMING_TTS_PORT": shared.get("wyoming_tts_port"),
+        "VOICE_WYOMING_TTS_VOICE": shared.get("wyoming_tts_voice"),
+    }
+
+
+def _voice_settings_with_shared_speech(extra_values: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    merged = dict(_voice_settings())
+    merged.update({key: value for key, value in _shared_speech_voice_settings().items() if value is not None})
+    if isinstance(extra_values, dict):
+        merged.update({key: value for key, value in extra_values.items() if value is not None})
+    return merged
+
+
+def _get_bool_setting(name: str, default: bool) -> bool:
+    return _as_bool(_voice_settings().get(name), default)
+
+
+def _get_int_setting(name: str, default: int, *, minimum: Optional[int] = None, maximum: Optional[int] = None) -> int:
+    return _as_int(_voice_settings().get(name), default, minimum=minimum, maximum=maximum)
+
+
+def _get_float_setting(name: str, default: float, *, minimum: Optional[float] = None, maximum: Optional[float] = None) -> float:
+    return _as_float(_voice_settings().get(name), default, minimum=minimum, maximum=maximum)
+
+
+def _normalize_stt_backend(value: Any) -> str:
+    token = _lower(value).replace("-", "_").replace(" ", "_")
+    if token in {"", "default"}:
+        return DEFAULT_STT_BACKEND
+    if token in {"faster_whisper", "fasterwhisper", "whisper"}:
+        return "faster_whisper"
+    if token == "vosk":
+        return "vosk"
+    if token == "wyoming":
+        return "wyoming"
+    return DEFAULT_STT_BACKEND
+
+
+KOKORO_MODEL_SPECS: Dict[str, Dict[str, str]] = {
+    "v1.0:q8": {
+        "label": "Kokoro English v1.0 (q8)",
+        "variant": "v1.0",
+        "quality": "q8",
+    },
+    "v1.0:fp32": {
+        "label": "Kokoro English v1.0 (fp32)",
+        "variant": "v1.0",
+        "quality": "fp32",
+    },
+    "v1.1-zh:q8": {
+        "label": "Kokoro Chinese v1.1 (q8)",
+        "variant": "v1.1-zh",
+        "quality": "q8",
+    },
+}
+
+
+def _normalize_tts_backend(value: Any) -> str:
+    token = _lower(value).replace("-", "_").replace(" ", "_")
+    if token in {"", "default"}:
+        return DEFAULT_TTS_BACKEND
+    if token == "wyoming":
+        return "wyoming"
+    if token == "kokoro":
+        return "kokoro"
+    if token in {"pocket_tts", "pockettts", "pocket"}:
+        return "pocket_tts"
+    if token == "piper":
+        return "piper"
+    return DEFAULT_TTS_BACKEND
+
+
+def _tts_model_root() -> str:
+    return os.path.expanduser(DEFAULT_TTS_MODEL_ROOT)
+
+
+def _ensure_tts_model_root() -> str:
+    root = _tts_model_root()
+    with contextlib.suppress(Exception):
+        os.makedirs(root, exist_ok=True)
+    return root
+
+
+def _tts_backend_model_root(backend: str) -> str:
+    base = _ensure_tts_model_root()
+    token = _normalize_tts_backend(backend)
+    dirname_map = {
+        "kokoro": "kokoro",
+        "pocket_tts": "pocket-tts",
+        "piper": "piper",
+        "wyoming": "wyoming",
+    }
+    dirname = dirname_map.get(token, token or DEFAULT_TTS_BACKEND)
+    return os.path.join(base, dirname)
+
+
+def _ensure_tts_backend_model_root(backend: str) -> str:
+    root = _tts_backend_model_root(backend)
+    with contextlib.suppress(Exception):
+        os.makedirs(root, exist_ok=True)
+    return root
+
+
+def _patch_kokoro_ssmd_parser() -> None:
+    global _kokoro_ssmd_patch_applied
+    if _kokoro_ssmd_patch_applied:
+        return
+    try:
+        ssmd_parser_mod = importlib.import_module("pykokoro.ssmd_parser")
+        ssmd_doc_parser_mod = importlib.import_module("pykokoro.stages.doc_parsers.ssmd")
+    except Exception:
+        return
+
+    original = getattr(ssmd_parser_mod, "parse_ssmd_to_segments", None)
+    if not callable(original):
+        return
+    if getattr(original, "_tater_forces_no_spacy", False):
+        _kokoro_ssmd_patch_applied = True
+        return
+
+    def _wrapped_parse_ssmd_to_segments(*args, **kwargs):
+        wrapped_kwargs = dict(kwargs or {})
+        wrapped_kwargs["use_spacy"] = False
+        wrapped_kwargs.setdefault("model_size", "sm")
+        return original(*args, **wrapped_kwargs)
+
+    setattr(_wrapped_parse_ssmd_to_segments, "_tater_forces_no_spacy", True)
+    setattr(ssmd_parser_mod, "parse_ssmd_to_segments", _wrapped_parse_ssmd_to_segments)
+    setattr(ssmd_doc_parser_mod, "parse_ssmd_to_segments", _wrapped_parse_ssmd_to_segments)
+    _kokoro_ssmd_patch_applied = True
+
+
+def _option_rows_from_values(values: List[str], *, current_value: Any = "", labels: Optional[Dict[str, str]] = None) -> List[Dict[str, str]]:
+    rows: List[Dict[str, str]] = []
+    seen = set()
+    for raw in values:
+        value = _text(raw)
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        label = _text((labels or {}).get(value)) or value
+        rows.append({"value": value, "label": label})
+
+    current = _text(current_value)
+    if current and current not in seen:
+        rows.insert(0, {"value": current, "label": _text((labels or {}).get(current)) or current})
+    return rows
+
+
+def _prefer_value_first(values: List[str], preferred_value: Any) -> List[str]:
+    preferred = _text(preferred_value)
+    ordered = [_text(value) for value in values if _text(value)]
+    if preferred and preferred in ordered:
+        ordered = [value for value in ordered if value != preferred]
+        ordered.insert(0, preferred)
+    return ordered
+
+
+def _module_available(module_name: str) -> bool:
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except Exception:
+        return False
+
+
+def _supported_kokoro_language_prefixes() -> set[str]:
+    prefixes = {"a", "b", "d", "f"}
+    if _module_available("pypinyin"):
+        prefixes.add("z")
+    if _module_available("pyopenjtalk"):
+        prefixes.add("j")
+    return prefixes
+
+
+def _kokoro_voice_supported(value: Any) -> bool:
+    token = _text(value).lower()
+    if not token:
+        return False
+    return token[0] in _supported_kokoro_language_prefixes()
+
+
+def _kokoro_voice_label(value: Any) -> str:
+    token = _text(value)
+    if not token:
+        return ""
+    prefix, _, remainder = token.partition("_")
+    prefix_labels = {
+        "af": "American Female",
+        "am": "American Male",
+        "bf": "British Female",
+        "bm": "British Male",
+        "ef": "Spanish Female",
+        "em": "Spanish Male",
+        "ff": "French Female",
+        "hf": "Hindi Female",
+        "hm": "Hindi Male",
+        "if": "Italian Female",
+        "im": "Italian Male",
+        "jf": "Japanese Female",
+        "jm": "Japanese Male",
+        "pf": "Portuguese Female",
+        "pm": "Portuguese Male",
+        "zf": "Chinese Female",
+        "zm": "Chinese Male",
+        "df": "German Female",
+        "dm": "German Male",
+    }
+    prefix_label = prefix_labels.get(prefix, prefix.upper())
+    if not remainder:
+        return prefix_label
+    pretty_name = remainder.replace("-", " ").replace("_", " ").title()
+    return f"{pretty_name} ({prefix_label})"
+
+
+def _kokoro_model_option_rows(*, current_value: Any = "") -> List[Dict[str, str]]:
+    labels = {key: _text(spec.get("label")) or key for key, spec in KOKORO_MODEL_SPECS.items()}
+    values = []
+    for model_key, spec in KOKORO_MODEL_SPECS.items():
+        variant = _text((spec or {}).get("variant")) or "v1.0"
+        voices = list(KOKORO_VOICE_NAMES_BY_VARIANT.get(variant) or KOKORO_VOICE_NAMES_BY_VARIANT.get("v1.0") or [])
+        if any(_kokoro_voice_supported(voice) for voice in voices):
+            values.append(model_key)
+    current_model = _text(current_value)
+    if current_model not in values:
+        current_model = DEFAULT_KOKORO_MODEL if DEFAULT_KOKORO_MODEL in values else ""
+    return _option_rows_from_values(values, current_value=current_model, labels=labels)
+
+
+def _kokoro_model_spec(model_id: Any) -> Dict[str, str]:
+    token = _text(model_id)
+    if token in KOKORO_MODEL_SPECS:
+        return dict(KOKORO_MODEL_SPECS[token])
+    return dict(KOKORO_MODEL_SPECS[DEFAULT_KOKORO_MODEL])
+
+
+def _kokoro_voice_option_rows(*, model_id: Any, current_value: Any = "") -> List[Dict[str, str]]:
+    spec = _kokoro_model_spec(model_id)
+    variant = _text(spec.get("variant")) or "v1.0"
+    voices = [
+        voice
+        for voice in list(KOKORO_VOICE_NAMES_BY_VARIANT.get(variant) or KOKORO_VOICE_NAMES_BY_VARIANT.get("v1.0") or [])
+        if _kokoro_voice_supported(voice)
+    ]
+    labels = {voice: _kokoro_voice_label(voice) for voice in voices}
+    preferred_voice = _text(current_value)
+    if preferred_voice not in voices:
+        preferred_voice = DEFAULT_KOKORO_VOICE if DEFAULT_KOKORO_VOICE in voices else _text(voices[0] if voices else "")
+    voices = _prefer_value_first(voices, preferred_voice)
+    return _option_rows_from_values(voices, current_value=preferred_voice, labels=labels)
+
+
+def _pocket_tts_model_option_rows(*, current_value: Any = "") -> List[Dict[str, str]]:
+    labels = {DEFAULT_POCKET_TTS_MODEL: f"Pocket TTS {DEFAULT_POCKET_TTS_MODEL}"}
+    return _option_rows_from_values([DEFAULT_POCKET_TTS_MODEL], current_value=current_value, labels=labels)
+
+
+def _pocket_tts_voice_option_rows(*, current_value: Any = "") -> List[Dict[str, str]]:
+    return _option_rows_from_values(sorted(POCKET_TTS_PREDEFINED_VOICES.keys()), current_value=current_value)
+
+
+def _stt_model_root() -> str:
+    return os.path.expanduser(DEFAULT_STT_MODEL_ROOT)
+
+
+def _ensure_stt_model_root() -> str:
+    root = _stt_model_root()
+    with contextlib.suppress(Exception):
+        os.makedirs(root, exist_ok=True)
+    return root
+
+
+def _stt_backend_model_root(backend: str) -> str:
+    base = _ensure_stt_model_root()
+    token = _normalize_stt_backend(backend)
+    dirname = "faster-whisper" if token == "faster_whisper" else token
+    return os.path.join(base, dirname)
+
+
+def _ensure_stt_backend_model_root(backend: str) -> str:
+    root = _stt_backend_model_root(backend)
+    with contextlib.suppress(Exception):
+        os.makedirs(root, exist_ok=True)
+    return root
+
+
+def _looks_like_faster_whisper_model_dir(path: str) -> bool:
+    token = os.path.expanduser(_text(path))
+    if not token or not os.path.isdir(token):
+        return False
+    required_files = ("config.json", "model.bin", "tokenizer.json")
+    return all(os.path.isfile(os.path.join(token, name)) for name in required_files)
+
+
+def _resolve_faster_whisper_model_source() -> str:
+    root = _ensure_stt_backend_model_root("faster_whisper")
+    direct_candidates = [root]
+    for candidate in direct_candidates:
+        if _looks_like_faster_whisper_model_dir(candidate):
+            return candidate
+
+    repo_dir = os.path.join(root, f"models--Systran--faster-whisper-{DEFAULT_FASTER_WHISPER_MODEL}")
+    refs_main = os.path.join(repo_dir, "refs", "main")
+    with contextlib.suppress(Exception):
+        snapshot_ref = _text(open(refs_main, "r", encoding="utf-8").read()).strip()
+        if snapshot_ref:
+            snapshot_dir = os.path.join(repo_dir, "snapshots", snapshot_ref)
+            if _looks_like_faster_whisper_model_dir(snapshot_dir):
+                return snapshot_dir
+
+    snapshot_root = os.path.join(repo_dir, "snapshots")
+    with contextlib.suppress(Exception):
+        for name in sorted(os.listdir(snapshot_root), reverse=True):
+            candidate = os.path.join(snapshot_root, name)
+            if _looks_like_faster_whisper_model_dir(candidate):
+                return candidate
+
+    with contextlib.suppress(Exception):
+        for current_root, dirs, _files in os.walk(root):
+            dirs.sort(reverse=True)
+            if _looks_like_faster_whisper_model_dir(current_root):
+                return current_root
+
+    return DEFAULT_FASTER_WHISPER_MODEL
+
+
+def _looks_like_vosk_model_dir(path: str) -> bool:
+    token = os.path.expanduser(_text(path))
+    if not token or not os.path.isdir(token):
+        return False
+    return (
+        os.path.isfile(os.path.join(token, "am", "final.mdl"))
+        and os.path.isdir(os.path.join(token, "conf"))
+    )
+
+
+def _find_vosk_model_path(search_roots: Optional[List[str]] = None) -> str:
+    roots = search_roots or [_ensure_stt_backend_model_root("vosk"), _ensure_stt_model_root()]
+    for root in roots:
+        if _looks_like_vosk_model_dir(root):
+            return root
+
+        with contextlib.suppress(Exception):
+            for name in sorted(os.listdir(root)):
+                candidate = os.path.join(root, name)
+                if _looks_like_vosk_model_dir(candidate):
+                    return candidate
+
+        with contextlib.suppress(Exception):
+            for current_root, dirs, _files in os.walk(root):
+                dirs.sort()
+                if _looks_like_vosk_model_dir(current_root):
+                    return current_root
+    return ""
+
+
+def _safe_extract_zip(archive_path: str, extract_root: str) -> None:
+    abs_root = os.path.abspath(extract_root)
+    with zipfile.ZipFile(archive_path) as zf:
+        for member in zf.infolist():
+            target = os.path.abspath(os.path.join(abs_root, member.filename))
+            if os.path.commonpath([abs_root, target]) != abs_root:
+                raise RuntimeError(f"Refusing to extract unexpected path from archive: {member.filename}")
+        zf.extractall(abs_root)
+
+
+def _bootstrap_vosk_model() -> str:
+    backend_root = _ensure_stt_backend_model_root("vosk")
+    existing = _find_vosk_model_path([backend_root, _ensure_stt_model_root()])
+    if existing:
+        return existing
+
+    with _vosk_bootstrap_lock:
+        existing = _find_vosk_model_path([backend_root, _ensure_stt_model_root()])
+        if existing:
+            return existing
+
+        logger.info(
+            "[native-voice] vosk model missing; downloading url=%s target_root=%s",
+            DEFAULT_VOSK_MODEL_URL,
+            backend_root,
+        )
+        with tempfile.TemporaryDirectory(prefix="tater_vosk_") as temp_dir:
+            archive_path = os.path.join(temp_dir, "vosk_model.zip")
+            extract_root = os.path.join(temp_dir, "extract")
+            os.makedirs(extract_root, exist_ok=True)
+            urllib_request.urlretrieve(DEFAULT_VOSK_MODEL_URL, archive_path)
+            _safe_extract_zip(archive_path, extract_root)
+            extracted_model = _find_vosk_model_path([extract_root])
+            if not extracted_model:
+                raise RuntimeError(
+                    f"Downloaded Vosk archive did not contain a valid model from {DEFAULT_VOSK_MODEL_URL}"
+                )
+
+            final_dir = os.path.join(backend_root, os.path.basename(extracted_model.rstrip(os.sep)))
+            with contextlib.suppress(Exception):
+                if os.path.isdir(final_dir) and not _looks_like_vosk_model_dir(final_dir):
+                    shutil.rmtree(final_dir)
+            shutil.copytree(extracted_model, final_dir, dirs_exist_ok=True)
+            if not _looks_like_vosk_model_dir(final_dir):
+                raise RuntimeError(f"Vosk model download completed but final model dir is invalid: {final_dir}")
+            logger.info("[native-voice] vosk model downloaded target=%s", final_dir)
+            return final_dir
+
+
+def _resolve_vosk_model_path() -> str:
+    resolved = _find_vosk_model_path()
+    if resolved:
+        return resolved
+    return _bootstrap_vosk_model()
+
+
+def _voice_config_snapshot() -> Dict[str, Any]:
+    settings = _voice_settings_with_shared_speech()
+    tts_backend = _normalize_tts_backend(settings.get("VOICE_TTS_BACKEND"))
+    tts_model = _text(settings.get("VOICE_TTS_MODEL"))
+    tts_voice = _text(settings.get("VOICE_TTS_VOICE"))
+    return {
+        "native_debug": _native_debug_enabled(),
+        "wyoming_timeout_s": _get_float_setting("VOICE_NATIVE_WYOMING_TIMEOUT_S", DEFAULT_WYOMING_TIMEOUT_SECONDS, minimum=5.0, maximum=180.0),
+        "wyoming_stt": {
+            "host": _text(settings.get("VOICE_WYOMING_STT_HOST")) or DEFAULT_WYOMING_STT_HOST,
+            "port": _get_int_setting("VOICE_WYOMING_STT_PORT", DEFAULT_WYOMING_STT_PORT, minimum=1, maximum=65535),
+        },
+        "stt": {
+            "backend": _normalize_stt_backend(settings.get("VOICE_STT_BACKEND")),
+            "model_root": DEFAULT_STT_MODEL_ROOT,
+            "faster_whisper": {
+                "model": DEFAULT_FASTER_WHISPER_MODEL,
+                "device": DEFAULT_FASTER_WHISPER_DEVICE,
+                "compute_type": DEFAULT_FASTER_WHISPER_COMPUTE_TYPE,
+                "model_root": _stt_backend_model_root("faster_whisper"),
+            },
+            "vosk": {
+                "model_root": _stt_backend_model_root("vosk"),
+            },
+        },
+        "tts": {
+            "backend": tts_backend,
+            "model_root": DEFAULT_TTS_MODEL_ROOT,
+            "model": (
+                tts_model
+                or (
+                    DEFAULT_KOKORO_MODEL
+                    if tts_backend == "kokoro"
+                    else DEFAULT_POCKET_TTS_MODEL if tts_backend == "pocket_tts" else DEFAULT_PIPER_MODEL
+                )
+            ),
+            "voice": (
+                tts_voice
+                or (
+                    DEFAULT_KOKORO_VOICE
+                    if tts_backend == "kokoro"
+                    else DEFAULT_POCKET_TTS_VOICE if tts_backend == "pocket_tts" else ""
+                )
+            ),
+            "kokoro": {
+                "model": _text(settings.get("VOICE_TTS_MODEL")) or DEFAULT_KOKORO_MODEL,
+                "voice": _text(settings.get("VOICE_TTS_VOICE")) or DEFAULT_KOKORO_VOICE,
+                "model_root": _tts_backend_model_root("kokoro"),
+            },
+            "pocket_tts": {
+                "model": _text(settings.get("VOICE_TTS_MODEL")) or DEFAULT_POCKET_TTS_MODEL,
+                "voice": _text(settings.get("VOICE_TTS_VOICE")) or DEFAULT_POCKET_TTS_VOICE,
+                "model_root": _tts_backend_model_root("pocket_tts"),
+            },
+            "piper": {
+                "model": _text(settings.get("VOICE_TTS_MODEL")) or DEFAULT_PIPER_MODEL,
+                "model_root": _tts_backend_model_root("piper"),
+            },
+        },
+        "wyoming_tts": {
+            "host": _text(settings.get("VOICE_WYOMING_TTS_HOST")) or DEFAULT_WYOMING_TTS_HOST,
+            "port": _get_int_setting("VOICE_WYOMING_TTS_PORT", DEFAULT_WYOMING_TTS_PORT, minimum=1, maximum=65535),
+            "voice": _text(settings.get("VOICE_WYOMING_TTS_VOICE")) or DEFAULT_WYOMING_TTS_VOICE,
+        },
+        "esphome": {
+            "api_port": _get_int_setting("VOICE_ESPHOME_API_PORT", DEFAULT_ESPHOME_API_PORT, minimum=1, maximum=65535),
+            "connect_timeout_s": _get_float_setting("VOICE_ESPHOME_CONNECT_TIMEOUT_S", DEFAULT_ESPHOME_CONNECT_TIMEOUT_S, minimum=2.0, maximum=60.0),
+            "retry_seconds": _get_int_setting("VOICE_ESPHOME_RETRY_SECONDS", DEFAULT_ESPHOME_RETRY_SECONDS, minimum=2, maximum=300),
+            "password_set": bool(_text(settings.get("VOICE_ESPHOME_PASSWORD"))),
+            "noise_psk_set": bool(_text(settings.get("VOICE_ESPHOME_NOISE_PSK"))),
+            "targets": _parse_manual_targets(_text(settings.get("VOICE_ESPHOME_TARGETS"))),
+        },
+        "discovery": {
+            "enabled": _get_bool_setting("VOICE_DISCOVERY_ENABLED", DEFAULT_DISCOVERY_ENABLED),
+            "scan_seconds": _get_int_setting("VOICE_DISCOVERY_SCAN_SECONDS", DEFAULT_DISCOVERY_SCAN_SECONDS, minimum=5, maximum=600),
+            "mdns_timeout_s": _get_float_setting("VOICE_DISCOVERY_MDNS_TIMEOUT_S", DEFAULT_DISCOVERY_MDNS_TIMEOUT_S, minimum=0.5, maximum=20.0),
+        },
+        "eou": {
+            "mode": DEFAULT_EOU_MODE,
+            "backend": DEFAULT_VAD_BACKEND,
+            "silence_s": float(DEFAULT_VAD_SILENCE_SECONDS),
+            "timeout_s": float(DEFAULT_VAD_TIMEOUT_SECONDS),
+            "startup_gate_s": float(DEFAULT_STARTUP_GATE_S),
+            "no_speech_timeout_s": float(DEFAULT_VAD_NO_SPEECH_TIMEOUT_S),
+            "silero_threshold": float(DEFAULT_SILERO_THRESHOLD),
+            "silero_neg_threshold": float(DEFAULT_SILERO_NEG_THRESHOLD),
+            "min_speech_frames": int(DEFAULT_SILERO_MIN_SPEECH_FRAMES),
+            "min_silence_frames": int(DEFAULT_SILERO_MIN_SILENCE_FRAMES),
+        },
+        "limits": {
+            "max_audio_bytes": _get_int_setting("VOICE_NATIVE_MAX_AUDIO_BYTES", DEFAULT_MAX_AUDIO_BYTES, minimum=4096, maximum=16 * 1024 * 1024),
+            "tts_url_ttl_s": _get_float_setting("VOICE_ESPHOME_TTS_URL_TTL_S", DEFAULT_TTS_URL_TTL_S, minimum=30.0, maximum=900.0),
+            "session_ttl_s": _get_int_setting("SESSION_TTL_SECONDS", DEFAULT_SESSION_TTL_SECONDS, minimum=300, maximum=24 * 60 * 60),
+            "history_store": _get_int_setting("MAX_STORE", DEFAULT_HISTORY_MAX_STORE, minimum=4, maximum=200),
+            "history_llm": _get_int_setting("MAX_LLM", DEFAULT_HISTORY_MAX_LLM, minimum=2, maximum=80),
+        },
+    }
+
+
+def _parse_manual_targets(raw: str) -> List[str]:
+    if not raw:
+        return []
+    out: List[str] = []
+    seen = set()
+    for token in re.split(r"[\s,;]+", raw):
+        host = _lower(token)
+        if not host or host in seen:
+            continue
+        seen.add(host)
+        out.append(host)
+    return out
+
+
+# -------------------- Voice Catalog --------------------
+def _load_wyoming_tts_voice_catalog() -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
+    global _wyoming_tts_voice_catalog_mem, _wyoming_tts_voice_catalog_meta_mem
+    try:
+        rows_raw = redis_client.get(REDIS_WYOMING_TTS_VOICES_KEY)
+        meta_raw = redis_client.get(REDIS_WYOMING_TTS_VOICES_META_KEY)
+        rows = json.loads(rows_raw) if rows_raw else []
+        meta = json.loads(meta_raw) if meta_raw else {}
+        if isinstance(rows, list):
+            _wyoming_tts_voice_catalog_mem = [r for r in rows if isinstance(r, dict)]
+        if isinstance(meta, dict):
+            _wyoming_tts_voice_catalog_meta_mem = dict(meta)
+    except Exception:
+        pass
+    return list(_wyoming_tts_voice_catalog_mem), dict(_wyoming_tts_voice_catalog_meta_mem)
+
+
+def _save_wyoming_tts_voice_catalog(rows: List[Dict[str, str]], *, host: str, port: int, error: str = "") -> None:
+    global _wyoming_tts_voice_catalog_mem, _wyoming_tts_voice_catalog_meta_mem
+    clean: List[Dict[str, str]] = []
+    seen = set()
+    for row in rows:
+        value = _text((row or {}).get("value"))
+        label = _text((row or {}).get("label"))
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        clean.append({"value": value, "label": label or value})
+    meta = {
+        "updated_ts": _now(),
+        "host": _text(host),
+        "port": int(port or 0),
+        "error": _text(error),
+    }
+    _wyoming_tts_voice_catalog_mem = list(clean)
+    _wyoming_tts_voice_catalog_meta_mem = dict(meta)
+    with contextlib.suppress(Exception):
+        redis_client.set(REDIS_WYOMING_TTS_VOICES_KEY, json.dumps(clean, ensure_ascii=False))
+        redis_client.set(REDIS_WYOMING_TTS_VOICES_META_KEY, json.dumps(meta, ensure_ascii=False))
+
+
+def _wyoming_tts_voice_option_rows(*, current_value: Any) -> List[Dict[str, str]]:
+    rows, _meta = _load_wyoming_tts_voice_catalog()
+    options = [{"value": "", "label": "Default"}]
+    options.extend(sorted(rows, key=lambda r: _lower(r.get("label"))))
+    current = _text(current_value)
+    if current and current not in {row.get("value") for row in options}:
+        options.append({"value": current, "label": f"{current} (saved)"})
+    return options
+
+
+def _load_piper_tts_model_catalog() -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
+    global _piper_tts_model_catalog_mem, _piper_tts_model_catalog_meta_mem
+    try:
+        rows_raw = redis_client.get(REDIS_PIPER_TTS_MODELS_KEY)
+        meta_raw = redis_client.get(REDIS_PIPER_TTS_MODELS_META_KEY)
+        rows = json.loads(rows_raw) if rows_raw else []
+        meta = json.loads(meta_raw) if meta_raw else {}
+        if isinstance(rows, list):
+            _piper_tts_model_catalog_mem = [r for r in rows if isinstance(r, dict)]
+        if isinstance(meta, dict):
+            _piper_tts_model_catalog_meta_mem = dict(meta)
+    except Exception:
+        pass
+    return list(_piper_tts_model_catalog_mem), dict(_piper_tts_model_catalog_meta_mem)
+
+
+def _save_piper_tts_model_catalog(rows: List[Dict[str, str]], *, source: str, error: str = "") -> None:
+    global _piper_tts_model_catalog_mem, _piper_tts_model_catalog_meta_mem
+    clean: List[Dict[str, str]] = []
+    seen = set()
+    for row in rows:
+        value = _text((row or {}).get("value"))
+        label = _text((row or {}).get("label")) or value
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        clean.append({"value": value, "label": label})
+    meta = {
+        "updated_ts": _now(),
+        "source": _text(source),
+        "error": _text(error),
+    }
+    _piper_tts_model_catalog_mem = list(clean)
+    _piper_tts_model_catalog_meta_mem = dict(meta)
+    with contextlib.suppress(Exception):
+        redis_client.set(REDIS_PIPER_TTS_MODELS_KEY, json.dumps(clean, ensure_ascii=False))
+        redis_client.set(REDIS_PIPER_TTS_MODELS_META_KEY, json.dumps(meta, ensure_ascii=False))
+
+
+def _refresh_piper_tts_model_catalog(force: bool = False) -> Dict[str, Any]:
+    rows, meta = _load_piper_tts_model_catalog()
+    if rows and not force:
+        return {"models": rows, "meta": meta, "count": len(rows)}
+
+    if not PIPER_VOICES_CATALOG_URL:
+        raise RuntimeError(f"piper dependency unavailable: {PIPER_IMPORT_ERROR or 'unknown import error'}")
+
+    catalog_rows: List[Dict[str, str]] = []
+    with urllib_request.urlopen(PIPER_VOICES_CATALOG_URL, timeout=20) as response:
+        payload = json.load(response)
+    if isinstance(payload, dict):
+        for voice_code in sorted(payload.keys()):
+            value = _text(voice_code)
+            if value:
+                catalog_rows.append({"value": value, "label": value})
+
+    _save_piper_tts_model_catalog(catalog_rows, source=PIPER_VOICES_CATALOG_URL, error="")
+    return {"models": catalog_rows, "meta": dict(_piper_tts_model_catalog_meta_mem), "count": len(catalog_rows)}
+
+
+def _piper_tts_model_option_rows(*, current_value: Any, ensure_catalog: bool = False) -> List[Dict[str, str]]:
+    rows, _meta = _load_piper_tts_model_catalog()
+    if ensure_catalog and not rows:
+        with contextlib.suppress(Exception):
+            rows = list((_refresh_piper_tts_model_catalog(force=False) or {}).get("models") or [])
+    options = sorted(rows, key=lambda r: _lower(r.get("label")))
+    current = _text(current_value) or DEFAULT_PIPER_MODEL
+    if current and current not in {row.get("value") for row in options}:
+        options.insert(0, {"value": current, "label": current})
+    return options
+
+
+def _voice_selection_from_string(raw: Any) -> Dict[str, str]:
+    token = _text(raw)
+    if not token:
+        return {}
+    with contextlib.suppress(Exception):
+        parsed = json.loads(token)
+        if isinstance(parsed, dict):
+            out = {
+                "name": _text(parsed.get("name")),
+                "language": _text(parsed.get("language")),
+                "speaker": _text(parsed.get("speaker")),
+            }
+            return {k: v for k, v in out.items() if v}
+    # backward-compat plain voice name
+    return {"name": token}
+
+
+def _voice_selection_to_value(selection: Dict[str, Any]) -> str:
+    payload = {
+        "name": _text(selection.get("name")),
+        "language": _text(selection.get("language")),
+        "speaker": _text(selection.get("speaker")),
+    }
+    clean = {k: v for k, v in payload.items() if v}
+    if not clean:
+        return ""
+    return json.dumps(clean, separators=(",", ":"), sort_keys=True)
+
+
+def _voice_selection_label(selection: Dict[str, Any]) -> str:
+    name = _text(selection.get("name"))
+    language = _text(selection.get("language"))
+    speaker = _text(selection.get("speaker"))
+    parts = [part for part in [name, language, speaker] if part]
+    return " / ".join(parts) if parts else "Default"
+
+
+# -------------------- Audio + VAD --------------------
+def _pcm_dbfs(audio_bytes: bytes, *, sample_width: int) -> Optional[float]:
+    data = bytes(audio_bytes or b"")
+    width = int(sample_width or DEFAULT_VOICE_SAMPLE_WIDTH)
+    if not data or width < 1 or width > 4:
+        return None
+
+    frame_size = max(1, width)
+    usable = len(data) - (len(data) % frame_size)
+    if usable <= 0:
+        return None
+    if usable != len(data):
+        data = data[:usable]
+
+    with contextlib.suppress(Exception):
+        rms = float(_pcm_rms(data, width))
+        if rms <= 0.0:
+            return -120.0
+        full_scale = float((1 << ((8 * width) - 1)) - 1)
+        if full_scale <= 0.0:
+            return None
+        normalized = min(1.0, max(rms / full_scale, 1e-9))
+        return 20.0 * math.log10(normalized)
+    return None
+
+
+def _pcm_apply_gain(audio_bytes: bytes, *, sample_width: int, gain: float) -> bytes:
+    data = bytes(audio_bytes or b"")
+    if not data:
+        return b""
+    factor = float(gain or 1.0)
+    if factor <= 1.0:
+        return data
+    width = int(sample_width or DEFAULT_VOICE_SAMPLE_WIDTH)
+    if _audioop is not None:
+        with contextlib.suppress(Exception):
+            return _audioop.mul(data, width, factor)
+    if width != 2:
+        return data
+    usable = len(data) - (len(data) % 2)
+    if usable <= 0:
+        return data
+    out = bytearray(usable)
+    src = memoryview(data[:usable]).cast("h")
+    dst = memoryview(out).cast("h")
+    for idx, sample in enumerate(src):
+        scaled = int(round(float(sample) * factor))
+        if scaled > 32767:
+            scaled = 32767
+        elif scaled < -32768:
+            scaled = -32768
+        dst[idx] = scaled
+    if usable < len(data):
+        out.extend(data[usable:])
+    return bytes(out)
+
+
+def _audio_format_from_settings(audio_settings: Any) -> Dict[str, int]:
+    source = audio_settings if audio_settings is not None else {}
+
+    def _read_int(candidates: List[str], default: int) -> int:
+        for key in candidates:
+            raw = source.get(key) if isinstance(source, dict) else getattr(source, key, None)
+            with contextlib.suppress(Exception):
+                value = int(raw)
+                if value > 0:
+                    return value
+        return int(default)
+
+    return {
+        "rate": _read_int(["rate", "sample_rate", "sample_rate_hz"], DEFAULT_VOICE_SAMPLE_RATE_HZ),
+        "width": _read_int(["width", "sample_width", "sample_width_bytes"], DEFAULT_VOICE_SAMPLE_WIDTH),
+        "channels": _read_int(["channels", "num_channels"], DEFAULT_VOICE_CHANNELS),
+    }
+
+
+def _pcm_to_pcm16_mono_16k(
+    audio_bytes: bytes,
+    audio_format: Dict[str, int],
+    *,
+    ratecv_state: Any = None,
+) -> Tuple[bytes, Any]:
+    data = bytes(audio_bytes or b"")
+    if not data:
+        return b"", ratecv_state
+
+    rate = int(audio_format.get("rate") or DEFAULT_VOICE_SAMPLE_RATE_HZ)
+    width = int(audio_format.get("width") or DEFAULT_VOICE_SAMPLE_WIDTH)
+    channels = int(audio_format.get("channels") or DEFAULT_VOICE_CHANNELS)
+
+    if width != 2:
+        if _audioop is None:
+            return b"", ratecv_state
+        with contextlib.suppress(Exception):
+            data = _audioop.lin2lin(data, width, 2)
+            width = 2
+        if width != 2:
+            return b"", ratecv_state
+
+    if channels > 1:
+        if _audioop is None:
+            return b"", ratecv_state
+        with contextlib.suppress(Exception):
+            data = _audioop.tomono(data, 2, 0.5, 0.5)
+            channels = 1
+        if channels != 1:
+            return b"", ratecv_state
+
+    if rate != 16000:
+        if _audioop is None:
+            return b"", ratecv_state
+        with contextlib.suppress(Exception):
+            data, ratecv_state = _audioop.ratecv(data, 2, 1, rate, 16000, ratecv_state)
+            rate = 16000
+        if rate != 16000:
+            return b"", ratecv_state
+
+    return data, ratecv_state
+
+
+class VadBackendBase:
+    def process(self, audio_bytes: bytes, audio_format: Dict[str, int]) -> Dict[str, Any]:
+        raise NotImplementedError
+
+
+class SileroVadBackend(VadBackendBase):
+    """Use the Silero VAD model directly for per-frame speech probability.
+
+    Instead of the VADIterator wrapper (which manages its own opaque state
+    machine and ``triggered`` flag), we call the model directly to get a
+    clean 0.0-1.0 probability for every 512-sample frame.  This gives the
+    SegmenterState full control over speech-start / speech-end decisions.
+    """
+
+    _shared_ready: Optional[bool] = None
+    _shared_error: str = ""
+    _shared_torch: Any = None
+    _shared_np: Any = None
+    _shared_model: Any = None
+
+    @classmethod
+    def _ensure_shared(cls) -> None:
+        if cls._shared_ready is not None:
+            return
+        try:
+            torch_mod = importlib.import_module("torch")
+            np_mod = importlib.import_module("numpy")
+            silero = importlib.import_module("silero_vad")
+            load_fn = getattr(silero, "load_silero_vad", None)
+            if not callable(load_fn):
+                raise RuntimeError("silero_vad missing load_silero_vad")
+            model = load_fn()
+            cls._shared_torch = torch_mod
+            cls._shared_np = np_mod
+            cls._shared_model = model
+            cls._shared_error = ""
+            cls._shared_ready = True
+        except Exception as exc:
+            cls._shared_torch = None
+            cls._shared_np = None
+            cls._shared_model = None
+            cls._shared_error = str(exc)
+            cls._shared_ready = False
+
+    def __init__(self, cfg: Dict[str, Any]):
+        self.threshold = float(cfg.get("silero_threshold") or DEFAULT_SILERO_THRESHOLD)
+        self.neg_threshold = _as_float(
+            cfg.get("silero_neg_threshold"),
+            DEFAULT_SILERO_NEG_THRESHOLD,
+            minimum=0.0,
+            maximum=1.0,
+        )
+        self._available = False
+        self._load_error = ""
+        self._ratecv_state = None
+        self._buffer = b""
+        self._frame_samples = int(DEFAULT_SILERO_FRAME_SAMPLES)
+        self._frame_bytes = int(self._frame_samples * 2)  # int16 mono
+        try:
+            self._ensure_shared()
+            if not bool(self.__class__._shared_ready):
+                raise RuntimeError(self.__class__._shared_error or "silero shared init failed")
+            self._torch = self.__class__._shared_torch
+            self._np = self.__class__._shared_np
+            self._model = self.__class__._shared_model
+            self._available = True
+        except Exception as exc:
+            self._load_error = str(exc)
+            self._available = False
+
+    def reset_state(self) -> None:
+        if self._available and self._model is not None:
+            with contextlib.suppress(Exception):
+                self._model.reset_states()
+        self._buffer = b""
+        self._ratecv_state = None
+
+    def _to_pcm16_mono_16k(self, audio_bytes: bytes, audio_format: Dict[str, int]) -> bytes:
+        data, self._ratecv_state = _pcm_to_pcm16_mono_16k(
+            audio_bytes,
+            audio_format,
+            ratecv_state=self._ratecv_state,
+        )
+        return data
+
+    def process(self, audio_bytes: bytes, audio_format: Dict[str, int]) -> Dict[str, Any]:
+        if not self._available:
+            return {
+                "backend": "silero",
+                "probability": 0.0,
+                "is_speech": False,
+                "frames": 0,
+                "error": self._load_error or "silero unavailable",
+            }
+
+        pcm16 = self._to_pcm16_mono_16k(audio_bytes, audio_format)
+        if not pcm16:
+            return {"backend": "silero", "probability": 0.0, "is_speech": False, "frames": 0}
+
+        try:
+            payload = self._buffer + pcm16
+            if len(payload) < self._frame_bytes:
+                self._buffer = payload
+                return {"backend": "silero", "probability": 0.0, "is_speech": False, "frames": 0}
+
+            offset = 0
+            total_frames = 0
+            prob_sum = 0.0
+            max_prob = 0.0
+            while (offset + self._frame_bytes) <= len(payload):
+                frame = payload[offset: offset + self._frame_bytes]
+                offset += self._frame_bytes
+                total_frames += 1
+                samples = self._np.frombuffer(frame, dtype=self._np.int16).astype(self._np.float32) / 32768.0
+                tensor = self._torch.from_numpy(samples)
+                prob = float(self._model(tensor, 16000).item())
+                prob_sum += prob
+                if prob > max_prob:
+                    max_prob = prob
+            self._buffer = payload[offset:]
+
+            avg_prob = prob_sum / total_frames if total_frames > 0 else 0.0
+            is_speech = avg_prob >= self.threshold
+
+            return {
+                "backend": "silero",
+                "probability": round(avg_prob, 4),
+                "max_probability": round(max_prob, 4),
+                "is_speech": is_speech,
+                "frames": total_frames,
+            }
+        except Exception as exc:
+            return {
+                "backend": "silero",
+                "probability": 0.0,
+                "is_speech": False,
+                "frames": 0,
+                "error": str(exc),
+            }
+
+
+# Segmenter modelled after Home Assistant's pipeline VAD.
+#
+# Two paths to finalization (whichever fires first):
+#   Path A (speech detected):
+#     WAITING -> speech frames >= min_speech_frames -> IN_SPEECH
+#     IN_SPEECH -> silence frames >= min_silence_frames -> DONE
+#   Path B (no speech detected):
+#     WAITING -> elapsed >= no_speech_timeout_s -> DONE
+#     (STT still received all audio, so it can transcribe whatever was said)
+#
+# A hard ``timeout_s`` caps total listening duration as a safety net.
+@dataclass
+class SegmenterState:
+    silence_s: float
+    timeout_s: float
+    no_speech_timeout_s: float
+    threshold: float
+    neg_threshold: float
+    min_speech_frames: int
+    min_silence_frames: int
+    min_silence_short_s: float = DEFAULT_VAD_MIN_SILENCE_SHORT_S
+    min_silence_long_s: float = DEFAULT_VAD_MIN_SILENCE_LONG_S
+
+    # running counters
+    speech_chunks: int = 0
+    speech_seconds_total: float = 0.0
+    voice_seen: bool = False
+    in_command: bool = False
+    timed_out: bool = False
+
+    _consecutive_speech: int = 0
+    _consecutive_silence: int = 0
+    _soft_silence_s: float = 0.0
+    _strong_speech_streak: int = 0
+    _total_chunks: int = 0
+    _elapsed_s: float = 0.0
+    _finalized: bool = False
+    _last_process_ts: float = 0.0
+
+    def __post_init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self._consecutive_speech = 0
+        self._consecutive_silence = 0
+        self._soft_silence_s = 0.0
+        self._strong_speech_streak = 0
+        self._total_chunks = 0
+        self._elapsed_s = 0.0
+        self._finalized = False
+        self._last_process_ts = 0.0
+        self.in_command = False
+        self.timed_out = False
+        self.voice_seen = False
+        self.speech_chunks = 0
+        self.speech_seconds_total = 0.0
+
+    def _speech_seconds(self) -> float:
+        return max(0.0, float(self.speech_seconds_total))
+
+    def process(
+        self,
+        chunk_seconds: float,
+        speech_probability: Optional[float],
+        now_ts: float,
+        *,
+        peak_probability: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        should_finalize = False
+        silence_elapsed = 0.0
+
+        if self._finalized:
+            return {
+                "should_finalize": True,
+                "voice_seen": self.voice_seen,
+                "speech_chunks": self.speech_chunks,
+                "speech_s": self._speech_seconds(),
+                "silence_s": 0.0,
+                "timed_out": self.timed_out,
+                "in_command": self.in_command,
+            }
+
+        chunk_seconds = max(0.001, float(chunk_seconds or 0.0))
+        if self._last_process_ts > 0.0:
+            wall_delta = max(0.0, float(now_ts) - float(self._last_process_ts))
+            if wall_delta > 0.0:
+                # Satellite chunk cadence can be sparse; use wall clock so endpointing
+                # remains responsive in real time.
+                chunk_seconds = max(chunk_seconds, min(wall_delta, 0.5))
+        self._last_process_ts = float(now_ts)
+        self._elapsed_s += chunk_seconds
+        self._total_chunks += 1
+        probability = min(1.0, max(0.0, float(speech_probability or 0.0)))
+        peak = min(1.0, max(0.0, float(peak_probability if peak_probability is not None else probability)))
+        start_probability = max(probability, peak)
+
+        # Hard timeout safety net
+        if self._elapsed_s >= self.timeout_s:
+            self.timed_out = True
+            self._finalized = True
+            should_finalize = True
+        elif not self.in_command:
+            # WAITING_FOR_SPEECH
+            if start_probability >= self.threshold:
+                self._consecutive_speech += 1
+                self._consecutive_silence = 0
+                self._soft_silence_s = 0.0
+                self._strong_speech_streak = 0
+                if self._consecutive_speech >= self.min_speech_frames:
+                    self.in_command = True
+                    self.voice_seen = True
+                    self.speech_chunks += self._consecutive_speech
+                    self.speech_seconds_total += chunk_seconds * self._consecutive_speech
+                    self._consecutive_silence = 0
+                    self._soft_silence_s = 0.0
+                    self._strong_speech_streak = self._consecutive_speech
+            else:
+                self._consecutive_speech = 0
+                self._soft_silence_s = 0.0
+                self._strong_speech_streak = 0
+                # No-speech timeout: if we've been waiting for speech and
+                # haven't detected any, finalize so STT can process whatever
+                # audio it received.  This handles the case where the user
+                # speaks their command immediately after the wake word (before
+                # the session even starts streaming).
+                if self._elapsed_s >= self.no_speech_timeout_s:
+                    self._finalized = True
+                    should_finalize = True
+        else:
+            # IN_SPEECH: accumulate speech, look for silence to finalize.
+            # We use a "soft silence" timer so mid-confidence noise (between
+            # neg_threshold and threshold) doesn't keep the mic open forever.
+            if probability >= self.neg_threshold:
+                if probability >= self.threshold:
+                    self.speech_chunks += 1
+                    self.speech_seconds_total += chunk_seconds
+                    self._strong_speech_streak += 1
+                    if self._strong_speech_streak >= self.min_speech_frames:
+                        self._soft_silence_s = 0.0
+                else:
+                    self._strong_speech_streak = 0
+                    self._soft_silence_s += chunk_seconds
+                self._consecutive_silence = 0
+                silence_elapsed = float(self._soft_silence_s)
+            else:
+                self._strong_speech_streak = 0
+                self._consecutive_silence += 1
+                self._soft_silence_s += chunk_seconds
+                silence_elapsed = max(float(self._soft_silence_s), float(self._consecutive_silence) * chunk_seconds)
+                # Require a small amount of real elapsed silence before the
+                # frame-count rule can end a turn. This avoids clipping on
+                # sparse chunk cadence where 3 silent chunks can be only ~0.15s.
+                min_silence_elapsed = min(
+                    float(self.silence_s),
+                    float(self.min_silence_long_s)
+                    if self.speech_seconds_total >= 1.0
+                    else float(self.min_silence_short_s),
+                )
+                if (
+                    (
+                        self._consecutive_silence >= self.min_silence_frames
+                        and self._soft_silence_s >= min_silence_elapsed
+                    )
+                    or self._soft_silence_s >= float(self.silence_s)
+                ):
+                    should_finalize = True
+                    self._finalized = True
+
+        return {
+            "should_finalize": should_finalize,
+            "voice_seen": self.voice_seen,
+            "speech_chunks": self.speech_chunks,
+            "speech_s": self._speech_seconds(),
+            "silence_s": silence_elapsed,
+            "timed_out": bool(self.timed_out),
+            "in_command": bool(self.in_command),
+        }
+
+
+@dataclass
+class EouEngine:
+    mode: str
+    backend_name: str
+    backend: VadBackendBase
+    segmenter: SegmenterState
+
+    def process(self, audio_bytes: bytes, audio_format: Dict[str, int], now_ts: float) -> Dict[str, Any]:
+        backend_data = self.backend.process(audio_bytes, audio_format)
+        rate = int(audio_format.get("rate") or DEFAULT_VOICE_SAMPLE_RATE_HZ)
+        width = int(audio_format.get("width") or DEFAULT_VOICE_SAMPLE_WIDTH)
+        channels = int(audio_format.get("channels") or DEFAULT_VOICE_CHANNELS)
+        bytes_per_second = max(1, rate * width * channels)
+        chunk_seconds = float(len(audio_bytes or b"")) / float(bytes_per_second)
+
+        probability = float(backend_data.get("probability", 0.0))
+        peak_probability = float(backend_data.get("max_probability", probability))
+        seg = self.segmenter.process(
+            chunk_seconds,
+            probability,
+            now_ts,
+            peak_probability=peak_probability,
+        )
+        is_speech = bool(seg.get("in_command", False))
+        merged = {
+            "backend": self.backend_name,
+            "binary_active": bool(is_speech),
+            "score": probability,
+            "chunk_score": probability,
+            **backend_data,
+            **seg,
+        }
+        return merged
+
+    def reset(self) -> None:
+        self.segmenter.reset()
+        if hasattr(self.backend, "reset_state"):
+            self.backend.reset_state()
+
+
+def _build_eou_engine(
+    audio_format: Dict[str, int],
+    *,
+    continued_chat_reopen: bool = False,
+    wake_word_session: bool = False,
+) -> EouEngine:
+    cfg = _voice_config_snapshot()
+    eou = cfg.get("eou") if isinstance(cfg.get("eou"), dict) else {}
+    backend_name = DEFAULT_VAD_BACKEND
+    mode = DEFAULT_EOU_MODE
+
+    threshold = float(eou.get("silero_threshold") or DEFAULT_SILERO_THRESHOLD)
+    neg_threshold = float(eou.get("silero_neg_threshold") or DEFAULT_SILERO_NEG_THRESHOLD)
+
+    backend: VadBackendBase = SileroVadBackend(eou)
+
+    segmenter = SegmenterState(
+        silence_s=float(eou.get("silence_s") or DEFAULT_VAD_SILENCE_SECONDS),
+        timeout_s=float(eou.get("timeout_s") or DEFAULT_VAD_TIMEOUT_SECONDS),
+        no_speech_timeout_s=float(eou.get("no_speech_timeout_s") or DEFAULT_VAD_NO_SPEECH_TIMEOUT_S),
+        threshold=threshold,
+        neg_threshold=neg_threshold,
+        min_speech_frames=_as_int(eou.get("min_speech_frames"), DEFAULT_SILERO_MIN_SPEECH_FRAMES, minimum=1, maximum=30),
+        min_silence_frames=_as_int(eou.get("min_silence_frames"), DEFAULT_SILERO_MIN_SILENCE_FRAMES, minimum=3, maximum=60),
+        min_silence_short_s=float(DEFAULT_VAD_MIN_SILENCE_SHORT_S),
+        min_silence_long_s=float(DEFAULT_VAD_MIN_SILENCE_LONG_S),
+    )
+    if wake_word_session:
+        # Wake-triggered turns are the most likely to catch wake tail or room
+        # noise at the front, so require a slightly more confident speech
+        # start and allow a touch more pause tolerance once the user is in a
+        # real utterance.
+        segmenter.min_speech_frames = max(
+            int(segmenter.min_speech_frames),
+            int(DEFAULT_WAKE_MIN_SPEECH_FRAMES),
+        )
+        segmenter.min_silence_long_s = max(
+            float(segmenter.min_silence_long_s),
+            float(DEFAULT_WAKE_MIN_SILENCE_LONG_S),
+        )
+    if continued_chat_reopen:
+        segmenter.silence_s = max(float(segmenter.silence_s), float(DEFAULT_CONTINUED_CHAT_REOPEN_SILENCE_SECONDS))
+        segmenter.timeout_s = max(float(segmenter.timeout_s), float(DEFAULT_CONTINUED_CHAT_REOPEN_TIMEOUT_SECONDS))
+        segmenter.no_speech_timeout_s = max(
+            float(segmenter.no_speech_timeout_s),
+            float(DEFAULT_CONTINUED_CHAT_REOPEN_NO_SPEECH_TIMEOUT_S),
+        )
+        segmenter.min_silence_frames = max(
+            int(segmenter.min_silence_frames),
+            int(DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_FRAMES),
+        )
+        segmenter.min_silence_short_s = max(
+            float(segmenter.min_silence_short_s),
+            float(DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_SHORT_S),
+        )
+        segmenter.min_silence_long_s = max(
+            float(segmenter.min_silence_long_s),
+            float(DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_LONG_S),
+        )
+
+    return EouEngine(mode=mode, backend_name=backend_name, backend=backend, segmenter=segmenter)
+
+
+# -------------------- Session Runtime --------------------
+@dataclass
+class VoiceSessionRuntime:
+    selector: str
+    session_id: str
+    conversation_id: str
+    wake_word: str
+    audio_format: Dict[str, int]
+    started_ts: float
+    startup_gate_until_ts: float
+    language: str = ""
+    context: Dict[str, Any] = field(default_factory=dict)
+    stt_backend: str = DEFAULT_STT_BACKEND
+    stt_backend_effective: str = DEFAULT_STT_BACKEND
+    tts_backend: str = DEFAULT_TTS_BACKEND
+    tts_backend_effective: str = DEFAULT_TTS_BACKEND
+
+    audio_chunks: int = 0
+    audio_bytes: int = 0
+    dropped_startup_chunks: int = 0
+    capture_started: bool = False
+    last_audio_ts: float = 0.0
+    state: str = VOICE_STATE_LISTENING
+    processing: bool = False
+
+    audio_buffer: bytearray = field(default_factory=bytearray)
+    eou_engine: Optional[EouEngine] = None
+
+    stt_task: Optional[asyncio.Task] = None
+    stt_queue: Optional[asyncio.Queue] = None
+    partial_stt_task: Optional[asyncio.Task] = None
+    stt_transcript: str = ""
+    partial_transcript: str = ""
+    partial_transcript_updates: int = 0
+    partial_transcript_updated_ts: float = 0.0
+    completeness_hold_until_ts: float = 0.0
+    completeness_hold_reason: str = ""
+    completeness_hold_count: int = 0
+    completeness_hold_partial: str = ""
+    stt_latency_ms: float = 0.0
+    tts_latency_ms: float = 0.0
+    speech_duration_s: float = 0.0
+    silence_duration_s: float = 0.0
+    turn_outcome: str = ""
+    finalize_reason_detail: str = ""
+    max_probability: float = 0.0
+    stt_end_sent: bool = False
+    intent_active: bool = False
+    live_tool_progress_played: bool = False
+    last_tool_progress_text: str = ""
+    live_tool_progress_callback: Optional[Callable[[str, Optional[Dict[str, Any]]], Any]] = None
+
+
+# -------------------- History + Hydra --------------------
+def _history_key(conv_id: str) -> str:
+    return f"tater:voice:conv:{conv_id}:history"
+
+
+def _history_ctx_key(conv_id: str) -> str:
+    return f"tater:voice:conv:{conv_id}:ctx"
+
+
+def _to_template_msg(role: str, content: Any) -> Optional[Dict[str, Any]]:
+    if isinstance(content, dict) and content.get("marker") == "plugin_wait":
+        return None
+    if isinstance(content, dict) and content.get("marker") == "plugin_response":
+        if _text(content.get("phase") or "final") != "final":
+            return None
+        payload = content.get("content")
+        if isinstance(payload, str):
+            return {"role": "assistant", "content": payload[:4000]}
+        try:
+            return {"role": "assistant", "content": json.dumps(payload, ensure_ascii=False)[:2000]}
+        except Exception:
+            return None
+    if isinstance(content, str):
+        return {"role": role, "content": content}
+    return {"role": role, "content": str(content)}
+
+
+async def _load_history(conv_id: str, limit: int) -> List[Dict[str, Any]]:
+    raw = redis_client.lrange(_history_key(conv_id), -limit, -1) or []
+    out: List[Dict[str, Any]] = []
+    for line in raw:
+        with contextlib.suppress(Exception):
+            item = json.loads(line)
+            if not isinstance(item, dict):
+                continue
+            role = _text(item.get("role") or "assistant")
+            if role not in {"user", "assistant"}:
+                role = "assistant"
+            templ = _to_template_msg(role, item.get("content"))
+            if templ:
+                out.append(templ)
+    return out
+
+
+async def _save_history_message(conv_id: str, role: str, content: Any) -> None:
+    cfg = _voice_config_snapshot()
+    limits = cfg.get("limits") if isinstance(cfg.get("limits"), dict) else {}
+    max_store = int(limits.get("history_store") or DEFAULT_HISTORY_MAX_STORE)
+    ttl = int(limits.get("session_ttl_s") or DEFAULT_SESSION_TTL_SECONDS)
+
+    key = _history_key(conv_id)
+    payload = json.dumps({"role": role, "content": content}, ensure_ascii=False)
+    pipe = redis_client.pipeline()
+    pipe.rpush(key, payload)
+    pipe.ltrim(key, -max_store, -1)
+    pipe.expire(key, ttl)
+    pipe.execute()
+
+
+async def _load_context(conv_id: str) -> Dict[str, Any]:
+    raw = redis_client.get(_history_ctx_key(conv_id))
+    if not raw:
+        return {}
+    with contextlib.suppress(Exception):
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+async def _save_context(conv_id: str, ctx: Dict[str, Any]) -> None:
+    if not isinstance(ctx, dict):
+        return
+    cfg = _voice_config_snapshot()
+    limits = cfg.get("limits") if isinstance(cfg.get("limits"), dict) else {}
+    ttl = int(limits.get("session_ttl_s") or DEFAULT_SESSION_TTL_SECONDS)
+    with contextlib.suppress(Exception):
+        redis_client.setex(_history_ctx_key(conv_id), ttl, json.dumps(ctx, ensure_ascii=False))
+
+
+async def _run_hydra_turn_for_voice(*, transcript: str, conv_id: str, session: VoiceSessionRuntime) -> str:
+    user_text = _text(transcript)
+    if not user_text:
+        return ""
+
+    cfg = _voice_config_snapshot()
+    limits = cfg.get("limits") if isinstance(cfg.get("limits"), dict) else {}
+    max_llm = int(limits.get("history_llm") or DEFAULT_HISTORY_MAX_LLM)
+
+    await _save_history_message(conv_id, "user", user_text)
+    history = await _load_history(conv_id, max_llm)
+    if not history or _text(history[-1].get("role")) != "user":
+        history.append({"role": "user", "content": user_text})
+
+    context = await _load_context(conv_id)
+    if not isinstance(context, dict):
+        context = {}
+    session_context = session.context if isinstance(session.context, dict) else {}
+    if session_context:
+        context.update(session_context)
+
+    registry = dict(verba_registry.get_verba_registry() or {})
+    max_rounds, max_tool_calls = resolve_agent_limits(redis_client)
+
+    origin = {
+        "platform": "homeassistant",
+        "entrypoint": "voice_core",
+        "session_id": session.session_id,
+        "device_id": session.selector,
+    }
+    device_name = _text(context.get("device_name"))
+    area_name = _text(context.get("area_name")) or _text(context.get("room_name"))
+    if device_name:
+        origin["device_name"] = device_name
+    if area_name:
+        origin["area_name"] = area_name
+
+    platform_preamble = ""
+    if device_name or area_name:
+        platform_preamble = (
+            "VOICE CONTEXT:\n"
+            f"- Device: {device_name or '(unknown)'}\n"
+            f"- Area/Room: {area_name or '(unknown)'}\n\n"
+            "DEFAULT ROOM RULE:\n"
+            "If the user asks to control lights, switches, fans, speakers, or similar devices and does not specify a room, "
+            "assume they mean the Area/Room shown above.\n\n"
+            "Use this as voice context only. Do not claim the user explicitly said the room unless they actually did.\n"
+        )
+
+    async with get_llm_client_from_env(redis_conn=redis_client) as llm_client:
+        async def _wait(
+            func_name: str,
+            plugin_obj: Any,
+            wait_text: str = "",
+            wait_payload: Optional[Dict[str, Any]] = None,
+        ) -> None:
+            progress_payload = dict(wait_payload) if isinstance(wait_payload, dict) else {}
+            text = _text(wait_text) or _text(progress_payload.get("text")) or "I'm working on that now."
+            progress_payload["text"] = text
+            await _save_history_message(
+                conv_id,
+                "assistant",
+                {"marker": "plugin_wait", "content": text, "payload": progress_payload},
+            )
+            callback = session.live_tool_progress_callback if callable(session.live_tool_progress_callback) else None
+            if _experimental_live_tool_progress_enabled() and callback is not None:
+                result = callback(text, progress_payload)
+                if inspect.isawaitable(result):
+                    await result
+
+        result = await run_hydra_turn(
+            llm_client=llm_client,
+            platform="voice_core",
+            history_messages=history,
+            registry=registry,
+            enabled_predicate=get_verba_enabled,
+            context=context,
+            user_text=user_text,
+            scope=conv_id,
+            origin=origin,
+            redis_client=redis_client,
+            max_rounds=max_rounds,
+            max_tool_calls=max_tool_calls,
+            platform_preamble=platform_preamble,
+            wait_callback=_wait,
+        )
+
+    response_text = _text((result or {}).get("text"))
+    if not response_text:
+        response_text = "I couldn't generate a response right now."
+
+    await _save_history_message(
+        conv_id,
+        "assistant",
+        {"marker": "plugin_response", "phase": "final", "content": response_text},
+    )
+    await _save_context(conv_id, context)
+    return response_text
+
+
+# -------------------- Wyoming --------------------
+def _stt_config_snapshot() -> Dict[str, Any]:
+    cfg = _voice_config_snapshot()
+    stt = cfg.get("stt") if isinstance(cfg.get("stt"), dict) else {}
+    return stt if isinstance(stt, dict) else {}
+
+
+def _selected_stt_backend() -> str:
+    return _normalize_stt_backend(_stt_config_snapshot().get("backend"))
+
+
+def _stt_backend_available(backend: str) -> Tuple[bool, str]:
+    token = _normalize_stt_backend(backend)
+    if token == "wyoming":
+        ok = (
+            AsyncTcpClient is not None
+            and Transcribe is not None
+            and Transcript is not None
+            and WyomingAudioStart is not None
+            and WyomingAudioChunk is not None
+            and WyomingAudioStop is not None
+            and WyomingError is not None
+        )
+        return ok, _text(WYOMING_IMPORT_ERROR) or "wyoming dependency unavailable"
+    if token == "faster_whisper":
+        return WhisperModel is not None, _text(FASTER_WHISPER_IMPORT_ERROR) or "faster-whisper dependency unavailable"
+    if token == "vosk":
+        if VoskModel is None or KaldiRecognizer is None:
+            return False, _text(VOSK_IMPORT_ERROR) or "vosk dependency unavailable"
+        try:
+            model_path = _resolve_vosk_model_path()
+        except Exception as exc:
+            return False, f"Vosk model unavailable: {exc}"
+        if not os.path.isdir(model_path):
+            return False, f"Vosk model not found under {_stt_backend_model_root('vosk')}"
+        if not _looks_like_vosk_model_dir(model_path):
+            return False, f"No Vosk model directory found under {_stt_backend_model_root('vosk')}"
+        return True, ""
+    return False, f"unsupported STT backend: {token}"
+
+
+def _resolve_stt_backend() -> Tuple[str, str]:
+    selected = _selected_stt_backend()
+    ok, reason = _stt_backend_available(selected)
+    if ok:
+        return selected, ""
+    if selected != "wyoming":
+        wyoming_ok, _wyoming_reason = _stt_backend_available("wyoming")
+        if wyoming_ok:
+            return "wyoming", f"{selected} unavailable: {reason}. Falling back to Wyoming."
+    return selected, reason
+
+
+def _tts_config_snapshot() -> Dict[str, Any]:
+    cfg = _voice_config_snapshot()
+    tts = cfg.get("tts") if isinstance(cfg.get("tts"), dict) else {}
+    return tts if isinstance(tts, dict) else {}
+
+
+def _selected_tts_backend(source: Optional[Dict[str, Any]] = None) -> str:
+    snapshot = source if isinstance(source, dict) else _tts_config_snapshot()
+    return _normalize_tts_backend(snapshot.get("backend"))
+
+
+def _tts_selection_from_values(values: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    values = values if isinstance(values, dict) else {}
+    merged = _voice_settings_with_shared_speech(values)
+
+    backend = _normalize_tts_backend(merged.get("VOICE_TTS_BACKEND"))
+    model = _text(merged.get("VOICE_TTS_MODEL"))
+    voice = _text(merged.get("VOICE_TTS_VOICE"))
+
+    if backend == "kokoro":
+        allowed_models = [row.get("value") for row in _kokoro_model_option_rows() if _text(row.get("value"))]
+        if model not in allowed_models:
+            model = DEFAULT_KOKORO_MODEL if DEFAULT_KOKORO_MODEL in allowed_models else _text(allowed_models[0] if allowed_models else "")
+        allowed_voices = [_text(row.get("value")) for row in _kokoro_voice_option_rows(model_id=model) if _text(row.get("value"))]
+        if voice not in allowed_voices:
+            voice = DEFAULT_KOKORO_VOICE if DEFAULT_KOKORO_VOICE in allowed_voices else _text(allowed_voices[0] if allowed_voices else "")
+    elif backend == "pocket_tts":
+        model = model or DEFAULT_POCKET_TTS_MODEL
+        allowed_voices = set(POCKET_TTS_PREDEFINED_VOICES.keys())
+        voice = voice if voice in allowed_voices else DEFAULT_POCKET_TTS_VOICE
+    elif backend == "piper":
+        model = model or DEFAULT_PIPER_MODEL
+        voice = ""
+    else:
+        model = ""
+        voice = _text(merged.get("VOICE_WYOMING_TTS_VOICE")) or DEFAULT_WYOMING_TTS_VOICE
+
+    return {
+        "backend": backend,
+        "model": model,
+        "voice": voice,
+        "wyoming_host": _text(merged.get("VOICE_WYOMING_TTS_HOST")) or DEFAULT_WYOMING_TTS_HOST,
+        "wyoming_port": _as_int(merged.get("VOICE_WYOMING_TTS_PORT"), DEFAULT_WYOMING_TTS_PORT, minimum=1, maximum=65535),
+        "wyoming_voice": _text(merged.get("VOICE_WYOMING_TTS_VOICE")) or DEFAULT_WYOMING_TTS_VOICE,
+    }
+
+
+def _tts_backend_available(backend: str) -> Tuple[bool, str]:
+    token = _normalize_tts_backend(backend)
+    if token == "wyoming":
+        ok = (
+            AsyncTcpClient is not None
+            and Synthesize is not None
+            and WyomingAudioStart is not None
+            and WyomingAudioChunk is not None
+            and WyomingAudioStop is not None
+            and WyomingError is not None
+        )
+        return ok, _text(WYOMING_IMPORT_ERROR) or "wyoming dependency unavailable"
+    if token == "kokoro":
+        return (
+            build_kokoro_pipeline is not None and KokoroPipelineConfig is not None,
+            _text(KOKORO_IMPORT_ERROR) or "kokoro dependency unavailable",
+        )
+    if token == "pocket_tts":
+        return PocketTTSModel is not None, _text(POCKET_TTS_IMPORT_ERROR) or "pocket-tts dependency unavailable"
+    if token == "piper":
+        return (
+            PiperVoice is not None and PiperSynthesisConfig is not None and piper_download_voice is not None,
+            _text(PIPER_IMPORT_ERROR) or "piper dependency unavailable",
+        )
+    return False, f"unsupported TTS backend: {token}"
+
+
+def _resolve_tts_backend(values: Optional[Dict[str, Any]] = None) -> Tuple[str, str]:
+    selected = _selected_tts_backend(_tts_selection_from_values(values))
+    ok, reason = _tts_backend_available(selected)
+    if ok:
+        return selected, ""
+    if selected != "wyoming":
+        wyoming_ok, _wyoming_reason = _tts_backend_available("wyoming")
+        if wyoming_ok:
+            return "wyoming", f"{selected} unavailable: {reason}. Falling back to Wyoming."
+    return selected, reason
+
+
+def _load_faster_whisper_model() -> Any:
+    if WhisperModel is None:
+        raise RuntimeError(f"faster-whisper dependency unavailable: {FASTER_WHISPER_IMPORT_ERROR or 'unknown import error'}")
+
+    model_source = _resolve_faster_whisper_model_source()
+    device = DEFAULT_FASTER_WHISPER_DEVICE
+    compute_type = DEFAULT_FASTER_WHISPER_COMPUTE_TYPE
+    key = (model_source, device, compute_type)
+
+    with _faster_whisper_model_lock:
+        model = _faster_whisper_model_cache.get(key)
+        if model is None:
+            kwargs: Dict[str, Any] = {
+                "device": device,
+                "compute_type": compute_type,
+            }
+            if not os.path.isdir(model_source):
+                kwargs["download_root"] = _ensure_stt_backend_model_root("faster_whisper")
+            logger.info(
+                "[native-voice] faster-whisper model source=%s kind=%s",
+                model_source,
+                "local" if os.path.isdir(model_source) else "alias",
+            )
+            model = WhisperModel(model_source, **kwargs)
+            _faster_whisper_model_cache[key] = model
+        return model
+
+
+def _load_vosk_model() -> Any:
+    if VoskModel is None:
+        raise RuntimeError(f"vosk dependency unavailable: {VOSK_IMPORT_ERROR or 'unknown import error'}")
+
+    model_path = _resolve_vosk_model_path()
+    if not os.path.isdir(model_path) or not _looks_like_vosk_model_dir(model_path):
+        raise RuntimeError(
+            f"Vosk STT selected but no extracted model was found under {_stt_backend_model_root('vosk')}"
+        )
+
+    with _vosk_model_lock:
+        model = _vosk_model_cache.get(model_path)
+        if model is None:
+            logger.info("[native-voice] vosk model source=%s", model_path)
+            model = VoskModel(model_path)
+            _vosk_model_cache[model_path] = model
+        return model
+
+
+def _transcribe_faster_whisper_sync(audio_bytes: bytes, audio_format: Dict[str, int], language: Optional[str]) -> str:
+    pcm16, _state = _pcm_to_pcm16_mono_16k(audio_bytes, audio_format)
+    if not pcm16:
+        return ""
+
+    np_mod = importlib.import_module("numpy")
+    audio_np = np_mod.frombuffer(pcm16, dtype=np_mod.int16).astype(np_mod.float32) / 32768.0
+    model = _load_faster_whisper_model()
+    segments, _info = model.transcribe(
+        audio_np,
+        language=_text(language) or None,
+        beam_size=1,
+        vad_filter=False,
+        condition_on_previous_text=False,
+    )
+    parts = []
+    for segment in segments:
+        text = _text(getattr(segment, "text", ""))
+        if text:
+            parts.append(text)
+    return re.sub(r"\s+", " ", " ".join(parts)).strip()
+
+
+def _vosk_result_text(payload: Any) -> str:
+    raw = _text(payload)
+    if not raw:
+        return ""
+    with contextlib.suppress(Exception):
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return _text(parsed.get("text"))
+    return ""
+
+
+def _transcribe_vosk_sync(audio_bytes: bytes, audio_format: Dict[str, int]) -> str:
+    pcm16, _state = _pcm_to_pcm16_mono_16k(audio_bytes, audio_format)
+    if not pcm16:
+        return ""
+
+    model = _load_vosk_model()
+    recognizer = KaldiRecognizer(model, 16000.0)
+    with contextlib.suppress(Exception):
+        recognizer.SetWords(False)
+    parts: List[str] = []
+    chunk_size = 4000
+    for offset in range(0, len(pcm16), chunk_size):
+        chunk = pcm16[offset: offset + chunk_size]
+        if not chunk:
+            continue
+        if recognizer.AcceptWaveform(chunk):
+            text = _vosk_result_text(recognizer.Result())
+            if text:
+                parts.append(text)
+    final_text = _vosk_result_text(recognizer.FinalResult())
+    if final_text:
+        parts.append(final_text)
+    return re.sub(r"\s+", " ", " ".join(part for part in parts if part)).strip()
+
+
+def _wyoming_timeout_s() -> float:
+    return _get_float_setting("VOICE_NATIVE_WYOMING_TIMEOUT_S", DEFAULT_WYOMING_TIMEOUT_SECONDS, minimum=5.0, maximum=180.0)
+
+
+def _wyoming_stt_endpoint() -> Tuple[str, int]:
+    cfg = _voice_config_snapshot()
+    stt = cfg.get("wyoming_stt") if isinstance(cfg.get("wyoming_stt"), dict) else {}
+    host = _text(stt.get("host")) or DEFAULT_WYOMING_STT_HOST
+    port = int(stt.get("port") or DEFAULT_WYOMING_STT_PORT)
+    return host, port
+
+
+def _wyoming_tts_endpoint() -> Tuple[str, int]:
+    cfg = _voice_config_snapshot()
+    tts = cfg.get("wyoming_tts") if isinstance(cfg.get("wyoming_tts"), dict) else {}
+    host = _text(tts.get("host")) or DEFAULT_WYOMING_TTS_HOST
+    port = int(tts.get("port") or DEFAULT_WYOMING_TTS_PORT)
+    return host, port
+
+
+async def _native_wyoming_refresh_tts_voices() -> Dict[str, Any]:
+    if AsyncTcpClient is None or Describe is None or Info is None or WyomingError is None:
+        raise RuntimeError(f"Wyoming describe dependency unavailable: {WYOMING_IMPORT_ERROR or 'unknown import error'}")
+
+    host, port = _wyoming_tts_endpoint()
+    timeout = _wyoming_timeout_s()
+
+    info_obj = None
+    async with AsyncTcpClient(host, port) as client:
+        await asyncio.wait_for(client.write_event(Describe().event()), timeout=timeout)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            left = max(0.1, deadline - time.monotonic())
+            event = await asyncio.wait_for(client.read_event(), timeout=left)
+            if event is None:
+                break
+            if WyomingError.is_type(event.type):
+                err = WyomingError.from_event(event)
+                raise RuntimeError(f"Wyoming TTS describe error: {err.text} ({err.code or 'unknown'})")
+            if Info.is_type(event.type):
+                info_obj = Info.from_event(event)
+                break
+
+    if info_obj is None:
+        raise RuntimeError("Wyoming TTS did not return info after describe.")
+
+    voices: List[Dict[str, str]] = []
+    seen = set()
+    tts_programs = getattr(info_obj, "tts", None)
+    if not isinstance(tts_programs, list):
+        tts_programs = []
+
+    for program in tts_programs:
+        program_name = _text(getattr(program, "name", None))
+        voice_rows = getattr(program, "voices", None)
+        if not isinstance(voice_rows, list):
+            continue
+        for voice in voice_rows:
+            voice_name = _text(getattr(voice, "name", None))
+            languages = [
+                _text(item)
+                for item in (getattr(voice, "languages", None) or [])
+                if _text(item)
+            ]
+            speakers = getattr(voice, "speakers", None)
+            speaker_rows = speakers if isinstance(speakers, list) else []
+
+            if speaker_rows:
+                for speaker in speaker_rows:
+                    selection = {
+                        "name": voice_name,
+                        "language": _text(languages[0]) if languages else "",
+                        "speaker": _text(getattr(speaker, "name", None)),
+                    }
+                    value = _voice_selection_to_value(selection)
+                    if not value or value in seen:
+                        continue
+                    seen.add(value)
+                    label = _voice_selection_label(selection)
+                    if program_name:
+                        label = f"{label} • {program_name}"
+                    voices.append({"value": value, "label": label})
+                continue
+
+            selection = {
+                "name": voice_name,
+                "language": _text(languages[0]) if languages else "",
+                "speaker": "",
+            }
+            value = _voice_selection_to_value(selection)
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            label = _voice_selection_label(selection)
+            if program_name:
+                label = f"{label} • {program_name}"
+            voices.append({"value": value, "label": label})
+
+    voices = sorted(voices, key=lambda row: _lower(row.get("label")))
+    _save_wyoming_tts_voice_catalog(voices, host=host, port=port, error="")
+    return {"host": host, "port": port, "voices": voices, "count": len(voices)}
+
+
+async def _native_wyoming_stream_stt_task(
+    token: str,
+    session_id: str,
+    queue: asyncio.Queue,
+    audio_format: Dict[str, int],
+    language: Optional[str],
+    session_ref: Optional["VoiceSessionRuntime"] = None,
+) -> None:
+    if (
+        AsyncTcpClient is None
+        or Transcribe is None
+        or Transcript is None
+        or WyomingAudioStart is None
+        or WyomingAudioChunk is None
+        or WyomingAudioStop is None
+        or WyomingError is None
+    ):
+        return
+
+    host, port = _wyoming_stt_endpoint()
+    timeout = _wyoming_timeout_s()
+    rate = int(audio_format.get("rate") or DEFAULT_VOICE_SAMPLE_RATE_HZ)
+    width = int(audio_format.get("width") or DEFAULT_VOICE_SAMPLE_WIDTH)
+    channels = int(audio_format.get("channels") or DEFAULT_VOICE_CHANNELS)
+
+    _native_debug(f"STT (stream) connect {host}:{port} rate={rate} width={width} ch={channels}")
+
+    try:
+        async with AsyncTcpClient(host, port) as client:
+            await asyncio.wait_for(client.write_event(Transcribe(language=_text(language) or None).event()), timeout=timeout)
+            await asyncio.wait_for(client.write_event(WyomingAudioStart(rate=rate, width=width, channels=channels).event()), timeout=timeout)
+            stop_sent = asyncio.Event()
+            result_future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+
+            async def _update_session_transcript(*, transcript: str, final: bool) -> None:
+                text_value = _text(transcript)
+                runtime = _selector_runtime(token)
+                if runtime and "lock" in runtime:
+                    async with runtime.get("lock"):
+                        sess = runtime.get("session")
+                        if isinstance(sess, VoiceSessionRuntime) and sess.session_id == session_id:
+                            if final:
+                                sess.stt_transcript = text_value
+                            else:
+                                sess.partial_transcript = text_value
+                                sess.partial_transcript_updates += 1
+                                sess.partial_transcript_updated_ts = _now()
+                            return
+                if isinstance(session_ref, VoiceSessionRuntime):
+                    with contextlib.suppress(Exception):
+                        if _text(session_ref.session_id) == _text(session_id):
+                            if final:
+                                session_ref.stt_transcript = text_value
+                            else:
+                                session_ref.partial_transcript = text_value
+                                session_ref.partial_transcript_updates += 1
+                                session_ref.partial_transcript_updated_ts = _now()
+
+            async def _reader() -> None:
+                try:
+                    while True:
+                        event = await asyncio.wait_for(client.read_event(), timeout=timeout)
+                        if event is None:
+                            break
+                        if Transcript.is_type(event.type):
+                            transcript = _text(Transcript.from_event(event).text)
+                            if stop_sent.is_set():
+                                _native_debug(f"STT stream transcript={transcript!r}")
+                                await _update_session_transcript(transcript=transcript, final=True)
+                                if not result_future.done():
+                                    result_future.set_result(transcript)
+                                return
+                            if transcript and _experimental_partial_stt_enabled():
+                                await _update_session_transcript(transcript=transcript, final=False)
+                                _native_debug(
+                                    f"STT partial transcript selector={token} session_id={session_id} transcript={transcript!r}"
+                                )
+                            continue
+                        if WyomingError.is_type(event.type):
+                            err = WyomingError.from_event(event)
+                            _native_debug(f"Wyoming STT error: {err.text}")
+                            if not result_future.done():
+                                result_future.set_result("")
+                            return
+                except Exception as exc:
+                    _native_debug(f"STT stream reader failed: {exc}")
+                    if not result_future.done():
+                        result_future.set_result("")
+
+            reader_task = asyncio.create_task(_reader())
+            try:
+                while True:
+                    chunk = await queue.get()
+                    if chunk is None:
+                        break
+                    await asyncio.wait_for(
+                        client.write_event(WyomingAudioChunk(rate=rate, width=width, channels=channels, audio=chunk).event()),
+                        timeout=timeout,
+                    )
+
+                await asyncio.wait_for(client.write_event(WyomingAudioStop().event()), timeout=timeout)
+                stop_sent.set()
+                transcript = await asyncio.wait_for(result_future, timeout=timeout)
+                if transcript:
+                    return
+                if isinstance(session_ref, VoiceSessionRuntime):
+                    fallback = _text(session_ref.partial_transcript)
+                    if fallback:
+                        session_ref.stt_transcript = fallback
+                        return
+            finally:
+                reader_task.cancel()
+                with contextlib.suppress(Exception):
+                    await reader_task
+    except Exception as exc:
+        _native_debug(f"STT stream task failed: {exc}")
+
+
+async def _native_transcribe_session_audio(session: "VoiceSessionRuntime") -> str:
+    backend = _normalize_stt_backend(_text(session.stt_backend_effective) or _text(session.stt_backend))
+    if backend == "wyoming":
+        if session.stt_task is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(session.stt_task, timeout=15.0)
+        final_text = _text(session.stt_transcript)
+        if final_text:
+            return final_text
+        fallback = _text(session.partial_transcript)
+        session.stt_transcript = fallback
+        return fallback
+
+    if session.partial_stt_task is not None:
+        session.partial_stt_task.cancel()
+        with contextlib.suppress(Exception):
+            await session.partial_stt_task
+        session.partial_stt_task = None
+
+    audio_bytes = bytes(session.audio_buffer or b"")
+    if not audio_bytes:
+        session.stt_transcript = ""
+        return ""
+
+    transcript = await _native_transcribe_local_audio_bytes(
+        backend=backend,
+        audio_bytes=audio_bytes,
+        audio_format=session.audio_format,
+        language=session.language,
+        selector=session.selector,
+        session_id=session.session_id,
+        partial=False,
+    )
+
+    session.stt_transcript = _text(transcript)
+    _native_debug(f"STT {backend} transcript={session.stt_transcript!r}")
+    return session.stt_transcript
+
+
+async def _native_transcribe_local_audio_bytes(
+    *,
+    backend: str,
+    audio_bytes: bytes,
+    audio_format: Dict[str, int],
+    language: Optional[str],
+    selector: str,
+    session_id: str,
+    partial: bool,
+) -> str:
+    token = _normalize_stt_backend(backend)
+    data = bytes(audio_bytes or b"")
+    if not data:
+        return ""
+
+    mode_label = "partial" if partial else "final"
+    if token == "faster_whisper":
+        _native_debug(
+            f"STT ({mode_label} faster-whisper) local selector={selector} session_id={session_id} bytes={len(data)}"
+        )
+        transcript = await asyncio.to_thread(
+            _transcribe_faster_whisper_sync,
+            data,
+            audio_format,
+            language,
+        )
+    elif token == "vosk":
+        _native_debug(
+            f"STT ({mode_label} vosk) local selector={selector} session_id={session_id} bytes={len(data)}"
+        )
+        transcript = await asyncio.to_thread(
+            _transcribe_vosk_sync,
+            data,
+            audio_format,
+        )
+    else:
+        raise RuntimeError(f"Unsupported local STT backend: {token}")
+
+    return _text(transcript)
+
+
+async def _native_local_partial_stt_task(
+    token: str,
+    session_id: str,
+    *,
+    session_ref: Optional["VoiceSessionRuntime"] = None,
+) -> None:
+    last_audio_bytes = 0
+    last_partial = ""
+    while True:
+        try:
+            await asyncio.sleep(float(DEFAULT_EXPERIMENTAL_PARTIAL_STT_INTERVAL_S))
+            if not _experimental_partial_stt_enabled():
+                return
+
+            runtime = _selector_runtime(token)
+            lock = runtime.get("lock")
+            if lock is None or not hasattr(lock, "acquire"):
+                return
+
+            async with lock:
+                session = runtime.get("session")
+                if not isinstance(session, VoiceSessionRuntime) or _text(session.session_id) != _text(session_id):
+                    return
+                if bool(session.processing):
+                    return
+                backend = _normalize_stt_backend(_text(session.stt_backend_effective) or _text(session.stt_backend))
+                if backend == "wyoming":
+                    return
+                audio_bytes = bytes(session.audio_buffer or b"")
+                audio_format = dict(session.audio_format or {})
+                language = session.language
+                speech_s = float(session.speech_duration_s or 0.0)
+                partial_updates = int(session.partial_transcript_updates or 0)
+
+            if speech_s < float(DEFAULT_EXPERIMENTAL_PARTIAL_STT_MIN_AUDIO_S):
+                continue
+            if not audio_bytes:
+                continue
+
+            rate = int(audio_format.get("rate") or DEFAULT_VOICE_SAMPLE_RATE_HZ)
+            width = int(audio_format.get("width") or DEFAULT_VOICE_SAMPLE_WIDTH)
+            channels = int(audio_format.get("channels") or DEFAULT_VOICE_CHANNELS)
+            bytes_per_second = max(1, rate * width * channels)
+            min_new_bytes = int(bytes_per_second * float(DEFAULT_EXPERIMENTAL_PARTIAL_STT_MIN_NEW_AUDIO_S))
+            if last_audio_bytes > 0 and (len(audio_bytes) - last_audio_bytes) < min_new_bytes and partial_updates > 0:
+                continue
+
+            transcript = await _native_transcribe_local_audio_bytes(
+                backend=backend,
+                audio_bytes=audio_bytes,
+                audio_format=audio_format,
+                language=language,
+                selector=token,
+                session_id=session_id,
+                partial=True,
+            )
+            text_value = _text(transcript)
+            if not text_value or text_value == last_partial:
+                if text_value:
+                    last_audio_bytes = len(audio_bytes)
+                continue
+
+            async with lock:
+                session = runtime.get("session")
+                if not isinstance(session, VoiceSessionRuntime) or _text(session.session_id) != _text(session_id):
+                    return
+                if bool(session.processing):
+                    return
+                session.partial_transcript = text_value
+                session.partial_transcript_updates += 1
+                session.partial_transcript_updated_ts = _now()
+
+            if (
+                isinstance(session_ref, VoiceSessionRuntime)
+                and session_ref is not session
+                and _text(session_ref.session_id) == _text(session_id)
+            ):
+                with contextlib.suppress(Exception):
+                    session_ref.partial_transcript = text_value
+                    session_ref.partial_transcript_updates += 1
+                    session_ref.partial_transcript_updated_ts = _now()
+
+            last_partial = text_value
+            last_audio_bytes = len(audio_bytes)
+            _native_debug(
+                f"STT partial transcript selector={token} session_id={session_id} transcript={text_value!r}"
+            )
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            _native_debug(f"local partial STT task failed selector={token} session_id={session_id} error={exc}")
+            return
+
+async def _native_wyoming_synthesize(
+    text: str,
+    *,
+    host: Optional[str] = None,
+    port: Optional[int] = None,
+    voice_value: Any = None,
+) -> Tuple[bytes, Dict[str, Any]]:
+    if (
+        AsyncTcpClient is None
+        or Synthesize is None
+        or WyomingAudioStart is None
+        or WyomingAudioChunk is None
+        or WyomingAudioStop is None
+        or WyomingError is None
+    ):
+        raise RuntimeError(f"Wyoming client dependency unavailable: {WYOMING_IMPORT_ERROR or 'unknown import error'}")
+
+    prompt = _text(text)
+    if not prompt:
+        return b"", {}
+
+    cfg = _voice_config_snapshot()
+    tts = cfg.get("wyoming_tts") if isinstance(cfg.get("wyoming_tts"), dict) else {}
+    host = _text(host) or _text(tts.get("host")) or DEFAULT_WYOMING_TTS_HOST
+    port = _as_int(port, int(tts.get("port") or DEFAULT_WYOMING_TTS_PORT), minimum=1, maximum=65535)
+    selected = _voice_selection_from_string(voice_value if voice_value is not None else tts.get("voice"))
+    selected_label = _voice_selection_label(selected) if selected else "default"
+    timeout = _wyoming_timeout_s()
+
+    _native_debug(f"TTS connect {host}:{port} text_len={len(prompt)} voice={selected_label}")
+
+    synth_event = None
+    if selected and SynthesizeVoice is not None:
+        voice_obj = SynthesizeVoice(
+            name=_text(selected.get("name")) or None,
+            language=_text(selected.get("language")) or None,
+            speaker=_text(selected.get("speaker")) or None,
+        )
+        synth_event = Synthesize(text=prompt, voice=voice_obj).event()
+    elif selected:
+        with contextlib.suppress(Exception):
+            synth_event = Synthesize(text=prompt, voice=selected).event()
+    if synth_event is None:
+        synth_event = Synthesize(text=prompt).event()
+
+    audio_out = bytearray()
+    audio_format: Dict[str, Any] = {}
+    saw_start = False
+
+    async with AsyncTcpClient(host, port) as client:
+        await asyncio.wait_for(client.write_event(synth_event), timeout=timeout)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            left = max(0.1, deadline - time.monotonic())
+            event = await asyncio.wait_for(client.read_event(), timeout=left)
+            if event is None:
+                break
+            if WyomingAudioStart.is_type(event.type):
+                start = WyomingAudioStart.from_event(event)
+                saw_start = True
+                audio_format = {"rate": start.rate, "width": start.width, "channels": start.channels}
+                continue
+            if WyomingAudioChunk.is_type(event.type):
+                chunk = WyomingAudioChunk.from_event(event)
+                audio_out.extend(chunk.audio or b"")
+                continue
+            if WyomingAudioStop.is_type(event.type):
+                break
+            if WyomingError.is_type(event.type):
+                err = WyomingError.from_event(event)
+                raise RuntimeError(f"Wyoming TTS error: {err.text} ({err.code or 'unknown'})")
+
+    if not saw_start:
+        raise RuntimeError("Wyoming TTS did not emit audio-start")
+    return bytes(audio_out), audio_format
+
+
+def _float_audio_to_pcm16_bytes(audio: Any) -> bytes:
+    np_mod = importlib.import_module("numpy")
+    array = np_mod.asarray(audio, dtype=np_mod.float32)
+    if array.ndim > 1:
+        array = np_mod.squeeze(array)
+    if array.ndim > 1:
+        array = array.reshape(-1)
+    if not array.size:
+        return b""
+    array = np_mod.clip(array, -1.0, 1.0)
+    return (array * 32767.0).astype(np_mod.int16).tobytes()
+
+
+@contextlib.contextmanager
+def _temporary_env(overrides: Dict[str, Any]):
+    previous: Dict[str, Optional[str]] = {}
+    try:
+        for key, value in overrides.items():
+            previous[key] = os.environ.get(key)
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = _text(value)
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def _load_kokoro_pipeline(model_id: str) -> Any:
+    if build_kokoro_pipeline is None or KokoroPipelineConfig is None:
+        raise RuntimeError(f"kokoro dependency unavailable: {KOKORO_IMPORT_ERROR or 'unknown import error'}")
+
+    spec = _kokoro_model_spec(model_id)
+    variant = _text(spec.get("variant")) or "v1.0"
+    quality = _text(spec.get("quality")) or "q8"
+    key = (variant, quality)
+
+    with _kokoro_pipeline_lock:
+        pipeline = _kokoro_pipeline_cache.get(key)
+        if pipeline is None:
+            root = _ensure_tts_backend_model_root("kokoro")
+            onnx_backend_mod = importlib.import_module("pykokoro.onnx_backend")
+            _patch_kokoro_ssmd_parser()
+
+            def _kokoro_cache_path(folder: Optional[str] = None):
+                base = root
+                if folder:
+                    base = os.path.join(base, folder)
+                os.makedirs(base, exist_ok=True)
+                from pathlib import Path
+                return Path(base)
+
+            setattr(onnx_backend_mod, "get_user_cache_path", _kokoro_cache_path)
+            cfg = KokoroPipelineConfig(
+                voice=DEFAULT_KOKORO_VOICE,
+                model_source="huggingface",
+                model_variant=variant,
+                model_quality=quality,
+                provider=DEFAULT_KOKORO_PROVIDER,
+                tokenizer_config=(
+                    KokoroTokenizerConfig(use_spacy=False)
+                    if KokoroTokenizerConfig is not None
+                    else None
+                ),
+            )
+            logger.info("[native-voice] kokoro model source=%s model=%s", root, model_id)
+            pipeline = build_kokoro_pipeline(config=cfg, eager=True)
+            _kokoro_pipeline_cache[key] = pipeline
+        return pipeline
+
+
+def _load_pocket_tts_model(model_id: str) -> Any:
+    if PocketTTSModel is None:
+        raise RuntimeError(f"pocket-tts dependency unavailable: {POCKET_TTS_IMPORT_ERROR or 'unknown import error'}")
+
+    token = _text(model_id) or DEFAULT_POCKET_TTS_MODEL
+    with _pocket_tts_model_lock:
+        model = _pocket_tts_model_cache.get(token)
+        if model is None:
+            root = _ensure_tts_backend_model_root("pocket_tts")
+            hf_root = os.path.join(root, "hf")
+            os.makedirs(hf_root, exist_ok=True)
+            logger.info("[native-voice] pocket-tts model source=%s model=%s", hf_root, token)
+            with _temporary_env(
+                {
+                    "HF_HOME": hf_root,
+                    "HF_HUB_CACHE": os.path.join(hf_root, "hub"),
+                    "HUGGINGFACE_HUB_CACHE": os.path.join(hf_root, "hub"),
+                }
+            ):
+                model = PocketTTSModel.load_model(config=token)
+            _pocket_tts_model_cache[token] = model
+        return model
+
+
+def _piper_model_paths(model_id: str) -> Tuple[str, str]:
+    root = _ensure_tts_backend_model_root("piper")
+    token = _text(model_id) or DEFAULT_PIPER_MODEL
+    return os.path.join(root, f"{token}.onnx"), os.path.join(root, f"{token}.onnx.json")
+
+
+def _load_piper_voice_model(model_id: str) -> Any:
+    if PiperVoice is None or PiperSynthesisConfig is None or piper_download_voice is None:
+        raise RuntimeError(f"piper dependency unavailable: {PIPER_IMPORT_ERROR or 'unknown import error'}")
+
+    model_path, config_path = _piper_model_paths(model_id)
+    backend_root = _ensure_tts_backend_model_root("piper")
+    if not (os.path.isfile(model_path) and os.path.isfile(config_path)):
+        logger.info("[native-voice] piper model missing; downloading model=%s target_root=%s", model_id, backend_root)
+        piper_download_voice(_text(model_id) or DEFAULT_PIPER_MODEL, download_dir=importlib.import_module("pathlib").Path(backend_root))
+
+    cache_key = _text(model_path)
+    with _piper_voice_lock:
+        voice = _piper_voice_cache.get(cache_key)
+        if voice is None:
+            logger.info("[native-voice] piper model source=%s", model_path)
+            voice = PiperVoice.load(model_path=model_path, config_path=config_path, download_dir=backend_root)
+            _piper_voice_cache[cache_key] = voice
+        return voice
+
+
+def _synthesize_kokoro_sync(text: str, model_id: str, voice: str) -> Tuple[bytes, Dict[str, Any]]:
+    pipeline = _load_kokoro_pipeline(model_id)
+    result = pipeline.run(_text(text), voice=_text(voice) or DEFAULT_KOKORO_VOICE)
+    audio_bytes = _float_audio_to_pcm16_bytes(getattr(result, "audio", None))
+    sample_rate = int(getattr(result, "sample_rate", 24000) or 24000)
+    return audio_bytes, {"rate": sample_rate, "width": 2, "channels": 1}
+
+
+def _synthesize_pocket_tts_sync(text: str, model_id: str, voice: str) -> Tuple[bytes, Dict[str, Any]]:
+    prompt = _text(text)
+    if not prompt:
+        return b"", {}
+    model = _load_pocket_tts_model(model_id)
+    root = _ensure_tts_backend_model_root("pocket_tts")
+    hf_root = os.path.join(root, "hf")
+    os.makedirs(hf_root, exist_ok=True)
+    with _temporary_env(
+        {
+            "HF_HOME": hf_root,
+            "HF_HUB_CACHE": os.path.join(hf_root, "hub"),
+            "HUGGINGFACE_HUB_CACHE": os.path.join(hf_root, "hub"),
+        }
+    ):
+        model_state = model.get_state_for_audio_prompt(_text(voice) or DEFAULT_POCKET_TTS_VOICE)
+        audio_tensor = model.generate_audio(model_state, prompt)
+    tensor = audio_tensor.detach().cpu().squeeze()
+    audio_bytes = _float_audio_to_pcm16_bytes(tensor.numpy())
+    return audio_bytes, {"rate": int(getattr(model, "sample_rate", 24000) or 24000), "width": 2, "channels": 1}
+
+
+def _split_piper_sentences(text: str) -> List[str]:
+    prompt = _text(text)
+    if not prompt:
+        return []
+    parts: List[str] = []
+    start = 0
+    length = len(prompt)
+    i = 0
+    while i < length:
+        ch = prompt[i]
+        if ch not in ".!?":
+            i += 1
+            continue
+        if i + 1 < length and prompt[i + 1] in ".!?":
+            i += 1
+            continue
+        if ch == "." and i > 0 and i + 1 < length and prompt[i - 1].isdigit() and prompt[i + 1].isdigit():
+            i += 1
+            continue
+        j = i - 1
+        while j >= start and (prompt[j].isalnum() or prompt[j] in "_-"):
+            j -= 1
+        token = prompt[j + 1 : i].lower()
+        if ch == "." and (token in _PIPER_ABBREVIATIONS or (len(token) == 1 and token.isalpha())):
+            i += 1
+            continue
+        k = i + 1
+        while k < length and prompt[k] in "\"'”’)]}":
+            k += 1
+        if k < length and not prompt[k].isspace():
+            i += 1
+            continue
+        segment = prompt[start:k].strip()
+        if segment:
+            parts.append(segment)
+        while k < length and prompt[k].isspace():
+            k += 1
+        start = k
+        i = k
+    tail = prompt[start:].strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def _build_piper_segment_plan(text: str) -> List[Tuple[str, float]]:
+    normalized = re.sub(r"\r\n?", "\n", _text(text))
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", normalized) if _text(part)]
+    if not paragraphs:
+        return []
+    plan: List[Tuple[str, float]] = []
+    last_paragraph_index = len(paragraphs) - 1
+    for paragraph_index, paragraph in enumerate(paragraphs):
+        sentences = _split_piper_sentences(paragraph)
+        if not sentences:
+            continue
+        last_sentence_index = len(sentences) - 1
+        for sentence_index, sentence in enumerate(sentences):
+            pause_seconds = 0.0
+            if sentence_index < last_sentence_index:
+                pause_seconds = DEFAULT_PIPER_SENTENCE_PAUSE_SECONDS
+            elif paragraph_index < last_paragraph_index:
+                pause_seconds = DEFAULT_PIPER_PARAGRAPH_PAUSE_SECONDS
+            plan.append((sentence, pause_seconds))
+    return plan
+
+
+def _build_experimental_tts_chunks(text: str) -> List[str]:
+    prompt = _text(text)
+    if len(prompt) < int(DEFAULT_EXPERIMENTAL_TTS_EARLY_START_MIN_CHARS):
+        return []
+    sentence_plan = _build_piper_segment_plan(prompt)
+    sentences = [_text(sentence) for sentence, _pause_s in sentence_plan if _text(sentence)]
+    if len(sentences) < 2:
+        return []
+    first_chunk = sentences[0]
+    remaining = list(sentences[1:])
+    if len(first_chunk) < int(DEFAULT_EXPERIMENTAL_TTS_EARLY_START_MIN_FIRST_CHARS) and remaining:
+        first_chunk = f"{first_chunk} {remaining.pop(0)}".strip()
+    chunks = [first_chunk]
+    if remaining:
+        remainder = " ".join(part for part in remaining if part).strip()
+        if remainder:
+            chunks.append(remainder)
+    return [chunk for chunk in chunks if _text(chunk)]
+
+
+def _synthesize_piper_segment_sync(voice: Any, prompt: str) -> Tuple[bytes, Dict[str, Any]]:
+    audio_out = bytearray()
+    sample_rate = 22050
+    sample_width = 2
+    sample_channels = 1
+    syn_config = PiperSynthesisConfig()
+    for chunk in voice.synthesize(prompt, syn_config=syn_config):
+        audio_out.extend(chunk.audio_int16_bytes)
+        sample_rate = int(getattr(chunk, "sample_rate", sample_rate) or sample_rate)
+        sample_width = int(getattr(chunk, "sample_width", sample_width) or sample_width)
+        sample_channels = int(getattr(chunk, "sample_channels", sample_channels) or sample_channels)
+    return bytes(audio_out), {"rate": sample_rate, "width": sample_width, "channels": sample_channels}
+
+
+def _synthesize_piper_sync(text: str, model_id: str) -> Tuple[bytes, Dict[str, Any]]:
+    prompt = _text(text)
+    if not prompt:
+        return b"", {}
+    voice = _load_piper_voice_model(model_id)
+    segment_plan = _build_piper_segment_plan(prompt) or [(prompt, 0.0)]
+    audio_parts: List[bytes] = []
+    audio_format: Dict[str, Any] = {"rate": 22050, "width": 2, "channels": 1}
+    for segment_text, pause_seconds in segment_plan:
+        segment_audio, segment_format = _synthesize_piper_segment_sync(voice, segment_text)
+        if segment_audio:
+            audio_parts.append(segment_audio)
+            audio_format = dict(segment_format)
+        if pause_seconds > 0:
+            audio_parts.append(_append_pcm_silence(b"", audio_format, seconds=pause_seconds))
+    padded = _append_pcm_silence(
+        b"".join(audio_parts),
+        audio_format,
+        seconds=DEFAULT_PIPER_TAIL_PAD_SECONDS,
+    )
+    return padded, audio_format
+
+
+async def _native_synthesize_text(
+    text: str,
+    *,
+    session: Optional["VoiceSessionRuntime"] = None,
+    values: Optional[Dict[str, Any]] = None,
+) -> Tuple[bytes, Dict[str, Any], str, str]:
+    prompt = _text(text)
+    if not prompt:
+        return b"", {}, "", ""
+
+    selection = _tts_selection_from_values(values)
+    selected_backend = _normalize_tts_backend(
+        _text(session.tts_backend if isinstance(session, VoiceSessionRuntime) else "") or selection.get("backend")
+    )
+    effective_backend = _normalize_tts_backend(
+        _text(session.tts_backend_effective if isinstance(session, VoiceSessionRuntime) else "")
+    )
+    backend_note = ""
+    if not effective_backend:
+        effective_backend, backend_note = _resolve_tts_backend(values)
+
+    try:
+        if effective_backend == "kokoro":
+            _native_debug(
+                f"TTS (kokoro) local model={selection.get('model')} voice={selection.get('voice') or DEFAULT_KOKORO_VOICE}"
+            )
+            audio_bytes, audio_format = await asyncio.to_thread(
+                _synthesize_kokoro_sync,
+                prompt,
+                _text(selection.get("model")) or DEFAULT_KOKORO_MODEL,
+                _text(selection.get("voice")) or DEFAULT_KOKORO_VOICE,
+            )
+            return audio_bytes, audio_format, effective_backend, backend_note
+        if effective_backend == "pocket_tts":
+            _native_debug(
+                f"TTS (pocket-tts) local model={selection.get('model')} voice={selection.get('voice') or DEFAULT_POCKET_TTS_VOICE}"
+            )
+            audio_bytes, audio_format = await asyncio.to_thread(
+                _synthesize_pocket_tts_sync,
+                prompt,
+                _text(selection.get("model")) or DEFAULT_POCKET_TTS_MODEL,
+                _text(selection.get("voice")) or DEFAULT_POCKET_TTS_VOICE,
+            )
+            return audio_bytes, audio_format, effective_backend, backend_note
+        if effective_backend == "piper":
+            _native_debug(f"TTS (piper) local model={selection.get('model') or DEFAULT_PIPER_MODEL}")
+            audio_bytes, audio_format = await asyncio.to_thread(
+                _synthesize_piper_sync,
+                prompt,
+                _text(selection.get("model")) or DEFAULT_PIPER_MODEL,
+            )
+            return audio_bytes, audio_format, effective_backend, backend_note
+        audio_bytes, audio_format = await _native_wyoming_synthesize(
+            prompt,
+            host=_text(selection.get("wyoming_host")) or None,
+            port=selection.get("wyoming_port"),
+            voice_value=selection.get("wyoming_voice"),
+        )
+        return audio_bytes, audio_format, "wyoming", backend_note
+    except Exception as exc:
+        if effective_backend != "wyoming":
+            wyoming_ok, _wyoming_reason = _tts_backend_available("wyoming")
+            if wyoming_ok:
+                logger.warning(
+                    "[native-voice] TTS backend fallback selected=%s effective=%s reason=%s",
+                    selected_backend,
+                    effective_backend,
+                    _text(exc),
+                )
+                audio_bytes, audio_format = await _native_wyoming_synthesize(
+                    prompt,
+                    host=_text(selection.get("wyoming_host")) or None,
+                    port=selection.get("wyoming_port"),
+                    voice_value=selection.get("wyoming_voice"),
+                )
+                fallback_note = (
+                    f"{backend_note} " if backend_note else ""
+                ) + f"{effective_backend} synthesis failed: {_text(exc)}. Falling back to Wyoming."
+                return audio_bytes, audio_format, "wyoming", fallback_note.strip()
+        raise
+
+
+def _normalized_audio_format(audio_format: Dict[str, Any]) -> Dict[str, int]:
+    return {
+        "rate": int(audio_format.get("rate") or DEFAULT_VOICE_SAMPLE_RATE_HZ),
+        "width": int(audio_format.get("width") or DEFAULT_VOICE_SAMPLE_WIDTH),
+        "channels": int(audio_format.get("channels") or DEFAULT_VOICE_CHANNELS),
+    }
+
+
+def _trim_pcm_for_playback(audio_bytes: bytes, audio_format: Dict[str, Any]) -> Tuple[bytes, Dict[str, int]]:
+    data = bytes(audio_bytes or b"")
+    fmt = _normalized_audio_format(audio_format or {})
+    width = int(fmt.get("width") or DEFAULT_VOICE_SAMPLE_WIDTH)
+    channels = int(fmt.get("channels") or DEFAULT_VOICE_CHANNELS)
+    if width not in {1, 2, 3, 4}:
+        width = DEFAULT_VOICE_SAMPLE_WIDTH
+    if channels < 1 or channels > 8:
+        channels = DEFAULT_VOICE_CHANNELS
+    fmt = {"rate": int(fmt.get("rate") or DEFAULT_VOICE_SAMPLE_RATE_HZ), "width": width, "channels": channels}
+    if not data:
+        return b"", fmt
+    block_align = max(1, width * channels)
+    usable = len(data) - (len(data) % block_align)
+    if usable <= 0:
+        return b"", fmt
+    return data[:usable], fmt
+
+
+def _stitch_pcm_playback_segments(parts: List[Tuple[bytes, Dict[str, Any], float]]) -> Tuple[bytes, Dict[str, int]]:
+    segments: List[Tuple[bytes, Dict[str, int], float]] = []
+    for audio_bytes, audio_format, pause_s in parts:
+        data, fmt = _trim_pcm_for_playback(audio_bytes, audio_format)
+        if not data:
+            continue
+        segments.append((data, fmt, max(0.0, float(pause_s or 0.0))))
+    if not segments:
+        return b"", {}
+
+    target_fmt = dict(segments[0][1])
+    if all(fmt == target_fmt for _, fmt, _ in segments):
+        out = bytearray()
+        for data, fmt, pause_s in segments:
+            out.extend(data)
+            if pause_s > 0:
+                out.extend(_append_pcm_silence(b"", fmt, seconds=pause_s))
+        return bytes(out), target_fmt
+
+    normalized_fmt = {"rate": 16000, "width": 2, "channels": 1}
+    out = bytearray()
+    for data, fmt, pause_s in segments:
+        normalized, _state = _pcm_to_pcm16_mono_16k(data, fmt)
+        if not normalized:
+            return b"", {}
+        out.extend(normalized)
+        if pause_s > 0:
+            out.extend(_append_pcm_silence(b"", normalized_fmt, seconds=pause_s))
+    return bytes(out), normalized_fmt
+
+
+async def _synthesize_spoken_response_audio(
+    response_text: str,
+    *,
+    session: "VoiceSessionRuntime",
+    continue_conversation: bool,
+    followup_cue: str = "",
+) -> Tuple[bytes, Dict[str, Any], str, str]:
+    reply = _text(response_text)
+    cue = _sanitize_followup_cue_text(followup_cue)
+    if not continue_conversation:
+        return await _native_synthesize_text(reply, session=session)
+
+    if not cue:
+        combined = _continued_chat_spoken_reply_text(
+            reply,
+            continue_conversation=True,
+            followup_cue=cue,
+        )
+        audio_bytes, audio_format, backend_used, backend_note = await _native_synthesize_text(
+            combined,
+            session=session,
+        )
+        if audio_bytes:
+            audio_bytes = _append_pcm_silence(
+                audio_bytes,
+                audio_format,
+                seconds=DEFAULT_CONTINUED_CHAT_CUE_TO_REOPEN_PAUSE_S,
+            )
+        return audio_bytes, audio_format, backend_used, backend_note
+
+    split_error = ""
+    try:
+        reply_audio = b""
+        reply_format: Dict[str, Any] = {}
+        reply_backend = ""
+        reply_note = ""
+        if reply:
+            reply_audio, reply_format, reply_backend, reply_note = await _native_synthesize_text(
+                reply,
+                session=session,
+            )
+
+        cue_audio, cue_format, cue_backend, cue_note = await _native_synthesize_text(
+            cue,
+            session=session,
+        )
+        stitched_audio, stitched_format = _stitch_pcm_playback_segments(
+            [
+                (reply_audio, reply_format, DEFAULT_CONTINUED_CHAT_REPLY_TO_CUE_PAUSE_S if cue_audio else 0.0),
+                (cue_audio, cue_format, DEFAULT_CONTINUED_CHAT_CUE_TO_REOPEN_PAUSE_S),
+            ]
+        )
+        if stitched_audio:
+            backend_used = reply_backend or cue_backend or _text(session.tts_backend_effective)
+            backend_note = _merge_text_notes(
+                reply_note,
+                cue_note,
+                (
+                    f"reply/cue TTS backend mismatch: {reply_backend}->{cue_backend}"
+                    if reply_backend and cue_backend and reply_backend != cue_backend
+                    else ""
+                ),
+            )
+            return stitched_audio, stitched_format, backend_used, backend_note
+    except Exception as exc:
+        split_error = _text(exc)
+
+    combined = _continued_chat_spoken_reply_text(
+        reply,
+        continue_conversation=True,
+        followup_cue=cue,
+    )
+    audio_bytes, audio_format, backend_used, backend_note = await _native_synthesize_text(
+        combined,
+        session=session,
+    )
+    if audio_bytes:
+        audio_bytes = _append_pcm_silence(
+            audio_bytes,
+            audio_format,
+            seconds=DEFAULT_CONTINUED_CHAT_CUE_TO_REOPEN_PAUSE_S,
+        )
+    backend_note = _merge_text_notes(
+        backend_note,
+        (f"followup split playback fallback: {split_error}" if split_error else ""),
+        "followup cue playback used single-pass fallback",
+    )
+    return audio_bytes, audio_format, backend_used, backend_note
+
+
+async def _ensure_voice_stt_end_sent(
+    client: Any,
+    module: Any,
+    *,
+    session: "VoiceSessionRuntime",
+    transcript: str,
+) -> None:
+    if bool(session.stt_end_sent):
+        return
+    await _esphome_send_event(client, module, ("VOICE_ASSISTANT_STT_END", "STT_END"), {"text": transcript})
+    session.stt_end_sent = True
+
+
+async def _ensure_voice_intent_active(
+    client: Any,
+    module: Any,
+    *,
+    session: "VoiceSessionRuntime",
+) -> None:
+    if bool(session.intent_active):
+        return
+    await _esphome_send_event(client, module, ("VOICE_ASSISTANT_INTENT_START", "INTENT_START"), None)
+    session.intent_active = True
+
+
+async def _send_voice_intent_end(
+    client: Any,
+    module: Any,
+    *,
+    session: "VoiceSessionRuntime",
+    continue_conversation: bool = False,
+) -> None:
+    await _esphome_send_event(
+        client,
+        module,
+        ("VOICE_ASSISTANT_INTENT_END", "INTENT_END"),
+        {
+            "conversation_id": _text(session.conversation_id) or _text(session.session_id),
+            "continue_conversation": "1" if continue_conversation else "0",
+        },
+    )
+    session.intent_active = False
+
+
+async def _play_live_tool_progress_for_session(
+    client: Any,
+    module: Any,
+    *,
+    selector: str,
+    runtime: Dict[str, Any],
+    session: "VoiceSessionRuntime",
+    transcript: str,
+    wait_text: str,
+) -> None:
+    if not _experimental_live_tool_progress_enabled():
+        return
+    spoken = _sanitize_tool_progress_spoken_text(wait_text)
+    if not spoken:
+        return
+    last = _lower(_text(session.last_tool_progress_text).rstrip(".!?"))
+    current = _lower(spoken.rstrip(".!?"))
+    if last and current and last == current:
+        return
+
+    audio_bytes, audio_format, _backend_used, _backend_note = await _native_synthesize_text(
+        spoken,
+        session=session,
+    )
+    if not audio_bytes:
+        return
+
+    url = _store_tts_url(selector, session.session_id, audio_bytes, audio_format)
+    if not url:
+        return
+
+    timeout_s = _run_end_timeout_s(audio_bytes, audio_format)
+    waiter: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+    lock = runtime.get("lock")
+
+    await _ensure_voice_stt_end_sent(client, module, session=session, transcript=transcript)
+    await _ensure_voice_intent_active(client, module, session=session)
+    await _send_voice_intent_end(client, module, session=session, continue_conversation=False)
+    await _esphome_send_event(client, module, ("VOICE_ASSISTANT_TTS_START", "TTS_START"), {"text": spoken})
+
+    async with lock:
+        runtime["awaiting_announcement"] = True
+        runtime["awaiting_session_id"] = _text(session.session_id)
+        runtime["awaiting_announcement_kind"] = "tool_progress"
+        runtime["announcement_future"] = waiter
+        _cancel_announcement_wait(runtime)
+        _schedule_announcement_timeout(selector, client, module, timeout_s)
+
+    await _esphome_send_event(client, module, ("VOICE_ASSISTANT_TTS_END", "TTS_END"), {"url": url})
+    _native_debug(
+        f"live tool progress queued selector={selector} session_id={session.session_id} timeout_s={timeout_s:.2f} text={spoken!r}"
+    )
+    with contextlib.suppress(Exception):
+        await waiter
+    await _ensure_voice_intent_active(client, module, session=session)
+    session.live_tool_progress_played = True
+    session.last_tool_progress_text = spoken
+
+
+async def _start_experimental_streamed_tts_response(
+    selector: str,
+    client: Any,
+    module: Any,
+    *,
+    session: VoiceSessionRuntime,
+    runtime: Dict[str, Any],
+    response_text: str,
+    transcript: str,
+) -> Optional[Dict[str, Any]]:
+    if not _experimental_tts_early_start_enabled():
+        return None
+    chunks = _build_experimental_tts_chunks(response_text)
+    if len(chunks) < 2:
+        return None
+
+    first_text = _text(chunks[0])
+    remaining_chunks = [chunk for chunk in chunks[1:] if _text(chunk)]
+    if not first_text or not remaining_chunks:
+        return None
+
+    tts_started = time.monotonic()
+    first_audio, first_format, backend_used, backend_note = await _native_synthesize_text(
+        first_text,
+        session=session,
+    )
+    first_latency_ms = max(0.0, (time.monotonic() - tts_started) * 1000.0)
+    if not first_audio:
+        return None
+
+    first_url = _store_tts_url(selector, session.session_id, first_audio, first_format)
+    if not first_url:
+        return None
+
+    session.tts_latency_ms = first_latency_ms
+    _voice_metrics_record_tts(selector, backend_used or session.tts_backend_effective or session.tts_backend, session.tts_latency_ms)
+
+    prepare_task = asyncio.create_task(
+        _prepare_streamed_tts_segments(
+            selector,
+            session.session_id,
+            session=session,
+            chunk_texts=remaining_chunks,
+        )
+    )
+
+    lock = runtime.get("lock")
+    timeout_s = _run_end_timeout_s(first_audio, first_format)
+    async with lock:
+        _clear_streamed_tts_state(runtime)
+        runtime["streamed_tts"] = {
+            "session_id": _text(session.session_id),
+            "ready_segments": [],
+            "done": False,
+            "error": "",
+            "backend_used": backend_used,
+            "backend_note": backend_note,
+            "prepare_task": prepare_task,
+            "segment_count": len(chunks),
+        }
+        runtime["awaiting_announcement"] = True
+        runtime["awaiting_session_id"] = _text(session.session_id)
+        runtime["awaiting_announcement_kind"] = "response_streamed"
+        runtime["announcement_future"] = None
+        _cancel_announcement_wait(runtime)
+        _schedule_announcement_timeout(selector, client, module, timeout_s)
+
+    await _ensure_voice_stt_end_sent(client, module, session=session, transcript=transcript)
+    if not bool(session.intent_active):
+        await _ensure_voice_intent_active(client, module, session=session)
+    await _send_voice_intent_end(client, module, session=session, continue_conversation=False)
+    await _esphome_send_event(client, module, ("VOICE_ASSISTANT_TTS_START", "TTS_START"), {"text": response_text})
+    await _esphome_send_event(client, module, ("VOICE_ASSISTANT_TTS_END", "TTS_END"), {"url": first_url})
+    _native_debug(
+        f"experimental streamed tts started selector={selector} session_id={session.session_id} "
+        f"segments={len(chunks)} timeout_s={timeout_s:.2f}"
+    )
+    return {
+        "first_url": first_url,
+        "backend_used": backend_used,
+        "backend_note": backend_note,
+        "tts_bytes": len(first_audio),
+        "tts_mode": "segmented_url",
+        "run_end_mode": "announcement_streamed",
+        "segment_count": len(chunks),
+    }
+
+
+# -------------------- TTS URL Store --------------------
+def _pcm_to_wav(audio_bytes: bytes, audio_format: Dict[str, Any]) -> Tuple[bytes, Dict[str, int]]:
+    pcm = bytes(audio_bytes or b"")
+    if not pcm:
+        return b"", {
+            "rate": DEFAULT_VOICE_SAMPLE_RATE_HZ,
+            "width": DEFAULT_VOICE_SAMPLE_WIDTH,
+            "channels": DEFAULT_VOICE_CHANNELS,
+        }
+
+    rate = int(audio_format.get("rate") or DEFAULT_VOICE_SAMPLE_RATE_HZ)
+    width = int(audio_format.get("width") or DEFAULT_VOICE_SAMPLE_WIDTH)
+    channels = int(audio_format.get("channels") or DEFAULT_VOICE_CHANNELS)
+    if width not in {1, 2, 3, 4}:
+        width = DEFAULT_VOICE_SAMPLE_WIDTH
+    if channels < 1 or channels > 8:
+        channels = DEFAULT_VOICE_CHANNELS
+
+    block_align = max(1, width * channels)
+    usable = len(pcm) - (len(pcm) % block_align)
+    if usable <= 0:
+        return b"", {"rate": rate, "width": width, "channels": channels}
+    if usable != len(pcm):
+        pcm = pcm[:usable]
+
+    with io.BytesIO() as out:
+        with wave.open(out, "wb") as wav_file:
+            wav_file.setnchannels(channels)
+            wav_file.setsampwidth(width)
+            wav_file.setframerate(rate)
+            wav_file.writeframes(pcm)
+        return out.getvalue(), {"rate": rate, "width": width, "channels": channels}
+
+
+def _tts_url_ttl_s() -> float:
+    cfg = _voice_config_snapshot()
+    limits = cfg.get("limits") if isinstance(cfg.get("limits"), dict) else {}
+    return float(limits.get("tts_url_ttl_s") or DEFAULT_TTS_URL_TTL_S)
+
+
+def _tts_url_prune_locked(now_ts: Optional[float] = None) -> int:
+    now = float(now_ts if isinstance(now_ts, (int, float)) else _now())
+    removed = 0
+    for stream_id, row in list(_tts_url_store.items()):
+        if not isinstance(row, dict):
+            _tts_url_store.pop(stream_id, None)
+            removed += 1
+            continue
+        expires_ts = float(row.get("expires_ts") or 0.0)
+        if expires_ts > 0 and now >= expires_ts:
+            _tts_url_store.pop(stream_id, None)
+            removed += 1
+    return removed
+
+
+def _service_host_for_peer(peer_host: str) -> str:
+    env_host = _text(os.getenv("VOICE_CORE_PUBLIC_HOST"))
+    if env_host:
+        return env_host
+
+    htmlui_host = _text(os.getenv("HTMLUI_HOST", "0.0.0.0"))
+    if htmlui_host not in {"0.0.0.0", "::"}:
+        return htmlui_host
+
+    targets: List[str] = []
+    peer = _lower(peer_host)
+    if peer and not peer.startswith("127."):
+        targets.append(peer)
+    targets.append("8.8.8.8")
+
+    for target in targets:
+        with contextlib.suppress(Exception):
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+                probe.connect((target, 80))
+                host = _text(probe.getsockname()[0])
+                if host and not host.startswith("127."):
+                    return host
+
+    with contextlib.suppress(Exception):
+        host = _text(socket.gethostbyname(socket.gethostname()))
+        if host and not host.startswith("127."):
+            return host
+
+    return "127.0.0.1"
+
+
+def _selector_host(selector: str) -> str:
+    token = _text(selector)
+    if token.startswith("host:"):
+        return _lower(token.split(":", 1)[1])
+
+    rows = _load_satellite_registry()
+    for row in rows:
+        if _text(row.get("selector")) == token:
+            host = _lower(row.get("host"))
+            if host:
+                return host
+    return ""
+
+
+def _store_tts_url(selector: str, session_id: str, audio_bytes: bytes, audio_format: Dict[str, Any]) -> str:
+    wav_bytes, normalized_format = _pcm_to_wav(audio_bytes, audio_format)
+    if not wav_bytes:
+        return ""
+
+    stream_id = uuid.uuid4().hex
+    expires_ts = _now() + _tts_url_ttl_s()
+    with _tts_url_store_lock:
+        _tts_url_prune_locked()
+        _tts_url_store[stream_id] = {
+            "id": stream_id,
+            "selector": _text(selector),
+            "session_id": _text(session_id),
+            "created_ts": _now(),
+            "expires_ts": expires_ts,
+            "audio_format": normalized_format,
+            "wav_bytes": wav_bytes,
+        }
+
+    host = _service_host_for_peer(_selector_host(selector))
+    url = f"http://{host}:{_main_app_port()}/tater-ha/v1/voice/esphome/tts/{stream_id}.wav"
+    _native_debug(
+        f"esphome tts url prepared selector={_text(selector)} session_id={_text(session_id)} bytes={len(wav_bytes)} url={url}"
+    )
+    return url
+
+
+def _fetch_tts_url(stream_id: str) -> Optional[Dict[str, Any]]:
+    token = _text(stream_id)
+    if not token:
+        return None
+    with _tts_url_store_lock:
+        _tts_url_prune_locked()
+        row = _tts_url_store.get(token)
+        if not isinstance(row, dict):
+            return None
+        return dict(row)
+
+
+def _store_media_url(
+    selector: str,
+    session_id: str,
+    media_bytes: bytes,
+    *,
+    media_type: str,
+    filename: str,
+) -> str:
+    data = bytes(media_bytes or b"")
+    if not data:
+        return ""
+
+    stream_id = uuid.uuid4().hex
+    expires_ts = _now() + _tts_url_ttl_s()
+    mime = _text(media_type).strip() or "application/octet-stream"
+    with _tts_url_store_lock:
+        _tts_url_prune_locked()
+        _tts_url_store[stream_id] = {
+            "id": stream_id,
+            "selector": _text(selector),
+            "session_id": _text(session_id),
+            "created_ts": _now(),
+            "expires_ts": expires_ts,
+            "media_type": mime,
+            "filename": _text(filename) or "audio.bin",
+            "body_bytes": data,
+        }
+
+    host = _service_host_for_peer(_selector_host(selector))
+    url = f"http://{host}:{_main_app_port()}/tater-ha/v1/voice/esphome/media/{stream_id}"
+    _native_debug(
+        f"esphome media url prepared selector={_text(selector)} session_id={_text(session_id)} "
+        f"bytes={len(data)} media_type={mime} url={url}"
+    )
+    return url
+
+
+async def _download_media_source(source_url: str) -> Tuple[bytes, str]:
+    url = _text(source_url).strip()
+    if not url:
+        raise ValueError("source_url is required")
+
+    def _fetch() -> Tuple[bytes, str]:
+        resp = requests.get(url, timeout=180)
+        resp.raise_for_status()
+        content_type = _text(resp.headers.get("Content-Type")).split(";", 1)[0].strip().lower()
+        return bytes(resp.content or b""), content_type
+
+    return await asyncio.to_thread(_fetch)
+
+
+def _estimate_pcm_duration_s(audio_bytes: bytes, audio_format: Dict[str, Any]) -> float:
+    data = bytes(audio_bytes or b"")
+    if not data:
+        return 0.0
+    rate = int(audio_format.get("rate") or DEFAULT_VOICE_SAMPLE_RATE_HZ)
+    width = int(audio_format.get("width") or DEFAULT_VOICE_SAMPLE_WIDTH)
+    channels = int(audio_format.get("channels") or DEFAULT_VOICE_CHANNELS)
+    frame_bytes = max(1, width * channels)
+    return float(len(data)) / float(max(1, rate * frame_bytes))
+
+
+def _append_pcm_silence(audio_bytes: bytes, audio_format: Dict[str, Any], *, seconds: float) -> bytes:
+    data = bytes(audio_bytes or b"")
+    if seconds <= 0:
+        return data
+    rate = int(audio_format.get("rate") or DEFAULT_VOICE_SAMPLE_RATE_HZ)
+    width = int(audio_format.get("width") or DEFAULT_VOICE_SAMPLE_WIDTH)
+    channels = int(audio_format.get("channels") or DEFAULT_VOICE_CHANNELS)
+    if width not in {1, 2, 3, 4}:
+        width = DEFAULT_VOICE_SAMPLE_WIDTH
+    if channels < 1 or channels > 8:
+        channels = DEFAULT_VOICE_CHANNELS
+    frame_bytes = max(1, width * channels)
+    silence_frames = max(1, int(round(float(rate) * float(seconds))))
+    return data + (b"\x00" * (silence_frames * frame_bytes))
+
+
+def _run_end_timeout_s(audio_bytes: bytes, audio_format: Dict[str, Any]) -> float:
+    return max(1.5, min(30.0, _estimate_pcm_duration_s(audio_bytes, audio_format) + 1.0))
+
+
+# -------------------- Satellite Registry --------------------
+def _normalize_satellite_row(raw: Any) -> Dict[str, Any]:
+    row = raw if isinstance(raw, dict) else {}
+    host = _lower(row.get("host"))
+    selector = _text(row.get("selector"))
+    if not selector and host:
+        selector = f"host:{host}"
+
+    return {
+        "selector": selector,
+        "host": host,
+        "name": _text(row.get("name")),
+        "source": _text(row.get("source")) or "manual",
+        "metadata": row.get("metadata") if isinstance(row.get("metadata"), dict) else {},
+        "last_seen_ts": _as_float(row.get("last_seen_ts"), 0.0),
+    }
+
+
+def _satellite_area_name(row: Any) -> str:
+    data = row if isinstance(row, dict) else {}
+    meta = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    for key in ("area_name", "room_name", "room", "area"):
+        value = _text(meta.get(key))
+        if value:
+            return value
+    return ""
+
+
+def _load_satellite_registry() -> List[Dict[str, Any]]:
+    with contextlib.suppress(Exception):
+        raw = redis_client.get(REDIS_VOICE_SATELLITE_REGISTRY_KEY)
+        if not raw:
+            return []
+        parsed = json.loads(raw)
+        if not isinstance(parsed, list):
+            return []
+        rows: List[Dict[str, Any]] = []
+        seen = set()
+        for item in parsed:
+            row = _normalize_satellite_row(item)
+            selector = _text(row.get("selector"))
+            if not selector or selector in seen:
+                continue
+            seen.add(selector)
+            rows.append(row)
+        return rows
+    return []
+
+
+def _save_satellite_registry(rows: List[Dict[str, Any]]) -> None:
+    clean: List[Dict[str, Any]] = []
+    seen = set()
+    for item in rows:
+        row = _normalize_satellite_row(item)
+        selector = _text(row.get("selector"))
+        if not selector or selector in seen:
+            continue
+        seen.add(selector)
+        clean.append(row)
+    with contextlib.suppress(Exception):
+        redis_client.set(REDIS_VOICE_SATELLITE_REGISTRY_KEY, json.dumps(clean, ensure_ascii=False))
+
+
+def _upsert_satellite(row: Dict[str, Any]) -> Dict[str, Any]:
+    incoming = _normalize_satellite_row(row)
+    selector = _text(incoming.get("selector"))
+    if not selector:
+        raise ValueError("satellite selector is required")
+
+    current = _load_satellite_registry()
+    merged: List[Dict[str, Any]] = []
+    replaced = False
+    for existing in current:
+        if _text(existing.get("selector")) != selector:
+            merged.append(existing)
+            continue
+        updated = dict(existing)
+        for key, value in incoming.items():
+            if key == "metadata":
+                old_meta = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
+                new_meta = value if isinstance(value, dict) else {}
+                updated["metadata"] = {**old_meta, **new_meta}
+                continue
+            if value in ("", None) and key != "last_seen_ts":
+                continue
+            updated[key] = value
+        updated["last_seen_ts"] = _now()
+        merged.append(_normalize_satellite_row(updated))
+        replaced = True
+
+    if not replaced:
+        incoming["last_seen_ts"] = _now()
+        merged.append(incoming)
+
+    _save_satellite_registry(merged)
+    for row_out in merged:
+        if _text(row_out.get("selector")) == selector:
+            return row_out
+    return incoming
+
+
+def _set_satellite_selected(selector: str, selected: bool) -> None:
+    token = _text(selector)
+    if not token:
+        return
+    rows = _load_satellite_registry()
+    next_rows: List[Dict[str, Any]] = []
+    found = False
+    for row in rows:
+        if _text(row.get("selector")) != token:
+            next_rows.append(row)
+            continue
+        updated = dict(row)
+        meta = dict(updated.get("metadata") or {})
+        meta["esphome_selected"] = bool(selected)
+        updated["metadata"] = meta
+        updated["last_seen_ts"] = _now()
+        next_rows.append(updated)
+        found = True
+    if not found:
+        next_rows.append(
+            {
+                "selector": token,
+                "host": _lower(token.split(":", 1)[1]) if token.startswith("host:") else "",
+                "name": "",
+                "source": "manual",
+                "metadata": {"esphome_selected": bool(selected)},
+                "last_seen_ts": _now(),
+            }
+        )
+    _save_satellite_registry(next_rows)
+
+
+def _esphome_target_map() -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for row in _load_satellite_registry():
+        selector = _text(row.get("selector"))
+        host = _lower(row.get("host"))
+        meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        if not selector or not host:
+            continue
+        if bool(meta.get("esphome_selected")):
+            out[selector] = host
+    return out
+
+
+def _sync_manual_targets() -> int:
+    cfg = _voice_config_snapshot()
+    esphome = cfg.get("esphome") if isinstance(cfg.get("esphome"), dict) else {}
+    targets = esphome.get("targets") if isinstance(esphome.get("targets"), list) else []
+    if not targets:
+        return 0
+
+    current_rows = { _text(row.get("selector")): row for row in _load_satellite_registry() }
+    touched = 0
+    for host in targets:
+        host_token = _lower(host)
+        selector = f"host:{host_token}"
+        existing = current_rows.get(selector) if isinstance(current_rows.get(selector), dict) else {}
+        existing_meta = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
+        selected = bool(existing_meta.get("esphome_selected", True))
+        merged_meta = dict(existing_meta)
+        merged_meta["esphome_selected"] = selected
+        _upsert_satellite(
+            {
+                "selector": selector,
+                "host": host_token,
+                "name": _text(existing.get("name")) or _text(host),
+                "source": _text(existing.get("source")) or "manual",
+                "metadata": merged_meta,
+            }
+        )
+        touched += 1
+    return touched
+
+
+def _satellite_lookup(selector: str) -> Dict[str, Any]:
+    token = _text(selector)
+    if not token:
+        return {}
+    for row in _load_satellite_registry():
+        if _text(row.get("selector")) == token:
+            return dict(row)
+    return {}
+
+
+def _remove_satellite(selector: str) -> bool:
+    token = _text(selector)
+    if not token:
+        return False
+    rows = _load_satellite_registry()
+    next_rows = [row for row in rows if _text(row.get("selector")) != token]
+    changed = len(next_rows) != len(rows)
+    if changed:
+        _save_satellite_registry(next_rows)
+    return changed
+
+
+def _current_manual_targets() -> List[str]:
+    return _parse_manual_targets(_text(_voice_settings().get("VOICE_ESPHOME_TARGETS")))
+
+
+def _save_manual_targets(hosts: List[str]) -> None:
+    clean: List[str] = []
+    seen = set()
+    for host in hosts:
+        token = _lower(host)
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        clean.append(token)
+    redis_client.hset(VOICE_CORE_SETTINGS_HASH_KEY, mapping={"VOICE_ESPHOME_TARGETS": ",".join(clean)})
+
+
+# -------------------- mDNS Discovery --------------------
+def _discover_mdns_sync(scan_seconds: float) -> List[Dict[str, Any]]:
+    try:
+        from zeroconf import ServiceBrowser, ServiceStateChange, Zeroconf  # type: ignore
+    except Exception:
+        return []
+
+    service_types = ("_esphomelib._tcp.local.", "_esphome._tcp.local.")
+    timeout_ms = max(200, int(float(scan_seconds) * 1000))
+    found: Dict[str, Dict[str, Any]] = {}
+    lock = threading.Lock()
+
+    def _decode(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, bytes):
+            with contextlib.suppress(Exception):
+                return value.decode("utf-8", "ignore").strip()
+            return ""
+        return str(value).strip()
+
+    def _collect_addresses(info: Any) -> List[str]:
+        out: List[str] = []
+        seen = set()
+        parsed = None
+        with contextlib.suppress(Exception):
+            parsed = info.parsed_addresses()
+        if isinstance(parsed, list):
+            for addr in parsed:
+                token = _lower(addr)
+                if not token or token in seen:
+                    continue
+                seen.add(token)
+                out.append(token)
+        return out
+
+    def _on_state(*args: Any, **kwargs: Any) -> None:
+        zc = kwargs.get("zeroconf")
+        service_type = kwargs.get("service_type")
+        name = kwargs.get("name")
+        state_change = kwargs.get("state_change")
+        if zc is None and len(args) >= 1:
+            zc = args[0]
+        if service_type is None and len(args) >= 2:
+            service_type = args[1]
+        if name is None and len(args) >= 3:
+            name = args[2]
+        if state_change is None and len(args) >= 4:
+            state_change = args[3]
+
+        if zc is None or not service_type or not name:
+            return
+        if state_change not in (ServiceStateChange.Added, ServiceStateChange.Updated):
+            return
+
+        info = None
+        with contextlib.suppress(Exception):
+            info = zc.get_service_info(service_type, name, timeout=timeout_ms)
+        if info is None:
+            return
+
+        addresses = _collect_addresses(info)
+        host = ""
+        for addr in addresses:
+            if addr.startswith("127.") or addr == "::1":
+                continue
+            host = addr
+            break
+        if not host:
+            host = _lower(_decode(getattr(info, "server", "")).rstrip("."))
+        if not host:
+            return
+
+        props = getattr(info, "properties", None)
+        props_map = props if isinstance(props, dict) else {}
+        node_name = _decode(props_map.get(b"name")) or _decode(name).split(".", 1)[0] or host
+
+        row = {
+            "selector": f"host:{host}",
+            "host": host,
+            "name": node_name,
+            "source": "mdns_esphome",
+            "metadata": {
+                "mdns_service": _decode(name),
+                "mdns_type": _decode(service_type),
+                "mdns_addresses": addresses,
+            },
+        }
+        with lock:
+            found[row["selector"]] = row
+
+    zc = Zeroconf()
+    browsers = []
+    try:
+        for st in service_types:
+            with contextlib.suppress(Exception):
+                browsers.append(ServiceBrowser(zc, st, handlers=[_on_state]))
+        time.sleep(float(max(0.5, scan_seconds)))
+    finally:
+        for browser in browsers:
+            with contextlib.suppress(Exception):
+                browser.cancel()
+        with contextlib.suppress(Exception):
+            zc.close()
+
+    return list(found.values())
+
+
+async def _discover_mdns_once() -> List[Dict[str, Any]]:
+    cfg = _voice_config_snapshot()
+    discovery = cfg.get("discovery") if isinstance(cfg.get("discovery"), dict) else {}
+    timeout_s = float(discovery.get("mdns_timeout_s") or DEFAULT_DISCOVERY_MDNS_TIMEOUT_S)
+    return await asyncio.to_thread(_discover_mdns_sync, timeout_s)
+
+
+async def _discovery_loop() -> None:
+    while True:
+        try:
+            cfg = _voice_config_snapshot()
+            discovery = cfg.get("discovery") if isinstance(cfg.get("discovery"), dict) else {}
+            enabled = bool(discovery.get("enabled"))
+
+            _sync_manual_targets()
+            if enabled:
+                rows = await _discover_mdns_once()
+                for row in rows:
+                    _upsert_satellite(row)
+                _discovery_stats["last_counts"] = {"mdns_esphome": len(rows)}
+            else:
+                _discovery_stats["last_counts"] = {"mdns_esphome": 0}
+
+            _discovery_stats["runs"] = int(_discovery_stats.get("runs") or 0) + 1
+            _discovery_stats["last_run_ts"] = _now()
+            _discovery_stats["last_success_ts"] = _now()
+            _discovery_stats["last_error"] = ""
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _discovery_stats["last_error"] = str(exc)
+            _discovery_stats["last_run_ts"] = _now()
+            logger.warning("[native-voice] discovery loop error: %s", exc)
+
+        interval = _get_int_setting("VOICE_DISCOVERY_SCAN_SECONDS", DEFAULT_DISCOVERY_SCAN_SECONDS, minimum=5, maximum=600)
+        await asyncio.sleep(float(interval))
+
+
+# -------------------- ESPHome Native API --------------------
+def _esphome_import() -> Tuple[Optional[Any], str]:
+    try:
+        module = importlib.import_module("aioesphomeapi")
+        return module, ""
+    except Exception as exc:
+        return None, str(exc)
+
+
+def _esphome_module_attr(module: Any, name: str) -> Any:
+    if module is not None:
+        value = getattr(module, name, None)
+        if value is not None:
+            return value
+        sub_model = getattr(module, "model", None)
+        if sub_model is not None:
+            value = getattr(sub_model, name, None)
+            if value is not None:
+                return value
+    with contextlib.suppress(Exception):
+        model_module = importlib.import_module("aioesphomeapi.model")
+        value = getattr(model_module, name, None)
+        if value is not None:
+            return value
+    return None
+
+
+def _esphome_event_type_value(module: Any, *candidates: str) -> Any:
+    enum_cls = _esphome_module_attr(module, "VoiceAssistantEventType")
+    if enum_cls is None:
+        return None
+
+    wanted = {_lower(item) for item in candidates if _text(item)}
+    for candidate in candidates:
+        token = _text(candidate)
+        if not token:
+            continue
+        direct = getattr(enum_cls, token, None)
+        if direct is not None:
+            return direct
+
+    for attr_name in dir(enum_cls):
+        if _lower(attr_name) in wanted:
+            return getattr(enum_cls, attr_name, None)
+
+    return None
+
+
+def _esphome_payload_strings(data: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    payload = data if isinstance(data, dict) else {}
+    out: Dict[str, str] = {}
+    for key, value in payload.items():
+        token = _text(key)
+        if not token or value is None:
+            continue
+        if isinstance(value, bool):
+            out[token] = "1" if value else "0"
+        else:
+            out[token] = str(value)
+    return out
+
+
+async def _esphome_client_call(client: Any, method_name: str, *args: Any, **kwargs: Any) -> Any:
+    method = getattr(client, method_name, None)
+    if not callable(method):
+        raise RuntimeError(f"ESPHome client missing method: {method_name}")
+    result = method(*args, **kwargs)
+    if inspect.isawaitable(result):
+        return await result
+    return result
+
+
+async def _esphome_send_event(client: Any, module: Any, event_candidates: Tuple[str, ...], data: Optional[Dict[str, Any]]) -> bool:
+    event_type = _esphome_event_type_value(module, *event_candidates)
+    if event_type is None:
+        _native_debug(f"esphome event unavailable candidates={event_candidates}")
+        return False
+
+    payload = _esphome_payload_strings(data)
+    try:
+        await _esphome_client_call(client, "send_voice_assistant_event", event_type, payload if payload else None)
+        return True
+    except Exception as exc:
+        _native_debug(f"esphome event send failed candidates={event_candidates} error={exc}")
+        return False
+
+
+def _esphome_client_connected(client: Any, fallback: bool = False) -> bool:
+    if client is None:
+        return False
+
+    marker = getattr(client, "is_connected", None)
+    if callable(marker):
+        try:
+            value = marker()
+            if inspect.isawaitable(value):
+                return fallback
+            return bool(value)
+        except Exception:
+            return fallback
+    if isinstance(marker, bool):
+        return marker
+
+    marker2 = getattr(client, "connected", None)
+    if isinstance(marker2, bool):
+        return marker2
+
+    return fallback
+
+
+def _asset_data_url(path: str) -> str:
+    token = _text(path)
+    if not token:
+        return ""
+    cached = _asset_data_url_cache.get(token)
+    if cached:
+        return cached
+    try:
+        with open(token, "rb") as handle:
+            raw = handle.read()
+        mime = mimetypes.guess_type(token)[0] or "application/octet-stream"
+        encoded = base64.b64encode(raw).decode("ascii")
+        value = f"data:{mime};base64,{encoded}"
+        _asset_data_url_cache[token] = value
+        return value
+    except Exception:
+        return ""
+
+
+def _default_satellite_image_src() -> str:
+    path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "images", "tatervoice.png"))
+    return _asset_data_url(path)
+
+
+def _named_satellite_image_src(image_name: str) -> str:
+    path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "images", image_name))
+    return _asset_data_url(path)
+
+
+def _satellite_image_src(*name_candidates: Any) -> str:
+    for raw_name in name_candidates:
+        token = _lower(raw_name)
+        if not token:
+            continue
+        if "tatervpe" in token:
+            return _named_satellite_image_src("voicepe.png")
+        if "tatersat1" in token:
+            return _named_satellite_image_src("sat1.png")
+    return _default_satellite_image_src()
+
+
+def _esphome_scalar(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    with contextlib.suppress(Exception):
+        text = str(value)
+        if text and text != repr(value):
+            return text
+    return None
+
+
+def _esphome_class_token(obj: Any, suffix: str) -> str:
+    name = _text(getattr(getattr(obj, "__class__", None), "__name__", ""))
+    if not name:
+        return ""
+    lowered = name.lower()
+    wanted = suffix.lower()
+    if lowered.endswith(wanted):
+        return name[: -len(suffix)]
+    return name
+
+
+def _esphome_format_state_value(value: Any, *, unit: str = "", kind: str = "") -> str:
+    if value is None:
+        return ""
+    kind_token = _lower(kind)
+    if isinstance(value, bool):
+        if "binary" in kind_token:
+            return "On" if value else "Off"
+        return "Yes" if value else "No"
+    if isinstance(value, float):
+        text = f"{value:.2f}".rstrip("0").rstrip(".")
+    else:
+        text = _text(value)
+    if not text:
+        return ""
+    return f"{text} {unit}".strip() if unit else text
+
+
+_ESPHOME_STATE_ATTR_NAMES: Tuple[str, ...] = (
+    "state",
+    "value",
+    "position",
+    "current_operation",
+    "operation",
+    "mode",
+    "preset",
+    "option",
+    "brightness",
+    "level",
+    "volume",
+    "current_temperature",
+    "target_temperature",
+    "temperature",
+    "speed",
+    "direction",
+    "oscillating",
+    "muted",
+    "active",
+    "media_title",
+    "media_artist",
+    "effect",
+    "color_mode",
+    "red",
+    "green",
+    "blue",
+    "white",
+    "cold_white",
+    "warm_white",
+    "color_brightness",
+)
+
+
+def _esphome_kind_label(kind: Any) -> str:
+    token = _text(kind).strip()
+    if not token:
+        return "Entity"
+    token = token.replace("_", " ")
+    token = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", token)
+    token = re.sub(r"\s+", " ", token).strip()
+    return token.title() if token else "Entity"
+
+
+def _esphome_entity_meta_label(info_row: Dict[str, Any], state_row: Dict[str, Any]) -> str:
+    info = info_row if isinstance(info_row, dict) else {}
+    state = state_row if isinstance(state_row, dict) else {}
+    parts: List[str] = []
+    kind_label = _esphome_kind_label(info.get("kind") or state.get("kind"))
+    if kind_label:
+        parts.append(kind_label)
+    device_class = _text(info.get("device_class")).replace("_", " ").strip()
+    if device_class:
+        parts.append(device_class.title())
+    entity_category = _text(info.get("entity_category")).replace("_", " ").strip()
+    if entity_category:
+        parts.append(entity_category.title())
+    return " • ".join(part for part in parts if part)
+
+
+def _esphome_entity_state_attrs(state: Any) -> Dict[str, Any]:
+    if state is None:
+        return {}
+    out: Dict[str, Any] = {}
+    for attr in _ESPHOME_STATE_ATTR_NAMES:
+        if not hasattr(state, attr):
+            continue
+        candidate = getattr(state, attr, None)
+        if callable(candidate):
+            continue
+        scalar = _esphome_scalar(candidate)
+        if scalar in {None, ""}:
+            continue
+        out[attr] = scalar
+    return out
+
+
+def _esphome_entity_display_value(info_row: Dict[str, Any], state_row: Dict[str, Any]) -> str:
+    info = info_row if isinstance(info_row, dict) else {}
+    state = state_row if isinstance(state_row, dict) else {}
+    unit = _text(info.get("unit"))
+    attrs = state.get("attrs") if isinstance(state.get("attrs"), dict) else {}
+
+    preferred_attrs = (
+        "state",
+        "value",
+        "position",
+        "mode",
+        "option",
+        "preset",
+        "current_operation",
+        "operation",
+        "active",
+        "brightness",
+        "level",
+        "volume",
+        "current_temperature",
+        "target_temperature",
+        "temperature",
+        "speed",
+        "direction",
+        "effect",
+        "color_mode",
+        "media_title",
+    )
+    for attr in preferred_attrs:
+        if attr not in attrs:
+            continue
+        value = attrs.get(attr)
+        if attr in {"brightness", "level", "volume", "position"} and isinstance(value, (int, float)):
+            if 0.0 <= float(value) <= 1.0:
+                return f"{round(float(value) * 100)}%"
+        return _esphome_format_state_value(value, unit=unit, kind=_text(info.get("kind") or state.get("kind")))
+
+    fallback_value = _esphome_format_state_value(
+        state.get("raw"),
+        unit=unit,
+        kind=_text(info.get("kind") or state.get("kind")),
+    )
+    if fallback_value:
+        return fallback_value
+    if attrs:
+        first_value = next(iter(attrs.values()))
+        fallback_value = _esphome_format_state_value(
+            first_value,
+            unit=unit,
+            kind=_text(info.get("kind") or state.get("kind")),
+        )
+        if fallback_value:
+            return fallback_value
+    return "Available"
+
+
+def _esphome_list_values(value: Any) -> List[str]:
+    if isinstance(value, (list, tuple, set)):
+        out: List[str] = []
+        for item in value:
+            token = _text(_esphome_scalar(item))
+            if token:
+                out.append(token)
+        return out
+    token = _text(_esphome_scalar(value))
+    return [token] if token else []
+
+
+def _esphome_entity_is_on(state_row: Dict[str, Any]) -> Optional[bool]:
+    state = state_row if isinstance(state_row, dict) else {}
+    attrs = state.get("attrs") if isinstance(state.get("attrs"), dict) else {}
+    for key in ("state", "active"):
+        value = attrs.get(key)
+        if isinstance(value, bool):
+            return value
+    raw = state.get("raw")
+    if isinstance(raw, bool):
+        return raw
+    return None
+
+
+def _esphome_color_component(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except Exception:
+        return None
+    if 0.0 <= numeric <= 1.0:
+        numeric *= 255.0
+    return max(0, min(255, int(round(numeric))))
+
+
+def _esphome_light_color_hex(info_row: Dict[str, Any], state_row: Dict[str, Any]) -> str:
+    info = info_row if isinstance(info_row, dict) else {}
+    state = state_row if isinstance(state_row, dict) else {}
+    attrs = state.get("attrs") if isinstance(state.get("attrs"), dict) else {}
+    red = _esphome_color_component(attrs.get("red"))
+    green = _esphome_color_component(attrs.get("green"))
+    blue = _esphome_color_component(attrs.get("blue"))
+    if red is None or green is None or blue is None:
+        return "#ff9b45" if _esphome_light_supports_color(info, state) else ""
+    return f"#{red:02x}{green:02x}{blue:02x}"
+
+
+def _esphome_light_supports_color(info_row: Dict[str, Any], state_row: Dict[str, Any]) -> bool:
+    info = info_row if isinstance(info_row, dict) else {}
+    state = state_row if isinstance(state_row, dict) else {}
+    attrs = state.get("attrs") if isinstance(state.get("attrs"), dict) else {}
+    if all(_esphome_color_component(attrs.get(name)) is not None for name in ("red", "green", "blue")):
+        return True
+    color_mode = _lower(attrs.get("color_mode"))
+    if any(token in color_mode for token in ("rgb", "hs", "xy")):
+        return True
+    supported = [_lower(item) for item in _esphome_list_values(info.get("supported_color_modes"))]
+    return any(any(token in mode for token in ("rgb", "hs", "xy")) for mode in supported)
+
+
+def _esphome_entity_control_spec(info_row: Dict[str, Any], state_row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    info = info_row if isinstance(info_row, dict) else {}
+    state = state_row if isinstance(state_row, dict) else {}
+    key = _text(info.get("key") or state.get("key"))
+    if not key:
+        return None
+    kind = _lower(info.get("kind") or state.get("kind"))
+    attrs = state.get("attrs") if isinstance(state.get("attrs"), dict) else {}
+
+    if "switch" in kind:
+        return {
+            "type": "toggle",
+            "command": "switch_set",
+            "checked": bool(_esphome_entity_is_on(state)),
+        }
+
+    if "light" in kind:
+        return {
+            "type": "light",
+            "command": "light_set",
+            "checked": bool(_esphome_entity_is_on(state)),
+            "supports_color": _esphome_light_supports_color(info, state),
+            "color": _esphome_light_color_hex(info, state),
+        }
+
+    if "button" in kind:
+        return {
+            "type": "button",
+            "command": "button_press",
+            "label": "Run",
+        }
+
+    if "select" in kind:
+        options = _esphome_list_values(info.get("options"))
+        if options:
+            return {
+                "type": "select",
+                "command": "select_set",
+                "value": _text(attrs.get("option") or attrs.get("state") or state.get("raw")),
+                "options": options,
+            }
+
+    if "number" in kind:
+        current_value = attrs.get("state")
+        if current_value is None:
+            current_value = state.get("raw")
+        return {
+            "type": "number",
+            "command": "number_set",
+            "value": current_value,
+            "min": info.get("min_value"),
+            "max": info.get("max_value"),
+            "step": info.get("step"),
+        }
+
+    return None
+
+
+def _esphome_device_info_snapshot(info: Any) -> Dict[str, Any]:
+    if info is None:
+        return {}
+    names = [
+        "name",
+        "friendly_name",
+        "manufacturer",
+        "model",
+        "project_name",
+        "project_version",
+        "esphome_version",
+        "compilation_time",
+        "mac_address",
+        "bluetooth_mac_address",
+        "webserver_port",
+    ]
+    out: Dict[str, Any] = {}
+    for name in names:
+        value = _esphome_scalar(getattr(info, name, None))
+        if value not in {None, ""}:
+            out[name] = value
+    return out
+
+
+def _esphome_entity_info_snapshot(info: Any) -> Dict[str, Any]:
+    if info is None:
+        return {}
+    key = getattr(info, "key", None)
+    if key is None:
+        return {}
+    key_text = _text(key)
+    if not key_text:
+        return {}
+    class_name = _text(getattr(getattr(info, "__class__", None), "__name__", ""))
+    kind = _esphome_class_token(info, "Info")
+    out = {
+        "key": key_text,
+        "kind": kind,
+        "class_name": class_name,
+        "name": _text(getattr(info, "name", None)) or _text(getattr(info, "object_id", None)) or f"Entity {key_text}",
+        "object_id": _text(getattr(info, "object_id", None)),
+        "unit": _text(getattr(info, "unit_of_measurement", None)) or _text(getattr(info, "unit", None)),
+        "device_class": _text(getattr(info, "device_class", None)),
+        "entity_category": _text(getattr(info, "entity_category", None)),
+        "icon": _text(getattr(info, "icon", None)),
+        "disabled_by_default": bool(getattr(info, "disabled_by_default", False)),
+    }
+    for attr in ("min_value", "max_value", "step"):
+        scalar = _esphome_scalar(getattr(info, attr, None))
+        if scalar not in {None, ""}:
+            out[attr] = scalar
+    for attr in ("options", "effects", "supported_color_modes"):
+        values = _esphome_list_values(getattr(info, attr, None))
+        if values:
+            out[attr] = values
+    return out
+
+
+def _esphome_entity_state_snapshot(state: Any) -> Dict[str, Any]:
+    if state is None:
+        return {}
+    key = getattr(state, "key", None)
+    if key is None:
+        return {}
+    key_text = _text(key)
+    if not key_text:
+        return {}
+    raw_value = None
+    for attr in ("state", "value"):
+        if not hasattr(state, attr):
+            continue
+        candidate = getattr(state, attr, None)
+        if callable(candidate):
+            continue
+        raw_value = candidate
+        break
+    kind = _esphome_class_token(state, "State")
+    attrs = _esphome_entity_state_attrs(state)
+    return {
+        "key": key_text,
+        "kind": kind,
+        "raw": _esphome_scalar(raw_value),
+        "attrs": attrs,
+        "updated_ts": _now(),
+    }
+
+
+def _esphome_entity_rows(entity_infos: Any, entity_states: Any) -> List[Dict[str, Any]]:
+    infos = entity_infos if isinstance(entity_infos, dict) else {}
+    states = entity_states if isinstance(entity_states, dict) else {}
+    rows: List[Dict[str, str]] = []
+    for key, info in infos.items():
+        if not isinstance(info, dict):
+            continue
+        state_row = states.get(key) if isinstance(states.get(key), dict) else {}
+        row: Dict[str, Any] = {
+            "key": _text(info.get("key") or key),
+            "label": _text(info.get("name")) or _text(info.get("object_id")) or f"Entity {key}",
+            "value": _esphome_entity_display_value(info, state_row),
+            "kind": _text(info.get("kind")),
+            "meta": _esphome_entity_meta_label(info, state_row),
+        }
+        control = _esphome_entity_control_spec(info, state_row)
+        if control:
+            row["control"] = control
+        rows.append(row)
+    rows.sort(key=lambda row: (_lower(row.get("label")), _lower(row.get("kind"))))
+    return rows
+
+
+async def _esphome_list_entity_catalog(client: Any) -> Dict[str, Dict[str, Any]]:
+    method = getattr(client, "list_entities_services", None)
+    if not callable(method):
+        method = getattr(client, "list_entities", None)
+    if not callable(method):
+        return {}
+    result = method()
+    if inspect.isawaitable(result):
+        result = await result
+    parts: List[Any] = []
+    if isinstance(result, tuple):
+        parts.extend(list(result))
+    elif isinstance(result, list):
+        parts.append(result)
+    else:
+        parts.append(result)
+    out: Dict[str, Dict[str, Any]] = {}
+    for part in parts:
+        if not isinstance(part, (list, tuple)):
+            continue
+        for item in part:
+            snap = _esphome_entity_info_snapshot(item)
+            key = _text(snap.get("key"))
+            if key:
+                out[key] = snap
+    return out
+
+
+async def _esphome_subscribe_states(selector: str, client: Any) -> Optional[Callable[[], None]]:
+    method = getattr(client, "subscribe_states", None)
+    if not callable(method):
+        return None
+    token = _text(selector)
+
+    def _on_state(state: Any) -> None:
+        snap = _esphome_entity_state_snapshot(state)
+        key = _text(snap.get("key"))
+        if not key:
+            return
+        row = _esphome_native_clients.get(token)
+        if not isinstance(row, dict):
+            return
+        state_map = row.get("entity_states")
+        if not isinstance(state_map, dict):
+            state_map = {}
+            row["entity_states"] = state_map
+        state_map[key] = snap
+        row["entity_state_updated_ts"] = _now()
+
+    try:
+        result = method(_on_state)
+    except TypeError:
+        result = method(on_state=_on_state)
+    if inspect.isawaitable(result):
+        result = await result
+    if callable(result):
+        return result
+    return None
+
+
+def _esphome_log_enum_value(module: Any, level_name: str) -> Any:
+    enum_cls = _esphome_module_attr(module, "LogLevel")
+    if enum_cls is None:
+        return None
+    token = _text(level_name).strip().upper()
+    if not token:
+        return None
+    if not token.startswith("LOG_LEVEL_"):
+        token = f"LOG_LEVEL_{token}"
+    return getattr(enum_cls, token, None)
+
+
+def _esphome_log_buffer(row: Dict[str, Any]) -> deque:
+    buffer = row.get("log_lines")
+    if isinstance(buffer, deque):
+        if buffer.maxlen != _ESPHOME_LOG_BUFFER_LIMIT:
+            buffer = deque(buffer, maxlen=_ESPHOME_LOG_BUFFER_LIMIT)
+            row["log_lines"] = buffer
+        return buffer
+    buffer = deque(maxlen=_ESPHOME_LOG_BUFFER_LIMIT)
+    row["log_lines"] = buffer
+    return buffer
+
+
+def _esphome_format_log_level(module: Any, raw_level: Any) -> str:
+    with contextlib.suppress(Exception):
+        enum_cls = _esphome_module_attr(module, "LogLevel")
+        if enum_cls is not None and raw_level is not None:
+            token = enum_cls(int(raw_level)).name
+            if token.startswith("LOG_LEVEL_"):
+                token = token[10:]
+            return token.lower()
+    token = _text(raw_level).strip().lower()
+    return token or "info"
+
+
+def _esphome_log_text(value: Any) -> str:
+    if isinstance(value, (bytes, bytearray)):
+        with contextlib.suppress(Exception):
+            return _ANSI_ESCAPE_RE.sub("", bytes(value).decode("utf-8", errors="replace")).strip()
+        return ""
+    return _ANSI_ESCAPE_RE.sub("", _text(value)).strip()
+
+
+def _esphome_log_message_text(message: Any) -> str:
+    parts: List[str] = []
+    tag = _esphome_log_text(getattr(message, "tag", None) or getattr(message, "source", None))
+    if tag:
+        parts.append(f"[{tag}]")
+    body = _esphome_log_text(
+        getattr(message, "message", None) or getattr(message, "msg", None) or getattr(message, "text", None)
+    )
+    if body:
+        parts.append(body)
+    send_failed = getattr(message, "send_failed", None)
+    if parts:
+        if bool(send_failed):
+            parts.append("(send_failed)")
+        return " ".join(part for part in parts if part).strip()
+    return _esphome_log_text(message)
+
+
+def _esphome_append_log_entry(row: Dict[str, Any], *, level: str, message: str, ts_value: Optional[float] = None) -> Dict[str, Any]:
+    text = _text(message)
+    if not text:
+        text = "(empty log line)"
+    seq = int(row.get("log_seq") or 0) + 1
+    row["log_seq"] = seq
+    ts = float(ts_value if ts_value is not None else _now())
+    time_label = _format_ts_label(ts)
+    entry = {
+        "seq": seq,
+        "ts": ts,
+        "time": time_label,
+        "level": _text(level).lower() or "info",
+        "message": text,
+        "display": f"{time_label} [{_text(level).upper() or 'INFO'}] {text}",
+    }
+    _esphome_log_buffer(row).append(entry)
+    row["log_last_line_ts"] = ts
+    return entry
+
+
+def _esphome_log_entries_after(row: Dict[str, Any], after_seq: int = 0, *, limit: int = 250) -> List[Dict[str, Any]]:
+    entries = list(_esphome_log_buffer(row))
+    if after_seq > 0:
+        entries = [entry for entry in entries if int(entry.get("seq") or 0) > int(after_seq)]
+    if limit > 0 and len(entries) > limit:
+        entries = entries[-limit:]
+    return entries
+
+
+async def _esphome_disable_device_logs(client: Any, module: Any) -> None:
+    method = getattr(client, "subscribe_logs", None)
+    if not callable(method):
+        return
+    level_none = _esphome_log_enum_value(module, "none")
+    kwargs: Dict[str, Any] = {"dump_config": False}
+    if level_none is not None:
+        kwargs["log_level"] = level_none
+
+    def _noop(_: Any) -> None:
+        return None
+
+    try:
+        result = method(_noop, **kwargs)
+    except TypeError:
+        result = method(on_log=_noop, **kwargs)
+    if inspect.isawaitable(result):
+        result = await result
+    if callable(result):
+        with contextlib.suppress(Exception):
+            follow_up = result()
+            if inspect.isawaitable(follow_up):
+                await follow_up
+
+
+async def _esphome_logs_start(selector: str) -> Dict[str, Any]:
+    token = _text(selector)
+    if not token:
+        raise RuntimeError("selector is required")
+    module, import_error = _esphome_import()
+    if module is None:
+        raise RuntimeError(f"aioesphomeapi unavailable: {import_error or 'unknown error'}")
+
+    async with _esphome_native_lock:
+        row = _esphome_native_clients.get(token)
+        client = row.get("client") if isinstance(row, dict) else None
+        if not isinstance(row, dict) or client is None or not bool(row.get("connected")):
+            raise RuntimeError("Satellite is not currently connected.")
+        row["log_last_access_ts"] = _now()
+        row["log_viewers"] = max(1, int(row.get("log_viewers") or 0) + 1)
+        existing_unsubscribe = row.get("log_unsubscribe")
+        if callable(existing_unsubscribe):
+            entries = _esphome_log_entries_after(row, 0)
+            return {
+                "ok": True,
+                "selector": token,
+                "active": True,
+                "cursor": int(row.get("log_seq") or 0),
+                "entries": entries,
+                "viewer_count": int(row.get("log_viewers") or 0),
+            }
+
+    try:
+        method = getattr(client, "subscribe_logs", None)
+        if not callable(method):
+            raise RuntimeError("ESPHome log subscription is unavailable for this client.")
+        log_level = (
+            _esphome_log_enum_value(module, "very_verbose")
+            or _esphome_log_enum_value(module, "verbose")
+            or _esphome_log_enum_value(module, "debug")
+            or _esphome_log_enum_value(module, "config")
+            or _esphome_log_enum_value(module, "info")
+        )
+
+        def _on_log(message: Any) -> None:
+            row = _esphome_native_clients.get(token)
+            if not isinstance(row, dict):
+                return
+            level = _esphome_format_log_level(module, getattr(message, "level", None))
+            line = _esphome_log_message_text(message)
+            _esphome_append_log_entry(row, level=level, message=line, ts_value=_now())
+
+        kwargs: Dict[str, Any] = {"dump_config": True}
+        if log_level is not None:
+            kwargs["log_level"] = log_level
+        try:
+            result = method(_on_log, **kwargs)
+        except TypeError:
+            result = method(on_log=_on_log, **kwargs)
+        if inspect.isawaitable(result):
+            result = await result
+        unsubscribe = result if callable(result) else None
+    except Exception:
+        async with _esphome_native_lock:
+            row = _esphome_native_clients.get(token)
+            if isinstance(row, dict):
+                row["log_viewers"] = max(0, int(row.get("log_viewers") or 1) - 1)
+                row["log_last_access_ts"] = _now()
+        raise
+
+    async with _esphome_native_lock:
+        row = _esphome_native_clients.get(token)
+        if not isinstance(row, dict):
+            raise RuntimeError("Satellite log row is unavailable.")
+        row["log_unsubscribe"] = unsubscribe
+        row["log_started_ts"] = _now()
+        row["log_last_access_ts"] = _now()
+        row["log_error"] = ""
+        host = _text(row.get("host"))
+        device_info = row.get("device_info") if isinstance(row.get("device_info"), dict) else {}
+        device_label = (
+            _text(device_info.get("friendly_name"))
+            or _text(device_info.get("name"))
+            or token
+        )
+        _esphome_append_log_entry(
+            row,
+            level="info",
+            message=f"Starting log output from {host or token} using ESPHome API.",
+            ts_value=_now(),
+        )
+        _esphome_append_log_entry(
+            row,
+            level="info",
+            message=f"Successful handshake with {device_label} @ {host or token}.",
+            ts_value=_now(),
+        )
+        entries = _esphome_log_entries_after(row, 0)
+        return {
+            "ok": True,
+            "selector": token,
+            "active": True,
+            "cursor": int(row.get("log_seq") or 0),
+            "entries": entries,
+            "viewer_count": int(row.get("log_viewers") or 0),
+        }
+
+
+async def _esphome_logs_poll(selector: str, *, after_seq: int = 0) -> Dict[str, Any]:
+    token = _text(selector)
+    if not token:
+        raise RuntimeError("selector is required")
+    async with _esphome_native_lock:
+        row = _esphome_native_clients.get(token)
+        if not isinstance(row, dict):
+            raise RuntimeError("Satellite is unknown.")
+        row["log_last_access_ts"] = _now()
+        entries = _esphome_log_entries_after(row, after_seq)
+        return {
+            "ok": True,
+            "selector": token,
+            "active": callable(row.get("log_unsubscribe")),
+            "connected": bool(row.get("connected")),
+            "cursor": int(row.get("log_seq") or 0),
+            "entries": entries,
+            "viewer_count": int(row.get("log_viewers") or 0),
+            "error": _text(row.get("log_error")),
+        }
+
+
+async def _esphome_logs_stop(selector: str, *, force: bool = False, reason: str = "viewer_closed") -> Dict[str, Any]:
+    token = _text(selector)
+    if not token:
+        return {"ok": True, "selector": token, "stopped": False, "viewer_count": 0}
+    async with _esphome_native_lock:
+        row = _esphome_native_clients.get(token)
+        client = row.get("client") if isinstance(row, dict) else None
+        unsubscribe = row.get("log_unsubscribe") if isinstance(row, dict) else None
+        viewers = int(row.get("log_viewers") or 0) if isinstance(row, dict) else 0
+        if isinstance(row, dict):
+            viewers = 0 if force else max(0, viewers - 1)
+            row["log_viewers"] = viewers
+            row["log_last_access_ts"] = _now()
+            if viewers > 0 and callable(unsubscribe):
+                return {"ok": True, "selector": token, "stopped": False, "viewer_count": viewers}
+            if callable(unsubscribe):
+                row["log_unsubscribe"] = None
+            row["log_error"] = _text(reason)
+    if callable(unsubscribe):
+        with contextlib.suppress(Exception):
+            result = unsubscribe()
+            if inspect.isawaitable(result):
+                await result
+    if client is not None:
+        with contextlib.suppress(Exception):
+            await _esphome_disable_device_logs(client, module=_esphome_import()[0])
+    return {"ok": True, "selector": token, "stopped": callable(unsubscribe), "viewer_count": 0}
+
+
+async def _esphome_logs_cleanup_idle() -> None:
+    cutoff = _now() - float(_ESPHOME_LOG_IDLE_SECONDS)
+    stale: List[str] = []
+    async with _esphome_native_lock:
+        for selector, row in _esphome_native_clients.items():
+            if not isinstance(row, dict):
+                continue
+            if not callable(row.get("log_unsubscribe")):
+                continue
+            last_access = _as_float(row.get("log_last_access_ts"), 0.0)
+            if last_access > 0 and last_access < cutoff:
+                stale.append(_text(selector))
+    for selector in stale:
+        with contextlib.suppress(Exception):
+            await _esphome_logs_stop(selector, force=True, reason="idle_timeout")
+
+
+def _combine_unsubscribes(*callbacks: Any) -> Optional[Callable[[], None]]:
+    valid = [cb for cb in callbacks if callable(cb)]
+    if not valid:
+        return None
+
+    def _unsubscribe() -> None:
+        for cb in valid:
+            with contextlib.suppress(Exception):
+                result = cb()
+                if inspect.isawaitable(result):
+                    asyncio.create_task(result)
+
+    return _unsubscribe
+
+
+async def _esphome_call_client_method(client: Any, method_name: str, *, timeout: float) -> Tuple[bool, str]:
+    method = getattr(client, method_name, None)
+    if not callable(method):
+        return False, "unavailable"
+    try:
+        result = method()
+    except TypeError:
+        return False, "signature_mismatch"
+    except Exception as exc:
+        return False, f"error:{exc}"
+
+    try:
+        if inspect.isawaitable(result):
+            await asyncio.wait_for(result, timeout=timeout)
+    except Exception as exc:
+        return False, f"error:{exc}"
+
+    return True, "ok"
+
+
+async def _esphome_verify_connection(client: Any, *, timeout: float) -> Tuple[bool, str]:
+    if client is None:
+        return False, "missing_client"
+
+    marker_before = _esphome_client_connected(client, fallback=False)
+    ping_ok, ping_reason = await _esphome_call_client_method(client, "ping", timeout=timeout)
+    info_ok, info_reason = await _esphome_call_client_method(client, "device_info", timeout=timeout)
+    marker_after = _esphome_client_connected(client, fallback=False)
+
+    if marker_before or marker_after or ping_ok or info_ok:
+        details = f"marker_before={marker_before} marker_after={marker_after} ping={ping_reason} device_info={info_reason}"
+        return True, details
+    return False, f"marker_before={marker_before} ping={ping_reason} device_info={info_reason}"
+
+
+def _esphome_voice_feature_snapshot(info: Any, client: Any, module: Any) -> Dict[str, Any]:
+    flags = 0
+    api_audio_bit = 0
+    speaker_bit = 0
+    feature_enum = _esphome_module_attr(module, "VoiceAssistantFeature")
+    if feature_enum is not None:
+        with contextlib.suppress(Exception):
+            api_audio_bit = int(getattr(feature_enum, "API_AUDIO"))
+        with contextlib.suppress(Exception):
+            speaker_bit = int(getattr(feature_enum, "SPEAKER"))
+
+    compat_fn = getattr(info, "voice_assistant_feature_flags_compat", None)
+    if callable(compat_fn):
+        with contextlib.suppress(Exception):
+            api_version = getattr(client, "api_version", None)
+            if api_version is not None:
+                flags = int(compat_fn(api_version) or 0)
+            else:
+                flags = int(compat_fn() or 0)
+
+    if not flags:
+        for attr in ("voice_assistant_feature_flags", "voice_assistant_feature_flags_compat"):
+            value = getattr(info, attr, None)
+            if callable(value):
+                with contextlib.suppress(Exception):
+                    value = value()
+            with contextlib.suppress(Exception):
+                parsed = int(value or 0)
+                if parsed:
+                    flags = parsed
+                    break
+
+    api_audio_known = bool(api_audio_bit and flags)
+    speaker_known = bool(speaker_bit and flags)
+
+    return {
+        "flags": int(flags),
+        "api_audio_bit": int(api_audio_bit),
+        "speaker_bit": int(speaker_bit),
+        "api_audio_known": api_audio_known,
+        "speaker_known": speaker_known,
+        "api_audio_supported": True if not api_audio_known else bool(api_audio_bit and (int(flags) & int(api_audio_bit))),
+        "speaker_supported": True if not speaker_known else bool(speaker_bit and (int(flags) & int(speaker_bit))),
+    }
+
+
+async def _esphome_build_client(module: Any, *, host: str, port: int) -> Any:
+    APIClient = getattr(module, "APIClient", None)
+    if APIClient is None:
+        raise RuntimeError("aioesphomeapi.APIClient is unavailable")
+
+    settings = _voice_settings()
+    password = _text(settings.get("VOICE_ESPHOME_PASSWORD"))
+    noise_psk = _text(settings.get("VOICE_ESPHOME_NOISE_PSK"))
+
+    if noise_psk:
+        try:
+            return APIClient(host, port, password, noise_psk=noise_psk)
+        except TypeError:
+            pass
+        try:
+            return APIClient(address=host, port=port, password=password, noise_psk=noise_psk)
+        except TypeError:
+            pass
+        try:
+            return APIClient(host=host, port=port, password=password, noise_psk=noise_psk)
+        except TypeError:
+            pass
+
+    try:
+        return APIClient(host, port, password)
+    except TypeError:
+        pass
+    try:
+        return APIClient(address=host, port=port, password=password)
+    except TypeError:
+        pass
+    return APIClient(host=host, port=port, password=password)
+
+
+def _selector_runtime(selector: str) -> Dict[str, Any]:
+    token = _text(selector)
+    row = _voice_selector_runtime.get(token)
+    if not isinstance(row, dict):
+        row = {
+            "lock": asyncio.Lock(),
+            "session": None,
+            "awaiting_announcement": False,
+            "awaiting_session_id": "",
+            "awaiting_announcement_kind": "",
+            "announcement_future": None,
+            "announcement_task": None,
+            "audio_stall_task": None,
+            "pending_followup_conversation_id": "",
+            "pending_followup_until_ts": 0.0,
+            "streamed_tts": None,
+            "streamed_tts_dispatch_task": None,
+        }
+        _voice_selector_runtime[token] = row
+    if not hasattr(row.get("lock"), "acquire"):
+        row["lock"] = asyncio.Lock()
+    return row
+
+
+def _cancel_announcement_wait(runtime: Dict[str, Any]) -> None:
+    task = runtime.get("announcement_task")
+    if isinstance(task, asyncio.Task):
+        if task is asyncio.current_task():
+            runtime["announcement_task"] = None
+            return
+        task.cancel()
+    runtime["announcement_task"] = None
+
+
+def _cancel_audio_stall_watch(runtime: Dict[str, Any]) -> None:
+    task = runtime.get("audio_stall_task")
+    if isinstance(task, asyncio.Task):
+        if task is asyncio.current_task():
+            runtime["audio_stall_task"] = None
+            return
+        task.cancel()
+    runtime["audio_stall_task"] = None
+
+
+def _cancel_streamed_tts_dispatch(runtime: Dict[str, Any]) -> None:
+    task = runtime.get("streamed_tts_dispatch_task")
+    if isinstance(task, asyncio.Task):
+        if task is asyncio.current_task():
+            runtime["streamed_tts_dispatch_task"] = None
+            return
+        task.cancel()
+    runtime["streamed_tts_dispatch_task"] = None
+
+
+def _clear_streamed_tts_state(runtime: Dict[str, Any]) -> None:
+    state = runtime.get("streamed_tts")
+    if isinstance(state, dict):
+        task = state.get("prepare_task")
+        if isinstance(task, asyncio.Task):
+            if task is asyncio.current_task():
+                state["prepare_task"] = None
+            else:
+                task.cancel()
+    runtime["streamed_tts"] = None
+    _cancel_streamed_tts_dispatch(runtime)
+
+
+def _clear_pending_followup(runtime: Dict[str, Any]) -> None:
+    runtime["pending_followup_conversation_id"] = ""
+    runtime["pending_followup_until_ts"] = 0.0
+
+
+def _arm_pending_followup(runtime: Dict[str, Any], conversation_id: str) -> None:
+    conv = _text(conversation_id)
+    if not conv:
+        _clear_pending_followup(runtime)
+        return
+    runtime["pending_followup_conversation_id"] = conv
+    runtime["pending_followup_until_ts"] = _now() + float(DEFAULT_CONTINUED_CHAT_REUSE_SECONDS)
+
+
+def _claim_pending_followup(runtime: Dict[str, Any]) -> str:
+    conv = _text(runtime.get("pending_followup_conversation_id"))
+    until_ts = _as_float(runtime.get("pending_followup_until_ts"), 0.0)
+    if conv and _now() <= until_ts:
+        _clear_pending_followup(runtime)
+        return conv
+    _clear_pending_followup(runtime)
+    return ""
+
+
+def _schedule_audio_stall_watch(
+    selector: str,
+    client: Any,
+    module: Any,
+    *,
+    session_id: str,
+) -> None:
+    token = _text(selector)
+    sid = _text(session_id)
+    if not token or not sid:
+        return
+
+    runtime = _selector_runtime(token)
+
+    async def _watch() -> None:
+        try:
+            while True:
+                await asyncio.sleep(max(0.05, float(DEFAULT_AUDIO_STALL_POLL_S)))
+                should_finalize = False
+                finalize_reason = ""
+                gap_s = 0.0
+                voice_seen = False
+                chunks = 0
+                wake_started = False
+
+                lock = runtime.get("lock")
+                if lock is None or not hasattr(lock, "acquire"):
+                    return
+
+                async with lock:
+                    session = runtime.get("session")
+                    if not isinstance(session, VoiceSessionRuntime):
+                        return
+                    if _text(session.session_id) != sid:
+                        return
+                    if bool(session.processing):
+                        return
+
+                    # Don't judge stream health before startup/post-gate has armed.
+                    now_ts = _now()
+                    wake_started = bool(_text(session.wake_word))
+                    if now_ts < float(session.startup_gate_until_ts):
+                        continue
+
+                    chunks = int(session.audio_chunks)
+                    last_ts = float(session.last_audio_ts or 0.0)
+                    if last_ts <= 0.0:
+                        elapsed = now_ts - float(session.started_ts or now_ts)
+                        timeout_s = float(DEFAULT_AUDIO_STALL_NO_SPEECH_TIMEOUT_S if wake_started else DEFAULT_BLANK_WAKE_TIMEOUT_S)
+                        if elapsed >= timeout_s:
+                            should_finalize = True
+                            finalize_reason = "audio_stall_no_audio" if wake_started else "blank_wake_timeout"
+                        else:
+                            continue
+
+                    gap_s = max(0.0, now_ts - last_ts)
+
+                    seg = None
+                    if isinstance(session.eou_engine, EouEngine):
+                        seg = session.eou_engine.segmenter
+                    voice_seen = bool(seg.voice_seen) if isinstance(seg, SegmenterState) else bool(chunks > 0)
+
+                    if voice_seen:
+                        if gap_s >= float(DEFAULT_AUDIO_STALL_TIMEOUT_S):
+                            should_finalize = True
+                            finalize_reason = "audio_stall_after_speech"
+                    else:
+                        timeout_s = float(DEFAULT_AUDIO_STALL_NO_SPEECH_TIMEOUT_S if wake_started else DEFAULT_BLANK_WAKE_TIMEOUT_S)
+                        if gap_s >= timeout_s:
+                            should_finalize = True
+                            finalize_reason = "audio_stall_no_speech" if wake_started else "blank_wake_timeout"
+
+                if should_finalize:
+                    _native_debug(
+                        f"esphome audio stall finalize selector={token} session_id={sid} "
+                        f"reason={finalize_reason} gap_s={gap_s:.2f} voice_seen={voice_seen} chunks={chunks}"
+                    )
+                    with contextlib.suppress(Exception):
+                        await _finalize_session(
+                            token,
+                            client,
+                            module,
+                            session_id=sid,
+                            abort=False,
+                            reason=finalize_reason,
+                        )
+                    return
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            _native_debug(f"audio stall watch failed selector={token} session_id={sid} error={exc}")
+
+    _cancel_audio_stall_watch(runtime)
+    runtime["audio_stall_task"] = asyncio.create_task(_watch())
+
+
+async def _prepare_streamed_tts_segments(
+    selector: str,
+    session_id: str,
+    *,
+    session: VoiceSessionRuntime,
+    chunk_texts: List[str],
+) -> None:
+    token = _text(selector)
+    runtime = _selector_runtime(token)
+    prepared: List[Dict[str, Any]] = []
+    error = ""
+    backend_used = ""
+    backend_note = ""
+    try:
+        for chunk_text in chunk_texts:
+            if not _text(chunk_text):
+                continue
+            audio_bytes, audio_format, backend_used, backend_note = await _native_synthesize_text(
+                chunk_text,
+                session=session,
+            )
+            if not audio_bytes:
+                continue
+            url = _store_tts_url(token, session_id, audio_bytes, audio_format)
+            if not url:
+                continue
+            prepared.append(
+                {
+                    "text": _text(chunk_text),
+                    "url": url,
+                    "timeout_s": _run_end_timeout_s(audio_bytes, audio_format),
+                    "tts_bytes": len(audio_bytes),
+                    "backend_used": backend_used,
+                    "backend_note": backend_note,
+                }
+            )
+    except asyncio.CancelledError:
+        return
+    except Exception as exc:
+        error = _text(exc) or "segment_prepare_failed"
+
+    lock = runtime.get("lock")
+    if lock is None or not hasattr(lock, "acquire"):
+        return
+    async with lock:
+        state = runtime.get("streamed_tts")
+        if not isinstance(state, dict) or _text(state.get("session_id")) != _text(session_id):
+            return
+        ready_segments = state.get("ready_segments")
+        if not isinstance(ready_segments, list):
+            ready_segments = []
+            state["ready_segments"] = ready_segments
+        ready_segments.extend(prepared)
+        state["done"] = True
+        state["error"] = error
+        if backend_used:
+            state["backend_used"] = backend_used
+        if backend_note:
+            state["backend_note"] = backend_note
+        state["prepare_task"] = None
+
+
+async def _send_streamed_tts_segment(
+    selector: str,
+    client: Any,
+    module: Any,
+    *,
+    session_id: str,
+    segment: Dict[str, Any],
+) -> None:
+    token = _text(selector)
+    runtime = _selector_runtime(token)
+    lock = runtime.get("lock")
+    timeout_s = max(1.0, float(segment.get("timeout_s") or 0.0))
+    await _esphome_send_event(
+        client,
+        module,
+        ("VOICE_ASSISTANT_TTS_START", "TTS_START"),
+        {"text": _text(segment.get("text")) or "Continuing response."},
+    )
+    await _esphome_send_event(
+        client,
+        module,
+        ("VOICE_ASSISTANT_TTS_END", "TTS_END"),
+        {"url": _text(segment.get("url"))},
+    )
+    async with lock:
+        runtime["awaiting_announcement"] = True
+        runtime["awaiting_session_id"] = _text(session_id)
+        runtime["awaiting_announcement_kind"] = "response_streamed"
+        runtime["announcement_future"] = None
+        _cancel_announcement_wait(runtime)
+        _schedule_announcement_timeout(token, client, module, timeout_s)
+    _native_debug(
+        f"streamed tts segment queued selector={token} session_id={session_id} timeout_s={timeout_s:.2f} url={_text(segment.get('url'))}"
+    )
+
+
+async def _await_and_dispatch_streamed_tts_segment(
+    selector: str,
+    client: Any,
+    module: Any,
+    *,
+    session_id: str,
+) -> None:
+    token = _text(selector)
+    runtime = _selector_runtime(token)
+    lock = runtime.get("lock")
+    segment: Optional[Dict[str, Any]] = None
+    should_finalize = False
+    try:
+        while True:
+            await asyncio.sleep(0.05)
+            async with lock:
+                state = runtime.get("streamed_tts")
+                if not isinstance(state, dict) or _text(state.get("session_id")) != _text(session_id):
+                    return
+                if bool(runtime.get("awaiting_announcement")):
+                    return
+                ready_segments = state.get("ready_segments") if isinstance(state.get("ready_segments"), list) else []
+                if ready_segments:
+                    segment = dict(ready_segments.pop(0))
+                    break
+                if bool(state.get("done")):
+                    runtime["streamed_tts"] = None
+                    should_finalize = True
+                    break
+        if isinstance(segment, dict):
+            await _send_streamed_tts_segment(
+                token,
+                client,
+                module,
+                session_id=session_id,
+                segment=segment,
+            )
+            return
+        if should_finalize:
+            await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+    except asyncio.CancelledError:
+        return
+    except Exception as exc:
+        _native_debug(f"streamed tts dispatch failed selector={token} session_id={session_id} error={exc}")
+        with contextlib.suppress(Exception):
+            await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+    finally:
+        async with lock:
+            task = runtime.get("streamed_tts_dispatch_task")
+            if task is asyncio.current_task():
+                runtime["streamed_tts_dispatch_task"] = None
+
+
+async def _maybe_continue_streamed_tts(
+    selector: str,
+    client: Any,
+    module: Any,
+    *,
+    reason: str,
+) -> bool:
+    token = _text(selector)
+    if not token:
+        return False
+
+    runtime = _selector_runtime(token)
+    lock = runtime.get("lock")
+    segment: Optional[Dict[str, Any]] = None
+    should_finalize = False
+    session_id = ""
+
+    async with lock:
+        state = runtime.get("streamed_tts")
+        if not isinstance(state, dict):
+            return False
+        session_id = _text(state.get("session_id"))
+        runtime["awaiting_announcement"] = False
+        runtime["awaiting_session_id"] = ""
+        runtime["awaiting_announcement_kind"] = ""
+        runtime["announcement_future"] = None
+        _cancel_announcement_wait(runtime)
+
+        ready_segments = state.get("ready_segments") if isinstance(state.get("ready_segments"), list) else []
+        if ready_segments:
+            segment = dict(ready_segments.pop(0))
+        elif bool(state.get("done")):
+            runtime["streamed_tts"] = None
+            should_finalize = True
+        else:
+            if not isinstance(runtime.get("streamed_tts_dispatch_task"), asyncio.Task):
+                runtime["streamed_tts_dispatch_task"] = asyncio.create_task(
+                    _await_and_dispatch_streamed_tts_segment(
+                        token,
+                        client,
+                        module,
+                        session_id=session_id,
+                    )
+                )
+            _native_debug(
+                f"streamed tts awaiting next segment selector={token} session_id={session_id} reason={_text(reason) or 'announcement_finished'}"
+            )
+            return True
+
+    if isinstance(segment, dict):
+        await _send_streamed_tts_segment(
+            token,
+            client,
+            module,
+            session_id=session_id,
+            segment=segment,
+        )
+        return True
+
+    if should_finalize:
+        await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+        _native_debug(
+            f"streamed tts finalize selector={token} session_id={session_id} reason={_text(reason) or 'segment_complete'}"
+        )
+        return True
+    return False
+
+
+async def _finalize_after_announcement(selector: str, client: Any, module: Any, *, reason: str) -> bool:
+    token = _text(selector)
+    if not token:
+        return False
+
+    runtime = _selector_runtime(token)
+    lock = runtime.get("lock")
+    async with lock:
+        kind = _text(runtime.get("awaiting_announcement_kind"))
+    if kind == "response_streamed" and await _maybe_continue_streamed_tts(token, client, module, reason=reason):
+        return True
+
+    future: Optional[asyncio.Future[Any]] = None
+    async with lock:
+        waiting = bool(runtime.get("awaiting_announcement"))
+        session_id = _text(runtime.get("awaiting_session_id"))
+        kind = _text(runtime.get("awaiting_announcement_kind"))
+        maybe_future = runtime.get("announcement_future")
+        if isinstance(maybe_future, asyncio.Future):
+            future = maybe_future
+        if not waiting:
+            return False
+        runtime["awaiting_announcement"] = False
+        runtime["awaiting_session_id"] = ""
+        runtime["awaiting_announcement_kind"] = ""
+        runtime["announcement_future"] = None
+        _cancel_announcement_wait(runtime)
+
+    if isinstance(future, asyncio.Future) and not future.done():
+        with contextlib.suppress(Exception):
+            future.set_result({"reason": reason, "kind": kind, "session_id": session_id})
+
+    if kind == "tool_progress":
+        _native_debug(f"esphome tool progress finalize selector={token} session_id={session_id} reason={reason}")
+        return True
+
+    await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+    _native_debug(f"esphome announcement finalize selector={token} session_id={session_id} reason={reason}")
+    return True
+
+
+async def _queue_selector_audio_url(
+    selector: str,
+    url: str,
+    *,
+    text: str = "",
+    timeout_s: float = 180.0,
+) -> Dict[str, Any]:
+    token = _text(selector)
+    target_url = _text(url).strip()
+    if not token:
+        raise ValueError("selector is required")
+    if not target_url:
+        raise ValueError("url is required")
+
+    module, import_error = _esphome_import()
+    if import_error:
+        raise RuntimeError(import_error)
+
+    async with _esphome_native_lock:
+        client_row = dict(_esphome_native_clients.get(token) or {})
+    client = client_row.get("client")
+    if not bool(client_row.get("connected")) or client is None:
+        raise RuntimeError(f"Satellite {token} is not connected")
+
+    runtime = _selector_runtime(token)
+    lock = runtime.get("lock")
+    playback_id = uuid.uuid4().hex
+    timeout = max(5.0, min(float(timeout_s or 0.0), 900.0))
+
+    async with lock:
+        active_session = runtime.get("session")
+        if isinstance(active_session, VoiceSessionRuntime):
+            raise RuntimeError(f"Satellite {token} is busy with an active voice session")
+        _clear_streamed_tts_state(runtime)
+        _cancel_announcement_wait(runtime)
+        runtime["awaiting_announcement"] = True
+        runtime["awaiting_session_id"] = playback_id
+        runtime["awaiting_announcement_kind"] = "external"
+        runtime["announcement_future"] = None
+        _schedule_announcement_timeout(token, client, module, timeout)
+
+    try:
+        await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_START", "RUN_START"), None)
+        await _esphome_send_event(
+            client,
+            module,
+            ("VOICE_ASSISTANT_TTS_START", "TTS_START"),
+            {"text": _text(text) or "Playing audio."},
+        )
+        await _esphome_send_event(client, module, ("VOICE_ASSISTANT_TTS_END", "TTS_END"), {"url": target_url})
+    except Exception:
+        async with lock:
+            _cancel_announcement_wait(runtime)
+            runtime["awaiting_announcement"] = False
+            runtime["awaiting_session_id"] = ""
+            runtime["awaiting_announcement_kind"] = ""
+            runtime["announcement_future"] = None
+        with contextlib.suppress(Exception):
+            await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+        raise
+
+    logger.info(
+        "[native-voice] external audio queued selector=%s playback_id=%s timeout_s=%.2f url=%s",
+        token,
+        playback_id,
+        timeout,
+        target_url,
+    )
+    return {"selector": token, "playback_id": playback_id, "timeout_s": timeout, "url": target_url}
+
+
+def _schedule_announcement_timeout(selector: str, client: Any, module: Any, timeout_s: float) -> None:
+    token = _text(selector)
+    if not token:
+        return
+
+    runtime = _selector_runtime(token)
+
+    async def _timer() -> None:
+        try:
+            await asyncio.sleep(max(0.2, float(timeout_s)))
+            completed = await _finalize_after_announcement(token, client, module, reason="announcement_timeout")
+            if completed:
+                logger.info(
+                    "[native-voice] announcement timeout finalize selector=%s timeout_s=%.2f",
+                    token,
+                    float(timeout_s),
+                )
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            _native_debug(f"announcement timeout task failed selector={token} error={exc}")
+
+    runtime["announcement_task"] = asyncio.create_task(_timer())
+
+
+def _transcript_is_low_signal(transcript: str) -> bool:
+    text = _text(transcript).lower()
+    if not text:
+        return True
+    words = re.findall(r"[a-z0-9']+", text)
+    if not words:
+        return True
+    # Keep common short commands; filter known filler/noise utterances.
+    preserved = {"yes", "no", "stop", "cancel", "play", "pause", "next", "back"}
+    if len(words) == 1 and words[0] in preserved:
+        return False
+    filler = {"um", "uh", "hmm", "mm", "huh", "er", "ah", "uhh", "umm", "mmm"}
+    if len(words) == 1 and words[0] in filler:
+        return True
+    compact = "".join(words)
+    return len(compact) < 3
+
+
+async def _process_voice_turn(session: VoiceSessionRuntime) -> Dict[str, Any]:
+    stt_started = time.monotonic()
+    transcript = _text(await _native_transcribe_session_audio(session))
+    session.stt_latency_ms = max(0.0, (time.monotonic() - stt_started) * 1000.0)
+    _voice_metrics_record_stt(session.selector, session.stt_backend_effective or session.stt_backend, session.stt_latency_ms)
+    if not transcript:
+        return {
+            "transcript": "",
+            "no_op": True,
+            "no_op_reason": "empty_transcript",
+        }
+
+    if _transcript_is_low_signal(transcript):
+        _native_debug(
+            f"low-signal transcript bypass selector={session.selector} session_id={session.session_id} transcript={transcript!r}"
+        )
+        return {
+            "transcript": transcript,
+            "no_op": True,
+            "no_op_reason": "low_signal_transcript",
+        }
+
+    completeness = _transcript_completeness_assessment(transcript)
+    word_count = len(re.findall(r"[a-z0-9']+", transcript.lower()))
+    if (not bool(completeness.get("complete"))) and word_count <= 6:
+        _native_debug(
+            f"clipped transcript bypass selector={session.selector} session_id={session.session_id} "
+            f"reason={_text(completeness.get('reason'))} transcript={transcript!r}"
+        )
+        return {
+            "transcript": transcript,
+            "no_op": True,
+            "no_op_reason": "clipped_ambiguous_transcript",
+        }
+
+    _native_debug(
+        f"hydra turn start selector={session.selector} session_id={session.session_id} transcript_len={len(transcript)}"
+    )
+    response_text = await _run_hydra_turn_for_voice(
+        transcript=transcript,
+        conv_id=_text(session.conversation_id) or session.session_id,
+        session=session,
+    )
+    _native_debug(
+        f"hydra turn result selector={session.selector} session_id={session.session_id} response_len={len(_text(response_text))}"
+    )
+
+    return {
+        "transcript": transcript,
+        "response_text": _text(response_text),
+    }
+
+
+async def _finalize_session(
+    selector: str,
+    client: Any,
+    module: Any,
+    *,
+    session_id: str,
+    abort: bool,
+    reason: str,
+) -> None:
+    token = _text(selector)
+    runtime = _selector_runtime(token)
+    lock = runtime.get("lock")
+
+    async with lock:
+        session = runtime.get("session")
+        if not isinstance(session, VoiceSessionRuntime):
+            return
+        if _text(session.session_id) != _text(session_id):
+            return
+        if session.processing:
+            return
+        session.processing = True
+        _cancel_audio_stall_watch(runtime)
+        runtime["session"] = None
+
+    if session.stt_queue is not None:
+        session.stt_queue.put_nowait(None)
+    if session.partial_stt_task is not None:
+        session.partial_stt_task.cancel()
+        with contextlib.suppress(Exception):
+            await session.partial_stt_task
+        session.partial_stt_task = None
+
+    if abort:
+        logger.info(
+            "[native-voice] session aborted selector=%s session_id=%s reason=%s",
+            token,
+            _text(session_id),
+            _text(reason) or "device_stopped",
+        )
+        with contextlib.suppress(Exception):
+            await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+        return
+
+    no_speech_reason = _text(reason)
+    if no_speech_reason in {"server_vad", "audio_stall_no_speech", "audio_stall_no_audio", "blank_wake_timeout"}:
+        seg = None
+        if isinstance(session.eou_engine, EouEngine):
+            seg = session.eou_engine.segmenter
+        seg_voice_seen = bool(seg.voice_seen) if isinstance(seg, SegmenterState) else False
+        seg_chunks = int(seg.speech_chunks) if isinstance(seg, SegmenterState) else 0
+        seg_speech_s = float(seg._speech_seconds()) if isinstance(seg, SegmenterState) else 0.0
+        if (not seg_voice_seen) or seg_chunks <= 0 or seg_speech_s < 0.05:
+            with contextlib.suppress(Exception):
+                await _native_transcribe_session_audio(session)
+
+            recovered_transcript = _text(session.stt_transcript)
+            seg_threshold = float(seg.threshold) if isinstance(seg, SegmenterState) else float(DEFAULT_SILERO_THRESHOLD)
+            recovered_words = re.findall(r"[a-z0-9']+", recovered_transcript.lower())
+            recovered_assessment = _transcript_completeness_assessment(recovered_transcript) if recovered_transcript else {"complete": True}
+            is_brief_command = bool(
+                len(recovered_words) == 1
+                and recovered_words[0] in {"yes", "no", "stop", "cancel", "play", "pause", "next", "back"}
+            )
+            recovery_prob_threshold = (
+                max(seg_threshold, 0.28) if is_brief_command else max(0.60, seg_threshold + 0.10)
+            )
+            recovery_ok = (
+                bool(recovered_transcript)
+                and (not _transcript_is_low_signal(recovered_transcript))
+                and bool(recovered_assessment.get("complete", True))
+                and float(session.max_probability) >= float(recovery_prob_threshold)
+            )
+            if recovery_ok:
+                _native_debug(
+                    f"no-speech guard recovered transcript selector={token} session_id={session.session_id} "
+                    f"reason={no_speech_reason} transcript_len={len(recovered_transcript)} "
+                    f"max_prob={session.max_probability:.3f} threshold={recovery_prob_threshold:.3f}"
+                )
+            else:
+                outcome = _classify_no_op_outcome(
+                    session,
+                    reason=no_speech_reason,
+                    transcript=recovered_transcript,
+                )
+                session.turn_outcome = outcome
+                logger.info(
+                    "[native-voice] no speech finalize selector=%s session_id=%s reason=%s outcome=%s chunks=%s speech_s=%.2f bytes=%s max_prob=%.3f",
+                    token,
+                    _text(session_id),
+                    no_speech_reason,
+                    outcome,
+                    seg_chunks,
+                    seg_speech_s,
+                    int(session.audio_bytes),
+                    float(session.max_probability),
+                )
+                _voice_metrics_record_turn(
+                    selector=token,
+                    outcome=outcome,
+                    reason=no_speech_reason,
+                    speech_s=float(session.speech_duration_s or seg_speech_s or 0.0),
+                    silence_s=float(session.silence_duration_s or 0.0),
+                    turn_latency_ms=max(0.0, (_now() - float(session.started_ts or _now())) * 1000.0),
+                )
+                # No-speech outcomes are normal in wake-word systems; end quietly
+                # so the device does not flash error red for benign wake misses.
+                with contextlib.suppress(Exception):
+                    await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+                return
+
+    try:
+        with contextlib.suppress(Exception):
+            await _esphome_send_event(client, module, ("VOICE_ASSISTANT_STT_VAD_END", "STT_VAD_END"), None)
+
+        async def _live_tool_progress(wait_text: str, wait_payload: Optional[Dict[str, Any]] = None) -> None:
+            await _play_live_tool_progress_for_session(
+                client,
+                module,
+                selector=token,
+                runtime=runtime,
+                session=session,
+                transcript=_text(session.stt_transcript),
+                wait_text=wait_text,
+            )
+
+        session.live_tool_progress_callback = _live_tool_progress
+        try:
+            result = await _process_voice_turn(session)
+        finally:
+            session.live_tool_progress_callback = None
+        transcript = _text(result.get("transcript"))
+        no_op = bool(result.get("no_op"))
+        if no_op:
+            no_op_reason = _text(result.get("no_op_reason"))
+            outcome = _classify_no_op_outcome(session, reason=no_op_reason, transcript=transcript)
+            session.turn_outcome = outcome
+            await _esphome_send_event(client, module, ("VOICE_ASSISTANT_STT_END", "STT_END"), {"text": transcript})
+            logger.info(
+                "[native-voice] no-op transcript finalize selector=%s session_id=%s reason=%s outcome=%s transcript_len=%s stt_ms=%.1f",
+                token,
+                _text(session.session_id),
+                no_op_reason or "unknown",
+                outcome,
+                len(transcript),
+                float(session.stt_latency_ms or 0.0),
+            )
+            _voice_metrics_record_turn(
+                selector=token,
+                outcome=outcome,
+                reason=no_op_reason or "unknown",
+                speech_s=float(session.speech_duration_s or 0.0),
+                silence_s=float(session.silence_duration_s or 0.0),
+                turn_latency_ms=max(0.0, (_now() - float(session.started_ts or _now())) * 1000.0),
+            )
+            await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+            return
+
+        response_text = _text(result.get("response_text"))
+        continue_conversation = False
+        followup_cue = ""
+        if _continued_chat_enabled():
+            continue_conversation = bool(await _response_is_followup_question(response_text))
+            if continue_conversation:
+                followup_cue = await _generate_followup_cue(transcript, response_text)
+                _voice_metrics_record_continued_chat_attempt(token)
+        tts_backend_used = ""
+        tts_backend_note = ""
+        tts_url = ""
+        tts_bytes = 0
+        tts_mode = "stream"
+        run_end_mode = "immediate"
+        wait_for_announcement = False
+
+        async with lock:
+            if continue_conversation:
+                _arm_pending_followup(runtime, _text(session.conversation_id) or _text(session.session_id))
+            else:
+                _clear_pending_followup(runtime)
+
+        streamed_tts = None
+        if not continue_conversation and not bool(session.live_tool_progress_played):
+            streamed_tts = await _start_experimental_streamed_tts_response(
+                token,
+                client,
+                module,
+                session=session,
+                runtime=runtime,
+                response_text=response_text,
+                transcript=transcript,
+            )
+
+        if streamed_tts:
+            tts_backend_used = _text(streamed_tts.get("backend_used"))
+            tts_backend_note = _text(streamed_tts.get("backend_note"))
+            tts_url = _text(streamed_tts.get("first_url"))
+            tts_bytes = int(streamed_tts.get("tts_bytes") or 0)
+            tts_mode = _text(streamed_tts.get("tts_mode")) or "segmented_url"
+            run_end_mode = _text(streamed_tts.get("run_end_mode")) or "announcement_streamed"
+            wait_for_announcement = True
+        else:
+            tts_started = time.monotonic()
+            tts_audio, tts_format, tts_backend_used, tts_backend_note = await _synthesize_spoken_response_audio(
+                response_text,
+                session=session,
+                continue_conversation=continue_conversation,
+                followup_cue=followup_cue,
+            )
+            session.tts_latency_ms = max(0.0, (time.monotonic() - tts_started) * 1000.0)
+            _voice_metrics_record_tts(token, tts_backend_used or session.tts_backend_effective or session.tts_backend, session.tts_latency_ms)
+
+            await _ensure_voice_stt_end_sent(client, module, session=session, transcript=transcript)
+            if not bool(session.intent_active):
+                await _ensure_voice_intent_active(client, module, session=session)
+            await _send_voice_intent_end(
+                client,
+                module,
+                session=session,
+                continue_conversation=continue_conversation,
+            )
+            await _esphome_send_event(client, module, ("VOICE_ASSISTANT_TTS_START", "TTS_START"), {"text": response_text})
+
+            tts_url = _store_tts_url(token, session.session_id, tts_audio, tts_format)
+            if not tts_url:
+                tts_url = "voice-assistant://stream"
+
+            await _esphome_send_event(client, module, ("VOICE_ASSISTANT_TTS_END", "TTS_END"), {"url": tts_url})
+
+            wait_for_announcement = tts_url.startswith(("http://", "https://"))
+            if wait_for_announcement:
+                timeout_s = _run_end_timeout_s(tts_audio, tts_format)
+                async with lock:
+                    runtime["awaiting_announcement"] = True
+                    runtime["awaiting_session_id"] = _text(session.session_id)
+                    runtime["awaiting_announcement_kind"] = "response"
+                    runtime["announcement_future"] = None
+                    _cancel_announcement_wait(runtime)
+                    _schedule_announcement_timeout(token, client, module, timeout_s)
+                _native_debug(
+                    f"esphome awaiting announcement_finished selector={token} session_id={session.session_id} timeout_s={timeout_s:.2f}"
+                )
+                tts_mode = "url"
+                run_end_mode = "announcement"
+            else:
+                await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+                tts_mode = "stream"
+                run_end_mode = "immediate"
+            tts_bytes = len(tts_audio)
+
+        session.turn_outcome = _VOICE_OUTCOME_VALID
+        _voice_metrics_record_turn(
+            selector=token,
+            outcome=_VOICE_OUTCOME_VALID,
+            reason=_text(reason) or "response",
+            speech_s=float(session.speech_duration_s or 0.0),
+            silence_s=float(session.silence_duration_s or 0.0),
+            turn_latency_ms=max(0.0, (_now() - float(session.started_ts or _now())) * 1000.0),
+        )
+        logger.info(
+            "[native-voice] session result selector=%s session_id=%s transcript_len=%s response_len=%s live_tool_progress=%s stt_ms=%.1f tts_ms=%.1f turn_ms=%.1f tts_backend=%s tts_bytes=%s tts_mode=%s run_end_mode=%s continue_conversation=%s tts_url=%s",
+            token,
+            _text(session.session_id),
+            len(transcript),
+            len(response_text),
+            "1" if bool(session.live_tool_progress_played) else "0",
+            float(session.stt_latency_ms or 0.0),
+            float(session.tts_latency_ms or 0.0),
+            max(0.0, (_now() - float(session.started_ts or _now())) * 1000.0),
+            tts_backend_used,
+            tts_bytes,
+            tts_mode,
+            run_end_mode,
+            "1" if continue_conversation else "0",
+            tts_url,
+        )
+        if tts_backend_note:
+            logger.warning(
+                "[native-voice] TTS backend note selector=%s session_id=%s detail=%s",
+                token,
+                _text(session.session_id),
+                tts_backend_note,
+            )
+
+    except Exception as exc:
+        msg = _text(exc)
+        _voice_metrics_record_connection_event(token, event="error")
+        logger.warning(
+            "[native-voice] session finalize failed selector=%s session_id=%s error=%s",
+            token,
+            _text(session.session_id),
+            msg,
+        )
+
+        code = "tater_pipeline_error"
+        if "No transcript produced" in msg:
+            code = "stt-no-text-recognized"
+
+        with contextlib.suppress(Exception):
+            await _esphome_send_event(
+                client,
+                module,
+                ("VOICE_ASSISTANT_ERROR", "ERROR"),
+                {"code": code, "message": msg or "Voice pipeline error"},
+            )
+        with contextlib.suppress(Exception):
+            await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+
+
+async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module: Any, *, api_audio_supported: bool) -> Callable[[], None]:
+    subscribe = getattr(client, "subscribe_voice_assistant", None)
+    if not callable(subscribe):
+        raise RuntimeError("ESPHome client does not support subscribe_voice_assistant()")
+
+    token = _text(selector)
+    runtime = _selector_runtime(token)
+    lock = runtime.get("lock")
+
+    async def _handle_start(conversation_id: str, request_flags: int, audio_settings: Any, wake_word_phrase: Optional[str]) -> Optional[int]:
+        if not api_audio_supported:
+            msg = "Device does not report API_AUDIO support. Voice Core currently requires API_AUDIO for stable operation."
+            logger.warning("[native-voice] %s selector=%s", msg, token)
+            await _esphome_send_event(
+                client,
+                module,
+                ("VOICE_ASSISTANT_ERROR", "ERROR"),
+                {"code": "api_audio_not_supported", "message": msg},
+            )
+            await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+            return None
+
+        old = runtime.get("session")
+        if isinstance(old, VoiceSessionRuntime):
+            with contextlib.suppress(Exception):
+                await _finalize_session(token, client, module, session_id=old.session_id, abort=True, reason="new_session_started")
+
+        fmt = _audio_format_from_settings(audio_settings)
+        sid = uuid.uuid4().hex
+        explicit_conv = _text(conversation_id)
+        wake_phrase = _text(wake_word_phrase)
+        followup_conv = ""
+        async with lock:
+            if explicit_conv or wake_phrase:
+                _clear_pending_followup(runtime)
+            else:
+                followup_conv = _claim_pending_followup(runtime)
+        conv = explicit_conv or followup_conv or sid
+        continued_chat_reopen = bool(followup_conv) and not bool(explicit_conv) and not bool(wake_phrase)
+        if followup_conv:
+            _native_debug(
+                f"continued chat reuse selector={token} session_id={sid} conversation_id={followup_conv}"
+            )
+
+        try:
+            eou_engine = _build_eou_engine(
+                fmt,
+                continued_chat_reopen=continued_chat_reopen,
+                wake_word_session=bool(wake_phrase),
+            )
+        except Exception as exc:
+            msg = f"Failed to initialize Silero VAD: {exc}"
+            logger.warning("[native-voice] %s selector=%s", msg, token)
+            await _esphome_send_event(
+                client,
+                module,
+                ("VOICE_ASSISTANT_ERROR", "ERROR"),
+                {"code": "vad_unavailable", "message": msg},
+            )
+            await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+            return None
+
+        backend_ready = bool(getattr(eou_engine.backend, "_available", True))
+        backend_error = _text(getattr(eou_engine.backend, "_load_error", ""))
+        if not backend_ready:
+            msg = f"Silero VAD unavailable: {backend_error or 'unknown error'}"
+            logger.warning("[native-voice] %s selector=%s", msg, token)
+            await _esphome_send_event(
+                client,
+                module,
+                ("VOICE_ASSISTANT_ERROR", "ERROR"),
+                {"code": "vad_unavailable", "message": msg},
+            )
+            await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+            return None
+
+        start_ts = _now()
+        startup_gate_s = float(DEFAULT_STARTUP_GATE_S)
+        if wake_phrase:
+            startup_gate_s = max(startup_gate_s, float(DEFAULT_WAKE_STARTUP_GATE_S))
+        if continued_chat_reopen:
+            startup_gate_s = max(startup_gate_s, float(DEFAULT_CONTINUED_CHAT_REOPEN_STARTUP_GATE_S))
+        requested_stt_backend = _selected_stt_backend()
+        effective_stt_backend, stt_backend_note = _resolve_stt_backend()
+        requested_tts_backend = _selected_tts_backend()
+        effective_tts_backend, tts_backend_note = _resolve_tts_backend()
+        satellite_row = _satellite_lookup(token)
+        area_name = _satellite_area_name(satellite_row)
+        async with _esphome_native_lock:
+            client_row = dict(_esphome_native_clients.get(token) or {})
+        device_info = client_row.get("device_info") if isinstance(client_row.get("device_info"), dict) else {}
+        satellite_name = _text(satellite_row.get("name"))
+        device_info_name = _text(device_info.get("name"))
+        device_friendly_name = _text(device_info.get("friendly_name"))
+        device_mac_address = _text(device_info.get("mac_address"))
+        device_bluetooth_mac_address = _text(device_info.get("bluetooth_mac_address"))
+        device_name = (
+            device_friendly_name
+            or device_info_name
+            or satellite_name
+            or _text(getattr(client, "address", None))
+            or token
+        )
+        session_context: Dict[str, Any] = {
+            "device_id": token,
+            "device_name": device_name,
+            "satellite_selector": token,
+            "satellite_host": _lower(satellite_row.get("host")) or host_token,
+        }
+        if satellite_name:
+            session_context["satellite_name"] = satellite_name
+        if device_info_name:
+            session_context["device_info_name"] = device_info_name
+        if device_friendly_name:
+            session_context["device_friendly_name"] = device_friendly_name
+        if device_mac_address:
+            session_context["device_mac_address"] = device_mac_address
+            session_context["mac_address"] = device_mac_address
+        if device_bluetooth_mac_address:
+            session_context["device_bluetooth_mac_address"] = device_bluetooth_mac_address
+            session_context["bluetooth_mac_address"] = device_bluetooth_mac_address
+        if area_name:
+            session_context["area_name"] = area_name
+            session_context["room_name"] = area_name
+
+        session = VoiceSessionRuntime(
+            selector=token,
+            session_id=sid,
+            conversation_id=conv,
+            wake_word=wake_phrase,
+            audio_format=fmt,
+            started_ts=start_ts,
+            startup_gate_until_ts=(start_ts + max(0.0, startup_gate_s)),
+            context=session_context,
+            stt_backend=requested_stt_backend,
+            stt_backend_effective=effective_stt_backend,
+            tts_backend=requested_tts_backend,
+            tts_backend_effective=effective_tts_backend,
+            eou_engine=eou_engine,
+        )
+        async with lock:
+            _cancel_announcement_wait(runtime)
+            _cancel_audio_stall_watch(runtime)
+            _clear_streamed_tts_state(runtime)
+            runtime["awaiting_announcement"] = False
+            runtime["awaiting_session_id"] = ""
+            runtime["awaiting_announcement_kind"] = ""
+            runtime["announcement_future"] = None
+            runtime["session"] = session
+
+        _voice_metrics_record_session_start(
+            selector=token,
+            continued_chat_reopen=continued_chat_reopen,
+            stt_fallback_used=bool(stt_backend_note) or (requested_stt_backend != effective_stt_backend),
+            tts_fallback_used=bool(tts_backend_note) or (requested_tts_backend != effective_tts_backend),
+        )
+
+        _schedule_audio_stall_watch(token, client, module, session_id=sid)
+
+        logger.info(
+            "[native-voice] session start selector=%s conversation_id=%s session_id=%s wake_word=%s followup=%s area=%s stt=%s tts=%s rate=%s width=%s ch=%s",
+            token,
+            conv,
+            sid,
+            _text(wake_word_phrase),
+            "1" if continued_chat_reopen else "0",
+            area_name,
+            effective_stt_backend,
+            effective_tts_backend,
+            int(fmt.get("rate") or 0),
+            int(fmt.get("width") or 0),
+            int(fmt.get("channels") or 0),
+        )
+        if stt_backend_note:
+            logger.warning(
+                "[native-voice] STT backend fallback selector=%s selected=%s effective=%s reason=%s",
+                token,
+                requested_stt_backend,
+                effective_stt_backend,
+                stt_backend_note,
+            )
+        if tts_backend_note:
+            logger.warning(
+                "[native-voice] TTS backend fallback selector=%s selected=%s effective=%s reason=%s",
+                token,
+                requested_tts_backend,
+                effective_tts_backend,
+                tts_backend_note,
+            )
+
+        eou_engine = session.eou_engine if isinstance(session.eou_engine, EouEngine) else None
+        if eou_engine is not None:
+            seg = eou_engine.segmenter
+            _native_debug(
+                "esphome vad tuning "
+                f"selector={token} backend={eou_engine.backend_name} "
+                f"silence_s={seg.silence_s:.2f} timeout_s={seg.timeout_s:.2f} "
+                f"no_speech_timeout_s={seg.no_speech_timeout_s:.2f} "
+                f"threshold={seg.threshold:.2f} neg_threshold={seg.neg_threshold:.2f} "
+                f"min_speech_frames={seg.min_speech_frames} min_silence_frames={seg.min_silence_frames} "
+                f"silero_threshold={float(getattr(eou_engine.backend, 'threshold', DEFAULT_SILERO_THRESHOLD)):.2f}"
+            )
+
+        await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_START", "RUN_START"), None)
+        await _esphome_send_event(client, module, ("VOICE_ASSISTANT_STT_START", "STT_START"), None)
+        return 0
+
+    async def _handle_audio(data: bytes) -> None:
+        audio_bytes = bytes(data or b"")
+        if not audio_bytes:
+            return
+
+        # Grab session state under lock, then release before VAD inference.
+        async with lock:
+            session = runtime.get("session")
+            if not isinstance(session, VoiceSessionRuntime):
+                return
+            if session.processing:
+                return
+            sid = session.session_id
+            audio_format = session.audio_format
+            eou_engine = session.eou_engine
+            gate_ts = float(session.startup_gate_until_ts)
+
+        width = int(audio_format.get("width") or DEFAULT_VOICE_SAMPLE_WIDTH)
+        audio_bytes = _pcm_apply_gain(audio_bytes, sample_width=width, gain=DEFAULT_AUDIO_INPUT_GAIN)
+        if not audio_bytes:
+            return
+
+        now_ts = _now()
+
+        # Startup gate: drop audio that might contain the wake prompt.
+        if now_ts < gate_ts:
+            async with lock:
+                s = runtime.get("session")
+                if isinstance(s, VoiceSessionRuntime) and s.session_id == sid:
+                    s.last_audio_ts = now_ts
+                    s.dropped_startup_chunks += 1
+                    if s.dropped_startup_chunks == 1:
+                        _native_debug(
+                            f"esphome startup audio gate selector={token} session_id={sid} "
+                            f"gate_s={max(0.0, gate_ts - s.started_ts):.2f}"
+                        )
+            return
+
+        # Run VAD inference OUTSIDE the lock so we don't block audio delivery.
+        metrics: Dict[str, Any] = {}
+        should_finalize = False
+
+        if isinstance(eou_engine, EouEngine):
+            metrics = eou_engine.process(audio_bytes, audio_format, now_ts)
+            should_finalize = bool(metrics.get("should_finalize"))
+
+        # Re-acquire lock to update session state and stream to STT.
+        async with lock:
+            session = runtime.get("session")
+            if not isinstance(session, VoiceSessionRuntime) or session.session_id != sid:
+                return
+            if session.processing:
+                return
+
+            session.last_audio_ts = now_ts
+            session.speech_duration_s = max(
+                float(session.speech_duration_s or 0.0),
+                float(metrics.get("speech_s") or 0.0),
+            )
+            session.silence_duration_s = float(metrics.get("silence_s") or 0.0)
+            with contextlib.suppress(Exception):
+                p = float(metrics.get("max_probability", metrics.get("probability", 0.0)) or 0.0)
+                if p > session.max_probability:
+                    session.max_probability = p
+
+            limits_snapshot = _voice_config_snapshot().get("limits")
+            limits_d = limits_snapshot if isinstance(limits_snapshot, dict) else {}
+            max_audio_bytes = int(limits_d.get("max_audio_bytes") or DEFAULT_MAX_AUDIO_BYTES)
+
+            # Start STT handling on first audio chunk past the gate.
+            if not session.capture_started:
+                if _normalize_stt_backend(session.stt_backend_effective) == "wyoming":
+                    session.stt_queue = asyncio.Queue()
+                    session.stt_task = asyncio.create_task(
+                        _native_wyoming_stream_stt_task(
+                            token=token,
+                            session_id=session.session_id,
+                            queue=session.stt_queue,
+                            audio_format=session.audio_format,
+                            language=session.language,
+                            session_ref=session,
+                        )
+                    )
+                elif _experimental_partial_stt_enabled():
+                    session.partial_stt_task = asyncio.create_task(
+                        _native_local_partial_stt_task(
+                            token=token,
+                            session_id=session.session_id,
+                            session_ref=session,
+                        )
+                    )
+                session.capture_started = True
+                _native_debug(
+                    f"esphome capture started selector={token} session_id={session.session_id} "
+                    f"mode={'stream' if session.stt_queue is not None else 'buffered'} stt={session.stt_backend_effective}"
+                )
+
+            # Append audio to buffer and stream to STT.
+            if session.audio_bytes + len(audio_bytes) <= max_audio_bytes:
+                session.audio_buffer.extend(audio_bytes)
+                session.audio_bytes += len(audio_bytes)
+                session.audio_chunks += 1
+                if session.stt_queue is not None:
+                    try:
+                        session.stt_queue.put_nowait(audio_bytes)
+                    except asyncio.QueueFull:
+                        pass
+
+            chunks = int(session.audio_chunks)
+            if chunks in {1, 5, 10} or (chunks % 50 == 0):
+                prob = metrics.get("probability", "-")
+                peak_prob = metrics.get("max_probability", "-")
+                _native_debug(
+                    "esphome audio "
+                    f"selector={token} session_id={sid} chunks={chunks} bytes={session.audio_bytes} "
+                    f"probability={prob} peak_probability={peak_prob} voice_seen={bool(metrics.get('voice_seen'))} "
+                    f"in_command={bool(metrics.get('in_command'))} speech_s={metrics.get('speech_s', '-')} "
+                    f"silence_s={metrics.get('silence_s', '-')} timed_out={bool(metrics.get('timed_out'))}"
+                )
+
+            if session.completeness_hold_until_ts > 0.0 and float(metrics.get("silence_s") or 0.0) <= 0.05:
+                session.completeness_hold_until_ts = 0.0
+                session.completeness_hold_reason = ""
+                session.completeness_hold_partial = ""
+
+            if should_finalize:
+                partial_text = _text(session.partial_transcript) or _text(session.stt_transcript)
+                partial_fresh = (
+                    bool(partial_text)
+                    and session.partial_transcript_updated_ts > 0.0
+                    and (now_ts - float(session.partial_transcript_updated_ts)) <= 3.0
+                )
+                if session.completeness_hold_until_ts > now_ts:
+                    should_finalize = False
+                elif session.completeness_hold_until_ts > 0.0:
+                    session.finalize_reason_detail = (
+                        f"completeness_hold_expired:{_text(session.completeness_hold_reason) or 'timeout'}"
+                    )
+                    session.completeness_hold_until_ts = 0.0
+                    session.completeness_hold_reason = ""
+                elif partial_fresh:
+                    assessment = _transcript_completeness_assessment(partial_text)
+                    allow_hold = _text(session.completeness_hold_partial) != partial_text
+                    if (
+                        allow_hold
+                        and (not bool(assessment.get("complete")))
+                        and float(metrics.get("speech_s") or 0.0) >= 0.30
+                    ):
+                        session.completeness_hold_until_ts = now_ts + float(DEFAULT_TRANSCRIPT_COMPLETENESS_EXTENSION_S)
+                        session.completeness_hold_reason = _text(assessment.get("reason")) or "incomplete_partial"
+                        session.completeness_hold_count += 1
+                        session.completeness_hold_partial = partial_text
+                        session.finalize_reason_detail = f"completeness_hold:{session.completeness_hold_reason}"
+                        _native_debug(
+                            f"transcript completeness hold selector={token} session_id={sid} "
+                            f"reason={session.completeness_hold_reason} partial={partial_text!r}"
+                        )
+                        should_finalize = False
+
+        # Send events outside the lock.
+        if should_finalize:
+            _native_debug(
+                f"server_vad finalize selector={token} session_id={sid} reason=server_vad "
+                f"silence_s={float(metrics.get('silence_s') or 0.0):.2f} speech_chunks={int(metrics.get('speech_chunks') or 0)} "
+                f"speech_s={float(metrics.get('speech_s') or 0.0):.2f} timed_out={bool(metrics.get('timed_out'))}"
+            )
+            with contextlib.suppress(Exception):
+                await _finalize_session(token, client, module, session_id=sid, abort=False, reason="server_vad")
+
+    async def _handle_stop(abort: bool) -> None:
+        sid = ""
+        chunks = 0
+        total = 0
+        async with lock:
+            session = runtime.get("session")
+            if isinstance(session, VoiceSessionRuntime):
+                sid = session.session_id
+                chunks = session.audio_chunks
+                total = session.audio_bytes
+            _cancel_announcement_wait(runtime)
+            _cancel_audio_stall_watch(runtime)
+            runtime["awaiting_announcement"] = False
+            runtime["awaiting_session_id"] = ""
+            runtime["awaiting_announcement_kind"] = ""
+            runtime["announcement_future"] = None
+
+        logger.info(
+            "[native-voice] session stop selector=%s session_id=%s abort=%s chunks=%s bytes=%s",
+            token,
+            sid,
+            bool(abort),
+            chunks,
+            total,
+        )
+        if sid:
+            with contextlib.suppress(Exception):
+                await _finalize_session(token, client, module, session_id=sid, abort=bool(abort), reason="device_stop")
+
+    async def _handle_announcement_finished(*_args: Any, **_kwargs: Any) -> None:
+        completed = await _finalize_after_announcement(token, client, module, reason="announcement_finished")
+        if completed:
+            logger.info("[native-voice] announcement finished selector=%s", token)
+
+    subscribe_kwargs: Dict[str, Any] = {
+        "handle_start": _handle_start,
+        "handle_stop": _handle_stop,
+    }
+
+    with contextlib.suppress(Exception):
+        sig = inspect.signature(subscribe)
+        if "handle_audio" in sig.parameters:
+            subscribe_kwargs["handle_audio"] = _handle_audio if api_audio_supported else None
+        if "handle_announcement_finished" in sig.parameters:
+            subscribe_kwargs["handle_announcement_finished"] = _handle_announcement_finished
+
+    if "handle_audio" not in subscribe_kwargs:
+        subscribe_kwargs["handle_audio"] = _handle_audio if api_audio_supported else None
+
+    try:
+        unsub = subscribe(**subscribe_kwargs)
+    except TypeError:
+        fallback = dict(subscribe_kwargs)
+        fallback.pop("handle_announcement_finished", None)
+        unsub = subscribe(**fallback)
+
+    if inspect.isawaitable(unsub):
+        unsub = await unsub
+    if not callable(unsub):
+        raise RuntimeError("subscribe_voice_assistant did not return unsubscribe callback")
+    return unsub
+
+
+async def _esphome_disconnect_selector(selector: str, *, reason: str) -> None:
+    token = _text(selector)
+    if not token:
+        return
+
+    async with _esphome_native_lock:
+        row = _esphome_native_clients.get(token)
+        client = row.get("client") if isinstance(row, dict) else None
+        unsubscribe = row.get("unsubscribe") if isinstance(row, dict) else None
+        log_unsubscribe = row.get("log_unsubscribe") if isinstance(row, dict) else None
+        was_connected = bool(row.get("connected", False)) if isinstance(row, dict) else False
+        if isinstance(row, dict):
+            row["connected"] = False
+            row["client"] = None
+            row["unsubscribe"] = None
+            row["log_unsubscribe"] = None
+            row["log_viewers"] = 0
+            row["last_disconnect_ts"] = _now()
+            row["last_error"] = _text(reason)
+
+    runtime = _selector_runtime(token)
+    lock = runtime.get("lock")
+    sid = ""
+    async with lock:
+        session = runtime.get("session")
+        if isinstance(session, VoiceSessionRuntime):
+            sid = session.session_id
+        runtime["session"] = None
+        _clear_streamed_tts_state(runtime)
+        _cancel_announcement_wait(runtime)
+        _cancel_audio_stall_watch(runtime)
+        runtime["awaiting_announcement"] = False
+        runtime["awaiting_session_id"] = ""
+        runtime["awaiting_announcement_kind"] = ""
+        runtime["announcement_future"] = None
+
+    if sid and client is not None:
+        module, _ = _esphome_import()
+        if module is not None:
+            with contextlib.suppress(Exception):
+                await _finalize_session(token, client, module, session_id=sid, abort=True, reason=reason or "disconnect")
+
+    if callable(unsubscribe):
+        with contextlib.suppress(Exception):
+            unsubscribe()
+    if callable(log_unsubscribe):
+        with contextlib.suppress(Exception):
+            result = log_unsubscribe()
+            if inspect.isawaitable(result):
+                await result
+
+    disconnect_fn = getattr(client, "disconnect", None)
+    if callable(disconnect_fn):
+        with contextlib.suppress(Exception):
+            result = disconnect_fn()
+            if inspect.isawaitable(result):
+                await result
+
+    if was_connected:
+        logger.info("[native-voice] esphome disconnected selector=%s reason=%s", token, _text(reason))
+        _voice_metrics_record_connection_event(token, event="disconnect")
+
+
+async def _esphome_disconnect_all(reason: str) -> None:
+    async with _esphome_native_lock:
+        selectors = list(_esphome_native_clients.keys())
+    for selector in selectors:
+        await _esphome_disconnect_selector(selector, reason=reason)
+
+
+async def _esphome_connect_selector(selector: str, *, host: str, port: Optional[int] = None, source: str = "reconcile") -> Dict[str, Any]:
+    token = _text(selector)
+    host_token = _lower(host)
+    if not token or not host_token:
+        raise RuntimeError("selector and host are required")
+
+    module, import_error = _esphome_import()
+    if module is None:
+        msg = f"aioesphomeapi unavailable: {import_error or 'unknown error'}"
+        async with _esphome_native_lock:
+            row = _esphome_native_clients.get(token) or {}
+            row.update(
+                {
+                    "selector": token,
+                    "host": host_token,
+                    "port": int(port or _get_int_setting("VOICE_ESPHOME_API_PORT", DEFAULT_ESPHOME_API_PORT)),
+                    "connected": False,
+                    "last_attempt_ts": _now(),
+                    "last_error": msg,
+                    "source": source,
+                }
+            )
+            _esphome_native_clients[token] = row
+        _voice_metrics_record_connection_event(token, event="error")
+        raise RuntimeError(msg)
+
+    timeout = _get_float_setting("VOICE_ESPHOME_CONNECT_TIMEOUT_S", DEFAULT_ESPHOME_CONNECT_TIMEOUT_S, minimum=2.0, maximum=60.0)
+    connect_port = int(port or _get_int_setting("VOICE_ESPHOME_API_PORT", DEFAULT_ESPHOME_API_PORT))
+
+    _native_debug(f"esphome connect attempt selector={token} host={host_token} port={connect_port} source={source}")
+
+    async with _esphome_native_lock:
+        row = _esphome_native_clients.get(token) or {}
+        row.update(
+            {
+                "selector": token,
+                "host": host_token,
+                "port": connect_port,
+                "connected": False,
+                "last_attempt_ts": _now(),
+                "source": source,
+            }
+        )
+        _esphome_native_clients[token] = row
+
+    try:
+        client = await _esphome_build_client(module, host=host_token, port=connect_port)
+        connect_fn = getattr(client, "connect", None)
+        if not callable(connect_fn):
+            raise RuntimeError("aioesphomeapi client has no connect()")
+
+        kwargs: Dict[str, Any] = {}
+        with contextlib.suppress(Exception):
+            sig = inspect.signature(connect_fn)
+            if "login" in sig.parameters:
+                kwargs["login"] = True
+            if "on_stop" in sig.parameters:
+                async def _on_stop(expected_disconnect: bool) -> None:
+                    await _esphome_disconnect_selector(token, reason="expected_disconnect" if expected_disconnect else "connection_lost")
+                kwargs["on_stop"] = _on_stop
+
+        result = connect_fn(**kwargs) if kwargs else connect_fn()
+        if inspect.isawaitable(result):
+            await asyncio.wait_for(result, timeout=timeout)
+
+        await asyncio.sleep(0.2)
+        verified, verify_reason = await _esphome_verify_connection(client, timeout=max(1.0, timeout))
+        _native_debug(f"esphome connect verification selector={token} verified={verified} details={verify_reason}")
+        if not verified:
+            raise RuntimeError(f"ESPHome API connection could not be verified. Details: {verify_reason}")
+
+        device_name = token
+        device_info_snapshot: Dict[str, Any] = {}
+        entity_infos: Dict[str, Dict[str, Any]] = {}
+        voice_features = {
+            "flags": 0,
+            "api_audio_bit": 0,
+            "speaker_bit": 0,
+            "api_audio_known": False,
+            "speaker_known": False,
+            "api_audio_supported": True,
+            "speaker_supported": True,
+        }
+
+        with contextlib.suppress(Exception):
+            info = await _esphome_client_call(client, "device_info")
+            device_info_snapshot = _esphome_device_info_snapshot(info)
+            for candidate in (getattr(info, "friendly_name", None), getattr(info, "name", None)):
+                label = _text(candidate)
+                if label:
+                    device_name = label
+                    break
+            voice_features = _esphome_voice_feature_snapshot(info, client, module)
+
+        with contextlib.suppress(Exception):
+            entity_infos = await _esphome_list_entity_catalog(client)
+
+        voice_unsubscribe = await _esphome_subscribe_voice_assistant(
+            token,
+            client,
+            module,
+            api_audio_supported=bool(voice_features.get("api_audio_supported")),
+        )
+        state_unsubscribe = await _esphome_subscribe_states(token, client)
+        unsubscribe = _combine_unsubscribes(voice_unsubscribe, state_unsubscribe)
+
+        logger.info(
+            "[native-voice] esphome voice features selector=%s flags=%s flags_known=%s api_audio_supported=%s speaker_supported=%s",
+            token,
+            int(voice_features.get("flags") or 0),
+            bool(voice_features.get("api_audio_known")) or bool(voice_features.get("speaker_known")),
+            bool(voice_features.get("api_audio_supported")),
+            bool(voice_features.get("speaker_supported")),
+        )
+
+        _upsert_satellite(
+            {
+                "selector": token,
+                "host": host_token,
+                "name": device_name,
+                "source": "esphome_native",
+                "metadata": {
+                    "esphome_selected": True,
+                    "esphome_port": connect_port,
+                    "voice_feature_flags": int(voice_features.get("flags") or 0),
+                    "voice_api_audio_supported": bool(voice_features.get("api_audio_supported")),
+                    "voice_speaker_supported": bool(voice_features.get("speaker_supported")),
+                },
+            }
+        )
+
+        async with _esphome_native_lock:
+            row = _esphome_native_clients.get(token) or {}
+            reconnect = bool(_as_float(row.get("last_success_ts"), 0.0) > 0.0 or _as_float(row.get("last_disconnect_ts"), 0.0) > 0.0)
+            row.update(
+                {
+                    "selector": token,
+                    "host": host_token,
+                    "port": connect_port,
+                    "client": client,
+                    "unsubscribe": unsubscribe,
+                    "connected": True,
+                    "device_info": dict(device_info_snapshot),
+                    "entity_infos": dict(entity_infos),
+                    "entity_states": row.get("entity_states") if isinstance(row.get("entity_states"), dict) else {},
+                    "entity_state_updated_ts": _as_float(row.get("entity_state_updated_ts"), _now()),
+                    "voice_feature_flags": int(voice_features.get("flags") or 0),
+                    "voice_api_audio_supported": bool(voice_features.get("api_audio_supported")),
+                    "voice_speaker_supported": bool(voice_features.get("speaker_supported")),
+                    "last_success_ts": _now(),
+                    "last_error": "",
+                    "source": source,
+                }
+            )
+            _esphome_native_clients[token] = row
+            if reconnect:
+                _voice_metrics_record_connection_event(token, event="reconnect")
+            logger.info(
+                "[native-voice] esphome connected selector=%s host=%s port=%s source=%s api_audio_supported=%s speaker_supported=%s",
+                token,
+                host_token,
+                connect_port,
+                source,
+                bool(row.get("voice_api_audio_supported")),
+                bool(row.get("voice_speaker_supported")),
+            )
+            return dict(row)
+
+    except Exception as exc:
+        unsubscribe_cb = locals().get("unsubscribe")
+        if callable(unsubscribe_cb):
+            with contextlib.suppress(Exception):
+                unsubscribe_cb()
+
+        client_obj = locals().get("client")
+        disconnect_fn = getattr(client_obj, "disconnect", None)
+        if callable(disconnect_fn):
+            with contextlib.suppress(Exception):
+                result = disconnect_fn()
+                if inspect.isawaitable(result):
+                    await asyncio.wait_for(result, timeout=max(1.0, timeout))
+
+        msg = _text(exc)
+        _native_debug(f"esphome connect failed selector={token} host={host_token} error={msg}")
+
+        async with _esphome_native_lock:
+            row = _esphome_native_clients.get(token) or {}
+            row.update(
+                {
+                    "selector": token,
+                    "host": host_token,
+                    "port": connect_port,
+                    "connected": False,
+                    "last_error": msg,
+                    "source": source,
+                }
+            )
+            _esphome_native_clients[token] = row
+        _voice_metrics_record_connection_event(token, event="error")
+        raise
+
+
+async def _esphome_reconcile_once(*, force: bool = False) -> Dict[str, Any]:
+    async with _esphome_reconcile_lock:
+        _esphome_native_stats["runs"] = int(_esphome_native_stats.get("runs") or 0) + 1
+        _esphome_native_stats["last_run_ts"] = _now()
+
+        targets = _esphome_target_map()
+        retry_seconds = _get_int_setting(
+            "VOICE_ESPHOME_RETRY_SECONDS",
+            DEFAULT_ESPHOME_RETRY_SECONDS,
+            minimum=2,
+            maximum=300,
+        )
+
+        async with _esphome_native_lock:
+            snapshot = {k: dict(v) for k, v in _esphome_native_clients.items()}
+
+        # disconnect removed targets / dead connections
+        for selector, row in snapshot.items():
+            if selector not in targets:
+                await _esphome_disconnect_selector(selector, reason="not_targeted")
+                continue
+            client = row.get("client")
+            connected_row = bool(row.get("connected", False))
+            if connected_row and not _esphome_client_connected(client, fallback=connected_row):
+                await _esphome_disconnect_selector(selector, reason="connection_lost")
+
+        # connect missing targets
+        for selector, host in targets.items():
+            row = snapshot.get(selector) or {}
+            if bool(row.get("connected", False)) and _esphome_client_connected(row.get("client"), fallback=True):
+                continue
+            last_attempt = _as_float(row.get("last_attempt_ts"), 0.0)
+            if (not force) and ((_now() - last_attempt) < retry_seconds):
+                continue
+            try:
+                await _esphome_connect_selector(selector, host=host, source="reconcile")
+                _esphome_native_stats["last_success_ts"] = _now()
+                _esphome_native_stats["last_error"] = ""
+            except Exception as exc:
+                _esphome_native_stats["last_error"] = _text(exc)
+
+        return _esphome_status()
+
+
+async def _esphome_loop() -> None:
+    while True:
+        try:
+            _sync_manual_targets()
+            await _esphome_reconcile_once(force=False)
+            await _esphome_logs_cleanup_idle()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _esphome_native_stats["last_error"] = _text(exc)
+            _esphome_native_stats["last_run_ts"] = _now()
+            logger.warning("[native-voice] esphome reconcile loop error: %s", exc)
+        await asyncio.sleep(float(max(2, _get_int_setting("VOICE_ESPHOME_RETRY_SECONDS", DEFAULT_ESPHOME_RETRY_SECONDS))))
+
+
+async def _esphome_bootstrap_reconnect() -> None:
+    # After a core restart, satellites may still be unwinding the previous API
+    # session. Do one immediate force-reconcile and one short delayed pass so
+    # they can recover without needing a device reboot.
+    try:
+        status = await _esphome_reconcile_once(force=True)
+        logger.info(
+            "[native-voice] startup esphome reconcile selected=%s connected=%s",
+            len(status.get("targets") or {}),
+            len(
+                [
+                    row
+                    for row in (status.get("clients") or {}).values()
+                    if isinstance(row, dict) and bool(row.get("connected"))
+                ]
+            ),
+        )
+    except Exception as exc:
+        logger.warning("[native-voice] startup esphome reconcile failed: %s", exc)
+
+    try:
+        await asyncio.sleep(2.0)
+        status = await _esphome_reconcile_once(force=True)
+        logger.info(
+            "[native-voice] delayed esphome reconcile selected=%s connected=%s",
+            len(status.get("targets") or {}),
+            len(
+                [
+                    row
+                    for row in (status.get("clients") or {}).values()
+                    if isinstance(row, dict) and bool(row.get("connected"))
+                ]
+            ),
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning("[native-voice] delayed esphome reconcile failed: %s", exc)
+
+
+def _esphome_status() -> Dict[str, Any]:
+    module, import_error = _esphome_import()
+    targets = _esphome_target_map()
+    metrics_snapshot = _voice_metrics_snapshot()
+    device_metrics = metrics_snapshot.get("devices") if isinstance(metrics_snapshot.get("devices"), dict) else {}
+
+    clients: Dict[str, Any] = {}
+    for selector, row in _esphome_native_clients.items():
+        if not isinstance(row, dict):
+            continue
+        runtime = _selector_runtime(selector)
+        session = runtime.get("session")
+        device_info = row.get("device_info") if isinstance(row.get("device_info"), dict) else {}
+        entity_infos = row.get("entity_infos") if isinstance(row.get("entity_infos"), dict) else {}
+        entity_states = row.get("entity_states") if isinstance(row.get("entity_states"), dict) else {}
+        entity_rows = _esphome_entity_rows(entity_infos, entity_states)
+        metrics_row = device_metrics.get(selector) if isinstance(device_metrics.get(selector), dict) else {}
+        clients[selector] = {
+            "selector": _text(row.get("selector") or selector),
+            "host": _text(row.get("host")),
+            "port": int(row.get("port") or _get_int_setting("VOICE_ESPHOME_API_PORT", DEFAULT_ESPHOME_API_PORT)),
+            "connected": bool(row.get("connected", False)),
+            "selected": selector in targets,
+            "voice_subscribed": bool(row.get("unsubscribe")),
+            "active_session_id": _text(session.session_id) if isinstance(session, VoiceSessionRuntime) else "",
+            "voice_feature_flags": int(row.get("voice_feature_flags") or 0),
+            "voice_api_audio_supported": bool(row.get("voice_api_audio_supported")),
+            "voice_speaker_supported": bool(row.get("voice_speaker_supported")),
+            "last_attempt_ts": _as_float(row.get("last_attempt_ts"), 0.0),
+            "last_success_ts": _as_float(row.get("last_success_ts"), 0.0),
+            "last_disconnect_ts": _as_float(row.get("last_disconnect_ts"), 0.0),
+            "last_error": _text(row.get("last_error")),
+            "source": _text(row.get("source")),
+            "device_info": dict(device_info),
+            "entity_count": len(entity_infos),
+            "entity_row_count": len(entity_rows),
+            "entity_rows": entity_rows,
+            "entity_state_updated_ts": _as_float(row.get("entity_state_updated_ts"), 0.0),
+            "log_active": callable(row.get("log_unsubscribe")),
+            "log_viewers": int(row.get("log_viewers") or 0),
+            "log_cursor": int(row.get("log_seq") or 0),
+            "log_last_line_ts": _as_float(row.get("log_last_line_ts"), 0.0),
+            "log_last_access_ts": _as_float(row.get("log_last_access_ts"), 0.0),
+            "log_error": _text(row.get("log_error")),
+            "voice_metrics": dict(metrics_row),
+        }
+
+    return {
+        "enabled": True,
+        "available": module is not None,
+        "import_error": "" if module is not None else _text(import_error),
+        "targets": targets,
+        "clients": clients,
+        "stats": dict(_esphome_native_stats),
+        "voice_metrics": metrics_snapshot,
+    }
+
+
+def _esphome_entities_for_selector(selector: str) -> Dict[str, Any]:
+    token = _text(selector)
+    if not token:
+        raise ValueError("selector is required")
+
+    row = _esphome_native_clients.get(token)
+    if not isinstance(row, dict):
+        raise RuntimeError(f"Satellite {token} is unknown")
+
+    entity_infos = row.get("entity_infos") if isinstance(row.get("entity_infos"), dict) else {}
+    entity_states = row.get("entity_states") if isinstance(row.get("entity_states"), dict) else {}
+    device_info = row.get("device_info") if isinstance(row.get("device_info"), dict) else {}
+    entity_rows = _esphome_entity_rows(entity_infos, entity_states)
+
+    entities: List[Dict[str, Any]] = []
+    for key, info in entity_infos.items():
+        if not isinstance(info, dict):
+            continue
+        state_row = entity_states.get(key) if isinstance(entity_states.get(key), dict) else {}
+        entities.append(
+            {
+                "key": _text(info.get("key") or key),
+                "kind": _text(info.get("kind")),
+                "name": _text(info.get("name")) or _text(info.get("object_id")) or f"Entity {key}",
+                "object_id": _text(info.get("object_id")),
+                "unit": _text(info.get("unit")),
+                "device_class": _text(info.get("device_class")),
+                "entity_category": _text(info.get("entity_category")),
+                "icon": _text(info.get("icon")),
+                "disabled_by_default": bool(info.get("disabled_by_default")),
+                "value": _esphome_entity_display_value(info, state_row),
+                "meta": _esphome_entity_meta_label(info, state_row),
+                "raw": state_row.get("raw"),
+                "attrs": dict(state_row.get("attrs") or {}) if isinstance(state_row, dict) else {},
+                "updated_ts": _as_float(state_row.get("updated_ts"), 0.0) if isinstance(state_row, dict) else 0.0,
+            }
+        )
+
+    entities.sort(key=lambda item: (_lower(item.get("name")), _lower(item.get("kind")), _lower(item.get("object_id"))))
+    return {
+        "selector": token,
+        "connected": bool(row.get("connected")),
+        "host": _text(row.get("host")),
+        "device_info": dict(device_info),
+        "entities": entities,
+        "entity_rows": entity_rows,
+        "count": len(entities),
+    }
+
+
+def _esphome_store_entity_state_override(selector: str, key: str, kind: str, raw: Any, attrs: Dict[str, Any]) -> None:
+    token = _text(selector)
+    entry_key = _text(key)
+    if not token or not entry_key:
+        return
+    row = _esphome_native_clients.get(token)
+    if not isinstance(row, dict):
+        return
+    state_map = row.get("entity_states")
+    if not isinstance(state_map, dict):
+        state_map = {}
+        row["entity_states"] = state_map
+    state_map[entry_key] = {
+        "key": entry_key,
+        "kind": _text(kind),
+        "raw": raw,
+        "attrs": dict(attrs or {}),
+        "updated_ts": _now(),
+    }
+    row["entity_state_updated_ts"] = _now()
+
+
+def _esphome_hex_to_rgb(color_value: Any) -> Tuple[float, float, float]:
+    token = _text(color_value).lstrip("#")
+    if len(token) == 3:
+        token = "".join(ch * 2 for ch in token)
+    if len(token) != 6 or any(ch not in "0123456789abcdefABCDEF" for ch in token):
+        raise RuntimeError(f"Invalid color value: {color_value}")
+    return (
+        int(token[0:2], 16) / 255.0,
+        int(token[2:4], 16) / 255.0,
+        int(token[4:6], 16) / 255.0,
+    )
+
+
+async def _esphome_command_entity(
+    selector: str,
+    *,
+    entity_key: Any,
+    command: str,
+    value: Any = None,
+    options: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    token = _text(selector)
+    key_text = _text(entity_key)
+    action = _lower(command)
+    if not token:
+        raise ValueError("selector is required")
+    if not key_text:
+        raise ValueError("entity_key is required")
+    if not action:
+        raise ValueError("command is required")
+    payload = options if isinstance(options, dict) else {}
+
+    async with _esphome_native_lock:
+        client_row = dict(_esphome_native_clients.get(token) or {})
+    client = client_row.get("client")
+    if not bool(client_row.get("connected")) or client is None:
+        raise RuntimeError(f"Satellite {token} is not connected")
+
+    row = _esphome_native_clients.get(token)
+    entity_infos = row.get("entity_infos") if isinstance(row, dict) and isinstance(row.get("entity_infos"), dict) else {}
+    info = entity_infos.get(key_text) if isinstance(entity_infos.get(key_text), dict) else {}
+    if not info:
+        raise RuntimeError(f"Entity {key_text} was not found on satellite {token}")
+
+    kind = _lower(info.get("kind"))
+    key_num = _as_int(key_text, 0, minimum=0)
+    if key_num <= 0:
+        raise RuntimeError(f"Entity {key_text} has an invalid key")
+
+    if action in {"press", "button_press"}:
+        if "button" not in kind:
+            raise RuntimeError(f"Entity {key_text} is not a button")
+        await _esphome_client_call(client, "button_command", key_num)
+    elif action in {"number_set", "set_number"}:
+        if "number" not in kind:
+            raise RuntimeError(f"Entity {key_text} is not a number")
+        try:
+            numeric = float(value)
+        except Exception as exc:
+            raise RuntimeError(f"number_set requires a numeric value: {exc}") from exc
+        await _esphome_client_call(client, "number_command", key_num, numeric)
+        _esphome_store_entity_state_override(token, key_text, _text(info.get("kind")), numeric, {"state": numeric})
+    elif action in {"switch_set", "set_switch"}:
+        if "switch" not in kind:
+            raise RuntimeError(f"Entity {key_text} is not a switch")
+        state = _as_bool(value, False)
+        await _esphome_client_call(client, "switch_command", key_num, state)
+        _esphome_store_entity_state_override(token, key_text, _text(info.get("kind")), state, {"state": state})
+    elif action in {"light_set", "set_light"}:
+        if "light" not in kind:
+            raise RuntimeError(f"Entity {key_text} is not a light")
+        state_value = payload.get("state", value)
+        brightness_value = payload.get("brightness")
+        color_value = payload.get("color")
+        command_kwargs: Dict[str, Any] = {}
+        attrs_override: Dict[str, Any] = {}
+        raw_override = None
+        if state_value not in {None, ""}:
+            state_bool = _as_bool(state_value, False)
+            command_kwargs["state"] = state_bool
+            attrs_override["state"] = state_bool
+            raw_override = state_bool
+        if brightness_value not in {None, ""}:
+            brightness = _as_float(brightness_value, 1.0, minimum=0.0, maximum=1.0)
+            command_kwargs["brightness"] = brightness
+            attrs_override["brightness"] = brightness
+        if color_value not in {None, ""}:
+            rgb = _esphome_hex_to_rgb(color_value)
+            command_kwargs["rgb"] = rgb
+            command_kwargs.setdefault("state", True)
+            attrs_override.update(
+                {
+                    "state": True,
+                    "red": rgb[0],
+                    "green": rgb[1],
+                    "blue": rgb[2],
+                    "color_mode": "rgb",
+                }
+            )
+            raw_override = True
+        if not command_kwargs:
+            raise RuntimeError("light_set requires a state, brightness, or color value")
+        await _esphome_client_call(client, "light_command", key_num, **command_kwargs)
+        _esphome_store_entity_state_override(
+            token,
+            key_text,
+            _text(info.get("kind")),
+            raw_override,
+            attrs_override,
+        )
+    elif action in {"select_set", "set_select"}:
+        if "select" not in kind:
+            raise RuntimeError(f"Entity {key_text} is not a select")
+        state = _text(value)
+        if not state:
+            raise RuntimeError("select_set requires a state value")
+        await _esphome_client_call(client, "select_command", key_num, state)
+        _esphome_store_entity_state_override(token, key_text, _text(info.get("kind")), state, {"state": state})
+    elif action in {"text_set", "set_text"}:
+        if "text" not in kind:
+            raise RuntimeError(f"Entity {key_text} is not a text entity")
+        state = _text(value)
+        await _esphome_client_call(client, "text_command", key_num, state)
+        _esphome_store_entity_state_override(token, key_text, _text(info.get("kind")), state, {"state": state})
+    else:
+        raise RuntimeError(f"Unsupported command: {command}")
+
+    return _esphome_entities_for_selector(token)
+
+
+# -------------------- WebUI Tab --------------------
+def _format_ts_label(ts_value: Any) -> str:
+    ts = _as_float(ts_value, 0.0)
+    if ts <= 0:
+        return "-"
+    with contextlib.suppress(Exception):
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+    return "-"
+
+
+def _voice_ui_spec_map() -> Dict[str, Dict[str, Any]]:
+    out: Dict[str, Dict[str, Any]] = {}
+    for spec in VOICE_UI_SETTING_SPECS:
+        if not isinstance(spec, dict):
+            continue
+        key = _text(spec.get("key"))
+        if not key:
+            continue
+        out[key] = dict(spec)
+    return out
+
+
+def _voice_ui_field_value(spec: Dict[str, Any], raw_value: Any) -> Any:
+    field_type = _lower(spec.get("type") or "text")
+    default = spec.get("default")
+    if field_type == "checkbox":
+        return _as_bool(raw_value, _as_bool(default, False))
+
+    if field_type == "number":
+        minimum = spec.get("min") if isinstance(spec.get("min"), (int, float)) else None
+        maximum = spec.get("max") if isinstance(spec.get("max"), (int, float)) else None
+        default_num = default if isinstance(default, (int, float)) and not isinstance(default, bool) else 0
+        step = spec.get("step")
+        wants_int = isinstance(default, int) and not isinstance(default, bool)
+        if wants_int:
+            with contextlib.suppress(Exception):
+                if step is not None and not float(step).is_integer():
+                    wants_int = False
+        if wants_int:
+            min_int = int(minimum) if isinstance(minimum, (int, float)) else None
+            max_int = int(maximum) if isinstance(maximum, (int, float)) else None
+            return _as_int(raw_value, int(default_num), minimum=min_int, maximum=max_int)
+        return _as_float(raw_value, float(default_num), minimum=minimum, maximum=maximum)
+
+    return _text(raw_value if raw_value is not None else default)
+
+
+def _voice_ui_setting_fields() -> List[Dict[str, Any]]:
+    stored = _voice_settings()
+    rows: List[Dict[str, Any]] = []
+    for spec in VOICE_UI_SETTING_SPECS:
+        if not isinstance(spec, dict):
+            continue
+        key = _text(spec.get("key"))
+        if not key:
+            continue
+        row = dict(spec)
+        row["key"] = key
+        field_type = _lower(row.get("type") or "text")
+        raw_value = stored.get(key, row.get("default"))
+
+        if field_type in {"select", "multiselect"}:
+            row["options"] = list(spec.get("options") or [])
+
+        if field_type == "password":
+            has_saved = bool(_text(stored.get(key)))
+            row["value"] = ""
+            if has_saved:
+                existing_desc = _text(row.get("description"))
+                keep_desc = "Leave blank to keep current saved value."
+                row["description"] = f"{existing_desc} {keep_desc}".strip() if existing_desc else keep_desc
+                row["placeholder"] = "Leave blank to keep current value"
+        else:
+            row["value"] = _voice_ui_field_value(spec, raw_value)
+
+        rows.append(row)
+    return rows
+
+
+def _voice_ui_setting_sections() -> List[Dict[str, Any]]:
+    ordered_fields = _voice_ui_setting_fields()
+    by_key = {_text(field.get("key")): field for field in ordered_fields if isinstance(field, dict)}
+    groups: List[Tuple[str, List[str]]] = [
+        ("Core", ["VOICE_NATIVE_DEBUG", "VOICE_CONTINUED_CHAT_ENABLED"]),
+        (
+            "Experimental",
+            [
+                "VOICE_EXPERIMENTAL_PARTIAL_STT_ENABLED",
+                "VOICE_EXPERIMENTAL_TTS_EARLY_START_ENABLED",
+            ],
+        ),
+        (
+            "Discovery",
+            [
+                "VOICE_DISCOVERY_ENABLED",
+                "VOICE_DISCOVERY_SCAN_SECONDS",
+                "VOICE_DISCOVERY_MDNS_TIMEOUT_S",
+                "VOICE_ESPHOME_TARGETS",
+            ],
+        ),
+        (
+            "ESPHome",
+            [
+                "VOICE_ESPHOME_API_PORT",
+                "VOICE_ESPHOME_PASSWORD",
+                "VOICE_ESPHOME_NOISE_PSK",
+                "VOICE_ESPHOME_CONNECT_TIMEOUT_S",
+                "VOICE_ESPHOME_RETRY_SECONDS",
+                "VOICE_NATIVE_WYOMING_TIMEOUT_S",
+            ],
+        ),
+    ]
+
+    sections: List[Dict[str, Any]] = []
+    used = set()
+    for label, keys in groups:
+        fields = []
+        for key in keys:
+            field = by_key.get(key)
+            if not isinstance(field, dict):
+                continue
+            fields.append(field)
+            used.add(key)
+        if fields:
+            sections.append({"label": label, "fields": fields})
+
+    remaining = [
+        field
+        for field in ordered_fields
+        if _text(field.get("key")) not in used
+    ]
+    if remaining:
+        sections.append({"label": "Advanced", "fields": remaining})
+    return sections
+
+
+def _voice_ui_settings_item_form() -> Dict[str, Any]:
+    sections = list(_voice_ui_setting_sections())
+    return {
+        "id": "voice_settings",
+        "group": "settings",
+        "title": "Voice Pipeline Settings",
+        "subtitle": "Tune ESPHome and runtime behavior here. Shared STT/TTS model choices now live in Tater Settings under Models.",
+        "sections": sections,
+        "save_action": "voice_settings_save",
+        "save_label": "Save Settings",
+        "settings_title": "Voice Pipeline Settings",
+        "fields_dropdown": False,
+        "sections_in_dropdown": False,
+        "remove_action": "",
+    }
+
+
+def _satellite_host_from_selector(selector: str) -> str:
+    token = _text(selector)
+    if token.startswith("host:"):
+        return _lower(token.split(":", 1)[1])
+    return ""
+
+
+def _voice_ui_satellite_item_forms(status: Dict[str, Any]) -> List[Dict[str, Any]]:
+    clients = status.get("clients") if isinstance(status.get("clients"), dict) else {}
+    registry = _load_satellite_registry()
+    rows_by_selector: Dict[str, Dict[str, Any]] = {}
+
+    for row in registry:
+        selector = _text(row.get("selector"))
+        if not selector:
+            host = _lower(row.get("host"))
+            if host:
+                selector = f"host:{host}"
+        if not selector:
+            continue
+        normalized = dict(row)
+        normalized["selector"] = selector
+        rows_by_selector[selector] = normalized
+
+    for selector, client_row in clients.items():
+        if not isinstance(client_row, dict):
+            continue
+        token = _text(selector)
+        if not token:
+            continue
+        current = rows_by_selector.get(token) or {}
+        host = _lower(current.get("host")) or _lower(client_row.get("host")) or _satellite_host_from_selector(token)
+        meta = current.get("metadata") if isinstance(current.get("metadata"), dict) else {}
+        rows_by_selector[token] = {
+            "selector": token,
+            "host": host,
+            "name": _text(current.get("name")) or _text(client_row.get("name")) or host or token,
+            "source": _text(current.get("source")) or _text(client_row.get("source")) or "esphome_native",
+            "metadata": dict(meta),
+            "last_seen_ts": _as_float(current.get("last_seen_ts"), 0.0),
+        }
+
+    items: List[Dict[str, Any]] = []
+    sortable_rows = []
+    for selector, row in rows_by_selector.items():
+        client_row = clients.get(selector) if isinstance(clients.get(selector), dict) else {}
+        meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        selected = bool(meta.get("esphome_selected"))
+        connected = bool(client_row.get("connected"))
+        name = _text(row.get("name")) or _text(row.get("host")) or selector
+        host = _lower(row.get("host")) or _satellite_host_from_selector(selector)
+        sortable_rows.append((selected, connected, _lower(name or host), selector, row, client_row))
+
+    sortable_rows.sort(key=lambda item: (0 if item[0] else 1, 0 if item[1] else 1, item[2], item[3]))
+    for selected, connected, _sort_name, selector, row, client_row in sortable_rows:
+        host = _lower(row.get("host")) or _satellite_host_from_selector(selector)
+        name = _text(row.get("name")) or host or selector
+        source = _text(row.get("source")) or "unknown"
+        area_name = _satellite_area_name(row)
+        last_seen = _format_ts_label(row.get("last_seen_ts"))
+        last_error = _text(client_row.get("last_error"))
+        device_info = client_row.get("device_info") if isinstance(client_row.get("device_info"), dict) else {}
+        entity_rows = list(client_row.get("entity_rows") or []) if isinstance(client_row.get("entity_rows"), list) else []
+        entity_row_count = int(client_row.get("entity_row_count") or len(entity_rows) or 0)
+        entity_count = int(client_row.get("entity_count") or 0)
+        state_updated = _format_ts_label(client_row.get("entity_state_updated_ts"))
+        log_last_line = _format_ts_label(client_row.get("log_last_line_ts"))
+        voice_metrics = client_row.get("voice_metrics") if isinstance(client_row.get("voice_metrics"), dict) else {}
+        device_name = _text(device_info.get("name"))
+        friendly_name = _text(device_info.get("friendly_name"))
+        manufacturer = _text(device_info.get("manufacturer"))
+        model = _text(device_info.get("model"))
+        project_name = _text(device_info.get("project_name"))
+        project_version = _text(device_info.get("project_version"))
+        esphome_version = _text(device_info.get("esphome_version"))
+        compilation_time = _text(device_info.get("compilation_time"))
+        mac_address = _text(device_info.get("mac_address"))
+        bluetooth_mac_address = _text(device_info.get("bluetooth_mac_address"))
+        api_audio = bool(client_row.get("voice_api_audio_supported"))
+        speaker_supported = bool(client_row.get("voice_speaker_supported"))
+        subtitle = f"{host or 'unknown host'} • {'selected' if selected else 'not selected'} • {'connected' if connected else 'disconnected'}"
+        detail_parts = [f"source={source}"]
+        if last_seen != "-":
+            detail_parts.append(f"seen={last_seen}")
+        if state_updated != "-":
+            detail_parts.append(f"sensors={state_updated}")
+        if log_last_line != "-":
+            detail_parts.append(f"logs={log_last_line}")
+        if last_error:
+            detail_parts.append(f"error={last_error}")
+
+        hero_badges: List[Dict[str, str]] = [
+            {"label": "Selected" if selected else "Not Selected", "tone": "accent" if selected else "muted"},
+            {"label": "Connected" if connected else "Offline", "tone": "success" if connected else "danger"},
+            {"label": "API Audio" if api_audio else "No API Audio", "tone": "success" if api_audio else "muted"},
+            {"label": "Speaker" if speaker_supported else "No Speaker", "tone": "success" if speaker_supported else "muted"},
+        ]
+        summary_rows: List[Dict[str, str]] = [
+            {"label": "Host", "value": host or "-"},
+            {"label": "Room / Area", "value": area_name or "-"},
+            {"label": "Source", "value": source or "-"},
+            {"label": "Last Seen", "value": last_seen},
+            {"label": "Sensor Update", "value": state_updated},
+            {"label": "Last Log", "value": log_last_line},
+            {"label": "Entities", "value": str(entity_count)},
+            {"label": "Live Entities", "value": str(entity_row_count)},
+        ]
+        last_outcome = _text(voice_metrics.get("last_outcome"))
+        last_reason = _text(voice_metrics.get("last_reason"))
+        if last_outcome:
+            summary_rows.append({"label": "Last Outcome", "value": last_outcome.replace("_", " ")})
+        if float(voice_metrics.get("avg_turn_latency_ms") or 0.0) > 0.0:
+            summary_rows.append({"label": "Avg Turn", "value": f"{float(voice_metrics.get('avg_turn_latency_ms')):.1f} ms"})
+        if float(voice_metrics.get("avg_stt_latency_ms") or 0.0) > 0.0:
+            summary_rows.append({"label": "Avg STT", "value": f"{float(voice_metrics.get('avg_stt_latency_ms')):.1f} ms"})
+        if float(voice_metrics.get("avg_tts_latency_ms") or 0.0) > 0.0:
+            summary_rows.append({"label": "Avg TTS", "value": f"{float(voice_metrics.get('avg_tts_latency_ms')):.1f} ms"})
+        if float(voice_metrics.get("avg_speech_s") or 0.0) > 0.0:
+            summary_rows.append({"label": "Avg Speech", "value": f"{float(voice_metrics.get('avg_speech_s')):.2f} s"})
+        if float(voice_metrics.get("avg_silence_s") or 0.0) > 0.0:
+            summary_rows.append({"label": "Avg Silence", "value": f"{float(voice_metrics.get('avg_silence_s')):.2f} s"})
+        if last_reason:
+            summary_rows.append({"label": "Last Reason", "value": last_reason.replace("_", " ")})
+        if device_name:
+            summary_rows.append({"label": "Device Name", "value": device_name})
+        if friendly_name:
+            summary_rows.append({"label": "Friendly Name", "value": friendly_name})
+        if manufacturer:
+            summary_rows.append({"label": "Maker", "value": manufacturer})
+        if model:
+            summary_rows.append({"label": "Model", "value": model})
+        if project_name or project_version:
+            summary_rows.append(
+                {"label": "Project", "value": " ".join(part for part in [project_name, project_version] if part).strip()}
+            )
+        if esphome_version:
+            summary_rows.append({"label": "ESPHome", "value": esphome_version})
+        if compilation_time:
+            summary_rows.append({"label": "Build", "value": compilation_time})
+        if mac_address:
+            summary_rows.append({"label": "MAC", "value": mac_address})
+        if bluetooth_mac_address:
+            summary_rows.append({"label": "BT MAC", "value": bluetooth_mac_address})
+        hero_image_src = _satellite_image_src(device_name, friendly_name, name)
+        sensor_rows = [
+            {
+                "key": _text(sensor.get("key")),
+                "label": _text(sensor.get("label")) or "Sensor",
+                "value": _text(sensor.get("value")) or "-",
+                "kind": _text(sensor.get("kind")),
+                "meta": _text(sensor.get("meta")),
+                "control": dict(sensor.get("control") or {}) if isinstance(sensor.get("control"), dict) else {},
+            }
+            for sensor in entity_rows
+            if isinstance(sensor, dict)
+        ]
+
+        fields: List[Dict[str, Any]] = [
+            {
+                "key": "area_name",
+                "label": "Room / Area",
+                "type": "text",
+                "value": area_name,
+                "placeholder": "Office",
+                "description": "Used as the default room context for voice turns from this satellite.",
+            },
+        ]
+
+        items.append(
+            {
+                "id": selector,
+                "group": "satellite",
+                "title": name,
+                "subtitle": subtitle,
+                "detail": " • ".join(detail_parts),
+                "connected": connected,
+                "hero_image_src": hero_image_src,
+                "hero_image_alt": f"{name} satellite",
+                "hero_badges": hero_badges,
+                "summary_rows": summary_rows,
+                "sensor_rows": sensor_rows,
+                "sensor_title": "Live Entities" if sensor_rows else "No Entities",
+                "fields": fields,
+                "popup_mode": "voice-satellite-log",
+                "popup_config": {
+                    "selector": selector,
+                    "name": name,
+                    "host": host,
+                },
+                "popup_fields": [
+                    {
+                        "key": "live_log_feed",
+                        "label": "Live Device Log",
+                        "type": "textarea",
+                        "value": "Opening live log feed...",
+                        "description": "Live ESPHome logs from this satellite. New lines stream in automatically while the popup stays open.",
+                    }
+                ],
+                "save_action": "voice_satellite_save",
+                "save_label": "Save",
+                "remove_action": "voice_satellite_remove",
+                "remove_label": "Forget",
+                "remove_confirm": f"Forget satellite {name}?",
+                "run_action": "voice_disconnect" if connected else "voice_connect",
+                "run_label": "Disconnect" if connected else "Connect",
+                "run_confirm": "Disconnect and deselect this satellite?" if connected else "",
+                "settings_title": f"{name} Live Log",
+                "settings_label": "Live Log",
+            }
+        )
+
+    return items
+
+
+def _payload_values(payload: Dict[str, Any]) -> Dict[str, Any]:
+    body = payload if isinstance(payload, dict) else {}
+    values = body.get("values")
+    if isinstance(values, dict):
+        return dict(values)
+    out: Dict[str, Any] = {}
+    for key, value in body.items():
+        token = _text(key)
+        if not token or token in {"id", "selector", "action"}:
+            continue
+        out[token] = value
+    return out
+
+
+def _payload_selector(payload: Dict[str, Any]) -> str:
+    body = payload if isinstance(payload, dict) else {}
+    return _text(body.get("selector")) or _text(body.get("id"))
+
+
+def _save_voice_ui_settings(values: Dict[str, Any]) -> Dict[str, Any]:
+    incoming = values if isinstance(values, dict) else {}
+    specs = _voice_ui_spec_map()
+    current = _voice_settings()
+    mapping: Dict[str, str] = {}
+    changed_keys: List[str] = []
+
+    for key, spec in specs.items():
+        if key not in incoming:
+            continue
+        field_type = _lower(spec.get("type") or "text")
+        raw_value = incoming.get(key)
+
+        if field_type == "password":
+            token = _text(raw_value)
+            if not token:
+                continue
+            normalized = token
+        elif field_type == "checkbox":
+            normalized = "true" if _as_bool(raw_value, False) else "false"
+        elif field_type == "number":
+            coerced = _voice_ui_field_value(spec, raw_value)
+            if isinstance(coerced, float) and coerced.is_integer():
+                normalized = str(int(coerced))
+            else:
+                normalized = str(coerced)
+        elif field_type == "select":
+            normalized = _text(raw_value)
+            allowed = []
+            for option in list(spec.get("options") or []):
+                if isinstance(option, dict):
+                    allowed.append(_text(option.get("value") or option.get("id") or option.get("key")))
+                else:
+                    allowed.append(_text(option))
+            allowed = [item for item in allowed if item]
+            if allowed and normalized not in allowed:
+                normalized = _text(current.get(key)) or _text(spec.get("default"))
+        else:
+            normalized = _text(raw_value)
+            if key == "VOICE_ESPHOME_TARGETS":
+                normalized = ",".join(_parse_manual_targets(normalized))
+
+        old = _text(current.get(key))
+        if normalized != old:
+            mapping[key] = normalized
+            changed_keys.append(key)
+
+    if mapping:
+        redis_client.hset(VOICE_CORE_SETTINGS_HASH_KEY, mapping=mapping)
+
+    return {
+        "updated_count": len(changed_keys),
+        "changed_keys": changed_keys,
+        "restart_required": False,
+    }
+
+
+def get_htmlui_tab_data(*, redis_client: Any = None, core_key: str = "voice_core", core_tab: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    voice_rows, voices_meta = _load_wyoming_tts_voice_catalog()
+    piper_rows, piper_meta = _load_piper_tts_model_catalog()
+    status = _esphome_status()
+    clients = status.get("clients") if isinstance(status.get("clients"), dict) else {}
+    satellites = _load_satellite_registry()
+
+    connected = len([row for row in clients.values() if isinstance(row, dict) and bool(row.get("connected"))])
+    selected = len(status.get("targets") or {})
+    discovered = len([row for row in satellites if _lower(row.get("source")).startswith("mdns")])
+
+    cfg = _voice_config_snapshot()
+    eou = cfg.get("eou") if isinstance(cfg.get("eou"), dict) else {}
+    stt = cfg.get("stt") if isinstance(cfg.get("stt"), dict) else {}
+    tts = cfg.get("tts") if isinstance(cfg.get("tts"), dict) else {}
+    effective_stt_backend, _stt_note = _resolve_stt_backend()
+    effective_tts_backend, _tts_note = _resolve_tts_backend()
+    tts_catalog_count = len(piper_rows) if effective_tts_backend == "piper" else len(voice_rows)
+    tts_catalog_updated = piper_meta.get("updated_ts") if effective_tts_backend == "piper" else voices_meta.get("updated_ts")
+
+    summary = (
+        f"Selected satellites: {selected} • Connected: {connected} • "
+        f"STT: {_text(stt.get('backend')) or DEFAULT_STT_BACKEND}->{effective_stt_backend} • "
+        f"TTS: {_text(tts.get('backend')) or DEFAULT_TTS_BACKEND}->{effective_tts_backend} • "
+        f"EOU: {_text(eou.get('mode'))}/{_text(eou.get('backend'))}"
+    )
+    item_forms = [_voice_ui_settings_item_form()]
+    item_forms.extend(_voice_ui_satellite_item_forms(status))
+    return {
+        "summary": summary,
+        "stats": [
+            {"label": "Selected", "value": selected},
+            {"label": "Connected", "value": connected},
+            {"label": "Known Satellites", "value": len(satellites)},
+            {"label": "mDNS Discovered", "value": discovered},
+            {"label": "Reconcile Runs", "value": int(_esphome_native_stats.get("runs") or 0)},
+            {"label": "STT Backend", "value": effective_stt_backend},
+            {"label": "TTS Backend", "value": effective_tts_backend},
+            {"label": "TTS Catalog", "value": tts_catalog_count},
+            {"label": "Last TTS Refresh", "value": _format_ts_label(tts_catalog_updated)},
+        ],
+        "items": [],
+        "ui": {
+            "kind": "settings_manager",
+            "title": "Voice Pipeline",
+            "use_tabs": True,
+            "default_tab": "satellites",
+            "stats_refresh_button": True,
+            "stats_refresh_label": "Refresh",
+            "item_sections_in_dropdown": False,
+            "manager_tabs": [
+                {"key": "satellites", "label": "Satellites", "source": "items", "item_group": "satellite", "page_size": 8},
+                {"key": "settings", "label": "Settings", "source": "items", "item_group": "settings"},
+                {"key": "add", "label": "Add", "source": "add_form"},
+            ],
+            "add_form": {
+                "action": "voice_satellite_add_manual",
+                "submit_label": "Add Satellite",
+                "fields": [
+                    {
+                        "key": "host",
+                        "label": "Host / IP",
+                        "type": "text",
+                        "placeholder": "10.4.20.19",
+                        "description": "Hostname or IP of an ESPHome voice satellite.",
+                    },
+                    {
+                        "key": "name",
+                        "label": "Name",
+                        "type": "text",
+                        "placeholder": "Kitchen Satellite",
+                    },
+                    {
+                        "key": "area_name",
+                        "label": "Room / Area",
+                        "type": "text",
+                        "placeholder": "Kitchen",
+                        "description": "Optional default room context for voice turns from this satellite.",
+                    },
+                ],
+            },
+            "item_forms": item_forms,
+        },
+        "empty_message": "No satellites discovered yet. Use Refresh or add one manually.",
+    }
+
+
+def _run_async_blocking(coro: Any, timeout: float = 45.0) -> Any:
+    """Run async coroutine from sync core action handlers."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        holder: Dict[str, Any] = {"done": False, "result": None, "error": None}
+
+        def _worker() -> None:
+            worker_loop = asyncio.new_event_loop()
+            try:
+                asyncio.set_event_loop(worker_loop)
+                holder["result"] = worker_loop.run_until_complete(asyncio.wait_for(coro, timeout=timeout))
+            except Exception as exc:
+                holder["error"] = exc
+            finally:
+                with contextlib.suppress(Exception):
+                    worker_loop.close()
+                holder["done"] = True
+
+        thread = threading.Thread(target=_worker, daemon=True)
+        thread.start()
+        thread.join(timeout + 1.0)
+        if not holder.get("done"):
+            raise TimeoutError("Timed out waiting for async action")
+        if holder.get("error") is not None:
+            raise holder["error"]
+        return holder.get("result")
+
+    return asyncio.run(asyncio.wait_for(coro, timeout=timeout))
+
+
+def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_client: Any = None, core_key: str = "voice_core") -> Dict[str, Any]:
+    action_name = _lower(action)
+    body = payload if isinstance(payload, dict) else {}
+
+    if action_name == "voice_settings_save":
+        values = _payload_values(body)
+        result = _save_voice_ui_settings(values)
+        _sync_manual_targets()
+        with contextlib.suppress(Exception):
+            _run_async_blocking(_esphome_reconcile_once(force=True), timeout=45.0)
+        updated = int(result.get("updated_count") or 0)
+        message = f"Saved {updated} setting(s)." if updated > 0 else "No settings changed."
+        if bool(result.get("restart_required")):
+            message = f"{message} Restart Voice Core to apply port changes."
+        return {
+            "ok": True,
+            "action": action_name,
+            "message": message,
+            **result,
+            "status": _esphome_status(),
+        }
+
+    if action_name == "voice_satellite_add_manual":
+        values = _payload_values(body)
+        host = _lower(values.get("host") or body.get("host"))
+        if not host:
+            raise ValueError("host is required")
+        selector = f"host:{host}"
+        name = _text(values.get("name")) or host
+        area_name = _text(values.get("area_name"))
+        _upsert_satellite(
+            {
+                "selector": selector,
+                "host": host,
+                "name": name,
+                "source": "manual",
+                "metadata": {
+                    "esphome_selected": True,
+                    "area_name": area_name,
+                },
+            }
+        )
+        targets = _current_manual_targets()
+        if host not in targets:
+            targets.append(host)
+            _save_manual_targets(targets)
+        with contextlib.suppress(Exception):
+            _run_async_blocking(_esphome_reconcile_once(force=True), timeout=45.0)
+        return {
+            "ok": True,
+            "action": action_name,
+            "selector": selector,
+            "message": f"Added satellite {name}.",
+            "status": _esphome_status(),
+        }
+
+    if action_name == "voice_satellite_save":
+        selector = _payload_selector(body)
+        values = _payload_values(body)
+        existing = _satellite_lookup(selector) if selector else {}
+        host = _lower(values.get("host")) or _lower(existing.get("host")) or _satellite_host_from_selector(selector)
+        if not selector and host:
+            selector = f"host:{host}"
+        if not selector:
+            raise ValueError("selector is required")
+
+        metadata = dict(existing.get("metadata") or {})
+        if "area_name" in values:
+            metadata["area_name"] = _text(values.get("area_name"))
+
+        name = _text(values.get("name")) or _text(existing.get("name")) or host or selector
+        source = _text(existing.get("source")) or "manual"
+        _upsert_satellite(
+            {
+                "selector": selector,
+                "host": host,
+                "name": name,
+                "source": source,
+                "metadata": metadata,
+            }
+        )
+
+        return {
+            "ok": True,
+            "action": action_name,
+            "selector": selector,
+            "message": f"Saved satellite {name}.",
+            "status": _esphome_status(),
+        }
+
+    if action_name == "voice_satellite_remove":
+        selector = _payload_selector(body)
+        if not selector:
+            raise ValueError("selector is required")
+        existing = _satellite_lookup(selector)
+        host = _lower(existing.get("host")) or _satellite_host_from_selector(selector)
+        removed = _remove_satellite(selector)
+        if host:
+            next_targets = [item for item in _current_manual_targets() if _lower(item) != host]
+            _save_manual_targets(next_targets)
+        with contextlib.suppress(Exception):
+            _run_async_blocking(_esphome_disconnect_selector(selector, reason="manual_remove"), timeout=20.0)
+        return {
+            "ok": True,
+            "action": action_name,
+            "selector": selector,
+            "removed": bool(removed),
+            "message": "Satellite removed." if removed else "Satellite was already absent.",
+            "status": _esphome_status(),
+        }
+
+    if action_name == "voice_discover":
+        rows = _run_async_blocking(_discover_mdns_once(), timeout=30.0)
+        for row in rows or []:
+            _upsert_satellite(row)
+        _sync_manual_targets()
+        return {
+            "ok": True,
+            "action": action_name,
+            "count": len(rows or []),
+            "message": f"Discovery completed: {len(rows or [])} satellite(s) found.",
+            "status": _esphome_status(),
+        }
+
+    if action_name == "voice_reconcile":
+        status = _run_async_blocking(_esphome_reconcile_once(force=True), timeout=45.0)
+        return {"ok": True, "action": action_name, "status": status, "message": "Reconcile completed."}
+
+    if action_name == "voice_refresh":
+        rows = _run_async_blocking(_discover_mdns_once(), timeout=30.0)
+        for row in rows or []:
+            _upsert_satellite(row)
+        _sync_manual_targets()
+        status = _run_async_blocking(_esphome_reconcile_once(force=True), timeout=45.0)
+        return {
+            "ok": True,
+            "action": action_name,
+            "count": len(rows or []),
+            "status": status,
+            "message": f"Refresh completed: discovered {len(rows or [])} satellite(s) and reconciled selected devices.",
+        }
+
+    if action_name == "voice_connect":
+        selector = _payload_selector(body)
+        if not selector:
+            raise ValueError("selector is required")
+        _set_satellite_selected(selector, True)
+        row = _satellite_lookup(selector)
+        host = _lower(row.get("host")) or _satellite_host_from_selector(selector)
+        if host:
+            targets = _current_manual_targets()
+            if host not in targets:
+                targets.append(host)
+                _save_manual_targets(targets)
+        status = _run_async_blocking(_esphome_reconcile_once(force=True), timeout=45.0)
+        return {
+            "ok": True,
+            "action": action_name,
+            "selector": selector,
+            "status": status,
+            "message": "Satellite selected and connect requested.",
+        }
+
+    if action_name == "voice_disconnect":
+        selector = _payload_selector(body)
+        if not selector:
+            raise ValueError("selector is required")
+        _set_satellite_selected(selector, False)
+        row = _satellite_lookup(selector)
+        host = _lower(row.get("host")) or _satellite_host_from_selector(selector)
+        if host:
+            next_targets = [item for item in _current_manual_targets() if _lower(item) != host]
+            _save_manual_targets(next_targets)
+        _run_async_blocking(_esphome_disconnect_selector(selector, reason="manual_disconnect"), timeout=20.0)
+        return {
+            "ok": True,
+            "action": action_name,
+            "selector": selector,
+            "status": _esphome_status(),
+            "message": "Satellite disconnected and deselected.",
+        }
+
+    if action_name == "voice_logs_start":
+        selector = _payload_selector(body)
+        if not selector:
+            raise ValueError("selector is required")
+        result = _run_async_blocking(_esphome_logs_start(selector), timeout=20.0)
+        result["action"] = action_name
+        return result
+
+    if action_name == "voice_logs_poll":
+        selector = _payload_selector(body)
+        if not selector:
+            raise ValueError("selector is required")
+        after_seq = _as_int(body.get("after_seq"), 0, minimum=0)
+        result = _run_async_blocking(_esphome_logs_poll(selector, after_seq=after_seq), timeout=20.0)
+        result["action"] = action_name
+        return result
+
+    if action_name == "voice_logs_stop":
+        selector = _payload_selector(body)
+        if not selector:
+            raise ValueError("selector is required")
+        force = _as_bool(body.get("force"), False)
+        result = _run_async_blocking(_esphome_logs_stop(selector, force=force), timeout=20.0)
+        result["action"] = action_name
+        return result
+
+    raise ValueError(f"Unknown action: {action_name}")
+
+
+# -------------------- Router / Lifecycle --------------------
+router = APIRouter()
+
+
+async def startup() -> None:
+    selected_stt_backend = _selected_stt_backend()
+    effective_stt_backend, stt_backend_note = _resolve_stt_backend()
+    selected_tts_backend = _selected_tts_backend()
+    effective_tts_backend, tts_backend_note = _resolve_tts_backend()
+    logger.info(
+        "[voice_core] startup version=%s backend=native_voice_pipeline esphome_native=true",
+        __version__,
+    )
+    logger.info(
+        "[native-voice] pcm path audioop=%s input_gain=%.2f",
+        "enabled" if _audioop is not None else "fallback",
+        float(DEFAULT_AUDIO_INPUT_GAIN),
+    )
+    if _audioop is None:
+        if sys.version_info < (3, 13):
+            logger.warning(
+                "[native-voice] audioop unavailable on Python %s.%s; fallback PCM math is slower and may add VAD latency",
+                sys.version_info.major,
+                sys.version_info.minor,
+            )
+        else:
+            logger.warning(
+                "[native-voice] audioop unavailable (expected on Python 3.13+); fallback PCM math is active"
+            )
+    else:
+        logger.info("[native-voice] audioop fast path active")
+    logger.info(
+        "[native-voice] vad backend=%s threshold=%.2f neg_threshold=%.2f",
+        DEFAULT_VAD_BACKEND,
+        float(DEFAULT_SILERO_THRESHOLD),
+        float(DEFAULT_SILERO_NEG_THRESHOLD),
+    )
+    logger.info(
+        "[native-voice] stt backend selected=%s effective=%s faster_whisper=%s vosk=%s wyoming=%s",
+        selected_stt_backend,
+        effective_stt_backend,
+        "available" if WhisperModel is not None else "missing",
+        "available" if VoskModel is not None else "missing",
+        "available" if AsyncTcpClient is not None else "missing",
+    )
+    logger.info("[native-voice] stt model root=%s", _stt_model_root())
+    logger.info(
+        "[native-voice] tts backend selected=%s effective=%s kokoro=%s pocket_tts=%s piper=%s wyoming=%s",
+        selected_tts_backend,
+        effective_tts_backend,
+        "available" if build_kokoro_pipeline is not None else "missing",
+        "available" if PocketTTSModel is not None else "missing",
+        "available" if PiperVoice is not None else "missing",
+        "available" if AsyncTcpClient is not None else "missing",
+    )
+    logger.info("[native-voice] tts model root=%s", _tts_model_root())
+    if stt_backend_note:
+        logger.warning("[native-voice] stt backend note: %s", stt_backend_note)
+    if tts_backend_note:
+        logger.warning("[native-voice] tts backend note: %s", tts_backend_note)
+
+    # Pre-load the Silero VAD model so the first voice session doesn't pay the load cost.
+    try:
+        SileroVadBackend._ensure_shared()
+        if SileroVadBackend._shared_ready:
+            logger.info("[native-voice] silero VAD model pre-loaded successfully")
+        else:
+            logger.warning("[native-voice] silero VAD model pre-load failed: %s", SileroVadBackend._shared_error)
+    except Exception as exc:
+        logger.warning("[native-voice] silero VAD model pre-load error: %s", exc)
+
+    # Ensure manual targets are represented before loops begin.
+    _sync_manual_targets()
+
+    if "esphome_bootstrap" not in _background_tasks or _background_tasks["esphome_bootstrap"].done():
+        _background_tasks["esphome_bootstrap"] = asyncio.create_task(_esphome_bootstrap_reconnect())
+    if "discovery" not in _background_tasks or _background_tasks["discovery"].done():
+        _background_tasks["discovery"] = asyncio.create_task(_discovery_loop())
+    if "esphome" not in _background_tasks or _background_tasks["esphome"].done():
+        _background_tasks["esphome"] = asyncio.create_task(_esphome_loop())
+
+
+async def shutdown() -> None:
+    for key, task in list(_background_tasks.items()):
+        if isinstance(task, asyncio.Task):
+            task.cancel()
+    for task in list(_background_tasks.values()):
+        if isinstance(task, asyncio.Task):
+            with contextlib.suppress(Exception):
+                await task
+    _background_tasks.clear()
+
+    with contextlib.suppress(Exception):
+        await _esphome_disconnect_all("portal_shutdown")
+
+
+@router.get("/tater-ha/v1/health")
+async def health() -> Dict[str, Any]:
+    return {"ok": True, "service": "voice_core", "version": __version__, "ts": _now()}
+
+
+@router.get("/tater-ha/v1/voice/config")
+async def voice_config(x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
+    _require_api_auth(x_tater_token)
+    cfg = _voice_config_snapshot()
+    return {
+        "version": __version__,
+        "settings": _voice_ui_setting_fields(),
+        "snapshot": cfg,
+    }
+
+
+@router.get("/tater-ha/v1/voice/native/status")
+async def native_status(x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
+    _require_api_auth(x_tater_token)
+    selected_stt_backend = _selected_stt_backend()
+    effective_stt_backend, stt_backend_note = _resolve_stt_backend()
+    selected_tts_backend = _selected_tts_backend()
+    effective_tts_backend, tts_backend_note = _resolve_tts_backend()
+    selectors = []
+    for key, row in _voice_selector_runtime.items():
+        if not isinstance(row, dict):
+            continue
+        session = row.get("session")
+        selectors.append(
+            {
+                "selector": key,
+                "active_session_id": session.session_id if isinstance(session, VoiceSessionRuntime) else "",
+                "state": session.state if isinstance(session, VoiceSessionRuntime) else VOICE_STATE_IDLE,
+                "awaiting_announcement": bool(row.get("awaiting_announcement")),
+            }
+        )
+
+    return {
+        "ok": True,
+        "version": __version__,
+        "stt_backend_selected": selected_stt_backend,
+        "stt_backend_effective": effective_stt_backend,
+        "stt_backend_note": _text(stt_backend_note),
+        "stt_model_root": _stt_model_root(),
+        "tts_backend_selected": selected_tts_backend,
+        "tts_backend_effective": effective_tts_backend,
+        "tts_backend_note": _text(tts_backend_note),
+        "tts_model_root": _tts_model_root(),
+        "faster_whisper_available": FASTER_WHISPER_IMPORT_ERROR is None,
+        "faster_whisper_error": _text(FASTER_WHISPER_IMPORT_ERROR),
+        "vosk_available": VOSK_IMPORT_ERROR is None,
+        "vosk_error": _text(VOSK_IMPORT_ERROR),
+        "kokoro_available": KOKORO_IMPORT_ERROR is None,
+        "kokoro_error": _text(KOKORO_IMPORT_ERROR),
+        "pocket_tts_available": POCKET_TTS_IMPORT_ERROR is None,
+        "pocket_tts_error": _text(POCKET_TTS_IMPORT_ERROR),
+        "piper_available": PIPER_IMPORT_ERROR is None,
+        "piper_error": _text(PIPER_IMPORT_ERROR),
+        "wyoming_available": WYOMING_IMPORT_ERROR is None,
+        "wyoming_error": _text(WYOMING_IMPORT_ERROR),
+        "selectors": selectors,
+        "discovery": dict(_discovery_stats),
+        "esphome": _esphome_status(),
+    }
+
+
+@router.get("/tater-ha/v1/voice/esphome/status")
+async def esphome_status(x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
+    _require_api_auth(x_tater_token)
+    return _esphome_status()
+
+
+@router.post("/tater-ha/v1/voice/esphome/entities")
+async def esphome_entities(payload: Dict[str, Any], x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
+    _require_api_auth(x_tater_token)
+    selector = _text((payload or {}).get("selector"))
+    if not selector:
+        raise HTTPException(status_code=400, detail="selector is required")
+    try:
+        result = _esphome_entities_for_selector(selector)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"ok": True, **result}
+
+
+@router.post("/tater-ha/v1/voice/esphome/entities/command")
+async def esphome_entities_command(payload: Dict[str, Any], x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
+    _require_api_auth(x_tater_token)
+    selector = _text((payload or {}).get("selector"))
+    entity_key = _text((payload or {}).get("entity_key") or (payload or {}).get("key"))
+    command = _text((payload or {}).get("command"))
+    value = (payload or {}).get("value")
+    try:
+        result = await _esphome_command_entity(
+            selector,
+            entity_key=entity_key,
+            command=command,
+            value=value,
+            options=payload if isinstance(payload, dict) else {},
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"ok": True, **result}
+
+
+@router.get("/tater-ha/v1/voice/satellites")
+async def satellites(x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
+    _require_api_auth(x_tater_token)
+    rows = _load_satellite_registry()
+    return {"items": rows, "count": len(rows)}
+
+
+@router.post("/tater-ha/v1/voice/satellites/select")
+async def satellites_select(payload: Dict[str, Any], x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
+    _require_api_auth(x_tater_token)
+    selector = _text((payload or {}).get("selector"))
+    selected = _as_bool((payload or {}).get("selected"), True)
+    if not selector:
+        raise HTTPException(status_code=400, detail="selector is required")
+    _set_satellite_selected(selector, selected)
+    return {"ok": True, "selector": selector, "selected": selected, "status": _esphome_status()}
+
+
+@router.post("/tater-ha/v1/voice/esphome/reconcile")
+async def esphome_reconcile(payload: Optional[Dict[str, Any]] = None, x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
+    _require_api_auth(x_tater_token)
+    force = _as_bool((payload or {}).get("force"), True)
+    return await _esphome_reconcile_once(force=force)
+
+
+@router.post("/tater-ha/v1/voice/esphome/disconnect")
+async def esphome_disconnect(payload: Dict[str, Any], x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
+    _require_api_auth(x_tater_token)
+    selector = _text((payload or {}).get("selector"))
+    if not selector:
+        raise HTTPException(status_code=400, detail="selector is required")
+    await _esphome_disconnect_selector(selector, reason="manual_endpoint")
+    return {"ok": True, "selector": selector, "status": _esphome_status()}
+
+
+@router.get("/tater-ha/v1/voice/wyoming/tts/voices")
+async def wyoming_tts_voices(x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
+    _require_api_auth(x_tater_token)
+    rows, meta = _load_wyoming_tts_voice_catalog()
+    return {"voices": rows, "meta": meta, "count": len(rows)}
+
+
+@router.post("/tater-ha/v1/voice/wyoming/tts/voices/refresh")
+async def wyoming_tts_voices_refresh(x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
+    _require_api_auth(x_tater_token)
+    result = await _native_wyoming_refresh_tts_voices()
+    return {"ok": True, **result}
+
+
+@router.post("/tater-ha/v1/voice/esphome/play")
+async def esphome_play(payload: Dict[str, Any], x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
+    _require_api_auth(x_tater_token)
+
+    selector = _text(payload.get("selector"))
+    source_url = _text(payload.get("source_url"))
+    audio_b64 = _text(payload.get("audio_b64"))
+    announce_text = _text(payload.get("text"))
+    filename = _text(payload.get("filename")) or "audio.bin"
+    requested_media_type = _text(payload.get("media_type")).split(";", 1)[0].strip().lower()
+    timeout_s = _as_float(payload.get("timeout_s"), 180.0)
+
+    if not selector:
+        raise HTTPException(status_code=400, detail="selector is required")
+    if not source_url and not audio_b64:
+        raise HTTPException(status_code=400, detail="source_url or audio_b64 is required")
+
+    fetched_media_type = ""
+    media_bytes = b""
+    if audio_b64:
+        try:
+            media_bytes = base64.b64decode(audio_b64, validate=True)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"audio_b64 is invalid: {exc}") from exc
+        if not media_bytes:
+            raise HTTPException(status_code=400, detail="audio_b64 decoded to empty content")
+    else:
+        try:
+            media_bytes, fetched_media_type = await _download_media_source(source_url)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Failed to fetch audio source: {exc}") from exc
+
+    media_type = requested_media_type or fetched_media_type or "application/octet-stream"
+    playback_id = uuid.uuid4().hex
+    playback_url = _store_media_url(
+        selector,
+        playback_id,
+        media_bytes,
+        media_type=media_type,
+        filename=filename,
+    )
+    if not playback_url:
+        raise HTTPException(status_code=500, detail="Failed to store media for playback")
+
+    try:
+        result = await _queue_selector_audio_url(
+            selector,
+            playback_url,
+            text=announce_text,
+            timeout_s=timeout_s,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=f"Failed to queue selector playback: {exc}") from exc
+
+    return {
+        "ok": True,
+        "selector": selector,
+        "source_url": source_url,
+        "playback_url": playback_url,
+        "media_type": media_type,
+        **result,
+    }
+
+
+@router.get("/tater-ha/v1/voice/esphome/tts/{stream_id}.wav")
+async def esphome_tts_stream(stream_id: str) -> Response:
+    row = _fetch_tts_url(stream_id)
+    if not isinstance(row, dict):
+        raise HTTPException(status_code=404, detail="TTS stream not found or expired")
+
+    wav_bytes = row.get("wav_bytes") if isinstance(row.get("wav_bytes"), (bytes, bytearray)) else b""
+    if not wav_bytes:
+        raise HTTPException(status_code=404, detail="TTS stream has no audio data")
+
+    _native_debug(
+        f"esphome tts url fetch stream_id={_text(stream_id)} session_id={_text(row.get('session_id'))} "
+        f"selector={_text(row.get('selector'))} bytes={len(wav_bytes)}"
+    )
+
+    headers = {
+        "Cache-Control": "no-store, max-age=0",
+        "Pragma": "no-cache",
+    }
+    return Response(content=bytes(wav_bytes), media_type="audio/wav", headers=headers)
+
+
+@router.get("/tater-ha/v1/voice/esphome/media/{stream_id}")
+async def esphome_media_stream(stream_id: str) -> Response:
+    row = _fetch_tts_url(stream_id)
+    if not isinstance(row, dict):
+        raise HTTPException(status_code=404, detail="Media stream not found or expired")
+
+    body_bytes = row.get("body_bytes") if isinstance(row.get("body_bytes"), (bytes, bytearray)) else b""
+    if not body_bytes:
+        raise HTTPException(status_code=404, detail="Media stream has no audio data")
+
+    media_type = _text(row.get("media_type")).split(";", 1)[0].strip().lower() or "application/octet-stream"
+    _native_debug(
+        f"esphome media url fetch stream_id={_text(stream_id)} session_id={_text(row.get('session_id'))} "
+        f"selector={_text(row.get('selector'))} bytes={len(body_bytes)} media_type={media_type}"
+    )
+
+    headers = {
+        "Cache-Control": "no-store, max-age=0",
+        "Pragma": "no-cache",
+    }
+    return Response(content=bytes(body_bytes), media_type=media_type, headers=headers)

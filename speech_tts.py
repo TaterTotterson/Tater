@@ -126,6 +126,17 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _main_app_port() -> int:
+    raw = _text(os.getenv("HTMLUI_PORT") or "8501") or "8501"
+    try:
+        port = int(raw)
+    except Exception:
+        port = 8501
+    if port < 1 or port > 65535:
+        port = 8501
+    return int(port)
+
+
 def normalize_tts_backend(value: Any) -> str:
     token = _text(value).lower().replace("-", "_").replace(" ", "_")
     if token in {"", "default"}:
@@ -295,15 +306,7 @@ def _ha_headers(token: Any) -> Dict[str, str]:
 
 
 def _voice_core_base_url() -> str:
-    settings = redis_client.hgetall("voice_core_settings") or {}
-    raw_port = _text(settings.get("bind_port")) or "8502"
-    try:
-        port = int(raw_port)
-    except Exception:
-        port = 8502
-    if port < 1 or port > 65535:
-        port = 8502
-    return f"http://127.0.0.1:{port}"
+    return f"http://127.0.0.1:{_main_app_port()}"
 
 
 def _cleanup_runtime_tts_assets(now_ts: Optional[float] = None) -> None:

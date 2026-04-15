@@ -29,6 +29,7 @@ from redis.exceptions import RedisError
 import core_registry as core_registry_module
 import verba_registry as verba_registry_module
 import portal_registry as portal_registry_module
+from esphome import home as esphome_home_module
 from admin_gate import DEFAULT_ADMIN_ONLY_PLUGINS, REDIS_KEY as ADMIN_GATE_KEY, get_admin_only_plugins
 from hydra import estimate_hydra_chat_context_window, get_active_chat_jobs_snapshot, run_hydra_turn
 from hydra import (
@@ -388,6 +389,25 @@ def _portal_setting_fields(portal_key: str, required: Dict[str, Any], current: D
     return updated if isinstance(updated, list) else fields
 
 
+def _esphome_settings_fields() -> List[Dict[str, Any]]:
+    try:
+        rows = esphome_home_module.settings_fields()
+        return rows if isinstance(rows, list) else []
+    except Exception:
+        logger.exception("[esphome] failed building ESPHome settings fields")
+        return []
+
+
+def _save_esphome_settings_values(values: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        result = esphome_home_module.save_settings_values(values or {})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc) or "Failed to save ESPHome settings.") from exc
+    return result if isinstance(result, dict) else {"ok": True}
+
+
 def _portal_prepare_settings_values(portal_key: str, values: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(values or {})
     module = _portal_settings_module(portal_key)
@@ -569,21 +589,27 @@ def _hydra_role_llm_key(role: str, field: str) -> str:
     return f"{HYDRA_ROLE_LLM_KEY_PREFIX}{str(role or '').strip()}:{str(field or '').strip()}"
 
 
-def _discover_core_webui_tabs(core_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _discover_runtime_webui_tabs(
+    surface_entries: List[Dict[str, Any]],
+    *,
+    runtime: SurfaceRuntimeManager,
+    kind: str,
+    require_desired_running: bool,
+) -> List[Dict[str, Any]]:
     discovered: List[Dict[str, Any]] = []
     seen_labels = set()
 
-    for core in core_entries or []:
-        if not isinstance(core, dict):
+    for entry in surface_entries or []:
+        if not isinstance(entry, dict):
             continue
 
-        key = str(core.get("key") or "").strip()
+        key = str(entry.get("key") or "").strip()
         if not key:
             continue
-        if not _as_bool_flag(core.get("has_webui_tab_renderer"), False):
+        if not _as_bool_flag(entry.get("has_webui_tab_renderer"), False):
             continue
 
-        tab_cfg = core.get("webui_tab") if isinstance(core.get("webui_tab"), dict) else {}
+        tab_cfg = entry.get("webui_tab") if isinstance(entry.get("webui_tab"), dict) else {}
         label = str(tab_cfg.get("label") or "").strip()
         if not label:
             continue
@@ -592,7 +618,7 @@ def _discover_core_webui_tabs(core_entries: List[Dict[str, Any]]) -> List[Dict[s
 
         requires_running = _as_bool_flag(tab_cfg.get("requires_running"), True)
         desired_running = str(redis_client.get(f"{key}_running") or "").strip().lower() == "true"
-        if requires_running and not desired_running:
+        if require_desired_running and requires_running and not desired_running:
             continue
 
         try:
@@ -604,9 +630,11 @@ def _discover_core_webui_tabs(core_entries: List[Dict[str, Any]]) -> List[Dict[s
             {
                 "label": label,
                 "core_key": key,
+                "surface_key": key,
+                "surface_kind": kind,
                 "order": order,
                 "requires_running": requires_running,
-                "running": bool(core_runtime.is_running(key)),
+                "running": bool(runtime.is_running(key)),
             }
         )
         seen_labels.add(label)
@@ -615,13 +643,28 @@ def _discover_core_webui_tabs(core_entries: List[Dict[str, Any]]) -> List[Dict[s
     return discovered
 
 
-def _load_core_htmlui_tab_payload(tab_spec: Dict[str, Any]) -> Dict[str, Any]:
-    key = str((tab_spec or {}).get("core_key") or "").strip()
+def _discover_core_webui_tabs(core_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return _discover_runtime_webui_tabs(
+        core_entries,
+        runtime=core_runtime,
+        kind="core",
+        require_desired_running=True,
+    )
+
+
+def _discover_platform_webui_tabs(platform_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return []
+
+
+def _load_surface_htmlui_tab_payload(tab_spec: Dict[str, Any]) -> Dict[str, Any]:
+    key = str((tab_spec or {}).get("surface_key") or (tab_spec or {}).get("core_key") or "").strip()
     if not key:
-        return {"error": "Missing core key for tab."}
+        return {"error": "Missing surface key for tab."}
+
+    runtime = core_runtime
 
     try:
-        module = core_runtime._import_module(key, reload_module=False)
+        module = runtime._import_module(key, reload_module=False)
     except Exception as exc:
         return {"error": f"Import failed: {exc}"}
 
@@ -680,6 +723,52 @@ def _load_core_htmlui_tab_payload(tab_spec: Dict[str, Any]) -> Dict[str, Any]:
         "ui": ui,
         "updated_at": float(time.time()),
     }
+
+
+def _run_surface_htmlui_tab_action(tab_spec: Dict[str, Any], payload: "CoreTabActionRequest") -> Dict[str, Any]:
+    key = str((tab_spec or {}).get("surface_key") or (tab_spec or {}).get("core_key") or "").strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="Missing surface key.")
+
+    runtime = core_runtime
+    try:
+        module = runtime._import_module(key, reload_module=False)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to load core module: {exc}")
+
+    action_handler = getattr(module, "handle_htmlui_tab_action", None)
+    if not callable(action_handler):
+        raise HTTPException(status_code=404, detail=f"{key} does not expose handle_htmlui_tab_action().")
+
+    action_name = str(payload.action or "").strip()
+    if not action_name:
+        raise HTTPException(status_code=400, detail="Missing action name.")
+
+    try:
+        result = action_handler(
+            action=action_name,
+            payload=payload.payload if isinstance(payload.payload, dict) else {},
+            redis_client=redis_client,
+            core_key=key,
+        )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"HTMLUI action failed: {exc}")
+
+    if result is None:
+        return {"ok": True}
+    if not isinstance(result, dict):
+        return {"ok": True, "result": result}
+    return result
+
+
+def _voice_platform_tab_spec() -> Dict[str, Any]:
+    return esphome_home_module.runtime_tab_spec()
 
 
 def _verba_display_name(verba: Any) -> str:
@@ -1914,6 +2003,48 @@ def _autostart_enabled_surfaces() -> None:
             portal_runtime.start(key)
 
 
+def _run_async_sync(coro: Any, timeout: float = 45.0) -> Any:
+    try:
+        return asyncio.run(asyncio.wait_for(coro, timeout=timeout))
+    except RuntimeError:
+        holder: Dict[str, Any] = {"done": False, "result": None, "error": None}
+
+        def _worker() -> None:
+            worker_loop = asyncio.new_event_loop()
+            try:
+                asyncio.set_event_loop(worker_loop)
+                holder["result"] = worker_loop.run_until_complete(asyncio.wait_for(coro, timeout=timeout))
+            except Exception as exc:
+                holder["error"] = exc
+            finally:
+                with contextlib.suppress(Exception):
+                    worker_loop.close()
+                holder["done"] = True
+
+        thread = threading.Thread(target=_worker, daemon=True)
+        thread.start()
+        thread.join(timeout + 1.0)
+        if not holder.get("done"):
+            raise TimeoutError("Timed out waiting for async operation")
+        if holder.get("error") is not None:
+            raise holder["error"]
+        return holder.get("result")
+
+
+def _start_builtin_esphome() -> None:
+    if esphome_home_module.is_running():
+        return
+    logger.info("[startup] starting built-in ESPHome services")
+    _run_async_sync(esphome_home_module.startup(), timeout=60.0)
+
+
+def _stop_builtin_esphome() -> None:
+    if not esphome_home_module.is_running():
+        return
+    logger.info("[shutdown] stopping built-in ESPHome services")
+    _run_async_sync(esphome_home_module.shutdown(), timeout=30.0)
+
+
 def _restore_progress_logger(label: str):
     prefix = str(label or "restore").strip().lower()
 
@@ -2118,6 +2249,7 @@ def _restore_enabled_surfaces() -> Dict[str, Any]:
         "cores_missing_after": 0,
         "portals_missing_before": 0,
         "portals_missing_after": 0,
+        "builtin_platforms": [],
     }
 
     # 1) Verbas
@@ -2169,6 +2301,7 @@ def _restore_enabled_surfaces() -> Dict[str, Any]:
     # Refresh registries after potential module downloads.
     core_registry_module.refresh_core_registry()
     portal_registry_module.refresh_portal_registry()
+    summary["builtin_platforms"] = ["esphome"]
 
     return summary
 
@@ -2211,6 +2344,7 @@ def _replay_startup_after_redis_configure() -> Dict[str, Any]:
             result["ran_autostart"] = True
         else:
             logger.info("[runtime-autostart] skipped (HTMLUI_AUTOSTART_ENABLED_SURFACES_ON_STARTUP=false)")
+        _start_builtin_esphome()
     except Exception as exc:
         err = str(exc)
         bootstrap_state["restore_error"] = err
@@ -2331,22 +2465,31 @@ def _quiesce_surfaces_for_redis_maintenance(
     late_grace_seconds: float,
 ) -> Dict[str, Any]:
     core_keys = _running_surface_keys(core_runtime)
+    esphome_running = bool(esphome_home_module.is_running())
     portal_keys = _running_surface_keys(portal_runtime)
 
     logger.info(
-        "[%s] pausing runtimes before Redis maintenance (cores=%d portals=%d)",
+        "[%s] pausing runtimes before Redis maintenance (cores=%d esphome=%d portals=%d)",
         action,
         len(core_keys),
+        1 if esphome_running else 0,
         len(portal_keys),
     )
 
-    # Stop portals first to reduce inbound chatter, then cores.
+    # Stop portals first to reduce inbound chatter, then ESPHome, then cores.
     stopped_portals = _stop_surface_keys(
         portal_runtime,
         portal_keys,
         timeout=stop_timeout,
         late_grace_seconds=late_grace_seconds,
     )
+    esphome_failed = False
+    if esphome_running:
+        try:
+            _stop_builtin_esphome()
+        except Exception:
+            logger.exception("[%s] failed stopping built-in ESPHome services", action)
+            esphome_failed = True
     stopped_cores = _stop_surface_keys(
         core_runtime,
         core_keys,
@@ -2358,15 +2501,18 @@ def _quiesce_surfaces_for_redis_maintenance(
     core_late = list(stopped_cores.get("stopped_late") or [])
     if portal_late or core_late:
         logger.info(
-            "[%s] runtimes stopped during grace window (cores=%s portals=%s)",
+            "[%s] runtimes stopped during grace window (cores=%s esphome=%s portals=%s)",
             action,
             ",".join(core_late) if core_late else "-",
+            "stopped" if esphome_running and not esphome_failed else "-",
             ",".join(portal_late) if portal_late else "-",
         )
 
     stop_failures: List[str] = []
     for row in stopped_portals.get("failed") or []:
         stop_failures.append(f"portal:{str(row.get('key') or '').strip()}")
+    if esphome_failed:
+        stop_failures.append("esphome:built_in")
     for row in stopped_cores.get("failed") or []:
         stop_failures.append(f"core:{str(row.get('key') or '').strip()}")
 
@@ -2374,10 +2520,12 @@ def _quiesce_surfaces_for_redis_maintenance(
         "action": action,
         "active_before": {
             "cores": core_keys,
+            "esphome": esphome_running,
             "portals": portal_keys,
         },
         "stopped": {
             "cores": stopped_cores,
+            "esphome": {"requested": ["built_in"] if esphome_running else [], "stopped": ["built_in"] if esphome_running and not esphome_failed else [], "failed": ["built_in"] if esphome_failed else []},
             "portals": stopped_portals,
         },
         "stop_failures": stop_failures,
@@ -2390,14 +2538,26 @@ def _resume_surfaces_after_redis_maintenance(snapshot: Dict[str, Any]) -> Dict[s
         active_before = {}
 
     core_keys = [str(key).strip() for key in (active_before.get("cores") or []) if str(key).strip()]
+    esphome_was_running = bool(active_before.get("esphome"))
     portal_keys = [str(key).strip() for key in (active_before.get("portals") or []) if str(key).strip()]
 
-    # Start cores first, then portals.
+    # Start cores first, then built-in ESPHome services, then portals.
     resumed_cores = _resume_surface_keys(core_runtime, core_keys)
+    esphome_resumed = {"requested": ["built_in"] if esphome_was_running else [], "resumed": [], "already_running": [], "failed": []}
+    if esphome_was_running:
+        try:
+            if esphome_home_module.is_running():
+                esphome_resumed["already_running"].append("built_in")
+            else:
+                _start_builtin_esphome()
+                esphome_resumed["resumed"].append("built_in")
+        except Exception as exc:
+            esphome_resumed["failed"].append({"key": "built_in", "error": str(exc)})
     resumed_portals = _resume_surface_keys(portal_runtime, portal_keys)
 
     return {
         "cores": resumed_cores,
+        "esphome": esphome_resumed,
         "portals": resumed_portals,
     }
 
@@ -2425,6 +2585,13 @@ def _wait_for_surface_failures_to_stop(
                 runtime = core_runtime
             elif sep and kind == "portal":
                 runtime = portal_runtime
+
+            if sep and kind == "esphome":
+                if esphome_home_module.is_running():
+                    still_pending.append(item)
+                else:
+                    resolved.append(item)
+                continue
 
             if runtime is None or not key:
                 still_pending.append(item)
@@ -2608,6 +2775,7 @@ class AppSettingsRequest(BaseModel):
     speech_announcement_tts_voice: Optional[str] = None
     speech_announcement_tts_entity: Optional[str] = None
     speech_tts_public_base_url: Optional[str] = None
+    esphome_settings: Optional[Dict[str, Any]] = None
     emoji_enable_on_reaction_add: Optional[bool] = None
     emoji_enable_auto_reaction_on_reply: Optional[bool] = None
     emoji_reaction_chain_chance_percent: Optional[int] = None
@@ -2689,6 +2857,7 @@ class WebUiAuthLoginRequest(BaseModel):
 
 
 app = FastAPI(title="TaterOS", version="0.2.0")
+esphome_home_module.include_routes(app)
 
 STATIC_DIR = Path(__file__).resolve().parent / "tateros_static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -2734,6 +2903,7 @@ async def _startup_event() -> None:
             _autostart_enabled_surfaces()
         else:
             logger.info("[startup-autostart] skipped (HTMLUI_AUTOSTART_ENABLED_SURFACES_ON_STARTUP=false)")
+        await esphome_home_module.startup()
     except RedisError as exc:
         bootstrap_state["restore_error"] = str(exc)
         logger.warning("Redis unavailable during startup autostart: %s", exc)
@@ -2746,6 +2916,7 @@ async def _startup_event() -> None:
 @app.on_event("shutdown")
 async def _shutdown_event() -> None:
     core_runtime.stop_all()
+    await esphome_home_module.shutdown()
     portal_runtime.stop_all()
     logger.info("TaterOS backend stopped")
 
@@ -3280,6 +3451,7 @@ def health() -> Dict[str, Any]:
         "redis_status": redis_status_payload,
         "verbas_enabled": int(verbas_enabled),
         "cores_running": len([k for k in core_runtime.threads if core_runtime.is_running(k)]),
+        "esphome_running": bool(esphome_home_module.is_running()),
         "portals_running": len([k for k in portal_runtime.threads if portal_runtime.is_running(k)]),
         "hydra_jobs_active": int(hydra_job_counts.get("total") or 0),
         "chat_jobs_active": int(hydra_job_counts.get("total") or 0),  # Backward-compatible key for older clients.
@@ -3595,8 +3767,7 @@ def list_cores() -> Dict[str, Any]:
 
 @app.get("/api/cores/tabs")
 def list_core_tabs() -> Dict[str, Any]:
-    entries = core_registry_module.refresh_core_registry()
-    tabs = _discover_core_webui_tabs(entries)
+    tabs = _discover_core_webui_tabs(core_registry_module.refresh_core_registry())
     dynamic_tabs: List[Dict[str, Any]] = []
 
     for tab in tabs:
@@ -3627,13 +3798,12 @@ def get_core_tab_payload(core_key: str) -> Dict[str, Any]:
     if not key:
         raise HTTPException(status_code=400, detail="Missing core key.")
 
-    entries = core_registry_module.refresh_core_registry()
-    tabs = _discover_core_webui_tabs(entries)
+    tabs = _discover_core_webui_tabs(core_registry_module.refresh_core_registry())
     tab = next((item for item in tabs if str(item.get("core_key") or "").strip() == key), None)
     if not isinstance(tab, dict):
         raise HTTPException(status_code=404, detail=f"Unknown or unavailable core tab: {key}")
 
-    return _load_core_htmlui_tab_payload(tab)
+    return _load_surface_htmlui_tab_payload(tab)
 
 
 @app.post("/api/cores/{core_key}/tab-action")
@@ -3642,30 +3812,40 @@ def run_core_tab_action(core_key: str, payload: CoreTabActionRequest) -> Dict[st
     if not key:
         raise HTTPException(status_code=400, detail="Missing core key.")
 
-    entries = core_registry_module.refresh_core_registry()
-    known = {str(item.get("key") or "").strip() for item in entries}
-    if key not in known:
+    tabs = _discover_core_webui_tabs(core_registry_module.refresh_core_registry())
+    tab = next((item for item in tabs if str(item.get("core_key") or "").strip() == key), None)
+    if not isinstance(tab, dict):
         raise HTTPException(status_code=404, detail=f"Unknown core: {key}")
 
+    return _run_surface_htmlui_tab_action(tab, payload)
+
+
+@app.get("/api/settings/esphome/runtime")
+def get_esphome_runtime_payload() -> Dict[str, Any]:
+    tab = _voice_platform_tab_spec()
+    return {
+        "tab": {
+            "label": str(tab.get("label") or "ESPHome"),
+            "core_key": str(tab.get("core_key") or "esphome"),
+            "surface_kind": str(tab.get("surface_kind") or "esphome"),
+            "running": bool(tab.get("running")),
+        },
+        "payload": esphome_home_module.get_runtime_payload(
+            redis_client=redis_client,
+            core_key=str(tab.get("core_key") or "esphome"),
+            core_tab=tab,
+        ),
+    }
+
+
+@app.post("/api/settings/esphome/runtime/action")
+def run_esphome_runtime_action(payload: CoreTabActionRequest) -> Dict[str, Any]:
     try:
-        module = core_runtime._import_module(key, reload_module=False)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to load core module: {exc}")
-
-    action_handler = getattr(module, "handle_htmlui_tab_action", None)
-    if not callable(action_handler):
-        raise HTTPException(status_code=404, detail=f"{key} does not expose handle_htmlui_tab_action().")
-
-    action_name = str(payload.action or "").strip()
-    if not action_name:
-        raise HTTPException(status_code=400, detail="Missing action name.")
-
-    try:
-        result = action_handler(
-            action=action_name,
+        return esphome_home_module.handle_runtime_action(
+            action=str(payload.action or "").strip(),
             payload=payload.payload if isinstance(payload.payload, dict) else {},
             redis_client=redis_client,
-            core_key=key,
+            core_key="esphome",
         )
     except HTTPException:
         raise
@@ -3674,13 +3854,7 @@ def run_core_tab_action(core_key: str, payload: CoreTabActionRequest) -> Dict[st
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Core tab action failed: {exc}")
-
-    if result is None:
-        return {"ok": True}
-    if not isinstance(result, dict):
-        return {"ok": True, "result": result}
-    return result
+        raise HTTPException(status_code=500, detail=f"ESPHome action failed: {exc}")
 
 
 @app.post("/api/cores/{core_key}/start")
@@ -4679,6 +4853,22 @@ def get_settings() -> Dict[str, Any]:
     )
     speech_settings = get_shared_speech_settings()
     speech_ui = get_speech_ui_payload(speech_settings)
+    esphome_fields = _esphome_settings_fields()
+    esphome_settings_item = esphome_home_module._voice_ui_settings_item_form() if hasattr(esphome_home_module, "_voice_ui_settings_item_form") else {}
+    esphome_sections = (
+        esphome_settings_item.get("sections")
+        if isinstance(esphome_settings_item, dict) and isinstance(esphome_settings_item.get("sections"), list)
+        else []
+    )
+    esphome_ui = {
+        "label": "ESPHome",
+        "description": "Built-in ESPHome device services for Tater. Voice satellites, sensors, and future ESPHome-native devices live here.",
+        "fields": esphome_fields,
+        "sections": esphome_sections,
+        "running": bool(esphome_home_module.is_running()),
+        "runtime_tab_label": "ESPHome",
+        "runtime_tab_hint": "Tater Voice satellites, live entities, rooms, and logs are managed directly in this ESPHome settings area.",
+    }
     homeassistant_tts_options = _fetch_homeassistant_tts_entity_options(
         homeassistant_settings.get("HA_BASE_URL", "http://homeassistant.local:8123"),
         homeassistant_settings.get("HA_TOKEN", ""),
@@ -4779,6 +4969,7 @@ def get_settings() -> Dict[str, Any]:
         "speech_tts_public_base_url": str(speech_settings.get("tts_public_base_url") or ""),
         "speech_ui": speech_ui,
         "announcement_speech_ui": announcement_speech_ui,
+        "esphome_ui": esphome_ui,
         "emoji_enable_on_reaction_add": bool(emoji_settings.get("enable_on_reaction_add", True)),
         "emoji_enable_auto_reaction_on_reply": bool(emoji_settings.get("enable_auto_reaction_on_reply", True)),
         "emoji_reaction_chain_chance_percent": int(emoji_settings.get("reaction_chain_chance_percent", 100)),
@@ -5068,6 +5259,13 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
             ).strip(),
         )
 
+    esphome_result: Dict[str, Any] = {}
+    if "esphome_settings" in updates:
+        raw_esphome_settings = updates.get("esphome_settings")
+        if raw_esphome_settings is not None and not isinstance(raw_esphome_settings, dict):
+            raise HTTPException(status_code=400, detail="esphome_settings must be an object.")
+        esphome_result = _save_esphome_settings_values(dict(raw_esphome_settings or {}))
+
     emoji_keys = {
         "emoji_enable_on_reaction_add",
         "emoji_enable_auto_reaction_on_reply",
@@ -5254,4 +5452,4 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         cleaned = sorted(set(values))
         redis_client.set(ADMIN_GATE_KEY, json.dumps(cleaned))
 
-    return {"ok": True, "updated": sorted(updates.keys())}
+    return {"ok": True, "updated": sorted(updates.keys()), "esphome": esphome_result}
