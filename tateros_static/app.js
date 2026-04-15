@@ -33,6 +33,7 @@ const state = {
   coreTabSpecs: {},
   coreTabPayloadCache: {},
   coreTabLoadPromises: {},
+  esphomeRuntimeLoadPromise: null,
   sidebarCollapsed: String(safeStorageGet("tater_tateros_sidebar_collapsed", "false")).trim().toLowerCase() === "true",
   sidebarCollapseTimer: 0,
   runtimeBreakdownPollTimer: 0,
@@ -4731,6 +4732,515 @@ function renderCoreTabPayload(payload, tabSpec) {
   `;
 }
 
+function _encodeCoreManagerJson(value) {
+  try {
+    return value ? encodeURIComponent(JSON.stringify(value)) : "";
+  } catch (_error) {
+    return "";
+  }
+}
+
+function renderEspHomeRuntimeStats(stats) {
+  const rows = Array.isArray(stats) ? stats : [];
+  if (!rows.length) {
+    return "";
+  }
+  return `
+    <div class="core-metric-row">
+      ${rows
+        .map((entry) => {
+          const label = String(entry?.label || "").trim();
+          const valueText = String(entry?.value ?? "-").trim() || "-";
+          if (!label) {
+            return "";
+          }
+          return `
+            <div class="core-metric-pill">
+              <div class="small">${escapeHtml(label)}</div>
+              <div>${escapeHtml(valueText)}</div>
+            </div>
+          `;
+        })
+        .join("")}
+      <button type="button" class="action-btn core-tab-refresh-btn" data-core-tab-refresh="1">Refresh</button>
+    </div>
+  `;
+}
+
+function renderEspHomeStatsPanel(sections, tables) {
+  const metricSections = Array.isArray(sections) ? sections : [];
+  const dataTables = Array.isArray(tables) ? tables : [];
+  const sectionHtml = metricSections
+    .map((section) => {
+      const title = String(section?.title || "Stats").trim() || "Stats";
+      const metrics = Array.isArray(section?.metrics) ? section.metrics : [];
+      const pills = metrics
+        .map((entry) => {
+          const label = String(entry?.label || "").trim();
+          const valueText = String(entry?.value ?? "-").trim() || "-";
+          if (!label) {
+            return "";
+          }
+          return `
+            <div class="core-metric-pill">
+              <div class="small">${escapeHtml(label)}</div>
+              <div>${escapeHtml(valueText)}</div>
+            </div>
+          `;
+        })
+        .join("");
+      if (!pills) {
+        return "";
+      }
+      return `
+        <section class="core-inline-section">
+          <div class="small core-inline-section-title">${escapeHtml(title)}</div>
+          <div class="core-metric-row">${pills}</div>
+        </section>
+      `;
+    })
+    .join("");
+  const tableHtml = dataTables
+    .map((table) => {
+      const title = String(table?.title || "Table").trim() || "Table";
+      const columns = Array.isArray(table?.columns) ? table.columns : [];
+      const rows = Array.isArray(table?.rows) ? table.rows : [];
+      const emptyMessage = String(table?.empty_message || "No rows.").trim() || "No rows.";
+      return `
+        <section class="core-inline-section">
+          <div class="small core-inline-section-title">${escapeHtml(title)}</div>
+          ${renderSimpleDataTable(columns, rows, emptyMessage)}
+        </section>
+      `;
+    })
+    .join("");
+  if (!sectionHtml && !tableHtml) {
+    return renderNotice("No ESPHome stats yet.");
+  }
+  return `${sectionHtml}${tableHtml}`;
+}
+
+async function runEspHomeRefreshAction() {
+  return api("/api/settings/esphome/runtime/action", {
+    method: "POST",
+    body: JSON.stringify({
+      action: "voice_refresh",
+      payload: {},
+    }),
+  });
+}
+
+function renderEspHomeSummaryRows(summaryRows) {
+  const rows = Array.isArray(summaryRows) ? summaryRows : [];
+  if (!rows.length) {
+    return "";
+  }
+  return `
+    <div class="core-satellite-facts">
+      ${rows
+        .map((row) => {
+          const label = String(row?.label || "").trim();
+          const value = String(row?.value ?? "").trim();
+          if (!label || !value) {
+            return "";
+          }
+          return `
+            <div class="core-satellite-fact">
+              <div class="small core-satellite-fact-label">${escapeHtml(label)}</div>
+              <div class="core-satellite-fact-value">${escapeHtml(value)}</div>
+            </div>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
+function renderEspHomeEntityControl(row, connected = true) {
+  const control = row?.control && typeof row.control === "object" ? row.control : null;
+  if (!control) {
+    return "";
+  }
+  const entityKey = String(row?.key || "").trim();
+  const label = String(row?.label || "").trim() || "Entity";
+  if (!entityKey) {
+    return "";
+  }
+  const disabledAttr = connected ? "" : " disabled";
+  const controlType = String(control.type || "").trim().toLowerCase();
+  const command = String(control.command || "").trim();
+  if (!command) {
+    return "";
+  }
+
+  if (controlType === "toggle" || controlType === "light") {
+    const checked = boolFromAny(control.checked, false) ? " checked" : "";
+    const toggleHtml = `
+      <label class="toggle-row core-satellite-entity-toggle-row">
+        <input
+          type="checkbox"
+          class="toggle-input esphome-entity-toggle"
+          data-esphome-entity-key="${escapeHtml(entityKey)}"
+          data-esphome-entity-command="${escapeHtml(command)}"
+          data-esphome-entity-label="${escapeHtml(label)}"${checked}${disabledAttr}
+        />
+        <span class="small">${boolFromAny(control.checked, false) ? "On" : "Off"}</span>
+      </label>
+    `;
+    const colorEnabled = controlType === "light" && boolFromAny(control.supports_color, false);
+    const colorValue = String(control.color || "#ff9b45").trim() || "#ff9b45";
+    const colorHtml = colorEnabled
+      ? `
+        <label class="core-satellite-entity-color-wrap" title="Set light color">
+          <span class="small">Color</span>
+          <input
+            type="color"
+            class="esphome-entity-color"
+            value="${escapeHtml(colorValue)}"
+            data-esphome-entity-key="${escapeHtml(entityKey)}"
+            data-esphome-entity-command="${escapeHtml(command)}"
+            data-esphome-entity-label="${escapeHtml(label)}"${disabledAttr}
+          />
+        </label>
+      `
+      : "";
+    return `<div class="core-satellite-sensor-controls">${toggleHtml}${colorHtml}</div>`;
+  }
+
+  if (controlType === "button") {
+    return `
+      <div class="core-satellite-sensor-controls">
+        <button
+          type="button"
+          class="inline-btn esphome-entity-button"
+          data-esphome-entity-key="${escapeHtml(entityKey)}"
+          data-esphome-entity-command="${escapeHtml(command)}"
+          data-esphome-entity-label="${escapeHtml(label)}"${disabledAttr}
+        >${escapeHtml(String(control.label || "Run"))}</button>
+      </div>
+    `;
+  }
+
+  if (controlType === "select") {
+    const options = Array.isArray(control.options) ? control.options : [];
+    if (!options.length) {
+      return "";
+    }
+    const currentValue = String(control.value || "").trim();
+    return `
+      <div class="core-satellite-sensor-controls">
+        <select
+          class="esphome-entity-select"
+          data-esphome-entity-key="${escapeHtml(entityKey)}"
+          data-esphome-entity-command="${escapeHtml(command)}"
+          data-esphome-entity-label="${escapeHtml(label)}"${disabledAttr}>
+          ${options
+            .map((option) => {
+              const value = String(option || "").trim();
+              if (!value) {
+                return "";
+              }
+              const selected = value === currentValue ? " selected" : "";
+              return `<option value="${escapeHtml(value)}"${selected}>${escapeHtml(value)}</option>`;
+            })
+            .join("")}
+        </select>
+      </div>
+    `;
+  }
+
+  if (controlType === "number") {
+    const value = String(control.value ?? "").trim();
+    const min = control.min ?? "";
+    const max = control.max ?? "";
+    const step = control.step ?? "";
+    return `
+      <div class="core-satellite-sensor-controls">
+        <div class="core-satellite-inline-set">
+          <input
+            type="number"
+            class="esphome-entity-number"
+            value="${escapeHtml(value)}"
+            ${min !== "" ? `min="${escapeHtml(String(min))}"` : ""}
+            ${max !== "" ? `max="${escapeHtml(String(max))}"` : ""}
+            ${step !== "" ? `step="${escapeHtml(String(step))}"` : ""}
+            data-esphome-entity-key="${escapeHtml(entityKey)}"
+            data-esphome-entity-command="${escapeHtml(command)}"
+            data-esphome-entity-label="${escapeHtml(label)}"${disabledAttr}
+          />
+          <button
+            type="button"
+            class="inline-btn esphome-entity-number-set"
+            data-esphome-entity-key="${escapeHtml(entityKey)}"
+            data-esphome-entity-command="${escapeHtml(command)}"
+            data-esphome-entity-label="${escapeHtml(label)}"${disabledAttr}
+          >Set</button>
+        </div>
+      </div>
+    `;
+  }
+
+  return "";
+}
+
+function renderEspHomeSensorRows(sensorRows, sensorTitle = "Live Entities", connected = true) {
+  const rows = Array.isArray(sensorRows) ? sensorRows : [];
+  if (!rows.length) {
+    return "";
+  }
+  return `
+    <div class="core-satellite-sensors">
+      <div class="small core-satellite-sensors-title">${escapeHtml(String(sensorTitle || "Live Entities"))}</div>
+      <div class="core-satellite-sensor-grid">
+        ${rows
+          .map((row) => {
+            const label = String(row?.label || "").trim();
+            const value = String(row?.value ?? "").trim();
+            const meta = String(row?.meta || row?.kind || "").trim();
+            const controlHtml = renderEspHomeEntityControl(row, connected);
+            if (!label || !value) {
+              return "";
+            }
+            return `
+              <div class="core-satellite-sensor-pill${controlHtml ? " is-controllable" : ""}">
+                <span class="core-satellite-sensor-label">${escapeHtml(label)}</span>
+                <span class="core-satellite-sensor-value">${escapeHtml(value)}</span>
+                ${meta ? `<span class="core-satellite-sensor-meta">${escapeHtml(meta)}</span>` : ""}
+                ${controlHtml}
+              </div>
+            `;
+          })
+          .join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderEspHomeSatelliteCard(item, coreKey = "esphome") {
+  const itemId = String(item?.id || "").trim();
+  const encodedId = escapeHtml(encodeCoreManagerId(itemId));
+  const title = String(item?.title || itemId || "Satellite").trim() || "Satellite";
+  const subtitle = String(item?.subtitle || "").trim();
+  const detail = String(item?.detail || "").trim();
+  const saveAction = String(item?.save_action || "").trim();
+  const removeAction = String(item?.remove_action || "").trim();
+  const runAction = String(item?.run_action || "").trim();
+  const runConfirm = String(item?.run_confirm || "").trim();
+  const removeConfirm = String(item?.remove_confirm || "Forget this satellite?").trim();
+  const popupFields = Array.isArray(item?.popup_fields) ? item.popup_fields : [];
+  const popupFieldsEncoded = _encodeCoreManagerJson(popupFields);
+  const popupConfigEncoded = _encodeCoreManagerJson(item?.popup_config || {});
+  const popupMode = String(item?.popup_mode || "").trim();
+  const popupTitle = String(item?.settings_title || `${title} Live Log`).trim() || `${title} Live Log`;
+  const settingsLabel = String(item?.settings_label || "Live Log").trim() || "Live Log";
+  const fields = Array.isArray(item?.fields) ? item.fields : [];
+  const heroImageSrc = String(item?.hero_image_src || "").trim();
+  const heroImageAlt = String(item?.hero_image_alt || title).trim() || title;
+  const heroBadges = Array.isArray(item?.hero_badges) ? item.hero_badges : [];
+  const summaryRows = Array.isArray(item?.summary_rows) ? item.summary_rows : [];
+  const sensorRows = Array.isArray(item?.sensor_rows) ? item.sensor_rows : [];
+  const sensorTitle = String(item?.sensor_title || "Live Entities").trim() || "Live Entities";
+  const connected = boolFromAny(item?.connected, false);
+
+  const heroBadgesHtml = heroBadges.length
+    ? `
+      <div class="core-satellite-badges">
+        ${heroBadges
+          .map((badge) => {
+            const label = String(badge?.label || "").trim();
+            if (!label) {
+              return "";
+            }
+            const tone = String(badge?.tone || "muted").trim().toLowerCase().replace(/[^a-z0-9_-]/g, "");
+            return `<span class="core-satellite-badge tone-${escapeHtml(tone || "muted")}">${escapeHtml(label)}</span>`;
+          })
+          .join("")}
+      </div>
+    `
+    : "";
+
+  const summaryBlockHtml = `
+    <div class="core-satellite-summary">
+      ${
+        heroImageSrc
+          ? `<div class="core-satellite-image-wrap"><img class="core-satellite-image" src="${escapeHtml(heroImageSrc)}" alt="${escapeHtml(
+              heroImageAlt
+            )}"></div>`
+          : ""
+      }
+      <div class="core-satellite-summary-main">
+        ${subtitle ? `<div class="small core-satellite-subtitle">${escapeHtml(subtitle)}</div>` : ""}
+        ${heroBadgesHtml}
+        ${detail ? `<div class="small core-satellite-detail">${escapeHtml(detail)}</div>` : ""}
+        ${renderEspHomeSummaryRows(summaryRows)}
+        ${renderEspHomeSensorRows(sensorRows, sensorTitle, connected)}
+      </div>
+    </div>
+  `;
+
+  return `
+    <article class="card core-manager-item esphome-satellite-card"
+      data-core-key="${escapeHtml(coreKey)}"
+      data-core-item-id="${encodedId}"
+      data-core-item-group="satellite"
+      data-core-save-action="${escapeHtml(saveAction)}"
+      data-core-remove-action="${escapeHtml(removeAction)}"
+      data-core-run-action="${escapeHtml(runAction)}"
+      data-core-run-confirm="${escapeHtml(runConfirm)}"
+      data-core-remove-confirm="${escapeHtml(removeConfirm)}"
+      data-core-item-popup-fields="${escapeHtml(popupFieldsEncoded)}"
+      data-core-item-popup-mode="${escapeHtml(popupMode)}"
+      data-core-item-popup-config="${escapeHtml(popupConfigEncoded)}"
+      data-core-item-popup-title="${escapeHtml(popupTitle)}">
+      <div class="card-head">
+        <h3 class="card-title">${escapeHtml(title)}</h3>
+        <span class="small">${escapeHtml(coreKey)}</span>
+      </div>
+      ${summaryBlockHtml}
+      ${fields.length ? `<div class="form-grid">${fields.map((field) => renderCoreManagerField(field)).join("")}</div>` : ""}
+      <div class="inline-row" style="margin-top:10px;">
+        ${saveAction ? `<button type="button" class="action-btn core-manager-save">Save</button>` : ""}
+        ${popupFields.length ? `<button type="button" class="action-btn core-manager-settings">${escapeHtml(settingsLabel)}</button>` : ""}
+        ${removeAction ? `<button type="button" class="inline-btn danger core-manager-remove">Forget</button>` : ""}
+        ${runAction ? `<button type="button" class="action-btn core-manager-run" style="margin-left:auto;">${escapeHtml(String(item?.run_label || "Run"))}</button>` : ""}
+        <span class="small core-manager-status"></span>
+      </div>
+    </article>
+  `;
+}
+
+function renderEspHomeSettingsCard(item, coreKey = "esphome") {
+  const title = String(item?.title || "Voice Pipeline Settings").trim() || "Voice Pipeline Settings";
+  const subtitle = String(item?.subtitle || "").trim();
+  const saveAction = String(item?.save_action || "").trim();
+  const sections = Array.isArray(item?.sections) ? item.sections : [];
+  return `
+    <article class="card core-manager-item"
+      data-core-key="${escapeHtml(coreKey)}"
+      data-core-item-id="${escapeHtml(encodeCoreManagerId(String(item?.id || "voice_settings")))}"
+      data-core-item-group="settings"
+      data-core-save-action="${escapeHtml(saveAction)}">
+      <div class="card-head">
+        <h3 class="card-title">${escapeHtml(title)}</h3>
+        <span class="small">${escapeHtml(coreKey)}</span>
+      </div>
+      ${subtitle ? `<div class="small">${escapeHtml(subtitle)}</div>` : ""}
+      ${sections
+        .map((section) => {
+          const sectionLabel = String(section?.label || "Section").trim() || "Section";
+          const fields = Array.isArray(section?.fields) ? section.fields : [];
+          return `
+            <section class="core-inline-section" style="margin-top:12px;">
+              <div class="small core-inline-section-title">${escapeHtml(sectionLabel)}</div>
+              <div class="form-grid">
+                ${fields.map((field) => renderCoreManagerField(field)).join("")}
+              </div>
+            </section>
+          `;
+        })
+        .join("")}
+      <div class="inline-row" style="margin-top:12px;">
+        ${saveAction ? `<button type="button" class="action-btn core-manager-save">${escapeHtml(String(item?.save_label || "Save Settings"))}</button>` : ""}
+        <span class="small core-manager-status"></span>
+      </div>
+    </article>
+  `;
+}
+
+function renderEspHomeActionCard(item, coreKey = "esphome") {
+  const title = String(item?.title || "Action").trim() || "Action";
+  const subtitle = String(item?.subtitle || "").trim();
+  const runAction = String(item?.run_action || "").trim();
+  const runConfirm = String(item?.run_confirm || "").trim();
+  return `
+    <article class="card core-manager-item"
+      data-core-key="${escapeHtml(coreKey)}"
+      data-core-item-id="${escapeHtml(encodeCoreManagerId(String(item?.id || title)))}"
+      data-core-item-group="action"
+      data-core-run-action="${escapeHtml(runAction)}"
+      data-core-run-confirm="${escapeHtml(runConfirm)}">
+      <div class="card-head">
+        <h3 class="card-title">${escapeHtml(title)}</h3>
+        <span class="small">${escapeHtml(coreKey)}</span>
+      </div>
+      ${subtitle ? `<div class="small">${escapeHtml(subtitle)}</div>` : ""}
+      <div class="inline-row" style="margin-top:12px;">
+        ${runAction ? `<button type="button" class="action-btn core-manager-run">${escapeHtml(String(item?.run_label || "Run"))}</button>` : ""}
+        <span class="small core-manager-status"></span>
+      </div>
+    </article>
+  `;
+}
+
+function renderEspHomeAddPanel(addForm, coreKey = "esphome") {
+  const action = String(addForm?.action || "").trim();
+  const submitLabel = String(addForm?.submit_label || "Add Satellite").trim() || "Add Satellite";
+  const fields = Array.isArray(addForm?.fields) ? addForm.fields : [];
+  return `
+    <form class="card core-manager-add-form"
+      data-core-key="${escapeHtml(coreKey)}"
+      data-core-action="${escapeHtml(action)}">
+      <div class="card-head">
+        <h3 class="card-title">Add Satellite</h3>
+        <span class="small">${escapeHtml(coreKey)}</span>
+      </div>
+      <div class="small">Add a satellite manually when mDNS discovery has not found it yet.</div>
+      <div class="form-grid" style="margin-top:12px;">
+        ${fields.map((field) => renderCoreManagerField(field)).join("")}
+      </div>
+      <div class="inline-row" style="margin-top:12px;">
+        <button type="submit" class="action-btn">${escapeHtml(submitLabel)}</button>
+        <span class="small core-manager-status"></span>
+      </div>
+    </form>
+  `;
+}
+
+function renderEspHomeRuntimeHeader({ title = "Tater Voice", summary = "", stats = [], coreKey = "esphome" } = {}) {
+  return `
+    <div class="card esphome-runtime-shell">
+      <div class="card-head">
+        <h3 class="card-title">${escapeHtml(String(title || "Tater Voice"))}</h3>
+        <span class="small">${escapeHtml(String(coreKey || "esphome"))}</span>
+      </div>
+      ${summary ? `<div class="small">${escapeHtml(summary)}</div>` : ""}
+      ${renderEspHomeRuntimeStats(Array.isArray(stats) ? stats : [])}
+    </div>
+  `;
+}
+
+function bindEspHomeSettingsTabs(root = document) {
+  const host =
+    root instanceof HTMLElement
+      ? root.querySelector("#settings-esphome-shell")
+      : document.getElementById("settings-esphome-shell");
+  if (!(host instanceof HTMLElement)) {
+    return;
+  }
+  const buttons = Array.from(host.querySelectorAll(".settings-subtab-btn[data-esphome-tab]"));
+  const panels = Array.from(host.querySelectorAll(".settings-subpanel[data-esphome-panel]"));
+  if (!buttons.length || !panels.length) {
+    return;
+  }
+  const activate = (tabKey) => {
+    buttons.forEach((button) => {
+      button.classList.toggle("active", button.dataset.esphomeTab === tabKey);
+    });
+    panels.forEach((panel) => {
+      panel.classList.toggle("active", panel.dataset.esphomePanel === tabKey);
+    });
+  };
+  buttons.forEach((button) => {
+    if (button.dataset.esphomeTabBound === "1") {
+      return;
+    }
+    button.dataset.esphomeTabBound = "1";
+    button.addEventListener("click", () => activate(String(button.dataset.esphomeTab || "").trim()));
+  });
+  const initial = String(host.dataset.esphomeActiveTab || "satellites").trim() || "satellites";
+  activate(initial);
+}
+
 function renderCoreTabPending(tabSpec, message = "Open this tab to load data.") {
   const safeTabLabel = escapeHtml(tabSpec?.label || tabSpec?.core_key || "Core");
   const safeCoreKey = escapeHtml(tabSpec?.core_key || "");
@@ -5261,6 +5771,134 @@ async function runCoreTabAction(coreKey, action, payload = {}) {
   });
 }
 
+function resolveCoreActionEndpoint(node, coreKey = "") {
+  const host = node && typeof node.closest === "function" ? node.closest("[data-core-action-endpoint]") : null;
+  const endpoint = String(host?.dataset?.coreActionEndpoint || "").trim();
+  if (endpoint) {
+    return endpoint;
+  }
+  const key = String(coreKey || host?.dataset?.coreKey || "").trim();
+  if (!key) {
+    throw new Error("Missing core key.");
+  }
+  return `/api/cores/${encodeURIComponent(key)}/tab-action`;
+}
+
+async function runCoreManagerAction(node, coreKey, action, payload = {}) {
+  const endpoint = resolveCoreActionEndpoint(node, coreKey);
+  return api(endpoint, {
+    method: "POST",
+    body: JSON.stringify({
+      action,
+      payload,
+    }),
+  });
+}
+
+function resolveCoreRefreshScope(node) {
+  const host = node && typeof node.closest === "function" ? node.closest("[data-core-refresh-scope]") : null;
+  return String(host?.dataset?.coreRefreshScope || "").trim();
+}
+
+async function fetchEspHomeRuntimePayload() {
+  return api("/api/settings/esphome/runtime");
+}
+
+async function ensureEspHomeRuntimeLoaded({ force = false } = {}) {
+  const shell = document.getElementById("settings-esphome-shell");
+  const head = document.getElementById("settings-esphome-runtime-head");
+  const satellitesHost = document.getElementById("settings-esphome-runtime-satellites");
+  const addHost = document.getElementById("settings-esphome-runtime-add");
+  const statsHost = document.getElementById("settings-esphome-runtime-stats");
+  if (
+    !(shell instanceof HTMLElement) ||
+    !(head instanceof HTMLElement) ||
+    !(satellitesHost instanceof HTMLElement) ||
+    !(addHost instanceof HTMLElement)
+  ) {
+    return;
+  }
+  const alreadyLoaded = String(shell.dataset.runtimeLoaded || "").trim() === "1";
+  if (!force && alreadyLoaded) {
+    return;
+  }
+  if (!force && state.esphomeRuntimeLoadPromise) {
+    return state.esphomeRuntimeLoadPromise;
+  }
+
+  shell.dataset.coreActionEndpoint = "/api/settings/esphome/runtime/action";
+  shell.dataset.coreRefreshScope = "esphome-runtime";
+  shell.dataset.coreKey = "esphome";
+  shell.dataset.runtimeLoaded = "loading";
+  head.innerHTML = renderNotice(force ? "Refreshing ESPHome runtime..." : "Loading ESPHome runtime...");
+  satellitesHost.innerHTML = renderNotice("Loading satellites...");
+  addHost.innerHTML = renderNotice("Loading add form...");
+  if (statsHost instanceof HTMLElement) {
+    statsHost.innerHTML = renderNotice("Loading stats...");
+  }
+
+  const request = fetchEspHomeRuntimePayload()
+    .then((result) => {
+      const tabSpec =
+        result?.tab && typeof result.tab === "object"
+          ? result.tab
+          : { core_key: "esphome", label: "ESPHome", surface_kind: "esphome" };
+      const payload = result?.payload && typeof result.payload === "object" ? result.payload : result;
+      const body = payload && typeof payload === "object" ? payload : {};
+      const ui = body?.ui && typeof body.ui === "object" ? body.ui : {};
+      const itemForms = Array.isArray(ui?.item_forms) ? ui.item_forms : [];
+      const satelliteItems = itemForms.filter((item) => String(item?.group || "").trim().toLowerCase() === "satellite");
+      const addForm = ui?.add_form && typeof ui.add_form === "object" ? ui.add_form : {};
+      const summary = String(body.summary || "").trim();
+      const headerStats = Array.isArray(body.header_stats) ? body.header_stats : [];
+      const statsSections = Array.isArray(body.stats_sections) ? body.stats_sections : [];
+      const statsTables = Array.isArray(body.stats_tables) ? body.stats_tables : [];
+      const emptyMessage = String(body.empty_message || "No satellites discovered yet.").trim();
+      const coreKey = String(tabSpec?.core_key || "esphome").trim() || "esphome";
+
+      head.innerHTML = renderEspHomeRuntimeHeader({
+        title: String(ui?.title || tabSpec?.label || "Tater Voice"),
+        summary,
+        stats: headerStats,
+        coreKey,
+      });
+      satellitesHost.innerHTML = satelliteItems.length
+        ? `<div class="core-tab-items core-tab-items-group-satellite">${satelliteItems
+            .map((item) => renderEspHomeSatelliteCard(item, coreKey))
+            .join("")}</div>`
+        : renderNotice(emptyMessage);
+      addHost.innerHTML = renderEspHomeAddPanel(addForm, coreKey);
+      if (statsHost instanceof HTMLElement) {
+        statsHost.innerHTML = renderEspHomeStatsPanel(statsSections, statsTables);
+      }
+      shell.dataset.runtimeLoaded = "1";
+      bindCoreTabManagers();
+    })
+    .catch((error) => {
+      const message = error instanceof Error ? error.message : String(error || "Failed to load ESPHome runtime.");
+      head.innerHTML = renderNotice(message);
+      satellitesHost.innerHTML = renderNotice(message);
+      addHost.innerHTML = renderNotice(message);
+      if (statsHost instanceof HTMLElement) {
+        statsHost.innerHTML = renderNotice(message);
+      }
+      shell.dataset.runtimeLoaded = "error";
+    })
+    .finally(() => {
+      if (state.esphomeRuntimeLoadPromise === request) {
+        state.esphomeRuntimeLoadPromise = null;
+      }
+    });
+
+  state.esphomeRuntimeLoadPromise = request;
+  return request;
+}
+
+async function refreshEspHomeRuntimeInPlace() {
+  await runEspHomeRefreshAction();
+  await ensureEspHomeRuntimeLoaded({ force: true });
+}
+
 function getCoreTabSpec(tabName = "") {
   const key = String(tabName || "").trim();
   if (!key) {
@@ -5353,6 +5991,220 @@ async function refreshCoreTabInPlace(tabName = "") {
   }
 }
 
+async function refreshCoreManagerInPlace(node, fallbackTab = "") {
+  const scope = resolveCoreRefreshScope(node);
+  if (scope === "esphome-runtime") {
+    await refreshEspHomeRuntimeInPlace();
+    return "esphome-runtime";
+  }
+  const targetTab = String(fallbackTab || persistCoreTabFromNode(node) || "").trim();
+  await refreshCoreTabInPlace(targetTab);
+  return targetTab || getActiveCoreTopTab() || "manage";
+}
+
+function updateEspHomeSatelliteSensorRows(card, entityRows) {
+  if (!(card instanceof HTMLElement)) {
+    return;
+  }
+  const summaryMain = card.querySelector(".core-satellite-summary-main");
+  if (!(summaryMain instanceof HTMLElement)) {
+    return;
+  }
+  const rows = Array.isArray(entityRows) ? entityRows : [];
+  const title = rows.length ? "Live Entities" : "No Entities";
+  const html = renderEspHomeSensorRows(rows, title, true);
+  const current = summaryMain.querySelector(".core-satellite-sensors");
+  if (html) {
+    if (current instanceof HTMLElement) {
+      current.outerHTML = html;
+    } else {
+      summaryMain.insertAdjacentHTML("beforeend", html);
+    }
+  } else if (current instanceof HTMLElement) {
+    current.remove();
+  }
+  bindEspHomeEntityControls(card);
+}
+
+function bindEspHomeEntityControls(root = document) {
+  const executeEntityAction = async (controlEl, payload, { revert } = {}) => {
+    const card = controlEl?.closest?.(".esphome-satellite-card");
+    const coreKey = String(card?.dataset?.coreKey || "esphome").trim();
+    const selector = decodeCoreManagerId(card?.dataset?.coreItemId || "");
+    if (!(card instanceof HTMLElement) || !coreKey || !selector) {
+      throw new Error("Missing satellite context.");
+    }
+    const result = await runCoreManagerAction(card, coreKey, "voice_entity_command", {
+      id: selector,
+      selector,
+      ...payload,
+    });
+    updateEspHomeSatelliteSensorRows(card, result?.entity_rows);
+    setCoreManagerStatus(card, String(result?.message || "Updated."));
+    return result;
+  };
+
+  root.querySelectorAll(".esphome-entity-toggle").forEach((input) => {
+    if (!(input instanceof HTMLInputElement) || input.dataset.esphomeBound === "1") {
+      return;
+    }
+    input.dataset.esphomeBound = "1";
+    input.addEventListener("change", async () => {
+      const previous = !input.checked;
+      input.disabled = true;
+      try {
+        await executeEntityAction(input, {
+          entity_key: String(input.dataset.esphomeEntityKey || "").trim(),
+          command: String(input.dataset.esphomeEntityCommand || "").trim(),
+          value: input.checked,
+          entity_label: String(input.dataset.esphomeEntityLabel || "").trim(),
+        });
+      } catch (error) {
+        input.checked = previous;
+        const message = String(error?.message || "Failed to update entity.");
+        setCoreManagerStatus(input.closest(".esphome-satellite-card"), `Failed: ${message}`);
+        showToast(`Failed: ${message}`, "error", 3200);
+      } finally {
+        if (document.body.contains(input)) {
+          input.disabled = false;
+        }
+      }
+    });
+  });
+
+  root.querySelectorAll(".esphome-entity-color").forEach((input) => {
+    if (!(input instanceof HTMLInputElement) || input.dataset.esphomeBound === "1") {
+      return;
+    }
+    input.dataset.esphomeBound = "1";
+    input.dataset.esphomeLastValue = input.value;
+    input.addEventListener("change", async () => {
+      const previous = String(input.dataset.esphomeLastValue || input.value || "#ff9b45").trim() || "#ff9b45";
+      input.disabled = true;
+      try {
+        await executeEntityAction(input, {
+          entity_key: String(input.dataset.esphomeEntityKey || "").trim(),
+          command: String(input.dataset.esphomeEntityCommand || "").trim(),
+          value: true,
+          state: true,
+          color: input.value,
+          entity_label: String(input.dataset.esphomeEntityLabel || "").trim(),
+        });
+      } catch (error) {
+        input.value = previous;
+        const message = String(error?.message || "Failed to update light color.");
+        setCoreManagerStatus(input.closest(".esphome-satellite-card"), `Failed: ${message}`);
+        showToast(`Failed: ${message}`, "error", 3200);
+      } finally {
+        input.dataset.esphomeLastValue = input.value;
+        if (document.body.contains(input)) {
+          input.disabled = false;
+        }
+      }
+    });
+  });
+
+  root.querySelectorAll(".esphome-entity-button").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement) || button.dataset.esphomeBound === "1") {
+      return;
+    }
+    button.dataset.esphomeBound = "1";
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      try {
+        await executeEntityAction(button, {
+          entity_key: String(button.dataset.esphomeEntityKey || "").trim(),
+          command: String(button.dataset.esphomeEntityCommand || "").trim(),
+          entity_label: String(button.dataset.esphomeEntityLabel || "").trim(),
+        });
+      } catch (error) {
+        const message = String(error?.message || "Failed to run entity action.");
+        setCoreManagerStatus(button.closest(".esphome-satellite-card"), `Failed: ${message}`);
+        showToast(`Failed: ${message}`, "error", 3200);
+      } finally {
+        if (document.body.contains(button)) {
+          button.disabled = false;
+        }
+      }
+    });
+  });
+
+  root.querySelectorAll(".esphome-entity-select").forEach((select) => {
+    if (!(select instanceof HTMLSelectElement) || select.dataset.esphomeBound === "1") {
+      return;
+    }
+    select.dataset.esphomeBound = "1";
+    select.dataset.esphomeLastValue = select.value;
+    select.addEventListener("change", async () => {
+      const previous = String(select.dataset.esphomeLastValue || "").trim();
+      select.disabled = true;
+      try {
+        await executeEntityAction(select, {
+          entity_key: String(select.dataset.esphomeEntityKey || "").trim(),
+          command: String(select.dataset.esphomeEntityCommand || "").trim(),
+          value: select.value,
+          entity_label: String(select.dataset.esphomeEntityLabel || "").trim(),
+        });
+      } catch (error) {
+        select.value = previous;
+        const message = String(error?.message || "Failed to update entity.");
+        setCoreManagerStatus(select.closest(".esphome-satellite-card"), `Failed: ${message}`);
+        showToast(`Failed: ${message}`, "error", 3200);
+      } finally {
+        select.dataset.esphomeLastValue = select.value;
+        if (document.body.contains(select)) {
+          select.disabled = false;
+        }
+      }
+    });
+  });
+
+  root.querySelectorAll(".esphome-entity-number-set").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement) || button.dataset.esphomeBound === "1") {
+      return;
+    }
+    button.dataset.esphomeBound = "1";
+    button.addEventListener("click", async () => {
+      const wrap = button.closest(".core-satellite-inline-set");
+      const input = wrap?.querySelector?.(".esphome-entity-number");
+      if (!(input instanceof HTMLInputElement)) {
+        return;
+      }
+      const previous = input.dataset.esphomeLastValue || input.value;
+      button.disabled = true;
+      input.disabled = true;
+      try {
+        await executeEntityAction(button, {
+          entity_key: String(button.dataset.esphomeEntityKey || "").trim(),
+          command: String(button.dataset.esphomeEntityCommand || "").trim(),
+          value: input.value,
+          entity_label: String(button.dataset.esphomeEntityLabel || "").trim(),
+        });
+      } catch (error) {
+        input.value = String(previous || "");
+        const message = String(error?.message || "Failed to update entity.");
+        setCoreManagerStatus(button.closest(".esphome-satellite-card"), `Failed: ${message}`);
+        showToast(`Failed: ${message}`, "error", 3200);
+      } finally {
+        input.dataset.esphomeLastValue = input.value;
+        if (document.body.contains(button)) {
+          button.disabled = false;
+        }
+        if (document.body.contains(input)) {
+          input.disabled = false;
+        }
+      }
+    });
+  });
+
+  root.querySelectorAll(".esphome-entity-number").forEach((input) => {
+    if (!(input instanceof HTMLInputElement)) {
+      return;
+    }
+    input.dataset.esphomeLastValue = input.value;
+  });
+}
+
 function bindCoreTabManagers() {
   bindCoreManagerTabs();
   bindCoreManagerSubtabs();
@@ -5360,6 +6212,7 @@ function bindCoreTabManagers() {
   bindCoreManagerPagination();
   bindCoreManagerConditionalFields();
   bindCoreManagerDependentSelects();
+  bindEspHomeEntityControls();
   document.querySelectorAll(".core-tab-refresh-btn[data-core-tab-refresh]").forEach((button) => {
     if (!(button instanceof HTMLButtonElement)) {
       return;
@@ -5369,15 +6222,20 @@ function bindCoreTabManagers() {
     }
     button.dataset.coreTabRefreshBound = "1";
     button.addEventListener("click", async () => {
+      const refreshScope = resolveCoreRefreshScope(button);
       const targetTab = String(getActiveCoreTopTab() || "").trim();
-      if (!targetTab || targetTab === "manage" || button.disabled) {
+      if ((!refreshScope && (!targetTab || targetTab === "manage")) || button.disabled) {
         return;
       }
       const originalText = String(button.textContent || "Refresh");
       button.disabled = true;
       button.textContent = "Refreshing...";
       try {
-        await refreshCoreTabInPlace(targetTab);
+        if (refreshScope === "esphome-runtime") {
+          await refreshEspHomeRuntimeInPlace();
+        } else {
+          await refreshCoreTabInPlace(targetTab);
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error || "Refresh failed");
         state.notice = `Refresh failed: ${message}`;
@@ -5411,8 +6269,8 @@ function bindCoreTabManagers() {
       try {
         const activeTab = persistCoreTabFromNode(form);
         const values = collectCoreManagerValues(form);
-        await runCoreTabAction(coreKey, action, { ...values, values });
-        await refreshCoreTabInPlace(activeTab);
+        await runCoreManagerAction(form, coreKey, action, { ...values, values });
+        await refreshCoreManagerInPlace(form, activeTab);
       } catch (error) {
         setCoreManagerStatus(form, `Failed: ${error.message}`);
       } finally {
@@ -5578,7 +6436,7 @@ function bindCoreTabManagers() {
         pollTimer = 0;
       }
       try {
-        await runCoreTabAction(coreKey, "voice_logs_stop", { id: selector, selector });
+        await runCoreManagerAction(card, coreKey, "voice_logs_stop", { id: selector, selector });
       } catch (_error) {
         // Ignore cleanup failures while closing the log viewer.
       }
@@ -5593,7 +6451,7 @@ function bindCoreTabManagers() {
           return;
         }
         try {
-          const result = await runCoreTabAction(coreKey, "voice_logs_poll", {
+          const result = await runCoreManagerAction(card, coreKey, "voice_logs_poll", {
             id: selector,
             selector,
             after_seq: cursor,
@@ -5651,7 +6509,7 @@ function bindCoreTabManagers() {
           statusNode.classList.add("voice-log-status");
         }
         try {
-          const result = await runCoreTabAction(coreKey, "voice_logs_start", { id: selector, selector });
+          const result = await runCoreManagerAction(card, coreKey, "voice_logs_start", { id: selector, selector });
           const entries = Array.isArray(result?.entries) ? result.entries : [];
           cursor = Number(result?.cursor || 0);
           renderEntries(entries, true);
@@ -5709,9 +6567,9 @@ function bindCoreTabManagers() {
             successText: "Saved.",
             errorPrefix: "Core manager save failed",
           },
-          () => runCoreTabAction(coreKey, action, { ...values, values })
+          () => runCoreManagerAction(form, coreKey, action, { ...values, values })
         );
-        await refreshCoreTabInPlace(activeTab);
+        await refreshCoreManagerInPlace(form, activeTab);
         state.notice = String(result?.message || "Saved.");
         setCoreManagerStatus(form, state.notice);
         showToast(state.notice);
@@ -5763,9 +6621,9 @@ function bindCoreTabManagers() {
                   successText: "Saved.",
                   errorPrefix: "Core manager save failed",
                 },
-                () => runCoreTabAction(coreKey, action, { id: itemId, values })
+                () => runCoreManagerAction(card, coreKey, action, { id: itemId, values })
               );
-              await refreshCoreTabInPlace(activeTab);
+              await refreshCoreManagerInPlace(card, activeTab);
               state.notice = String(result?.message || "Saved.");
               return result;
             }
@@ -5799,9 +6657,9 @@ function bindCoreTabManagers() {
             successText: "Saved.",
             errorPrefix: "Core manager save failed",
           },
-          () => runCoreTabAction(coreKey, action, { id: itemId, values })
+          () => runCoreManagerAction(card, coreKey, action, { id: itemId, values })
         );
-        await refreshCoreTabInPlace(activeTab);
+        await refreshCoreManagerInPlace(card, activeTab);
         state.notice = String(result?.message || "Saved.");
         setCoreManagerStatus(card, state.notice);
         showToast(state.notice);
@@ -5840,9 +6698,9 @@ function bindCoreTabManagers() {
             successText: "Removed.",
             errorPrefix: "Core manager remove failed",
           },
-          () => runCoreTabAction(coreKey, action, { id: itemId })
+          () => runCoreManagerAction(card, coreKey, action, { id: itemId })
         );
-        await refreshCoreTabInPlace(activeTab);
+        await refreshCoreManagerInPlace(card, activeTab);
         state.notice = String(result?.message || "Removed.");
         setCoreManagerStatus(card, state.notice);
         showToast(state.notice);
@@ -5882,7 +6740,7 @@ function bindCoreTabManagers() {
             successText: "Queued.",
             errorPrefix: "Core manager run failed",
           },
-          () => runCoreTabAction(coreKey, action, { id: itemId, values })
+          () => runCoreManagerAction(card, coreKey, action, { id: itemId, values })
         );
         const sampleUrl = String(result?.sample_url || "").trim();
         if (sampleUrl) {
@@ -5893,7 +6751,7 @@ function bindCoreTabManagers() {
             showToast(`Sample ready but playback failed: ${playError.message}`, "error", 3600);
           }
         }
-        await refreshCoreTabInPlace(activeTab);
+        await refreshCoreManagerInPlace(card, activeTab);
         state.notice = String(result?.message || "Queued.");
         setCoreManagerStatus(card, state.notice);
         showToast(state.notice);
@@ -6227,7 +7085,7 @@ async function loadChatView() {
           <div class="chat-composer-bar">
             <input id="chat-files" class="chat-file-input" type="file" multiple />
             <label for="chat-files" class="chat-composer-btn chat-composer-attach" title="Attach files" aria-label="Attach files">
-              <span class="chat-composer-icon" aria-hidden="true">📎</span>
+              <span class="chat-composer-icon chat-composer-plus" aria-hidden="true">+</span>
             </label>
             <textarea
               id="chat-input"
@@ -6235,21 +7093,22 @@ async function loadChatView() {
               rows="1"
               placeholder="${escapeHtml(`Message ${getTaterFullName()}...`)}"
             ></textarea>
-            <button
-              type="button"
-              id="clear-chat-files"
-              class="chat-composer-btn chat-composer-clear"
-              style="display:none;"
-              title="Clear attached files"
-              aria-label="Clear attached files"
-            >
-              <span class="chat-composer-icon chat-composer-clear-plus" aria-hidden="true">＋</span>
-            </button>
             <button type="button" id="send-chat" class="chat-composer-send" title="Send message" aria-label="Send message">
               <span class="chat-composer-icon chat-composer-send-arrow" aria-hidden="true">➤</span>
             </button>
           </div>
-          <div id="chat-files-meta" class="small chat-files-meta" style="display:none;"></div>
+          <div id="chat-files-row" class="chat-files-row" style="display:none;">
+            <div id="chat-files-meta" class="small chat-files-meta"></div>
+            <button
+              type="button"
+              id="clear-chat-files"
+              class="chat-files-clear-btn"
+              title="Clear attached files"
+              aria-label="Clear attached files"
+            >
+              Clear
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -6259,6 +7118,7 @@ async function loadChatView() {
   const speedStatsEl = document.getElementById("chat-speed-stats");
   const status = document.getElementById("chat-status");
   const chatFilesEl = document.getElementById("chat-files");
+  const chatFilesRowEl = document.getElementById("chat-files-row");
   const chatFilesMetaEl = document.getElementById("chat-files-meta");
   const clearChatFilesBtn = document.getElementById("clear-chat-files");
   let pendingFiles = [];
@@ -6320,9 +7180,8 @@ async function loadChatView() {
     }
     if (!pendingFiles.length) {
       chatFilesMetaEl.textContent = "";
-      chatFilesMetaEl.style.display = "none";
-      if (clearChatFilesBtn) {
-        clearChatFilesBtn.style.display = "none";
+      if (chatFilesRowEl) {
+        chatFilesRowEl.style.display = "none";
       }
       return;
     }
@@ -6331,10 +7190,9 @@ async function loadChatView() {
       .map((file) => String(file?.name || "").trim())
       .filter(Boolean);
     const extra = pendingFiles.length > names.length ? ` +${pendingFiles.length - names.length} more` : "";
-    chatFilesMetaEl.textContent = `${pendingFiles.length} file(s): ${names.join(", ")}${extra}`;
-    chatFilesMetaEl.style.display = "block";
-    if (clearChatFilesBtn) {
-      clearChatFilesBtn.style.display = "inline-flex";
+    chatFilesMetaEl.textContent = `${pendingFiles.length} file${pendingFiles.length === 1 ? "" : "s"} attached: ${names.join(", ")}${extra}`;
+    if (chatFilesRowEl) {
+      chatFilesRowEl.style.display = "flex";
     }
   };
 
@@ -7238,112 +8096,148 @@ async function loadSettingsView() {
   const initialAnnouncementTtsVoiceOptions = Array.isArray(announcementTtsVoiceOptionsByModel[currentAnnouncementTtsModel])
     ? announcementTtsVoiceOptionsByModel[currentAnnouncementTtsModel]
     : [];
+  const esphomeUi = settings?.esphome_ui && typeof settings.esphome_ui === "object" ? settings.esphome_ui : {};
+  const esphomeFields = Array.isArray(esphomeUi.fields) ? esphomeUi.fields : [];
+  const esphomeFieldsHtml = esphomeFields.length
+    ? esphomeFields.map((field) => renderCoreManagerField(field)).join("")
+    : renderNotice("ESPHome settings are unavailable right now.");
+  const esphomeSections = Array.isArray(esphomeUi.sections) ? esphomeUi.sections : [];
+  const esphomeExperimentalSection = esphomeSections.find(
+    (section) => String(section?.label || "").trim().toLowerCase() === "experimental"
+  ) || null;
+  const esphomeExperimentalFields = Array.isArray(esphomeExperimentalSection?.fields) ? esphomeExperimentalSection.fields : [];
+  const esphomeExperimentalFieldsHtml = esphomeExperimentalFields.length
+    ? esphomeExperimentalFields.map((field) => renderCoreManagerField(field)).join("")
+    : "";
+  const esphomePipelineSections = esphomeSections.filter(
+    (section) => String(section?.label || "").trim().toLowerCase() !== "experimental"
+  );
+  const esphomePipelineFields = esphomePipelineSections.flatMap((section) =>
+    Array.isArray(section?.fields) ? section.fields : []
+  );
+  const esphomePipelineFieldsHtml = esphomePipelineFields.length
+    ? esphomePipelineFields.map((field) => renderCoreManagerField(field)).join("")
+    : esphomeFieldsHtml;
+  const esphomeRunning = boolFromAny(esphomeUi.running, false);
 
   root.innerHTML = `${consumeNoticeHtml()}
     <div class="card">
       <div class="card-head">
         <h3 class="card-title">Settings</h3>
       </div>
-      <div class="small">Categories: General, Hydra, Integrations, Emoji, Compotato, Redis, Advanced.</div>
+      <div class="small">Categories: General, Models, Hydra, Integrations, ESPHome, Redis, Misc, Advanced.</div>
       <div id="settings-status" class="small" style="margin-top: 6px;"></div>
 
       <div class="settings-tabs">
         <button type="button" class="settings-tab-btn active" data-settings-tab="general">General</button>
+        <button type="button" class="settings-tab-btn" data-settings-tab="models">Models</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="hydra">Hydra</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="integrations">Integrations</button>
-        <button type="button" class="settings-tab-btn" data-settings-tab="emoji">Emoji</button>
-        <button type="button" class="settings-tab-btn" data-settings-tab="compozr">Compotato</button>
+        <button type="button" class="settings-tab-btn" data-settings-tab="esphome">ESPHome</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="redis">Redis</button>
+        <button type="button" class="settings-tab-btn" data-settings-tab="misc">Misc</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="advanced">Advanced</button>
       </div>
 
       <form id="settings-form">
         <section class="settings-tab-panel active" data-settings-panel="general">
-          <div class="form-grid two-col">
-            <label>WebUI Username
-              <input id="set_username" type="text" value="${escapeHtml(settings.username || "User")}" />
-            </label>
-            <label>Show tokens/sec stats
-              ${renderToggleRow(`<input id="set_show_speed_stats" class="toggle-input" type="checkbox" ${settings.show_speed_stats ? "checked" : ""} />`)}
-            </label>
-            <label>Tater First Name
-              <input id="set_tater_first_name" type="text" value="${escapeHtml(settings.tater_first_name || "Tater")}" />
-            </label>
-            <label>Tater Last Name
-              <input id="set_tater_last_name" type="text" value="${escapeHtml(settings.tater_last_name || "Totterson")}" />
-            </label>
-            <label style="grid-column: 1 / -1;">Personality / Style
-              <textarea id="set_tater_personality">${escapeHtml(settings.tater_personality || "")}</textarea>
-            </label>
+          <div class="form-grid">
+            <section class="core-inline-section">
+              <div class="small core-inline-section-title">General</div>
+              <div class="form-grid two-col">
+                <label>WebUI Username
+                  <input id="set_username" type="text" value="${escapeHtml(settings.username || "User")}" />
+                </label>
+                <label>Show tokens/sec stats
+                  ${renderToggleRow(`<input id="set_show_speed_stats" class="toggle-input" type="checkbox" ${settings.show_speed_stats ? "checked" : ""} />`)}
+                </label>
+                <label>Tater First Name
+                  <input id="set_tater_first_name" type="text" value="${escapeHtml(settings.tater_first_name || "Tater")}" />
+                </label>
+                <label>Tater Last Name
+                  <input id="set_tater_last_name" type="text" value="${escapeHtml(settings.tater_last_name || "Totterson")}" />
+                </label>
+                <label style="grid-column: 1 / -1;">Personality / Style
+                  <textarea id="set_tater_personality">${escapeHtml(settings.tater_personality || "")}</textarea>
+                </label>
+              </div>
+            </section>
 
-            <div class="settings-section-title">WebUI Login</div>
-            <label>WebUI Password
-              <input
-                id="set_webui_password"
-                type="password"
-                autocomplete="new-password"
-                placeholder="Leave blank to keep current password"
-              />
-            </label>
-            <label>Repeat WebUI Password
-              <input
-                id="set_webui_password_confirm"
-                type="password"
-                autocomplete="new-password"
-                placeholder="Repeat new password"
-              />
-            </label>
-            <div class="inline-row" style="grid-column: 1 / -1;">
-              <button
-                type="button"
-                id="settings-webui-password-clear"
-                class="inline-btn danger"
-                ${webuiPasswordIsSet ? "" : "disabled"}
-              >
-                Remove WebUI Password
-              </button>
-              <span id="settings-webui-password-status" class="small">${
-                webuiPasswordIsSet
-                  ? "WebUI password is enabled. Login is required."
-                  : "No WebUI password set. Login is not required."
-              }</span>
-            </div>
-
-            <div class="settings-section-title">Chat Avatars</div>
-            <div class="settings-avatar-grid" style="grid-column: 1 / -1;">
-              <div class="settings-avatar-card">
-                <div class="small">WebUI User Avatar</div>
-                ${
-                  settings.user_avatar
-                    ? `<img id="set_user_avatar_preview" class="settings-avatar-preview" src="${escapeHtml(
-                        settings.user_avatar
-                      )}" alt="User avatar preview" />`
-                    : `<div id="set_user_avatar_preview" class="settings-avatar-preview fallback">${escapeHtml(
-                        _avatarInitial(settings.username || "User", "U")
-                      )}</div>`
-                }
-                <div class="settings-avatar-controls">
-                  <input id="set_user_avatar_file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" />
-                  <button type="button" id="set_user_avatar_clear" class="inline-btn danger">Clear User Avatar</button>
+            <section class="core-inline-section">
+              <div class="small core-inline-section-title">WebUI Login</div>
+              <div class="form-grid two-col">
+                <label>WebUI Password
+                  <input
+                    id="set_webui_password"
+                    type="password"
+                    autocomplete="new-password"
+                    placeholder="Leave blank to keep current password"
+                  />
+                </label>
+                <label>Repeat WebUI Password
+                  <input
+                    id="set_webui_password_confirm"
+                    type="password"
+                    autocomplete="new-password"
+                    placeholder="Repeat new password"
+                  />
+                </label>
+                <div class="inline-row" style="grid-column: 1 / -1;">
+                  <button
+                    type="button"
+                    id="settings-webui-password-clear"
+                    class="inline-btn danger"
+                    ${webuiPasswordIsSet ? "" : "disabled"}
+                  >
+                    Remove WebUI Password
+                  </button>
+                  <span id="settings-webui-password-status" class="small">${
+                    webuiPasswordIsSet
+                      ? "WebUI password is enabled. Login is required."
+                      : "No WebUI password set. Login is not required."
+                  }</span>
                 </div>
               </div>
-              <div class="settings-avatar-card">
-                <div class="small">Tater Avatar</div>
-                ${
-                  settings.tater_avatar
-                    ? `<img id="set_tater_avatar_preview" class="settings-avatar-preview" src="${escapeHtml(
-                        settings.tater_avatar
-                      )}" alt="Tater avatar preview" />`
-                    : `<div id="set_tater_avatar_preview" class="settings-avatar-preview fallback">${escapeHtml(
-                        _avatarInitial(settings.tater_first_name || "Tater", "T")
-                      )}</div>`
-                }
-                <div class="settings-avatar-controls">
-                  <input id="set_tater_avatar_file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" />
-                  <button type="button" id="set_tater_avatar_clear" class="inline-btn danger">Clear Tater Avatar</button>
+            </section>
+
+            <section class="core-inline-section">
+              <div class="small core-inline-section-title">Chat Avatars</div>
+              <div class="settings-avatar-grid">
+                <div class="settings-avatar-card">
+                  <div class="small">WebUI User Avatar</div>
+                  ${
+                    settings.user_avatar
+                      ? `<img id="set_user_avatar_preview" class="settings-avatar-preview" src="${escapeHtml(
+                          settings.user_avatar
+                        )}" alt="User avatar preview" />`
+                      : `<div id="set_user_avatar_preview" class="settings-avatar-preview fallback">${escapeHtml(
+                          _avatarInitial(settings.username || "User", "U")
+                        )}</div>`
+                  }
+                  <div class="settings-avatar-controls">
+                    <input id="set_user_avatar_file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" />
+                    <button type="button" id="set_user_avatar_clear" class="inline-btn danger">Clear User Avatar</button>
+                  </div>
+                </div>
+                <div class="settings-avatar-card">
+                  <div class="small">Tater Avatar</div>
+                  ${
+                    settings.tater_avatar
+                      ? `<img id="set_tater_avatar_preview" class="settings-avatar-preview" src="${escapeHtml(
+                          settings.tater_avatar
+                        )}" alt="Tater avatar preview" />`
+                      : `<div id="set_tater_avatar_preview" class="settings-avatar-preview fallback">${escapeHtml(
+                          _avatarInitial(settings.tater_first_name || "Tater", "T")
+                        )}</div>`
+                  }
+                  <div class="settings-avatar-controls">
+                    <input id="set_tater_avatar_file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" />
+                    <button type="button" id="set_tater_avatar_clear" class="inline-btn danger">Clear Tater Avatar</button>
+                  </div>
                 </div>
               </div>
-            </div>
+            </section>
+
             <div class="inline-row" style="grid-column: 1 / -1;">
               <button type="button" id="settings-save-general" class="action-btn">Save Settings</button>
               <span class="small">Saves General and non-model settings.</span>
@@ -7351,43 +8245,425 @@ async function loadSettingsView() {
           </div>
         </section>
 
-        <section class="settings-tab-panel" data-settings-panel="integrations">
+        <section class="settings-tab-panel" data-settings-panel="models">
           <div class="form-grid two-col">
-            <div class="settings-section-title">Web Search</div>
-            <label>Google API Key
-              <input id="set_web_search_google_api_key" type="password" value="${escapeHtml(settings.web_search_google_api_key || "")}" />
-            </label>
-            <label>Google Search CX
-              <input id="set_web_search_google_cx" type="text" value="${escapeHtml(settings.web_search_google_cx || "")}" />
-            </label>
+            <div class="settings-section-title">Models</div>
+            <div class="small" style="grid-column: 1 / -1;">
+              Shared model routing for Tater, including base LLM routing, vision, STT, and TTS.
+            </div>
+            <div class="hydra-model-mode" style="grid-column: 1 / -1;">
+              <div class="small hydra-model-mode-label">Beast Mode Routing</div>
+              ${renderToggleRow(
+                `<input id="set_hydra_beast_mode_enabled" class="toggle-input" type="checkbox" ${
+                  settings.hydra_beast_mode_enabled ? "checked" : ""
+                } />`
+              )}
+              <div class="small">Off: regular calls use Base model servers. On: dedicated models per head, while AI Calls still uses Base model servers.</div>
+            </div>
+            <div id="settings-hydra-model-stack" class="hydra-model-stack">
+              <div id="settings-hydra-base-fields" class="hydra-model-panel is-active">
+                <div class="hydra-model-panel-title">Base Model</div>
+                <div class="small hydra-model-panel-note">Used for regular AI calls. Multiple base servers rotate in round-robin order.</div>
+                <label>Base Host / IP
+                  <input id="set_hydra_llm_host" type="text" value="${escapeHtml(
+                    hydraPrimaryBaseRow.host || ""
+                  )}" />
+                </label>
+                <label>Base Port
+                  <input id="set_hydra_llm_port" type="number" min="1" max="65535" value="${escapeHtml(
+                    hydraPrimaryBaseRow.port || ""
+                  )}" />
+                </label>
+                <label style="grid-column: 1 / -1;">Base Model
+                  <input id="set_hydra_llm_model" type="text" value="${escapeHtml(
+                    hydraPrimaryBaseRow.model || ""
+                  )}" />
+                </label>
+                <div class="hydra-base-server-block">
+                  <div class="hydra-role-title">Additional Base Servers</div>
+                  <div class="small hydra-model-panel-note">Add more base servers to alternate regular AI calls across them.</div>
+                  <div id="settings-hydra-base-servers" class="hydra-base-server-list">${hydraAdditionalBaseRowsHtml}</div>
+                  <div class="inline-row">
+                    <button type="button" id="settings-hydra-base-server-add" class="inline-btn">Add Server</button>
+                  </div>
+                </div>
+              </div>
 
-            <div class="settings-section-title">Home Assistant</div>
-            <label>Base URL
-              <input id="set_homeassistant_base_url" type="text" value="${escapeHtml(settings.homeassistant_base_url || "http://homeassistant.local:8123")}" />
-            </label>
-            <label>Long-Lived Access Token
-              <input id="set_homeassistant_token" type="password" value="${escapeHtml(settings.homeassistant_token || "")}" />
-            </label>
+              <div class="hydra-model-panel is-active">
+                <div class="hydra-model-panel-title">Vision Model</div>
+                <div class="small hydra-model-panel-note">Used for image tools and vision-enabled requests.</div>
+                <label>Vision API Base URL
+                  <input id="set_vision_api_base" type="text" value="${escapeHtml(
+                    settings.vision_api_base || "http://127.0.0.1:1234"
+                  )}" />
+                </label>
+                <label>Vision Model
+                  <input id="set_vision_model" type="text" value="${escapeHtml(
+                    settings.vision_model || "qwen2.5-vl-7b-instruct"
+                  )}" />
+                </label>
+                <label style="grid-column: 1 / -1;">Vision API Key (optional)
+                  <input id="set_vision_api_key" type="password" value="${escapeHtml(settings.vision_api_key || "")}" />
+                </label>
+              </div>
 
-            <div class="settings-section-title">UniFi Network</div>
-            <label>Console Base URL
-              <input id="set_unifi_network_base_url" type="text" value="${escapeHtml(settings.unifi_network_base_url || "https://10.4.20.1")}" />
-            </label>
-            <label>API Key
-              <input id="set_unifi_network_api_key" type="password" value="${escapeHtml(settings.unifi_network_api_key || "")}" />
-            </label>
+              <div class="hydra-model-panel is-active">
+                <div class="hydra-model-panel-title">STT</div>
+                <div class="small hydra-model-panel-note">
+                  Shared globally across Tater, cores, and verbas.
+                </div>
+                <label>STT Backend
+                  <select id="set_speech_stt_backend">
+                    ${renderSettingsSelectOptions(speechSttBackendOptions, settings.speech_stt_backend || "faster_whisper")}
+                  </select>
+                </label>
+                <label id="speech-wyoming-stt-host-wrap">Wyoming STT Host
+                  <input id="set_speech_wyoming_stt_host" type="text" value="${escapeHtml(
+                    settings.speech_wyoming_stt_host || "127.0.0.1"
+                  )}" />
+                </label>
+                <label id="speech-wyoming-stt-port-wrap">Wyoming STT Port
+                  <input id="set_speech_wyoming_stt_port" type="number" min="1" max="65535" value="${escapeHtml(
+                    settings.speech_wyoming_stt_port || "10300"
+                  )}" />
+                </label>
+              </div>
 
-            <div class="settings-section-title">UniFi Protect</div>
-            <label>Console Base URL
-              <input id="set_unifi_protect_base_url" type="text" value="${escapeHtml(settings.unifi_protect_base_url || "https://10.4.20.127")}" />
-            </label>
-            <label>API Key
-              <input id="set_unifi_protect_api_key" type="password" value="${escapeHtml(settings.unifi_protect_api_key || "")}" />
-            </label>
+              <div class="hydra-model-panel is-active">
+                <div class="hydra-model-panel-title">TTS</div>
+                <div class="small hydra-model-panel-note">
+                  Shared globally across Tater, cores, and verbas.
+                </div>
+                <div class="small core-inline-section-title" style="grid-column: 1 / -1;">Direct TTS</div>
+                <label>TTS Backend
+                  <select id="set_speech_tts_backend">
+                    ${renderSettingsSelectOptions(speechTtsBackendOptions, currentSpeechTtsBackend)}
+                  </select>
+                </label>
+                <label id="speech-tts-model-wrap">TTS Model
+                  <select id="set_speech_tts_model">
+                    ${renderSettingsSelectOptions(initialSpeechTtsModelOptions, settings.speech_tts_model || "")}
+                  </select>
+                </label>
+                <label id="speech-tts-voice-wrap">TTS Voice
+                  <select id="set_speech_tts_voice">
+                    ${renderSettingsSelectOptions(initialSpeechTtsVoiceOptions, settings.speech_tts_voice || "")}
+                  </select>
+                </label>
+                <label id="speech-wyoming-tts-host-wrap">Wyoming TTS Host
+                  <input id="set_speech_wyoming_tts_host" type="text" value="${escapeHtml(
+                    settings.speech_wyoming_tts_host || "127.0.0.1"
+                  )}" />
+                </label>
+                <label id="speech-wyoming-tts-port-wrap">Wyoming TTS Port
+                  <input id="set_speech_wyoming_tts_port" type="number" min="1" max="65535" value="${escapeHtml(
+                    settings.speech_wyoming_tts_port || "10200"
+                  )}" />
+                </label>
+                <label id="speech-wyoming-tts-voice-wrap" style="grid-column: 1 / -1;">Wyoming TTS Voice (optional)
+                  <select id="set_speech_wyoming_tts_voice">
+                    <option value="">Default</option>
+                    ${
+                      settings.speech_wyoming_tts_voice
+                        ? `<option value="${escapeHtml(settings.speech_wyoming_tts_voice)}" selected>${escapeHtml(
+                            `${settings.speech_wyoming_tts_voice} (saved)`
+                          )}</option>`
+                        : ""
+                    }
+                  </select>
+                  <div id="speech-wyoming-tts-voice-status" class="small"></div>
+                </label>
+
+                <div class="small core-inline-section-title" style="grid-column: 1 / -1; margin-top: 8px;">Announcement TTS</div>
+                <div class="small hydra-model-panel-note" style="grid-column: 1 / -1;">
+                  Default for cores, verbas, and platforms that speak through Home Assistant media players or announcement flows.
+                </div>
+                <label>Announcement Backend
+                  <select id="set_speech_announcement_tts_backend">
+                    ${renderSettingsSelectOptions(announcementTtsBackendOptions, currentAnnouncementTtsBackend)}
+                  </select>
+                </label>
+                <label id="speech-announcement-tts-model-wrap">Announcement Model
+                  <select id="set_speech_announcement_tts_model">
+                    ${renderSettingsSelectOptions(initialAnnouncementTtsModelOptions, settings.speech_announcement_tts_model || "")}
+                  </select>
+                </label>
+                <label id="speech-announcement-tts-voice-wrap">Announcement Voice
+                  <select id="set_speech_announcement_tts_voice">
+                    ${renderSettingsSelectOptions(initialAnnouncementTtsVoiceOptions, settings.speech_announcement_tts_voice || "")}
+                  </select>
+                </label>
+                <label id="speech-announcement-tts-entity-wrap">Home Assistant TTS Entity
+                  <select id="set_speech_announcement_tts_entity">
+                    ${renderSettingsSelectOptions(announcementHaTtsEntityOptions, settings.speech_announcement_tts_entity || "", {
+                      blankLabel: "(Select Home Assistant TTS entity)",
+                    })}
+                  </select>
+                </label>
+
+                <label style="grid-column: 1 / -1;">Public Tater Audio URL
+                  <input id="set_speech_tts_public_base_url" type="text" value="${escapeHtml(
+                    settings.speech_tts_public_base_url || ""
+                  )}" placeholder="http://10.4.20.173:8797" />
+                  <div class="small">Used when Home Assistant media players need to fetch audio generated by Tater backends like Wyoming, Kokoro, Pocket TTS, or Piper.</div>
+                </label>
+                <label style="grid-column: 1 / -1;">TTS Sample Text
+                  <textarea id="set_speech_tts_sample_text" rows="3">Hello from Tater. This is a voice preview.</textarea>
+                </label>
+                <div class="inline-row" style="grid-column: 1 / -1;">
+                  <button type="button" id="settings-speech-tts-preview" class="inline-btn">Test Voice</button>
+                  <button type="button" id="settings-speech-tts-download" class="inline-btn">Download Sample</button>
+                  <span id="settings-speech-tts-preview-status" class="small"></span>
+                </div>
+              </div>
+              <div id="settings-hydra-beast-fields" class="hydra-model-panel ${
+                settings.hydra_beast_mode_enabled ? "is-active" : ""
+              }">
+                <div class="hydra-model-panel-title">Beast Head Models</div>
+                <div class="small hydra-model-panel-note">Used only in Beast Mode. AI Calls still uses Base model keys.</div>
+
+                <div class="hydra-role-title">Chat (normal conversation replies)</div>
+                <label>Chat Host / IP
+                  <input id="set_hydra_llm_chat_host" type="text" value="${escapeHtml(
+                    settings.hydra_llm_chat_host || ""
+                  )}" />
+                </label>
+                <label>Chat Port
+                  <input id="set_hydra_llm_chat_port" type="number" min="1" max="65535" value="${escapeHtml(
+                    settings.hydra_llm_chat_port || ""
+                  )}" />
+                </label>
+                <label style="grid-column: 1 / -1;">Chat Model
+                  <input id="set_hydra_llm_chat_model" type="text" value="${escapeHtml(
+                    settings.hydra_llm_chat_model || ""
+                  )}" />
+                </label>
+
+                <div class="hydra-role-title">Astraeus (planning)</div>
+                <label>Astraeus Host / IP
+                  <input id="set_hydra_llm_astraeus_host" type="text" value="${escapeHtml(
+                    settings.hydra_llm_astraeus_host || ""
+                  )}" />
+                </label>
+                <label>Astraeus Port
+                  <input id="set_hydra_llm_astraeus_port" type="number" min="1" max="65535" value="${escapeHtml(
+                    settings.hydra_llm_astraeus_port || ""
+                  )}" />
+                </label>
+                <label style="grid-column: 1 / -1;">Astraeus Model
+                  <input id="set_hydra_llm_astraeus_model" type="text" value="${escapeHtml(
+                    settings.hydra_llm_astraeus_model || ""
+                  )}" />
+                </label>
+
+                <div class="hydra-role-title">Thanatos (execution)</div>
+                <label>Thanatos Host / IP
+                  <input id="set_hydra_llm_thanatos_host" type="text" value="${escapeHtml(
+                    settings.hydra_llm_thanatos_host || ""
+                  )}" />
+                </label>
+                <label>Thanatos Port
+                  <input id="set_hydra_llm_thanatos_port" type="number" min="1" max="65535" value="${escapeHtml(
+                    settings.hydra_llm_thanatos_port || ""
+                  )}" />
+                </label>
+                <label style="grid-column: 1 / -1;">Thanatos Model
+                  <input id="set_hydra_llm_thanatos_model" type="text" value="${escapeHtml(
+                    settings.hydra_llm_thanatos_model || ""
+                  )}" />
+                </label>
+
+                <div class="hydra-role-title">Minos (judging)</div>
+                <label>Minos Host / IP
+                  <input id="set_hydra_llm_minos_host" type="text" value="${escapeHtml(
+                    settings.hydra_llm_minos_host || ""
+                  )}" />
+                </label>
+                <label>Minos Port
+                  <input id="set_hydra_llm_minos_port" type="number" min="1" max="65535" value="${escapeHtml(
+                    settings.hydra_llm_minos_port || ""
+                  )}" />
+                </label>
+                <label style="grid-column: 1 / -1;">Minos Model
+                  <input id="set_hydra_llm_minos_model" type="text" value="${escapeHtml(
+                    settings.hydra_llm_minos_model || ""
+                  )}" />
+                </label>
+
+                <div class="hydra-role-title">Hermes (final response)</div>
+                <label>Hermes Host / IP
+                  <input id="set_hydra_llm_hermes_host" type="text" value="${escapeHtml(
+                    settings.hydra_llm_hermes_host || ""
+                  )}" />
+                </label>
+                <label>Hermes Port
+                  <input id="set_hydra_llm_hermes_port" type="number" min="1" max="65535" value="${escapeHtml(
+                    settings.hydra_llm_hermes_port || ""
+                  )}" />
+                </label>
+                <label style="grid-column: 1 / -1;">Hermes Model
+                  <input id="set_hydra_llm_hermes_model" type="text" value="${escapeHtml(
+                    settings.hydra_llm_hermes_model || ""
+                  )}" />
+                </label>
+              </div>
+            </div>
+            <div class="inline-row" style="grid-column: 1 / -1;">
+              <button type="button" id="settings-hydra-model-save" class="action-btn">Save Models</button>
+              <span class="small">Saves shared LLM, vision, STT, and TTS routing settings.</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="settings-tab-panel" data-settings-panel="integrations">
+          <div class="form-grid">
+            <section class="core-inline-section">
+              <div class="small core-inline-section-title">Web Search</div>
+              <div class="form-grid two-col">
+                <label>Google API Key
+                  <input id="set_web_search_google_api_key" type="password" value="${escapeHtml(settings.web_search_google_api_key || "")}" />
+                </label>
+                <label>Google Search CX
+                  <input id="set_web_search_google_cx" type="text" value="${escapeHtml(settings.web_search_google_cx || "")}" />
+                </label>
+              </div>
+            </section>
+
+            <section class="core-inline-section">
+              <div class="small core-inline-section-title">Home Assistant</div>
+              <div class="form-grid two-col">
+                <label>Base URL
+                  <input id="set_homeassistant_base_url" type="text" value="${escapeHtml(settings.homeassistant_base_url || "http://homeassistant.local:8123")}" />
+                </label>
+                <label>Long-Lived Access Token
+                  <input id="set_homeassistant_token" type="password" value="${escapeHtml(settings.homeassistant_token || "")}" />
+                </label>
+              </div>
+            </section>
+
+            <section class="core-inline-section">
+              <div class="small core-inline-section-title">UniFi Network</div>
+              <div class="form-grid two-col">
+                <label>Console Base URL
+                  <input id="set_unifi_network_base_url" type="text" value="${escapeHtml(settings.unifi_network_base_url || "https://10.4.20.1")}" />
+                </label>
+                <label>API Key
+                  <input id="set_unifi_network_api_key" type="password" value="${escapeHtml(settings.unifi_network_api_key || "")}" />
+                </label>
+              </div>
+            </section>
+
+            <section class="core-inline-section">
+              <div class="small core-inline-section-title">UniFi Protect</div>
+              <div class="form-grid two-col">
+                <label>Console Base URL
+                  <input id="set_unifi_protect_base_url" type="text" value="${escapeHtml(settings.unifi_protect_base_url || "https://10.4.20.127")}" />
+                </label>
+                <label>API Key
+                  <input id="set_unifi_protect_api_key" type="password" value="${escapeHtml(settings.unifi_protect_api_key || "")}" />
+                </label>
+              </div>
+            </section>
+
             <div class="inline-row" style="grid-column: 1 / -1;">
               <button type="button" id="settings-save-integrations" class="action-btn">Save Settings</button>
               <span class="small">Saves Integrations and non-model settings.</span>
             </div>
+          </div>
+        </section>
+
+        <section class="settings-tab-panel" data-settings-panel="esphome">
+          <div
+            id="settings-esphome-shell"
+            data-core-action-endpoint="/api/settings/esphome/runtime/action"
+            data-core-refresh-scope="esphome-runtime"
+            data-core-key="esphome"
+          >
+            <div class="settings-subtabs">
+              <button type="button" class="settings-subtab-btn active" data-esphome-tab="satellites">Satellites</button>
+              <button type="button" class="settings-subtab-btn" data-esphome-tab="platform">Settings</button>
+              <button type="button" class="settings-subtab-btn" data-esphome-tab="stats">Stats</button>
+            </div>
+
+            <div id="settings-esphome-runtime-head">
+              ${renderNotice("Open the ESPHome tab to load the built-in ESPHome runtime.")}
+            </div>
+
+            <div class="settings-subpanel active" data-esphome-panel="satellites">
+              <div class="small" style="margin:10px 0 14px;">
+                Live ESPHome satellites connected directly to Tater, including room context, live entities, and device logs.
+              </div>
+              <div id="settings-esphome-runtime-satellites">
+                ${renderNotice("Open the ESPHome tab to load satellites.")}
+              </div>
+              <div style="margin-top:16px;">
+                <div class="settings-section-title">Add Satellite</div>
+                <div class="small" style="margin-bottom:10px;">
+                  Manually add a satellite by host or IP when discovery has not found it yet.
+                </div>
+                <div id="settings-esphome-runtime-add">
+                  ${renderNotice("Open the ESPHome tab to load the add form.")}
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-subpanel" data-esphome-panel="platform">
+              <div id="settings-esphome-form">
+                <section class="core-inline-section">
+                  <div class="small core-inline-section-title">ESPHome Platform</div>
+                  <div class="small">
+                    ${escapeHtml(
+                      String(esphomeUi.description || "Built-in ESPHome services for Tater.")
+                    )}
+                  </div>
+                  <div class="small" style="margin-top:8px;">
+                    ${escapeHtml(
+                      String(esphomeUi.runtime_tab_hint || "Live voice satellites, entities, and logs are managed directly in this ESPHome settings area.")
+                    )}
+                  </div>
+                </section>
+
+                <section class="core-inline-section">
+                  <div class="small core-inline-section-title">Runtime</div>
+                  <div class="small">
+                    Built-in service status: ${escapeHtml(esphomeRunning ? "running" : "starting")} • always-on with Tater
+                  </div>
+                </section>
+
+                ${
+                  esphomeExperimentalFieldsHtml
+                    ? `<section class="core-inline-section">
+                        <div class="small core-inline-section-title">Experimental</div>
+                        <div class="form-grid two-col">
+                          ${esphomeExperimentalFieldsHtml}
+                        </div>
+                      </section>`
+                    : ""
+                }
+
+                <section class="core-inline-section">
+                  <div class="small core-inline-section-title">Voice Pipeline Settings</div>
+                  <div class="form-grid two-col">
+                    ${esphomePipelineFieldsHtml}
+                  </div>
+                </section>
+
+                <div class="inline-row" style="margin-top:12px;">
+                  <button type="button" id="settings-save-esphome" class="action-btn">Save Settings</button>
+                  <span class="small">Saves built-in ESPHome device settings for Tater.</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-subpanel" data-esphome-panel="stats">
+              <div class="small" style="margin:10px 0 14px;">
+                Voice pipeline quality, latency, fallback, and discovery metrics for tuning ESPHome devices in Tater.
+              </div>
+              <div id="settings-esphome-runtime-stats">
+                ${renderNotice("Open the ESPHome tab to load stats.")}
+              </div>
+            </div>
+
           </div>
         </section>
 
@@ -7459,50 +8735,75 @@ async function loadSettingsView() {
           </div>
         </section>
 
-        <section class="settings-tab-panel" data-settings-panel="emoji">
-          <div class="form-grid two-col">
-            <label>Enable reaction-chain mode (Discord)
-              ${renderToggleRow(
-                `<input id="set_emoji_enable_on_reaction_add" class="toggle-input" type="checkbox" ${
-                  settings.emoji_enable_on_reaction_add ? "checked" : ""
-                } />`
-              )}
-            </label>
-            <label>Enable auto reactions on replies
-              ${renderToggleRow(
-                `<input id="set_emoji_enable_auto_reaction_on_reply" class="toggle-input" type="checkbox" ${
-                  settings.emoji_enable_auto_reaction_on_reply ? "checked" : ""
-                } />`
-              )}
-            </label>
-            <label>Reaction-chain chance (%)
-              <input id="set_emoji_reaction_chain_chance_percent" type="number" min="0" max="100" value="${escapeHtml(
-                settings.emoji_reaction_chain_chance_percent ?? 100
-              )}" />
-            </label>
-            <label>Reply reaction chance (%)
-              <input id="set_emoji_reply_reaction_chance_percent" type="number" min="0" max="100" value="${escapeHtml(
-                settings.emoji_reply_reaction_chance_percent ?? 12
-              )}" />
-            </label>
-            <label>Reaction-chain cooldown (seconds)
-              <input id="set_emoji_reaction_chain_cooldown_seconds" type="number" min="0" max="86400" value="${escapeHtml(
-                settings.emoji_reaction_chain_cooldown_seconds ?? 30
-              )}" />
-            </label>
-            <label>Reply reaction cooldown (seconds)
-              <input id="set_emoji_reply_reaction_cooldown_seconds" type="number" min="0" max="86400" value="${escapeHtml(
-                settings.emoji_reply_reaction_cooldown_seconds ?? 120
-              )}" />
-            </label>
-            <label>Minimum message length
-              <input id="set_emoji_min_message_length" type="number" min="0" max="200" value="${escapeHtml(
-                settings.emoji_min_message_length ?? 4
-              )}" />
-            </label>
+        <section class="settings-tab-panel" data-settings-panel="misc">
+          <div class="form-grid">
+            <section class="core-inline-section">
+              <div class="small core-inline-section-title">Compotato Popup Effects</div>
+              <div class="form-grid two-col">
+                <label>Popup Animation Style
+                  <select id="set_popup_effect_style">
+                    <option value="disabled" ${popupEffectStyle === "disabled" ? "selected" : ""}>Disabled</option>
+                    <option value="flame" ${popupEffectStyle === "flame" ? "selected" : ""}>Flame</option>
+                    <option value="dust" ${popupEffectStyle === "dust" ? "selected" : ""}>Crumble To Dust</option>
+                    <option value="glitch" ${popupEffectStyle === "glitch" ? "selected" : ""}>Glitch Out</option>
+                    <option value="portal" ${popupEffectStyle === "portal" ? "selected" : ""}>Portal Swirl Shut</option>
+                    <option value="melt" ${popupEffectStyle === "melt" ? "selected" : ""}>Melt Downward</option>
+                  </select>
+                </label>
+                <div class="small" style="grid-column: 1 / -1;">
+                  Applies to modal popups and toast popups when they appear and close.
+                </div>
+              </div>
+            </section>
+
+            <section class="core-inline-section">
+              <div class="small core-inline-section-title">Emoji</div>
+              <div class="form-grid two-col">
+                <label>Enable reaction-chain mode (Discord)
+                  ${renderToggleRow(
+                    `<input id="set_emoji_enable_on_reaction_add" class="toggle-input" type="checkbox" ${
+                      settings.emoji_enable_on_reaction_add ? "checked" : ""
+                    } />`
+                  )}
+                </label>
+                <label>Enable auto reactions on replies
+                  ${renderToggleRow(
+                    `<input id="set_emoji_enable_auto_reaction_on_reply" class="toggle-input" type="checkbox" ${
+                      settings.emoji_enable_auto_reaction_on_reply ? "checked" : ""
+                    } />`
+                  )}
+                </label>
+                <label>Reaction-chain chance (%)
+                  <input id="set_emoji_reaction_chain_chance_percent" type="number" min="0" max="100" value="${escapeHtml(
+                    settings.emoji_reaction_chain_chance_percent ?? 100
+                  )}" />
+                </label>
+                <label>Reply reaction chance (%)
+                  <input id="set_emoji_reply_reaction_chance_percent" type="number" min="0" max="100" value="${escapeHtml(
+                    settings.emoji_reply_reaction_chance_percent ?? 12
+                  )}" />
+                </label>
+                <label>Reaction-chain cooldown (seconds)
+                  <input id="set_emoji_reaction_chain_cooldown_seconds" type="number" min="0" max="86400" value="${escapeHtml(
+                    settings.emoji_reaction_chain_cooldown_seconds ?? 30
+                  )}" />
+                </label>
+                <label>Reply reaction cooldown (seconds)
+                  <input id="set_emoji_reply_reaction_cooldown_seconds" type="number" min="0" max="86400" value="${escapeHtml(
+                    settings.emoji_reply_reaction_cooldown_seconds ?? 120
+                  )}" />
+                </label>
+                <label>Minimum message length
+                  <input id="set_emoji_min_message_length" type="number" min="0" max="200" value="${escapeHtml(
+                    settings.emoji_min_message_length ?? 4
+                  )}" />
+                </label>
+              </div>
+            </section>
+
             <div class="inline-row" style="grid-column: 1 / -1;">
-              <button type="button" id="settings-save-emoji" class="action-btn">Save Settings</button>
-              <span class="small">Saves Emoji and non-model settings.</span>
+              <button type="button" id="settings-save-misc" class="action-btn">Save Settings</button>
+              <span class="small">Saves Misc and non-model settings.</span>
             </div>
           </div>
         </section>
@@ -7510,7 +8811,6 @@ async function loadSettingsView() {
         <section class="settings-tab-panel" data-settings-panel="hydra">
           <div class="settings-subtabs">
             <button type="button" class="settings-subtab-btn active" data-hydra-tab="settings">Hydra</button>
-            <button type="button" class="settings-subtab-btn" data-hydra-tab="models">Hydra Models</button>
             <button type="button" class="settings-subtab-btn" data-hydra-tab="metrics">Hydra Metrics</button>
             <button type="button" class="settings-subtab-btn" data-hydra-tab="data">Hydra Data</button>
           </div>
@@ -7552,274 +8852,7 @@ async function loadSettingsView() {
               </div>
               <div class="inline-row" style="grid-column: 1 / -1;">
                 <button type="button" id="settings-save" class="action-btn">Save Settings</button>
-                <span class="small">Saves non-model settings. Use the Hydra Models tab for model routing settings.</span>
-              </div>
-            </div>
-          </div>
-
-          <div class="settings-subpanel" data-hydra-panel="models">
-            <div class="form-grid two-col">
-              <div class="settings-section-title">Hydra Models</div>
-              <div class="hydra-model-mode" style="grid-column: 1 / -1;">
-                <div class="small hydra-model-mode-label">Beast Mode Routing</div>
-                ${renderToggleRow(
-                  `<input id="set_hydra_beast_mode_enabled" class="toggle-input" type="checkbox" ${
-                    settings.hydra_beast_mode_enabled ? "checked" : ""
-                  } />`
-                )}
-                <div class="small">Off: regular calls use Base model servers. On: dedicated models per head, while AI Calls still uses Base model servers.</div>
-              </div>
-              <div id="settings-hydra-model-stack" class="hydra-model-stack">
-                <div id="settings-hydra-base-fields" class="hydra-model-panel is-active">
-                  <div class="hydra-model-panel-title">Base Model</div>
-                  <div class="small hydra-model-panel-note">Used for regular AI calls. Multiple base servers rotate in round-robin order.</div>
-                  <label>Base Host / IP
-                    <input id="set_hydra_llm_host" type="text" value="${escapeHtml(
-                      hydraPrimaryBaseRow.host || ""
-                    )}" />
-                  </label>
-                  <label>Base Port
-                    <input id="set_hydra_llm_port" type="number" min="1" max="65535" value="${escapeHtml(
-                      hydraPrimaryBaseRow.port || ""
-                    )}" />
-                  </label>
-                  <label style="grid-column: 1 / -1;">Base Model
-                    <input id="set_hydra_llm_model" type="text" value="${escapeHtml(
-                      hydraPrimaryBaseRow.model || ""
-                    )}" />
-                  </label>
-                  <div class="hydra-base-server-block">
-                    <div class="hydra-role-title">Additional Base Servers</div>
-                    <div class="small hydra-model-panel-note">Add more base servers to alternate regular AI calls across them.</div>
-                    <div id="settings-hydra-base-servers" class="hydra-base-server-list">${hydraAdditionalBaseRowsHtml}</div>
-                    <div class="inline-row">
-                      <button type="button" id="settings-hydra-base-server-add" class="inline-btn">Add Server</button>
-                    </div>
-                  </div>
-                </div>
-
-                <div class="hydra-model-panel is-active">
-                  <div class="hydra-model-panel-title">Vision Model</div>
-                  <div class="small hydra-model-panel-note">Used for image tools and vision-enabled requests.</div>
-                  <label>Vision API Base URL
-                    <input id="set_vision_api_base" type="text" value="${escapeHtml(
-                      settings.vision_api_base || "http://127.0.0.1:1234"
-                    )}" />
-                  </label>
-                  <label>Vision Model
-                    <input id="set_vision_model" type="text" value="${escapeHtml(
-                      settings.vision_model || "qwen2.5-vl-7b-instruct"
-                    )}" />
-                  </label>
-                  <label style="grid-column: 1 / -1;">Vision API Key (optional)
-                    <input id="set_vision_api_key" type="password" value="${escapeHtml(settings.vision_api_key || "")}" />
-                  </label>
-                </div>
-
-                <div class="hydra-model-panel is-active">
-                  <div class="hydra-model-panel-title">STT</div>
-                  <div class="small hydra-model-panel-note">
-                    Shared globally across Tater, cores, and verbas.
-                  </div>
-                  <label>STT Backend
-                    <select id="set_speech_stt_backend">
-                      ${renderSettingsSelectOptions(speechSttBackendOptions, settings.speech_stt_backend || "faster_whisper")}
-                    </select>
-                  </label>
-                  <label id="speech-wyoming-stt-host-wrap">Wyoming STT Host
-                    <input id="set_speech_wyoming_stt_host" type="text" value="${escapeHtml(
-                      settings.speech_wyoming_stt_host || "127.0.0.1"
-                    )}" />
-                  </label>
-                  <label id="speech-wyoming-stt-port-wrap">Wyoming STT Port
-                    <input id="set_speech_wyoming_stt_port" type="number" min="1" max="65535" value="${escapeHtml(
-                      settings.speech_wyoming_stt_port || "10300"
-                    )}" />
-                  </label>
-                </div>
-
-                <div class="hydra-model-panel is-active">
-                  <div class="hydra-model-panel-title">TTS</div>
-                  <div class="small hydra-model-panel-note">
-                    Shared globally across Tater, cores, and verbas.
-                  </div>
-                  <div class="small core-inline-section-title" style="grid-column: 1 / -1;">Direct TTS</div>
-                  <label>TTS Backend
-                    <select id="set_speech_tts_backend">
-                      ${renderSettingsSelectOptions(speechTtsBackendOptions, currentSpeechTtsBackend)}
-                    </select>
-                  </label>
-                  <label id="speech-tts-model-wrap">TTS Model
-                    <select id="set_speech_tts_model">
-                      ${renderSettingsSelectOptions(initialSpeechTtsModelOptions, settings.speech_tts_model || "")}
-                    </select>
-                  </label>
-                  <label id="speech-tts-voice-wrap">TTS Voice
-                    <select id="set_speech_tts_voice">
-                      ${renderSettingsSelectOptions(initialSpeechTtsVoiceOptions, settings.speech_tts_voice || "")}
-                    </select>
-                  </label>
-                  <label id="speech-wyoming-tts-host-wrap">Wyoming TTS Host
-                    <input id="set_speech_wyoming_tts_host" type="text" value="${escapeHtml(
-                      settings.speech_wyoming_tts_host || "127.0.0.1"
-                    )}" />
-                  </label>
-                  <label id="speech-wyoming-tts-port-wrap">Wyoming TTS Port
-                    <input id="set_speech_wyoming_tts_port" type="number" min="1" max="65535" value="${escapeHtml(
-                      settings.speech_wyoming_tts_port || "10200"
-                    )}" />
-                  </label>
-                  <label id="speech-wyoming-tts-voice-wrap" style="grid-column: 1 / -1;">Wyoming TTS Voice (optional)
-                    <select id="set_speech_wyoming_tts_voice">
-                      <option value="">Default</option>
-                      ${
-                        settings.speech_wyoming_tts_voice
-                          ? `<option value="${escapeHtml(settings.speech_wyoming_tts_voice)}" selected>${escapeHtml(
-                              `${settings.speech_wyoming_tts_voice} (saved)`
-                            )}</option>`
-                          : ""
-                      }
-                    </select>
-                    <div id="speech-wyoming-tts-voice-status" class="small"></div>
-                  </label>
-
-                  <div class="small core-inline-section-title" style="grid-column: 1 / -1; margin-top: 8px;">Announcement TTS</div>
-                  <div class="small hydra-model-panel-note" style="grid-column: 1 / -1;">
-                    Default for cores, verbas, and platforms that speak through Home Assistant media players or announcement flows.
-                  </div>
-                  <label>Announcement Backend
-                    <select id="set_speech_announcement_tts_backend">
-                      ${renderSettingsSelectOptions(announcementTtsBackendOptions, currentAnnouncementTtsBackend)}
-                    </select>
-                  </label>
-                  <label id="speech-announcement-tts-model-wrap">Announcement Model
-                    <select id="set_speech_announcement_tts_model">
-                      ${renderSettingsSelectOptions(initialAnnouncementTtsModelOptions, settings.speech_announcement_tts_model || "")}
-                    </select>
-                  </label>
-                  <label id="speech-announcement-tts-voice-wrap">Announcement Voice
-                    <select id="set_speech_announcement_tts_voice">
-                      ${renderSettingsSelectOptions(initialAnnouncementTtsVoiceOptions, settings.speech_announcement_tts_voice || "")}
-                    </select>
-                  </label>
-                  <label id="speech-announcement-tts-entity-wrap">Home Assistant TTS Entity
-                    <select id="set_speech_announcement_tts_entity">
-                      ${renderSettingsSelectOptions(announcementHaTtsEntityOptions, settings.speech_announcement_tts_entity || "", {
-                        blankLabel: "(Select Home Assistant TTS entity)",
-                      })}
-                    </select>
-                  </label>
-
-                  <label style="grid-column: 1 / -1;">Public Tater Audio URL
-                    <input id="set_speech_tts_public_base_url" type="text" value="${escapeHtml(
-                      settings.speech_tts_public_base_url || ""
-                    )}" placeholder="http://10.4.20.173:8797" />
-                    <div class="small">Used when Home Assistant media players need to fetch audio generated by Tater backends like Wyoming, Kokoro, Pocket TTS, or Piper.</div>
-                  </label>
-                  <label style="grid-column: 1 / -1;">TTS Sample Text
-                    <textarea id="set_speech_tts_sample_text" rows="3">Hello from Tater. This is a voice preview.</textarea>
-                  </label>
-                  <div class="inline-row" style="grid-column: 1 / -1;">
-                    <button type="button" id="settings-speech-tts-preview" class="inline-btn">Test Voice</button>
-                    <button type="button" id="settings-speech-tts-download" class="inline-btn">Download Sample</button>
-                    <span id="settings-speech-tts-preview-status" class="small"></span>
-                  </div>
-                </div>
-                <div id="settings-hydra-beast-fields" class="hydra-model-panel ${
-                  settings.hydra_beast_mode_enabled ? "is-active" : ""
-                }">
-                  <div class="hydra-model-panel-title">Beast Head Models</div>
-                  <div class="small hydra-model-panel-note">Used only in Beast Mode. AI Calls still uses Base model keys.</div>
-
-                  <div class="hydra-role-title">Chat (normal conversation replies)</div>
-                  <label>Chat Host / IP
-                    <input id="set_hydra_llm_chat_host" type="text" value="${escapeHtml(
-                      settings.hydra_llm_chat_host || ""
-                    )}" />
-                  </label>
-                  <label>Chat Port
-                    <input id="set_hydra_llm_chat_port" type="number" min="1" max="65535" value="${escapeHtml(
-                      settings.hydra_llm_chat_port || ""
-                    )}" />
-                  </label>
-                  <label style="grid-column: 1 / -1;">Chat Model
-                    <input id="set_hydra_llm_chat_model" type="text" value="${escapeHtml(
-                      settings.hydra_llm_chat_model || ""
-                    )}" />
-                  </label>
-
-                  <div class="hydra-role-title">Astraeus (planning)</div>
-                  <label>Astraeus Host / IP
-                    <input id="set_hydra_llm_astraeus_host" type="text" value="${escapeHtml(
-                      settings.hydra_llm_astraeus_host || ""
-                    )}" />
-                  </label>
-                  <label>Astraeus Port
-                    <input id="set_hydra_llm_astraeus_port" type="number" min="1" max="65535" value="${escapeHtml(
-                      settings.hydra_llm_astraeus_port || ""
-                    )}" />
-                  </label>
-                  <label style="grid-column: 1 / -1;">Astraeus Model
-                    <input id="set_hydra_llm_astraeus_model" type="text" value="${escapeHtml(
-                      settings.hydra_llm_astraeus_model || ""
-                    )}" />
-                  </label>
-
-                  <div class="hydra-role-title">Thanatos (execution)</div>
-                  <label>Thanatos Host / IP
-                    <input id="set_hydra_llm_thanatos_host" type="text" value="${escapeHtml(
-                      settings.hydra_llm_thanatos_host || ""
-                    )}" />
-                  </label>
-                  <label>Thanatos Port
-                    <input id="set_hydra_llm_thanatos_port" type="number" min="1" max="65535" value="${escapeHtml(
-                      settings.hydra_llm_thanatos_port || ""
-                    )}" />
-                  </label>
-                  <label style="grid-column: 1 / -1;">Thanatos Model
-                    <input id="set_hydra_llm_thanatos_model" type="text" value="${escapeHtml(
-                      settings.hydra_llm_thanatos_model || ""
-                    )}" />
-                  </label>
-
-                  <div class="hydra-role-title">Minos (judging)</div>
-                  <label>Minos Host / IP
-                    <input id="set_hydra_llm_minos_host" type="text" value="${escapeHtml(
-                      settings.hydra_llm_minos_host || ""
-                    )}" />
-                  </label>
-                  <label>Minos Port
-                    <input id="set_hydra_llm_minos_port" type="number" min="1" max="65535" value="${escapeHtml(
-                      settings.hydra_llm_minos_port || ""
-                    )}" />
-                  </label>
-                  <label style="grid-column: 1 / -1;">Minos Model
-                    <input id="set_hydra_llm_minos_model" type="text" value="${escapeHtml(
-                      settings.hydra_llm_minos_model || ""
-                    )}" />
-                  </label>
-
-                  <div class="hydra-role-title">Hermes (final response)</div>
-                  <label>Hermes Host / IP
-                    <input id="set_hydra_llm_hermes_host" type="text" value="${escapeHtml(
-                      settings.hydra_llm_hermes_host || ""
-                    )}" />
-                  </label>
-                  <label>Hermes Port
-                    <input id="set_hydra_llm_hermes_port" type="number" min="1" max="65535" value="${escapeHtml(
-                      settings.hydra_llm_hermes_port || ""
-                    )}" />
-                  </label>
-                  <label style="grid-column: 1 / -1;">Hermes Model
-                    <input id="set_hydra_llm_hermes_model" type="text" value="${escapeHtml(
-                      settings.hydra_llm_hermes_model || ""
-                    )}" />
-                  </label>
-                </div>
-              </div>
-              <div class="inline-row" style="grid-column: 1 / -1;">
-                <button type="button" id="settings-hydra-model-save" class="action-btn">Save Model</button>
-              <span class="small">Saves Hydra, Vision, and shared speech model settings.</span>
+                <span class="small">Saves Hydra-only behavior settings. Use the Models tab for model routing settings.</span>
               </div>
             </div>
           </div>
@@ -7884,53 +8917,37 @@ async function loadSettingsView() {
           </div>
         </section>
 
-        <section class="settings-tab-panel" data-settings-panel="compozr">
-          <div class="form-grid two-col">
-            <div class="settings-section-title">Compotato Popup Effects</div>
-            <label>Popup Animation Style
-              <select id="set_popup_effect_style">
-                <option value="disabled" ${popupEffectStyle === "disabled" ? "selected" : ""}>Disabled</option>
-                <option value="flame" ${popupEffectStyle === "flame" ? "selected" : ""}>Flame</option>
-                <option value="dust" ${popupEffectStyle === "dust" ? "selected" : ""}>Crumble To Dust</option>
-                <option value="glitch" ${popupEffectStyle === "glitch" ? "selected" : ""}>Glitch Out</option>
-                <option value="portal" ${popupEffectStyle === "portal" ? "selected" : ""}>Portal Swirl Shut</option>
-                <option value="melt" ${popupEffectStyle === "melt" ? "selected" : ""}>Melt Downward</option>
-              </select>
-            </label>
-            <div class="small">Applies to modal popups and toast popups when they appear and close.</div>
-            <div class="inline-row" style="grid-column: 1 / -1;">
-              <button type="button" id="settings-save-compozr" class="action-btn">Save Settings</button>
-              <span class="small">Saves Compotato and non-model settings.</span>
-            </div>
-          </div>
-        </section>
-
         <section class="settings-tab-panel" data-settings-panel="advanced">
           <div class="form-grid">
-            <div class="settings-section-title">Admin Tool Gating</div>
-            <label>
-              Admin-only plugin ids
-              <select id="set_admin_only_plugins" class="settings-multiselect" multiple size="14">
-                ${adminOptionHtml}
-              </select>
-              <div class="small">Selected plugins can only run for portal admin users.</div>
-            </label>
-            <div class="inline-row">
-              <button type="button" id="settings-admin-defaults" class="inline-btn">Reset To Defaults</button>
-              <span class="small">Loads the default admin-only plugin list.</span>
-            </div>
-
-            <div class="core-inline-section tone-danger">
-              <div class="core-inline-section-title">Chat Data</div>
-              <div class="inline-row">
-                <button type="button" id="settings-clear-chat" class="inline-btn danger">Clear Chat History</button>
-                <span class="small">Deletes all messages in the WebUI chat history.</span>
+            <section class="core-inline-section">
+              <div class="small core-inline-section-title">Admin Tool Gating</div>
+              <div class="form-grid">
+                <label>
+                  Admin-only plugin ids
+                  <select id="set_admin_only_plugins" class="settings-multiselect" multiple size="14">
+                    ${adminOptionHtml}
+                  </select>
+                  <div class="small">Selected plugins can only run for portal admin users.</div>
+                </label>
+                <div class="inline-row">
+                  <button type="button" id="settings-admin-defaults" class="inline-btn">Reset To Defaults</button>
+                  <span class="small">Loads the default admin-only plugin list.</span>
+                </div>
               </div>
-            </div>
+            </section>
+
             <div class="inline-row">
               <button type="button" id="settings-save-advanced" class="action-btn">Save Settings</button>
               <span class="small">Saves Advanced and non-model settings.</span>
             </div>
+
+            <section class="core-inline-section tone-danger">
+              <div class="small core-inline-section-title">Clear Chat History</div>
+              <div class="inline-row">
+                <button type="button" id="settings-clear-chat" class="inline-btn danger">Clear Chat History</button>
+                <span class="small">Deletes all messages in the WebUI chat history.</span>
+              </div>
+            </section>
           </div>
         </section>
 
@@ -7999,6 +9016,9 @@ async function loadSettingsView() {
     tabPanels.forEach((panel) => {
       panel.classList.toggle("active", panel.dataset.settingsPanel === tabKey);
     });
+    if (String(tabKey || "").trim() === "esphome") {
+      void ensureEspHomeRuntimeLoaded({ force: true });
+    }
   };
 
   tabButtons.forEach((button) => {
@@ -8966,21 +9986,21 @@ async function loadSettingsView() {
       payload[`hydra_llm_${role}_port`] = portEl ? String(portEl.value || "").trim() : "";
       payload[`hydra_llm_${role}_model`] = modelEl ? String(modelEl.value || "").trim() : "";
     });
-    statusEl.textContent = "Saving Hydra, Vision, and shared speech model settings...";
+    statusEl.textContent = "Saving shared model settings...";
     try {
       await api("/api/settings", {
         method: "POST",
         body: JSON.stringify(payload),
       });
-      statusEl.textContent = "Hydra, Vision, and shared speech model settings saved.";
-      showToast("Hydra, Vision, and shared speech model settings saved.");
+      statusEl.textContent = "Shared model settings saved.";
+      showToast("Shared model settings saved.");
     } catch (error) {
       statusEl.textContent = `Model save failed: ${error.message}`;
     }
   });
 
-  const hydraSubtabButtons = Array.from(root.querySelectorAll(".settings-subtab-btn"));
-  const hydraSubPanels = Array.from(root.querySelectorAll(".settings-subpanel"));
+  const hydraSubtabButtons = Array.from(root.querySelectorAll(".settings-subtab-btn[data-hydra-tab]"));
+  const hydraSubPanels = Array.from(root.querySelectorAll(".settings-subpanel[data-hydra-panel]"));
   const activateHydraSubtab = (tabKey) => {
     hydraSubtabButtons.forEach((button) => {
       button.classList.toggle("active", button.dataset.hydraTab === tabKey);
@@ -8992,6 +10012,7 @@ async function loadSettingsView() {
   hydraSubtabButtons.forEach((button) => {
     button.addEventListener("click", () => activateHydraSubtab(button.dataset.hydraTab));
   });
+  bindEspHomeSettingsTabs(root);
 
   const metricsStatusEl = document.getElementById("settings-cerb-metrics-status");
   const metricsContentEl = document.getElementById("settings-cerb-metrics-content");
@@ -9483,6 +10504,7 @@ async function loadSettingsView() {
       }
     }
 
+    const esphomeFormEl = document.getElementById("settings-esphome-form");
     const payload = {
       username: document.getElementById("set_username").value,
       max_display: Number(document.getElementById("set_max_display").value || 8),
@@ -9525,6 +10547,7 @@ async function loadSettingsView() {
       ).checked,
       popup_effect_style: normalizePopupEffectStyle(document.getElementById("set_popup_effect_style")?.value || "flame"),
       admin_only_plugins: adminOnlyPlugins,
+      esphome_settings: esphomeFormEl ? collectCoreManagerValues(esphomeFormEl) : {},
     };
     if (clearWebuiPasswordRequested) {
       payload.clear_webui_password = true;
@@ -9550,7 +10573,7 @@ async function loadSettingsView() {
         payload.clear_tater_avatar = true;
       }
 
-      await api("/api/settings", {
+      const saveResult = await api("/api/settings", {
         method: "POST",
         body: JSON.stringify(payload),
       });
@@ -9595,8 +10618,8 @@ async function loadSettingsView() {
     "settings-save",
     "settings-save-general",
     "settings-save-integrations",
-    "settings-save-emoji",
-    "settings-save-compozr",
+    "settings-save-esphome",
+    "settings-save-misc",
     "settings-save-advanced",
   ].forEach((buttonId) => {
     document.getElementById(buttonId)?.addEventListener("click", runSettingsSave);

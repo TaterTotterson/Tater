@@ -16,6 +16,10 @@ CORE_SHOP_MANIFEST_URL_DEFAULT = os.getenv(
 )
 CORE_SHOP_MANIFEST_URLS_KEY = "tater:core_shop_manifest_urls"
 DEFAULT_CORE_SHOP_LABEL = "Tater Core Shop"
+RESERVED_BUILTIN_CORE_IDS = {
+    "voice",
+    "voice_core",
+}
 
 def _normalize_manifest_url(url: str | None) -> str:
     return str(url or "").strip()
@@ -34,6 +38,10 @@ def _normalize_core_id(raw_id: str | None) -> str:
     if platform_id.endswith("_core"):
         platform_id = platform_id[: -len("_core")]
     return platform_id
+
+
+def _is_reserved_builtin_core_id(raw_id: str | None) -> bool:
+    return _normalize_core_id(raw_id) in RESERVED_BUILTIN_CORE_IDS
 
 
 def _safe_core_file_path(platform_id: str) -> str:
@@ -197,6 +205,8 @@ def load_core_shop_catalog(manifest_sources=None) -> tuple[list[dict], list[str]
             platform_id = _normalize_core_id(raw_item.get("id"))
             if not platform_id or platform_id in seen_ids:
                 continue
+            if _is_reserved_builtin_core_id(platform_id):
+                continue
 
             item = dict(raw_item)
             item["id"] = platform_id
@@ -209,6 +219,8 @@ def load_core_shop_catalog(manifest_sources=None) -> tuple[list[dict], list[str]
 
 
 def is_core_installed(platform_id: str) -> bool:
+    if _is_reserved_builtin_core_id(platform_id):
+        return False
     try:
         return os.path.exists(_safe_core_file_path(platform_id))
     except Exception:
@@ -229,6 +241,8 @@ def install_core_from_shop_item(item: dict, manifest_url: str | None = None) -> 
 
     try:
         platform_id = _normalize_core_id(item.get("id"))
+        if _is_reserved_builtin_core_id(platform_id):
+            return False, f"{platform_id} is now bundled into Tater and cannot be installed as an external core."
         entry = (item.get("entry") or "").strip()
         expected_sha = (item.get("sha256") or "").strip().lower()
         source_manifest_url = _normalize_manifest_url(manifest_url or item.get("_source_manifest_url"))
@@ -296,6 +310,8 @@ def _enabled_missing_core_ids() -> list[str]:
 
             platform_id = _normalize_core_id(module_key)
             if not platform_id or platform_id in seen:
+                continue
+            if _is_reserved_builtin_core_id(platform_id):
                 continue
 
             if not is_core_installed(platform_id):
@@ -479,6 +495,8 @@ def _installed_core_ids() -> list[str]:
             stem = filename[:-3]
             platform_id = _normalize_core_id(stem)
             if platform_id:
+                if _is_reserved_builtin_core_id(platform_id):
+                    continue
                 installed_ids.add(platform_id)
     return sorted(installed_ids)
 
@@ -520,6 +538,8 @@ def _get_installed_core_version(platform_id: str) -> str:
 
 
 def uninstall_core_file(platform_id: str) -> tuple[bool, str]:
+    if _is_reserved_builtin_core_id(platform_id):
+        return False, f"{_normalize_core_id(platform_id)} is bundled into Tater and cannot be removed as an external core."
     try:
         path = _safe_core_file_path(platform_id)
         if not os.path.exists(path):
@@ -597,4 +617,3 @@ def _build_installed_core_entries(catalog_items: list[dict]) -> list[dict]:
 
     entries.sort(key=lambda item: item["display_name"].lower())
     return entries
-

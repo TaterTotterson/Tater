@@ -41,7 +41,7 @@ _INTERNAL_PORTAL_AUTH_TARGETS = (
     ("homekit_portal_settings", 8789, "/tater-homekit/v1", "AUTH_TOKEN"),
     ("xbmc_portal_settings", 8790, "/tater-xbmc/v1", None),
     ("macos_portal_settings", 8791, "/macos", "AUTH_TOKEN"),
-    ("voice_core_settings", 8502, "/tater-ha/v1/voice", None),
+    ("voice_core_settings", 8501, "/tater-ha/v1/voice", None),
 )
 _INTERNAL_PORTAL_AUTH_CACHE_TTL_SECONDS = max(
     1.0,
@@ -84,6 +84,10 @@ def _port_or_default(value: Any, default: int) -> int:
     return port
 
 
+def _main_app_port(default: int = 8501) -> int:
+    return _port_or_default(os.getenv("HTMLUI_PORT"), default)
+
+
 def _default_port_for_scheme(scheme: str) -> int:
     token = _text(scheme).strip().lower()
     if token == "https":
@@ -113,7 +117,10 @@ def _load_internal_portal_auth_rows() -> List[Dict[str, Any]]:
             if not isinstance(settings, dict):
                 settings = {}
 
-            port = _port_or_default(settings.get("bind_port"), default_port)
+            if settings_key == "voice_core_settings":
+                port = _main_app_port(default_port)
+            else:
+                port = _port_or_default(settings.get("bind_port"), default_port)
             key_value = _text(settings.get("API_AUTH_KEY")).strip()
             if not key_value and legacy_key:
                 key_value = _text(settings.get(legacy_key)).strip()

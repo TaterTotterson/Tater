@@ -10,6 +10,9 @@ logger = logging.getLogger("core_registry")
 
 CORE_DIR = Path(os.getenv("TATER_CORE_DIR", "cores"))
 _SAFE_MODULE_RE = re.compile(r"^[A-Za-z0-9_]+_core$")
+_RESERVED_BUILTIN_CORE_MODULE_KEYS = {
+    "voice_core",
+}
 
 _DEFAULT_CORE_ORDER = [
     "ai_task_core",
@@ -46,6 +49,8 @@ def _discover_core_module_keys() -> List[str]:
     for file_path in CORE_DIR.glob("*_core.py"):
         stem = str(file_path.stem or "").strip()
         if stem and _SAFE_MODULE_RE.fullmatch(stem):
+            if stem in _RESERVED_BUILTIN_CORE_MODULE_KEYS:
+                continue
             discovered.add(stem)
 
     return sorted(discovered, key=_core_sort_key)
