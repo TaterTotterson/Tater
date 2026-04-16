@@ -8,7 +8,7 @@ Clean ESPHome-compatible backend pipeline:
 - Wyoming STT/TTS orchestration
 - Hydra turn execution
 - URL-based TTS playback lifecycle (announcement_finished aware)
-- mDNS + manual target discovery/reconcile
+- mDNS discovery + selected-satellite reconcile
 """
 
 from __future__ import annotations
@@ -37,8 +37,6 @@ import time
 import uuid
 import wave
 import zipfile
-import mimetypes
-from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib import request as urllib_request
@@ -270,151 +268,18 @@ CORE_WEBUI_TAB = {
 
 PLATFORM_SETTINGS = CORE_SETTINGS
 PLATFORM_WEBUI_TAB = CORE_WEBUI_TAB
-
-VOICE_UI_SETTING_SPECS: List[Dict[str, Any]] = [
-    {
-        "key": "VOICE_NATIVE_DEBUG",
-        "label": "Native Voice Debug Logs",
-        "type": "checkbox",
-        "default": False,
-        "description": "Enable verbose voice pipeline logs.",
-    },
-    {
-        "key": "VOICE_CONTINUED_CHAT_ENABLED",
-        "label": "Continued Chat (Auto Reopen Mic)",
-        "type": "checkbox",
-        "default": DEFAULT_CONTINUED_CHAT_ENABLED,
-        "description": "If enabled, Voice Core uses a small AI check to decide whether to reopen the mic for a follow-up reply.",
-    },
-    {
-        "key": "VOICE_EXPERIMENTAL_LIVE_TOOL_PROGRESS_ENABLED",
-        "label": "Experimental Live Tool Progress Speech",
-        "type": "checkbox",
-        "default": DEFAULT_EXPERIMENTAL_LIVE_TOOL_PROGRESS_ENABLED,
-        "description": "If enabled, Voice will briefly stop thinking, speak Hydra's tool-start line, then return to thinking before the tool runs. This is experimental and may add a little latency.",
-    },
-    {
-        "key": "VOICE_EXPERIMENTAL_PARTIAL_STT_ENABLED",
-        "label": "Experimental Partial STT",
-        "type": "checkbox",
-        "default": DEFAULT_EXPERIMENTAL_PARTIAL_STT_ENABLED,
-        "description": "If enabled, Tater will try to build live partial transcripts during capture for all STT backends. This can improve turn-end decisions, but may use more CPU/GPU.",
-    },
-    {
-        "key": "VOICE_EXPERIMENTAL_TTS_EARLY_START_ENABLED",
-        "label": "Experimental Early-Start TTS",
-        "type": "checkbox",
-        "default": DEFAULT_EXPERIMENTAL_TTS_EARLY_START_ENABLED,
-        "description": "If enabled, Tater may start speaking long replies sooner by splitting playback into early chunks. This is experimental and may introduce slightly more audible sentence gaps.",
-    },
-    {
-        "key": "VOICE_ESPHOME_TARGETS",
-        "label": "Manual Target Hosts",
-        "type": "text",
-        "default": "",
-        "description": "Comma-separated host/IP list (for example: 10.4.20.19,10.4.20.139).",
-    },
-    {
-        "key": "VOICE_DISCOVERY_ENABLED",
-        "label": "Enable mDNS Discovery",
-        "type": "checkbox",
-        "default": True,
-        "description": "Discover ESPHome satellites via mDNS.",
-    },
-    {
-        "key": "VOICE_DISCOVERY_SCAN_SECONDS",
-        "label": "Discovery Scan Interval (sec)",
-        "type": "number",
-        "default": DEFAULT_DISCOVERY_SCAN_SECONDS,
-        "min": 5,
-        "max": 600,
-    },
-    {
-        "key": "VOICE_DISCOVERY_MDNS_TIMEOUT_S",
-        "label": "mDNS Listen Window (sec)",
-        "type": "number",
-        "default": DEFAULT_DISCOVERY_MDNS_TIMEOUT_S,
-        "min": 0.5,
-        "max": 20.0,
-        "step": 0.1,
-    },
-    {
-        "key": "VOICE_ESPHOME_API_PORT",
-        "label": "ESPHome API Port",
-        "type": "number",
-        "default": DEFAULT_ESPHOME_API_PORT,
-        "min": 1,
-        "max": 65535,
-    },
-    {
-        "key": "VOICE_ESPHOME_PASSWORD",
-        "label": "ESPHome API Password",
-        "type": "password",
-        "default": "",
-    },
-    {
-        "key": "VOICE_ESPHOME_NOISE_PSK",
-        "label": "ESPHome Noise PSK",
-        "type": "password",
-        "default": "",
-    },
-    {
-        "key": "VOICE_ESPHOME_CONNECT_TIMEOUT_S",
-        "label": "ESPHome Connect Timeout (sec)",
-        "type": "number",
-        "default": DEFAULT_ESPHOME_CONNECT_TIMEOUT_S,
-        "min": 2.0,
-        "max": 60.0,
-        "step": 0.1,
-    },
-    {
-        "key": "VOICE_ESPHOME_RETRY_SECONDS",
-        "label": "ESPHome Retry Seconds",
-        "type": "number",
-        "default": DEFAULT_ESPHOME_RETRY_SECONDS,
-        "min": 2,
-        "max": 300,
-    },
-    {
-        "key": "VOICE_NATIVE_WYOMING_TIMEOUT_S",
-        "label": "Wyoming Timeout (sec)",
-        "type": "number",
-        "default": DEFAULT_WYOMING_TIMEOUT_SECONDS,
-        "min": 5.0,
-        "max": 180.0,
-        "step": 0.1,
-    },
-]
+# ESPHome settings/schema now live in esphome.settings so the native ESPHome
+# surface can grow beyond voice-only devices without piling more UI metadata
+# into the live voice runtime.
 
 # -------------------- Global Runtime --------------------
 _voice_runtime_lock = asyncio.Lock()
 _voice_selector_runtime: Dict[str, Dict[str, Any]] = {}
 
-_esphome_native_lock = asyncio.Lock()
-_esphome_reconcile_lock = asyncio.Lock()
-_esphome_native_clients: Dict[str, Dict[str, Any]] = {}
-_ESPHOME_LOG_BUFFER_LIMIT = 500
-_ESPHOME_LOG_IDLE_SECONDS = 120.0
-_esphome_native_stats: Dict[str, Any] = {
-    "runs": 0,
-    "last_run_ts": 0.0,
-    "last_success_ts": 0.0,
-    "last_error": "",
-}
-
-_discovery_stats: Dict[str, Any] = {
-    "runs": 0,
-    "last_run_ts": 0.0,
-    "last_success_ts": 0.0,
-    "last_error": "",
-    "last_counts": {},
-}
-
 _background_tasks: Dict[str, asyncio.Task] = {}
 
 _tts_url_store: Dict[str, Dict[str, Any]] = {}
 _tts_url_store_lock = threading.Lock()
-_asset_data_url_cache: Dict[str, str] = {}
 
 _wyoming_tts_voice_catalog_mem: List[Dict[str, str]] = []
 _wyoming_tts_voice_catalog_meta_mem: Dict[str, Any] = {
@@ -442,7 +307,6 @@ _pocket_tts_model_lock = threading.Lock()
 _piper_voice_cache: Dict[str, Any] = {}
 _piper_voice_lock = threading.Lock()
 _kokoro_ssmd_patch_applied = False
-_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _TRANSCRIPT_COMPLETE_SHORT_COMMANDS = {
     "yes",
     "no",
@@ -1615,7 +1479,6 @@ def _voice_config_snapshot() -> Dict[str, Any]:
             "retry_seconds": _get_int_setting("VOICE_ESPHOME_RETRY_SECONDS", DEFAULT_ESPHOME_RETRY_SECONDS, minimum=2, maximum=300),
             "password_set": bool(_text(settings.get("VOICE_ESPHOME_PASSWORD"))),
             "noise_psk_set": bool(_text(settings.get("VOICE_ESPHOME_NOISE_PSK"))),
-            "targets": _parse_manual_targets(_text(settings.get("VOICE_ESPHOME_TARGETS"))),
         },
         "discovery": {
             "enabled": _get_bool_setting("VOICE_DISCOVERY_ENABLED", DEFAULT_DISCOVERY_ENABLED),
@@ -1642,20 +1505,6 @@ def _voice_config_snapshot() -> Dict[str, Any]:
             "history_llm": _get_int_setting("MAX_LLM", DEFAULT_HISTORY_MAX_LLM, minimum=2, maximum=80),
         },
     }
-
-
-def _parse_manual_targets(raw: str) -> List[str]:
-    if not raw:
-        return []
-    out: List[str] = []
-    seen = set()
-    for token in re.split(r"[\s,;]+", raw):
-        host = _lower(token)
-        if not host or host in seen:
-            continue
-        seen.add(host)
-        out.append(host)
-    return out
 
 
 # -------------------- Voice Catalog --------------------
@@ -4364,49 +4213,6 @@ def _set_satellite_selected(selector: str, selected: bool) -> None:
     _save_satellite_registry(next_rows)
 
 
-def _esphome_target_map() -> Dict[str, str]:
-    out: Dict[str, str] = {}
-    for row in _load_satellite_registry():
-        selector = _text(row.get("selector"))
-        host = _lower(row.get("host"))
-        meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-        if not selector or not host:
-            continue
-        if bool(meta.get("esphome_selected")):
-            out[selector] = host
-    return out
-
-
-def _sync_manual_targets() -> int:
-    cfg = _voice_config_snapshot()
-    esphome = cfg.get("esphome") if isinstance(cfg.get("esphome"), dict) else {}
-    targets = esphome.get("targets") if isinstance(esphome.get("targets"), list) else []
-    if not targets:
-        return 0
-
-    current_rows = { _text(row.get("selector")): row for row in _load_satellite_registry() }
-    touched = 0
-    for host in targets:
-        host_token = _lower(host)
-        selector = f"host:{host_token}"
-        existing = current_rows.get(selector) if isinstance(current_rows.get(selector), dict) else {}
-        existing_meta = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
-        selected = bool(existing_meta.get("esphome_selected", True))
-        merged_meta = dict(existing_meta)
-        merged_meta["esphome_selected"] = selected
-        _upsert_satellite(
-            {
-                "selector": selector,
-                "host": host_token,
-                "name": _text(existing.get("name")) or _text(host),
-                "source": _text(existing.get("source")) or "manual",
-                "metadata": merged_meta,
-            }
-        )
-        touched += 1
-    return touched
-
-
 def _satellite_lookup(selector: str) -> Dict[str, Any]:
     token = _text(selector)
     if not token:
@@ -4429,1196 +4235,47 @@ def _remove_satellite(selector: str) -> bool:
     return changed
 
 
-def _current_manual_targets() -> List[str]:
-    return _parse_manual_targets(_text(_voice_settings().get("VOICE_ESPHOME_TARGETS")))
-
-
-def _save_manual_targets(hosts: List[str]) -> None:
-    clean: List[str] = []
-    seen = set()
-    for host in hosts:
-        token = _lower(host)
-        if not token or token in seen:
-            continue
-        seen.add(token)
-        clean.append(token)
-    redis_client.hset(VOICE_CORE_SETTINGS_HASH_KEY, mapping={"VOICE_ESPHOME_TARGETS": ",".join(clean)})
-
-
-# -------------------- mDNS Discovery --------------------
-def _discover_mdns_sync(scan_seconds: float) -> List[Dict[str, Any]]:
-    try:
-        from zeroconf import ServiceBrowser, ServiceStateChange, Zeroconf  # type: ignore
-    except Exception:
-        return []
-
-    service_types = ("_esphomelib._tcp.local.", "_esphome._tcp.local.")
-    timeout_ms = max(200, int(float(scan_seconds) * 1000))
-    found: Dict[str, Dict[str, Any]] = {}
-    lock = threading.Lock()
-
-    def _decode(value: Any) -> str:
-        if value is None:
-            return ""
-        if isinstance(value, bytes):
-            with contextlib.suppress(Exception):
-                return value.decode("utf-8", "ignore").strip()
-            return ""
-        return str(value).strip()
-
-    def _collect_addresses(info: Any) -> List[str]:
-        out: List[str] = []
-        seen = set()
-        parsed = None
-        with contextlib.suppress(Exception):
-            parsed = info.parsed_addresses()
-        if isinstance(parsed, list):
-            for addr in parsed:
-                token = _lower(addr)
-                if not token or token in seen:
-                    continue
-                seen.add(token)
-                out.append(token)
-        return out
-
-    def _on_state(*args: Any, **kwargs: Any) -> None:
-        zc = kwargs.get("zeroconf")
-        service_type = kwargs.get("service_type")
-        name = kwargs.get("name")
-        state_change = kwargs.get("state_change")
-        if zc is None and len(args) >= 1:
-            zc = args[0]
-        if service_type is None and len(args) >= 2:
-            service_type = args[1]
-        if name is None and len(args) >= 3:
-            name = args[2]
-        if state_change is None and len(args) >= 4:
-            state_change = args[3]
-
-        if zc is None or not service_type or not name:
-            return
-        if state_change not in (ServiceStateChange.Added, ServiceStateChange.Updated):
-            return
-
-        info = None
-        with contextlib.suppress(Exception):
-            info = zc.get_service_info(service_type, name, timeout=timeout_ms)
-        if info is None:
-            return
-
-        addresses = _collect_addresses(info)
-        host = ""
-        for addr in addresses:
-            if addr.startswith("127.") or addr == "::1":
-                continue
-            host = addr
-            break
-        if not host:
-            host = _lower(_decode(getattr(info, "server", "")).rstrip("."))
-        if not host:
-            return
-
-        props = getattr(info, "properties", None)
-        props_map = props if isinstance(props, dict) else {}
-        node_name = _decode(props_map.get(b"name")) or _decode(name).split(".", 1)[0] or host
-
-        row = {
-            "selector": f"host:{host}",
-            "host": host,
-            "name": node_name,
-            "source": "mdns_esphome",
-            "metadata": {
-                "mdns_service": _decode(name),
-                "mdns_type": _decode(service_type),
-                "mdns_addresses": addresses,
-            },
-        }
-        with lock:
-            found[row["selector"]] = row
-
-    zc = Zeroconf()
-    browsers = []
-    try:
-        for st in service_types:
-            with contextlib.suppress(Exception):
-                browsers.append(ServiceBrowser(zc, st, handlers=[_on_state]))
-        time.sleep(float(max(0.5, scan_seconds)))
-    finally:
-        for browser in browsers:
-            with contextlib.suppress(Exception):
-                browser.cancel()
-        with contextlib.suppress(Exception):
-            zc.close()
-
-    return list(found.values())
-
-
-async def _discover_mdns_once() -> List[Dict[str, Any]]:
-    cfg = _voice_config_snapshot()
-    discovery = cfg.get("discovery") if isinstance(cfg.get("discovery"), dict) else {}
-    timeout_s = float(discovery.get("mdns_timeout_s") or DEFAULT_DISCOVERY_MDNS_TIMEOUT_S)
-    return await asyncio.to_thread(_discover_mdns_sync, timeout_s)
-
-
-async def _discovery_loop() -> None:
-    while True:
-        try:
-            cfg = _voice_config_snapshot()
-            discovery = cfg.get("discovery") if isinstance(cfg.get("discovery"), dict) else {}
-            enabled = bool(discovery.get("enabled"))
-
-            _sync_manual_targets()
-            if enabled:
-                rows = await _discover_mdns_once()
-                for row in rows:
-                    _upsert_satellite(row)
-                _discovery_stats["last_counts"] = {"mdns_esphome": len(rows)}
-            else:
-                _discovery_stats["last_counts"] = {"mdns_esphome": 0}
-
-            _discovery_stats["runs"] = int(_discovery_stats.get("runs") or 0) + 1
-            _discovery_stats["last_run_ts"] = _now()
-            _discovery_stats["last_success_ts"] = _now()
-            _discovery_stats["last_error"] = ""
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            _discovery_stats["last_error"] = str(exc)
-            _discovery_stats["last_run_ts"] = _now()
-            logger.warning("[native-voice] discovery loop error: %s", exc)
-
-        interval = _get_int_setting("VOICE_DISCOVERY_SCAN_SECONDS", DEFAULT_DISCOVERY_SCAN_SECONDS, minimum=5, maximum=600)
-        await asyncio.sleep(float(interval))
-
-
-# -------------------- ESPHome Native API --------------------
-def _esphome_import() -> Tuple[Optional[Any], str]:
-    try:
-        module = importlib.import_module("aioesphomeapi")
-        return module, ""
-    except Exception as exc:
-        return None, str(exc)
-
-
-def _esphome_module_attr(module: Any, name: str) -> Any:
-    if module is not None:
-        value = getattr(module, name, None)
-        if value is not None:
-            return value
-        sub_model = getattr(module, "model", None)
-        if sub_model is not None:
-            value = getattr(sub_model, name, None)
-            if value is not None:
-                return value
-    with contextlib.suppress(Exception):
-        model_module = importlib.import_module("aioesphomeapi.model")
-        value = getattr(model_module, name, None)
-        if value is not None:
-            return value
-    return None
-
-
-def _esphome_event_type_value(module: Any, *candidates: str) -> Any:
-    enum_cls = _esphome_module_attr(module, "VoiceAssistantEventType")
-    if enum_cls is None:
-        return None
-
-    wanted = {_lower(item) for item in candidates if _text(item)}
-    for candidate in candidates:
-        token = _text(candidate)
-        if not token:
-            continue
-        direct = getattr(enum_cls, token, None)
-        if direct is not None:
-            return direct
-
-    for attr_name in dir(enum_cls):
-        if _lower(attr_name) in wanted:
-            return getattr(enum_cls, attr_name, None)
-
-    return None
-
-
-def _esphome_payload_strings(data: Optional[Dict[str, Any]]) -> Dict[str, str]:
-    payload = data if isinstance(data, dict) else {}
-    out: Dict[str, str] = {}
-    for key, value in payload.items():
-        token = _text(key)
-        if not token or value is None:
-            continue
-        if isinstance(value, bool):
-            out[token] = "1" if value else "0"
-        else:
-            out[token] = str(value)
-    return out
-
-
-async def _esphome_client_call(client: Any, method_name: str, *args: Any, **kwargs: Any) -> Any:
-    method = getattr(client, method_name, None)
-    if not callable(method):
-        raise RuntimeError(f"ESPHome client missing method: {method_name}")
-    result = method(*args, **kwargs)
-    if inspect.isawaitable(result):
-        return await result
-    return result
-
-
-async def _esphome_send_event(client: Any, module: Any, event_candidates: Tuple[str, ...], data: Optional[Dict[str, Any]]) -> bool:
-    event_type = _esphome_event_type_value(module, *event_candidates)
-    if event_type is None:
-        _native_debug(f"esphome event unavailable candidates={event_candidates}")
-        return False
-
-    payload = _esphome_payload_strings(data)
-    try:
-        await _esphome_client_call(client, "send_voice_assistant_event", event_type, payload if payload else None)
-        return True
-    except Exception as exc:
-        _native_debug(f"esphome event send failed candidates={event_candidates} error={exc}")
-        return False
-
-
-def _esphome_client_connected(client: Any, fallback: bool = False) -> bool:
-    if client is None:
-        return False
-
-    marker = getattr(client, "is_connected", None)
-    if callable(marker):
-        try:
-            value = marker()
-            if inspect.isawaitable(value):
-                return fallback
-            return bool(value)
-        except Exception:
-            return fallback
-    if isinstance(marker, bool):
-        return marker
-
-    marker2 = getattr(client, "connected", None)
-    if isinstance(marker2, bool):
-        return marker2
-
-    return fallback
-
-
-def _asset_data_url(path: str) -> str:
-    token = _text(path)
-    if not token:
-        return ""
-    cached = _asset_data_url_cache.get(token)
-    if cached:
-        return cached
-    try:
-        with open(token, "rb") as handle:
-            raw = handle.read()
-        mime = mimetypes.guess_type(token)[0] or "application/octet-stream"
-        encoded = base64.b64encode(raw).decode("ascii")
-        value = f"data:{mime};base64,{encoded}"
-        _asset_data_url_cache[token] = value
-        return value
-    except Exception:
-        return ""
-
-
-def _default_satellite_image_src() -> str:
-    path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "images", "tatervoice.png"))
-    return _asset_data_url(path)
-
-
-def _named_satellite_image_src(image_name: str) -> str:
-    path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "images", image_name))
-    return _asset_data_url(path)
-
-
-def _satellite_image_src(*name_candidates: Any) -> str:
-    for raw_name in name_candidates:
-        token = _lower(raw_name)
-        if not token:
-            continue
-        if "tatervpe" in token:
-            return _named_satellite_image_src("voicepe.png")
-        if "tatersat1" in token:
-            return _named_satellite_image_src("sat1.png")
-    return _default_satellite_image_src()
-
-
-def _esphome_scalar(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    with contextlib.suppress(Exception):
-        text = str(value)
-        if text and text != repr(value):
-            return text
-    return None
-
-
-def _esphome_class_token(obj: Any, suffix: str) -> str:
-    name = _text(getattr(getattr(obj, "__class__", None), "__name__", ""))
-    if not name:
-        return ""
-    lowered = name.lower()
-    wanted = suffix.lower()
-    if lowered.endswith(wanted):
-        return name[: -len(suffix)]
-    return name
-
-
-def _esphome_format_state_value(value: Any, *, unit: str = "", kind: str = "") -> str:
-    if value is None:
-        return ""
-    kind_token = _lower(kind)
-    if isinstance(value, bool):
-        if "binary" in kind_token:
-            return "On" if value else "Off"
-        return "Yes" if value else "No"
-    if isinstance(value, float):
-        text = f"{value:.2f}".rstrip("0").rstrip(".")
-    else:
-        text = _text(value)
-    if not text:
-        return ""
-    return f"{text} {unit}".strip() if unit else text
-
-
-_ESPHOME_STATE_ATTR_NAMES: Tuple[str, ...] = (
-    "state",
-    "value",
-    "position",
-    "current_operation",
-    "operation",
-    "mode",
-    "preset",
-    "option",
-    "brightness",
-    "level",
-    "volume",
-    "current_temperature",
-    "target_temperature",
-    "temperature",
-    "speed",
-    "direction",
-    "oscillating",
-    "muted",
-    "active",
-    "media_title",
-    "media_artist",
-    "effect",
-    "color_mode",
-    "red",
-    "green",
-    "blue",
-    "white",
-    "cold_white",
-    "warm_white",
-    "color_brightness",
-)
-
-
-def _esphome_kind_label(kind: Any) -> str:
-    token = _text(kind).strip()
-    if not token:
-        return "Entity"
-    token = token.replace("_", " ")
-    token = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", token)
-    token = re.sub(r"\s+", " ", token).strip()
-    return token.title() if token else "Entity"
-
-
-def _esphome_entity_meta_label(info_row: Dict[str, Any], state_row: Dict[str, Any]) -> str:
-    info = info_row if isinstance(info_row, dict) else {}
-    state = state_row if isinstance(state_row, dict) else {}
-    parts: List[str] = []
-    kind_label = _esphome_kind_label(info.get("kind") or state.get("kind"))
-    if kind_label:
-        parts.append(kind_label)
-    device_class = _text(info.get("device_class")).replace("_", " ").strip()
-    if device_class:
-        parts.append(device_class.title())
-    entity_category = _text(info.get("entity_category")).replace("_", " ").strip()
-    if entity_category:
-        parts.append(entity_category.title())
-    return " • ".join(part for part in parts if part)
-
-
-def _esphome_entity_state_attrs(state: Any) -> Dict[str, Any]:
-    if state is None:
-        return {}
-    out: Dict[str, Any] = {}
-    for attr in _ESPHOME_STATE_ATTR_NAMES:
-        if not hasattr(state, attr):
-            continue
-        candidate = getattr(state, attr, None)
-        if callable(candidate):
-            continue
-        scalar = _esphome_scalar(candidate)
-        if scalar in {None, ""}:
-            continue
-        out[attr] = scalar
-    return out
-
-
-def _esphome_entity_display_value(info_row: Dict[str, Any], state_row: Dict[str, Any]) -> str:
-    info = info_row if isinstance(info_row, dict) else {}
-    state = state_row if isinstance(state_row, dict) else {}
-    unit = _text(info.get("unit"))
-    attrs = state.get("attrs") if isinstance(state.get("attrs"), dict) else {}
-
-    preferred_attrs = (
-        "state",
-        "value",
-        "position",
-        "mode",
-        "option",
-        "preset",
-        "current_operation",
-        "operation",
-        "active",
-        "brightness",
-        "level",
-        "volume",
-        "current_temperature",
-        "target_temperature",
-        "temperature",
-        "speed",
-        "direction",
-        "effect",
-        "color_mode",
-        "media_title",
-    )
-    for attr in preferred_attrs:
-        if attr not in attrs:
-            continue
-        value = attrs.get(attr)
-        if attr in {"brightness", "level", "volume", "position"} and isinstance(value, (int, float)):
-            if 0.0 <= float(value) <= 1.0:
-                return f"{round(float(value) * 100)}%"
-        return _esphome_format_state_value(value, unit=unit, kind=_text(info.get("kind") or state.get("kind")))
-
-    fallback_value = _esphome_format_state_value(
-        state.get("raw"),
-        unit=unit,
-        kind=_text(info.get("kind") or state.get("kind")),
-    )
-    if fallback_value:
-        return fallback_value
-    if attrs:
-        first_value = next(iter(attrs.values()))
-        fallback_value = _esphome_format_state_value(
-            first_value,
-            unit=unit,
-            kind=_text(info.get("kind") or state.get("kind")),
-        )
-        if fallback_value:
-            return fallback_value
-    return "Available"
-
-
-def _esphome_list_values(value: Any) -> List[str]:
-    if isinstance(value, (list, tuple, set)):
-        out: List[str] = []
-        for item in value:
-            token = _text(_esphome_scalar(item))
-            if token:
-                out.append(token)
-        return out
-    token = _text(_esphome_scalar(value))
-    return [token] if token else []
-
-
-def _esphome_entity_is_on(state_row: Dict[str, Any]) -> Optional[bool]:
-    state = state_row if isinstance(state_row, dict) else {}
-    attrs = state.get("attrs") if isinstance(state.get("attrs"), dict) else {}
-    for key in ("state", "active"):
-        value = attrs.get(key)
-        if isinstance(value, bool):
-            return value
-    raw = state.get("raw")
-    if isinstance(raw, bool):
-        return raw
-    return None
-
-
-def _esphome_color_component(value: Any) -> Optional[int]:
-    if value is None:
-        return None
-    try:
-        numeric = float(value)
-    except Exception:
-        return None
-    if 0.0 <= numeric <= 1.0:
-        numeric *= 255.0
-    return max(0, min(255, int(round(numeric))))
-
-
-def _esphome_light_color_hex(info_row: Dict[str, Any], state_row: Dict[str, Any]) -> str:
-    info = info_row if isinstance(info_row, dict) else {}
-    state = state_row if isinstance(state_row, dict) else {}
-    attrs = state.get("attrs") if isinstance(state.get("attrs"), dict) else {}
-    red = _esphome_color_component(attrs.get("red"))
-    green = _esphome_color_component(attrs.get("green"))
-    blue = _esphome_color_component(attrs.get("blue"))
-    if red is None or green is None or blue is None:
-        return "#ff9b45" if _esphome_light_supports_color(info, state) else ""
-    return f"#{red:02x}{green:02x}{blue:02x}"
-
-
-def _esphome_light_supports_color(info_row: Dict[str, Any], state_row: Dict[str, Any]) -> bool:
-    info = info_row if isinstance(info_row, dict) else {}
-    state = state_row if isinstance(state_row, dict) else {}
-    attrs = state.get("attrs") if isinstance(state.get("attrs"), dict) else {}
-    if all(_esphome_color_component(attrs.get(name)) is not None for name in ("red", "green", "blue")):
-        return True
-    color_mode = _lower(attrs.get("color_mode"))
-    if any(token in color_mode for token in ("rgb", "hs", "xy")):
-        return True
-    supported = [_lower(item) for item in _esphome_list_values(info.get("supported_color_modes"))]
-    return any(any(token in mode for token in ("rgb", "hs", "xy")) for mode in supported)
-
-
-def _esphome_entity_control_spec(info_row: Dict[str, Any], state_row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    info = info_row if isinstance(info_row, dict) else {}
-    state = state_row if isinstance(state_row, dict) else {}
-    key = _text(info.get("key") or state.get("key"))
-    if not key:
-        return None
-    kind = _lower(info.get("kind") or state.get("kind"))
-    attrs = state.get("attrs") if isinstance(state.get("attrs"), dict) else {}
-
-    if "switch" in kind:
-        return {
-            "type": "toggle",
-            "command": "switch_set",
-            "checked": bool(_esphome_entity_is_on(state)),
-        }
-
-    if "light" in kind:
-        return {
-            "type": "light",
-            "command": "light_set",
-            "checked": bool(_esphome_entity_is_on(state)),
-            "supports_color": _esphome_light_supports_color(info, state),
-            "color": _esphome_light_color_hex(info, state),
-        }
-
-    if "button" in kind:
-        return {
-            "type": "button",
-            "command": "button_press",
-            "label": "Run",
-        }
-
-    if "select" in kind:
-        options = _esphome_list_values(info.get("options"))
-        if options:
-            return {
-                "type": "select",
-                "command": "select_set",
-                "value": _text(attrs.get("option") or attrs.get("state") or state.get("raw")),
-                "options": options,
-            }
-
-    if "number" in kind:
-        current_value = attrs.get("state")
-        if current_value is None:
-            current_value = state.get("raw")
-        return {
-            "type": "number",
-            "command": "number_set",
-            "value": current_value,
-            "min": info.get("min_value"),
-            "max": info.get("max_value"),
-            "step": info.get("step"),
-        }
-
-    return None
-
-
-def _esphome_device_info_snapshot(info: Any) -> Dict[str, Any]:
-    if info is None:
-        return {}
-    names = [
-        "name",
-        "friendly_name",
-        "manufacturer",
-        "model",
-        "project_name",
-        "project_version",
-        "esphome_version",
-        "compilation_time",
-        "mac_address",
-        "bluetooth_mac_address",
-        "webserver_port",
-    ]
-    out: Dict[str, Any] = {}
-    for name in names:
-        value = _esphome_scalar(getattr(info, name, None))
-        if value not in {None, ""}:
-            out[name] = value
-    return out
-
-
-def _esphome_entity_info_snapshot(info: Any) -> Dict[str, Any]:
-    if info is None:
-        return {}
-    key = getattr(info, "key", None)
-    if key is None:
-        return {}
-    key_text = _text(key)
-    if not key_text:
-        return {}
-    class_name = _text(getattr(getattr(info, "__class__", None), "__name__", ""))
-    kind = _esphome_class_token(info, "Info")
-    out = {
-        "key": key_text,
-        "kind": kind,
-        "class_name": class_name,
-        "name": _text(getattr(info, "name", None)) or _text(getattr(info, "object_id", None)) or f"Entity {key_text}",
-        "object_id": _text(getattr(info, "object_id", None)),
-        "unit": _text(getattr(info, "unit_of_measurement", None)) or _text(getattr(info, "unit", None)),
-        "device_class": _text(getattr(info, "device_class", None)),
-        "entity_category": _text(getattr(info, "entity_category", None)),
-        "icon": _text(getattr(info, "icon", None)),
-        "disabled_by_default": bool(getattr(info, "disabled_by_default", False)),
-    }
-    for attr in ("min_value", "max_value", "step"):
-        scalar = _esphome_scalar(getattr(info, attr, None))
-        if scalar not in {None, ""}:
-            out[attr] = scalar
-    for attr in ("options", "effects", "supported_color_modes"):
-        values = _esphome_list_values(getattr(info, attr, None))
-        if values:
-            out[attr] = values
-    return out
-
-
-def _esphome_entity_state_snapshot(state: Any) -> Dict[str, Any]:
-    if state is None:
-        return {}
-    key = getattr(state, "key", None)
-    if key is None:
-        return {}
-    key_text = _text(key)
-    if not key_text:
-        return {}
-    raw_value = None
-    for attr in ("state", "value"):
-        if not hasattr(state, attr):
-            continue
-        candidate = getattr(state, attr, None)
-        if callable(candidate):
-            continue
-        raw_value = candidate
-        break
-    kind = _esphome_class_token(state, "State")
-    attrs = _esphome_entity_state_attrs(state)
-    return {
-        "key": key_text,
-        "kind": kind,
-        "raw": _esphome_scalar(raw_value),
-        "attrs": attrs,
-        "updated_ts": _now(),
-    }
-
-
-def _esphome_entity_rows(entity_infos: Any, entity_states: Any) -> List[Dict[str, Any]]:
-    infos = entity_infos if isinstance(entity_infos, dict) else {}
-    states = entity_states if isinstance(entity_states, dict) else {}
-    rows: List[Dict[str, str]] = []
-    for key, info in infos.items():
-        if not isinstance(info, dict):
-            continue
-        state_row = states.get(key) if isinstance(states.get(key), dict) else {}
-        row: Dict[str, Any] = {
-            "key": _text(info.get("key") or key),
-            "label": _text(info.get("name")) or _text(info.get("object_id")) or f"Entity {key}",
-            "value": _esphome_entity_display_value(info, state_row),
-            "kind": _text(info.get("kind")),
-            "meta": _esphome_entity_meta_label(info, state_row),
-        }
-        control = _esphome_entity_control_spec(info, state_row)
-        if control:
-            row["control"] = control
-        rows.append(row)
-    rows.sort(key=lambda row: (_lower(row.get("label")), _lower(row.get("kind"))))
-    return rows
-
-
-async def _esphome_list_entity_catalog(client: Any) -> Dict[str, Dict[str, Any]]:
-    method = getattr(client, "list_entities_services", None)
-    if not callable(method):
-        method = getattr(client, "list_entities", None)
-    if not callable(method):
-        return {}
-    result = method()
-    if inspect.isawaitable(result):
-        result = await result
-    parts: List[Any] = []
-    if isinstance(result, tuple):
-        parts.extend(list(result))
-    elif isinstance(result, list):
-        parts.append(result)
-    else:
-        parts.append(result)
-    out: Dict[str, Dict[str, Any]] = {}
-    for part in parts:
-        if not isinstance(part, (list, tuple)):
-            continue
-        for item in part:
-            snap = _esphome_entity_info_snapshot(item)
-            key = _text(snap.get("key"))
-            if key:
-                out[key] = snap
-    return out
-
-
-async def _esphome_subscribe_states(selector: str, client: Any) -> Optional[Callable[[], None]]:
-    method = getattr(client, "subscribe_states", None)
-    if not callable(method):
-        return None
-    token = _text(selector)
-
-    def _on_state(state: Any) -> None:
-        snap = _esphome_entity_state_snapshot(state)
-        key = _text(snap.get("key"))
-        if not key:
-            return
-        row = _esphome_native_clients.get(token)
-        if not isinstance(row, dict):
-            return
-        state_map = row.get("entity_states")
-        if not isinstance(state_map, dict):
-            state_map = {}
-            row["entity_states"] = state_map
-        state_map[key] = snap
-        row["entity_state_updated_ts"] = _now()
-
-    try:
-        result = method(_on_state)
-    except TypeError:
-        result = method(on_state=_on_state)
-    if inspect.isawaitable(result):
-        result = await result
-    if callable(result):
-        return result
-    return None
-
-
-def _esphome_log_enum_value(module: Any, level_name: str) -> Any:
-    enum_cls = _esphome_module_attr(module, "LogLevel")
-    if enum_cls is None:
-        return None
-    token = _text(level_name).strip().upper()
-    if not token:
-        return None
-    if not token.startswith("LOG_LEVEL_"):
-        token = f"LOG_LEVEL_{token}"
-    return getattr(enum_cls, token, None)
-
-
-def _esphome_log_buffer(row: Dict[str, Any]) -> deque:
-    buffer = row.get("log_lines")
-    if isinstance(buffer, deque):
-        if buffer.maxlen != _ESPHOME_LOG_BUFFER_LIMIT:
-            buffer = deque(buffer, maxlen=_ESPHOME_LOG_BUFFER_LIMIT)
-            row["log_lines"] = buffer
-        return buffer
-    buffer = deque(maxlen=_ESPHOME_LOG_BUFFER_LIMIT)
-    row["log_lines"] = buffer
-    return buffer
-
-
-def _esphome_format_log_level(module: Any, raw_level: Any) -> str:
-    with contextlib.suppress(Exception):
-        enum_cls = _esphome_module_attr(module, "LogLevel")
-        if enum_cls is not None and raw_level is not None:
-            token = enum_cls(int(raw_level)).name
-            if token.startswith("LOG_LEVEL_"):
-                token = token[10:]
-            return token.lower()
-    token = _text(raw_level).strip().lower()
-    return token or "info"
-
-
-def _esphome_log_text(value: Any) -> str:
-    if isinstance(value, (bytes, bytearray)):
-        with contextlib.suppress(Exception):
-            return _ANSI_ESCAPE_RE.sub("", bytes(value).decode("utf-8", errors="replace")).strip()
-        return ""
-    return _ANSI_ESCAPE_RE.sub("", _text(value)).strip()
-
-
-def _esphome_log_message_text(message: Any) -> str:
-    parts: List[str] = []
-    tag = _esphome_log_text(getattr(message, "tag", None) or getattr(message, "source", None))
-    if tag:
-        parts.append(f"[{tag}]")
-    body = _esphome_log_text(
-        getattr(message, "message", None) or getattr(message, "msg", None) or getattr(message, "text", None)
-    )
-    if body:
-        parts.append(body)
-    send_failed = getattr(message, "send_failed", None)
-    if parts:
-        if bool(send_failed):
-            parts.append("(send_failed)")
-        return " ".join(part for part in parts if part).strip()
-    return _esphome_log_text(message)
-
-
-def _esphome_append_log_entry(row: Dict[str, Any], *, level: str, message: str, ts_value: Optional[float] = None) -> Dict[str, Any]:
-    text = _text(message)
-    if not text:
-        text = "(empty log line)"
-    seq = int(row.get("log_seq") or 0) + 1
-    row["log_seq"] = seq
-    ts = float(ts_value if ts_value is not None else _now())
-    time_label = _format_ts_label(ts)
-    entry = {
-        "seq": seq,
-        "ts": ts,
-        "time": time_label,
-        "level": _text(level).lower() or "info",
-        "message": text,
-        "display": f"{time_label} [{_text(level).upper() or 'INFO'}] {text}",
-    }
-    _esphome_log_buffer(row).append(entry)
-    row["log_last_line_ts"] = ts
-    return entry
-
-
-def _esphome_log_entries_after(row: Dict[str, Any], after_seq: int = 0, *, limit: int = 250) -> List[Dict[str, Any]]:
-    entries = list(_esphome_log_buffer(row))
-    if after_seq > 0:
-        entries = [entry for entry in entries if int(entry.get("seq") or 0) > int(after_seq)]
-    if limit > 0 and len(entries) > limit:
-        entries = entries[-limit:]
-    return entries
-
-
-async def _esphome_disable_device_logs(client: Any, module: Any) -> None:
-    method = getattr(client, "subscribe_logs", None)
-    if not callable(method):
-        return
-    level_none = _esphome_log_enum_value(module, "none")
-    kwargs: Dict[str, Any] = {"dump_config": False}
-    if level_none is not None:
-        kwargs["log_level"] = level_none
-
-    def _noop(_: Any) -> None:
-        return None
-
-    try:
-        result = method(_noop, **kwargs)
-    except TypeError:
-        result = method(on_log=_noop, **kwargs)
-    if inspect.isawaitable(result):
-        result = await result
-    if callable(result):
-        with contextlib.suppress(Exception):
-            follow_up = result()
-            if inspect.isawaitable(follow_up):
-                await follow_up
-
-
-async def _esphome_logs_start(selector: str) -> Dict[str, Any]:
-    token = _text(selector)
-    if not token:
-        raise RuntimeError("selector is required")
-    module, import_error = _esphome_import()
-    if module is None:
-        raise RuntimeError(f"aioesphomeapi unavailable: {import_error or 'unknown error'}")
-
-    async with _esphome_native_lock:
-        row = _esphome_native_clients.get(token)
-        client = row.get("client") if isinstance(row, dict) else None
-        if not isinstance(row, dict) or client is None or not bool(row.get("connected")):
-            raise RuntimeError("Satellite is not currently connected.")
-        row["log_last_access_ts"] = _now()
-        row["log_viewers"] = max(1, int(row.get("log_viewers") or 0) + 1)
-        existing_unsubscribe = row.get("log_unsubscribe")
-        if callable(existing_unsubscribe):
-            entries = _esphome_log_entries_after(row, 0)
-            return {
-                "ok": True,
-                "selector": token,
-                "active": True,
-                "cursor": int(row.get("log_seq") or 0),
-                "entries": entries,
-                "viewer_count": int(row.get("log_viewers") or 0),
-            }
-
-    try:
-        method = getattr(client, "subscribe_logs", None)
-        if not callable(method):
-            raise RuntimeError("ESPHome log subscription is unavailable for this client.")
-        log_level = (
-            _esphome_log_enum_value(module, "very_verbose")
-            or _esphome_log_enum_value(module, "verbose")
-            or _esphome_log_enum_value(module, "debug")
-            or _esphome_log_enum_value(module, "config")
-            or _esphome_log_enum_value(module, "info")
-        )
-
-        def _on_log(message: Any) -> None:
-            row = _esphome_native_clients.get(token)
-            if not isinstance(row, dict):
-                return
-            level = _esphome_format_log_level(module, getattr(message, "level", None))
-            line = _esphome_log_message_text(message)
-            _esphome_append_log_entry(row, level=level, message=line, ts_value=_now())
-
-        kwargs: Dict[str, Any] = {"dump_config": True}
-        if log_level is not None:
-            kwargs["log_level"] = log_level
-        try:
-            result = method(_on_log, **kwargs)
-        except TypeError:
-            result = method(on_log=_on_log, **kwargs)
-        if inspect.isawaitable(result):
-            result = await result
-        unsubscribe = result if callable(result) else None
-    except Exception:
-        async with _esphome_native_lock:
-            row = _esphome_native_clients.get(token)
-            if isinstance(row, dict):
-                row["log_viewers"] = max(0, int(row.get("log_viewers") or 1) - 1)
-                row["log_last_access_ts"] = _now()
-        raise
-
-    async with _esphome_native_lock:
-        row = _esphome_native_clients.get(token)
-        if not isinstance(row, dict):
-            raise RuntimeError("Satellite log row is unavailable.")
-        row["log_unsubscribe"] = unsubscribe
-        row["log_started_ts"] = _now()
-        row["log_last_access_ts"] = _now()
-        row["log_error"] = ""
-        host = _text(row.get("host"))
-        device_info = row.get("device_info") if isinstance(row.get("device_info"), dict) else {}
-        device_label = (
-            _text(device_info.get("friendly_name"))
-            or _text(device_info.get("name"))
-            or token
-        )
-        _esphome_append_log_entry(
-            row,
-            level="info",
-            message=f"Starting log output from {host or token} using ESPHome API.",
-            ts_value=_now(),
-        )
-        _esphome_append_log_entry(
-            row,
-            level="info",
-            message=f"Successful handshake with {device_label} @ {host or token}.",
-            ts_value=_now(),
-        )
-        entries = _esphome_log_entries_after(row, 0)
-        return {
-            "ok": True,
-            "selector": token,
-            "active": True,
-            "cursor": int(row.get("log_seq") or 0),
-            "entries": entries,
-            "viewer_count": int(row.get("log_viewers") or 0),
-        }
-
-
-async def _esphome_logs_poll(selector: str, *, after_seq: int = 0) -> Dict[str, Any]:
-    token = _text(selector)
-    if not token:
-        raise RuntimeError("selector is required")
-    async with _esphome_native_lock:
-        row = _esphome_native_clients.get(token)
-        if not isinstance(row, dict):
-            raise RuntimeError("Satellite is unknown.")
-        row["log_last_access_ts"] = _now()
-        entries = _esphome_log_entries_after(row, after_seq)
-        return {
-            "ok": True,
-            "selector": token,
-            "active": callable(row.get("log_unsubscribe")),
-            "connected": bool(row.get("connected")),
-            "cursor": int(row.get("log_seq") or 0),
-            "entries": entries,
-            "viewer_count": int(row.get("log_viewers") or 0),
-            "error": _text(row.get("log_error")),
-        }
-
-
-async def _esphome_logs_stop(selector: str, *, force: bool = False, reason: str = "viewer_closed") -> Dict[str, Any]:
-    token = _text(selector)
-    if not token:
-        return {"ok": True, "selector": token, "stopped": False, "viewer_count": 0}
-    async with _esphome_native_lock:
-        row = _esphome_native_clients.get(token)
-        client = row.get("client") if isinstance(row, dict) else None
-        unsubscribe = row.get("log_unsubscribe") if isinstance(row, dict) else None
-        viewers = int(row.get("log_viewers") or 0) if isinstance(row, dict) else 0
-        if isinstance(row, dict):
-            viewers = 0 if force else max(0, viewers - 1)
-            row["log_viewers"] = viewers
-            row["log_last_access_ts"] = _now()
-            if viewers > 0 and callable(unsubscribe):
-                return {"ok": True, "selector": token, "stopped": False, "viewer_count": viewers}
-            if callable(unsubscribe):
-                row["log_unsubscribe"] = None
-            row["log_error"] = _text(reason)
-    if callable(unsubscribe):
-        with contextlib.suppress(Exception):
-            result = unsubscribe()
-            if inspect.isawaitable(result):
-                await result
-    if client is not None:
-        with contextlib.suppress(Exception):
-            await _esphome_disable_device_logs(client, module=_esphome_import()[0])
-    return {"ok": True, "selector": token, "stopped": callable(unsubscribe), "viewer_count": 0}
-
-
-async def _esphome_logs_cleanup_idle() -> None:
-    cutoff = _now() - float(_ESPHOME_LOG_IDLE_SECONDS)
-    stale: List[str] = []
-    async with _esphome_native_lock:
-        for selector, row in _esphome_native_clients.items():
-            if not isinstance(row, dict):
-                continue
-            if not callable(row.get("log_unsubscribe")):
-                continue
-            last_access = _as_float(row.get("log_last_access_ts"), 0.0)
-            if last_access > 0 and last_access < cutoff:
-                stale.append(_text(selector))
-    for selector in stale:
-        with contextlib.suppress(Exception):
-            await _esphome_logs_stop(selector, force=True, reason="idle_timeout")
-
-
-def _combine_unsubscribes(*callbacks: Any) -> Optional[Callable[[], None]]:
-    valid = [cb for cb in callbacks if callable(cb)]
-    if not valid:
-        return None
-
-    def _unsubscribe() -> None:
-        for cb in valid:
-            with contextlib.suppress(Exception):
-                result = cb()
-                if inspect.isawaitable(result):
-                    asyncio.create_task(result)
-
-    return _unsubscribe
-
-
-async def _esphome_call_client_method(client: Any, method_name: str, *, timeout: float) -> Tuple[bool, str]:
-    method = getattr(client, method_name, None)
-    if not callable(method):
-        return False, "unavailable"
-    try:
-        result = method()
-    except TypeError:
-        return False, "signature_mismatch"
-    except Exception as exc:
-        return False, f"error:{exc}"
-
-    try:
-        if inspect.isawaitable(result):
-            await asyncio.wait_for(result, timeout=timeout)
-    except Exception as exc:
-        return False, f"error:{exc}"
-
-    return True, "ok"
-
-
-async def _esphome_verify_connection(client: Any, *, timeout: float) -> Tuple[bool, str]:
-    if client is None:
-        return False, "missing_client"
-
-    marker_before = _esphome_client_connected(client, fallback=False)
-    ping_ok, ping_reason = await _esphome_call_client_method(client, "ping", timeout=timeout)
-    info_ok, info_reason = await _esphome_call_client_method(client, "device_info", timeout=timeout)
-    marker_after = _esphome_client_connected(client, fallback=False)
-
-    if marker_before or marker_after or ping_ok or info_ok:
-        details = f"marker_before={marker_before} marker_after={marker_after} ping={ping_reason} device_info={info_reason}"
-        return True, details
-    return False, f"marker_before={marker_before} ping={ping_reason} device_info={info_reason}"
-
-
-def _esphome_voice_feature_snapshot(info: Any, client: Any, module: Any) -> Dict[str, Any]:
-    flags = 0
-    api_audio_bit = 0
-    speaker_bit = 0
-    feature_enum = _esphome_module_attr(module, "VoiceAssistantFeature")
-    if feature_enum is not None:
-        with contextlib.suppress(Exception):
-            api_audio_bit = int(getattr(feature_enum, "API_AUDIO"))
-        with contextlib.suppress(Exception):
-            speaker_bit = int(getattr(feature_enum, "SPEAKER"))
-
-    compat_fn = getattr(info, "voice_assistant_feature_flags_compat", None)
-    if callable(compat_fn):
-        with contextlib.suppress(Exception):
-            api_version = getattr(client, "api_version", None)
-            if api_version is not None:
-                flags = int(compat_fn(api_version) or 0)
-            else:
-                flags = int(compat_fn() or 0)
-
-    if not flags:
-        for attr in ("voice_assistant_feature_flags", "voice_assistant_feature_flags_compat"):
-            value = getattr(info, attr, None)
-            if callable(value):
-                with contextlib.suppress(Exception):
-                    value = value()
-            with contextlib.suppress(Exception):
-                parsed = int(value or 0)
-                if parsed:
-                    flags = parsed
-                    break
-
-    api_audio_known = bool(api_audio_bit and flags)
-    speaker_known = bool(speaker_bit and flags)
-
-    return {
-        "flags": int(flags),
-        "api_audio_bit": int(api_audio_bit),
-        "speaker_bit": int(speaker_bit),
-        "api_audio_known": api_audio_known,
-        "speaker_known": speaker_known,
-        "api_audio_supported": True if not api_audio_known else bool(api_audio_bit and (int(flags) & int(api_audio_bit))),
-        "speaker_supported": True if not speaker_known else bool(speaker_bit and (int(flags) & int(speaker_bit))),
-    }
-
-
-async def _esphome_build_client(module: Any, *, host: str, port: int) -> Any:
-    APIClient = getattr(module, "APIClient", None)
-    if APIClient is None:
-        raise RuntimeError("aioesphomeapi.APIClient is unavailable")
-
-    settings = _voice_settings()
-    password = _text(settings.get("VOICE_ESPHOME_PASSWORD"))
-    noise_psk = _text(settings.get("VOICE_ESPHOME_NOISE_PSK"))
-
-    if noise_psk:
-        try:
-            return APIClient(host, port, password, noise_psk=noise_psk)
-        except TypeError:
-            pass
-        try:
-            return APIClient(address=host, port=port, password=password, noise_psk=noise_psk)
-        except TypeError:
-            pass
-        try:
-            return APIClient(host=host, port=port, password=password, noise_psk=noise_psk)
-        except TypeError:
-            pass
-
-    try:
-        return APIClient(host, port, password)
-    except TypeError:
-        pass
-    try:
-        return APIClient(address=host, port=port, password=password)
-    except TypeError:
-        pass
-    return APIClient(host=host, port=port, password=password)
+# Generic ESPHome discovery and device-runtime internals now live in
+# `esphome.device_runtime`. The voice pipeline keeps only the voice-specific
+# session logic, registry helpers, and small UI helpers that are still used by
+# the native ESPHome surface.
+
+
+# UI-only ESPHome presentation helpers live in `esphome.ui_helpers`.
+
+# -------------------- ESPHome Device Runtime Bridge --------------------
+from .. import device_runtime as _esphome_device_runtime
+from .. import ui_helpers as _esphome_ui_helpers
+
+_discover_mdns_once = _esphome_device_runtime.discover_mdns_once
+_discovery_loop = _esphome_device_runtime.discovery_loop
+_esphome_target_map = _esphome_device_runtime.target_map
+_esphome_import = _esphome_device_runtime.esphome_import
+_esphome_module_attr = _esphome_device_runtime.esphome_module_attr
+_esphome_event_type_value = _esphome_device_runtime.esphome_event_type_value
+_esphome_payload_strings = _esphome_device_runtime.esphome_payload_strings
+_esphome_client_call = _esphome_device_runtime.esphome_client_call
+_esphome_send_event = _esphome_device_runtime.esphome_send_event
+_esphome_client_connected = _esphome_device_runtime.esphome_client_connected
+_esphome_list_entity_catalog = _esphome_device_runtime.list_entity_catalog
+_esphome_subscribe_states = _esphome_device_runtime.subscribe_states
+_esphome_logs_start = _esphome_device_runtime.logs_start
+_esphome_logs_poll = _esphome_device_runtime.logs_poll
+_esphome_logs_stop = _esphome_device_runtime.logs_stop
+_esphome_logs_cleanup_idle = _esphome_device_runtime.logs_cleanup_idle
+_esphome_verify_connection = _esphome_device_runtime.verify_connection
+_esphome_voice_feature_snapshot = _esphome_device_runtime.voice_feature_snapshot
+_esphome_build_client = _esphome_device_runtime.build_client
+_esphome_disconnect_selector = _esphome_device_runtime.disconnect_selector
+_esphome_disconnect_all = _esphome_device_runtime.disconnect_all
+_esphome_connect_selector = _esphome_device_runtime.connect_selector
+_esphome_reconcile_once = _esphome_device_runtime.reconcile_once
+_esphome_loop = _esphome_device_runtime.esphome_loop
+_esphome_bootstrap_reconnect = _esphome_device_runtime.bootstrap_reconnect
+_esphome_status = _esphome_device_runtime.status
+_esphome_entities_for_selector = _esphome_device_runtime.entities_for_selector
+_esphome_command_entity = _esphome_device_runtime.command_entity
+_esphome_client_row_snapshot_sync = _esphome_device_runtime.client_row_snapshot_sync
 
 
 def _selector_runtime(selector: str) -> Dict[str, Any]:
@@ -5638,6 +4295,7 @@ def _selector_runtime(selector: str) -> Dict[str, Any]:
             "pending_followup_until_ts": 0.0,
             "streamed_tts": None,
             "streamed_tts_dispatch_task": None,
+            "service_running": False,
         }
         _voice_selector_runtime[token] = row
     if not hasattr(row.get("lock"), "acquire"):
@@ -5750,7 +4408,6 @@ def _schedule_audio_stall_watch(
                     if bool(session.processing):
                         return
 
-                    # Don't judge stream health before startup/post-gate has armed.
                     now_ts = _now()
                     wake_started = bool(_text(session.wake_word))
                     if now_ts < float(session.startup_gate_until_ts):
@@ -5760,7 +4417,9 @@ def _schedule_audio_stall_watch(
                     last_ts = float(session.last_audio_ts or 0.0)
                     if last_ts <= 0.0:
                         elapsed = now_ts - float(session.started_ts or now_ts)
-                        timeout_s = float(DEFAULT_AUDIO_STALL_NO_SPEECH_TIMEOUT_S if wake_started else DEFAULT_BLANK_WAKE_TIMEOUT_S)
+                        timeout_s = float(
+                            DEFAULT_AUDIO_STALL_NO_SPEECH_TIMEOUT_S if wake_started else DEFAULT_BLANK_WAKE_TIMEOUT_S
+                        )
                         if elapsed >= timeout_s:
                             should_finalize = True
                             finalize_reason = "audio_stall_no_audio" if wake_started else "blank_wake_timeout"
@@ -5779,7 +4438,9 @@ def _schedule_audio_stall_watch(
                             should_finalize = True
                             finalize_reason = "audio_stall_after_speech"
                     else:
-                        timeout_s = float(DEFAULT_AUDIO_STALL_NO_SPEECH_TIMEOUT_S if wake_started else DEFAULT_BLANK_WAKE_TIMEOUT_S)
+                        timeout_s = float(
+                            DEFAULT_AUDIO_STALL_NO_SPEECH_TIMEOUT_S if wake_started else DEFAULT_BLANK_WAKE_TIMEOUT_S
+                        )
                         if gap_s >= timeout_s:
                             should_finalize = True
                             finalize_reason = "audio_stall_no_speech" if wake_started else "blank_wake_timeout"
@@ -6068,6 +4729,31 @@ async def _finalize_after_announcement(selector: str, client: Any, module: Any, 
     return True
 
 
+def _schedule_announcement_timeout(selector: str, client: Any, module: Any, timeout_s: float) -> None:
+    token = _text(selector)
+    if not token:
+        return
+
+    runtime = _selector_runtime(token)
+
+    async def _timer() -> None:
+        try:
+            await asyncio.sleep(max(0.2, float(timeout_s)))
+            completed = await _finalize_after_announcement(token, client, module, reason="announcement_timeout")
+            if completed:
+                logger.info(
+                    "[native-voice] announcement timeout finalize selector=%s timeout_s=%.2f",
+                    token,
+                    float(timeout_s),
+                )
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            _native_debug(f"announcement timeout task failed selector={token} error={exc}")
+
+    runtime["announcement_task"] = asyncio.create_task(_timer())
+
+
 async def _queue_selector_audio_url(
     selector: str,
     url: str,
@@ -6086,8 +4772,7 @@ async def _queue_selector_audio_url(
     if import_error:
         raise RuntimeError(import_error)
 
-    async with _esphome_native_lock:
-        client_row = dict(_esphome_native_clients.get(token) or {})
+    client_row = _esphome_client_row_snapshot_sync(token)
     client = client_row.get("client")
     if not bool(client_row.get("connected")) or client is None:
         raise RuntimeError(f"Satellite {token} is not connected")
@@ -6139,31 +4824,6 @@ async def _queue_selector_audio_url(
     return {"selector": token, "playback_id": playback_id, "timeout_s": timeout, "url": target_url}
 
 
-def _schedule_announcement_timeout(selector: str, client: Any, module: Any, timeout_s: float) -> None:
-    token = _text(selector)
-    if not token:
-        return
-
-    runtime = _selector_runtime(token)
-
-    async def _timer() -> None:
-        try:
-            await asyncio.sleep(max(0.2, float(timeout_s)))
-            completed = await _finalize_after_announcement(token, client, module, reason="announcement_timeout")
-            if completed:
-                logger.info(
-                    "[native-voice] announcement timeout finalize selector=%s timeout_s=%.2f",
-                    token,
-                    float(timeout_s),
-                )
-        except asyncio.CancelledError:
-            return
-        except Exception as exc:
-            _native_debug(f"announcement timeout task failed selector={token} error={exc}")
-
-    runtime["announcement_task"] = asyncio.create_task(_timer())
-
-
 def _transcript_is_low_signal(transcript: str) -> bool:
     text = _text(transcript).lower()
     if not text:
@@ -6171,7 +4831,6 @@ def _transcript_is_low_signal(transcript: str) -> bool:
     words = re.findall(r"[a-z0-9']+", text)
     if not words:
         return True
-    # Keep common short commands; filter known filler/noise utterances.
     preserved = {"yes", "no", "stop", "cancel", "play", "pause", "next", "back"}
     if len(words) == 1 and words[0] in preserved:
         return False
@@ -6294,7 +4953,9 @@ async def _finalize_session(
             recovered_transcript = _text(session.stt_transcript)
             seg_threshold = float(seg.threshold) if isinstance(seg, SegmenterState) else float(DEFAULT_SILERO_THRESHOLD)
             recovered_words = re.findall(r"[a-z0-9']+", recovered_transcript.lower())
-            recovered_assessment = _transcript_completeness_assessment(recovered_transcript) if recovered_transcript else {"complete": True}
+            recovered_assessment = (
+                _transcript_completeness_assessment(recovered_transcript) if recovered_transcript else {"complete": True}
+            )
             is_brief_command = bool(
                 len(recovered_words) == 1
                 and recovered_words[0] in {"yes", "no", "stop", "cancel", "play", "pause", "next", "back"}
@@ -6340,8 +5001,6 @@ async def _finalize_session(
                     silence_s=float(session.silence_duration_s or 0.0),
                     turn_latency_ms=max(0.0, (_now() - float(session.started_ts or _now())) * 1000.0),
                 )
-                # No-speech outcomes are normal in wake-word systems; end quietly
-                # so the device does not flash error red for benign wake misses.
                 with contextlib.suppress(Exception):
                     await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
                 return
@@ -6583,9 +5242,7 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
         conv = explicit_conv or followup_conv or sid
         continued_chat_reopen = bool(followup_conv) and not bool(explicit_conv) and not bool(wake_phrase)
         if followup_conv:
-            _native_debug(
-                f"continued chat reuse selector={token} session_id={sid} conversation_id={followup_conv}"
-            )
+            _native_debug(f"continued chat reuse selector={token} session_id={sid} conversation_id={followup_conv}")
 
         try:
             eou_engine = _build_eou_engine(
@@ -6631,8 +5288,7 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
         effective_tts_backend, tts_backend_note = _resolve_tts_backend()
         satellite_row = _satellite_lookup(token)
         area_name = _satellite_area_name(satellite_row)
-        async with _esphome_native_lock:
-            client_row = dict(_esphome_native_clients.get(token) or {})
+        client_row = _esphome_client_row_snapshot_sync(token)
         device_info = client_row.get("device_info") if isinstance(client_row.get("device_info"), dict) else {}
         satellite_name = _text(satellite_row.get("name"))
         device_info_name = _text(device_info.get("name"))
@@ -6650,7 +5306,7 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             "device_id": token,
             "device_name": device_name,
             "satellite_selector": token,
-            "satellite_host": _lower(satellite_row.get("host")) or host_token,
+            "satellite_host": _lower(satellite_row.get("host")) or _satellite_host_from_selector(token),
         }
         if satellite_name:
             session_context["satellite_name"] = satellite_name
@@ -6755,7 +5411,6 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
         if not audio_bytes:
             return
 
-        # Grab session state under lock, then release before VAD inference.
         async with lock:
             session = runtime.get("session")
             if not isinstance(session, VoiceSessionRuntime):
@@ -6773,8 +5428,6 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             return
 
         now_ts = _now()
-
-        # Startup gate: drop audio that might contain the wake prompt.
         if now_ts < gate_ts:
             async with lock:
                 s = runtime.get("session")
@@ -6788,15 +5441,12 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                         )
             return
 
-        # Run VAD inference OUTSIDE the lock so we don't block audio delivery.
         metrics: Dict[str, Any] = {}
         should_finalize = False
-
         if isinstance(eou_engine, EouEngine):
             metrics = eou_engine.process(audio_bytes, audio_format, now_ts)
             should_finalize = bool(metrics.get("should_finalize"))
 
-        # Re-acquire lock to update session state and stream to STT.
         async with lock:
             session = runtime.get("session")
             if not isinstance(session, VoiceSessionRuntime) or session.session_id != sid:
@@ -6819,7 +5469,6 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             limits_d = limits_snapshot if isinstance(limits_snapshot, dict) else {}
             max_audio_bytes = int(limits_d.get("max_audio_bytes") or DEFAULT_MAX_AUDIO_BYTES)
 
-            # Start STT handling on first audio chunk past the gate.
             if not session.capture_started:
                 if _normalize_stt_backend(session.stt_backend_effective) == "wyoming":
                     session.stt_queue = asyncio.Queue()
@@ -6847,7 +5496,6 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                     f"mode={'stream' if session.stt_queue is not None else 'buffered'} stt={session.stt_backend_effective}"
                 )
 
-            # Append audio to buffer and stream to STT.
             if session.audio_bytes + len(audio_bytes) <= max_audio_bytes:
                 session.audio_buffer.extend(audio_bytes)
                 session.audio_bytes += len(audio_bytes)
@@ -6909,7 +5557,6 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                         )
                         should_finalize = False
 
-        # Send events outside the lock.
         if should_finalize:
             _native_debug(
                 f"server_vad finalize selector={token} session_id={sid} reason=server_vad "
@@ -6982,789 +5629,39 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
     return unsub
 
 
-async def _esphome_disconnect_selector(selector: str, *, reason: str) -> None:
-    token = _text(selector)
-    if not token:
-        return
-
-    async with _esphome_native_lock:
-        row = _esphome_native_clients.get(token)
-        client = row.get("client") if isinstance(row, dict) else None
-        unsubscribe = row.get("unsubscribe") if isinstance(row, dict) else None
-        log_unsubscribe = row.get("log_unsubscribe") if isinstance(row, dict) else None
-        was_connected = bool(row.get("connected", False)) if isinstance(row, dict) else False
-        if isinstance(row, dict):
-            row["connected"] = False
-            row["client"] = None
-            row["unsubscribe"] = None
-            row["log_unsubscribe"] = None
-            row["log_viewers"] = 0
-            row["last_disconnect_ts"] = _now()
-            row["last_error"] = _text(reason)
-
-    runtime = _selector_runtime(token)
-    lock = runtime.get("lock")
-    sid = ""
-    async with lock:
-        session = runtime.get("session")
-        if isinstance(session, VoiceSessionRuntime):
-            sid = session.session_id
-        runtime["session"] = None
-        _clear_streamed_tts_state(runtime)
-        _cancel_announcement_wait(runtime)
-        _cancel_audio_stall_watch(runtime)
-        runtime["awaiting_announcement"] = False
-        runtime["awaiting_session_id"] = ""
-        runtime["awaiting_announcement_kind"] = ""
-        runtime["announcement_future"] = None
-
-    if sid and client is not None:
-        module, _ = _esphome_import()
-        if module is not None:
-            with contextlib.suppress(Exception):
-                await _finalize_session(token, client, module, session_id=sid, abort=True, reason=reason or "disconnect")
-
-    if callable(unsubscribe):
-        with contextlib.suppress(Exception):
-            unsubscribe()
-    if callable(log_unsubscribe):
-        with contextlib.suppress(Exception):
-            result = log_unsubscribe()
-            if inspect.isawaitable(result):
-                await result
-
-    disconnect_fn = getattr(client, "disconnect", None)
-    if callable(disconnect_fn):
-        with contextlib.suppress(Exception):
-            result = disconnect_fn()
-            if inspect.isawaitable(result):
-                await result
-
-    if was_connected:
-        logger.info("[native-voice] esphome disconnected selector=%s reason=%s", token, _text(reason))
-        _voice_metrics_record_connection_event(token, event="disconnect")
-
-
-async def _esphome_disconnect_all(reason: str) -> None:
-    async with _esphome_native_lock:
-        selectors = list(_esphome_native_clients.keys())
-    for selector in selectors:
-        await _esphome_disconnect_selector(selector, reason=reason)
-
-
-async def _esphome_connect_selector(selector: str, *, host: str, port: Optional[int] = None, source: str = "reconcile") -> Dict[str, Any]:
-    token = _text(selector)
-    host_token = _lower(host)
-    if not token or not host_token:
-        raise RuntimeError("selector and host are required")
-
-    module, import_error = _esphome_import()
-    if module is None:
-        msg = f"aioesphomeapi unavailable: {import_error or 'unknown error'}"
-        async with _esphome_native_lock:
-            row = _esphome_native_clients.get(token) or {}
-            row.update(
-                {
-                    "selector": token,
-                    "host": host_token,
-                    "port": int(port or _get_int_setting("VOICE_ESPHOME_API_PORT", DEFAULT_ESPHOME_API_PORT)),
-                    "connected": False,
-                    "last_attempt_ts": _now(),
-                    "last_error": msg,
-                    "source": source,
-                }
-            )
-            _esphome_native_clients[token] = row
-        _voice_metrics_record_connection_event(token, event="error")
-        raise RuntimeError(msg)
-
-    timeout = _get_float_setting("VOICE_ESPHOME_CONNECT_TIMEOUT_S", DEFAULT_ESPHOME_CONNECT_TIMEOUT_S, minimum=2.0, maximum=60.0)
-    connect_port = int(port or _get_int_setting("VOICE_ESPHOME_API_PORT", DEFAULT_ESPHOME_API_PORT))
-
-    _native_debug(f"esphome connect attempt selector={token} host={host_token} port={connect_port} source={source}")
-
-    async with _esphome_native_lock:
-        row = _esphome_native_clients.get(token) or {}
-        row.update(
-            {
-                "selector": token,
-                "host": host_token,
-                "port": connect_port,
-                "connected": False,
-                "last_attempt_ts": _now(),
-                "source": source,
-            }
-        )
-        _esphome_native_clients[token] = row
-
-    try:
-        client = await _esphome_build_client(module, host=host_token, port=connect_port)
-        connect_fn = getattr(client, "connect", None)
-        if not callable(connect_fn):
-            raise RuntimeError("aioesphomeapi client has no connect()")
-
-        kwargs: Dict[str, Any] = {}
-        with contextlib.suppress(Exception):
-            sig = inspect.signature(connect_fn)
-            if "login" in sig.parameters:
-                kwargs["login"] = True
-            if "on_stop" in sig.parameters:
-                async def _on_stop(expected_disconnect: bool) -> None:
-                    await _esphome_disconnect_selector(token, reason="expected_disconnect" if expected_disconnect else "connection_lost")
-                kwargs["on_stop"] = _on_stop
-
-        result = connect_fn(**kwargs) if kwargs else connect_fn()
-        if inspect.isawaitable(result):
-            await asyncio.wait_for(result, timeout=timeout)
-
-        await asyncio.sleep(0.2)
-        verified, verify_reason = await _esphome_verify_connection(client, timeout=max(1.0, timeout))
-        _native_debug(f"esphome connect verification selector={token} verified={verified} details={verify_reason}")
-        if not verified:
-            raise RuntimeError(f"ESPHome API connection could not be verified. Details: {verify_reason}")
-
-        device_name = token
-        device_info_snapshot: Dict[str, Any] = {}
-        entity_infos: Dict[str, Dict[str, Any]] = {}
-        voice_features = {
-            "flags": 0,
-            "api_audio_bit": 0,
-            "speaker_bit": 0,
-            "api_audio_known": False,
-            "speaker_known": False,
-            "api_audio_supported": True,
-            "speaker_supported": True,
-        }
-
-        with contextlib.suppress(Exception):
-            info = await _esphome_client_call(client, "device_info")
-            device_info_snapshot = _esphome_device_info_snapshot(info)
-            for candidate in (getattr(info, "friendly_name", None), getattr(info, "name", None)):
-                label = _text(candidate)
-                if label:
-                    device_name = label
-                    break
-            voice_features = _esphome_voice_feature_snapshot(info, client, module)
-
-        with contextlib.suppress(Exception):
-            entity_infos = await _esphome_list_entity_catalog(client)
-
-        voice_unsubscribe = await _esphome_subscribe_voice_assistant(
-            token,
-            client,
-            module,
-            api_audio_supported=bool(voice_features.get("api_audio_supported")),
-        )
-        state_unsubscribe = await _esphome_subscribe_states(token, client)
-        unsubscribe = _combine_unsubscribes(voice_unsubscribe, state_unsubscribe)
-
-        logger.info(
-            "[native-voice] esphome voice features selector=%s flags=%s flags_known=%s api_audio_supported=%s speaker_supported=%s",
-            token,
-            int(voice_features.get("flags") or 0),
-            bool(voice_features.get("api_audio_known")) or bool(voice_features.get("speaker_known")),
-            bool(voice_features.get("api_audio_supported")),
-            bool(voice_features.get("speaker_supported")),
-        )
-
-        _upsert_satellite(
-            {
-                "selector": token,
-                "host": host_token,
-                "name": device_name,
-                "source": "esphome_native",
-                "metadata": {
-                    "esphome_selected": True,
-                    "esphome_port": connect_port,
-                    "voice_feature_flags": int(voice_features.get("flags") or 0),
-                    "voice_api_audio_supported": bool(voice_features.get("api_audio_supported")),
-                    "voice_speaker_supported": bool(voice_features.get("speaker_supported")),
-                },
-            }
-        )
-
-        async with _esphome_native_lock:
-            row = _esphome_native_clients.get(token) or {}
-            reconnect = bool(_as_float(row.get("last_success_ts"), 0.0) > 0.0 or _as_float(row.get("last_disconnect_ts"), 0.0) > 0.0)
-            row.update(
-                {
-                    "selector": token,
-                    "host": host_token,
-                    "port": connect_port,
-                    "client": client,
-                    "unsubscribe": unsubscribe,
-                    "connected": True,
-                    "device_info": dict(device_info_snapshot),
-                    "entity_infos": dict(entity_infos),
-                    "entity_states": row.get("entity_states") if isinstance(row.get("entity_states"), dict) else {},
-                    "entity_state_updated_ts": _as_float(row.get("entity_state_updated_ts"), _now()),
-                    "voice_feature_flags": int(voice_features.get("flags") or 0),
-                    "voice_api_audio_supported": bool(voice_features.get("api_audio_supported")),
-                    "voice_speaker_supported": bool(voice_features.get("speaker_supported")),
-                    "last_success_ts": _now(),
-                    "last_error": "",
-                    "source": source,
-                }
-            )
-            _esphome_native_clients[token] = row
-            if reconnect:
-                _voice_metrics_record_connection_event(token, event="reconnect")
-            logger.info(
-                "[native-voice] esphome connected selector=%s host=%s port=%s source=%s api_audio_supported=%s speaker_supported=%s",
-                token,
-                host_token,
-                connect_port,
-                source,
-                bool(row.get("voice_api_audio_supported")),
-                bool(row.get("voice_speaker_supported")),
-            )
-            return dict(row)
-
-    except Exception as exc:
-        unsubscribe_cb = locals().get("unsubscribe")
-        if callable(unsubscribe_cb):
-            with contextlib.suppress(Exception):
-                unsubscribe_cb()
-
-        client_obj = locals().get("client")
-        disconnect_fn = getattr(client_obj, "disconnect", None)
-        if callable(disconnect_fn):
-            with contextlib.suppress(Exception):
-                result = disconnect_fn()
-                if inspect.isawaitable(result):
-                    await asyncio.wait_for(result, timeout=max(1.0, timeout))
-
-        msg = _text(exc)
-        _native_debug(f"esphome connect failed selector={token} host={host_token} error={msg}")
-
-        async with _esphome_native_lock:
-            row = _esphome_native_clients.get(token) or {}
-            row.update(
-                {
-                    "selector": token,
-                    "host": host_token,
-                    "port": connect_port,
-                    "connected": False,
-                    "last_error": msg,
-                    "source": source,
-                }
-            )
-            _esphome_native_clients[token] = row
-        _voice_metrics_record_connection_event(token, event="error")
-        raise
-
-
-async def _esphome_reconcile_once(*, force: bool = False) -> Dict[str, Any]:
-    async with _esphome_reconcile_lock:
-        _esphome_native_stats["runs"] = int(_esphome_native_stats.get("runs") or 0) + 1
-        _esphome_native_stats["last_run_ts"] = _now()
-
-        targets = _esphome_target_map()
-        retry_seconds = _get_int_setting(
-            "VOICE_ESPHOME_RETRY_SECONDS",
-            DEFAULT_ESPHOME_RETRY_SECONDS,
-            minimum=2,
-            maximum=300,
-        )
-
-        async with _esphome_native_lock:
-            snapshot = {k: dict(v) for k, v in _esphome_native_clients.items()}
-
-        # disconnect removed targets / dead connections
-        for selector, row in snapshot.items():
-            if selector not in targets:
-                await _esphome_disconnect_selector(selector, reason="not_targeted")
-                continue
-            client = row.get("client")
-            connected_row = bool(row.get("connected", False))
-            if connected_row and not _esphome_client_connected(client, fallback=connected_row):
-                await _esphome_disconnect_selector(selector, reason="connection_lost")
-
-        # connect missing targets
-        for selector, host in targets.items():
-            row = snapshot.get(selector) or {}
-            if bool(row.get("connected", False)) and _esphome_client_connected(row.get("client"), fallback=True):
-                continue
-            last_attempt = _as_float(row.get("last_attempt_ts"), 0.0)
-            if (not force) and ((_now() - last_attempt) < retry_seconds):
-                continue
-            try:
-                await _esphome_connect_selector(selector, host=host, source="reconcile")
-                _esphome_native_stats["last_success_ts"] = _now()
-                _esphome_native_stats["last_error"] = ""
-            except Exception as exc:
-                _esphome_native_stats["last_error"] = _text(exc)
-
-        return _esphome_status()
-
-
-async def _esphome_loop() -> None:
-    while True:
-        try:
-            _sync_manual_targets()
-            await _esphome_reconcile_once(force=False)
-            await _esphome_logs_cleanup_idle()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            _esphome_native_stats["last_error"] = _text(exc)
-            _esphome_native_stats["last_run_ts"] = _now()
-            logger.warning("[native-voice] esphome reconcile loop error: %s", exc)
-        await asyncio.sleep(float(max(2, _get_int_setting("VOICE_ESPHOME_RETRY_SECONDS", DEFAULT_ESPHOME_RETRY_SECONDS))))
-
-
-async def _esphome_bootstrap_reconnect() -> None:
-    # After a core restart, satellites may still be unwinding the previous API
-    # session. Do one immediate force-reconcile and one short delayed pass so
-    # they can recover without needing a device reboot.
-    try:
-        status = await _esphome_reconcile_once(force=True)
-        logger.info(
-            "[native-voice] startup esphome reconcile selected=%s connected=%s",
-            len(status.get("targets") or {}),
-            len(
-                [
-                    row
-                    for row in (status.get("clients") or {}).values()
-                    if isinstance(row, dict) and bool(row.get("connected"))
-                ]
-            ),
-        )
-    except Exception as exc:
-        logger.warning("[native-voice] startup esphome reconcile failed: %s", exc)
-
-    try:
-        await asyncio.sleep(2.0)
-        status = await _esphome_reconcile_once(force=True)
-        logger.info(
-            "[native-voice] delayed esphome reconcile selected=%s connected=%s",
-            len(status.get("targets") or {}),
-            len(
-                [
-                    row
-                    for row in (status.get("clients") or {}).values()
-                    if isinstance(row, dict) and bool(row.get("connected"))
-                ]
-            ),
-        )
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        logger.warning("[native-voice] delayed esphome reconcile failed: %s", exc)
-
-
-def _esphome_status() -> Dict[str, Any]:
-    module, import_error = _esphome_import()
-    targets = _esphome_target_map()
-    metrics_snapshot = _voice_metrics_snapshot()
-    device_metrics = metrics_snapshot.get("devices") if isinstance(metrics_snapshot.get("devices"), dict) else {}
-
-    clients: Dict[str, Any] = {}
-    for selector, row in _esphome_native_clients.items():
-        if not isinstance(row, dict):
-            continue
-        runtime = _selector_runtime(selector)
-        session = runtime.get("session")
-        device_info = row.get("device_info") if isinstance(row.get("device_info"), dict) else {}
-        entity_infos = row.get("entity_infos") if isinstance(row.get("entity_infos"), dict) else {}
-        entity_states = row.get("entity_states") if isinstance(row.get("entity_states"), dict) else {}
-        entity_rows = _esphome_entity_rows(entity_infos, entity_states)
-        metrics_row = device_metrics.get(selector) if isinstance(device_metrics.get(selector), dict) else {}
-        clients[selector] = {
-            "selector": _text(row.get("selector") or selector),
-            "host": _text(row.get("host")),
-            "port": int(row.get("port") or _get_int_setting("VOICE_ESPHOME_API_PORT", DEFAULT_ESPHOME_API_PORT)),
-            "connected": bool(row.get("connected", False)),
-            "selected": selector in targets,
-            "voice_subscribed": bool(row.get("unsubscribe")),
-            "active_session_id": _text(session.session_id) if isinstance(session, VoiceSessionRuntime) else "",
-            "voice_feature_flags": int(row.get("voice_feature_flags") or 0),
-            "voice_api_audio_supported": bool(row.get("voice_api_audio_supported")),
-            "voice_speaker_supported": bool(row.get("voice_speaker_supported")),
-            "last_attempt_ts": _as_float(row.get("last_attempt_ts"), 0.0),
-            "last_success_ts": _as_float(row.get("last_success_ts"), 0.0),
-            "last_disconnect_ts": _as_float(row.get("last_disconnect_ts"), 0.0),
-            "last_error": _text(row.get("last_error")),
-            "source": _text(row.get("source")),
-            "device_info": dict(device_info),
-            "entity_count": len(entity_infos),
-            "entity_row_count": len(entity_rows),
-            "entity_rows": entity_rows,
-            "entity_state_updated_ts": _as_float(row.get("entity_state_updated_ts"), 0.0),
-            "log_active": callable(row.get("log_unsubscribe")),
-            "log_viewers": int(row.get("log_viewers") or 0),
-            "log_cursor": int(row.get("log_seq") or 0),
-            "log_last_line_ts": _as_float(row.get("log_last_line_ts"), 0.0),
-            "log_last_access_ts": _as_float(row.get("log_last_access_ts"), 0.0),
-            "log_error": _text(row.get("log_error")),
-            "voice_metrics": dict(metrics_row),
-        }
-
-    return {
-        "enabled": True,
-        "available": module is not None,
-        "import_error": "" if module is not None else _text(import_error),
-        "targets": targets,
-        "clients": clients,
-        "stats": dict(_esphome_native_stats),
-        "voice_metrics": metrics_snapshot,
-    }
-
-
-def _esphome_entities_for_selector(selector: str) -> Dict[str, Any]:
-    token = _text(selector)
-    if not token:
-        raise ValueError("selector is required")
-
-    row = _esphome_native_clients.get(token)
-    if not isinstance(row, dict):
-        raise RuntimeError(f"Satellite {token} is unknown")
-
-    entity_infos = row.get("entity_infos") if isinstance(row.get("entity_infos"), dict) else {}
-    entity_states = row.get("entity_states") if isinstance(row.get("entity_states"), dict) else {}
-    device_info = row.get("device_info") if isinstance(row.get("device_info"), dict) else {}
-    entity_rows = _esphome_entity_rows(entity_infos, entity_states)
-
-    entities: List[Dict[str, Any]] = []
-    for key, info in entity_infos.items():
-        if not isinstance(info, dict):
-            continue
-        state_row = entity_states.get(key) if isinstance(entity_states.get(key), dict) else {}
-        entities.append(
-            {
-                "key": _text(info.get("key") or key),
-                "kind": _text(info.get("kind")),
-                "name": _text(info.get("name")) or _text(info.get("object_id")) or f"Entity {key}",
-                "object_id": _text(info.get("object_id")),
-                "unit": _text(info.get("unit")),
-                "device_class": _text(info.get("device_class")),
-                "entity_category": _text(info.get("entity_category")),
-                "icon": _text(info.get("icon")),
-                "disabled_by_default": bool(info.get("disabled_by_default")),
-                "value": _esphome_entity_display_value(info, state_row),
-                "meta": _esphome_entity_meta_label(info, state_row),
-                "raw": state_row.get("raw"),
-                "attrs": dict(state_row.get("attrs") or {}) if isinstance(state_row, dict) else {},
-                "updated_ts": _as_float(state_row.get("updated_ts"), 0.0) if isinstance(state_row, dict) else 0.0,
-            }
-        )
-
-    entities.sort(key=lambda item: (_lower(item.get("name")), _lower(item.get("kind")), _lower(item.get("object_id"))))
-    return {
-        "selector": token,
-        "connected": bool(row.get("connected")),
-        "host": _text(row.get("host")),
-        "device_info": dict(device_info),
-        "entities": entities,
-        "entity_rows": entity_rows,
-        "count": len(entities),
-    }
-
-
-def _esphome_store_entity_state_override(selector: str, key: str, kind: str, raw: Any, attrs: Dict[str, Any]) -> None:
-    token = _text(selector)
-    entry_key = _text(key)
-    if not token or not entry_key:
-        return
-    row = _esphome_native_clients.get(token)
-    if not isinstance(row, dict):
-        return
-    state_map = row.get("entity_states")
-    if not isinstance(state_map, dict):
-        state_map = {}
-        row["entity_states"] = state_map
-    state_map[entry_key] = {
-        "key": entry_key,
-        "kind": _text(kind),
-        "raw": raw,
-        "attrs": dict(attrs or {}),
-        "updated_ts": _now(),
-    }
-    row["entity_state_updated_ts"] = _now()
-
-
-def _esphome_hex_to_rgb(color_value: Any) -> Tuple[float, float, float]:
-    token = _text(color_value).lstrip("#")
-    if len(token) == 3:
-        token = "".join(ch * 2 for ch in token)
-    if len(token) != 6 or any(ch not in "0123456789abcdefABCDEF" for ch in token):
-        raise RuntimeError(f"Invalid color value: {color_value}")
-    return (
-        int(token[0:2], 16) / 255.0,
-        int(token[2:4], 16) / 255.0,
-        int(token[4:6], 16) / 255.0,
-    )
-
-
-async def _esphome_command_entity(
-    selector: str,
-    *,
-    entity_key: Any,
-    command: str,
-    value: Any = None,
-    options: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    token = _text(selector)
-    key_text = _text(entity_key)
-    action = _lower(command)
-    if not token:
-        raise ValueError("selector is required")
-    if not key_text:
-        raise ValueError("entity_key is required")
-    if not action:
-        raise ValueError("command is required")
-    payload = options if isinstance(options, dict) else {}
-
-    async with _esphome_native_lock:
-        client_row = dict(_esphome_native_clients.get(token) or {})
-    client = client_row.get("client")
-    if not bool(client_row.get("connected")) or client is None:
-        raise RuntimeError(f"Satellite {token} is not connected")
-
-    row = _esphome_native_clients.get(token)
-    entity_infos = row.get("entity_infos") if isinstance(row, dict) and isinstance(row.get("entity_infos"), dict) else {}
-    info = entity_infos.get(key_text) if isinstance(entity_infos.get(key_text), dict) else {}
-    if not info:
-        raise RuntimeError(f"Entity {key_text} was not found on satellite {token}")
-
-    kind = _lower(info.get("kind"))
-    key_num = _as_int(key_text, 0, minimum=0)
-    if key_num <= 0:
-        raise RuntimeError(f"Entity {key_text} has an invalid key")
-
-    if action in {"press", "button_press"}:
-        if "button" not in kind:
-            raise RuntimeError(f"Entity {key_text} is not a button")
-        await _esphome_client_call(client, "button_command", key_num)
-    elif action in {"number_set", "set_number"}:
-        if "number" not in kind:
-            raise RuntimeError(f"Entity {key_text} is not a number")
-        try:
-            numeric = float(value)
-        except Exception as exc:
-            raise RuntimeError(f"number_set requires a numeric value: {exc}") from exc
-        await _esphome_client_call(client, "number_command", key_num, numeric)
-        _esphome_store_entity_state_override(token, key_text, _text(info.get("kind")), numeric, {"state": numeric})
-    elif action in {"switch_set", "set_switch"}:
-        if "switch" not in kind:
-            raise RuntimeError(f"Entity {key_text} is not a switch")
-        state = _as_bool(value, False)
-        await _esphome_client_call(client, "switch_command", key_num, state)
-        _esphome_store_entity_state_override(token, key_text, _text(info.get("kind")), state, {"state": state})
-    elif action in {"light_set", "set_light"}:
-        if "light" not in kind:
-            raise RuntimeError(f"Entity {key_text} is not a light")
-        state_value = payload.get("state", value)
-        brightness_value = payload.get("brightness")
-        color_value = payload.get("color")
-        command_kwargs: Dict[str, Any] = {}
-        attrs_override: Dict[str, Any] = {}
-        raw_override = None
-        if state_value not in {None, ""}:
-            state_bool = _as_bool(state_value, False)
-            command_kwargs["state"] = state_bool
-            attrs_override["state"] = state_bool
-            raw_override = state_bool
-        if brightness_value not in {None, ""}:
-            brightness = _as_float(brightness_value, 1.0, minimum=0.0, maximum=1.0)
-            command_kwargs["brightness"] = brightness
-            attrs_override["brightness"] = brightness
-        if color_value not in {None, ""}:
-            rgb = _esphome_hex_to_rgb(color_value)
-            command_kwargs["rgb"] = rgb
-            command_kwargs.setdefault("state", True)
-            attrs_override.update(
-                {
-                    "state": True,
-                    "red": rgb[0],
-                    "green": rgb[1],
-                    "blue": rgb[2],
-                    "color_mode": "rgb",
-                }
-            )
-            raw_override = True
-        if not command_kwargs:
-            raise RuntimeError("light_set requires a state, brightness, or color value")
-        await _esphome_client_call(client, "light_command", key_num, **command_kwargs)
-        _esphome_store_entity_state_override(
-            token,
-            key_text,
-            _text(info.get("kind")),
-            raw_override,
-            attrs_override,
-        )
-    elif action in {"select_set", "set_select"}:
-        if "select" not in kind:
-            raise RuntimeError(f"Entity {key_text} is not a select")
-        state = _text(value)
-        if not state:
-            raise RuntimeError("select_set requires a state value")
-        await _esphome_client_call(client, "select_command", key_num, state)
-        _esphome_store_entity_state_override(token, key_text, _text(info.get("kind")), state, {"state": state})
-    elif action in {"text_set", "set_text"}:
-        if "text" not in kind:
-            raise RuntimeError(f"Entity {key_text} is not a text entity")
-        state = _text(value)
-        await _esphome_client_call(client, "text_command", key_num, state)
-        _esphome_store_entity_state_override(token, key_text, _text(info.get("kind")), state, {"state": state})
-    else:
-        raise RuntimeError(f"Unsupported command: {command}")
-
-    return _esphome_entities_for_selector(token)
-
-
 # -------------------- WebUI Tab --------------------
 def _format_ts_label(ts_value: Any) -> str:
-    ts = _as_float(ts_value, 0.0)
-    if ts <= 0:
-        return "-"
-    with contextlib.suppress(Exception):
-        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
-    return "-"
+    return _esphome_ui_helpers.format_ts_label(ts_value)
 
 
 def _voice_ui_spec_map() -> Dict[str, Dict[str, Any]]:
-    out: Dict[str, Dict[str, Any]] = {}
-    for spec in VOICE_UI_SETTING_SPECS:
-        if not isinstance(spec, dict):
-            continue
-        key = _text(spec.get("key"))
-        if not key:
-            continue
-        out[key] = dict(spec)
-    return out
+    from .. import settings as esphome_settings
+
+    return esphome_settings._voice_ui_spec_map()
 
 
 def _voice_ui_field_value(spec: Dict[str, Any], raw_value: Any) -> Any:
-    field_type = _lower(spec.get("type") or "text")
-    default = spec.get("default")
-    if field_type == "checkbox":
-        return _as_bool(raw_value, _as_bool(default, False))
+    from .. import settings as esphome_settings
 
-    if field_type == "number":
-        minimum = spec.get("min") if isinstance(spec.get("min"), (int, float)) else None
-        maximum = spec.get("max") if isinstance(spec.get("max"), (int, float)) else None
-        default_num = default if isinstance(default, (int, float)) and not isinstance(default, bool) else 0
-        step = spec.get("step")
-        wants_int = isinstance(default, int) and not isinstance(default, bool)
-        if wants_int:
-            with contextlib.suppress(Exception):
-                if step is not None and not float(step).is_integer():
-                    wants_int = False
-        if wants_int:
-            min_int = int(minimum) if isinstance(minimum, (int, float)) else None
-            max_int = int(maximum) if isinstance(maximum, (int, float)) else None
-            return _as_int(raw_value, int(default_num), minimum=min_int, maximum=max_int)
-        return _as_float(raw_value, float(default_num), minimum=minimum, maximum=maximum)
-
-    return _text(raw_value if raw_value is not None else default)
+    return esphome_settings._voice_ui_field_value(spec, raw_value)
 
 
 def _voice_ui_setting_fields() -> List[Dict[str, Any]]:
-    stored = _voice_settings()
-    rows: List[Dict[str, Any]] = []
-    for spec in VOICE_UI_SETTING_SPECS:
-        if not isinstance(spec, dict):
-            continue
-        key = _text(spec.get("key"))
-        if not key:
-            continue
-        row = dict(spec)
-        row["key"] = key
-        field_type = _lower(row.get("type") or "text")
-        raw_value = stored.get(key, row.get("default"))
+    from .. import settings as esphome_settings
 
-        if field_type in {"select", "multiselect"}:
-            row["options"] = list(spec.get("options") or [])
-
-        if field_type == "password":
-            has_saved = bool(_text(stored.get(key)))
-            row["value"] = ""
-            if has_saved:
-                existing_desc = _text(row.get("description"))
-                keep_desc = "Leave blank to keep current saved value."
-                row["description"] = f"{existing_desc} {keep_desc}".strip() if existing_desc else keep_desc
-                row["placeholder"] = "Leave blank to keep current value"
-        else:
-            row["value"] = _voice_ui_field_value(spec, raw_value)
-
-        rows.append(row)
-    return rows
+    return esphome_settings.settings_fields()
 
 
 def _voice_ui_setting_sections() -> List[Dict[str, Any]]:
-    ordered_fields = _voice_ui_setting_fields()
-    by_key = {_text(field.get("key")): field for field in ordered_fields if isinstance(field, dict)}
-    groups: List[Tuple[str, List[str]]] = [
-        ("Core", ["VOICE_NATIVE_DEBUG", "VOICE_CONTINUED_CHAT_ENABLED"]),
-        (
-            "Experimental",
-            [
-                "VOICE_EXPERIMENTAL_LIVE_TOOL_PROGRESS_ENABLED",
-                "VOICE_EXPERIMENTAL_PARTIAL_STT_ENABLED",
-                "VOICE_EXPERIMENTAL_TTS_EARLY_START_ENABLED",
-            ],
-        ),
-        (
-            "Discovery",
-            [
-                "VOICE_DISCOVERY_ENABLED",
-                "VOICE_DISCOVERY_SCAN_SECONDS",
-                "VOICE_DISCOVERY_MDNS_TIMEOUT_S",
-                "VOICE_ESPHOME_TARGETS",
-            ],
-        ),
-        (
-            "ESPHome",
-            [
-                "VOICE_ESPHOME_API_PORT",
-                "VOICE_ESPHOME_PASSWORD",
-                "VOICE_ESPHOME_NOISE_PSK",
-                "VOICE_ESPHOME_CONNECT_TIMEOUT_S",
-                "VOICE_ESPHOME_RETRY_SECONDS",
-                "VOICE_NATIVE_WYOMING_TIMEOUT_S",
-            ],
-        ),
-    ]
+    from .. import settings as esphome_settings
 
-    sections: List[Dict[str, Any]] = []
-    used = set()
-    for label, keys in groups:
-        fields = []
-        for key in keys:
-            field = by_key.get(key)
-            if not isinstance(field, dict):
-                continue
-            fields.append(field)
-            used.add(key)
-        if fields:
-            sections.append({"label": label, "fields": fields})
-
-    remaining = [
-        field
-        for field in ordered_fields
-        if _text(field.get("key")) not in used
-    ]
-    if remaining:
-        sections.append({"label": "Advanced", "fields": remaining})
-    return sections
+    return esphome_settings.settings_sections()
 
 
 def _voice_ui_settings_item_form() -> Dict[str, Any]:
-    sections = list(_voice_ui_setting_sections())
-    return {
-        "id": "voice_settings",
-        "group": "settings",
-        "title": "Voice Pipeline Settings",
-        "subtitle": "Tune ESPHome and runtime behavior here. Shared STT/TTS model choices now live in Tater Settings under Models.",
-        "sections": sections,
-        "save_action": "voice_settings_save",
-        "save_label": "Save Settings",
-        "settings_title": "Voice Pipeline Settings",
-        "fields_dropdown": False,
-        "sections_in_dropdown": False,
-        "remove_action": "",
-    }
+    from .. import settings as esphome_settings
+
+    return esphome_settings.settings_item_form()
 
 
 def _satellite_host_from_selector(selector: str) -> str:
@@ -7775,210 +5672,8 @@ def _satellite_host_from_selector(selector: str) -> str:
 
 
 def _voice_ui_satellite_item_forms(status: Dict[str, Any]) -> List[Dict[str, Any]]:
-    clients = status.get("clients") if isinstance(status.get("clients"), dict) else {}
-    registry = _load_satellite_registry()
-    rows_by_selector: Dict[str, Dict[str, Any]] = {}
-
-    for row in registry:
-        selector = _text(row.get("selector"))
-        if not selector:
-            host = _lower(row.get("host"))
-            if host:
-                selector = f"host:{host}"
-        if not selector:
-            continue
-        normalized = dict(row)
-        normalized["selector"] = selector
-        rows_by_selector[selector] = normalized
-
-    for selector, client_row in clients.items():
-        if not isinstance(client_row, dict):
-            continue
-        token = _text(selector)
-        if not token:
-            continue
-        current = rows_by_selector.get(token) or {}
-        host = _lower(current.get("host")) or _lower(client_row.get("host")) or _satellite_host_from_selector(token)
-        meta = current.get("metadata") if isinstance(current.get("metadata"), dict) else {}
-        rows_by_selector[token] = {
-            "selector": token,
-            "host": host,
-            "name": _text(current.get("name")) or _text(client_row.get("name")) or host or token,
-            "source": _text(current.get("source")) or _text(client_row.get("source")) or "esphome_native",
-            "metadata": dict(meta),
-            "last_seen_ts": _as_float(current.get("last_seen_ts"), 0.0),
-        }
-
-    items: List[Dict[str, Any]] = []
-    sortable_rows = []
-    for selector, row in rows_by_selector.items():
-        client_row = clients.get(selector) if isinstance(clients.get(selector), dict) else {}
-        meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-        selected = bool(meta.get("esphome_selected"))
-        connected = bool(client_row.get("connected"))
-        name = _text(row.get("name")) or _text(row.get("host")) or selector
-        host = _lower(row.get("host")) or _satellite_host_from_selector(selector)
-        sortable_rows.append((selected, connected, _lower(name or host), selector, row, client_row))
-
-    sortable_rows.sort(key=lambda item: (0 if item[0] else 1, 0 if item[1] else 1, item[2], item[3]))
-    for selected, connected, _sort_name, selector, row, client_row in sortable_rows:
-        host = _lower(row.get("host")) or _satellite_host_from_selector(selector)
-        name = _text(row.get("name")) or host or selector
-        source = _text(row.get("source")) or "unknown"
-        area_name = _satellite_area_name(row)
-        last_seen = _format_ts_label(row.get("last_seen_ts"))
-        last_error = _text(client_row.get("last_error"))
-        device_info = client_row.get("device_info") if isinstance(client_row.get("device_info"), dict) else {}
-        entity_rows = list(client_row.get("entity_rows") or []) if isinstance(client_row.get("entity_rows"), list) else []
-        entity_row_count = int(client_row.get("entity_row_count") or len(entity_rows) or 0)
-        entity_count = int(client_row.get("entity_count") or 0)
-        state_updated = _format_ts_label(client_row.get("entity_state_updated_ts"))
-        log_last_line = _format_ts_label(client_row.get("log_last_line_ts"))
-        voice_metrics = client_row.get("voice_metrics") if isinstance(client_row.get("voice_metrics"), dict) else {}
-        device_name = _text(device_info.get("name"))
-        friendly_name = _text(device_info.get("friendly_name"))
-        manufacturer = _text(device_info.get("manufacturer"))
-        model = _text(device_info.get("model"))
-        project_name = _text(device_info.get("project_name"))
-        project_version = _text(device_info.get("project_version"))
-        esphome_version = _text(device_info.get("esphome_version"))
-        compilation_time = _text(device_info.get("compilation_time"))
-        mac_address = _text(device_info.get("mac_address"))
-        bluetooth_mac_address = _text(device_info.get("bluetooth_mac_address"))
-        api_audio = bool(client_row.get("voice_api_audio_supported"))
-        speaker_supported = bool(client_row.get("voice_speaker_supported"))
-        subtitle = f"{host or 'unknown host'} • {'selected' if selected else 'not selected'} • {'connected' if connected else 'disconnected'}"
-        detail_parts = [f"source={source}"]
-        if last_seen != "-":
-            detail_parts.append(f"seen={last_seen}")
-        if state_updated != "-":
-            detail_parts.append(f"sensors={state_updated}")
-        if log_last_line != "-":
-            detail_parts.append(f"logs={log_last_line}")
-        if last_error:
-            detail_parts.append(f"error={last_error}")
-
-        hero_badges: List[Dict[str, str]] = [
-            {"label": "Selected" if selected else "Not Selected", "tone": "accent" if selected else "muted"},
-            {"label": "Connected" if connected else "Offline", "tone": "success" if connected else "danger"},
-            {"label": "API Audio" if api_audio else "No API Audio", "tone": "success" if api_audio else "muted"},
-            {"label": "Speaker" if speaker_supported else "No Speaker", "tone": "success" if speaker_supported else "muted"},
-        ]
-        summary_rows: List[Dict[str, str]] = [
-            {"label": "Host", "value": host or "-"},
-            {"label": "Room / Area", "value": area_name or "-"},
-            {"label": "Source", "value": source or "-"},
-            {"label": "Last Seen", "value": last_seen},
-            {"label": "Sensor Update", "value": state_updated},
-            {"label": "Last Log", "value": log_last_line},
-            {"label": "Entities", "value": str(entity_count)},
-            {"label": "Live Entities", "value": str(entity_row_count)},
-        ]
-        last_outcome = _text(voice_metrics.get("last_outcome"))
-        last_reason = _text(voice_metrics.get("last_reason"))
-        if last_outcome:
-            summary_rows.append({"label": "Last Outcome", "value": last_outcome.replace("_", " ")})
-        if float(voice_metrics.get("avg_turn_latency_ms") or 0.0) > 0.0:
-            summary_rows.append({"label": "Avg Turn", "value": f"{float(voice_metrics.get('avg_turn_latency_ms')):.1f} ms"})
-        if float(voice_metrics.get("avg_stt_latency_ms") or 0.0) > 0.0:
-            summary_rows.append({"label": "Avg STT", "value": f"{float(voice_metrics.get('avg_stt_latency_ms')):.1f} ms"})
-        if float(voice_metrics.get("avg_tts_latency_ms") or 0.0) > 0.0:
-            summary_rows.append({"label": "Avg TTS", "value": f"{float(voice_metrics.get('avg_tts_latency_ms')):.1f} ms"})
-        if float(voice_metrics.get("avg_speech_s") or 0.0) > 0.0:
-            summary_rows.append({"label": "Avg Speech", "value": f"{float(voice_metrics.get('avg_speech_s')):.2f} s"})
-        if float(voice_metrics.get("avg_silence_s") or 0.0) > 0.0:
-            summary_rows.append({"label": "Avg Silence", "value": f"{float(voice_metrics.get('avg_silence_s')):.2f} s"})
-        if last_reason:
-            summary_rows.append({"label": "Last Reason", "value": last_reason.replace("_", " ")})
-        if device_name:
-            summary_rows.append({"label": "Device Name", "value": device_name})
-        if friendly_name:
-            summary_rows.append({"label": "Friendly Name", "value": friendly_name})
-        if manufacturer:
-            summary_rows.append({"label": "Maker", "value": manufacturer})
-        if model:
-            summary_rows.append({"label": "Model", "value": model})
-        if project_name or project_version:
-            summary_rows.append(
-                {"label": "Project", "value": " ".join(part for part in [project_name, project_version] if part).strip()}
-            )
-        if esphome_version:
-            summary_rows.append({"label": "ESPHome", "value": esphome_version})
-        if compilation_time:
-            summary_rows.append({"label": "Build", "value": compilation_time})
-        if mac_address:
-            summary_rows.append({"label": "MAC", "value": mac_address})
-        if bluetooth_mac_address:
-            summary_rows.append({"label": "BT MAC", "value": bluetooth_mac_address})
-        hero_image_src = _satellite_image_src(device_name, friendly_name, name)
-        sensor_rows = [
-            {
-                "key": _text(sensor.get("key")),
-                "label": _text(sensor.get("label")) or "Sensor",
-                "value": _text(sensor.get("value")) or "-",
-                "kind": _text(sensor.get("kind")),
-                "meta": _text(sensor.get("meta")),
-                "control": dict(sensor.get("control") or {}) if isinstance(sensor.get("control"), dict) else {},
-            }
-            for sensor in entity_rows
-            if isinstance(sensor, dict)
-        ]
-
-        fields: List[Dict[str, Any]] = [
-            {
-                "key": "area_name",
-                "label": "Room / Area",
-                "type": "text",
-                "value": area_name,
-                "placeholder": "Office",
-                "description": "Used as the default room context for voice turns from this satellite.",
-            },
-        ]
-
-        items.append(
-            {
-                "id": selector,
-                "group": "satellite",
-                "title": name,
-                "subtitle": subtitle,
-                "detail": " • ".join(detail_parts),
-                "connected": connected,
-                "hero_image_src": hero_image_src,
-                "hero_image_alt": f"{name} satellite",
-                "hero_badges": hero_badges,
-                "summary_rows": summary_rows,
-                "sensor_rows": sensor_rows,
-                "sensor_title": "Live Entities" if sensor_rows else "No Entities",
-                "fields": fields,
-                "popup_mode": "voice-satellite-log",
-                "popup_config": {
-                    "selector": selector,
-                    "name": name,
-                    "host": host,
-                },
-                "popup_fields": [
-                    {
-                        "key": "live_log_feed",
-                        "label": "Live Device Log",
-                        "type": "textarea",
-                        "value": "Opening live log feed...",
-                        "description": "Live ESPHome logs from this satellite. New lines stream in automatically while the popup stays open.",
-                    }
-                ],
-                "save_action": "voice_satellite_save",
-                "save_label": "Save",
-                "remove_action": "voice_satellite_remove",
-                "remove_label": "Forget",
-                "remove_confirm": f"Forget satellite {name}?",
-                "run_action": "voice_disconnect" if connected else "voice_connect",
-                "run_label": "Disconnect" if connected else "Connect",
-                "run_confirm": "Disconnect and deselect this satellite?" if connected else "",
-                "settings_title": f"{name} Live Log",
-                "settings_label": "Live Log",
-            }
-        )
-
-    return items
+    rows = _esphome_ui_helpers.satellite_item_forms(status)
+    return rows if isinstance(rows, list) else []
 
 
 def _payload_values(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -8001,60 +5696,9 @@ def _payload_selector(payload: Dict[str, Any]) -> str:
 
 
 def _save_voice_ui_settings(values: Dict[str, Any]) -> Dict[str, Any]:
-    incoming = values if isinstance(values, dict) else {}
-    specs = _voice_ui_spec_map()
-    current = _voice_settings()
-    mapping: Dict[str, str] = {}
-    changed_keys: List[str] = []
+    from .. import settings as esphome_settings
 
-    for key, spec in specs.items():
-        if key not in incoming:
-            continue
-        field_type = _lower(spec.get("type") or "text")
-        raw_value = incoming.get(key)
-
-        if field_type == "password":
-            token = _text(raw_value)
-            if not token:
-                continue
-            normalized = token
-        elif field_type == "checkbox":
-            normalized = "true" if _as_bool(raw_value, False) else "false"
-        elif field_type == "number":
-            coerced = _voice_ui_field_value(spec, raw_value)
-            if isinstance(coerced, float) and coerced.is_integer():
-                normalized = str(int(coerced))
-            else:
-                normalized = str(coerced)
-        elif field_type == "select":
-            normalized = _text(raw_value)
-            allowed = []
-            for option in list(spec.get("options") or []):
-                if isinstance(option, dict):
-                    allowed.append(_text(option.get("value") or option.get("id") or option.get("key")))
-                else:
-                    allowed.append(_text(option))
-            allowed = [item for item in allowed if item]
-            if allowed and normalized not in allowed:
-                normalized = _text(current.get(key)) or _text(spec.get("default"))
-        else:
-            normalized = _text(raw_value)
-            if key == "VOICE_ESPHOME_TARGETS":
-                normalized = ",".join(_parse_manual_targets(normalized))
-
-        old = _text(current.get(key))
-        if normalized != old:
-            mapping[key] = normalized
-            changed_keys.append(key)
-
-    if mapping:
-        redis_client.hset(VOICE_CORE_SETTINGS_HASH_KEY, mapping=mapping)
-
-    return {
-        "updated_count": len(changed_keys),
-        "changed_keys": changed_keys,
-        "restart_required": False,
-    }
+    return esphome_settings.save_settings_values(values)
 
 
 def get_htmlui_tab_data(*, redis_client: Any = None, core_key: str = "voice_core", core_tab: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -8092,7 +5736,7 @@ def get_htmlui_tab_data(*, redis_client: Any = None, core_key: str = "voice_core
             {"label": "Connected", "value": connected},
             {"label": "Known Satellites", "value": len(satellites)},
             {"label": "mDNS Discovered", "value": discovered},
-            {"label": "Reconcile Runs", "value": int(_esphome_native_stats.get("runs") or 0)},
+            {"label": "Reconcile Runs", "value": int(_esphome_device_runtime.native_stats().get("runs") or 0)},
             {"label": "STT Backend", "value": effective_stt_backend},
             {"label": "TTS Backend", "value": effective_tts_backend},
             {"label": "TTS Catalog", "value": tts_catalog_count},
@@ -8185,7 +5829,6 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
     if action_name == "voice_settings_save":
         values = _payload_values(body)
         result = _save_voice_ui_settings(values)
-        _sync_manual_targets()
         with contextlib.suppress(Exception):
             _run_async_blocking(_esphome_reconcile_once(force=True), timeout=45.0)
         updated = int(result.get("updated_count") or 0)
@@ -8220,10 +5863,6 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
                 },
             }
         )
-        targets = _current_manual_targets()
-        if host not in targets:
-            targets.append(host)
-            _save_manual_targets(targets)
         with contextlib.suppress(Exception):
             _run_async_blocking(_esphome_reconcile_once(force=True), timeout=45.0)
         return {
@@ -8272,12 +5911,7 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
         selector = _payload_selector(body)
         if not selector:
             raise ValueError("selector is required")
-        existing = _satellite_lookup(selector)
-        host = _lower(existing.get("host")) or _satellite_host_from_selector(selector)
         removed = _remove_satellite(selector)
-        if host:
-            next_targets = [item for item in _current_manual_targets() if _lower(item) != host]
-            _save_manual_targets(next_targets)
         with contextlib.suppress(Exception):
             _run_async_blocking(_esphome_disconnect_selector(selector, reason="manual_remove"), timeout=20.0)
         return {
@@ -8293,7 +5927,6 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
         rows = _run_async_blocking(_discover_mdns_once(), timeout=30.0)
         for row in rows or []:
             _upsert_satellite(row)
-        _sync_manual_targets()
         return {
             "ok": True,
             "action": action_name,
@@ -8310,7 +5943,6 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
         rows = _run_async_blocking(_discover_mdns_once(), timeout=30.0)
         for row in rows or []:
             _upsert_satellite(row)
-        _sync_manual_targets()
         status = _run_async_blocking(_esphome_reconcile_once(force=True), timeout=45.0)
         return {
             "ok": True,
@@ -8325,13 +5957,6 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
         if not selector:
             raise ValueError("selector is required")
         _set_satellite_selected(selector, True)
-        row = _satellite_lookup(selector)
-        host = _lower(row.get("host")) or _satellite_host_from_selector(selector)
-        if host:
-            targets = _current_manual_targets()
-            if host not in targets:
-                targets.append(host)
-                _save_manual_targets(targets)
         status = _run_async_blocking(_esphome_reconcile_once(force=True), timeout=45.0)
         return {
             "ok": True,
@@ -8346,11 +5971,6 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
         if not selector:
             raise ValueError("selector is required")
         _set_satellite_selected(selector, False)
-        row = _satellite_lookup(selector)
-        host = _lower(row.get("host")) or _satellite_host_from_selector(selector)
-        if host:
-            next_targets = [item for item in _current_manual_targets() if _lower(item) != host]
-            _save_manual_targets(next_targets)
         _run_async_blocking(_esphome_disconnect_selector(selector, reason="manual_disconnect"), timeout=20.0)
         return {
             "ok": True,
@@ -8460,9 +6080,6 @@ async def startup() -> None:
     except Exception as exc:
         logger.warning("[native-voice] silero VAD model pre-load error: %s", exc)
 
-    # Ensure manual targets are represented before loops begin.
-    _sync_manual_targets()
-
     if "esphome_bootstrap" not in _background_tasks or _background_tasks["esphome_bootstrap"].done():
         _background_tasks["esphome_bootstrap"] = asyncio.create_task(_esphome_bootstrap_reconnect())
     if "discovery" not in _background_tasks or _background_tasks["discovery"].done():
@@ -8546,7 +6163,7 @@ async def native_status(x_tater_token: Optional[str] = Header(None)) -> Dict[str
         "wyoming_available": WYOMING_IMPORT_ERROR is None,
         "wyoming_error": _text(WYOMING_IMPORT_ERROR),
         "selectors": selectors,
-        "discovery": dict(_discovery_stats),
+        "discovery": dict(_esphome_device_runtime.discovery_stats()),
         "esphome": _esphome_status(),
     }
 

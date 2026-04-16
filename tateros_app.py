@@ -767,7 +767,7 @@ def _run_surface_htmlui_tab_action(tab_spec: Dict[str, Any], payload: "CoreTabAc
     return result
 
 
-def _voice_platform_tab_spec() -> Dict[str, Any]:
+def _esphome_platform_tab_spec() -> Dict[str, Any]:
     return esphome_home_module.runtime_tab_spec()
 
 
@@ -3822,7 +3822,7 @@ def run_core_tab_action(core_key: str, payload: CoreTabActionRequest) -> Dict[st
 
 @app.get("/api/settings/esphome/runtime")
 def get_esphome_runtime_payload() -> Dict[str, Any]:
-    tab = _voice_platform_tab_spec()
+    tab = _esphome_platform_tab_spec()
     return {
         "tab": {
             "label": str(tab.get("label") or "ESPHome"),
@@ -4854,7 +4854,7 @@ def get_settings() -> Dict[str, Any]:
     speech_settings = get_shared_speech_settings()
     speech_ui = get_speech_ui_payload(speech_settings)
     esphome_fields = _esphome_settings_fields()
-    esphome_settings_item = esphome_home_module._voice_ui_settings_item_form() if hasattr(esphome_home_module, "_voice_ui_settings_item_form") else {}
+    esphome_settings_item = esphome_home_module.settings_item_form() if hasattr(esphome_home_module, "settings_item_form") else {}
     esphome_sections = (
         esphome_settings_item.get("sections")
         if isinstance(esphome_settings_item, dict) and isinstance(esphome_settings_item.get("sections"), list)

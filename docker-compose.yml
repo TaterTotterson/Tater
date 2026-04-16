@@ -1,31 +1,32 @@
-version: "3.9"
-
 services:
   tater:
-    build: .
+    build:
+      context: .
     container_name: tater_app
-    ports:
-      - "8501:8501"  # HTML Web UI
+    restart: unless-stopped
+    network_mode: host
     environment:
+      TZ: ${TZ:-America/Chicago}
+      HTMLUI_HOST: ${HTMLUI_HOST:-0.0.0.0}
       HTMLUI_PORT: ${HTMLUI_PORT:-8501}
-      LLM_HOST: ${LLM_HOST}
-      LLM_PORT: ${LLM_PORT}
-      LLM_MODEL: ${LLM_MODEL}
-      LLM_EMB_MODEL: ${LLM_EMB_MODEL}
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      AUTOMATIC_URL: ${AUTOMATIC_URL}
-      PREMIUMIZE_API_KEY: ${PREMIUMIZE_API_KEY}
-    depends_on:
-      - redis
+      TATER_REDIS_CONFIG_PATH: ${TATER_REDIS_CONFIG_PATH:-/app/.runtime/redis_connection.json}
+      AUTOMATIC_URL: ${AUTOMATIC_URL:-}
+      PREMIUMIZE_API_KEY: ${PREMIUMIZE_API_KEY:-}
+      LLM_HOST: ${LLM_HOST:-}
+      LLM_PORT: ${LLM_PORT:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_EMB_MODEL: ${LLM_EMB_MODEL:-}
+    volumes:
+      - ${TATER_AGENT_LAB_PATH:-./agent_lab}:/app/agent_lab
+      - ${TATER_RUNTIME_PATH:-./.runtime}:/app/.runtime
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
 
   redis:
-    image: redis:alpine
+    image: redis/redis-stack-server:latest
     container_name: tater_redis
-    ports:
-      - "6379:6379"
+    profiles: ["redis"]
+    restart: unless-stopped
+    network_mode: host
     volumes:
-      - redis_data:/data
-
-volumes:
-  redis_data:
+      - ${TATER_REDIS_DATA_PATH:-./redis_data}:/data
