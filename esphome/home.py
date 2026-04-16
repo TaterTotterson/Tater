@@ -1,49 +1,30 @@
 from __future__ import annotations
 
+import contextlib
 from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
 
-from .voice_pipeline import (
-    VOICE_CORE_SETTINGS_HASH_KEY,
-    _discovery_stats,
-    _load_piper_tts_model_catalog,
-    _load_satellite_registry,
-    _load_wyoming_tts_voice_catalog,
-    _resolve_stt_backend,
-    _resolve_tts_backend,
-    _run_async_blocking,
-    _save_voice_ui_settings,
-    _selector_runtime,
-    _set_satellite_selected,
-    _sync_manual_targets,
-    _text,
-    _voice_config_snapshot,
-    _voice_ui_satellite_item_forms,
-    _voice_ui_setting_fields,
-    _voice_ui_settings_item_form,
-    _voice_metrics_snapshot,
-    _esphome_disconnect_selector,
-    _esphome_reconcile_once,
-    _esphome_status,
-    _lower,
-    router,
-    shutdown as _voice_shutdown,
-    startup as _voice_startup,
-)
+from . import runtime as esphome_runtime
+from . import settings as esphome_settings
 
 
 def settings_hash_key() -> str:
-    return str(VOICE_CORE_SETTINGS_HASH_KEY or "voice_core_settings")
+    return esphome_settings.settings_hash_key()
 
 
 def settings_fields() -> List[Dict[str, Any]]:
-    rows = _voice_ui_setting_fields()
+    rows = esphome_settings.settings_fields()
     return rows if isinstance(rows, list) else []
 
 
+def settings_item_form() -> Dict[str, Any]:
+    form = esphome_settings.settings_item_form()
+    return form if isinstance(form, dict) else {}
+
+
 def save_settings_values(values: Dict[str, Any]) -> Dict[str, Any]:
-    result = _save_voice_ui_settings(values or {})
+    result = esphome_settings.save_settings_values(values or {})
     return result if isinstance(result, dict) else {"ok": True}
 
 
@@ -60,55 +41,50 @@ def runtime_tab_spec() -> Dict[str, Any]:
 
 
 def is_running() -> bool:
-    runtime = _selector_runtime("__esphome_home__")
-    return bool(runtime.get("service_running"))
+    return esphome_runtime.is_running()
 
 
 async def startup() -> None:
-    if is_running():
-        return
-    await _voice_startup()
-    runtime = _selector_runtime("__esphome_home__")
-    runtime["service_running"] = True
+    await esphome_runtime.startup()
 
 
 async def shutdown() -> None:
-    if not is_running():
-        return
-    await _voice_shutdown()
-    runtime = _selector_runtime("__esphome_home__")
-    runtime["service_running"] = False
+    await esphome_runtime.shutdown()
 
 
 def get_runtime_payload(*, redis_client: Any = None, core_key: str = "esphome", core_tab: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    voice_rows, voices_meta = _load_wyoming_tts_voice_catalog()
-    piper_rows, piper_meta = _load_piper_tts_model_catalog()
-    status = _esphome_status()
+    voice_rows, voices_meta = esphome_runtime.load_wyoming_tts_voice_catalog()
+    piper_rows, piper_meta = esphome_runtime.load_piper_tts_model_catalog()
+    status = esphome_runtime.status()
     clients = status.get("clients") if isinstance(status.get("clients"), dict) else {}
-    voice_metrics = status.get("voice_metrics") if isinstance(status.get("voice_metrics"), dict) else _voice_metrics_snapshot()
-    satellites = _load_satellite_registry()
+    voice_metrics = (
+        status.get("voice_metrics")
+        if isinstance(status.get("voice_metrics"), dict)
+        else esphome_runtime.voice_metrics_snapshot()
+    )
+    satellites = esphome_runtime.load_satellite_registry()
 
     connected = len([row for row in clients.values() if isinstance(row, dict) and bool(row.get("connected"))])
     selected = len(status.get("targets") or {})
-    discovered = len([row for row in satellites if _lower(row.get("source")).startswith("mdns")])
+    discovered = len([row for row in satellites if esphome_runtime.lower(row.get("source")).startswith("mdns")])
 
-    cfg = _voice_config_snapshot()
+    cfg = esphome_runtime.voice_config_snapshot()
     eou = cfg.get("eou") if isinstance(cfg.get("eou"), dict) else {}
     stt = cfg.get("stt") if isinstance(cfg.get("stt"), dict) else {}
     tts = cfg.get("tts") if isinstance(cfg.get("tts"), dict) else {}
-    effective_stt_backend, _stt_note = _resolve_stt_backend()
-    effective_tts_backend, _tts_note = _resolve_tts_backend()
+    effective_stt_backend, _stt_note = esphome_runtime.resolve_stt_backend()
+    effective_tts_backend, _tts_note = esphome_runtime.resolve_tts_backend()
     tts_catalog_count = len(piper_rows) if effective_tts_backend == "piper" else len(voice_rows)
     tts_catalog_updated = piper_meta.get("updated_ts") if effective_tts_backend == "piper" else voices_meta.get("updated_ts")
     stt_backend_rows = [
-        {"backend": _text(name) or "unknown", "avg_ms": f"{float(value or 0.0):.1f}"}
+        {"backend": esphome_runtime.text(name) or "unknown", "avg_ms": f"{float(value or 0.0):.1f}"}
         for name, value in sorted(
             ((voice_metrics.get("avg_stt_latency_by_backend_ms") or {}) if isinstance(voice_metrics.get("avg_stt_latency_by_backend_ms"), dict) else {}).items(),
             key=lambda item: str(item[0]),
         )
     ]
     tts_backend_rows = [
-        {"backend": _text(name) or "unknown", "avg_ms": f"{float(value or 0.0):.1f}"}
+        {"backend": esphome_runtime.text(name) or "unknown", "avg_ms": f"{float(value or 0.0):.1f}"}
         for name, value in sorted(
             ((voice_metrics.get("avg_tts_latency_by_backend_ms") or {}) if isinstance(voice_metrics.get("avg_tts_latency_by_backend_ms"), dict) else {}).items(),
             key=lambda item: str(item[0]),
@@ -121,15 +97,15 @@ def get_runtime_payload(*, redis_client: Any = None, core_key: str = "esphome", 
         device_info = row.get("device_info") if isinstance(row.get("device_info"), dict) else {}
         metrics_row = row.get("voice_metrics") if isinstance(row.get("voice_metrics"), dict) else {}
         title = (
-            _text(device_info.get("friendly_name"))
-            or _text(device_info.get("name"))
-            or _text(row.get("selector"))
-            or _text(selector)
+            esphome_runtime.text(device_info.get("friendly_name"))
+            or esphome_runtime.text(device_info.get("name"))
+            or esphome_runtime.text(row.get("selector"))
+            or esphome_runtime.text(selector)
         )
         device_rows.append(
             {
                 "satellite": title,
-                "host": _text(row.get("host")) or "-",
+                "host": esphome_runtime.text(row.get("host")) or "-",
                 "sessions": str(int(metrics_row.get("sessions_started") or 0)),
                 "valid": str(int(metrics_row.get("valid_turns") or 0)),
                 "no_ops": str(int(metrics_row.get("no_op_turns") or 0)),
@@ -146,12 +122,13 @@ def get_runtime_payload(*, redis_client: Any = None, core_key: str = "esphome", 
         f"False wakes: {int(voice_metrics.get('false_wake_count') or 0)} • "
         f"Low signal: {int(voice_metrics.get('low_signal_count') or 0)} • "
         f"Avg turn: {float(voice_metrics.get('avg_turn_latency_ms') or 0.0):.0f} ms • "
-        f"STT: {_text(stt.get('backend'))}->{effective_stt_backend} • "
-        f"TTS: {_text(tts.get('backend'))}->{effective_tts_backend} • "
-        f"EOU: {_text(eou.get('mode'))}/{_text(eou.get('backend'))}"
+        f"STT: {esphome_runtime.text(stt.get('backend'))}->{effective_stt_backend} • "
+        f"TTS: {esphome_runtime.text(tts.get('backend'))}->{effective_tts_backend} • "
+        f"EOU: {esphome_runtime.text(eou.get('mode'))}/{esphome_runtime.text(eou.get('backend'))}"
     )
-    item_forms = [_voice_ui_settings_item_form()]
-    item_forms.extend(_voice_ui_satellite_item_forms(status))
+    item_forms = [esphome_settings.settings_item_form()]
+    item_forms.extend(esphome_settings.satellite_item_forms(status))
+    discovery_stats = esphome_runtime.discovery_stats()
     return {
         "summary": summary,
         "header_stats": [
@@ -178,7 +155,7 @@ def get_runtime_payload(*, redis_client: Any = None, core_key: str = "esphome", 
             {"label": "STT Backend", "value": effective_stt_backend},
             {"label": "TTS Backend", "value": effective_tts_backend},
             {"label": "TTS Catalog", "value": tts_catalog_count},
-            {"label": "Last TTS Refresh", "value": _text(tts_catalog_updated) or "-"},
+            {"label": "Last TTS Refresh", "value": esphome_runtime.text(tts_catalog_updated) or "-"},
         ],
         "stats_sections": [
             {
@@ -188,7 +165,7 @@ def get_runtime_payload(*, redis_client: Any = None, core_key: str = "esphome", 
                     {"label": "Connected", "value": connected},
                     {"label": "Known Satellites", "value": len(satellites)},
                     {"label": "mDNS Discovered", "value": discovered},
-                    {"label": "Discovery Runs", "value": int(_discovery_stats.get("runs") or 0)},
+                    {"label": "Discovery Runs", "value": int(discovery_stats.get("runs") or 0)},
                 ],
             },
             {
@@ -223,7 +200,7 @@ def get_runtime_payload(*, redis_client: Any = None, core_key: str = "esphome", 
                     {"label": "STT Fallbacks", "value": int(voice_metrics.get("stt_fallback_count") or 0)},
                     {"label": "TTS Fallbacks", "value": int(voice_metrics.get("tts_fallback_count") or 0)},
                     {"label": "TTS Catalog", "value": tts_catalog_count},
-                    {"label": "Last TTS Refresh", "value": _text(tts_catalog_updated) or "-"},
+                    {"label": "Last TTS Refresh", "value": esphome_runtime.text(tts_catalog_updated) or "-"},
                 ],
             },
         ],
@@ -300,30 +277,27 @@ def get_runtime_payload(*, redis_client: Any = None, core_key: str = "esphome", 
 
 
 def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client: Any = None, core_key: str = "esphome") -> Dict[str, Any]:
-    from . import voice_pipeline as vp
-
-    action_name = _lower(action)
+    action_name = esphome_runtime.lower(action)
     body = payload if isinstance(payload, dict) else {}
 
     if action_name == "voice_settings_save":
-        values = vp._payload_values(body)
-        result = _save_voice_ui_settings(values)
-        _sync_manual_targets()
-        with vp.contextlib.suppress(Exception):
-            _run_async_blocking(vp._esphome_reconcile_once(force=True), timeout=45.0)
+        values = esphome_runtime.payload_values(body)
+        result = esphome_settings.save_settings_values(values)
+        with contextlib.suppress(Exception):
+            esphome_runtime.reconcile_once(force=True, timeout=45.0)
         updated = int(result.get("updated_count") or 0)
         message = f"Saved {updated} setting(s)." if updated > 0 else "No settings changed."
-        return {"ok": True, "action": action_name, "message": message, **result, "status": _esphome_status()}
+        return {"ok": True, "action": action_name, "message": message, **result, "status": esphome_runtime.status()}
 
     if action_name == "voice_satellite_add_manual":
-        values = vp._payload_values(body)
-        host = _lower(values.get("host") or body.get("host"))
+        values = esphome_runtime.payload_values(body)
+        host = esphome_runtime.lower(values.get("host") or body.get("host"))
         if not host:
             raise ValueError("host is required")
         selector = f"host:{host}"
-        name = _text(values.get("name")) or host
-        area_name = _text(values.get("area_name"))
-        vp._upsert_satellite(
+        name = esphome_runtime.text(values.get("name")) or host
+        area_name = esphome_runtime.text(values.get("area_name"))
+        esphome_runtime.upsert_satellite(
             {
                 "selector": selector,
                 "host": host,
@@ -335,62 +309,51 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
                 },
             }
         )
-        targets = vp._current_manual_targets()
-        if host not in targets:
-            targets.append(host)
-            vp._save_manual_targets(targets)
-        with vp.contextlib.suppress(Exception):
-            _run_async_blocking(vp._esphome_reconcile_once(force=True), timeout=45.0)
-        return {"ok": True, "action": action_name, "selector": selector, "message": f"Added satellite {name}.", "status": _esphome_status()}
+        with contextlib.suppress(Exception):
+            esphome_runtime.reconcile_once(force=True, timeout=45.0)
+        return {"ok": True, "action": action_name, "selector": selector, "message": f"Added satellite {name}.", "status": esphome_runtime.status()}
 
     if action_name == "voice_satellite_save":
-        selector = vp._payload_selector(body)
-        values = vp._payload_values(body)
-        existing = vp._satellite_lookup(selector) if selector else {}
-        host = _lower(values.get("host")) or _lower(existing.get("host")) or vp._satellite_host_from_selector(selector)
+        selector = esphome_runtime.payload_selector(body)
+        values = esphome_runtime.payload_values(body)
+        existing = esphome_runtime.satellite_lookup(selector) if selector else {}
+        host = esphome_runtime.lower(values.get("host")) or esphome_runtime.lower(existing.get("host")) or esphome_runtime.satellite_host_from_selector(selector)
         if not selector and host:
             selector = f"host:{host}"
         if not selector:
             raise ValueError("selector is required")
         metadata = dict(existing.get("metadata") or {})
         if "area_name" in values:
-            metadata["area_name"] = _text(values.get("area_name"))
-        name = _text(values.get("name")) or _text(existing.get("name")) or host or selector
-        source = _text(existing.get("source")) or "manual"
-        vp._upsert_satellite({"selector": selector, "host": host, "name": name, "source": source, "metadata": metadata})
-        return {"ok": True, "action": action_name, "selector": selector, "message": f"Saved satellite {name}.", "status": _esphome_status()}
+            metadata["area_name"] = esphome_runtime.text(values.get("area_name"))
+        name = esphome_runtime.text(values.get("name")) or esphome_runtime.text(existing.get("name")) or host or selector
+        source = esphome_runtime.text(existing.get("source")) or "manual"
+        esphome_runtime.upsert_satellite({"selector": selector, "host": host, "name": name, "source": source, "metadata": metadata})
+        return {"ok": True, "action": action_name, "selector": selector, "message": f"Saved satellite {name}.", "status": esphome_runtime.status()}
 
     if action_name == "voice_satellite_remove":
-        selector = vp._payload_selector(body)
+        selector = esphome_runtime.payload_selector(body)
         if not selector:
             raise ValueError("selector is required")
-        existing = vp._satellite_lookup(selector)
-        host = _lower(existing.get("host")) or vp._satellite_host_from_selector(selector)
-        removed = vp._remove_satellite(selector)
-        if host:
-            next_targets = [item for item in vp._current_manual_targets() if _lower(item) != host]
-            vp._save_manual_targets(next_targets)
-        with vp.contextlib.suppress(Exception):
-            _run_async_blocking(vp._esphome_disconnect_selector(selector, reason="manual_remove"), timeout=20.0)
-        return {"ok": True, "action": action_name, "selector": selector, "removed": bool(removed), "message": "Satellite removed." if removed else "Satellite was already absent.", "status": _esphome_status()}
+        removed = esphome_runtime.remove_satellite(selector)
+        with contextlib.suppress(Exception):
+            esphome_runtime.disconnect_selector(selector, reason="manual_remove", timeout=20.0)
+        return {"ok": True, "action": action_name, "selector": selector, "removed": bool(removed), "message": "Satellite removed." if removed else "Satellite was already absent.", "status": esphome_runtime.status()}
 
     if action_name == "voice_discover":
-        rows = _run_async_blocking(vp._discover_mdns_once(), timeout=30.0)
+        rows = esphome_runtime.discover_once()
         for row in rows or []:
-            vp._upsert_satellite(row)
-        _sync_manual_targets()
-        return {"ok": True, "action": action_name, "count": len(rows or []), "message": f"Discovery completed: {len(rows or [])} satellite(s) found.", "status": _esphome_status()}
+            esphome_runtime.upsert_satellite(row)
+        return {"ok": True, "action": action_name, "count": len(rows or []), "message": f"Discovery completed: {len(rows or [])} satellite(s) found.", "status": esphome_runtime.status()}
 
     if action_name == "voice_reconcile":
-        status = _run_async_blocking(vp._esphome_reconcile_once(force=True), timeout=45.0)
+        status = esphome_runtime.reconcile_once(force=True, timeout=45.0)
         return {"ok": True, "action": action_name, "status": status, "message": "Reconcile completed."}
 
     if action_name == "voice_refresh":
-        rows = _run_async_blocking(vp._discover_mdns_once(), timeout=30.0)
+        rows = esphome_runtime.discover_once()
         for row in rows or []:
-            vp._upsert_satellite(row)
-        _sync_manual_targets()
-        status = _run_async_blocking(vp._esphome_reconcile_once(force=True), timeout=45.0)
+            esphome_runtime.upsert_satellite(row)
+        status = esphome_runtime.reconcile_once(force=True, timeout=45.0)
         return {
             "ok": True,
             "action": action_name,
@@ -400,51 +363,37 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
         }
 
     if action_name == "voice_connect":
-        selector = vp._payload_selector(body)
+        selector = esphome_runtime.payload_selector(body)
         if not selector:
             raise ValueError("selector is required")
-        _set_satellite_selected(selector, True)
-        row = vp._satellite_lookup(selector)
-        host = _lower(row.get("host")) or vp._satellite_host_from_selector(selector)
-        if host:
-            targets = vp._current_manual_targets()
-            if host not in targets:
-                targets.append(host)
-                vp._save_manual_targets(targets)
-        status = _run_async_blocking(vp._esphome_reconcile_once(force=True), timeout=45.0)
+        esphome_runtime.set_satellite_selected(selector, True)
+        status = esphome_runtime.reconcile_once(force=True, timeout=45.0)
         return {"ok": True, "action": action_name, "selector": selector, "status": status, "message": "Satellite selected and connect requested."}
 
     if action_name == "voice_disconnect":
-        selector = vp._payload_selector(body)
+        selector = esphome_runtime.payload_selector(body)
         if not selector:
             raise ValueError("selector is required")
-        _set_satellite_selected(selector, False)
-        row = vp._satellite_lookup(selector)
-        host = _lower(row.get("host")) or vp._satellite_host_from_selector(selector)
-        if host:
-            next_targets = [item for item in vp._current_manual_targets() if _lower(item) != host]
-            vp._save_manual_targets(next_targets)
-        _run_async_blocking(_esphome_disconnect_selector(selector, reason="manual_disconnect"), timeout=20.0)
-        return {"ok": True, "action": action_name, "selector": selector, "status": _esphome_status(), "message": "Satellite disconnected and deselected."}
+        esphome_runtime.set_satellite_selected(selector, False)
+        esphome_runtime.disconnect_selector(selector, reason="manual_disconnect", timeout=20.0)
+        return {"ok": True, "action": action_name, "selector": selector, "status": esphome_runtime.status(), "message": "Satellite disconnected and deselected."}
 
     if action_name == "voice_entity_command":
-        selector = vp._payload_selector(body)
-        entity_key = _text(body.get("entity_key") or body.get("key"))
-        command = _text(body.get("command"))
+        selector = esphome_runtime.payload_selector(body)
+        entity_key = esphome_runtime.text(body.get("entity_key") or body.get("key"))
+        command = esphome_runtime.text(body.get("command"))
         if not selector:
             raise ValueError("selector is required")
         if not entity_key:
             raise ValueError("entity_key is required")
         if not command:
             raise ValueError("command is required")
-        result = _run_async_blocking(
-            vp._esphome_command_entity(
-                selector,
-                entity_key=entity_key,
-                command=command,
-                value=body.get("value"),
-                options=body,
-            ),
+        result = esphome_runtime.command_entity(
+            selector,
+            entity_key=entity_key,
+            command=command,
+            value=body.get("value"),
+            options=body,
             timeout=20.0,
         )
         entity_rows = list(result.get("entity_rows") or []) if isinstance(result, dict) else []
@@ -455,32 +404,32 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
             "entity_key": entity_key,
             "command": command,
             "entity_rows": entity_rows,
-            "message": f"Updated {_text(body.get('entity_label')) or 'entity'}.",
+            "message": f"Updated {esphome_runtime.text(body.get('entity_label')) or 'entity'}.",
         }
 
     if action_name == "voice_logs_start":
-        selector = vp._payload_selector(body)
+        selector = esphome_runtime.payload_selector(body)
         if not selector:
             raise ValueError("selector is required")
-        result = _run_async_blocking(vp._esphome_logs_start(selector), timeout=20.0)
+        result = esphome_runtime.logs_start(selector, timeout=20.0)
         result["action"] = action_name
         return result
 
     if action_name == "voice_logs_poll":
-        selector = vp._payload_selector(body)
+        selector = esphome_runtime.payload_selector(body)
         if not selector:
             raise ValueError("selector is required")
-        after_seq = vp._as_int(body.get("after_seq"), 0, minimum=0)
-        result = _run_async_blocking(vp._esphome_logs_poll(selector, after_seq=after_seq), timeout=20.0)
+        after_seq = esphome_runtime.as_int(body.get("after_seq"), 0, minimum=0)
+        result = esphome_runtime.logs_poll(selector, after_seq=after_seq, timeout=20.0)
         result["action"] = action_name
         return result
 
     if action_name == "voice_logs_stop":
-        selector = vp._payload_selector(body)
+        selector = esphome_runtime.payload_selector(body)
         if not selector:
             raise ValueError("selector is required")
-        force = vp._as_bool(body.get("force"), False)
-        result = _run_async_blocking(vp._esphome_logs_stop(selector, force=force), timeout=20.0)
+        force = esphome_runtime.as_bool(body.get("force"), False)
+        result = esphome_runtime.logs_stop(selector, force=force, timeout=20.0)
         result["action"] = action_name
         return result
 
@@ -488,7 +437,7 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
 
 
 def include_routes(app: Any) -> None:
-    app.include_router(router)
+    esphome_runtime.include_routes(app)
 
 
 def raise_unavailable_settings_error() -> None:
