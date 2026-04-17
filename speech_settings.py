@@ -19,14 +19,12 @@ DEFAULT_WYOMING_STT_PORT = 10300
 DEFAULT_WYOMING_TTS_HOST = "127.0.0.1"
 DEFAULT_WYOMING_TTS_PORT = 10200
 DEFAULT_WYOMING_TTS_VOICE = ""
-DEFAULT_TTS_PUBLIC_BASE_URL = ""
 DEFAULT_KOKORO_MODEL = "v1.0:q8"
 DEFAULT_KOKORO_VOICE = "af_bella"
 DEFAULT_POCKET_TTS_MODEL = "b6369a24"
 DEFAULT_POCKET_TTS_VOICE = "alba"
 DEFAULT_PIPER_MODEL = "en_US-lessac-medium"
-DEFAULT_ANNOUNCEMENT_TTS_BACKEND = "homeassistant_api"
-DEFAULT_ANNOUNCEMENT_TTS_ENTITY = "tts.piper"
+DEFAULT_ANNOUNCEMENT_TTS_BACKEND = DEFAULT_TTS_BACKEND
 
 KOKORO_MODEL_SPECS: Dict[str, Dict[str, str]] = {
     "v1.0:q8": {
@@ -105,20 +103,7 @@ def _normalize_tts_backend(value: Any) -> str:
 
 
 def normalize_announcement_tts_backend(value: Any, *, default: str = DEFAULT_ANNOUNCEMENT_TTS_BACKEND) -> str:
-    token = _clean(value).lower().replace("-", "_").replace(" ", "_")
-    if token in {"", "default"}:
-        return default
-    if token in {"homeassistant_api", "homeassistant", "ha_api", "ha_tts"}:
-        return "homeassistant_api"
-    if token == "wyoming":
-        return "wyoming"
-    if token == "kokoro":
-        return "kokoro"
-    if token in {"pocket_tts", "pockettts", "pocket"}:
-        return "pocket_tts"
-    if token == "piper":
-        return "piper"
-    return default
+    return _normalize_tts_backend(_clean(value) or default)
 
 
 def _option_rows_from_values(
@@ -319,11 +304,12 @@ def _piper_tts_model_option_rows(*, current_value: Any = "", ensure_catalog: boo
 
 def get_speech_settings() -> Dict[str, Any]:
     shared = redis_client.hgetall(SPEECH_SETTINGS_KEY) or {}
+    current_tts_backend = _normalize_tts_backend(shared.get("tts_backend"))
     return {
         "stt_backend": _normalize_stt_backend(shared.get("stt_backend")),
         "wyoming_stt_host": _clean(shared.get("wyoming_stt_host")) or DEFAULT_WYOMING_STT_HOST,
         "wyoming_stt_port": _as_int(shared.get("wyoming_stt_port"), DEFAULT_WYOMING_STT_PORT),
-        "tts_backend": _normalize_tts_backend(shared.get("tts_backend")),
+        "tts_backend": current_tts_backend,
         "tts_model": _clean(shared.get("tts_model")),
         "tts_voice": _clean(shared.get("tts_voice")),
         "wyoming_tts_host": _clean(shared.get("wyoming_tts_host")) or DEFAULT_WYOMING_TTS_HOST,
@@ -335,8 +321,6 @@ def get_speech_settings() -> Dict[str, Any]:
         ),
         "announcement_tts_model": _clean(shared.get("announcement_tts_model")),
         "announcement_tts_voice": _clean(shared.get("announcement_tts_voice")),
-        "announcement_tts_entity": _clean(shared.get("announcement_tts_entity")) or DEFAULT_ANNOUNCEMENT_TTS_ENTITY,
-        "tts_public_base_url": _clean(shared.get("tts_public_base_url")) or DEFAULT_TTS_PUBLIC_BASE_URL,
     }
 
 
@@ -354,16 +338,15 @@ def save_speech_settings(
     announcement_tts_backend: Any,
     announcement_tts_model: Any,
     announcement_tts_voice: Any,
-    announcement_tts_entity: Any,
-    tts_public_base_url: Any,
 ) -> None:
+    direct_tts_backend = _normalize_tts_backend(tts_backend)
     redis_client.hset(
         SPEECH_SETTINGS_KEY,
         mapping={
             "stt_backend": _normalize_stt_backend(stt_backend),
             "wyoming_stt_host": _clean(wyoming_stt_host) or DEFAULT_WYOMING_STT_HOST,
             "wyoming_stt_port": str(_as_int(wyoming_stt_port, DEFAULT_WYOMING_STT_PORT)),
-            "tts_backend": _normalize_tts_backend(tts_backend),
+            "tts_backend": direct_tts_backend,
             "tts_model": _clean(tts_model),
             "tts_voice": _clean(tts_voice),
             "wyoming_tts_host": _clean(wyoming_tts_host) or DEFAULT_WYOMING_TTS_HOST,
@@ -375,10 +358,10 @@ def save_speech_settings(
             ),
             "announcement_tts_model": _clean(announcement_tts_model),
             "announcement_tts_voice": _clean(announcement_tts_voice),
-            "announcement_tts_entity": _clean(announcement_tts_entity) or DEFAULT_ANNOUNCEMENT_TTS_ENTITY,
-            "tts_public_base_url": _clean(tts_public_base_url).rstrip("/"),
         },
     )
+    with contextlib.suppress(Exception):
+        redis_client.hdel(SPEECH_SETTINGS_KEY, "tts_public_base_url")
 
 
 def get_speech_ui_payload(settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -439,8 +422,6 @@ def get_announcement_tts_ui_payload(
     backend: Any = "",
     model: Any = "",
     voice: Any = "",
-    homeassistant_tts_entity: Any = "",
-    homeassistant_tts_options: Optional[List[Dict[str, str]]] = None,
     default_backend: str = DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
 ) -> Dict[str, Any]:
     current_backend = normalize_announcement_tts_backend(backend, default=default_backend)
@@ -448,22 +429,15 @@ def get_announcement_tts_ui_payload(
     current_voice = _clean(voice)
     speech_ui = get_speech_ui_payload(
         {
-            "tts_backend": current_backend if current_backend != "homeassistant_api" else DEFAULT_TTS_BACKEND,
+            "tts_backend": current_backend,
             "tts_model": current_model,
             "tts_voice": current_voice,
         }
     )
-    ha_rows = [row for row in list(homeassistant_tts_options or []) if isinstance(row, dict)]
-    current_entity = _clean(homeassistant_tts_entity)
-    if current_entity and current_entity not in {_clean(row.get("value")) for row in ha_rows}:
-        ha_rows.insert(0, {"value": current_entity, "label": f"{current_entity} (saved)"})
-    backend_options = [{"value": "homeassistant_api", "label": "Home Assistant API TTS"}]
-    backend_options.extend(list(speech_ui.get("tts_backend_options") or []))
     return {
-        "tts_backend_options": backend_options,
+        "tts_backend_options": list(speech_ui.get("tts_backend_options") or []),
         "tts_model_options_by_backend": dict(speech_ui.get("tts_model_options_by_backend") or {}),
         "tts_voice_options_by_model": dict(speech_ui.get("tts_voice_options_by_model") or {}),
-        "homeassistant_tts_entity_options": ha_rows,
     }
 
 
@@ -481,45 +455,32 @@ def build_announcement_tts_fields(
     backend: Any = "",
     model: Any = "",
     voice: Any = "",
-    homeassistant_tts_entity: Any = "",
-    homeassistant_tts_options: Optional[List[Dict[str, str]]] = None,
     default_backend: str = DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
     backend_key: str = "tts_backend",
     model_key: str = "tts_model",
     voice_key: str = "tts_voice",
-    homeassistant_tts_entity_key: str = "tts_entity",
     backend_label: str = "TTS Backend",
     model_label: str = "TTS Model",
     voice_label: str = "TTS Voice",
-    homeassistant_tts_entity_label: str = "Home Assistant TTS Entity",
     backend_description: str = "",
     model_description: str = "",
     voice_description: str = "",
-    homeassistant_tts_entity_description: str = "",
-    homeassistant_tts_placeholder: str = "(Select Home Assistant TTS entity)",
 ) -> List[Dict[str, Any]]:
     payload = get_announcement_tts_ui_payload(
         backend=backend,
         model=model,
         voice=voice,
-        homeassistant_tts_entity=homeassistant_tts_entity,
-        homeassistant_tts_options=homeassistant_tts_options,
         default_backend=default_backend,
     )
     current_backend = normalize_announcement_tts_backend(backend, default=default_backend)
     backend_options = [row for row in list(payload.get("tts_backend_options") or []) if isinstance(row, dict)]
     model_options_by_backend = dict(payload.get("tts_model_options_by_backend") or {})
     voice_options_by_model = dict(payload.get("tts_voice_options_by_model") or {})
-    ha_entity_options = [row for row in list(payload.get("homeassistant_tts_entity_options") or []) if isinstance(row, dict)]
 
     current_model_options = [row for row in list(model_options_by_backend.get(current_backend) or []) if isinstance(row, dict)]
     current_model = _selected_option_value(current_model_options, model)
     current_voice_options = [row for row in list(voice_options_by_model.get(current_model) or []) if isinstance(row, dict)]
     current_voice = _selected_option_value(current_voice_options, voice)
-
-    ha_fields_options = [{"value": "", "label": _clean(homeassistant_tts_placeholder) or "(Select Home Assistant TTS entity)"}]
-    ha_fields_options.extend(ha_entity_options)
-    current_ha_entity = _selected_option_value(ha_fields_options, homeassistant_tts_entity)
 
     backend_keys_with_models = [key for key, rows in model_options_by_backend.items() if isinstance(rows, list) and rows]
     backend_keys_with_voices = []
@@ -564,14 +525,5 @@ def build_announcement_tts_fields(
                 "options_by_source": voice_options_by_model,
                 "default_options": current_voice_options,
             },
-        },
-        {
-            "key": homeassistant_tts_entity_key,
-            "label": _clean(homeassistant_tts_entity_label) or "Home Assistant TTS Entity",
-            "type": "select",
-            "options": ha_fields_options,
-            "value": current_ha_entity,
-            "description": _clean(homeassistant_tts_entity_description),
-            "show_when": {"source_key": backend_key, "equals": "homeassistant_api"},
         },
     ]
