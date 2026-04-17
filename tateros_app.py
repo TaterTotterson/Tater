@@ -16,7 +16,6 @@ from datetime import datetime
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from urllib import request as urllib_request
 from urllib.parse import urlparse, urlunparse
 
 import dotenv
@@ -79,7 +78,7 @@ from speech_settings import (
     get_speech_ui_payload,
     save_speech_settings as save_shared_speech_settings,
 )
-from speech_tts import fetch_wyoming_tts_voice_options, get_runtime_tts_wav, synthesize_preview_wav
+from speech_tts import fetch_wyoming_tts_voice_options, synthesize_preview_wav
 from vision_settings import get_vision_settings as get_shared_vision_settings, save_vision_settings as save_shared_vision_settings
 from tateros import core_store as core_store_module
 from tateros import verba_store as verba_store_module
@@ -1172,55 +1171,6 @@ def _read_tater_avatar_data_url() -> str:
     mimetype = _guess_image_mimetype(raw_default)
     encoded = base64.b64encode(raw_default).decode("utf-8")
     return f"data:{mimetype};base64,{encoded}"
-
-
-def _fetch_homeassistant_tts_entity_options(
-    base_url: Any,
-    token: Any,
-    *,
-    current_value: Any = "",
-) -> List[Dict[str, str]]:
-    base = str(base_url or "").strip().rstrip("/")
-    bearer = str(token or "").strip()
-    rows: List[Dict[str, str]] = []
-    seen: set[str] = set()
-
-    def add_row(value: Any, label: Any = "") -> None:
-        entity_id = str(value or "").strip()
-        if not entity_id or entity_id in seen:
-            return
-        seen.add(entity_id)
-        rows.append({"value": entity_id, "label": str(label or entity_id).strip() or entity_id})
-
-    if base and bearer:
-        try:
-            request = urllib_request.Request(
-                f"{base}/api/states",
-                headers={
-                    "Authorization": f"Bearer {bearer}",
-                    "Content-Type": "application/json",
-                },
-                method="GET",
-            )
-            with urllib_request.urlopen(request, timeout=10) as response:
-                payload = json.load(response)
-            if isinstance(payload, list):
-                for item in payload:
-                    if not isinstance(item, dict):
-                        continue
-                    entity_id = str(item.get("entity_id") or "").strip()
-                    if not entity_id.lower().startswith("tts."):
-                        continue
-                    attrs = item.get("attributes") if isinstance(item.get("attributes"), dict) else {}
-                    friendly_name = str((attrs or {}).get("friendly_name") or "").strip()
-                    add_row(entity_id, f"{friendly_name} ({entity_id})" if friendly_name else entity_id)
-        except Exception:
-            logger.debug("[tateros] failed to load Home Assistant TTS entities", exc_info=True)
-
-    current = str(current_value or "").strip()
-    if current and current not in seen:
-        add_row(current, f"{current} (saved)")
-    return rows
 
 
 def _b64url_encode(raw: bytes) -> str:
@@ -2773,8 +2723,6 @@ class AppSettingsRequest(BaseModel):
     speech_announcement_tts_backend: Optional[str] = None
     speech_announcement_tts_model: Optional[str] = None
     speech_announcement_tts_voice: Optional[str] = None
-    speech_announcement_tts_entity: Optional[str] = None
-    speech_tts_public_base_url: Optional[str] = None
     esphome_settings: Optional[Dict[str, Any]] = None
     emoji_enable_on_reaction_add: Optional[bool] = None
     emoji_enable_auto_reaction_on_reply: Optional[bool] = None
@@ -4869,18 +4817,11 @@ def get_settings() -> Dict[str, Any]:
         "runtime_tab_label": "ESPHome",
         "runtime_tab_hint": "Tater Voice satellites, live entities, rooms, and logs are managed directly in this ESPHome settings area.",
     }
-    homeassistant_tts_options = _fetch_homeassistant_tts_entity_options(
-        homeassistant_settings.get("HA_BASE_URL", "http://homeassistant.local:8123"),
-        homeassistant_settings.get("HA_TOKEN", ""),
-        current_value=speech_settings.get("announcement_tts_entity"),
-    )
     announcement_speech_ui = get_announcement_tts_ui_payload(
         backend=speech_settings.get("announcement_tts_backend"),
         model=speech_settings.get("announcement_tts_model"),
         voice=speech_settings.get("announcement_tts_voice"),
-        homeassistant_tts_entity=speech_settings.get("announcement_tts_entity"),
-        homeassistant_tts_options=homeassistant_tts_options,
-        default_backend=str(speech_settings.get("announcement_tts_backend") or "homeassistant_api"),
+        default_backend=str(speech_settings.get("announcement_tts_backend") or speech_settings.get("tts_backend") or "wyoming"),
     )
     emoji_settings = get_core_emoji_settings() or {}
 
@@ -4965,8 +4906,6 @@ def get_settings() -> Dict[str, Any]:
         "speech_announcement_tts_backend": str(speech_settings.get("announcement_tts_backend") or ""),
         "speech_announcement_tts_model": str(speech_settings.get("announcement_tts_model") or ""),
         "speech_announcement_tts_voice": str(speech_settings.get("announcement_tts_voice") or ""),
-        "speech_announcement_tts_entity": str(speech_settings.get("announcement_tts_entity") or ""),
-        "speech_tts_public_base_url": str(speech_settings.get("tts_public_base_url") or ""),
         "speech_ui": speech_ui,
         "announcement_speech_ui": announcement_speech_ui,
         "esphome_ui": esphome_ui,
@@ -5034,17 +4973,6 @@ async def get_speech_wyoming_tts_voices(payload: WyomingTtsVoicesRequest) -> Dic
         raise
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc) or "Failed to fetch Wyoming TTS voices.") from exc
-
-
-@app.get("/api/speech/tts/runtime/{asset_id}.wav")
-async def get_runtime_tts_asset(asset_id: str) -> Response:
-    row = get_runtime_tts_wav(asset_id)
-    if not isinstance(row, dict):
-        raise HTTPException(status_code=404, detail="TTS audio not found or expired.")
-    wav_bytes = bytes(row.get("bytes") or b"")
-    if not wav_bytes:
-        raise HTTPException(status_code=404, detail="TTS audio is empty or expired.")
-    return Response(content=wav_bytes, media_type=str(row.get("content_type") or "audio/wav"))
 
 
 @app.post("/api/settings")
@@ -5217,8 +5145,6 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "speech_announcement_tts_backend",
         "speech_announcement_tts_model",
         "speech_announcement_tts_voice",
-        "speech_announcement_tts_entity",
-        "speech_tts_public_base_url",
     }
     if any(key in updates for key in speech_keys):
         current_speech = get_shared_speech_settings()
@@ -5250,12 +5176,6 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
             ).strip(),
             announcement_tts_voice=str(
                 updates.get("speech_announcement_tts_voice", current_speech.get("announcement_tts_voice") or "")
-            ).strip(),
-            announcement_tts_entity=str(
-                updates.get("speech_announcement_tts_entity", current_speech.get("announcement_tts_entity") or "")
-            ).strip(),
-            tts_public_base_url=str(
-                updates.get("speech_tts_public_base_url", current_speech.get("tts_public_base_url") or "")
             ).strip(),
         )
 
