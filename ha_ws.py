@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import threading
 from typing import Any, Dict, Optional
+
+import requests
 
 from helpers import redis_client
 
@@ -190,6 +193,86 @@ def call_service_sync(
             service_data=service_data,
             target=target,
             return_response=return_response,
+            timeout_s=timeout_s,
+        )
+    )
+
+
+def upload_local_media_source_file_sync(
+    base_url: Any,
+    token: Any,
+    *,
+    target_media_content_id: str,
+    filename: str,
+    content: bytes,
+    content_type: str = "audio/wav",
+    timeout_s: float = 60.0,
+) -> str:
+    base = _text(base_url).rstrip("/")
+    bearer = _text(token)
+    media_target = _text(target_media_content_id)
+    file_name = _text(filename) or "audio.wav"
+    payload = bytes(content or b"")
+    if not base:
+        raise ValueError("Home Assistant base URL is required.")
+    if not bearer:
+        raise ValueError("Home Assistant token is required.")
+    if not media_target:
+        raise ValueError("Home Assistant target media folder is required.")
+    if not payload:
+        raise ValueError("Media upload content is empty.")
+
+    response = requests.post(
+        f"{base}/api/media_source/local_source/upload",
+        headers={"Authorization": f"Bearer {bearer}"},
+        data={"media_content_id": media_target},
+        files={"file": (file_name, io.BytesIO(payload), _text(content_type) or "audio/wav")},
+        timeout=max(5.0, float(timeout_s)),
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"HA media upload failed: HTTP {response.status_code}: {response.text}")
+    try:
+        parsed = response.json()
+    except Exception as exc:
+        raise RuntimeError(f"HA media upload returned invalid JSON: {exc}") from exc
+
+    media_content_id = _text(parsed.get("media_content_id"))
+    if not media_content_id:
+        raise RuntimeError("HA media upload succeeded but returned no media_content_id.")
+    return media_content_id
+
+
+async def remove_local_media_source(
+    base_url: Any,
+    token: Any,
+    *,
+    media_content_id: str,
+    timeout_s: float = 20.0,
+) -> Any:
+    return await call(
+        base_url,
+        token,
+        {
+            "type": "media_source/local_source/remove",
+            "id": 1,
+            "media_content_id": _text(media_content_id),
+        },
+        timeout_s=timeout_s,
+    )
+
+
+def remove_local_media_source_sync(
+    base_url: Any,
+    token: Any,
+    *,
+    media_content_id: str,
+    timeout_s: float = 20.0,
+) -> Any:
+    return _run_sync(
+        remove_local_media_source(
+            base_url,
+            token,
+            media_content_id=media_content_id,
             timeout_s=timeout_s,
         )
     )

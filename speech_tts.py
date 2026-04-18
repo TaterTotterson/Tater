@@ -21,7 +21,11 @@ from urllib.parse import urlparse
 import requests
 
 from announcement_targets import split_announcement_targets
-from ha_ws import call_service_sync as ha_call_service_sync
+from ha_ws import (
+    call_service_sync as ha_call_service_sync,
+    remove_local_media_source_sync as ha_remove_local_media_source_sync,
+    upload_local_media_source_file_sync as ha_upload_local_media_source_file_sync,
+)
 from speech_settings import (
     DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
     DEFAULT_KOKORO_MODEL,
@@ -123,6 +127,8 @@ _runtime_tts_assets: Dict[str, Dict[str, Any]] = {}
 _runtime_tts_assets_lock = threading.Lock()
 logger = logging.getLogger("speech_tts")
 RUNTIME_TTS_ASSET_TTL_SECONDS = 15 * 60.0
+HOMEASSISTANT_MEDIA_SOURCE_TARGET = "media-source://media_source/local/tater_announcements"
+HOMEASSISTANT_MEDIA_SOURCE_CLEANUP_SECONDS = 15 * 60.0
 
 
 def _text(value: Any) -> str:
@@ -231,6 +237,36 @@ def build_runtime_tts_asset_url(asset_id: Any, *, peer_base: Any = "") -> str:
     if not token:
         raise RuntimeError("Runtime TTS asset id is required.")
     return f"{_service_base_url_for_peer(peer_base).rstrip('/')}/api/speech/tts/runtime/{token}.wav"
+
+
+def _schedule_homeassistant_media_cleanup(
+    *,
+    base_url: str,
+    token: str,
+    media_content_id: str,
+    delay_s: float = HOMEASSISTANT_MEDIA_SOURCE_CLEANUP_SECONDS,
+) -> None:
+    clean_base = _text(base_url).rstrip("/")
+    bearer = _text(token)
+    media_id = _text(media_content_id)
+    if not clean_base or not bearer or not media_id:
+        return
+
+    def _cleanup() -> None:
+        try:
+            ha_remove_local_media_source_sync(
+                clean_base,
+                bearer,
+                media_content_id=media_id,
+                timeout_s=20.0,
+            )
+            logger.info("[speech_tts] HA media cleanup removed media_content_id=%s", media_id)
+        except Exception as exc:
+            logger.warning("[speech_tts] HA media cleanup failed media_content_id=%s error=%s", media_id, exc)
+
+    timer = threading.Timer(max(30.0, float(delay_s or 0.0)), _cleanup)
+    timer.daemon = True
+    timer.start()
 
 
 def normalize_tts_backend(value: Any) -> str:
@@ -927,7 +963,7 @@ def _homeassistant_play_media_sync(
     base_url: str,
     token: str,
     players: list[str],
-    media_url: str,
+    media_content_id: str,
 ) -> Dict[str, Any]:
     clean_base = _text(base_url).rstrip("/")
     bearer = _text(token)
@@ -936,17 +972,17 @@ def _homeassistant_play_media_sync(
         return {"ok": False, "sent_count": 0, "error": "No Home Assistant media players selected."}
     if not clean_base or not bearer:
         return {"ok": False, "sent_count": 0, "error": "Home Assistant base URL or token is missing."}
-    if not _text(media_url):
-        return {"ok": False, "sent_count": 0, "error": "Home Assistant media URL is missing."}
+    if not _text(media_content_id):
+        return {"ok": False, "sent_count": 0, "error": "Home Assistant media content id is missing."}
 
     sent_count = 0
     failures: list[str] = []
 
     logger.info(
-        "[speech_tts] HA play_media start base=%s players=%s media_url=%s",
+        "[speech_tts] HA play_media start base=%s players=%s media_content_id=%s",
         clean_base,
         clean_players,
-        _text(media_url),
+        _text(media_content_id),
     )
     for player in clean_players:
         try:
@@ -957,7 +993,7 @@ def _homeassistant_play_media_sync(
                 service="play_media",
                 service_data={
                     "entity_id": player,
-                    "media_content_id": _text(media_url),
+                    "media_content_id": _text(media_content_id),
                     "media_content_type": "music",
                 },
                 timeout_s=30.0,
@@ -1048,24 +1084,42 @@ async def speak_announcement_targets(
         if not _text(ha_base) or not _text(token):
             warnings.append("Home Assistant announcement targets are selected but Home Assistant is not configured.")
         else:
-            asset_id = store_runtime_tts_wav(wav_bytes, content_type="audio/wav")
-            if not asset_id:
-                warnings.append("Failed to prepare Home Assistant announcement audio.")
-            else:
-                media_url = build_runtime_tts_asset_url(asset_id, peer_base=ha_base)
-                result["media_url"] = media_url
+            try:
+                media_content_id = await asyncio.to_thread(
+                    ha_upload_local_media_source_file_sync,
+                    _text(ha_base),
+                    _text(token),
+                    target_media_content_id=HOMEASSISTANT_MEDIA_SOURCE_TARGET,
+                    filename=f"tater-announcement-{uuid.uuid4().hex}.wav",
+                    content=wav_bytes,
+                    content_type="audio/wav",
+                    timeout_s=60.0,
+                )
+                result["homeassistant_media_content_id"] = media_content_id
+                logger.info(
+                    "[speech_tts] HA media upload prepared media_content_id=%s players=%s",
+                    media_content_id,
+                    homeassistant_players,
+                )
                 ha_result = await asyncio.to_thread(
                     _homeassistant_play_media_sync,
                     base_url=_text(ha_base),
                     token=_text(token),
                     players=homeassistant_players,
-                    media_url=media_url,
+                    media_content_id=media_content_id,
                 )
                 result["homeassistant_sent_count"] = int(ha_result.get("sent_count") or 0)
                 sent_count += int(ha_result.get("sent_count") or 0)
                 warnings.extend([_text(item) for item in list(ha_result.get("warnings") or []) if _text(item)])
                 if not ha_result.get("ok") and _text(ha_result.get("error")):
                     warnings.append(_text(ha_result.get("error")))
+                _schedule_homeassistant_media_cleanup(
+                    base_url=_text(ha_base),
+                    token=_text(token),
+                    media_content_id=media_content_id,
+                )
+            except Exception as exc:
+                warnings.append(f"Home Assistant media upload failed: {exc}")
 
     if voice_core_selectors:
         voice_result = await asyncio.to_thread(
