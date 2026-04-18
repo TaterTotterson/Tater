@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import HTTPException
 
 from . import runtime as esphome_runtime
+from . import firmware as esphome_firmware
 from . import settings as esphome_settings
 
 
@@ -52,9 +53,22 @@ async def shutdown() -> None:
     await esphome_runtime.shutdown()
 
 
-def get_runtime_payload(*, redis_client: Any = None, core_key: str = "esphome", core_tab: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    voice_rows, voices_meta = esphome_runtime.load_wyoming_tts_voice_catalog()
-    piper_rows, piper_meta = esphome_runtime.load_piper_tts_model_catalog()
+def _runtime_panel_token(panel: Any = "") -> str:
+    token = esphome_runtime.lower(panel)
+    return token if token in {"satellites", "firmware", "platform", "stats"} else ""
+
+
+def get_runtime_payload(
+    *,
+    redis_client: Any = None,
+    core_key: str = "esphome",
+    core_tab: Optional[Dict[str, Any]] = None,
+    panel: str = "",
+) -> Dict[str, Any]:
+    panel_token = _runtime_panel_token(panel)
+    include_satellites = panel_token in {"", "satellites"}
+    include_firmware = panel_token in {"", "firmware"}
+    include_stats = panel_token in {"", "stats"}
     status = esphome_runtime.status()
     clients = status.get("clients") if isinstance(status.get("clients"), dict) else {}
     voice_metrics = (
@@ -74,47 +88,6 @@ def get_runtime_payload(*, redis_client: Any = None, core_key: str = "esphome", 
     tts = cfg.get("tts") if isinstance(cfg.get("tts"), dict) else {}
     effective_stt_backend, _stt_note = esphome_runtime.resolve_stt_backend()
     effective_tts_backend, _tts_note = esphome_runtime.resolve_tts_backend()
-    tts_catalog_count = len(piper_rows) if effective_tts_backend == "piper" else len(voice_rows)
-    tts_catalog_updated = piper_meta.get("updated_ts") if effective_tts_backend == "piper" else voices_meta.get("updated_ts")
-    stt_backend_rows = [
-        {"backend": esphome_runtime.text(name) or "unknown", "avg_ms": f"{float(value or 0.0):.1f}"}
-        for name, value in sorted(
-            ((voice_metrics.get("avg_stt_latency_by_backend_ms") or {}) if isinstance(voice_metrics.get("avg_stt_latency_by_backend_ms"), dict) else {}).items(),
-            key=lambda item: str(item[0]),
-        )
-    ]
-    tts_backend_rows = [
-        {"backend": esphome_runtime.text(name) or "unknown", "avg_ms": f"{float(value or 0.0):.1f}"}
-        for name, value in sorted(
-            ((voice_metrics.get("avg_tts_latency_by_backend_ms") or {}) if isinstance(voice_metrics.get("avg_tts_latency_by_backend_ms"), dict) else {}).items(),
-            key=lambda item: str(item[0]),
-        )
-    ]
-    device_rows = []
-    for selector, row in sorted(clients.items(), key=lambda item: str(item[0])):
-        if not isinstance(row, dict):
-            continue
-        device_info = row.get("device_info") if isinstance(row.get("device_info"), dict) else {}
-        metrics_row = row.get("voice_metrics") if isinstance(row.get("voice_metrics"), dict) else {}
-        title = (
-            esphome_runtime.text(device_info.get("friendly_name"))
-            or esphome_runtime.text(device_info.get("name"))
-            or esphome_runtime.text(row.get("selector"))
-            or esphome_runtime.text(selector)
-        )
-        device_rows.append(
-            {
-                "satellite": title,
-                "host": esphome_runtime.text(row.get("host")) or "-",
-                "sessions": str(int(metrics_row.get("sessions_started") or 0)),
-                "valid": str(int(metrics_row.get("valid_turns") or 0)),
-                "no_ops": str(int(metrics_row.get("no_op_turns") or 0)),
-                "false_wakes": str(int(metrics_row.get("false_wake_count") or 0)),
-                "errors": str(int(metrics_row.get("error_count") or 0)),
-                "reconnects": str(int(metrics_row.get("reconnect_count") or 0)),
-                "avg_turn_ms": f"{float(metrics_row.get('avg_turn_latency_ms') or 0.0):.1f}",
-            }
-        )
 
     summary = (
         f"Selected satellites: {selected} • Connected: {connected} • "
@@ -126,11 +99,9 @@ def get_runtime_payload(*, redis_client: Any = None, core_key: str = "esphome", 
         f"TTS: {esphome_runtime.text(tts.get('backend'))}->{effective_tts_backend} • "
         f"EOU: {esphome_runtime.text(eou.get('mode'))}/{esphome_runtime.text(eou.get('backend'))}"
     )
-    item_forms = [esphome_settings.settings_item_form()]
-    item_forms.extend(esphome_settings.satellite_item_forms(status))
-    discovery_stats = esphome_runtime.discovery_stats()
-    return {
+    payload = {
         "summary": summary,
+        "panel": panel_token or "all",
         "header_stats": [
             {"label": "Connected", "value": connected},
             {"label": "Known Satellites", "value": len(satellites)},
@@ -138,7 +109,93 @@ def get_runtime_payload(*, redis_client: Any = None, core_key: str = "esphome", 
             {"label": "STT Backend", "value": effective_stt_backend},
             {"label": "TTS Backend", "value": effective_tts_backend},
         ],
-        "stats": [
+        "items": [],
+        "empty_message": "No satellites discovered yet. Use Refresh or add one manually.",
+        "ui": {
+            "kind": "esphome_native",
+            "title": "Tater Voice",
+        },
+    }
+    if include_satellites:
+        item_forms = [esphome_settings.settings_item_form()]
+        item_forms.extend(esphome_settings.satellite_item_forms(status))
+        payload["ui"]["add_form"] = {
+            "action": "voice_satellite_add_manual",
+            "submit_label": "Add Satellite",
+            "fields": [
+                {
+                    "key": "host",
+                    "label": "Host / IP",
+                    "type": "text",
+                    "placeholder": "10.4.20.19",
+                    "description": "Hostname or IP of an ESPHome voice satellite.",
+                },
+                {
+                    "key": "name",
+                    "label": "Name",
+                    "type": "text",
+                    "placeholder": "Kitchen Satellite",
+                },
+                {
+                    "key": "area_name",
+                    "label": "Room / Area",
+                    "type": "text",
+                    "placeholder": "Kitchen",
+                    "description": "Optional default room context for voice turns from this satellite.",
+                },
+            ],
+        }
+        payload["ui"]["item_forms"] = item_forms
+
+    if include_firmware:
+        payload["firmware"] = esphome_firmware.firmware_panel_payload(status)
+
+    if include_stats:
+        voice_rows, voices_meta = esphome_runtime.load_wyoming_tts_voice_catalog()
+        piper_rows, piper_meta = esphome_runtime.load_piper_tts_model_catalog()
+        tts_catalog_count = len(piper_rows) if effective_tts_backend == "piper" else len(voice_rows)
+        tts_catalog_updated = piper_meta.get("updated_ts") if effective_tts_backend == "piper" else voices_meta.get("updated_ts")
+        discovery_stats = esphome_runtime.discovery_stats()
+        stt_backend_rows = [
+            {"backend": esphome_runtime.text(name) or "unknown", "avg_ms": f"{float(value or 0.0):.1f}"}
+            for name, value in sorted(
+                ((voice_metrics.get("avg_stt_latency_by_backend_ms") or {}) if isinstance(voice_metrics.get("avg_stt_latency_by_backend_ms"), dict) else {}).items(),
+                key=lambda item: str(item[0]),
+            )
+        ]
+        tts_backend_rows = [
+            {"backend": esphome_runtime.text(name) or "unknown", "avg_ms": f"{float(value or 0.0):.1f}"}
+            for name, value in sorted(
+                ((voice_metrics.get("avg_tts_latency_by_backend_ms") or {}) if isinstance(voice_metrics.get("avg_tts_latency_by_backend_ms"), dict) else {}).items(),
+                key=lambda item: str(item[0]),
+            )
+        ]
+        device_rows = []
+        for selector, row in sorted(clients.items(), key=lambda item: str(item[0])):
+            if not isinstance(row, dict):
+                continue
+            device_info = row.get("device_info") if isinstance(row.get("device_info"), dict) else {}
+            metrics_row = row.get("voice_metrics") if isinstance(row.get("voice_metrics"), dict) else {}
+            title = (
+                esphome_runtime.text(device_info.get("friendly_name"))
+                or esphome_runtime.text(device_info.get("name"))
+                or esphome_runtime.text(row.get("selector"))
+                or esphome_runtime.text(selector)
+            )
+            device_rows.append(
+                {
+                    "satellite": title,
+                    "host": esphome_runtime.text(row.get("host")) or "-",
+                    "sessions": str(int(metrics_row.get("sessions_started") or 0)),
+                    "valid": str(int(metrics_row.get("valid_turns") or 0)),
+                    "no_ops": str(int(metrics_row.get("no_op_turns") or 0)),
+                    "false_wakes": str(int(metrics_row.get("false_wake_count") or 0)),
+                    "errors": str(int(metrics_row.get("error_count") or 0)),
+                    "reconnects": str(int(metrics_row.get("reconnect_count") or 0)),
+                    "avg_turn_ms": f"{float(metrics_row.get('avg_turn_latency_ms') or 0.0):.1f}",
+                }
+            )
+        payload["stats"] = [
             {"label": "Voice Sessions", "value": int(voice_metrics.get("sessions_started") or 0)},
             {"label": "Valid Turns", "value": int(voice_metrics.get("valid_turns") or 0)},
             {"label": "No-Ops", "value": int(voice_metrics.get("no_op_turns") or 0)},
@@ -156,8 +213,8 @@ def get_runtime_payload(*, redis_client: Any = None, core_key: str = "esphome", 
             {"label": "TTS Backend", "value": effective_tts_backend},
             {"label": "TTS Catalog", "value": tts_catalog_count},
             {"label": "Last TTS Refresh", "value": esphome_runtime.text(tts_catalog_updated) or "-"},
-        ],
-        "stats_sections": [
+        ]
+        payload["stats_sections"] = [
             {
                 "title": "Discovery & Devices",
                 "metrics": [
@@ -203,8 +260,8 @@ def get_runtime_payload(*, redis_client: Any = None, core_key: str = "esphome", 
                     {"label": "Last TTS Refresh", "value": esphome_runtime.text(tts_catalog_updated) or "-"},
                 ],
             },
-        ],
-        "stats_tables": [
+        ]
+        payload["stats_tables"] = [
             {
                 "title": "STT Latency By Backend",
                 "columns": [
@@ -239,46 +296,17 @@ def get_runtime_payload(*, redis_client: Any = None, core_key: str = "esphome", 
                 "rows": device_rows,
                 "empty_message": "No satellite metrics yet.",
             },
-        ],
-        "items": [],
-        "empty_message": "No satellites discovered yet. Use Refresh or add one manually.",
-        "ui": {
-            "kind": "esphome_native",
-            "title": "Tater Voice",
-            "add_form": {
-                "action": "voice_satellite_add_manual",
-                "submit_label": "Add Satellite",
-                "fields": [
-                    {
-                        "key": "host",
-                        "label": "Host / IP",
-                        "type": "text",
-                        "placeholder": "10.4.20.19",
-                        "description": "Hostname or IP of an ESPHome voice satellite.",
-                    },
-                    {
-                        "key": "name",
-                        "label": "Name",
-                        "type": "text",
-                        "placeholder": "Kitchen Satellite",
-                    },
-                    {
-                        "key": "area_name",
-                        "label": "Room / Area",
-                        "type": "text",
-                        "placeholder": "Kitchen",
-                        "description": "Optional default room context for voice turns from this satellite.",
-                    },
-                ],
-            },
-            "item_forms": item_forms,
-        },
-    }
+        ]
+    return payload
 
 
 def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client: Any = None, core_key: str = "esphome") -> Dict[str, Any]:
     action_name = esphome_runtime.lower(action)
     body = payload if isinstance(payload, dict) else {}
+
+    firmware_result = esphome_firmware.handle_runtime_action(action_name, body)
+    if isinstance(firmware_result, dict):
+        return firmware_result
 
     if action_name == "voice_settings_save":
         values = esphome_runtime.payload_values(body)

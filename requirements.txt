@@ -18,6 +18,7 @@ websocket-client
 aioftp
 irc3
 pyyaml
+esphome==2026.4.0
 fastapi
 uvicorn
 matrix-nio[aiohttp,e2e]

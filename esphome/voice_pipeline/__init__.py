@@ -565,7 +565,6 @@ def _experimental_live_tool_progress_enabled() -> bool:
         DEFAULT_EXPERIMENTAL_LIVE_TOOL_PROGRESS_ENABLED,
     )
 
-
 def _experimental_partial_stt_enabled() -> bool:
     return _get_bool_setting(
         "VOICE_EXPERIMENTAL_PARTIAL_STT_ENABLED",
@@ -2782,7 +2781,6 @@ _esphome_entities_for_selector = _esphome_device_runtime.entities_for_selector
 _esphome_command_entity = _esphome_device_runtime.command_entity
 _esphome_client_row_snapshot_sync = _esphome_device_runtime.client_row_snapshot_sync
 
-
 async def _prepare_streamed_tts_segments(
     selector: str,
     session_id: str,
@@ -3035,7 +3033,9 @@ async def _finalize_after_announcement(selector: str, client: Any, module: Any, 
             future.set_result({"reason": reason, "kind": kind, "session_id": session_id})
 
     if kind == "tool_progress":
-        _native_debug(f"esphome tool progress finalize selector={token} session_id={session_id} reason={reason}")
+        _native_debug(
+            f"esphome tool progress finalize selector={token} session_id={session_id} reason={reason} next_visual=tool_until_response"
+        )
         return True
 
     await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)

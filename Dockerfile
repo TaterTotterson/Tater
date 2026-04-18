@@ -13,6 +13,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     build-essential \
+    git \
     libpq-dev \
     wget \
     ffmpeg \

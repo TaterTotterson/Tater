@@ -34,6 +34,13 @@ const state = {
   coreTabPayloadCache: {},
   coreTabLoadPromises: {},
   esphomeRuntimeLoadPromise: null,
+  esphomeRuntimeRequestSeq: 0,
+  esphomeFirmwarePayload: null,
+  esphomeFirmwareSelection: {
+    templateKey: "",
+    selector: "",
+  },
+  esphomeFirmwareDrafts: {},
   sidebarCollapsed: String(safeStorageGet("tater_tateros_sidebar_collapsed", "false")).trim().toLowerCase() === "true",
   sidebarCollapseTimer: 0,
   runtimeBreakdownPollTimer: 0,
@@ -3918,19 +3925,26 @@ function renderCoreManagerField(field) {
           data-core-filter-default-options="${escapeHtml(filterDefaultOptions)}"
           data-core-filter-preferred-value="${escapeHtml(selected)}"`
       : "";
-    const optionsHtml = options
-      .map((raw) => {
-        if (raw && typeof raw === "object") {
-          const optionValue = String(raw.value ?? raw.id ?? raw.key ?? raw.label ?? "");
-          const optionLabel = String(raw.label ?? optionValue);
+    const renderSelectOptionRows = (rows) =>
+      rows
+        .map((raw) => {
+          if (raw && typeof raw === "object" && Array.isArray(raw.options) && !("value" in raw) && !("id" in raw) && !("key" in raw)) {
+            const groupLabel = String(raw.label ?? raw.title ?? "Options").trim() || "Options";
+            const groupRows = renderSelectOptionRows(raw.options);
+            return groupRows ? `<optgroup label="${escapeHtml(groupLabel)}">${groupRows}</optgroup>` : "";
+          }
+          if (raw && typeof raw === "object") {
+            const optionValue = String(raw.value ?? raw.id ?? raw.key ?? raw.label ?? "");
+            const optionLabel = String(raw.label ?? optionValue);
+            const isSelected = optionValue === selected ? "selected" : "";
+            return `<option value="${escapeHtml(optionValue)}" ${isSelected}>${escapeHtml(optionLabel)}</option>`;
+          }
+          const optionValue = String(raw ?? "");
           const isSelected = optionValue === selected ? "selected" : "";
-          return `<option value="${escapeHtml(optionValue)}" ${isSelected}>${escapeHtml(optionLabel)}</option>`;
-        }
-        const optionValue = String(raw ?? "");
-        const isSelected = optionValue === selected ? "selected" : "";
-        return `<option value="${escapeHtml(optionValue)}" ${isSelected}>${escapeHtml(optionValue)}</option>`;
-      })
-      .join("");
+          return `<option value="${escapeHtml(optionValue)}" ${isSelected}>${escapeHtml(optionValue)}</option>`;
+        })
+        .join("");
+    const optionsHtml = renderSelectOptionRows(options);
     return wrapField(`
       <label>${escapeHtml(label)}
         <select data-core-field-key="${escapeHtml(key)}" data-core-field-type="select"${dependentAttrs}>${optionsHtml}</select>
@@ -5196,6 +5210,318 @@ function renderEspHomeAddPanel(addForm, coreKey = "esphome") {
   `;
 }
 
+function renderEspHomeFirmwareSections(sections) {
+  const rows = Array.isArray(sections) ? sections : [];
+  if (!rows.length) {
+    return renderNotice("No firmware substitutions are available for this device.");
+  }
+  return rows
+    .map((section) => {
+      const title = String(section?.title || "Section").trim() || "Section";
+      const fields = Array.isArray(section?.fields) ? section.fields : [];
+      if (!fields.length) {
+        return "";
+      }
+      return `
+        <section class="core-inline-section" style="margin-top:12px;">
+          <div class="small core-inline-section-title">${escapeHtml(title)}</div>
+          <div class="form-grid two-col">
+            ${fields.map((field) => renderCoreManagerField(field)).join("")}
+          </div>
+        </section>
+      `;
+    })
+    .join("");
+}
+
+function normalizeEspHomeFirmwareSelection(firmware) {
+  const body = firmware && typeof firmware === "object" ? firmware : {};
+  const templates = Array.isArray(body?.templates) ? body.templates : [];
+  const devices = Array.isArray(body?.devices) ? body.devices : [];
+  const templateValues = templates.map((row) => String(row?.value || "").trim()).filter(Boolean);
+  const deviceValues = devices.map((row) => String(row?.value || "").trim()).filter(Boolean);
+  const requestedTemplate = String(
+    state.esphomeFirmwareSelection?.templateKey || body?.active_template_key || templateValues[0] || ""
+  ).trim();
+  const requestedSelector = String(
+    state.esphomeFirmwareSelection?.selector || body?.active_selector || deviceValues[0] || ""
+  ).trim();
+  return {
+    templateKey: templateValues.includes(requestedTemplate) ? requestedTemplate : templateValues[0] || "",
+    selector: deviceValues.includes(requestedSelector) ? requestedSelector : deviceValues[0] || "",
+  };
+}
+
+function resolveEspHomeFirmwareVariant(firmware, templateKey = "", selector = "") {
+  const body = firmware && typeof firmware === "object" ? firmware : {};
+  const variants = body?.variants && typeof body.variants === "object" ? body.variants : {};
+  const templateMap =
+    templateKey && variants[templateKey] && typeof variants[templateKey] === "object" ? variants[templateKey] : {};
+  return selector && templateMap[selector] && typeof templateMap[selector] === "object" ? templateMap[selector] : null;
+}
+
+function applyEspHomeFirmwareDraftToVariant(variant, templateKey = "") {
+  const base = variant && typeof variant === "object" ? variant : null;
+  if (!base) {
+    return null;
+  }
+  const token = String(templateKey || "").trim();
+  const draft =
+    token && state.esphomeFirmwareDrafts && typeof state.esphomeFirmwareDrafts === "object"
+      ? state.esphomeFirmwareDrafts[token]
+      : null;
+  if (!draft || typeof draft !== "object") {
+    return base;
+  }
+  const sections = Array.isArray(base?.sections) ? base.sections : [];
+  return {
+    ...base,
+    sections: sections.map((section) => {
+      const fields = Array.isArray(section?.fields) ? section.fields : [];
+      return {
+        ...section,
+        fields: fields.map((field) => {
+          const key = String(field?.key || "").trim();
+          if (!key || boolFromAny(field?.read_only, false) || !Object.prototype.hasOwnProperty.call(draft, key)) {
+            return field;
+          }
+          return {
+            ...field,
+            value: draft[key],
+          };
+        }),
+      };
+    }),
+  };
+}
+
+function captureEspHomeFirmwareDraft(card) {
+  if (!(card instanceof HTMLElement)) {
+    return;
+  }
+  const values = collectCoreManagerValues(card);
+  const templateKey = String(card.dataset?.firmwareTemplateKey || values?.template_key || "").trim();
+  if (!templateKey) {
+    return;
+  }
+  const draft = {};
+  Object.entries(values || {}).forEach(([key, value]) => {
+    const token = String(key || "").trim();
+    if (!token || token === "template_key" || token === "selector") {
+      return;
+    }
+    draft[token] = value;
+  });
+  state.esphomeFirmwareDrafts[templateKey] = draft;
+}
+
+function deriveWakeWordSlugFromUrl(value) {
+  const token = String(value || "").trim();
+  if (!token) {
+    return "";
+  }
+  const clean = token.split("?")[0].trim();
+  const segments = clean.split("/").filter(Boolean);
+  const filename = String(segments[segments.length - 1] || "").trim();
+  if (!filename) {
+    return "";
+  }
+  return filename.replace(/\.json$/i, "").replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^_+|_+$/g, "").toLowerCase();
+}
+
+function syncEspHomeFirmwareWakeWordCatalog(card, { fromPicker = false } = {}) {
+  if (!(card instanceof HTMLElement)) {
+    return;
+  }
+  const picker = card.querySelector('select[data-core-field-key="wake_word_catalog"]');
+  const urlInput = card.querySelector('input[data-core-field-key="wake_word_model_url"]');
+  const nameInput = card.querySelector('input[data-core-field-key="wake_word_name"]');
+  if (!(picker instanceof HTMLSelectElement) || !(urlInput instanceof HTMLInputElement)) {
+    return;
+  }
+
+  if (fromPicker) {
+    const selectedUrl = String(picker.value || "").trim();
+    if (selectedUrl && selectedUrl !== "__custom__") {
+      urlInput.value = selectedUrl;
+      if (nameInput instanceof HTMLInputElement && !nameInput.readOnly) {
+        const slug = deriveWakeWordSlugFromUrl(selectedUrl);
+        if (slug) {
+          nameInput.value = slug;
+        }
+      }
+    }
+    captureEspHomeFirmwareDraft(card);
+    return;
+  }
+
+  const currentUrl = String(urlInput.value || "").trim();
+  const optionValues = Array.from(picker.options).map((option) => String(option.value || "").trim());
+  if (currentUrl && optionValues.includes(currentUrl)) {
+    picker.value = currentUrl;
+  } else if (optionValues.includes("__custom__")) {
+    picker.value = "__custom__";
+  }
+  captureEspHomeFirmwareDraft(card);
+}
+
+function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
+  const body = firmware && typeof firmware === "object" ? firmware : {};
+  const templates = Array.isArray(body?.templates) ? body.templates : [];
+  const devices = Array.isArray(body?.devices) ? body.devices : [];
+  const cli = body?.cli && typeof body.cli === "object" ? body.cli : {};
+  const selection = normalizeEspHomeFirmwareSelection(body);
+  const selectedTemplate =
+    templates.find((row) => String(row?.value || "").trim() === selection.templateKey) || {};
+  const selectedDevice =
+    devices.find((row) => String(row?.value || "").trim() === selection.selector) || {};
+  const variant = applyEspHomeFirmwareDraftToVariant(
+    resolveEspHomeFirmwareVariant(body, selection.templateKey, selection.selector),
+    selection.templateKey
+  );
+  const variantAvailable = Boolean(variant && typeof variant === "object");
+  const title =
+    String(variant?.title || selectedDevice?.title || selection.selector || "Firmware Target").trim() || "Firmware Target";
+  const subtitle = String(variant?.subtitle || "").trim();
+  const detail = String(variant?.detail || selectedDevice?.detail || "").trim();
+  const templateLabel =
+    String(variant?.template_label || selectedTemplate?.label || selection.templateKey || "Firmware").trim() || "Firmware";
+  const cliAvailable = boolFromAny(variant?.cli_available ?? cli?.available, false);
+  const cliReason = String(variant?.cli_reason || cli?.detail || "").trim();
+  const links = Array.isArray(variant?.links) ? variant.links : [];
+  const linksHtml = links.length
+    ? `
+      <div class="small" style="margin-top:10px;">
+        ${links
+          .map((link) => {
+            const href = String(link?.href || "").trim();
+            const label = String(link?.label || href || "Link").trim() || "Link";
+            if (!href) {
+              return "";
+            }
+            return `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>`;
+          })
+          .filter(Boolean)
+          .join(" • ")}
+      </div>
+    `
+    : "";
+  const saveDisabledAttr = variantAvailable ? "" : " disabled";
+  const flashDisabledAttr = cliAvailable && variantAvailable ? "" : " disabled";
+  const itemId = escapeHtml(encodeCoreManagerId(selection.selector));
+  const controlsHtml = `
+    <section class="core-inline-section" style="margin-top:12px;">
+      <div class="small core-inline-section-title">Target</div>
+      <div class="form-grid two-col">
+        ${renderCoreManagerField({
+          key: "template_key",
+          label: "Firmware Template",
+          type: "select",
+          value: selection.templateKey,
+          options: templates,
+          description: "Pick the firmware YAML to use for this build.",
+        })}
+        ${renderCoreManagerField({
+          key: "selector",
+          label: "Connected Device",
+          type: "select",
+          value: selection.selector,
+          options: devices,
+          description: "Choose which currently connected ESPHome device should receive the build + flash action.",
+        })}
+      </div>
+    </section>
+  `;
+  const sectionsHtml = variant
+    ? renderEspHomeFirmwareSections(Array.isArray(variant?.sections) ? variant.sections : [])
+    : renderNotice("No firmware form is available for the current template/device selection.");
+
+  return `
+    <article class="card core-manager-item esphome-firmware-card"
+      data-core-key="${escapeHtml(coreKey)}"
+      data-core-item-id="${itemId}"
+      data-firmware-selector="${escapeHtml(selection.selector)}"
+      data-firmware-template-key="${escapeHtml(selection.templateKey)}">
+      <div class="card-head">
+        <h3 class="card-title">${escapeHtml(title)}</h3>
+        <span class="small">${escapeHtml(templateLabel)}</span>
+      </div>
+      ${subtitle ? `<div class="small">${escapeHtml(subtitle)}</div>` : ""}
+      ${detail ? `<div class="small" style="margin-top:6px;">${escapeHtml(detail)}</div>` : ""}
+      ${
+        !cliAvailable && cliReason
+          ? `<div class="small" style="margin-top:8px;">ESPHome CLI unavailable: ${escapeHtml(cliReason)}</div>`
+          : ""
+      }
+      ${linksHtml}
+      ${controlsHtml}
+      ${sectionsHtml}
+      <div class="inline-row" style="margin-top:12px;">
+        <button
+          type="button"
+          class="action-btn esphome-firmware-action"
+          data-firmware-action="voice_firmware_save"
+          data-firmware-title="Saving Firmware Settings"
+          data-firmware-working="Saving firmware substitutions..."
+          data-firmware-success="Firmware substitutions saved."
+          data-firmware-error="Firmware save failed"${saveDisabledAttr}
+        >Save</button>
+        <button
+          type="button"
+          class="action-btn esphome-firmware-action"
+          data-firmware-action="voice_firmware_flash_start"
+          data-firmware-title="Flashing Firmware"
+          data-firmware-working="Building and flashing firmware..."
+          data-firmware-success="Firmware flash finished."
+          data-firmware-error="Firmware flash failed"${flashDisabledAttr}
+        >Build + Flash</button>
+        <span class="small core-manager-status"></span>
+      </div>
+    </article>
+  `;
+}
+
+function renderEspHomeFirmwarePanel(firmware, coreKey = "esphome") {
+  const body = firmware && typeof firmware === "object" ? firmware : {};
+  const devices = Array.isArray(body?.devices) ? body.devices : [];
+  const warnings = Array.isArray(body?.warnings) ? body.warnings : [];
+  const cli = body?.cli && typeof body.cli === "object" ? body.cli : {};
+  const cliAvailable = boolFromAny(cli?.available, false);
+  const cliLabel = String(cli?.label || "Unavailable").trim() || "Unavailable";
+  const cliDetail = String(cli?.detail || "").trim();
+  const wifiNote = String(body?.wifi_note || "").trim();
+  const emptyMessage =
+    String(body?.empty_message || "No connected ESPHome devices are available for firmware actions.").trim() ||
+    "No connected ESPHome devices are available for firmware actions.";
+
+  return `
+    <div class="card">
+      <div class="card-head">
+        <h3 class="card-title">Firmware Builder</h3>
+        <span class="small">${escapeHtml(coreKey)}</span>
+      </div>
+      <div class="small">
+        Pick a firmware template, choose one connected ESPHome device, then build and flash directly from Tater.
+      </div>
+      <div class="small" style="margin-top:8px;">
+        ESPHome CLI: ${escapeHtml(cliLabel)}${cliDetail ? ` • ${escapeHtml(cliDetail)}` : ""}
+      </div>
+      ${wifiNote ? `<div class="small" style="margin-top:8px;">${escapeHtml(wifiNote)}</div>` : ""}
+      ${
+        !cliAvailable
+          ? `<div class="small" style="margin-top:8px;">Build and flash actions stay disabled until ESPHome is runnable from this machine.</div>`
+          : ""
+      }
+      ${
+        warnings.length
+          ? `<div class="small" style="margin-top:8px;">${warnings.map((warning) => escapeHtml(String(warning || "").trim())).filter(Boolean).join("<br>")}</div>`
+          : ""
+      }
+    </div>
+    ${devices.length ? renderEspHomeFirmwareCard(body, coreKey) : renderNotice(emptyMessage)}
+  `;
+}
+
 function renderEspHomeRuntimeHeader({ title = "Tater Voice", summary = "", stats = [], coreKey = "esphome" } = {}) {
   return `
     <div class="card esphome-runtime-shell">
@@ -5222,20 +5548,24 @@ function bindEspHomeSettingsTabs(root = document) {
   if (!buttons.length || !panels.length) {
     return;
   }
-  const activate = (tabKey) => {
+  const activate = (tabKey, { load = false } = {}) => {
+    host.dataset.esphomeActiveTab = String(tabKey || "satellites").trim() || "satellites";
     buttons.forEach((button) => {
       button.classList.toggle("active", button.dataset.esphomeTab === tabKey);
     });
     panels.forEach((panel) => {
       panel.classList.toggle("active", panel.dataset.esphomePanel === tabKey);
     });
+    if (load) {
+      void ensureEspHomeRuntimeLoaded({ force: true, panel: tabKey });
+    }
   };
   buttons.forEach((button) => {
     if (button.dataset.esphomeTabBound === "1") {
       return;
     }
     button.dataset.esphomeTabBound = "1";
-    button.addEventListener("click", () => activate(String(button.dataset.esphomeTab || "").trim()));
+    button.addEventListener("click", () => activate(String(button.dataset.esphomeTab || "").trim(), { load: true }));
   });
   const initial = String(host.dataset.esphomeActiveTab || "satellites").trim() || "satellites";
   activate(initial);
@@ -5800,25 +6130,44 @@ function resolveCoreRefreshScope(node) {
   return String(host?.dataset?.coreRefreshScope || "").trim();
 }
 
-async function fetchEspHomeRuntimePayload() {
-  return api("/api/settings/esphome/runtime");
+function normalizeEspHomeRuntimePanel(panel = "") {
+  const token = String(panel || "").trim().toLowerCase();
+  return ["satellites", "firmware", "platform", "stats"].includes(token) ? token : "satellites";
 }
 
-async function ensureEspHomeRuntimeLoaded({ force = false } = {}) {
+function getActiveEspHomeRuntimePanel(defaultPanel = "satellites") {
+  const shell = document.getElementById("settings-esphome-shell");
+  const activeButton = shell?.querySelector?.(".settings-subtab-btn.active[data-esphome-tab]");
+  return normalizeEspHomeRuntimePanel(
+    String(activeButton?.dataset?.esphomeTab || shell?.dataset?.esphomeActiveTab || defaultPanel).trim() || defaultPanel
+  );
+}
+
+async function fetchEspHomeRuntimePayload(panel = "") {
+  const targetPanel = normalizeEspHomeRuntimePanel(panel);
+  return api(`/api/settings/esphome/runtime?panel=${encodeURIComponent(targetPanel)}`);
+}
+
+async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
   const shell = document.getElementById("settings-esphome-shell");
   const head = document.getElementById("settings-esphome-runtime-head");
   const satellitesHost = document.getElementById("settings-esphome-runtime-satellites");
   const addHost = document.getElementById("settings-esphome-runtime-add");
+  const firmwareHost = document.getElementById("settings-esphome-runtime-firmware");
   const statsHost = document.getElementById("settings-esphome-runtime-stats");
   if (
     !(shell instanceof HTMLElement) ||
     !(head instanceof HTMLElement) ||
     !(satellitesHost instanceof HTMLElement) ||
-    !(addHost instanceof HTMLElement)
+    !(addHost instanceof HTMLElement) ||
+    !(firmwareHost instanceof HTMLElement)
   ) {
-    return;
+      return;
   }
-  const alreadyLoaded = String(shell.dataset.runtimeLoaded || "").trim() === "1";
+  const targetPanel = normalizeEspHomeRuntimePanel(panel || shell.dataset.esphomeActiveTab || "satellites");
+  const alreadyLoaded =
+    String(shell.dataset.runtimeLoaded || "").trim() === "1" &&
+    String(shell.dataset.runtimePanel || "").trim() === targetPanel;
   if (!force && alreadyLoaded) {
     return;
   }
@@ -5830,15 +6179,23 @@ async function ensureEspHomeRuntimeLoaded({ force = false } = {}) {
   shell.dataset.coreRefreshScope = "esphome-runtime";
   shell.dataset.coreKey = "esphome";
   shell.dataset.runtimeLoaded = "loading";
+  shell.dataset.runtimePanel = targetPanel;
   head.innerHTML = renderNotice(force ? "Refreshing ESPHome runtime..." : "Loading ESPHome runtime...");
-  satellitesHost.innerHTML = renderNotice("Loading satellites...");
-  addHost.innerHTML = renderNotice("Loading add form...");
-  if (statsHost instanceof HTMLElement) {
+  if (targetPanel === "satellites") {
+    satellitesHost.innerHTML = renderNotice("Loading satellites...");
+    addHost.innerHTML = renderNotice("Loading add form...");
+  } else if (targetPanel === "firmware") {
+    firmwareHost.innerHTML = renderNotice("Loading firmware builder...");
+  } else if (targetPanel === "stats" && statsHost instanceof HTMLElement) {
     statsHost.innerHTML = renderNotice("Loading stats...");
   }
+  const requestSeq = ++state.esphomeRuntimeRequestSeq;
 
-  const request = fetchEspHomeRuntimePayload()
+  const request = fetchEspHomeRuntimePayload(targetPanel)
     .then((result) => {
+      if (requestSeq !== state.esphomeRuntimeRequestSeq) {
+        return;
+      }
       const tabSpec =
         result?.tab && typeof result.tab === "object"
           ? result.tab
@@ -5853,6 +6210,7 @@ async function ensureEspHomeRuntimeLoaded({ force = false } = {}) {
       const headerStats = Array.isArray(body.header_stats) ? body.header_stats : [];
       const statsSections = Array.isArray(body.stats_sections) ? body.stats_sections : [];
       const statsTables = Array.isArray(body.stats_tables) ? body.stats_tables : [];
+      const firmware = body?.firmware && typeof body.firmware === "object" ? body.firmware : {};
       const emptyMessage = String(body.empty_message || "No satellites discovered yet.").trim();
       const coreKey = String(tabSpec?.core_key || "esphome").trim() || "esphome";
 
@@ -5862,25 +6220,41 @@ async function ensureEspHomeRuntimeLoaded({ force = false } = {}) {
         stats: headerStats,
         coreKey,
       });
-      satellitesHost.innerHTML = satelliteItems.length
-        ? `<div class="core-tab-items core-tab-items-group-satellite">${satelliteItems
-            .map((item) => renderEspHomeSatelliteCard(item, coreKey))
-            .join("")}</div>`
-        : renderNotice(emptyMessage);
-      addHost.innerHTML = renderEspHomeAddPanel(addForm, coreKey);
-      if (statsHost instanceof HTMLElement) {
+      if (targetPanel === "satellites") {
+        satellitesHost.innerHTML = satelliteItems.length
+          ? `<div class="core-tab-items core-tab-items-group-satellite">${satelliteItems
+              .map((item) => renderEspHomeSatelliteCard(item, coreKey))
+              .join("")}</div>`
+          : renderNotice(emptyMessage);
+        addHost.innerHTML = renderEspHomeAddPanel(addForm, coreKey);
+      }
+      if (targetPanel === "firmware") {
+        state.esphomeFirmwarePayload = firmware;
+        state.esphomeFirmwareSelection = normalizeEspHomeFirmwareSelection(firmware);
+        firmwareHost.innerHTML = renderEspHomeFirmwarePanel(firmware, coreKey);
+      }
+      if (targetPanel === "stats" && statsHost instanceof HTMLElement) {
         statsHost.innerHTML = renderEspHomeStatsPanel(statsSections, statsTables);
       }
       shell.dataset.runtimeLoaded = "1";
       bindCoreTabManagers();
     })
     .catch((error) => {
+      if (requestSeq !== state.esphomeRuntimeRequestSeq) {
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error || "Failed to load ESPHome runtime.");
       head.innerHTML = renderNotice(message);
-      satellitesHost.innerHTML = renderNotice(message);
-      addHost.innerHTML = renderNotice(message);
-      if (statsHost instanceof HTMLElement) {
+      if (targetPanel === "satellites") {
+        satellitesHost.innerHTML = renderNotice(message);
+        addHost.innerHTML = renderNotice(message);
+      } else if (targetPanel === "firmware") {
+        firmwareHost.innerHTML = renderNotice(message);
+      } else if (targetPanel === "stats" && statsHost instanceof HTMLElement) {
         statsHost.innerHTML = renderNotice(message);
+      }
+      if (targetPanel === "firmware") {
+        state.esphomeFirmwarePayload = null;
       }
       shell.dataset.runtimeLoaded = "error";
     })
@@ -5896,7 +6270,11 @@ async function ensureEspHomeRuntimeLoaded({ force = false } = {}) {
 
 async function refreshEspHomeRuntimeInPlace() {
   await runEspHomeRefreshAction();
-  await ensureEspHomeRuntimeLoaded({ force: true });
+  await ensureEspHomeRuntimeLoaded({ force: true, panel: getActiveEspHomeRuntimePanel() });
+}
+
+async function reloadEspHomeRuntimePayloadOnly() {
+  await ensureEspHomeRuntimeLoaded({ force: true, panel: getActiveEspHomeRuntimePanel() });
 }
 
 function getCoreTabSpec(tabName = "") {
@@ -6205,6 +6583,423 @@ function bindEspHomeEntityControls(root = document) {
   });
 }
 
+function rerenderEspHomeFirmwarePanel(root = document) {
+  const host =
+    root instanceof HTMLElement
+      ? root.querySelector("#settings-esphome-runtime-firmware")
+      : document.getElementById("settings-esphome-runtime-firmware");
+  if (!(host instanceof HTMLElement)) {
+    return;
+  }
+  const firmware = state.esphomeFirmwarePayload && typeof state.esphomeFirmwarePayload === "object" ? state.esphomeFirmwarePayload : null;
+  if (!firmware) {
+    return;
+  }
+  state.esphomeFirmwareSelection = normalizeEspHomeFirmwareSelection(firmware);
+  const shell = document.getElementById("settings-esphome-shell");
+  const coreKey = String(shell?.dataset?.coreKey || "esphome").trim() || "esphome";
+  host.innerHTML = renderEspHomeFirmwarePanel(firmware, coreKey);
+  bindCoreTabManagers();
+}
+
+function bindEspHomeFirmwareSelectors(root = document) {
+  root.querySelectorAll(".esphome-firmware-card select[data-core-field-key]").forEach((input) => {
+    if (!(input instanceof HTMLSelectElement)) {
+      return;
+    }
+    const key = String(input.dataset.coreFieldKey || "").trim();
+    if (!["template_key", "selector", "wake_word_catalog"].includes(key)) {
+      return;
+    }
+    if (input.dataset.esphomeFirmwareSelectBound === "1") {
+      return;
+    }
+    input.dataset.esphomeFirmwareSelectBound = "1";
+    input.addEventListener("change", () => {
+      const card = input.closest(".esphome-firmware-card");
+      if (key === "wake_word_catalog") {
+        syncEspHomeFirmwareWakeWordCatalog(card, { fromPicker: true });
+        return;
+      }
+      captureEspHomeFirmwareDraft(card);
+      const templateInput = card?.querySelector?.('select[data-core-field-key="template_key"]');
+      const selectorInput = card?.querySelector?.('select[data-core-field-key="selector"]');
+      state.esphomeFirmwareSelection = {
+        templateKey: String(templateInput?.value || "").trim(),
+        selector: String(selectorInput?.value || "").trim(),
+      };
+      rerenderEspHomeFirmwarePanel(document);
+    });
+  });
+
+  root.querySelectorAll('.esphome-firmware-card input[data-core-field-key="wake_word_model_url"]').forEach((input) => {
+    if (!(input instanceof HTMLInputElement) || input.dataset.esphomeFirmwareWakeWordBound === "1") {
+      return;
+    }
+    input.dataset.esphomeFirmwareWakeWordBound = "1";
+    const sync = () => {
+      const card = input.closest(".esphome-firmware-card");
+      syncEspHomeFirmwareWakeWordCatalog(card, { fromPicker: false });
+    };
+    input.addEventListener("input", sync);
+    input.addEventListener("change", sync);
+    sync();
+  });
+}
+
+function setEspHomeFirmwareCardBusy(card, busy) {
+  if (!(card instanceof HTMLElement)) {
+    return;
+  }
+  card.querySelectorAll(".esphome-firmware-action").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement)) {
+      return;
+    }
+    if (busy) {
+      button.dataset.esphomeFirmwareDisabledBefore = button.disabled ? "1" : "0";
+      button.disabled = true;
+      return;
+    }
+    const wasDisabled = String(button.dataset.esphomeFirmwareDisabledBefore || "").trim() === "1";
+    button.disabled = wasDisabled;
+    delete button.dataset.esphomeFirmwareDisabledBefore;
+  });
+}
+
+function openEspHomeFirmwareFlashViewer(card, coreKey) {
+  if (!(card instanceof HTMLElement)) {
+    return;
+  }
+  const selector = String(card.dataset?.firmwareSelector || decodeCoreManagerId(card.dataset?.coreItemId || "")).trim();
+  const templateKey = String(card.dataset?.firmwareTemplateKey || "").trim();
+  const templateSelect = card.querySelector('select[data-core-field-key="template_key"]');
+  const selectorSelect = card.querySelector('select[data-core-field-key="selector"]');
+  const templateLabel =
+    String(templateSelect?.selectedOptions?.[0]?.textContent || templateKey || "Firmware").trim() || "Firmware";
+  const deviceLabel =
+    String(selectorSelect?.selectedOptions?.[0]?.textContent || selector || "ESPHome Device").trim() || "ESPHome Device";
+  const values = collectCoreManagerValues(card);
+  if (!selector || !templateKey || !coreKey) {
+    showToast("Pick a firmware template and connected device before flashing.", "error", 3200);
+    return;
+  }
+
+  captureEspHomeFirmwareDraft(card);
+  setEspHomeFirmwareCardBusy(card, true);
+  setCoreManagerStatus(card, "Opening firmware flash log...");
+
+  let stopped = false;
+  let sessionId = "";
+  let cursor = 0;
+  let pollTimer = 0;
+  let logConsole = null;
+  let statusNode = null;
+  let modalDialog = null;
+
+  const deriveLogTone = (entry) => {
+    const explicitLevel = String(entry?.level || "").trim().toLowerCase();
+    if (explicitLevel) {
+      if (["error", "err", "danger"].includes(explicitLevel)) {
+        return "error";
+      }
+      if (["warn", "warning"].includes(explicitLevel)) {
+        return "warn";
+      }
+      if (["debug", "trace", "verbose", "very_verbose"].includes(explicitLevel)) {
+        return "debug";
+      }
+      if (["config", "info"].includes(explicitLevel)) {
+        return "info";
+      }
+    }
+    const text = String(entry?.message || entry?.display || "").trim();
+    const bracketMatch = text.match(/^\[[^\]]+\]\[([A-Z])\]/);
+    const token = bracketMatch?.[1] || "";
+    if (token === "E") {
+      return "error";
+    }
+    if (token === "W") {
+      return "warn";
+    }
+    if (token === "D" || token === "V") {
+      return "debug";
+    }
+    return "info";
+  };
+
+  const renderConsoleLine = (entry) => {
+    if (!(logConsole instanceof HTMLElement)) {
+      return;
+    }
+    const lineEl = document.createElement("div");
+    const tone = deriveLogTone(entry);
+    lineEl.className = `voice-log-line tone-${tone}`;
+    const timeText = String(entry?.time || "").trim();
+    if (timeText) {
+      const timeEl = document.createElement("span");
+      timeEl.className = "voice-log-time";
+      timeEl.textContent = timeText;
+      lineEl.appendChild(timeEl);
+    }
+    const levelToken = (() => {
+      const explicitLevel = String(entry?.level || "").trim().toLowerCase();
+      if (explicitLevel) {
+        return explicitLevel.replace(/_/g, " ").toUpperCase();
+      }
+      return tone.toUpperCase();
+    })();
+    const levelEl = document.createElement("span");
+    levelEl.className = `voice-log-level tone-${tone}`;
+    levelEl.textContent = levelToken;
+    lineEl.appendChild(levelEl);
+
+    const messageEl = document.createElement("span");
+    messageEl.className = "voice-log-message";
+    messageEl.textContent = String(entry?.display || entry?.message || "").trim();
+    lineEl.appendChild(messageEl);
+    logConsole.appendChild(lineEl);
+  };
+
+  const renderEntries = (entries, reset = false) => {
+    if (!(logConsole instanceof HTMLElement)) {
+      return;
+    }
+    const rows = Array.isArray(entries)
+      ? entries.filter((entry) => String(entry?.display || entry?.message || "").trim())
+      : [];
+    const shouldStick =
+      reset ||
+      logConsole.scrollHeight - logConsole.scrollTop - logConsole.clientHeight < 28;
+    if (reset) {
+      logConsole.innerHTML = "";
+    }
+    if (!rows.length && reset) {
+      const emptyEl = document.createElement("div");
+      emptyEl.className = "voice-log-empty";
+      emptyEl.textContent = "Waiting for ESPHome build output...";
+      logConsole.appendChild(emptyEl);
+    } else if (rows.length) {
+      rows.forEach((entry) => renderConsoleLine(entry));
+    }
+    if (shouldStick) {
+      logConsole.scrollTop = logConsole.scrollHeight;
+    }
+  };
+
+  const refreshBehindModal = async () => {
+    try {
+      await reloadEspHomeRuntimePayloadOnly();
+    } catch (_error) {
+      // Ignore background refresh failures while leaving the log viewer.
+    }
+  };
+
+  const stopViewer = async () => {
+    if (stopped) {
+      return;
+    }
+    stopped = true;
+    if (pollTimer) {
+      window.clearTimeout(pollTimer);
+      pollTimer = 0;
+    }
+    try {
+      if (sessionId) {
+        await runCoreManagerAction(card, coreKey, "voice_firmware_flash_stop", {
+          session_id: sessionId,
+          id: sessionId,
+        });
+      }
+    } catch (_error) {
+      // Ignore cleanup failures while closing the firmware log viewer.
+    } finally {
+      setEspHomeFirmwareCardBusy(card, false);
+      void refreshBehindModal();
+    }
+  };
+
+  const schedulePoll = (delayMs = 1200) => {
+    if (stopped || !sessionId) {
+      return;
+    }
+    pollTimer = window.setTimeout(async () => {
+      if (stopped || !sessionId) {
+        return;
+      }
+      try {
+        const result = await runCoreManagerAction(card, coreKey, "voice_firmware_flash_poll", {
+          session_id: sessionId,
+          id: sessionId,
+          after_seq: cursor,
+        });
+        const entries = Array.isArray(result?.entries) ? result.entries : [];
+        if (entries.length) {
+          renderEntries(entries, false);
+        }
+        cursor = Number(result?.cursor || cursor || 0);
+        if (statusNode instanceof HTMLElement) {
+          statusNode.textContent =
+            String(result?.status_text || result?.message || "").trim() || `Streaming firmware logs for ${deviceLabel}.`;
+        }
+        if (!boolFromAny(result?.active, true)) {
+          const message = String(result?.message || result?.status_text || "").trim();
+          setCoreManagerStatus(card, message || "Firmware session finished.");
+          return;
+        }
+        const phase = String(result?.phase || "").trim();
+        schedulePoll(phase === "awaiting_device_logs" ? 1500 : 1100);
+      } catch (error) {
+        if (statusNode instanceof HTMLElement) {
+          statusNode.textContent = `Firmware log error: ${String(error?.message || "unknown error")}`;
+        }
+        schedulePoll(2500);
+      }
+    }, delayMs);
+  };
+
+  openRuntimeSettingsModal({
+    title: `${templateLabel} Build + Flash`,
+    meta: [deviceLabel, selector].filter(Boolean).join(" • "),
+    fields: [
+      {
+        key: "live_log_feed",
+        label: "Firmware Log",
+        type: "textarea",
+        value: "",
+        description: "ESPHome build output, upload progress, and live device logs stay in this window.",
+      },
+    ],
+    onOpen: async ({ modal, fieldsEl, statusEl }) => {
+      statusNode = statusEl instanceof HTMLElement ? statusEl : null;
+      modalDialog = modal?.querySelector(".runtime-settings-dialog") || null;
+      modal?.classList.add("voice-log-modal");
+      modalDialog?.classList.add("runtime-settings-dialog-log");
+      fieldsEl?.classList.add("runtime-settings-fields-log");
+      const logArea = fieldsEl?.querySelector('[data-setting-key="live_log_feed"]') || null;
+      if (logArea instanceof HTMLTextAreaElement) {
+        logArea.readOnly = true;
+        logArea.spellcheck = false;
+        logArea.classList.add("voice-log-source-textarea");
+        const label = logArea.closest("label");
+        const consoleEl = document.createElement("div");
+        consoleEl.className = "voice-log-console";
+        consoleEl.setAttribute("role", "log");
+        consoleEl.setAttribute("aria-live", "polite");
+        consoleEl.setAttribute("aria-label", `${deviceLabel} firmware log`);
+        logConsole = consoleEl;
+        if (label instanceof HTMLElement) {
+          label.classList.add("voice-log-field");
+          label.appendChild(consoleEl);
+        }
+      }
+      if (statusNode instanceof HTMLElement) {
+        statusNode.textContent = `Starting firmware flash for ${deviceLabel}...`;
+        statusNode.classList.add("voice-log-status");
+      }
+      try {
+        const result = await runCoreManagerAction(card, coreKey, "voice_firmware_flash_start", {
+          id: selector,
+          selector,
+          template_key: templateKey,
+          values,
+        });
+        sessionId = String(result?.session_id || "").trim();
+        cursor = Number(result?.cursor || 0);
+        delete state.esphomeFirmwareDrafts[templateKey];
+        renderEntries(Array.isArray(result?.entries) ? result.entries : [], true);
+        if (statusNode instanceof HTMLElement) {
+          statusNode.textContent =
+            String(result?.status_text || result?.message || "").trim() || `Streaming firmware logs for ${deviceLabel}.`;
+        }
+        setCoreManagerStatus(card, "Firmware flash in progress...");
+        schedulePoll(900);
+      } catch (error) {
+        const message = String(error?.message || "unknown error");
+        renderEntries([{ display: `Failed to start firmware flash: ${message}`, level: "error" }], true);
+        if (statusNode instanceof HTMLElement) {
+          statusNode.textContent = `Firmware flash failed to start: ${message}`;
+        }
+        setEspHomeFirmwareCardBusy(card, false);
+        setCoreManagerStatus(card, `Failed: ${message}`);
+        showToast(`Failed: ${message}`, "error", 3600);
+      }
+    },
+    onClose: ({ modal, fieldsEl, statusEl }) => {
+      modal?.classList.remove("voice-log-modal");
+      modalDialog?.classList.remove("runtime-settings-dialog-log");
+      fieldsEl?.classList.remove("runtime-settings-fields-log");
+      if (statusEl instanceof HTMLElement) {
+        statusEl.classList.remove("voice-log-status");
+      }
+      void stopViewer();
+    },
+  });
+}
+
+function bindEspHomeFirmwareActions(root = document) {
+  root.querySelectorAll(".esphome-firmware-action").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement) || button.dataset.esphomeFirmwareBound === "1") {
+      return;
+    }
+    button.dataset.esphomeFirmwareBound = "1";
+    button.addEventListener("click", async (event) => {
+      const actionButton = event.currentTarget;
+      const card = actionButton?.closest?.(".esphome-firmware-card");
+      const coreKey = String(card?.dataset?.coreKey || "esphome").trim();
+      const selector = String(card?.dataset?.firmwareSelector || decodeCoreManagerId(card?.dataset?.coreItemId || "")).trim();
+      const templateKey = String(card?.dataset?.firmwareTemplateKey || "").trim();
+      const action = String(actionButton?.dataset?.firmwareAction || "").trim();
+      const title = String(actionButton?.dataset?.firmwareTitle || "Working...").trim() || "Working...";
+      const workingText = String(actionButton?.dataset?.firmwareWorking || "Working...").trim() || "Working...";
+      const successText = String(actionButton?.dataset?.firmwareSuccess || "Completed.").trim() || "Completed.";
+      const errorPrefix = String(actionButton?.dataset?.firmwareError || "Firmware action failed").trim() || "Firmware action failed";
+      if (!(card instanceof HTMLElement) || !coreKey || !selector || !action) {
+        return;
+      }
+
+      if (action === "voice_firmware_flash_start") {
+        openEspHomeFirmwareFlashViewer(card, coreKey);
+        return;
+      }
+
+      const values = collectCoreManagerValues(card);
+      captureEspHomeFirmwareDraft(card);
+      setCoreManagerStatus(card, workingText);
+      actionButton.disabled = true;
+      try {
+        const result = await runActionWithProgress(
+          {
+            title,
+            detail: selector,
+            workingText,
+            successText,
+            errorPrefix,
+          },
+          () =>
+            runCoreManagerAction(card, coreKey, action, {
+              id: selector,
+              selector,
+              template_key: templateKey,
+              values,
+            })
+        );
+        delete state.esphomeFirmwareDrafts[templateKey];
+        await reloadEspHomeRuntimePayloadOnly();
+        const message = String(result?.message || successText).trim() || successText;
+        showToast(message);
+      } catch (error) {
+        const message = String(error?.message || "Firmware action failed.");
+        setCoreManagerStatus(card, `Failed: ${message}`);
+        showToast(`Failed: ${message}`, "error", 3600);
+      } finally {
+        if (document.body.contains(actionButton)) {
+          actionButton.disabled = false;
+        }
+      }
+    });
+  });
+}
+
 function bindCoreTabManagers() {
   bindCoreManagerTabs();
   bindCoreManagerSubtabs();
@@ -6213,6 +7008,8 @@ function bindCoreTabManagers() {
   bindCoreManagerConditionalFields();
   bindCoreManagerDependentSelects();
   bindEspHomeEntityControls();
+  bindEspHomeFirmwareSelectors();
+  bindEspHomeFirmwareActions();
   document.querySelectorAll(".core-tab-refresh-btn[data-core-tab-refresh]").forEach((button) => {
     if (!(button instanceof HTMLButtonElement)) {
       return;
@@ -8564,6 +9361,7 @@ async function loadSettingsView() {
           >
             <div class="settings-subtabs">
               <button type="button" class="settings-subtab-btn active" data-esphome-tab="satellites">Satellites</button>
+              <button type="button" class="settings-subtab-btn" data-esphome-tab="firmware">Firmware</button>
               <button type="button" class="settings-subtab-btn" data-esphome-tab="platform">Settings</button>
               <button type="button" class="settings-subtab-btn" data-esphome-tab="stats">Stats</button>
             </div>
@@ -8635,6 +9433,15 @@ async function loadSettingsView() {
                   <button type="button" id="settings-save-esphome" class="action-btn">Save Settings</button>
                   <span class="small">Saves built-in ESPHome device settings for Tater.</span>
                 </div>
+              </div>
+            </div>
+
+            <div class="settings-subpanel" data-esphome-panel="firmware">
+              <div class="small" style="margin:10px 0 14px;">
+                Build or flash Tater firmware for connected VoicePE and Satellite1 devices after reviewing the template substitutions.
+              </div>
+              <div id="settings-esphome-runtime-firmware">
+                ${renderNotice("Open the ESPHome tab to load the firmware builder.")}
               </div>
             </div>
 
@@ -9000,7 +9807,7 @@ async function loadSettingsView() {
       panel.classList.toggle("active", panel.dataset.settingsPanel === tabKey);
     });
     if (String(tabKey || "").trim() === "esphome") {
-      void ensureEspHomeRuntimeLoaded({ force: true });
+      void ensureEspHomeRuntimeLoaded({ force: true, panel: getActiveEspHomeRuntimePanel() });
     }
   };
 

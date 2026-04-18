@@ -3769,7 +3769,7 @@ def run_core_tab_action(core_key: str, payload: CoreTabActionRequest) -> Dict[st
 
 
 @app.get("/api/settings/esphome/runtime")
-def get_esphome_runtime_payload() -> Dict[str, Any]:
+def get_esphome_runtime_payload(panel: str = "") -> Dict[str, Any]:
     tab = _esphome_platform_tab_spec()
     return {
         "tab": {
@@ -3782,6 +3782,7 @@ def get_esphome_runtime_payload() -> Dict[str, Any]:
             redis_client=redis_client,
             core_key=str(tab.get("core_key") or "esphome"),
             core_tab=tab,
+            panel=panel,
         ),
     }
 
