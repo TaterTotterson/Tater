@@ -1413,7 +1413,6 @@ async def disconnect_selector(selector: str, *, reason: str) -> None:
         session = runtime.get("session")
         if _is_voice_session(session):
             sid = _text(getattr(session, "session_id", ""))
-        runtime["session"] = None
         _clear_streamed_tts_state(runtime)
         _cancel_announcement_wait(runtime)
         _cancel_audio_stall_watch(runtime)
@@ -1422,11 +1421,10 @@ async def disconnect_selector(selector: str, *, reason: str) -> None:
         runtime["awaiting_announcement_kind"] = ""
         runtime["announcement_future"] = None
 
-    if sid and client is not None:
+    if sid:
         module, _ = esphome_import()
-        if module is not None:
-            with contextlib.suppress(Exception):
-                await _finalize_session(token, client, module, session_id=sid, abort=True, reason=reason or "disconnect")
+        with contextlib.suppress(Exception):
+            await _finalize_session(token, client, module, session_id=sid, abort=True, reason=reason or "disconnect")
 
     if callable(unsubscribe):
         with contextlib.suppress(Exception):
@@ -1962,7 +1960,10 @@ async def command_entity(
         brightness_value = payload.get("brightness")
         color_value = payload.get("color")
         command_kwargs: Dict[str, Any] = {}
-        attrs_override: Dict[str, Any] = {}
+        current_states = row.get("entity_states") if isinstance(row, dict) and isinstance(row.get("entity_states"), dict) else {}
+        current_state = current_states.get(key_text) if isinstance(current_states.get(key_text), dict) else {}
+        current_attrs = current_state.get("attrs") if isinstance(current_state.get("attrs"), dict) else {}
+        attrs_override: Dict[str, Any] = dict(current_attrs)
         raw_override = None
         if state_value not in {None, ""}:
             state_bool = _as_bool(state_value, False)
