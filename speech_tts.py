@@ -9,15 +9,19 @@ import json
 import logging
 import os
 import re
+import socket
 import threading
 import time
+import uuid
 import wave
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
+from urllib.parse import urlparse
 
 import requests
 
 from announcement_targets import split_announcement_targets
+from ha_ws import call_service_sync as ha_call_service_sync
 from speech_settings import (
     DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
     DEFAULT_KOKORO_MODEL,
@@ -115,7 +119,10 @@ _pocket_tts_model_lock = threading.Lock()
 _piper_voice_cache: Dict[str, Any] = {}
 _piper_voice_lock = threading.Lock()
 _kokoro_ssmd_patch_applied = False
+_runtime_tts_assets: Dict[str, Dict[str, Any]] = {}
+_runtime_tts_assets_lock = threading.Lock()
 logger = logging.getLogger("speech_tts")
+RUNTIME_TTS_ASSET_TTL_SECONDS = 15 * 60.0
 
 
 def _text(value: Any) -> str:
@@ -131,6 +138,99 @@ def _main_app_port() -> int:
     if port < 1 or port > 65535:
         port = 8501
     return int(port)
+
+
+def _cleanup_runtime_tts_assets_locked(*, now_ts: Optional[float] = None) -> int:
+    now = float(now_ts if isinstance(now_ts, (int, float)) else time.time())
+    removed = 0
+    for asset_id, row in list(_runtime_tts_assets.items()):
+        if not isinstance(row, dict):
+            _runtime_tts_assets.pop(asset_id, None)
+            removed += 1
+            continue
+        expires_ts = _as_float(row.get("expires_ts"), 0.0)
+        if expires_ts > 0 and now >= expires_ts:
+            _runtime_tts_assets.pop(asset_id, None)
+            removed += 1
+    return removed
+
+
+def store_runtime_tts_wav(
+    wav_bytes: bytes,
+    *,
+    content_type: str = "audio/wav",
+    ttl_s: float = RUNTIME_TTS_ASSET_TTL_SECONDS,
+) -> str:
+    payload = bytes(wav_bytes or b"")
+    if not payload:
+        return ""
+
+    asset_id = uuid.uuid4().hex
+    expires_ts = time.time() + max(30.0, float(ttl_s))
+    with _runtime_tts_assets_lock:
+        _cleanup_runtime_tts_assets_locked()
+        _runtime_tts_assets[asset_id] = {
+            "bytes": payload,
+            "content_type": _text(content_type) or "audio/wav",
+            "expires_ts": expires_ts,
+        }
+    return asset_id
+
+
+def get_runtime_tts_wav(asset_id: Any) -> Optional[Dict[str, Any]]:
+    token = _text(asset_id)
+    if not token:
+        return None
+
+    with _runtime_tts_assets_lock:
+        _cleanup_runtime_tts_assets_locked()
+        row = _runtime_tts_assets.get(token)
+        if not isinstance(row, dict):
+            return None
+        return {
+            "bytes": bytes(row.get("bytes") or b""),
+            "content_type": _text(row.get("content_type") or "audio/wav"),
+            "expires_ts": _as_float(row.get("expires_ts"), 0.0),
+        }
+
+
+def _service_base_url_for_peer(peer_base: Any = "") -> str:
+    preferred = _text(os.getenv("VOICE_CORE_PUBLIC_HOST")).rstrip("/")
+    if preferred:
+        if preferred.startswith(("http://", "https://")):
+            return preferred
+        return f"http://{preferred}:{_main_app_port()}"
+
+    htmlui_host = _text(os.getenv("HTMLUI_HOST", "0.0.0.0"))
+    if htmlui_host and htmlui_host not in {"0.0.0.0", "::", "127.0.0.1", "localhost"}:
+        return f"http://{htmlui_host}:{_main_app_port()}"
+
+    parsed = urlparse(_text(peer_base))
+    peer_host = _text(parsed.hostname)
+    targets = [peer_host] if peer_host and not peer_host.startswith("127.") else []
+    targets.append("8.8.8.8")
+
+    for target in targets:
+        with contextlib.suppress(Exception):
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+                probe.connect((target, 80))
+                host = _text(probe.getsockname()[0])
+                if host and not host.startswith("127."):
+                    return f"http://{host}:{_main_app_port()}"
+
+    with contextlib.suppress(Exception):
+        host = _text(socket.gethostbyname(socket.gethostname()))
+        if host and not host.startswith("127."):
+            return f"http://{host}:{_main_app_port()}"
+
+    return f"http://127.0.0.1:{_main_app_port()}"
+
+
+def build_runtime_tts_asset_url(asset_id: Any, *, peer_base: Any = "") -> str:
+    token = _text(asset_id)
+    if not token:
+        raise RuntimeError("Runtime TTS asset id is required.")
+    return f"{_service_base_url_for_peer(peer_base).rstrip('/')}/api/speech/tts/runtime/{token}.wav"
 
 
 def normalize_tts_backend(value: Any) -> str:
@@ -822,6 +922,60 @@ def _voice_core_play_media_sync(
     return {"ok": False, "sent_count": 0, "error": "; ".join(failures) or "Voice Core playback failed."}
 
 
+def _homeassistant_play_media_sync(
+    *,
+    base_url: str,
+    token: str,
+    players: list[str],
+    media_url: str,
+) -> Dict[str, Any]:
+    clean_base = _text(base_url).rstrip("/")
+    bearer = _text(token)
+    clean_players = [_text(item) for item in list(players or []) if _text(item)]
+    if not clean_players:
+        return {"ok": False, "sent_count": 0, "error": "No Home Assistant media players selected."}
+    if not clean_base or not bearer:
+        return {"ok": False, "sent_count": 0, "error": "Home Assistant base URL or token is missing."}
+    if not _text(media_url):
+        return {"ok": False, "sent_count": 0, "error": "Home Assistant media URL is missing."}
+
+    sent_count = 0
+    failures: list[str] = []
+
+    logger.info(
+        "[speech_tts] HA play_media start base=%s players=%s media_url=%s",
+        clean_base,
+        clean_players,
+        _text(media_url),
+    )
+    for player in clean_players:
+        try:
+            ha_call_service_sync(
+                clean_base,
+                bearer,
+                domain="media_player",
+                service="play_media",
+                service_data={
+                    "entity_id": player,
+                    "media_content_id": _text(media_url),
+                    "media_content_type": "music",
+                },
+                timeout_s=30.0,
+            )
+            logger.info("[speech_tts] HA play_media accepted player=%s", player)
+            sent_count += 1
+        except Exception as exc:
+            logger.warning("[speech_tts] HA play_media failed player=%s error=%s", player, exc)
+            failures.append(f"{player} ({exc})")
+
+    if sent_count:
+        result: Dict[str, Any] = {"ok": True, "sent_count": sent_count}
+        if failures:
+            result["warnings"] = failures
+        return result
+    return {"ok": False, "sent_count": 0, "error": "; ".join(failures) or "Home Assistant playback failed."}
+
+
 async def speak_announcement_targets(
     *,
     text: str,
@@ -849,16 +1003,18 @@ async def speak_announcement_targets(
 
     raw_targets = list(targets or [])
     grouped = split_announcement_targets(targets)
+    homeassistant_players = list(grouped.get("homeassistant_media_players") or [])
     voice_core_selectors = list(grouped.get("voice_core_selectors") or [])
-    target_count = len(voice_core_selectors)
+    target_count = len(homeassistant_players) + len(voice_core_selectors)
     logger.info(
-        "[speech_tts] speak_announcement_targets backend=%s raw_targets=%s voice_core_selectors=%s",
+        "[speech_tts] speak_announcement_targets backend=%s raw_targets=%s ha_players=%s voice_core_selectors=%s",
         normalize_announcement_tts_backend(backend, default=default_backend),
         raw_targets,
+        homeassistant_players,
         voice_core_selectors,
     )
     if target_count <= 0:
-        return {"ok": False, "sent_count": 0, "error": "No Voice Core announcement targets selected."}
+        return {"ok": False, "sent_count": 0, "error": "No announcement targets selected."}
 
     selected_backend = normalize_announcement_tts_backend(backend, default=default_backend)
     warnings: list[str] = []
@@ -866,7 +1022,7 @@ async def speak_announcement_targets(
     result: Dict[str, Any] = {
         "backend": selected_backend,
         "target_count": target_count,
-        "homeassistant_target_count": 0,
+        "homeassistant_target_count": len(homeassistant_players),
         "voice_core_target_count": len(voice_core_selectors),
     }
 
@@ -881,11 +1037,35 @@ async def speak_announcement_targets(
     )
     result["bytes"] = len(wav_bytes or b"")
     logger.info(
-        "[speech_tts] announcement synthesized backend=%s bytes=%s voice_core_selectors=%s",
+        "[speech_tts] announcement synthesized backend=%s bytes=%s ha_players=%s voice_core_selectors=%s",
         selected_backend,
         len(wav_bytes or b""),
+        homeassistant_players,
         voice_core_selectors,
     )
+
+    if homeassistant_players:
+        if not _text(ha_base) or not _text(token):
+            warnings.append("Home Assistant announcement targets are selected but Home Assistant is not configured.")
+        else:
+            asset_id = store_runtime_tts_wav(wav_bytes, content_type="audio/wav")
+            if not asset_id:
+                warnings.append("Failed to prepare Home Assistant announcement audio.")
+            else:
+                media_url = build_runtime_tts_asset_url(asset_id, peer_base=ha_base)
+                result["media_url"] = media_url
+                ha_result = await asyncio.to_thread(
+                    _homeassistant_play_media_sync,
+                    base_url=_text(ha_base),
+                    token=_text(token),
+                    players=homeassistant_players,
+                    media_url=media_url,
+                )
+                result["homeassistant_sent_count"] = int(ha_result.get("sent_count") or 0)
+                sent_count += int(ha_result.get("sent_count") or 0)
+                warnings.extend([_text(item) for item in list(ha_result.get("warnings") or []) if _text(item)])
+                if not ha_result.get("ok") and _text(ha_result.get("error")):
+                    warnings.append(_text(ha_result.get("error")))
 
     if voice_core_selectors:
         voice_result = await asyncio.to_thread(

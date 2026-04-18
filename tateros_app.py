@@ -78,7 +78,7 @@ from speech_settings import (
     get_speech_ui_payload,
     save_speech_settings as save_shared_speech_settings,
 )
-from speech_tts import fetch_wyoming_tts_voice_options, synthesize_preview_wav
+from speech_tts import fetch_wyoming_tts_voice_options, get_runtime_tts_wav, synthesize_preview_wav
 from vision_settings import get_vision_settings as get_shared_vision_settings, save_vision_settings as save_shared_vision_settings
 from tateros import core_store as core_store_module
 from tateros import verba_store as verba_store_module
@@ -4958,6 +4958,17 @@ async def preview_speech_tts(payload: SpeechTtsPreviewRequest) -> Response:
     if not wav_bytes:
         raise HTTPException(status_code=400, detail="TTS preview produced no audio.")
     return Response(content=wav_bytes, media_type="audio/wav")
+
+
+@app.get("/api/speech/tts/runtime/{asset_id}.wav")
+async def get_runtime_tts_asset(asset_id: str) -> Response:
+    row = get_runtime_tts_wav(asset_id)
+    if not isinstance(row, dict):
+        raise HTTPException(status_code=404, detail="TTS audio not found or expired.")
+    wav_bytes = bytes(row.get("bytes") or b"")
+    if not wav_bytes:
+        raise HTTPException(status_code=404, detail="TTS audio is empty or expired.")
+    return Response(content=wav_bytes, media_type=str(row.get("content_type") or "audio/wav"))
 
 
 @app.post("/api/settings/speech/wyoming-tts-voices")
