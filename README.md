@@ -2,21 +2,21 @@
   <img src="images/tater_hydra_logo.png" alt="Tater AI Assistant" width="300"/>
 </div>
 
-**Tater** is a local AI assistant powered by Hydra and local AI models, giving you a powerful set of AI-driven tools. It includes a WebUI for setup and private chats, and works across **Discord**, **Home Assistant**, **HomeKit**, **IRC**, **macOS**, **Matrix**, **Telegram**, and even the **OG Xbox via XBMC4Xbox**
+**Tater** is a local AI assistant that runs on local LLMs, with **Hydra** handling reasoning, orchestration, and tool use. It includes a built-in voice system that talks directly to ESPHome devices like **VoicePE** and **Sat1**, a WebUI for setup, configuration, and private chats, and integrations across **Discord**, **Home Assistant**, **HomeKit**, **IRC**, **macOS**, **Matrix**, **Telegram**, and even the **OG Xbox via XBMC4Xbox**.
 
 Main website: [taterassistant.com](https://taterassistant.com)
 
 ---
 
-## 🛒 Tater Shop (Unified Catalog)
+## 🧩 Tater Architecture
 
-Tater uses **Tater Shop** to manage:
+Tater is built around a modular system:
 
-- **Verbas**
-- **Portals**
-- **Cores**
+- **Cores** → core systems that extend Tater's capabilities
+- **Portals** → integrations with platforms like Discord, Home Assistant, and more
+- **Verbas** → AI-driven tools and actions Tater can perform
 
-Catalogs, versions, metadata, and update paths are managed in:
+These catalogs, versions, metadata, and update paths are managed through **Tater Shop**:
 
 👉 **https://github.com/TaterTotterson/Tater_Shop**
 
