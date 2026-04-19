@@ -2,9 +2,11 @@
   <img src="images/tater_hydra_logo.png" alt="Tater AI Assistant" width="300"/>
 </div>
 
-<div align="center">
+<h3 align="center">
   <a href="https://taterassistant.com">taterassistant.com</a>
-</div>
+</h3>
+
+<br />
 
 **Tater** is a local AI assistant that runs on local LLMs, with **Hydra** handling reasoning, orchestration, and tool use. It includes a built-in voice system that talks directly to ESPHome devices like **VoicePE** and **Sat1**, a WebUI for setup, configuration, and private chats, and integrations across **Discord**, **Home Assistant**, **HomeKit**, **IRC**, **macOS**, **Matrix**, **Telegram**, and even the **OG Xbox via XBMC4Xbox**.
 
