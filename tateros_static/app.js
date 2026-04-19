@@ -2884,6 +2884,7 @@ function renderChatMessage(message) {
   const avatarSrc = roleClass === "user" ? state.chatProfile.userAvatar : state.chatProfile.taterAvatar;
   const content = message.content;
   let bodyHtml = "";
+  let rowExtraClass = "";
 
   if (typeof content === "string") {
     bodyHtml =
@@ -2895,6 +2896,18 @@ function renderChatMessage(message) {
     if (marker === "plugin_wait") {
       const waitText = String(content.content || "").trim() || "Working on it...";
       bodyHtml = `<div class="bubble-body">${escapeHtml(waitText)}</div>`;
+    } else if (marker === "typing") {
+      rowExtraClass = " typing-indicator";
+      bodyHtml = `
+        <div class="bubble-body chat-typing-body" aria-label="${escapeHtml(`${displayName} is typing`)}">
+          <div class="chat-typing-label">${escapeHtml(`${displayName} is typing`)}</div>
+          <div class="chat-typing-dots" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+        </div>
+      `;
     } else {
       const contentType = String(content.type || "").toLowerCase();
       const fileId = String(content.id || "").trim();
@@ -2979,7 +2992,7 @@ function renderChatMessage(message) {
   `;
 
   return `
-    <article class="chat-row ${escapeHtml(roleClass)}">
+    <article class="chat-row ${escapeHtml(roleClass)}${rowExtraClass}">
       ${roleClass === "user" ? `${bubbleHtml}${avatarHtml}` : `${avatarHtml}${bubbleHtml}`}
     </article>
   `;
@@ -7982,6 +7995,30 @@ async function loadChatView() {
     });
   };
 
+  const removeChatTypingIndicator = () => {
+    if (!chatLog) {
+      return;
+    }
+    chatLog.querySelectorAll(".chat-row.typing-indicator").forEach((node) => node.remove());
+  };
+
+  const syncChatTypingIndicator = (scroll = true) => {
+    removeChatTypingIndicator();
+    if (_activeChatJobCount() <= 0) {
+      return;
+    }
+    chatLog.insertAdjacentHTML(
+      "beforeend",
+      renderChatMessage({
+        role: "assistant",
+        content: { marker: "typing" },
+      })
+    );
+    if (scroll) {
+      stickChatToBottom();
+    }
+  };
+
   const updatePendingFilesUi = () => {
     if (!chatFilesMetaEl) {
       return;
@@ -8045,6 +8082,7 @@ async function loadChatView() {
     const history = await api("/api/chat/history");
     const messages = Array.isArray(history.messages) ? history.messages : [];
     chatLog.innerHTML = messages.map(renderChatMessage).join("") || renderNotice("No messages yet.");
+    syncChatTypingIndicator(false);
     stickChatToBottom();
     bindChatMediaAutoScroll();
     await refreshChatSpeedStats();
@@ -8080,12 +8118,14 @@ async function loadChatView() {
     if (!messages.length) {
       return false;
     }
+    removeChatTypingIndicator();
     const existingLog = String(chatLog.innerHTML || "").trim();
     if (!existingLog || existingLog.includes('class="notice"')) {
       chatLog.innerHTML = "";
     }
     const html = messages.map(renderChatMessage).join("");
     chatLog.insertAdjacentHTML("beforeend", html);
+    syncChatTypingIndicator(false);
     stickChatToBottom();
     bindChatMediaAutoScroll();
     return true;
@@ -8252,6 +8292,7 @@ async function loadChatView() {
   const _setChatLiveStatus = (text = "") => {
     const activeCount = _activeChatJobCount();
     const normalized = String(text || "").trim();
+    syncChatTypingIndicator(activeCount > 0);
     if (activeCount > 0) {
       const toolLine = _aggregateChatToolUsageLine();
       const jobWord = activeCount === 1 ? "job" : "jobs";
