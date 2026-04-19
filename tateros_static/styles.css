@@ -3455,7 +3455,7 @@ body[data-popup-effect="melt"] .toast-item.flame-out::after {
 
 .chat-composer-bar {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   gap: 10px;
   border: 1px solid rgba(240, 131, 69, 0.18);
   border-radius: 24px;
@@ -3465,20 +3465,20 @@ body[data-popup-effect="melt"] .toast-item.flame-out::after {
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.18);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
-  padding: 8px 10px;
+  padding: 6px 8px;
 }
 
 .chat-composer-input {
   flex: 1 1 auto;
   min-width: 0;
-  min-height: 24px;
+  min-height: 20px;
   max-height: 200px;
   border: 0;
   border-radius: 16px;
   background: transparent;
-  padding: 10px 0 9px;
+  padding: 7px 0 6px;
   resize: none;
-  line-height: 1.45;
+  line-height: 1.35;
 }
 
 .chat-composer-input:focus {
@@ -4236,13 +4236,13 @@ body[data-popup-effect="melt"] .toast-item.flame-out::after {
   .chat-composer-bar {
     gap: 8px;
     border-radius: 20px;
-    padding: 7px 9px;
+    padding: 6px 8px;
   }
 
   .chat-composer-input {
-    min-height: 24px;
+    min-height: 20px;
     max-height: 160px;
-    padding: 9px 0 8px;
+    padding: 7px 0 6px;
   }
 
   .chat-composer-btn,

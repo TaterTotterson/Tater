@@ -73,7 +73,6 @@ _TEMPLATE_SPECS: tuple[Dict[str, Any], ...] = (
             ("microWakeWords", "voicePE-TaterTimer.yaml"),
             ("VoicePE-ESPHome", "voicePE-TaterTimer.yaml"),
         ],
-        "fallback_path": "firmware_templates/voicePE-TaterTimer.yaml",
         "fixed_keys": {"device_name"},
         "auto_keys": {"ha_voice_ip"},
         "match_tokens": {
@@ -93,7 +92,6 @@ _TEMPLATE_SPECS: tuple[Dict[str, Any], ...] = (
             ("microWakeWords", "satellite1-TaterTimer.yaml"),
             ("Satellite1-ESPHome", "satellite1-TaterTimer.yaml"),
         ],
-        "fallback_path": "firmware_templates/satellite1-TaterTimer.yaml",
         "fixed_keys": {"node_name"},
         "auto_keys": {"ha_voice_ip"},
         "match_tokens": {
@@ -174,10 +172,6 @@ def _repo_siblings_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def _bundled_template_root() -> Path:
-    return Path(__file__).resolve().parent
-
-
 def _sanitize_token(value: Any) -> str:
     token = _text(value)
     if not token:
@@ -236,6 +230,41 @@ def _runner_env_overrides() -> Dict[str, str]:
         "XDG_CACHE_HOME": str(FIRMWARE_CACHE_ROOT),
         "PLATFORMIO_CORE_DIR": str(FIRMWARE_PLATFORMIO_ROOT),
         "PLATFORMIO_CACHE_DIR": str(FIRMWARE_PLATFORMIO_ROOT / "cache"),
+    }
+
+
+def _active_flash_session_summaries() -> List[str]:
+    summaries: List[str] = []
+    with _FIRMWARE_SESSION_LOCK:
+        for session in list(_FIRMWARE_SESSIONS.values()):
+            if not isinstance(session, dict) or not bool(session.get("active")):
+                continue
+            label = _text(session.get("display_name")) or _text(session.get("selector")) or "firmware session"
+            summaries.append(label)
+    return summaries
+
+
+def _clean_firmware_workspace() -> Dict[str, Any]:
+    active = _active_flash_session_summaries()
+    if active:
+        joined = ", ".join(active[:3])
+        more = "" if len(active) <= 3 else f" and {len(active) - 3} more"
+        raise RuntimeError(f"Stop the active firmware session(s) first: {joined}{more}.")
+
+    removed: List[str] = []
+    for path in (FIRMWARE_CONFIG_ROOT, FIRMWARE_BUILD_ROOT, FIRMWARE_RUNNER_ROOT):
+        if path.exists():
+            shutil.rmtree(path, ignore_errors=True)
+            removed.append(path.name)
+    _ensure_agent_labs_dirs()
+    return {
+        "ok": True,
+        "removed": removed,
+        "message": (
+            "Cleaned firmware build files: "
+            + (", ".join(removed) if removed else "nothing to remove")
+            + "."
+        ),
     }
 
 
@@ -615,16 +644,6 @@ def _resolve_template_source(spec: Dict[str, Any], *, force_remote_refresh: bool
             }
         except Exception as exc:
             last_error = _text(exc) or f"Failed to load template from {_text(url)}."
-
-    fallback_path = _bundled_template_root() / _text(spec.get("fallback_path"))
-    if fallback_path.is_file():
-        return {
-            "repo_root": None,
-            "template_path": fallback_path,
-            "source_kind": "bundled",
-            "source_label": str(fallback_path),
-            "source_warning": last_error,
-        }
     if last_error:
         raise RuntimeError(last_error)
     return None
@@ -665,7 +684,6 @@ def _load_template_context(spec: Dict[str, Any], *, force_remote_refresh: bool =
         "sections": sections,
         "source_kind": _text(resolved.get("source_kind")),
         "source_label": _text(resolved.get("source_label")),
-        "source_warning": _text(resolved.get("source_warning")),
     }
 
 
@@ -1883,7 +1901,17 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
         result["action"] = action_name
         return result
 
-    if action_name not in {"voice_firmware_save", "voice_firmware_build", "voice_firmware_flash", "voice_firmware_flash_start"}:
+    if action_name == "voice_firmware_clean":
+        result = _clean_firmware_workspace()
+        result["action"] = action_name
+        return result
+
+    if action_name not in {
+        "voice_firmware_save",
+        "voice_firmware_build",
+        "voice_firmware_flash",
+        "voice_firmware_flash_start",
+    }:
         return None
 
     body = payload if isinstance(payload, dict) else {}

@@ -5475,6 +5475,15 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
           data-firmware-success="Firmware flash finished."
           data-firmware-error="Firmware flash failed"${flashDisabledAttr}
         >Build + Flash</button>
+        <button
+          type="button"
+          class="action-btn esphome-firmware-action"
+          data-firmware-action="voice_firmware_clean"
+          data-firmware-title="Cleaning Build Files"
+          data-firmware-working="Cleaning firmware build files..."
+          data-firmware-success="Firmware build files cleaned."
+          data-firmware-error="Firmware cleanup failed"
+        >Clean Build Files</button>
         <span class="small core-manager-status"></span>
       </div>
     </article>
@@ -6983,7 +6992,9 @@ function bindEspHomeFirmwareActions(root = document) {
               values,
             })
         );
-        delete state.esphomeFirmwareDrafts[templateKey];
+        if (action !== "voice_firmware_clean") {
+          delete state.esphomeFirmwareDrafts[templateKey];
+        }
         await reloadEspHomeRuntimePayloadOnly();
         const message = String(result?.message || successText).trim() || successText;
         showToast(message);

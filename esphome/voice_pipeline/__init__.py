@@ -414,7 +414,6 @@ _TRANSCRIPT_INCOMPLETE_TRAILING_WORDS = {
     "into",
     "my",
     "of",
-    "on",
     "or",
     "some",
     "than",
@@ -435,8 +434,14 @@ _TRANSCRIPT_INCOMPLETE_TRAILING_PHRASES = (
     "call the",
     "open the",
     "close the",
+    "turn on",
     "turn on the",
+    "turn off",
     "turn off the",
+    "switch on",
+    "switch on the",
+    "switch off",
+    "switch off the",
     "set a timer for",
     "set timer for",
     "what is the",
@@ -2413,7 +2418,15 @@ async def _play_live_tool_progress_for_session(
     await _ensure_voice_stt_end_sent(client, module, session=session, transcript=transcript)
     await _ensure_voice_intent_active(client, module, session=session)
     await _send_voice_intent_end(client, module, session=session, continue_conversation=False)
-    await _esphome_send_event(client, module, ("VOICE_ASSISTANT_TTS_START", "TTS_START"), {"text": spoken})
+    await _esphome_send_event(
+        client,
+        module,
+        ("VOICE_ASSISTANT_TTS_START", "TTS_START"),
+        {
+            "text": spoken,
+            "tts_kind": "tool",
+        },
+    )
 
     async with lock:
         runtime["awaiting_announcement"] = True
