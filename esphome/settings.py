@@ -40,7 +40,7 @@ def voice_ui_setting_specs() -> List[Dict[str, Any]]:
             "label": "Experimental Live Tool Progress Speech",
             "type": "checkbox",
             "default": vp.DEFAULT_EXPERIMENTAL_LIVE_TOOL_PROGRESS_ENABLED,
-            "description": "If enabled, Voice will briefly stop thinking, speak Hydra's tool-start line, then return to thinking before the tool runs. This is experimental and may add a little latency.",
+            "description": "If enabled, Tater can briefly speak Hydra tool-progress updates before the final reply. Updated Tater firmware on VoicePE or Satellite1 can also show the tool-call LED animation during that spoken update. If disabled, Tater stays in thinking until the final response.",
         },
         {
             "key": "VOICE_EXPERIMENTAL_PARTIAL_STT_ENABLED",
