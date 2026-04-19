@@ -895,7 +895,7 @@ def _build_piper_segment_plan(text: str) -> List[Tuple[str, float]]:
 
 def _build_experimental_tts_chunks(text: str) -> List[str]:
     vp = _vp()
-    prompt = vp._text(text)
+    prompt = vp._sanitize_spoken_response_text(text)
     if len(prompt) < int(vp.DEFAULT_EXPERIMENTAL_TTS_EARLY_START_MIN_CHARS):
         return []
     sentence_plan = _build_piper_segment_plan(prompt)
@@ -1082,7 +1082,7 @@ async def _synthesize_spoken_response_audio(
     followup_cue: str = "",
 ) -> Tuple[bytes, Dict[str, Any], str, str]:
     vp = _vp()
-    reply = vp._text(response_text)
+    reply = vp._sanitize_spoken_response_text(response_text)
     cue = vp._sanitize_followup_cue_text(followup_cue)
     if not continue_conversation:
         return await _native_synthesize_text(reply, session=session)
