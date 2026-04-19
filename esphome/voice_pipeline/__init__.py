@@ -29,6 +29,7 @@ try:
 except Exception:  # Python 3.13 removed audioop
     _audioop = None
 import contextlib
+import html
 import importlib
 import inspect
 import io
@@ -637,6 +638,37 @@ def _sanitize_tool_progress_spoken_text(raw_text: str) -> str:
     return cue
 
 
+def _sanitize_spoken_response_text(raw_text: str) -> str:
+    original = _text(raw_text)
+    text = html.unescape(original)
+    if not text:
+        return ""
+
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"!\[([^\]]*)\]\([^)]+\)", lambda m: _text(m.group(1)).strip(), text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"`{1,3}([^`]+?)`{1,3}", r"\1", text)
+    text = re.sub(r"```+", " ", text)
+    text = re.sub(r"(?m)^\s*(?:[-*+]+|\d+[.)]+|>+|#{1,6})\s*", "", text)
+
+    previous = None
+    while text != previous:
+        previous = text
+        text = re.sub(r"(?<!\w)(\*{1,3}|_{1,3}|~{2})([^*_~\n]+?)\1(?!\w)", r"\2", text)
+
+    text = re.sub(r"(?<!\w)[*_`~#>]+(?!\w)", " ", text)
+    text = re.sub(r"\s*\n+\s*", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"^[\s'\"`]+", "", text)
+    text = re.sub(r"[\s'\"`]+$", "", text)
+
+    if text:
+        return text
+
+    fallback = re.sub(r"\s+", " ", original.replace("\n", " ")).strip()
+    return fallback
+
+
 async def _generate_followup_cue(user_text: str, assistant_text: str) -> str:
     transcript = _text(user_text).strip()
     reply = _text(assistant_text).strip()
@@ -697,7 +729,7 @@ def _continued_chat_spoken_reply_text(
     continue_conversation: bool,
     followup_cue: str = "",
 ) -> str:
-    reply = _text(response_text)
+    reply = _sanitize_spoken_response_text(response_text)
     if not continue_conversation:
         return reply
 
@@ -3380,6 +3412,7 @@ async def _finalize_session(
             return
 
         response_text = _text(result.get("response_text"))
+        spoken_response_text = _sanitize_spoken_response_text(response_text)
         continue_conversation = False
         followup_cue = ""
         if _continued_chat_enabled():
@@ -3409,7 +3442,7 @@ async def _finalize_session(
                 module,
                 session=session,
                 runtime=runtime,
-                response_text=response_text,
+                response_text=spoken_response_text,
                 transcript=transcript,
             )
 
@@ -3424,7 +3457,7 @@ async def _finalize_session(
         else:
             tts_started = time.monotonic()
             tts_audio, tts_format, tts_backend_used, tts_backend_note = await _synthesize_spoken_response_audio(
-                response_text,
+                spoken_response_text,
                 session=session,
                 continue_conversation=continue_conversation,
                 followup_cue=followup_cue,
@@ -3441,7 +3474,18 @@ async def _finalize_session(
                 session=session,
                 continue_conversation=continue_conversation,
             )
-            await _esphome_send_event(client, module, ("VOICE_ASSISTANT_TTS_START", "TTS_START"), {"text": response_text})
+            await _esphome_send_event(
+                client,
+                module,
+                ("VOICE_ASSISTANT_TTS_START", "TTS_START"),
+                {
+                    "text": _continued_chat_spoken_reply_text(
+                        spoken_response_text,
+                        continue_conversation=continue_conversation,
+                        followup_cue=followup_cue,
+                    )
+                },
+            )
 
             tts_url = _store_tts_url(token, session.session_id, tts_audio, tts_format)
             if not tts_url:
