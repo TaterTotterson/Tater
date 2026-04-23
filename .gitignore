@@ -4,6 +4,7 @@ __pycache__/
 
 agent_lab/logs/*.log
 agent_lab/models/
+agent_lab/speaker_id/
 agent_lab/workspace/extracted_tmp_archive_*
 agent_lab/esphome/
 tests/

@@ -35,6 +35,7 @@ pandas
 wyoming
 silero-vad
 torch
+speechbrain==1.1.0
 faster-whisper
 vosk
 pykokoro

@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from . import runtime as esphome_runtime
 from . import firmware as esphome_firmware
 from . import settings as esphome_settings
+from . import speaker_id as esphome_speaker_id
 
 
 def settings_hash_key() -> str:
@@ -55,7 +56,7 @@ async def shutdown() -> None:
 
 def _runtime_panel_token(panel: Any = "") -> str:
     token = esphome_runtime.lower(panel)
-    return token if token in {"satellites", "firmware", "platform", "stats"} else ""
+    return token if token in {"satellites", "firmware", "platform", "speakerid", "stats"} else ""
 
 
 def get_runtime_payload(
@@ -68,6 +69,7 @@ def get_runtime_payload(
     panel_token = _runtime_panel_token(panel)
     include_satellites = panel_token in {"", "satellites"}
     include_firmware = panel_token in {"", "firmware"}
+    include_speaker_id = panel_token in {"", "speakerid"}
     include_stats = panel_token in {"", "stats"}
     status = esphome_runtime.status()
     clients = status.get("clients") if isinstance(status.get("clients"), dict) else {}
@@ -149,6 +151,9 @@ def get_runtime_payload(
 
     if include_firmware:
         payload["firmware"] = esphome_firmware.firmware_panel_payload(status)
+
+    if include_speaker_id:
+        payload["speaker_id"] = esphome_speaker_id.panel_payload(status)
 
     if include_stats:
         voice_rows, voices_meta = esphome_runtime.load_wyoming_tts_voice_catalog()
@@ -307,6 +312,10 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
     firmware_result = esphome_firmware.handle_runtime_action(action_name, body)
     if isinstance(firmware_result, dict):
         return firmware_result
+
+    speaker_id_result = esphome_speaker_id.handle_runtime_action(action_name, body, esphome_runtime.status())
+    if isinstance(speaker_id_result, dict):
+        return speaker_id_result
 
     if action_name == "voice_settings_save":
         values = esphome_runtime.payload_values(body)
