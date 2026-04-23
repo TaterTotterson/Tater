@@ -3201,6 +3201,43 @@ def _transcript_is_low_signal(transcript: str) -> bool:
 
 
 async def _process_voice_turn(session: VoiceSessionRuntime) -> Dict[str, Any]:
+    from .. import speaker_id as esphome_speaker_id
+
+    pending_enrollment = esphome_speaker_id.consume_pending_enrollment(session.selector)
+    if pending_enrollment:
+        try:
+            enrollment = await asyncio.to_thread(
+                esphome_speaker_id.add_enrollment_sample,
+                speaker_id=_text(pending_enrollment.get("speaker_id")),
+                audio_bytes=bytes(session.audio_buffer),
+                audio_format=dict(session.audio_format or {}),
+                speech_s=float(session.speech_duration_s or 0.0),
+            )
+            speaker_name = _text(enrollment.get("speaker_name")) or _text(pending_enrollment.get("speaker_name")) or "speaker"
+            sample_count = int(enrollment.get("sample_count") or 0)
+            return {
+                "transcript": "",
+                "response_text": f"Saved a speaker sample for {speaker_name}. Total samples: {sample_count}.",
+                "speaker_id_enrollment": True,
+            }
+        except Exception as exc:
+            speaker_name = _text(pending_enrollment.get("speaker_name")) or "speaker"
+            logger.exception(
+                "[native-voice] speaker id enrollment failed selector=%s session_id=%s speaker=%s",
+                session.selector,
+                session.session_id,
+                speaker_name,
+            )
+            _native_debug(
+                f"speaker id enrollment failed selector={session.selector} session_id={session.session_id} "
+                f"speaker={speaker_name!r} error={exc}"
+            )
+            return {
+                "transcript": "",
+                "response_text": f"I couldn't save a speaker sample for {speaker_name} yet. Check the Speaker ID status in Tater and try again.",
+                "speaker_id_enrollment": True,
+            }
+
     stt_started = time.monotonic()
     transcript = _text(await _native_transcribe_session_audio(session))
     session.stt_latency_ms = max(0.0, (time.monotonic() - stt_started) * 1000.0)
@@ -3234,6 +3271,37 @@ async def _process_voice_turn(session: VoiceSessionRuntime) -> Dict[str, Any]:
             "no_op": True,
             "no_op_reason": "clipped_ambiguous_transcript",
         }
+
+    try:
+        speaker_match = await asyncio.to_thread(
+            esphome_speaker_id.match_speaker_for_audio,
+            audio_bytes=bytes(session.audio_buffer),
+            audio_format=dict(session.audio_format or {}),
+            speech_s=float(session.speech_duration_s or 0.0),
+        )
+    except Exception as exc:
+        speaker_match = {"matched": False, "reason": "error"}
+        _native_debug(
+            f"speaker id error selector={session.selector} session_id={session.session_id} error={exc}"
+        )
+
+    if bool(speaker_match.get("matched")):
+        session.speaker_id = _text(speaker_match.get("speaker_id"))
+        session.speaker_name = _text(speaker_match.get("speaker_name"))
+        session.speaker_score = float(speaker_match.get("score") or 0.0)
+        if isinstance(session.context, dict):
+            session.context["speaker_id"] = session.speaker_id
+            session.context["speaker_name"] = session.speaker_name
+            session.context["speaker_score"] = session.speaker_score
+        _native_debug(
+            f"speaker id match selector={session.selector} session_id={session.session_id} "
+            f"speaker={session.speaker_name!r} score={session.speaker_score:.3f}"
+        )
+    elif _text(speaker_match.get("reason")) not in {"", "disabled", "too_short", "no_speakers"}:
+        _native_debug(
+            f"speaker id no-match selector={session.selector} session_id={session.session_id} "
+            f"reason={_text(speaker_match.get('reason'))} score={float(speaker_match.get('score') or 0.0):.3f}"
+        )
 
     _native_debug(
         f"hydra turn start selector={session.selector} session_id={session.session_id} transcript_len={len(transcript)}"

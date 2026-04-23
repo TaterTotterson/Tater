@@ -36,6 +36,7 @@ const state = {
   esphomeRuntimeLoadPromise: null,
   esphomeRuntimeRequestSeq: 0,
   esphomeFirmwarePayload: null,
+  esphomeSpeakerIdPayload: null,
   esphomeFirmwareSelection: {
     templateKey: "",
     selector: "",
@@ -5544,6 +5545,166 @@ function renderEspHomeFirmwarePanel(firmware, coreKey = "esphome") {
   `;
 }
 
+function renderEspHomeSpeakerIdSummaryMetrics(metrics) {
+  const rows = Array.isArray(metrics) ? metrics : [];
+  if (!rows.length) {
+    return "";
+  }
+  return `
+    <div class="core-metric-row">
+      ${rows
+        .map((row) => {
+          const label = String(row?.label || "").trim();
+          const value = String(row?.value ?? "").trim();
+          if (!label) {
+            return "";
+          }
+          return `
+            <div class="core-metric-pill">
+              <div class="small">${escapeHtml(label)}</div>
+              <div>${escapeHtml(value || "-")}</div>
+            </div>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
+function renderEspHomeSpeakerIdPanel(payload, coreKey = "esphome") {
+  const body = payload && typeof payload === "object" ? payload : {};
+  const availability = body?.availability && typeof body.availability === "object" ? body.availability : {};
+  const settingsSections = Array.isArray(body?.settings_sections) ? body.settings_sections : [];
+  const createFields = Array.isArray(body?.create_fields) ? body.create_fields : [];
+  const speakers = Array.isArray(body?.speakers) ? body.speakers : [];
+  const pending = body?.pending && typeof body.pending === "object" ? body.pending : null;
+  const available = boolFromAny(availability?.available, false);
+  const availabilityLabel = String(availability?.label || (available ? "available" : "unavailable")).trim() || "unavailable";
+  const availabilityDetail = String(availability?.detail || "").trim();
+  const modelSource = String(availability?.model_source || "").trim();
+
+  const settingsHtml = settingsSections.length
+    ? settingsSections
+        .map((section) => {
+          const label = String(section?.label || "Settings").trim() || "Settings";
+          const fields = Array.isArray(section?.fields) ? section.fields : [];
+          if (!fields.length) {
+            return "";
+          }
+          return `
+            <section class="core-inline-section">
+              <div class="small core-inline-section-title">${escapeHtml(label)}</div>
+              <div class="form-grid two-col">
+                ${fields.map((field) => renderCoreManagerField(field)).join("")}
+              </div>
+            </section>
+          `;
+        })
+        .join("")
+    : renderNotice("Speaker ID settings are unavailable right now.");
+
+  const pendingHtml = pending
+    ? `
+        <article class="card core-manager-item esphome-speaker-id-pending-card">
+          <div class="card-head">
+            <h3 class="card-title">Pending Capture</h3>
+          </div>
+          <div class="small">
+            The next voice turn from <strong>${escapeHtml(String(pending?.selector_label || "Any satellite"))}</strong> will be saved for
+            <strong>${escapeHtml(String(pending?.speaker_name || "speaker"))}</strong>.
+          </div>
+          <div class="small" style="margin-top:8px;">
+            Armed: ${escapeHtml(String(pending?.armed_at || "-"))} • Expires: ${escapeHtml(String(pending?.expires_at || "-"))}
+          </div>
+          <div class="inline-row" style="margin-top:12px;">
+            <button type="button" class="inline-btn danger esphome-speaker-id-cancel">Cancel Pending Capture</button>
+            <span class="small core-manager-status"></span>
+          </div>
+        </article>
+      `
+    : "";
+
+  const speakersHtml = speakers.length
+    ? speakers
+        .map((speaker) => {
+          const fields = Array.isArray(speaker?.fields) ? speaker.fields : [];
+          const sampleCount = Number(speaker?.sample_count || 0);
+          const name = String(speaker?.name || "Speaker").trim() || "Speaker";
+          const updatedAt = String(speaker?.updated_at || "-").trim() || "-";
+          const speakerId = String(speaker?.speaker_id || "").trim();
+          return `
+            <article class="card core-manager-item esphome-speaker-id-speaker-card" data-speaker-id="${escapeHtml(speakerId)}">
+              <div class="card-head">
+                <h3 class="card-title">${escapeHtml(name)}</h3>
+              </div>
+              ${renderEspHomeSpeakerIdSummaryMetrics([
+                { label: "Samples", value: sampleCount },
+                { label: "Last Updated", value: updatedAt },
+              ])}
+              <div class="form-grid" style="margin-top:12px;">
+                ${fields.map((field) => renderCoreManagerField(field)).join("")}
+              </div>
+              <div class="inline-row" style="margin-top:12px;">
+                <button type="button" class="action-btn esphome-speaker-id-save">Save</button>
+                <button type="button" class="action-btn esphome-speaker-id-capture"${available ? "" : " disabled"}>Capture Sample</button>
+                <button type="button" class="inline-btn danger esphome-speaker-id-delete">Delete</button>
+                <span class="small core-manager-status"></span>
+              </div>
+            </article>
+          `;
+        })
+        .join("")
+    : renderNotice("No enrolled speakers yet. Create one below, then capture one or more voice samples.");
+
+  return `
+    <section class="core-inline-section">
+      <div class="small core-inline-section-title">Speaker ID</div>
+      <div class="small">
+        Enroll local voiceprints for people who use your satellites, then let Tater attach the matched speaker to the voice turn before Hydra runs.
+      </div>
+      <div class="small" style="margin-top:8px;">
+        Status: ${escapeHtml(availabilityLabel)}${modelSource ? ` • Model: ${escapeHtml(modelSource)}` : ""}${availabilityDetail ? ` • ${escapeHtml(availabilityDetail)}` : ""}
+      </div>
+      <div class="small" style="margin-top:8px;">
+        Capture flow: click <strong>Capture Sample</strong>, say the wake word, then speak one clear sentence for a few seconds on the selected satellite.
+      </div>
+      <div style="margin-top:12px;">
+        ${renderEspHomeSpeakerIdSummaryMetrics(Array.isArray(body?.summary_metrics) ? body.summary_metrics : [])}
+      </div>
+    </section>
+
+    <article class="card core-manager-item esphome-speaker-id-settings-card" data-core-key="${escapeHtml(coreKey)}">
+      <div class="card-head">
+        <h3 class="card-title">Runtime Settings</h3>
+      </div>
+      ${settingsHtml}
+      <div class="inline-row" style="margin-top:12px;">
+        <button type="button" class="action-btn esphome-speaker-id-settings-save">Save Settings</button>
+        <span class="small core-manager-status"></span>
+      </div>
+    </article>
+
+    <article class="card core-manager-item esphome-speaker-id-create-card" data-core-key="${escapeHtml(coreKey)}">
+      <div class="card-head">
+        <h3 class="card-title">Create Speaker</h3>
+      </div>
+      <div class="form-grid">
+        ${createFields.map((field) => renderCoreManagerField(field)).join("")}
+      </div>
+      <div class="inline-row" style="margin-top:12px;">
+        <button type="button" class="action-btn esphome-speaker-id-create">Create Speaker</button>
+        <span class="small core-manager-status"></span>
+      </div>
+    </article>
+
+    <div class="core-tab-items">
+      ${speakersHtml}
+    </div>
+
+    ${pendingHtml}
+  `;
+}
+
 function renderEspHomeRuntimeHeader({ title = "Tater Voice", summary = "", stats = [], coreKey = "esphome" } = {}) {
   return `
     <div class="card esphome-runtime-shell">
@@ -6154,7 +6315,7 @@ function resolveCoreRefreshScope(node) {
 
 function normalizeEspHomeRuntimePanel(panel = "") {
   const token = String(panel || "").trim().toLowerCase();
-  return ["satellites", "firmware", "platform", "stats"].includes(token) ? token : "satellites";
+  return ["satellites", "firmware", "platform", "speakerid", "stats"].includes(token) ? token : "satellites";
 }
 
 function getActiveEspHomeRuntimePanel(defaultPanel = "satellites") {
@@ -6176,13 +6337,15 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
   const satellitesHost = document.getElementById("settings-esphome-runtime-satellites");
   const addHost = document.getElementById("settings-esphome-runtime-add");
   const firmwareHost = document.getElementById("settings-esphome-runtime-firmware");
+  const speakerIdHost = document.getElementById("settings-esphome-runtime-speakerid");
   const statsHost = document.getElementById("settings-esphome-runtime-stats");
   if (
     !(shell instanceof HTMLElement) ||
     !(head instanceof HTMLElement) ||
     !(satellitesHost instanceof HTMLElement) ||
     !(addHost instanceof HTMLElement) ||
-    !(firmwareHost instanceof HTMLElement)
+    !(firmwareHost instanceof HTMLElement) ||
+    !(speakerIdHost instanceof HTMLElement)
   ) {
       return;
   }
@@ -6208,6 +6371,8 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
     addHost.innerHTML = renderNotice("Loading add form...");
   } else if (targetPanel === "firmware") {
     firmwareHost.innerHTML = renderNotice("Loading firmware builder...");
+  } else if (targetPanel === "speakerid") {
+    speakerIdHost.innerHTML = renderNotice("Loading Speaker ID...");
   } else if (targetPanel === "stats" && statsHost instanceof HTMLElement) {
     statsHost.innerHTML = renderNotice("Loading stats...");
   }
@@ -6233,6 +6398,7 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
       const statsSections = Array.isArray(body.stats_sections) ? body.stats_sections : [];
       const statsTables = Array.isArray(body.stats_tables) ? body.stats_tables : [];
       const firmware = body?.firmware && typeof body.firmware === "object" ? body.firmware : {};
+      const speakerId = body?.speaker_id && typeof body.speaker_id === "object" ? body.speaker_id : {};
       const emptyMessage = String(body.empty_message || "No satellites discovered yet.").trim();
       const coreKey = String(tabSpec?.core_key || "esphome").trim() || "esphome";
 
@@ -6255,6 +6421,10 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
         state.esphomeFirmwareSelection = normalizeEspHomeFirmwareSelection(firmware);
         firmwareHost.innerHTML = renderEspHomeFirmwarePanel(firmware, coreKey);
       }
+      if (targetPanel === "speakerid" && speakerIdHost instanceof HTMLElement) {
+        state.esphomeSpeakerIdPayload = speakerId;
+        speakerIdHost.innerHTML = renderEspHomeSpeakerIdPanel(speakerId, coreKey);
+      }
       if (targetPanel === "stats" && statsHost instanceof HTMLElement) {
         statsHost.innerHTML = renderEspHomeStatsPanel(statsSections, statsTables);
       }
@@ -6272,11 +6442,15 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
         addHost.innerHTML = renderNotice(message);
       } else if (targetPanel === "firmware") {
         firmwareHost.innerHTML = renderNotice(message);
+      } else if (targetPanel === "speakerid" && speakerIdHost instanceof HTMLElement) {
+        speakerIdHost.innerHTML = renderNotice(message);
       } else if (targetPanel === "stats" && statsHost instanceof HTMLElement) {
         statsHost.innerHTML = renderNotice(message);
       }
       if (targetPanel === "firmware") {
         state.esphomeFirmwarePayload = null;
+      } else if (targetPanel === "speakerid") {
+        state.esphomeSpeakerIdPayload = null;
       }
       shell.dataset.runtimeLoaded = "error";
     })
@@ -7024,6 +7198,136 @@ function bindEspHomeFirmwareActions(root = document) {
   });
 }
 
+function rerenderEspHomeSpeakerIdPanel(root = document) {
+  const host =
+    root instanceof HTMLElement
+      ? root.querySelector("#settings-esphome-runtime-speakerid")
+      : document.getElementById("settings-esphome-runtime-speakerid");
+  if (!(host instanceof HTMLElement)) {
+    return;
+  }
+  const shell = document.getElementById("settings-esphome-shell");
+  const coreKey = String(host.dataset.coreKey || shell?.dataset?.coreKey || "esphome").trim() || "esphome";
+  const payload =
+    state.esphomeSpeakerIdPayload && typeof state.esphomeSpeakerIdPayload === "object" ? state.esphomeSpeakerIdPayload : {};
+  host.dataset.coreKey = coreKey;
+  host.innerHTML = renderEspHomeSpeakerIdPanel(payload, coreKey);
+  bindEspHomeSpeakerIdActions(document);
+}
+
+function bindEspHomeSpeakerIdActions(root = document) {
+  const runAction = async (host, action, payload, successText) => {
+    const statusHost = host instanceof HTMLElement ? host : null;
+    setCoreManagerStatus(statusHost, "Working...");
+    try {
+      const result = await api("/api/settings/esphome/runtime/action", {
+        method: "POST",
+        body: JSON.stringify({ action, payload }),
+      });
+      if (result?.speaker_id && typeof result.speaker_id === "object") {
+        state.esphomeSpeakerIdPayload = result.speaker_id;
+      }
+      rerenderEspHomeSpeakerIdPanel(document);
+      const message = String(result?.message || successText).trim() || successText;
+      showToast(message);
+      return result;
+    } catch (error) {
+      const message = String(error?.message || "Speaker ID action failed.");
+      setCoreManagerStatus(statusHost, `Failed: ${message}`);
+      showToast(`Failed: ${message}`, "error", 3600);
+      throw error;
+    }
+  };
+
+  root.querySelectorAll(".esphome-speaker-id-settings-save").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement) || button.dataset.esphomeSpeakerIdBound === "1") {
+      return;
+    }
+    button.dataset.esphomeSpeakerIdBound = "1";
+    button.addEventListener("click", async (event) => {
+      const card = event.currentTarget?.closest?.(".esphome-speaker-id-settings-card");
+      const values = collectCoreManagerValues(card);
+      await runAction(card, "speaker_id_settings_save", { values }, "Speaker ID settings saved.");
+    });
+  });
+
+  root.querySelectorAll(".esphome-speaker-id-cancel").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement) || button.dataset.esphomeSpeakerIdBound === "1") {
+      return;
+    }
+    button.dataset.esphomeSpeakerIdBound = "1";
+    button.addEventListener("click", async (event) => {
+      const card = event.currentTarget?.closest?.(".esphome-speaker-id-pending-card");
+      await runAction(card, "speaker_id_pending_cancel", {}, "Pending speaker capture canceled.");
+    });
+  });
+
+  root.querySelectorAll(".esphome-speaker-id-create").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement) || button.dataset.esphomeSpeakerIdBound === "1") {
+      return;
+    }
+    button.dataset.esphomeSpeakerIdBound = "1";
+    button.addEventListener("click", async (event) => {
+      const card = event.currentTarget?.closest?.(".esphome-speaker-id-create-card");
+      const values = collectCoreManagerValues(card);
+      await runAction(card, "speaker_id_speaker_create", { values }, "Speaker created.");
+    });
+  });
+
+  root.querySelectorAll(".esphome-speaker-id-save").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement) || button.dataset.esphomeSpeakerIdBound === "1") {
+      return;
+    }
+    button.dataset.esphomeSpeakerIdBound = "1";
+    button.addEventListener("click", async (event) => {
+      const card = event.currentTarget?.closest?.(".esphome-speaker-id-speaker-card");
+      const speakerId = String(card?.dataset?.speakerId || "").trim();
+      if (!speakerId) {
+        return;
+      }
+      const values = collectCoreManagerValues(card);
+      await runAction(card, "speaker_id_speaker_save", { speaker_id: speakerId, values }, "Speaker saved.");
+    });
+  });
+
+  root.querySelectorAll(".esphome-speaker-id-capture").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement) || button.dataset.esphomeSpeakerIdBound === "1") {
+      return;
+    }
+    button.dataset.esphomeSpeakerIdBound = "1";
+    button.addEventListener("click", async (event) => {
+      const card = event.currentTarget?.closest?.(".esphome-speaker-id-speaker-card");
+      const speakerId = String(card?.dataset?.speakerId || "").trim();
+      if (!speakerId) {
+        return;
+      }
+      const values = collectCoreManagerValues(card);
+      await runAction(
+        card,
+        "speaker_id_enrollment_arm",
+        { speaker_id: speakerId, values },
+        "Speaker capture armed."
+      );
+    });
+  });
+
+  root.querySelectorAll(".esphome-speaker-id-delete").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement) || button.dataset.esphomeSpeakerIdBound === "1") {
+      return;
+    }
+    button.dataset.esphomeSpeakerIdBound = "1";
+    button.addEventListener("click", async (event) => {
+      const card = event.currentTarget?.closest?.(".esphome-speaker-id-speaker-card");
+      const speakerId = String(card?.dataset?.speakerId || "").trim();
+      const title = String(card?.querySelector?.(".card-title")?.textContent || "this speaker").trim() || "this speaker";
+      if (!speakerId || !window.confirm(`Delete ${title}?`)) {
+        return;
+      }
+      await runAction(card, "speaker_id_speaker_delete", { speaker_id: speakerId }, "Speaker deleted.");
+    });
+  });
+}
+
 function bindCoreTabManagers() {
   bindCoreManagerTabs();
   bindCoreManagerSubtabs();
@@ -7034,6 +7338,7 @@ function bindCoreTabManagers() {
   bindEspHomeEntityControls();
   bindEspHomeFirmwareSelectors();
   bindEspHomeFirmwareActions();
+  bindEspHomeSpeakerIdActions();
   document.querySelectorAll(".core-tab-refresh-btn[data-core-tab-refresh]").forEach((button) => {
     if (!(button instanceof HTMLButtonElement)) {
       return;
@@ -9414,8 +9719,9 @@ async function loadSettingsView() {
             <div class="settings-subtabs">
               <button type="button" class="settings-subtab-btn active" data-esphome-tab="satellites">Satellites</button>
               <button type="button" class="settings-subtab-btn" data-esphome-tab="firmware">Firmware</button>
-              <button type="button" class="settings-subtab-btn" data-esphome-tab="platform">Settings</button>
+              <button type="button" class="settings-subtab-btn" data-esphome-tab="speakerid">Speaker ID</button>
               <button type="button" class="settings-subtab-btn" data-esphome-tab="stats">Stats</button>
+              <button type="button" class="settings-subtab-btn" data-esphome-tab="platform">Settings</button>
             </div>
 
             <div id="settings-esphome-runtime-head">
@@ -9494,6 +9800,15 @@ async function loadSettingsView() {
               </div>
               <div id="settings-esphome-runtime-firmware">
                 ${renderNotice("Open the ESPHome tab to load the firmware builder.")}
+              </div>
+            </div>
+
+            <div class="settings-subpanel" data-esphome-panel="speakerid">
+              <div class="small" style="margin:10px 0 14px;">
+                Enroll voiceprints for people who use your satellites, then let Tater tag the speaker before Hydra runs.
+              </div>
+              <div id="settings-esphome-runtime-speakerid">
+                ${renderNotice("Open the ESPHome tab to load Speaker ID.")}
               </div>
             </div>
 

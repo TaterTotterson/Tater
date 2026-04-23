@@ -63,6 +63,9 @@ class VoiceSessionRuntime:
     live_tool_progress_played: bool = False
     last_tool_progress_text: str = ""
     live_tool_progress_callback: Optional[Callable[[str, Optional[Dict[str, Any]]], Any]] = None
+    speaker_id: str = ""
+    speaker_name: str = ""
+    speaker_score: float = 0.0
 
 
 def _history_key(conv_id: str) -> str:
@@ -182,17 +185,22 @@ async def _run_hydra_turn_for_voice(*, transcript: str, conv_id: str, session: V
     }
     device_name = vp._text(context.get("device_name"))
     area_name = vp._text(context.get("area_name")) or vp._text(context.get("room_name"))
+    speaker_name = vp._text(context.get("speaker_name"))
     if device_name:
         origin["device_name"] = device_name
     if area_name:
         origin["area_name"] = area_name
+    if speaker_name:
+        origin["speaker_name"] = speaker_name
 
     platform_preamble = ""
-    if device_name or area_name:
+    if device_name or area_name or speaker_name:
+        speaker_line = f"- Speaker: {speaker_name}\n" if speaker_name else ""
         platform_preamble = (
             "VOICE CONTEXT:\n"
             f"- Device: {device_name or '(unknown)'}\n"
-            f"- Area/Room: {area_name or '(unknown)'}\n\n"
+            f"- Area/Room: {area_name or '(unknown)'}\n"
+            f"{speaker_line}\n"
             "DEFAULT ROOM RULE:\n"
             "If the user asks to control lights, switches, fans, speakers, or similar devices and does not specify a room, "
             "assume they mean the Area/Room shown above.\n\n"
