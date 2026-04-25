@@ -794,6 +794,17 @@ def _esphome_entity_control_spec(info_row: Dict[str, Any], state_row: Dict[str, 
             "step": info.get("step"),
         }
 
+    if kind == "text":
+        current_value = attrs.get("state")
+        if current_value is None:
+            current_value = state.get("raw")
+        return {
+            "type": "text",
+            "command": "text_set",
+            "value": _text(current_value),
+            "max_length": info.get("max_length"),
+        }
+
     return None
 
 
@@ -846,7 +857,7 @@ def _esphome_entity_info_snapshot(info: Any) -> Dict[str, Any]:
         "icon": _text(getattr(info, "icon", None)),
         "disabled_by_default": bool(getattr(info, "disabled_by_default", False)),
     }
-    for attr in ("min_value", "max_value", "step"):
+    for attr in ("min_value", "max_value", "step", "max_length"):
         scalar = _esphome_scalar(getattr(info, attr, None))
         if scalar not in {None, ""}:
             out[attr] = scalar

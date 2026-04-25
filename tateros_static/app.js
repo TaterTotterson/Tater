@@ -5008,6 +5008,33 @@ function renderEspHomeEntityControl(row, connected = true) {
     `;
   }
 
+  if (controlType === "text") {
+    const value = String(control.value ?? "").trim();
+    const maxLength = Number(control.max_length ?? 0);
+    const maxLengthAttr = Number.isFinite(maxLength) && maxLength > 0 ? ` maxlength="${escapeHtml(String(maxLength))}"` : "";
+    return `
+      <div class="core-satellite-sensor-controls">
+        <div class="core-satellite-inline-set">
+          <input
+            type="text"
+            class="esphome-entity-text"
+            value="${escapeHtml(value)}"${maxLengthAttr}
+            data-esphome-entity-key="${escapeHtml(entityKey)}"
+            data-esphome-entity-command="${escapeHtml(command)}"
+            data-esphome-entity-label="${escapeHtml(label)}"${disabledAttr}
+          />
+          <button
+            type="button"
+            class="inline-btn esphome-entity-text-set"
+            data-esphome-entity-key="${escapeHtml(entityKey)}"
+            data-esphome-entity-command="${escapeHtml(command)}"
+            data-esphome-entity-label="${escapeHtml(label)}"${disabledAttr}
+          >Set</button>
+        </div>
+      </div>
+    `;
+  }
+
   return "";
 }
 
@@ -6776,6 +6803,63 @@ function bindEspHomeEntityControls(root = document) {
       return;
     }
     input.dataset.esphomeLastValue = input.value;
+  });
+
+  root.querySelectorAll(".esphome-entity-text-set").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement) || button.dataset.esphomeBound === "1") {
+      return;
+    }
+    button.dataset.esphomeBound = "1";
+    button.addEventListener("click", async () => {
+      const wrap = button.closest(".core-satellite-inline-set");
+      const input = wrap?.querySelector?.(".esphome-entity-text");
+      if (!(input instanceof HTMLInputElement)) {
+        return;
+      }
+      const previous = input.dataset.esphomeLastValue || input.value;
+      button.disabled = true;
+      input.disabled = true;
+      try {
+        await executeEntityAction(button, {
+          entity_key: String(button.dataset.esphomeEntityKey || "").trim(),
+          command: String(button.dataset.esphomeEntityCommand || "").trim(),
+          value: input.value,
+          entity_label: String(button.dataset.esphomeEntityLabel || "").trim(),
+        });
+      } catch (error) {
+        input.value = String(previous || "");
+        const message = String(error?.message || "Failed to update entity.");
+        setCoreManagerStatus(button.closest(".esphome-satellite-card"), `Failed: ${message}`);
+        showToast(`Failed: ${message}`, "error", 3200);
+      } finally {
+        input.dataset.esphomeLastValue = input.value;
+        if (document.body.contains(button)) {
+          button.disabled = false;
+        }
+        if (document.body.contains(input)) {
+          input.disabled = false;
+        }
+      }
+    });
+  });
+
+  root.querySelectorAll(".esphome-entity-text").forEach((input) => {
+    if (!(input instanceof HTMLInputElement) || input.dataset.esphomeBound === "1") {
+      return;
+    }
+    input.dataset.esphomeBound = "1";
+    input.dataset.esphomeLastValue = input.value;
+    input.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") {
+        return;
+      }
+      event.preventDefault();
+      const wrap = input.closest(".core-satellite-inline-set");
+      const button = wrap?.querySelector?.(".esphome-entity-text-set");
+      if (button instanceof HTMLButtonElement && !button.disabled) {
+        button.click();
+      }
+    });
   });
 }
 
