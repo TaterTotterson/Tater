@@ -2461,10 +2461,13 @@ async def _play_live_tool_progress_for_session(
     )
 
     async with lock:
-        runtime["awaiting_announcement"] = True
-        runtime["awaiting_session_id"] = _text(session.session_id)
-        runtime["awaiting_announcement_kind"] = "tool_progress"
-        runtime["announcement_future"] = waiter
+        _set_awaiting_announcement_state(
+            runtime,
+            session_id=_text(session.session_id),
+            kind="tool_progress",
+            future=waiter,
+            timeout_s=timeout_s,
+        )
         _cancel_announcement_wait(runtime)
         _schedule_announcement_timeout(selector, client, module, timeout_s)
 
@@ -2539,10 +2542,13 @@ async def _start_experimental_streamed_tts_response(
             "prepare_task": prepare_task,
             "segment_count": len(chunks),
         }
-        runtime["awaiting_announcement"] = True
-        runtime["awaiting_session_id"] = _text(session.session_id)
-        runtime["awaiting_announcement_kind"] = "response_streamed"
-        runtime["announcement_future"] = None
+        _set_awaiting_announcement_state(
+            runtime,
+            session_id=_text(session.session_id),
+            kind="response_streamed",
+            future=None,
+            timeout_s=timeout_s,
+        )
         _cancel_announcement_wait(runtime)
         _schedule_announcement_timeout(selector, client, module, timeout_s)
 
@@ -2785,7 +2791,34 @@ def _append_pcm_silence(audio_bytes: bytes, audio_format: Dict[str, Any], *, sec
 
 
 def _run_end_timeout_s(audio_bytes: bytes, audio_format: Dict[str, Any]) -> float:
-    return max(1.5, min(30.0, _estimate_pcm_duration_s(audio_bytes, audio_format) + 1.0))
+    # Leave a little extra headroom for media-player startup and network jitter so
+    # a late `announcement_finished` doesn't force an early RUN_END.
+    return max(2.25, min(30.0, _estimate_pcm_duration_s(audio_bytes, audio_format) + 1.75))
+
+
+def _set_awaiting_announcement_state(
+    runtime: Dict[str, Any],
+    *,
+    session_id: str,
+    kind: str,
+    future: Optional[asyncio.Future[Any]],
+    timeout_s: float,
+) -> None:
+    runtime["awaiting_announcement"] = True
+    runtime["awaiting_session_id"] = _text(session_id)
+    runtime["awaiting_announcement_kind"] = _text(kind)
+    runtime["announcement_future"] = future
+    runtime["awaiting_announcement_started_ts"] = _now()
+    runtime["awaiting_announcement_timeout_s"] = max(0.0, float(timeout_s or 0.0))
+
+
+def _clear_awaiting_announcement_state(runtime: Dict[str, Any]) -> None:
+    runtime["awaiting_announcement"] = False
+    runtime["awaiting_session_id"] = ""
+    runtime["awaiting_announcement_kind"] = ""
+    runtime["announcement_future"] = None
+    runtime["awaiting_announcement_started_ts"] = 0.0
+    runtime["awaiting_announcement_timeout_s"] = 0.0
 
 
 # -------------------- ESPHome Runtime Bridge --------------------
@@ -2913,10 +2946,13 @@ async def _send_streamed_tts_segment(
         {"url": _text(segment.get("url"))},
     )
     async with lock:
-        runtime["awaiting_announcement"] = True
-        runtime["awaiting_session_id"] = _text(session_id)
-        runtime["awaiting_announcement_kind"] = "response_streamed"
-        runtime["announcement_future"] = None
+        _set_awaiting_announcement_state(
+            runtime,
+            session_id=_text(session_id),
+            kind="response_streamed",
+            future=None,
+            timeout_s=timeout_s,
+        )
         _cancel_announcement_wait(runtime)
         _schedule_announcement_timeout(token, client, module, timeout_s)
     _native_debug(
@@ -2999,10 +3035,7 @@ async def _maybe_continue_streamed_tts(
         if not isinstance(state, dict):
             return False
         session_id = _text(state.get("session_id"))
-        runtime["awaiting_announcement"] = False
-        runtime["awaiting_session_id"] = ""
-        runtime["awaiting_announcement_kind"] = ""
-        runtime["announcement_future"] = None
+        _clear_awaiting_announcement_state(runtime)
         _cancel_announcement_wait(runtime)
 
         ready_segments = state.get("ready_segments") if isinstance(state.get("ready_segments"), list) else []
@@ -3067,10 +3100,11 @@ async def _finalize_after_announcement(selector: str, client: Any, module: Any, 
             future = maybe_future
         if not waiting:
             return False
-        runtime["awaiting_announcement"] = False
-        runtime["awaiting_session_id"] = ""
-        runtime["awaiting_announcement_kind"] = ""
-        runtime["announcement_future"] = None
+        if reason == "announcement_timeout":
+            runtime["last_announcement_timeout_ts"] = _now()
+        else:
+            runtime["last_announcement_timeout_ts"] = 0.0
+        _clear_awaiting_announcement_state(runtime)
         _cancel_announcement_wait(runtime)
 
     if isinstance(future, asyncio.Future) and not future.done():
@@ -3147,10 +3181,13 @@ async def _queue_selector_audio_url(
             raise RuntimeError(f"Satellite {token} is busy with an active voice session")
         _clear_streamed_tts_state(runtime)
         _cancel_announcement_wait(runtime)
-        runtime["awaiting_announcement"] = True
-        runtime["awaiting_session_id"] = playback_id
-        runtime["awaiting_announcement_kind"] = "external"
-        runtime["announcement_future"] = None
+        _set_awaiting_announcement_state(
+            runtime,
+            session_id=playback_id,
+            kind="external",
+            future=None,
+            timeout_s=timeout,
+        )
         _schedule_announcement_timeout(token, client, module, timeout)
 
     try:
@@ -3165,10 +3202,7 @@ async def _queue_selector_audio_url(
     except Exception:
         async with lock:
             _cancel_announcement_wait(runtime)
-            runtime["awaiting_announcement"] = False
-            runtime["awaiting_session_id"] = ""
-            runtime["awaiting_announcement_kind"] = ""
-            runtime["announcement_future"] = None
+            _clear_awaiting_announcement_state(runtime)
         with contextlib.suppress(Exception):
             await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
         raise
@@ -3565,10 +3599,13 @@ async def _finalize_session(
             if wait_for_announcement:
                 timeout_s = _run_end_timeout_s(tts_audio, tts_format)
                 async with lock:
-                    runtime["awaiting_announcement"] = True
-                    runtime["awaiting_session_id"] = _text(session.session_id)
-                    runtime["awaiting_announcement_kind"] = "response"
-                    runtime["announcement_future"] = None
+                    _set_awaiting_announcement_state(
+                        runtime,
+                        session_id=_text(session.session_id),
+                        kind="response",
+                        future=None,
+                        timeout_s=timeout_s,
+                    )
                     _cancel_announcement_wait(runtime)
                     _schedule_announcement_timeout(token, client, module, timeout_s)
                 _native_debug(
@@ -3782,10 +3819,7 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             _cancel_announcement_wait(runtime)
             _cancel_audio_stall_watch(runtime)
             _clear_streamed_tts_state(runtime)
-            runtime["awaiting_announcement"] = False
-            runtime["awaiting_session_id"] = ""
-            runtime["awaiting_announcement_kind"] = ""
-            runtime["announcement_future"] = None
+            _clear_awaiting_announcement_state(runtime)
             runtime["session"] = session
 
         _voice_metrics_record_session_start(
@@ -4017,10 +4051,7 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                 total = session.audio_bytes
             _cancel_announcement_wait(runtime)
             _cancel_audio_stall_watch(runtime)
-            runtime["awaiting_announcement"] = False
-            runtime["awaiting_session_id"] = ""
-            runtime["awaiting_announcement_kind"] = ""
-            runtime["announcement_future"] = None
+            _clear_awaiting_announcement_state(runtime)
 
         logger.info(
             "[native-voice] session stop selector=%s session_id=%s abort=%s chunks=%s bytes=%s",
@@ -4035,6 +4066,26 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                 await _finalize_session(token, client, module, session_id=sid, abort=bool(abort), reason="device_stop")
 
     async def _handle_announcement_finished(*_args: Any, **_kwargs: Any) -> None:
+        now_ts = _now()
+        ignore_stale = False
+        kind = ""
+        sid = ""
+        age_s = 0.0
+        async with lock:
+            if bool(runtime.get("awaiting_announcement")):
+                kind = _text(runtime.get("awaiting_announcement_kind"))
+                sid = _text(runtime.get("awaiting_session_id"))
+                started_ts = float(runtime.get("awaiting_announcement_started_ts") or 0.0)
+                age_s = max(0.0, now_ts - started_ts) if started_ts > 0.0 else 0.0
+                last_timeout_ts = float(runtime.get("last_announcement_timeout_ts") or 0.0)
+                if last_timeout_ts > 0.0 and (now_ts - last_timeout_ts) <= 3.0 and age_s < 0.6:
+                    ignore_stale = True
+        if ignore_stale:
+            _native_debug(
+                f"stale announcement_finished ignored selector={token} session_id={sid or '-'} "
+                f"kind={kind or '-'} age_s={age_s:.2f}"
+            )
+            return
         completed = await _finalize_after_announcement(token, client, module, reason="announcement_finished")
         if completed:
             logger.info("[native-voice] announcement finished selector=%s", token)
