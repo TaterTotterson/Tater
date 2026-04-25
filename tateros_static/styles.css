@@ -5,6 +5,7 @@
   --bg-soft: #151617;
   --panel: #1a1b1d;
   --panel-2: #202225;
+  --panel-3: #26292d;
   --text: #f1eee8;
   --muted: #a8a096;
   --accent: #d65a1f;
@@ -12,8 +13,13 @@
   --danger: #ff5c5c;
   --ok: #4fd18c;
   --line: #2a2c30;
+  --line-soft: rgba(255, 255, 255, 0.06);
+  --line-strong: rgba(240, 131, 69, 0.24);
   --radius: 14px;
   --shadow: 0 18px 30px rgba(0, 0, 0, 0.25);
+  --shadow-soft: 0 12px 24px rgba(0, 0, 0, 0.16);
+  --shadow-lift: 0 24px 48px rgba(0, 0, 0, 0.28);
+  --accent-glow: 0 0 0 1px rgba(240, 131, 69, 0.12), 0 16px 34px rgba(214, 90, 31, 0.18);
 }
 
 * {
@@ -24,11 +30,13 @@ html,
 body {
   margin: 0;
   height: 100%;
-  font-family: "Trebuchet MS", "Lucida Grande", "Segoe UI", sans-serif;
+  font-family: "Aptos", "Segoe UI Variable Text", "Trebuchet MS", "Lucida Grande", "Segoe UI", sans-serif;
   color: var(--text);
+  color-scheme: dark;
   background: radial-gradient(circle at 12% 15%, #1d1f22 0%, transparent 40%),
-    radial-gradient(circle at 90% 90%, #2a211d 0%, transparent 36%),
-    linear-gradient(160deg, #0d0e10 0%, #131416 44%, #121315 100%);
+    radial-gradient(circle at 88% 84%, rgba(214, 90, 31, 0.14) 0%, transparent 32%),
+    radial-gradient(circle at 72% 18%, rgba(255, 255, 255, 0.035) 0%, transparent 24%),
+    linear-gradient(160deg, #0c0d0f 0%, #121315 42%, #101113 100%);
   background-attachment: fixed;
 }
 
@@ -52,9 +60,9 @@ body.webui-auth-locked #sidebar-expand-btn {
 .bg-shape {
   position: fixed;
   border-radius: 999px;
-  filter: blur(60px);
+  filter: blur(74px);
   pointer-events: none;
-  opacity: 0.2;
+  opacity: 0.15;
   z-index: 0;
 }
 
@@ -85,11 +93,14 @@ body.webui-auth-locked #sidebar-expand-btn {
 }
 
 .sidebar {
-  border-right: 1px solid var(--line);
-  background: transparent;
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-  padding: 26px 18px;
+  border-right: 1px solid var(--line-soft);
+  background:
+    linear-gradient(180deg, rgba(22, 24, 26, 0.95), rgba(16, 17, 19, 0.88)),
+    radial-gradient(circle at 12% 16%, rgba(240, 131, 69, 0.07), transparent 38%);
+  backdrop-filter: blur(18px) saturate(118%);
+  -webkit-backdrop-filter: blur(18px) saturate(118%);
+  box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.02), 24px 0 48px rgba(0, 0, 0, 0.2);
+  padding: 24px 18px 22px;
   display: flex;
   flex-direction: column;
   gap: 24px;
@@ -125,6 +136,8 @@ body.webui-auth-locked #sidebar-expand-btn {
 .app-shell.sidebar-collapsing .sidebar {
   transition: none;
   pointer-events: none;
+  transform-origin: left center;
+  will-change: transform, opacity, filter;
   border-right-color: rgba(240, 131, 69, 0.42);
   box-shadow: 0 0 26px rgba(240, 131, 69, 0.26), 0 0 58px rgba(214, 90, 31, 0.2);
   animation: sidebar-burn-slide 460ms cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
@@ -157,6 +170,8 @@ body.webui-auth-locked #sidebar-expand-btn {
 .app-shell.sidebar-expanding .sidebar {
   transition: none;
   pointer-events: none;
+  transform-origin: left center;
+  will-change: transform, opacity, filter;
   border-right-color: rgba(240, 131, 69, 0.42);
   box-shadow: 0 0 24px rgba(240, 131, 69, 0.22), 0 0 56px rgba(214, 90, 31, 0.18);
   animation: sidebar-ignite-slide 480ms cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
@@ -416,8 +431,10 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   top: 12px;
   z-index: 2400;
   border: 1px solid rgba(214, 90, 31, 0.5);
-  border-radius: 10px;
-  background: rgba(25, 26, 29, 0.92);
+  border-radius: 12px;
+  background:
+    linear-gradient(180deg, rgba(27, 28, 31, 0.94), rgba(20, 21, 24, 0.92)),
+    radial-gradient(circle at 18% 16%, rgba(240, 131, 69, 0.08), transparent 42%);
   color: var(--text);
   width: 38px;
   height: 38px;
@@ -430,11 +447,13 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   opacity: 0;
   pointer-events: none;
   transform: translateY(-4px);
-  transition: opacity 0.18s ease, transform 0.18s ease, border-color 0.18s ease;
+  box-shadow: 0 14px 26px rgba(0, 0, 0, 0.2);
+  transition: opacity 0.18s ease, transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
 }
 
 .sidebar-expand-fab:hover {
   border-color: var(--accent-soft);
+  box-shadow: var(--accent-glow);
 }
 
 .app-shell.sidebar-collapsed ~ .sidebar-expand-fab {
@@ -445,22 +464,22 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 
 @keyframes sidebar-burn-slide {
   0% {
-    transform: translateX(0) scale(1);
+    transform: perspective(1200px) translateX(0) rotateY(0deg) scale(1);
     opacity: 1;
     filter: brightness(1);
   }
   20% {
-    transform: translateX(-8%) scale(1.005);
+    transform: perspective(1200px) translateX(-5%) rotateY(4deg) scale(1.008);
     opacity: 1;
     filter: brightness(1.2);
   }
   65% {
-    transform: translateX(-78%) scale(0.99);
+    transform: perspective(1200px) translateX(-74%) rotateY(16deg) scale(0.98);
     opacity: 0.62;
     filter: brightness(1.04);
   }
   100% {
-    transform: translateX(calc(-100% - 10px)) scale(0.985);
+    transform: perspective(1200px) translateX(calc(-100% - 10px)) rotateY(24deg) scale(0.94);
     opacity: 0.02;
     filter: brightness(0.9);
   }
@@ -502,22 +521,22 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 
 @keyframes sidebar-ignite-slide {
   0% {
-    transform: translateX(calc(-100% - 10px)) scale(0.985);
+    transform: perspective(1200px) translateX(calc(-100% - 10px)) rotateY(24deg) scale(0.94);
     opacity: 0.08;
     filter: brightness(0.92);
   }
   35% {
-    transform: translateX(-46%) scale(0.994);
+    transform: perspective(1200px) translateX(-42%) rotateY(12deg) scale(0.98);
     opacity: 0.62;
     filter: brightness(1.12);
   }
   78% {
-    transform: translateX(2%) scale(1.002);
+    transform: perspective(1200px) translateX(2%) rotateY(-2deg) scale(1.004);
     opacity: 1;
     filter: brightness(1.06);
   }
   100% {
-    transform: translateX(0) scale(1);
+    transform: perspective(1200px) translateX(0) rotateY(0deg) scale(1);
     opacity: 1;
     filter: brightness(1);
   }
@@ -555,12 +574,12 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 
 @keyframes sidebar-dust-slide-out {
   0% {
-    transform: translateX(0) scale(1);
+    transform: perspective(1100px) translateX(0) rotateY(0deg) scale(1);
     opacity: 1;
     filter: blur(0);
   }
   100% {
-    transform: translateX(calc(-100% - 10px)) scale(0.98);
+    transform: perspective(1100px) translateX(calc(-100% - 10px)) rotateY(14deg) scale(0.95);
     opacity: 0.04;
     filter: blur(4px);
   }
@@ -568,12 +587,12 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 
 @keyframes sidebar-dust-slide-in {
   0% {
-    transform: translateX(calc(-100% - 10px)) scale(0.98);
+    transform: perspective(1100px) translateX(calc(-100% - 10px)) rotateY(14deg) scale(0.95);
     opacity: 0.08;
     filter: blur(4px);
   }
   100% {
-    transform: translateX(0) scale(1);
+    transform: perspective(1100px) translateX(0) rotateY(0deg) scale(1);
     opacity: 1;
     filter: blur(0);
   }
@@ -703,12 +722,12 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 
 @keyframes sidebar-portal-slide-out {
   0% {
-    transform: translateX(0) scale(1) rotate(0);
+    transform: perspective(1250px) translateX(0) rotateY(0deg) scale(1) rotate(0);
     opacity: 1;
     filter: none;
   }
   100% {
-    transform: translateX(calc(-100% - 10px)) scale(0.74) rotate(-7deg);
+    transform: perspective(1250px) translateX(calc(-100% - 10px)) rotateY(36deg) scale(0.72) rotate(-7deg);
     opacity: 0.03;
     filter: hue-rotate(22deg) saturate(1.2);
   }
@@ -716,12 +735,12 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 
 @keyframes sidebar-portal-slide-in {
   0% {
-    transform: translateX(calc(-100% - 10px)) scale(0.74) rotate(7deg);
+    transform: perspective(1250px) translateX(calc(-100% - 10px)) rotateY(36deg) scale(0.72) rotate(7deg);
     opacity: 0.07;
     filter: hue-rotate(20deg) saturate(1.2);
   }
   100% {
-    transform: translateX(0) scale(1) rotate(0);
+    transform: perspective(1250px) translateX(0) rotateY(0deg) scale(1) rotate(0);
     opacity: 1;
     filter: none;
   }
@@ -773,12 +792,12 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 
 @keyframes sidebar-melt-slide-out {
   0% {
-    transform: translateX(0) scaleY(1) scaleX(1) skewX(0);
+    transform: perspective(1050px) translateX(0) scaleY(1) scaleX(1) skewX(0) rotateY(0deg);
     opacity: 1;
     filter: none;
   }
   100% {
-    transform: translateX(calc(-100% - 10px)) scaleY(0.82) scaleX(1.04) skewX(2deg);
+    transform: perspective(1050px) translateX(calc(-100% - 10px)) scaleY(0.82) scaleX(1.04) skewX(2deg) rotateY(12deg);
     opacity: 0.03;
     filter: saturate(1.1);
   }
@@ -786,12 +805,12 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 
 @keyframes sidebar-melt-slide-in {
   0% {
-    transform: translateX(calc(-100% - 10px)) scaleY(1.18) scaleX(0.96) skewX(-3deg);
+    transform: perspective(1050px) translateX(calc(-100% - 10px)) scaleY(1.18) scaleX(0.96) skewX(-3deg) rotateY(12deg);
     opacity: 0.08;
     filter: saturate(1.12);
   }
   100% {
-    transform: translateX(0) scaleY(1) scaleX(1) skewX(0);
+    transform: perspective(1050px) translateX(0) scaleY(1) scaleX(1) skewX(0) rotateY(0deg);
     opacity: 1;
     filter: none;
   }
@@ -876,14 +895,15 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 .nav-btn,
 .action-btn,
 .inline-btn {
-  border: 1px solid var(--line);
-  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 13px;
   color: var(--text);
-  background: var(--panel);
-  padding: 10px 12px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.015));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03), 0 8px 18px rgba(0, 0, 0, 0.12);
+  padding: 10px 13px;
   font-weight: 600;
   cursor: pointer;
-  transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+  transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease, box-shadow 0.18s ease, color 0.18s ease;
 }
 
 .nav-btn:hover,
@@ -891,6 +911,7 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 .inline-btn:hover {
   transform: translateY(-1px);
   border-color: var(--accent-soft);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 12px 24px rgba(0, 0, 0, 0.18);
 }
 
 .nav-btn:disabled,
@@ -914,15 +935,16 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 }
 
 .nav-btn.active {
-  background: linear-gradient(135deg, rgba(214, 90, 31, 0.24), rgba(214, 90, 31, 0.08));
-  border-color: rgba(214, 90, 31, 0.52);
+  background: linear-gradient(135deg, rgba(214, 90, 31, 0.28), rgba(214, 90, 31, 0.1));
+  border-color: rgba(214, 90, 31, 0.56);
+  box-shadow: var(--accent-glow);
 }
 
 .main-pane {
-  padding: 20px 28px 32px;
+  padding: 22px 30px 34px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 18px;
   min-width: 0;
 }
 
@@ -939,8 +961,9 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 
 .topbar h2 {
   margin: 0;
-  font-family: "Candara", "Trebuchet MS", sans-serif;
-  letter-spacing: 0.03em;
+  font-family: "Avenir Next Condensed", "Candara", "Trebuchet MS", sans-serif;
+  font-size: 1.5rem;
+  letter-spacing: 0.035em;
 }
 
 .topbar p {
@@ -949,11 +972,13 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 }
 
 .runtime-summary {
-  border: 1px solid var(--line);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 999px;
-  padding: 7px 11px;
+  padding: 8px 12px;
   color: var(--muted);
   font-size: 0.85rem;
+  background: rgba(255, 255, 255, 0.025);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
 
 .runtime-summary.interactive {
@@ -981,7 +1006,7 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 
 .view-root {
   display: grid;
-  gap: 14px;
+  gap: 16px;
   width: 100%;
   max-width: var(--content-max);
   margin: 0 auto;
@@ -998,12 +1023,39 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 }
 
 .card {
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 14px;
-  background: linear-gradient(180deg, rgba(33, 34, 37, 0.84), rgba(24, 25, 28, 0.92));
-  box-shadow: var(--shadow);
+  position: relative;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.065);
+  border-radius: 18px;
+  padding: 16px;
+  background:
+    linear-gradient(180deg, rgba(35, 37, 40, 0.92), rgba(20, 21, 24, 0.95)),
+    radial-gradient(circle at 14% 12%, rgba(240, 131, 69, 0.06), transparent 36%);
+  backdrop-filter: blur(14px) saturate(112%);
+  -webkit-backdrop-filter: blur(14px) saturate(112%);
+  box-shadow: var(--shadow-lift);
   animation: reveal-up 320ms ease both;
+}
+
+.card::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.12), transparent);
+  opacity: 0.85;
+  pointer-events: none;
+}
+
+.card::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 92px;
+  height: 92px;
+  background: radial-gradient(circle at top right, rgba(240, 131, 69, 0.09), transparent 72%);
+  pointer-events: none;
 }
 
 .view-root .card:nth-child(2) {
@@ -1019,12 +1071,13 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   justify-content: space-between;
   gap: 12px;
   align-items: center;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
 }
 
 .card-title {
   margin: 0;
-  font-size: 1rem;
+  font-size: 1.04rem;
+  letter-spacing: 0.012em;
 }
 
 .small,
@@ -1065,7 +1118,7 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 .inline-btn {
   padding: 7px 10px;
   font-size: 0.85rem;
-  background: rgba(255, 255, 255, 0.02);
+  background: rgba(255, 255, 255, 0.025);
 }
 
 .inline-btn.danger {
@@ -1084,8 +1137,9 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 }
 
 .action-btn {
-  background: linear-gradient(135deg, rgba(214, 90, 31, 0.42), rgba(214, 90, 31, 0.2));
+  background: linear-gradient(135deg, rgba(214, 90, 31, 0.46), rgba(214, 90, 31, 0.22));
   border-color: rgba(214, 90, 31, 0.55);
+  box-shadow: var(--accent-glow);
 }
 
 .action-btn.danger {
@@ -1105,9 +1159,9 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 
 .settings-dropdown {
   margin-top: 10px;
-  border: 1px solid var(--line);
+  border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 12px;
-  background: rgba(0, 0, 0, 0.15);
+  background: linear-gradient(180deg, rgba(7, 8, 10, 0.22), rgba(7, 8, 10, 0.14));
   overflow: hidden;
 }
 
@@ -1149,22 +1203,34 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 10px;
+  padding: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 16px;
+  background: rgba(0, 0, 0, 0.16);
 }
 
 .shop-tab-btn {
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 8px 12px;
-  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid transparent;
+  border-radius: 12px;
+  padding: 8px 13px;
+  background: transparent;
   color: var(--text);
   font-weight: 700;
   cursor: pointer;
+  transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease, box-shadow 0.16s ease, color 0.16s ease;
+}
+
+.shop-tab-btn:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
 }
 
 .shop-tab-btn.active {
-  border-color: rgba(214, 90, 31, 0.52);
-  background: linear-gradient(135deg, rgba(214, 90, 31, 0.24), rgba(214, 90, 31, 0.09));
+  border-color: rgba(214, 90, 31, 0.58);
+  background: linear-gradient(135deg, rgba(214, 90, 31, 0.28), rgba(214, 90, 31, 0.1));
   color: var(--accent-soft);
+  box-shadow: var(--accent-glow);
 }
 
 .shop-tab-panel {
@@ -1251,22 +1317,34 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 12px;
+  padding: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 16px;
+  background: rgba(0, 0, 0, 0.16);
 }
 
 .settings-tab-btn {
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 8px 12px;
-  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid transparent;
+  border-radius: 12px;
+  padding: 8px 13px;
+  background: transparent;
   color: var(--text);
   font-weight: 700;
   cursor: pointer;
+  transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease, box-shadow 0.16s ease, color 0.16s ease;
+}
+
+.settings-tab-btn:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
 }
 
 .settings-tab-btn.active {
-  border-color: rgba(214, 90, 31, 0.52);
-  background: linear-gradient(135deg, rgba(214, 90, 31, 0.24), rgba(214, 90, 31, 0.09));
+  border-color: rgba(214, 90, 31, 0.58);
+  background: linear-gradient(135deg, rgba(214, 90, 31, 0.28), rgba(214, 90, 31, 0.1));
   color: var(--accent-soft);
+  box-shadow: var(--accent-glow);
 }
 
 .settings-tab-panel {
@@ -1283,22 +1361,35 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 10px;
+  padding: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 16px;
+  background: rgba(0, 0, 0, 0.16);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
 }
 
 .settings-subtab-btn {
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 7px 11px;
-  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid transparent;
+  border-radius: 12px;
+  padding: 8px 13px;
+  background: transparent;
   color: var(--text);
   font-weight: 700;
   cursor: pointer;
+  transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease, box-shadow 0.16s ease, color 0.16s ease;
+}
+
+.settings-subtab-btn:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
 }
 
 .settings-subtab-btn.active {
-  border-color: rgba(214, 90, 31, 0.52);
-  background: linear-gradient(135deg, rgba(214, 90, 31, 0.24), rgba(214, 90, 31, 0.09));
+  border-color: rgba(214, 90, 31, 0.58);
+  background: linear-gradient(135deg, rgba(214, 90, 31, 0.28), rgba(214, 90, 31, 0.1));
   color: var(--accent-soft);
+  box-shadow: var(--accent-glow);
 }
 
 .settings-subpanel {
@@ -1309,6 +1400,7 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 
 .settings-subpanel.active {
   display: block;
+  animation: reveal-up 220ms ease-out both;
 }
 
 .settings-section-title {
@@ -1319,10 +1411,10 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 }
 
 .hydra-model-mode {
-  border: 1px solid var(--line);
+  border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 12px;
-  padding: 10px;
-  background: rgba(0, 0, 0, 0.15);
+  padding: 12px;
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.18), rgba(255, 255, 255, 0.02));
   display: grid;
   gap: 8px;
 }
@@ -1343,9 +1435,9 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
-  border: 1px solid var(--line);
+  border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 12px;
-  background: rgba(0, 0, 0, 0.15);
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.18), rgba(255, 255, 255, 0.02));
   overflow: hidden;
   max-height: 0;
   opacity: 0;
@@ -1432,10 +1524,10 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 }
 
 .settings-avatar-card {
-  border: 1px solid var(--line);
+  border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 12px;
-  padding: 10px;
-  background: rgba(0, 0, 0, 0.16);
+  padding: 12px;
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.18), rgba(255, 255, 255, 0.02));
   display: grid;
   gap: 8px;
 }
@@ -1467,22 +1559,34 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  padding: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 16px;
+  background: rgba(0, 0, 0, 0.16);
 }
 
 .core-top-tab-btn {
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 8px 12px;
-  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid transparent;
+  border-radius: 12px;
+  padding: 8px 13px;
+  background: transparent;
   color: var(--text);
   font-weight: 700;
   cursor: pointer;
+  transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease, box-shadow 0.16s ease, color 0.16s ease;
+}
+
+.core-top-tab-btn:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
 }
 
 .core-top-tab-btn.active {
-  border-color: rgba(214, 90, 31, 0.52);
-  background: linear-gradient(135deg, rgba(214, 90, 31, 0.24), rgba(214, 90, 31, 0.09));
+  border-color: rgba(214, 90, 31, 0.58);
+  background: linear-gradient(135deg, rgba(214, 90, 31, 0.28), rgba(214, 90, 31, 0.1));
   color: var(--accent-soft);
+  box-shadow: var(--accent-glow);
 }
 
 .core-top-tab-panel {
@@ -1492,6 +1596,7 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 
 .core-top-tab-panel.active {
   display: block;
+  animation: reveal-up 220ms ease-out both;
 }
 
 .core-metric-row {
@@ -1502,11 +1607,11 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 }
 
 .core-metric-pill {
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+  padding: 9px 11px;
   min-width: 110px;
-  background: rgba(0, 0, 0, 0.15);
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.18), rgba(255, 255, 255, 0.02));
 }
 
 .core-tab-items {
@@ -1522,10 +1627,10 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 }
 
 .core-tab-item {
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 10px;
-  background: rgba(0, 0, 0, 0.14);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+  padding: 11px;
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.16), rgba(255, 255, 255, 0.02));
 }
 
 .core-manager-tabs {
@@ -1533,22 +1638,34 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 8px;
+  padding: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 16px;
+  background: rgba(0, 0, 0, 0.16);
 }
 
 .core-manager-tab-btn {
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 8px 12px;
-  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid transparent;
+  border-radius: 12px;
+  padding: 8px 13px;
+  background: transparent;
   color: var(--text);
   font-weight: 700;
   cursor: pointer;
+  transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease, box-shadow 0.16s ease, color 0.16s ease;
+}
+
+.core-manager-tab-btn:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
 }
 
 .core-manager-tab-btn.active {
-  border-color: rgba(214, 90, 31, 0.52);
-  background: linear-gradient(135deg, rgba(214, 90, 31, 0.24), rgba(214, 90, 31, 0.09));
+  border-color: rgba(214, 90, 31, 0.58);
+  background: linear-gradient(135deg, rgba(214, 90, 31, 0.28), rgba(214, 90, 31, 0.1));
   color: var(--accent-soft);
+  box-shadow: var(--accent-glow);
 }
 
 .core-manager-tab-panel {
@@ -1558,6 +1675,7 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 
 .core-manager-tab-panel.active {
   display: block;
+  animation: reveal-up 220ms ease-out both;
 }
 
 .core-manager-subtabs {
@@ -1565,22 +1683,34 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 8px;
+  padding: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 16px;
+  background: rgba(0, 0, 0, 0.16);
 }
 
 .core-manager-subtab-btn {
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 7px 11px;
-  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid transparent;
+  border-radius: 12px;
+  padding: 8px 13px;
+  background: transparent;
   color: var(--text);
   font-weight: 700;
   cursor: pointer;
+  transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease, box-shadow 0.16s ease, color 0.16s ease;
+}
+
+.core-manager-subtab-btn:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
 }
 
 .core-manager-subtab-btn.active {
-  border-color: rgba(214, 90, 31, 0.52);
-  background: linear-gradient(135deg, rgba(214, 90, 31, 0.24), rgba(214, 90, 31, 0.09));
+  border-color: rgba(214, 90, 31, 0.58);
+  background: linear-gradient(135deg, rgba(214, 90, 31, 0.28), rgba(214, 90, 31, 0.1));
   color: var(--accent-soft);
+  box-shadow: var(--accent-glow);
 }
 
 .core-manager-subtab-panel {
@@ -1590,6 +1720,7 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 
 .core-manager-subtab-panel.active {
   display: block;
+  animation: reveal-up 220ms ease-out both;
 }
 
 .core-manager-selector-wrap {
@@ -2640,6 +2771,13 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   padding: 10px;
 }
 
+.core-manager-item,
+.core-manager-item-event {
+  background:
+    linear-gradient(180deg, rgba(0, 0, 0, 0.15), rgba(255, 255, 255, 0.02)),
+    radial-gradient(circle at 16% 14%, rgba(240, 131, 69, 0.045), transparent 38%);
+}
+
 .core-manager-item-event .card-head {
   margin-bottom: 2px;
 }
@@ -2823,9 +2961,10 @@ textarea {
 
 .view-root[data-view="chat"] .chat-composer-bar {
   background:
-    radial-gradient(circle at 12% 18%, rgba(240, 131, 69, 0.04), transparent 42%),
-    rgba(12, 13, 15, 0.38);
+    radial-gradient(circle at 14% 18%, rgba(240, 131, 69, 0.06), transparent 42%),
+    linear-gradient(180deg, rgba(24, 25, 28, 0.96), rgba(13, 14, 16, 0.92));
   border-color: rgba(240, 131, 69, 0.22);
+  box-shadow: 0 18px 34px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
 .view-root[data-view="chat"] #chat-speed-stats {
@@ -2889,7 +3028,7 @@ textarea {
   background:
     radial-gradient(circle at 18% 20%, rgba(240, 131, 69, 0.12), transparent 42%),
     rgba(10, 11, 13, 0.34);
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.14);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.16);
 }
 
 .chat-avatar {
@@ -2925,17 +3064,21 @@ textarea {
 }
 
 .bubble {
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  padding: 10px;
-  background: rgba(0, 0, 0, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.065);
+  border-radius: 16px;
+  padding: 11px 12px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.015)),
+    rgba(0, 0, 0, 0.18);
+  box-shadow: var(--shadow-soft);
   min-width: 0;
   max-width: min(72%, 860px);
 }
 
 .bubble.user {
-  border-color: rgba(214, 90, 31, 0.58);
-  background: linear-gradient(150deg, rgba(214, 90, 31, 0.62), rgba(214, 90, 31, 0.34));
+  border-color: rgba(214, 90, 31, 0.52);
+  background: linear-gradient(150deg, rgba(214, 90, 31, 0.54), rgba(214, 90, 31, 0.28));
+  box-shadow: 0 14px 30px rgba(214, 90, 31, 0.16);
 }
 
 .bubble .role {
@@ -3503,9 +3646,9 @@ body[data-popup-effect="melt"] .toast-item.flame-out::after {
 }
 
 .chat-composer-card {
-  margin-top: 4px;
-  padding: 8px 0 0;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  margin-top: 6px;
+  padding: 10px 0 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .chat-composer {
@@ -3514,31 +3657,49 @@ body[data-popup-effect="melt"] .toast-item.flame-out::after {
 }
 
 .chat-composer-bar {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 10px;
-  border: 1px solid rgba(240, 131, 69, 0.18);
-  border-radius: 24px;
+  gap: 12px;
+  border: 1px solid rgba(240, 131, 69, 0.22);
+  border-radius: 26px;
   background:
-    radial-gradient(circle at 12% 18%, rgba(240, 131, 69, 0.05), transparent 42%),
-    rgba(12, 13, 15, 0.48);
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.18);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  padding: 6px 8px;
+    radial-gradient(circle at 14% 18%, rgba(240, 131, 69, 0.07), transparent 42%),
+    linear-gradient(180deg, rgba(22, 23, 26, 0.98), rgba(13, 14, 16, 0.94));
+  box-shadow: 0 18px 34px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  padding: 7px 9px;
+}
+
+.chat-composer-bar::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(135deg, rgba(240, 131, 69, 0.22), rgba(255, 255, 255, 0.05), rgba(240, 131, 69, 0.08));
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  opacity: 0.8;
+  pointer-events: none;
 }
 
 .chat-composer-input {
   flex: 1 1 auto;
   min-width: 0;
-  min-height: 20px;
+  min-height: 22px;
   max-height: 200px;
   border: 0;
   border-radius: 16px;
   background: transparent;
-  padding: 7px 0 6px;
+  padding: 8px 0 7px;
   resize: none;
-  line-height: 1.35;
+  line-height: 1.38;
+  font-size: 0.96rem;
 }
 
 .chat-composer-input:focus {
@@ -3552,13 +3713,13 @@ body[data-popup-effect="melt"] .toast-item.flame-out::after {
 
 .chat-composer-btn,
 .chat-composer-send {
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 999px;
   color: var(--text);
-  background: rgba(255, 255, 255, 0.035);
-  width: 36px;
-  min-width: 36px;
-  height: 36px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.02));
+  width: 38px;
+  min-width: 38px;
+  height: 38px;
   padding: 0;
   font-size: 0.82rem;
   font-weight: 600;
@@ -3582,8 +3743,8 @@ body[data-popup-effect="melt"] .toast-item.flame-out::after {
 .chat-composer-btn:hover,
 .chat-composer-send:hover {
   border-color: var(--accent-soft);
-  transform: translateY(-1px);
-  box-shadow: 0 6px 14px rgba(0, 0, 0, 0.12);
+  transform: translateY(-1px) scale(1.01);
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.16);
 }
 
 .chat-composer-attach {
@@ -3600,8 +3761,9 @@ body[data-popup-effect="melt"] .toast-item.flame-out::after {
   background: linear-gradient(135deg, rgba(214, 90, 31, 0.92), rgba(214, 90, 31, 0.64));
   border-color: rgba(214, 90, 31, 0.72);
   color: #fff7f2;
-  width: 38px;
-  min-width: 38px;
+  width: 40px;
+  min-width: 40px;
+  box-shadow: 0 10px 22px rgba(214, 90, 31, 0.24);
 }
 
 .chat-composer-send-arrow {
@@ -4290,26 +4452,26 @@ body[data-popup-effect="melt"] .toast-item.flame-out::after {
   }
 
   .chat-composer-card {
-    padding: 8px 0 0;
+    padding: 10px 0 0;
   }
 
   .chat-composer-bar {
     gap: 8px;
-    border-radius: 20px;
-    padding: 6px 8px;
+    border-radius: 22px;
+    padding: 7px 8px;
   }
 
   .chat-composer-input {
-    min-height: 20px;
+    min-height: 22px;
     max-height: 160px;
-    padding: 7px 0 6px;
+    padding: 8px 0 7px;
   }
 
   .chat-composer-btn,
   .chat-composer-send {
-    width: 34px;
-    min-width: 34px;
-    height: 34px;
+    width: 36px;
+    min-width: 36px;
+    height: 36px;
     padding: 0;
   }
 
