@@ -138,7 +138,6 @@ bootstrap_state: Dict[str, Any] = {
     "restore_error": "",
     "restore_summary": {},
     "autostart_enabled": True,
-    "redis_migration": {},
 }
 redis_maintenance_lock = threading.RLock()
 
@@ -1995,6 +1994,16 @@ def _stop_builtin_esphome() -> None:
     _run_async_sync(esphome_home_module.shutdown(), timeout=30.0)
 
 
+def _redis_reachable_for_startup() -> tuple[bool, str]:
+    timeout = _read_positive_float_env("HTMLUI_STARTUP_REDIS_PROBE_TIMEOUT_SECONDS", 0.45)
+    try:
+        config = get_redis_connection_config(include_secret=True)
+        ok, error = test_redis_connection_settings(config, timeout_seconds=timeout)
+        return bool(ok), str(error or "")
+    except Exception as exc:
+        return False, str(exc)
+
+
 def _restore_progress_logger(label: str):
     prefix = str(label or "restore").strip().lower()
 
@@ -2011,186 +2020,9 @@ def _restore_progress_logger(label: str):
     return _cb
 
 
-def _merge_hash_fields_without_overwrite(target_key: str, source: Dict[str, Any]) -> tuple[int, int]:
-    existing = redis_client.hgetall(target_key) or {}
-    to_write: Dict[str, str] = {}
-    skipped_existing = 0
-
-    for raw_field, raw_value in (source or {}).items():
-        field = str(raw_field or "").strip()
-        if not field:
-            continue
-        if field in existing:
-            skipped_existing += 1
-            continue
-        to_write[field] = str(raw_value) if raw_value is not None else ""
-
-    if to_write:
-        redis_client.hset(target_key, mapping=to_write)
-    return len(to_write), skipped_existing
-
-
-def _history_keys_for_legacy_marker_migration() -> List[str]:
-    keys = {CHAT_HISTORY_KEY}
-    for pattern in ("tater:channel:*:history", "tater:telegram:*:history", "tater:matrix:*:history"):
-        for raw_key in redis_client.scan_iter(match=pattern):
-            key = str(raw_key or "").strip()
-            if key:
-                keys.add(key)
-    return sorted(keys)
-
-
-def _migrate_legacy_plugin_history_markers() -> Dict[str, Any]:
-    """
-    One-way chat history migration:
-    - Drops legacy transient plugin wrappers: plugin_call, plugin_wait
-    - Unwraps plugin_response payloads into plain assistant content
-
-    This keeps conversation history readable after plugin -> verba rename and
-    avoids feeding wrapper-only tool markers back into Hydra context.
-    """
-    summary: Dict[str, Any] = {
-        "changed": False,
-        "history_keys_scanned": 0,
-        "history_keys_migrated": 0,
-        "history_entries_scanned": 0,
-        "history_entries_removed": 0,
-        "history_entries_unwrapped": 0,
-    }
-
-    history_keys = _history_keys_for_legacy_marker_migration()
-    summary["history_keys_scanned"] = len(history_keys)
-
-    for key in history_keys:
-        try:
-            rows = list(redis_client.lrange(key, 0, -1) or [])
-        except Exception:
-            continue
-        if not rows:
-            continue
-
-        migrated_rows: List[str] = []
-        key_changed = False
-
-        for raw_line in rows:
-            line = str(raw_line or "")
-            summary["history_entries_scanned"] += 1
-
-            try:
-                parsed = json.loads(line)
-            except Exception:
-                migrated_rows.append(line)
-                continue
-
-            if not isinstance(parsed, dict):
-                migrated_rows.append(line)
-                continue
-
-            content = parsed.get("content")
-            if not isinstance(content, dict):
-                migrated_rows.append(line)
-                continue
-
-            marker = str(content.get("marker") or "").strip().lower()
-            if marker not in {"plugin_call", "plugin_wait", "plugin_response"}:
-                migrated_rows.append(line)
-                continue
-
-            key_changed = True
-
-            if marker in {"plugin_call", "plugin_wait"}:
-                summary["history_entries_removed"] += 1
-                continue
-
-            payload = content.get("content")
-            if payload is None or (isinstance(payload, str) and not payload.strip()):
-                summary["history_entries_removed"] += 1
-                continue
-
-            migrated = dict(parsed)
-            migrated["content"] = payload
-            migrated_rows.append(json.dumps(migrated, ensure_ascii=False))
-            summary["history_entries_unwrapped"] += 1
-
-        if not key_changed:
-            continue
-
-        pipe = redis_client.pipeline()
-        pipe.delete(key)
-        if migrated_rows:
-            pipe.rpush(key, *migrated_rows)
-        pipe.execute()
-        summary["history_keys_migrated"] += 1
-        summary["changed"] = True
-
-    return summary
-
-
-def _migrate_legacy_plugin_redis_keys() -> Dict[str, Any]:
-    """
-    One-way Redis key migration:
-    - plugin_enabled -> verba_enabled
-    - plugin_settings:* -> verba_settings:*
-
-    Migration is no-op when legacy keys are absent.
-    """
-    summary: Dict[str, Any] = {
-        "changed": False,
-        "legacy_plugin_enabled_fields": 0,
-        "verba_enabled_fields_migrated": 0,
-        "verba_enabled_fields_skipped_existing": 0,
-        "legacy_plugin_settings_keys": 0,
-        "verba_settings_fields_migrated": 0,
-        "verba_settings_fields_skipped_existing": 0,
-        "legacy_keys_deleted": 0,
-        "legacy_history_keys_scanned": 0,
-        "legacy_history_keys_migrated": 0,
-        "legacy_history_entries_scanned": 0,
-        "legacy_history_entries_removed": 0,
-        "legacy_history_entries_unwrapped": 0,
-    }
-
-    old_enabled = redis_client.hgetall("plugin_enabled") or {}
-    if old_enabled:
-        summary["legacy_plugin_enabled_fields"] = len(old_enabled)
-        moved, skipped = _merge_hash_fields_without_overwrite("verba_enabled", old_enabled)
-        summary["verba_enabled_fields_migrated"] = moved
-        summary["verba_enabled_fields_skipped_existing"] = skipped
-        redis_client.delete("plugin_enabled")
-        summary["legacy_keys_deleted"] += 1
-        summary["changed"] = True
-
-    old_settings_keys = [str(k) for k in redis_client.scan_iter(match="plugin_settings:*")]
-    summary["legacy_plugin_settings_keys"] = len(old_settings_keys)
-    for old_key in old_settings_keys:
-        suffix = old_key[len("plugin_settings:") :]
-        new_key = f"verba_settings:{suffix}"
-        old_fields = redis_client.hgetall(old_key) or {}
-        moved, skipped = _merge_hash_fields_without_overwrite(new_key, old_fields)
-        summary["verba_settings_fields_migrated"] += moved
-        summary["verba_settings_fields_skipped_existing"] += skipped
-        redis_client.delete(old_key)
-        summary["legacy_keys_deleted"] += 1
-        summary["changed"] = True
-
-    history_summary = _migrate_legacy_plugin_history_markers()
-    summary["legacy_history_keys_scanned"] = int(history_summary.get("history_keys_scanned") or 0)
-    summary["legacy_history_keys_migrated"] = int(history_summary.get("history_keys_migrated") or 0)
-    summary["legacy_history_entries_scanned"] = int(history_summary.get("history_entries_scanned") or 0)
-    summary["legacy_history_entries_removed"] = int(history_summary.get("history_entries_removed") or 0)
-    summary["legacy_history_entries_unwrapped"] = int(history_summary.get("history_entries_unwrapped") or 0)
-    if history_summary.get("changed"):
-        summary["changed"] = True
-
-    return summary
-
-
 def _restore_enabled_surfaces() -> Dict[str, Any]:
     """
-    Match legacy startup behavior:
-    - restore missing enabled verbas
-    - restore missing enabled cores
-    - restore missing enabled portals
+    Restore enabled surfaces that are missing on disk.
     """
     summary: Dict[str, Any] = {
         "plugins_missing_before": 0,
@@ -2268,7 +2100,6 @@ def _replay_startup_after_redis_configure() -> Dict[str, Any]:
         "ran_autostart": False,
         "error": "",
         "restore_summary": {},
-        "redis_migration": {},
     }
 
     bootstrap_state["restore_in_progress"] = True
@@ -2276,10 +2107,6 @@ def _replay_startup_after_redis_configure() -> Dict[str, Any]:
     bootstrap_state["restore_error"] = ""
 
     try:
-        migration_summary = _migrate_legacy_plugin_redis_keys()
-        bootstrap_state["redis_migration"] = migration_summary
-        result["redis_migration"] = dict(migration_summary or {})
-
         if bool(bootstrap_state.get("restore_enabled")):
             summary = _restore_enabled_surfaces()
             bootstrap_state["restore_summary"] = summary
@@ -2833,25 +2660,25 @@ async def _startup_event() -> None:
     bootstrap_state["restore_complete"] = False
     bootstrap_state["restore_error"] = ""
     bootstrap_state["restore_summary"] = {}
-    bootstrap_state["redis_migration"] = {}
 
     try:
-        migration_summary = _migrate_legacy_plugin_redis_keys()
-        bootstrap_state["redis_migration"] = migration_summary
-        if migration_summary.get("changed"):
-            logger.info("[startup-migrate] migrated legacy plugin redis keys: %s", migration_summary)
-        if restore_enabled:
-            bootstrap_state["restore_in_progress"] = True
-            summary = _restore_enabled_surfaces()
-            bootstrap_state["restore_summary"] = summary
-            logger.info("[startup-restore] summary: %s", summary)
+        redis_ready, redis_error = _redis_reachable_for_startup()
+        if not redis_ready:
+            bootstrap_state["restore_error"] = redis_error or "Redis is unavailable."
+            logger.warning("Redis unavailable during startup bootstrap: %s", bootstrap_state["restore_error"])
         else:
-            logger.info("[startup-restore] skipped (HTMLUI_RESTORE_ENABLED_SURFACES_ON_STARTUP=false)")
-        if autostart_enabled:
-            _autostart_enabled_surfaces()
-        else:
-            logger.info("[startup-autostart] skipped (HTMLUI_AUTOSTART_ENABLED_SURFACES_ON_STARTUP=false)")
-        await esphome_home_module.startup()
+            if restore_enabled:
+                bootstrap_state["restore_in_progress"] = True
+                summary = _restore_enabled_surfaces()
+                bootstrap_state["restore_summary"] = summary
+                logger.info("[startup-restore] summary: %s", summary)
+            else:
+                logger.info("[startup-restore] skipped (HTMLUI_RESTORE_ENABLED_SURFACES_ON_STARTUP=false)")
+            if autostart_enabled:
+                _autostart_enabled_surfaces()
+            else:
+                logger.info("[startup-autostart] skipped (HTMLUI_AUTOSTART_ENABLED_SURFACES_ON_STARTUP=false)")
+            await esphome_home_module.startup()
     except RedisError as exc:
         bootstrap_state["restore_error"] = str(exc)
         logger.warning("Redis unavailable during startup autostart: %s", exc)
@@ -3413,7 +3240,6 @@ def health() -> Dict[str, Any]:
             "restore_complete": bool(bootstrap_state.get("restore_complete")),
             "restore_error": str(bootstrap_state.get("restore_error") or ""),
             "restore_summary": dict(bootstrap_state.get("restore_summary") or {}),
-            "redis_migration": dict(bootstrap_state.get("redis_migration") or {}),
         },
     }
 

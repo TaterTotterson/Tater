@@ -57,6 +57,32 @@ body.webui-auth-locked #sidebar-expand-btn {
   user-select: none;
 }
 
+body.redis-bootstrap-mode #app-sidebar,
+body.redis-bootstrap-mode #sidebar-expand-btn,
+body.redis-bootstrap-mode .topbar {
+  display: none !important;
+}
+
+body.redis-bootstrap-mode .app-shell {
+  display: block;
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+body.redis-bootstrap-mode .main-pane {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 34px 22px;
+}
+
+body.redis-bootstrap-mode .view-root {
+  width: 100%;
+  max-width: 980px;
+}
+
 .bg-shape {
   position: fixed;
   border-radius: 999px;
@@ -1056,6 +1082,58 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   height: 92px;
   background: radial-gradient(circle at top right, rgba(240, 131, 69, 0.09), transparent 72%);
   pointer-events: none;
+}
+
+.redis-bootstrap-wrap {
+  display: flex;
+  justify-content: center;
+}
+
+.redis-bootstrap-card {
+  width: min(100%, 920px);
+  padding: 22px 22px 18px;
+  border-color: rgba(240, 131, 69, 0.18);
+  box-shadow:
+    0 0 0 1px rgba(240, 131, 69, 0.08),
+    0 24px 56px rgba(0, 0, 0, 0.34);
+}
+
+.redis-bootstrap-brand {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.redis-bootstrap-brand .brand-dot {
+  margin-top: 4px;
+  flex: 0 0 auto;
+}
+
+.redis-bootstrap-kicker {
+  color: var(--accent-soft);
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.redis-bootstrap-title {
+  margin: 4px 0 8px;
+  font-family: "Avenir Next Condensed", "Candara", "Trebuchet MS", sans-serif;
+  font-size: clamp(1.8rem, 4vw, 2.35rem);
+  letter-spacing: 0.03em;
+}
+
+.redis-bootstrap-copy {
+  margin: 0;
+  max-width: 62ch;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.redis-bootstrap-status {
+  margin-bottom: 12px;
 }
 
 .view-root .card:nth-child(2) {
@@ -2210,28 +2288,6 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 
 .small.success {
   color: #8ae7a8;
-}
-
-.redis-setup-dialog {
-  width: min(760px, 96vw);
-  gap: 10px;
-}
-
-.redis-setup-form {
-  margin-top: 6px;
-}
-
-.redis-setup-form .inline-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.redis-setup-form .toggle-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
 }
 
 .action-progress-dialog {
