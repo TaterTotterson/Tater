@@ -393,10 +393,19 @@ let redisSetupPromise = null;
 let redisSetupResolve = null;
 let redisRecoveryPromptInFlight = false;
 let redisRecoveryPromptLastAt = 0;
+let healthRefreshTimer = 0;
+let healthRefreshPromise = null;
 let webuiAuthPromise = null;
 let webuiAuthResolve = null;
 let webuiAuthRecoveryInFlight = false;
 let webuiAuthRecoveryLastAt = 0;
+
+const REDIS_STATUS_TIMEOUT_MS = 900;
+const HEALTH_REQUEST_TIMEOUT_MS = 1200;
+const HEALTH_POLL_BOOT_MS = 1400;
+const HEALTH_POLL_RECOVERY_MS = 2200;
+const HEALTH_POLL_CONNECTED_MS = 8000;
+const REDIS_RECOVERY_PROMPT_COOLDOWN_MS = 1200;
 
 function _setWebuiAuthStatus(raw) {
   const next = raw && typeof raw === "object" ? raw : {};
@@ -762,6 +771,50 @@ function _showRedisSetupModal(status) {
   return modal;
 }
 
+function _resolveRedisSetup(status = null) {
+  const resolvedStatus = status && typeof status === "object" ? status : state.redisStatus || {};
+  if (typeof redisSetupResolve === "function") {
+    redisSetupResolve(resolvedStatus);
+  }
+  redisSetupPromise = null;
+  redisSetupResolve = null;
+}
+
+function _syncRedisSetupModal(status, { openIfDisconnected = false } = {}) {
+  const nextStatus = _setRedisStatus(status || state.redisStatus || {});
+  const modal = document.getElementById("redis-setup-modal");
+  const modalActive = Boolean(modal?.classList?.contains("active"));
+  if (nextStatus.connected) {
+    if (modal && typeof modal._applyRedisStatus === "function") {
+      modal._applyRedisStatus(nextStatus);
+    }
+    if (modalActive) {
+      closePopupModal(modal);
+    }
+    if (redisSetupPromise) {
+      _resolveRedisSetup(nextStatus);
+    }
+    return nextStatus;
+  }
+  if (openIfDisconnected || modalActive || redisSetupPromise) {
+    _showRedisSetupModal(nextStatus);
+  } else if (modal && typeof modal._applyRedisStatus === "function") {
+    modal._applyRedisStatus(nextStatus);
+  }
+  return nextStatus;
+}
+
+function _scheduleHealthRefresh(delayMs = HEALTH_POLL_CONNECTED_MS) {
+  if (healthRefreshTimer) {
+    window.clearTimeout(healthRefreshTimer);
+    healthRefreshTimer = 0;
+  }
+  healthRefreshTimer = window.setTimeout(() => {
+    healthRefreshTimer = 0;
+    void refreshHealth();
+  }, Math.max(0, Number(delayMs) || 0));
+}
+
 function ensureRedisSetupModal() {
   let modal = document.getElementById("redis-setup-modal");
   if (modal) {
@@ -956,8 +1009,11 @@ function ensureRedisSetupModal() {
   refreshBtn?.addEventListener("click", async () => {
     setBusy(true);
     try {
-      const status = await api("/api/redis/status");
+      const status = await api("/api/redis/status", { _timeoutMs: REDIS_STATUS_TIMEOUT_MS });
       applyStatus(status);
+      if (status?.connected) {
+        _syncRedisSetupModal(status);
+      }
     } catch (error) {
       if (statusEl) {
         statusEl.textContent = `Failed to refresh Redis status: ${error.message}`;
@@ -1013,12 +1069,7 @@ function ensureRedisSetupModal() {
         window.location.reload();
         return;
       }
-      closePopupModal(modal);
-      if (typeof redisSetupResolve === "function") {
-        redisSetupResolve(status);
-      }
-      redisSetupPromise = null;
-      redisSetupResolve = null;
+      _syncRedisSetupModal(status);
     } catch (error) {
       if (statusEl) {
         statusEl.textContent = String(error?.message || "Redis setup failed.");
@@ -1037,7 +1088,7 @@ function ensureRedisSetupModal() {
 async function ensureRedisSetup() {
   let status = state.redisStatus || {};
   try {
-    status = _setRedisStatus(await api("/api/redis/status", { _skipRedisRecovery: true, _timeoutMs: 2500 }));
+    status = _setRedisStatus(await api("/api/redis/status", { _skipRedisRecovery: true, _timeoutMs: REDIS_STATUS_TIMEOUT_MS }));
   } catch (error) {
     const message = String(error?.message || "Failed to load Redis status.");
     status = _setRedisStatus({
@@ -1050,7 +1101,8 @@ async function ensureRedisSetup() {
     return status;
   }
 
-  _showRedisSetupModal(status);
+  _syncRedisSetupModal(status, { openIfDisconnected: true });
+  _scheduleHealthRefresh(HEALTH_POLL_BOOT_MS);
   return redisSetupPromise;
 }
 
@@ -1087,13 +1139,14 @@ async function promptRedisSetupRecovery(reason = "", { force = false } = {}) {
   const now = Date.now();
   const existingModal = document.getElementById("redis-setup-modal");
   if (!force && existingModal?.classList.contains("active")) {
+    _scheduleHealthRefresh(180);
     return;
   }
   if (!force) {
     if (redisRecoveryPromptInFlight) {
       return;
     }
-    if (now - redisRecoveryPromptLastAt < 2500) {
+    if (now - redisRecoveryPromptLastAt < REDIS_RECOVERY_PROMPT_COOLDOWN_MS) {
       return;
     }
   }
@@ -1108,28 +1161,8 @@ async function promptRedisSetupRecovery(reason = "", { force = false } = {}) {
       connected: false,
       error: fallbackError,
     });
-    _showRedisSetupModal(status);
-
-    try {
-      status = _setRedisStatus(await api("/api/redis/status", { _skipRedisRecovery: true, _timeoutMs: 2500 }));
-    } catch (error) {
-      const nextError = String(reason || error?.message || status?.error || "Redis is unavailable.");
-      status = _setRedisStatus({
-        ...(status || {}),
-        connected: false,
-        error: nextError,
-      });
-    }
-
-    if (status.connected) {
-      const modal = document.getElementById("redis-setup-modal");
-      if (modal?.classList?.contains("active")) {
-        closePopupModal(modal);
-      }
-      return;
-    }
-
-    _showRedisSetupModal(status);
+    _syncRedisSetupModal(status, { openIfDisconnected: true });
+    _scheduleHealthRefresh(180);
   } finally {
     redisRecoveryPromptInFlight = false;
   }
@@ -2595,21 +2628,44 @@ function bindRuntimeSummary() {
 }
 
 async function refreshHealth() {
-  try {
-    const health = await api("/api/health");
-    if (health?.redis_status && typeof health.redis_status === "object") {
-      _setRedisStatus(health.redis_status);
-    }
-    const redisConnected = Boolean(health?.redis_status?.connected ?? health?.redis);
-    if (!redisConnected) {
-      setRuntimeSummaryText("Redis setup required", "offline");
-      void promptRedisSetupRecovery(String(health?.redis_status?.error || "Redis connection lost."));
-      return;
-    }
-    setRuntimeSummaryText(formatRuntimeSummary(health), "normal");
-  } catch {
-    setRuntimeSummaryText("Backend offline", "offline");
+  if (healthRefreshPromise) {
+    return healthRefreshPromise;
   }
+
+  healthRefreshPromise = (async () => {
+    let redisConnected = false;
+    try {
+      const health = await api("/api/health", { _timeoutMs: HEALTH_REQUEST_TIMEOUT_MS });
+      if (health?.redis_status && typeof health.redis_status === "object") {
+        _setRedisStatus(health.redis_status);
+      }
+      redisConnected = Boolean(health?.redis_status?.connected ?? health?.redis);
+      if (!redisConnected) {
+        setRuntimeSummaryText("Redis setup required", "offline");
+        _syncRedisSetupModal(
+          {
+            ...(health?.redis_status && typeof health.redis_status === "object" ? health.redis_status : state.redisStatus || {}),
+            connected: false,
+            error: String(health?.redis_status?.error || state.redisStatus?.error || "Redis connection lost."),
+          },
+          { openIfDisconnected: true }
+        );
+        return health;
+      }
+      _syncRedisSetupModal(health?.redis_status || state.redisStatus || {});
+      setRuntimeSummaryText(formatRuntimeSummary(health), "normal");
+      return health;
+    } catch {
+      setRuntimeSummaryText("Backend offline", "offline");
+      return null;
+    } finally {
+      const nextDelay = redisConnected ? HEALTH_POLL_CONNECTED_MS : HEALTH_POLL_RECOVERY_MS;
+      _scheduleHealthRefresh(nextDelay);
+      healthRefreshPromise = null;
+    }
+  })();
+
+  return healthRefreshPromise;
 }
 
 function closeChatEventSource(jobId = "") {
@@ -8806,8 +8862,13 @@ async function loadChatView() {
           task_name: taskName,
         });
         _setChatLiveStatus();
-      } catch {
+      } catch (error) {
         _setChatLiveStatus();
+        if (_isLikelyRedisFailureDetail(error?.message || "")) {
+          void promptRedisSetupRecovery(String(error?.message || "Redis connection lost."));
+        } else {
+          _scheduleHealthRefresh(220);
+        }
       }
 
       scheduleChatJobPoll(id, 1200);
@@ -8987,6 +9048,11 @@ async function loadChatView() {
       await refreshHealth();
     } catch (error) {
       _setChatLiveStatus(`Chat failed: ${error.message}`);
+      if (_isLikelyRedisFailureDetail(error?.message || "")) {
+        void promptRedisSetupRecovery(String(error?.message || "Redis connection lost."));
+      } else {
+        _scheduleHealthRefresh(220);
+      }
     } finally {
       state.chatSendInFlight = Math.max(0, Number(state.chatSendInFlight) - 1);
       state.sending = state.chatSendInFlight > 0;
@@ -11902,11 +11968,14 @@ async function init() {
   await refreshBranding();
   await refreshHealth();
   await loadView(state.view);
-
-  setInterval(refreshHealth, 8000);
+  _scheduleHealthRefresh(HEALTH_POLL_CONNECTED_MS);
 }
 
 window.addEventListener("beforeunload", () => {
+  if (healthRefreshTimer) {
+    window.clearTimeout(healthRefreshTimer);
+    healthRefreshTimer = 0;
+  }
   closeChatEventSource();
   stopAllChatJobPolling();
   stopRuntimeBreakdownPolling();
