@@ -36,18 +36,40 @@ def voice_ui_setting_specs() -> List[Dict[str, Any]]:
             "description": "If enabled, Tater uses a small AI check to decide whether to reopen the mic for a follow-up reply.",
         },
         {
+            "key": "VOICE_VAD_BACKEND",
+            "label": "VAD Backend",
+            "type": "select",
+            "default": vp.DEFAULT_VAD_BACKEND,
+            "options": [
+                {"value": "silero", "label": "Silero"},
+                {"value": "webrtc", "label": "WebRTC (lightweight)"},
+                {"value": "auto", "label": "Auto"},
+            ],
+            "description": "Silero is the best default. WebRTC is much lighter for low-power PCs and Pi-class hosts.",
+        },
+        {
+            "key": "VOICE_WEBRTC_VAD_AGGRESSIVENESS",
+            "label": "WebRTC VAD Aggressiveness",
+            "type": "number",
+            "default": vp.DEFAULT_WEBRTC_VAD_AGGRESSIVENESS,
+            "min": 0,
+            "max": 3,
+            "step": 1,
+            "description": "WebRTC only. 0 is least aggressive; 3 filters non-speech most aggressively.",
+        },
+        {
             "key": "VOICE_EXPERIMENTAL_LIVE_TOOL_PROGRESS_ENABLED",
             "label": "Experimental Live Tool Progress Speech",
             "type": "checkbox",
             "default": vp.DEFAULT_EXPERIMENTAL_LIVE_TOOL_PROGRESS_ENABLED,
-            "description": "If enabled, Tater can briefly speak Hydra tool-progress updates before the final reply. Updated Tater firmware on VoicePE or Satellite1 can also show the tool-call LED animation during that spoken update. If disabled, Tater stays in thinking until the final response.",
+            "description": "If enabled, Tater can briefly speak Hydra tool-progress updates before the final reply. Updated Tater firmware on VoicePE or Satellite1 can also show the tool-call LED animation during those spoken updates. If disabled, Tater stays in thinking until the final response.",
         },
         {
             "key": "VOICE_EXPERIMENTAL_PARTIAL_STT_ENABLED",
             "label": "Experimental Partial STT",
             "type": "checkbox",
             "default": vp.DEFAULT_EXPERIMENTAL_PARTIAL_STT_ENABLED,
-            "description": "If enabled, Tater will try to build live partial transcripts during capture for all STT backends. This can improve turn-end decisions, but may use more CPU/GPU.",
+            "description": "If enabled, Tater will try to build live partial transcripts during capture for local and Wyoming STT backends. This can improve turn-end decisions, but may use more CPU/GPU.",
         },
         {
             "key": "VOICE_EXPERIMENTAL_TTS_EARLY_START_ENABLED",
@@ -206,7 +228,9 @@ def settings_sections() -> List[Dict[str, Any]]:
     ordered_fields = settings_fields()
     by_key = {vp._text(field.get("key")): field for field in ordered_fields if isinstance(field, dict)}
     groups = [
-        ("Core", ["VOICE_NATIVE_DEBUG", "VOICE_CONTINUED_CHAT_ENABLED"]),
+        ("Debugging", ["VOICE_NATIVE_DEBUG"]),
+        ("Conversation Flow", ["VOICE_CONTINUED_CHAT_ENABLED"]),
+        ("Voice Activity Detection", ["VOICE_VAD_BACKEND", "VOICE_WEBRTC_VAD_AGGRESSIVENESS"]),
         (
             "Experimental",
             [
@@ -216,7 +240,7 @@ def settings_sections() -> List[Dict[str, Any]]:
             ],
         ),
         (
-            "Discovery",
+            "Satellite Discovery",
             [
                 "VOICE_DISCOVERY_ENABLED",
                 "VOICE_DISCOVERY_SCAN_SECONDS",
@@ -224,16 +248,16 @@ def settings_sections() -> List[Dict[str, Any]]:
             ],
         ),
         (
-            "ESPHome",
+            "ESPHome Connection",
             [
                 "VOICE_ESPHOME_API_PORT",
                 "VOICE_ESPHOME_PASSWORD",
                 "VOICE_ESPHOME_NOISE_PSK",
                 "VOICE_ESPHOME_CONNECT_TIMEOUT_S",
                 "VOICE_ESPHOME_RETRY_SECONDS",
-                "VOICE_NATIVE_WYOMING_TIMEOUT_S",
             ],
         ),
+        ("External Voice Services", ["VOICE_NATIVE_WYOMING_TIMEOUT_S"]),
     ]
 
     sections: List[Dict[str, Any]] = []

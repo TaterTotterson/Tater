@@ -53,14 +53,25 @@ _WAKE_WORD_MANIFEST_URLS: tuple[str, ...] = (
     f"https://raw.githubusercontent.com/{_WAKE_WORD_GITHUB_OWNER}/{_WAKE_WORD_GITHUB_REPO}/{_WAKE_WORD_GITHUB_REF}/wake_word_manifest.json",
     f"https://raw.githubusercontent.com/{_WAKE_WORD_GITHUB_OWNER}/{_WAKE_WORD_GITHUB_REPO}/{_WAKE_WORD_GITHUB_REF}/wake-word-manifest.json",
 )
+_WAKE_SOUND_MANIFEST_URLS: tuple[str, ...] = (
+    f"https://raw.githubusercontent.com/{_WAKE_WORD_GITHUB_OWNER}/{_WAKE_WORD_GITHUB_REPO}/{_WAKE_WORD_GITHUB_REF}/wake_sound_manifest.json",
+    f"https://raw.githubusercontent.com/{_WAKE_WORD_GITHUB_OWNER}/{_WAKE_WORD_GITHUB_REPO}/{_WAKE_WORD_GITHUB_REF}/wake-sound-manifest.json",
+)
 _WAKE_WORD_SOURCE_SPECS: tuple[Dict[str, str], ...] = (
     {"key": "microWakeWords", "label": "microWakeWords"},
     {"key": "microWakeWordsV2", "label": "microWakeWordsV2"},
     {"key": "microWakeWordsV3", "label": "microWakeWordsV3"},
 )
+_WAKE_SOUND_SOURCE_SPECS: tuple[Dict[str, str], ...] = (
+    {"key": "wakeSounds", "label": "wakeSounds"},
+)
+_WAKE_SOUND_AUDIO_EXTS = {".flac", ".mp3", ".ogg", ".wav"}
 _WAKE_WORD_CATALOG_CACHE_TTL_SECONDS = 10 * 60.0
 _WAKE_WORD_CATALOG_CACHE: Dict[str, Any] = {"ts": 0.0, "payload": {}}
 _WAKE_WORD_CATALOG_LOCK = threading.Lock()
+_WAKE_SOUND_CATALOG_CACHE_TTL_SECONDS = 10 * 60.0
+_WAKE_SOUND_CATALOG_CACHE: Dict[str, Any] = {"ts": 0.0, "payload": {}}
+_WAKE_SOUND_CATALOG_LOCK = threading.Lock()
 
 _TEMPLATE_SPECS: tuple[Dict[str, Any], ...] = (
     {
@@ -335,13 +346,7 @@ def _wake_word_label_from_slug(slug: str) -> str:
     parts = [part for part in re.split(r"[_\-\s]+", token) if part]
     if not parts:
         return token
-    rendered: List[str] = []
-    for part in parts:
-        if len(part) <= 3 and part.isascii():
-            rendered.append(part.upper())
-        else:
-            rendered.append(part.capitalize())
-    return " ".join(rendered)
+    return " ".join(part.capitalize() for part in parts)
 
 
 def _wake_word_source_version_tag(source_key: Any) -> str:
@@ -381,6 +386,33 @@ def _wake_word_slug_from_url(url: str) -> str:
     return _sanitize_token(name).lower()
 
 
+def _wake_sound_slug_from_url(url: str) -> str:
+    token = _text(url).strip()
+    if not token:
+        return ""
+    name = Path(token.split("?", 1)[0]).name
+    suffix = Path(name).suffix
+    if suffix:
+        name = name[: -len(suffix)]
+    return _sanitize_token(name).lower()
+
+
+def _wake_sound_label_from_slug(slug: str) -> str:
+    token = _text(slug).strip()
+    if not token:
+        return "Wake Sound"
+    parts = [part for part in re.split(r"[_\-\.\s]+", token) if part]
+    if not parts:
+        return token
+    rendered: List[str] = []
+    for part in parts:
+        if len(part) <= 3 and part.isascii():
+            rendered.append(part.upper())
+        else:
+            rendered.append(part.capitalize())
+    return " ".join(rendered)
+
+
 def _wake_word_raw_url(path: str) -> str:
     clean = _text(path).strip().lstrip("/")
     if not clean:
@@ -415,6 +447,30 @@ def _wake_word_entry(
         "id": f"{_text(source_key)}:{slug_token}",
         "slug": slug_token,
         "label": _text(label).strip() or _wake_word_label_from_slug(slug_token),
+        "url": url_token,
+        "path": _text(path).strip(),
+        "source_key": _text(source_key).strip(),
+        "source_label": _text(source_label).strip() or _text(source_key).strip(),
+    }
+
+
+def _wake_sound_entry(
+    *,
+    source_key: str,
+    source_label: str,
+    slug: str,
+    url: str,
+    label: str = "",
+    path: str = "",
+) -> Optional[Dict[str, str]]:
+    slug_token = _text(slug).strip()
+    url_token = _text(url).strip()
+    if not slug_token or not url_token:
+        return None
+    return {
+        "id": f"{_text(source_key)}:{slug_token}",
+        "slug": slug_token,
+        "label": _text(label).strip() or _wake_sound_label_from_slug(slug_token),
         "url": url_token,
         "path": _text(path).strip(),
         "source_key": _text(source_key).strip(),
@@ -473,6 +529,58 @@ def _wake_word_entries_from_manifest(payload: Any) -> List[Dict[str, str]]:
     return entries
 
 
+def _wake_sound_entries_from_manifest(payload: Any) -> List[Dict[str, str]]:
+    rows: List[Any] = []
+    if isinstance(payload, list):
+        rows = list(payload)
+    elif isinstance(payload, dict):
+        for key in ("entries", "wake_sounds", "sounds", "audio", "items"):
+            candidate = payload.get(key)
+            if isinstance(candidate, list):
+                rows = list(candidate)
+                break
+        if not rows:
+            for source_key, candidate in payload.items():
+                if isinstance(candidate, list):
+                    for item in candidate:
+                        if isinstance(item, dict):
+                            enriched = dict(item)
+                            enriched.setdefault("source", source_key)
+                            rows.append(enriched)
+
+    entries: List[Dict[str, str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        source_key = _text(row.get("source") or row.get("folder") or row.get("group")) or "wakeSounds"
+        source_spec = next((spec for spec in _WAKE_SOUND_SOURCE_SPECS if _lower(spec.get("key")) == _lower(source_key)), None)
+        source_key = _text((source_spec or {}).get("key")) or source_key
+        source_label = _text((source_spec or {}).get("label")) or source_key
+        url = (
+            _text(row.get("url"))
+            or _text(row.get("audio_url"))
+            or _text(row.get("sound_url"))
+            or _text(row.get("download_url"))
+            or _text(row.get("wake_sound_url"))
+            or _text(row.get("wake_word_triggered_sound_file"))
+        )
+        path = _text(row.get("path"))
+        if not url and path:
+            url = _wake_word_raw_url(path)
+        slug = _text(row.get("slug") or row.get("name") or row.get("key")) or _wake_sound_slug_from_url(url)
+        entry = _wake_sound_entry(
+            source_key=source_key,
+            source_label=source_label,
+            slug=slug,
+            url=url,
+            label=_text(row.get("label") or row.get("title")),
+            path=path,
+        )
+        if isinstance(entry, dict):
+            entries.append(entry)
+    return entries
+
+
 def _wake_word_entries_from_source_folder(source_spec: Dict[str, str], *, force_refresh: bool = False) -> List[Dict[str, str]]:
     path = _text(source_spec.get("key"))
     if not path:
@@ -510,8 +618,65 @@ def _wake_word_entries_from_source_folder(source_spec: Dict[str, str], *, force_
     return entries
 
 
+def _wake_sound_entries_from_source_folder(source_spec: Dict[str, str], *, force_refresh: bool = False) -> List[Dict[str, str]]:
+    path = _text(source_spec.get("key"))
+    if not path:
+        return []
+    try:
+        payload = _remote_json(_wake_word_contents_api_url(path), force_refresh=force_refresh)
+    except RuntimeError as exc:
+        if "HTTP 404" in _text(exc):
+            return []
+        raise
+
+    rows = payload if isinstance(payload, list) else payload.get("entries")
+    if not isinstance(rows, list):
+        return []
+
+    entries: List[Dict[str, str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if _lower(row.get("type")) != "file":
+            continue
+        name = _text(row.get("name")).strip()
+        if Path(name).suffix.lower() not in _WAKE_SOUND_AUDIO_EXTS:
+            continue
+        slug = _wake_sound_slug_from_url(name)
+        entry = _wake_sound_entry(
+            source_key=path,
+            source_label=_text(source_spec.get("label")) or path,
+            slug=slug,
+            url=_wake_word_raw_url(f"{path}/{name}"),
+            path=f"{path}/{name}",
+        )
+        if isinstance(entry, dict):
+            entries.append(entry)
+    return entries
+
+
 def _sorted_wake_word_entries(entries: List[Dict[str, str]]) -> List[Dict[str, str]]:
     source_order = {_text(spec.get("key")): index for index, spec in enumerate(_WAKE_WORD_SOURCE_SPECS)}
+    unique: Dict[str, Dict[str, str]] = {}
+    for row in entries:
+        if not isinstance(row, dict):
+            continue
+        url = _text(row.get("url"))
+        if not url:
+            continue
+        unique[url] = dict(row)
+    return sorted(
+        unique.values(),
+        key=lambda row: (
+            source_order.get(_text(row.get("source_key")), 999),
+            _lower(row.get("label")),
+            _lower(row.get("slug")),
+        ),
+    )
+
+
+def _sorted_wake_sound_entries(entries: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    source_order = {_text(spec.get("key")): index for index, spec in enumerate(_WAKE_SOUND_SOURCE_SPECS)}
     unique: Dict[str, Dict[str, str]] = {}
     for row in entries:
         if not isinstance(row, dict):
@@ -579,6 +744,55 @@ def _load_wake_word_catalog(*, force_refresh: bool = False) -> Dict[str, Any]:
     return payload
 
 
+def _load_wake_sound_catalog(*, force_refresh: bool = False) -> Dict[str, Any]:
+    now = time.time()
+    if not force_refresh:
+        with _WAKE_SOUND_CATALOG_LOCK:
+            cached_ts = float(_WAKE_SOUND_CATALOG_CACHE.get("ts") or 0.0)
+            cached_payload = _WAKE_SOUND_CATALOG_CACHE.get("payload")
+            if isinstance(cached_payload, dict) and (now - cached_ts) < _WAKE_SOUND_CATALOG_CACHE_TTL_SECONDS:
+                return copy.deepcopy(cached_payload)
+
+    warnings: List[str] = []
+
+    for manifest_url in _WAKE_SOUND_MANIFEST_URLS:
+        try:
+            manifest_payload = _remote_json(manifest_url, force_refresh=force_refresh)
+            entries = _sorted_wake_sound_entries(_wake_sound_entries_from_manifest(manifest_payload))
+            if entries:
+                payload = {
+                    "entries": entries,
+                    "source_kind": "manifest",
+                    "source_label": manifest_url,
+                    "warning": "",
+                }
+                with _WAKE_SOUND_CATALOG_LOCK:
+                    _WAKE_SOUND_CATALOG_CACHE["ts"] = now
+                    _WAKE_SOUND_CATALOG_CACHE["payload"] = copy.deepcopy(payload)
+                return payload
+        except RuntimeError as exc:
+            if "HTTP 404" not in _text(exc):
+                warnings.append(_text(exc))
+
+    entries: List[Dict[str, str]] = []
+    for source_spec in _WAKE_SOUND_SOURCE_SPECS:
+        try:
+            entries.extend(_wake_sound_entries_from_source_folder(source_spec, force_refresh=force_refresh))
+        except RuntimeError as exc:
+            warnings.append(_text(exc))
+
+    payload = {
+        "entries": _sorted_wake_sound_entries(entries),
+        "source_kind": "repo_contents",
+        "source_label": _text(_WAKE_WORD_GITHUB_REPO),
+        "warning": _text(warnings[0] if warnings else ""),
+    }
+    with _WAKE_SOUND_CATALOG_LOCK:
+        _WAKE_SOUND_CATALOG_CACHE["ts"] = now
+        _WAKE_SOUND_CATALOG_CACHE["payload"] = copy.deepcopy(payload)
+    return payload
+
+
 def _wake_word_picker_options(catalog: Dict[str, Any]) -> List[Dict[str, Any]]:
     entries = catalog.get("entries") if isinstance(catalog.get("entries"), list) else []
     rows: List[Dict[str, str]] = []
@@ -593,6 +807,25 @@ def _wake_word_picker_options(catalog: Dict[str, Any]) -> List[Dict[str, Any]]:
             {
                 "value": url,
                 "label": _wake_word_option_label(row.get("label"), row.get("slug"), source_key),
+            }
+        )
+    rows.sort(key=lambda option: (_lower(option.get("label")), _text(option.get("value"))))
+    return [{"value": "__custom__", "label": "Custom URL"}, *rows]
+
+
+def _wake_sound_picker_options(catalog: Dict[str, Any]) -> List[Dict[str, Any]]:
+    entries = catalog.get("entries") if isinstance(catalog.get("entries"), list) else []
+    rows: List[Dict[str, str]] = []
+    for row in entries:
+        if not isinstance(row, dict):
+            continue
+        url = _text(row.get("url"))
+        if not url:
+            continue
+        rows.append(
+            {
+                "value": url,
+                "label": _text(row.get("label")) or _wake_sound_label_from_slug(_text(row.get("slug"))),
             }
         )
     rows.sort(key=lambda option: (_lower(option.get("label")), _text(option.get("value"))))
@@ -776,6 +1009,7 @@ def _build_device_context(
     fixed_keys = set(template_spec.get("fixed_keys") or set())
     auto_keys = set(template_spec.get("auto_keys") or set())
     wake_word_catalog = _load_wake_word_catalog()
+    wake_sound_catalog = _load_wake_sound_catalog()
 
     display_name = (
         _text(device_info.get("friendly_name"))
@@ -796,6 +1030,8 @@ def _build_device_context(
         section_title = _text(template_ctx["sections"].get(key)) or "Firmware"
         if key in {"wake_word_name", "wake_word_model_url"}:
             section_title = "Micro Wake Word"
+        if key == "wake_word_triggered_sound_file":
+            section_title = "Wake Sound"
         if section_title not in section_lookup:
             fields: List[Dict[str, Any]] = []
             section_lookup[section_title] = fields
@@ -835,6 +1071,8 @@ def _build_device_context(
             description_parts.append("Auto-filled when you choose a prebuilt wake word, but you can still edit it.")
         elif key == "wake_word_model_url":
             description_parts.append("Pick a prebuilt wake word above or paste any custom JSON model URL.")
+        elif key == "wake_word_triggered_sound_file":
+            description_parts.append("Pick a prebuilt wake sound above or paste any custom audio URL.")
 
         if key in fixed_keys:
             description_parts.append("Locked to the firmware template for this device family.")
@@ -896,6 +1134,39 @@ def _build_device_context(
                 "type": "select",
                 "value": picker_value,
                 "options": _wake_word_picker_options(wake_word_catalog),
+                "description": catalog_description,
+            },
+        )
+
+    wake_sound_section = section_lookup.get("Wake Sound") if isinstance(section_lookup.get("Wake Sound"), list) else None
+    if isinstance(wake_sound_section, list) and "wake_word_triggered_sound_file" in fields_meta:
+        wake_sound_entries = wake_sound_catalog.get("entries") if isinstance(wake_sound_catalog.get("entries"), list) else []
+        current_wake_sound_url = _text(
+            (
+                fields_meta.get("wake_word_triggered_sound_file", {}).get("resolved_value")
+                if isinstance(fields_meta.get("wake_word_triggered_sound_file"), dict)
+                else ""
+            )
+        )
+        available_urls = {_text(row.get("url")) for row in wake_sound_entries if isinstance(row, dict)}
+        picker_value = current_wake_sound_url if current_wake_sound_url in available_urls else "__custom__"
+        catalog_description = (
+            f"Choose from {len(wake_sound_entries)} prebuilt wake sounds, "
+            "or leave this on Custom URL and paste your own audio URL below."
+            if wake_sound_entries
+            else "Prebuilt wake-sound catalog is unavailable right now. You can still paste any custom audio URL below."
+        )
+        catalog_warning = _text(wake_sound_catalog.get("warning"))
+        if catalog_warning and not wake_sound_entries:
+            catalog_description = f"{catalog_description} {_text(catalog_warning)}".strip()
+        wake_sound_section.insert(
+            0,
+            {
+                "key": "wake_sound_catalog",
+                "label": "Prebuilt Wake Sound",
+                "type": "select",
+                "value": picker_value,
+                "options": _wake_sound_picker_options(wake_sound_catalog),
                 "description": catalog_description,
             },
         )
@@ -1208,6 +1479,10 @@ def _normalize_profile_values(context: Dict[str, Any], values: Dict[str, Any]) -
         normalized["wake_word_model_url"] = wake_word_catalog_value
         if "wake_word_name" in normalized and not _text(normalized.get("wake_word_name")):
             normalized["wake_word_name"] = _wake_word_slug_from_url(wake_word_catalog_value)
+
+    wake_sound_catalog_value = _text(incoming.get("wake_sound_catalog"))
+    if wake_sound_catalog_value and wake_sound_catalog_value != "__custom__" and "wake_word_triggered_sound_file" in normalized:
+        normalized["wake_word_triggered_sound_file"] = wake_sound_catalog_value
 
     if _text(context.get("host")) and "ha_voice_ip" in normalized:
         normalized["ha_voice_ip"] = _text(context.get("host"))

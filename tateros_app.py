@@ -125,6 +125,15 @@ WEBUI_AUTH_PBKDF2_ITERATIONS = 260_000
 WEBUI_AUTH_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 365 * 5
 RUNTIME_CONTEXT_ESTIMATE_TTL_SECONDS = 20
 runtime_context_estimate_cache: Dict[str, Any] = {"updated_at": 0.0, "payload": {}}
+speech_model_warmup_lock = threading.RLock()
+speech_model_warmup_state: Dict[str, Any] = {
+    "running": False,
+    "started_ts": 0.0,
+    "finished_ts": 0.0,
+    "reason": "",
+    "items": [],
+    "errors": [],
+}
 
 
 def _trim(value: Any) -> str:
@@ -474,6 +483,185 @@ def _normalize_popup_effect_style(value: Any, default: str = DEFAULT_WEBUI_POPUP
         return token
     fallback = str(default or DEFAULT_WEBUI_POPUP_EFFECT_STYLE).strip().lower()
     return fallback if fallback in WEBUI_POPUP_EFFECT_STYLE_CHOICES else DEFAULT_WEBUI_POPUP_EFFECT_STYLE
+
+
+def _speech_model_warmup_snapshot() -> Dict[str, Any]:
+    with speech_model_warmup_lock:
+        return {
+            "running": bool(speech_model_warmup_state.get("running")),
+            "started_ts": float(speech_model_warmup_state.get("started_ts") or 0.0),
+            "finished_ts": float(speech_model_warmup_state.get("finished_ts") or 0.0),
+            "reason": str(speech_model_warmup_state.get("reason") or ""),
+            "items": list(speech_model_warmup_state.get("items") or []),
+            "errors": list(speech_model_warmup_state.get("errors") or []),
+        }
+
+
+def _speech_model_warmup_on_startup_enabled() -> bool:
+    token = str(os.getenv("TATER_SPEECH_WARMUP_ON_STARTUP", "true") or "true").strip().lower()
+    return token in {"1", "true", "yes", "on", "enabled"}
+
+
+def _speech_model_warmup_tts_items(settings: Dict[str, Any]) -> List[Dict[str, str]]:
+    items: List[Dict[str, str]] = []
+    seen: set[Tuple[str, str, str, str]] = set()
+    for prefix in ("", "announcement_"):
+        backend = str(settings.get(f"{prefix}tts_backend") or "").strip()
+        model = str(settings.get(f"{prefix}tts_model") or "").strip()
+        voice = str(settings.get(f"{prefix}tts_voice") or "").strip()
+        key = (backend, model, voice, str(settings.get("acceleration") or "").strip())
+        if not backend or key in seen:
+            continue
+        seen.add(key)
+        items.append(
+            {
+                "kind": "tts",
+                "backend": backend,
+                "model": model,
+                "voice": voice,
+                "acceleration": str(settings.get("acceleration") or "").strip(),
+            }
+        )
+    return items
+
+
+def _warm_speech_model_item(item: Dict[str, str]) -> str:
+    kind = str(item.get("kind") or "").strip()
+    backend = str(item.get("backend") or "").strip()
+    if kind == "stt":
+        from esphome import voice_pipeline as voice_pipeline
+
+        token = voice_pipeline._normalize_stt_backend(backend)
+        if token == "wyoming":
+            return "skipped remote Wyoming STT"
+        ok, reason = voice_pipeline._stt_backend_available(token)
+        if not ok:
+            raise RuntimeError(reason or f"{token} unavailable")
+        if token == "faster_whisper":
+            voice_pipeline._load_faster_whisper_model()
+            if voice_pipeline._faster_whisper_device() == "cuda":
+                silence = b"\x00\x00" * int(16000 * 0.5)
+                voice_pipeline._transcribe_faster_whisper_sync(
+                    silence,
+                    {"rate": 16000, "width": 2, "channels": 1},
+                    None,
+                )
+                return f"loaded STT {token} and warmed CUDA decode"
+        elif token == "vosk":
+            voice_pipeline._load_vosk_model()
+        else:
+            raise RuntimeError(f"unsupported STT backend: {token}")
+        return f"loaded STT {token}"
+
+    if kind == "tts":
+        from speech_tts import (
+            _load_kokoro_pipeline,
+            _load_piper_voice_model,
+            _load_pocket_tts_model,
+            normalize_tts_backend,
+        )
+
+        token = normalize_tts_backend(backend)
+        model = str(item.get("model") or "").strip()
+        if token == "wyoming":
+            return "skipped remote Wyoming TTS"
+        if token == "kokoro":
+            _load_kokoro_pipeline(model, acceleration=item.get("acceleration"))
+        elif token == "piper":
+            _load_piper_voice_model(model)
+        elif token == "pocket_tts":
+            _load_pocket_tts_model(model)
+        else:
+            raise RuntimeError(f"unsupported TTS backend: {token}")
+        return f"loaded TTS {token}"
+
+    raise RuntimeError(f"unsupported warmup item: {kind or 'unknown'}")
+
+
+def _run_speech_model_warmup(settings: Dict[str, Any], *, reason: str) -> None:
+    items = [
+        {"kind": "stt", "backend": str(settings.get("stt_backend") or "").strip()},
+        *_speech_model_warmup_tts_items(settings),
+    ]
+    items = [item for item in items if str(item.get("backend") or "").strip()]
+    with speech_model_warmup_lock:
+        speech_model_warmup_state.update(
+            {
+                "running": True,
+                "started_ts": time.time(),
+                "finished_ts": 0.0,
+                "reason": reason,
+                "items": [dict(item, status="pending") for item in items],
+                "errors": [],
+            }
+        )
+
+    logger.info("[speech-warmup] starting reason=%s items=%s", reason, items)
+    item_states: List[Dict[str, Any]] = []
+    errors: List[str] = []
+    for item in items:
+        row = dict(item)
+        label = f"{row.get('kind')}:{row.get('backend')}"
+        row["started_ts"] = time.time()
+        try:
+            row["message"] = _warm_speech_model_item(row)
+            row["status"] = "loaded" if not str(row["message"]).startswith("skipped") else "skipped"
+            logger.info("[speech-warmup] %s %s", label, row["message"])
+        except Exception as exc:
+            message = str(exc) or type(exc).__name__
+            row["status"] = "error"
+            row["error"] = message
+            errors.append(f"{label}: {message}")
+            logger.warning("[speech-warmup] %s failed: %s", label, message)
+        row["finished_ts"] = time.time()
+        item_states.append(row)
+        with speech_model_warmup_lock:
+            speech_model_warmup_state["items"] = list(item_states) + [
+                dict(pending, status="pending") for pending in items[len(item_states) :]
+            ]
+            speech_model_warmup_state["errors"] = list(errors)
+
+    with speech_model_warmup_lock:
+        speech_model_warmup_state.update(
+            {
+                "running": False,
+                "finished_ts": time.time(),
+                "items": item_states,
+                "errors": errors,
+            }
+        )
+    logger.info("[speech-warmup] finished errors=%s", len(errors))
+
+
+def _start_speech_model_warmup(settings: Dict[str, Any], *, reason: str = "settings-save") -> Dict[str, Any]:
+    with speech_model_warmup_lock:
+        if bool(speech_model_warmup_state.get("running")):
+            snapshot = _speech_model_warmup_snapshot()
+            snapshot["started"] = False
+            snapshot["already_running"] = True
+            return snapshot
+        speech_model_warmup_state.update(
+            {
+                "running": True,
+                "started_ts": time.time(),
+                "finished_ts": 0.0,
+                "reason": reason,
+                "items": [],
+                "errors": [],
+            }
+        )
+
+    thread = threading.Thread(
+        target=_run_speech_model_warmup,
+        kwargs={"settings": dict(settings or {}), "reason": reason},
+        daemon=True,
+        name="speech-model-warmup",
+    )
+    thread.start()
+    snapshot = _speech_model_warmup_snapshot()
+    snapshot["started"] = True
+    snapshot["already_running"] = False
+    return snapshot
 
 
 def _build_hydra_llm_endpoint(host: Any, port: Any) -> str:
@@ -2100,6 +2288,7 @@ def _replay_startup_after_redis_configure() -> Dict[str, Any]:
         "ran_autostart": False,
         "error": "",
         "restore_summary": {},
+        "speech_warmup": {},
     }
 
     bootstrap_state["restore_in_progress"] = True
@@ -2122,6 +2311,13 @@ def _replay_startup_after_redis_configure() -> Dict[str, Any]:
         else:
             logger.info("[runtime-autostart] skipped (HTMLUI_AUTOSTART_ENABLED_SURFACES_ON_STARTUP=false)")
         _start_builtin_esphome()
+        if _speech_model_warmup_on_startup_enabled():
+            result["speech_warmup"] = _start_speech_model_warmup(
+                get_shared_speech_settings(),
+                reason="runtime-bootstrap",
+            )
+        else:
+            logger.info("[speech-warmup] startup warmup skipped (TATER_SPEECH_WARMUP_ON_STARTUP=false)")
     except Exception as exc:
         err = str(exc)
         bootstrap_state["restore_error"] = err
@@ -2539,6 +2735,7 @@ class AppSettingsRequest(BaseModel):
     vision_model: Optional[str] = None
     vision_api_key: Optional[str] = None
     speech_stt_backend: Optional[str] = None
+    speech_acceleration: Optional[str] = None
     speech_wyoming_stt_host: Optional[str] = None
     speech_wyoming_stt_port: Optional[str] = None
     speech_tts_backend: Optional[str] = None
@@ -2592,6 +2789,7 @@ class SpeechTtsPreviewRequest(BaseModel):
     backend: Optional[str] = None
     model: Optional[str] = None
     voice: Optional[str] = None
+    acceleration: Optional[str] = None
     wyoming_host: Optional[str] = None
     wyoming_port: Optional[str] = None
     wyoming_voice: Optional[str] = None
@@ -2679,6 +2877,11 @@ async def _startup_event() -> None:
             else:
                 logger.info("[startup-autostart] skipped (HTMLUI_AUTOSTART_ENABLED_SURFACES_ON_STARTUP=false)")
             await esphome_home_module.startup()
+            if _speech_model_warmup_on_startup_enabled():
+                warmup = _start_speech_model_warmup(get_shared_speech_settings(), reason="startup")
+                logger.info("[speech-warmup] startup scheduled: %s", warmup)
+            else:
+                logger.info("[speech-warmup] startup warmup skipped (TATER_SPEECH_WARMUP_ON_STARTUP=false)")
     except RedisError as exc:
         bootstrap_state["restore_error"] = str(exc)
         logger.warning("Redis unavailable during startup autostart: %s", exc)
@@ -4722,6 +4925,7 @@ def get_settings() -> Dict[str, Any]:
         "vision_model": str(vision_settings.get("model") or "qwen2.5-vl-7b-instruct"),
         "vision_api_key": str(vision_settings.get("api_key") or ""),
         "speech_stt_backend": str(speech_settings.get("stt_backend") or ""),
+        "speech_acceleration": str(speech_settings.get("acceleration") or ""),
         "speech_wyoming_stt_host": str(speech_settings.get("wyoming_stt_host") or ""),
         "speech_wyoming_stt_port": str(speech_settings.get("wyoming_stt_port") or ""),
         "speech_tts_backend": str(speech_settings.get("tts_backend") or ""),
@@ -4733,6 +4937,7 @@ def get_settings() -> Dict[str, Any]:
         "speech_announcement_tts_backend": str(speech_settings.get("announcement_tts_backend") or ""),
         "speech_announcement_tts_model": str(speech_settings.get("announcement_tts_model") or ""),
         "speech_announcement_tts_voice": str(speech_settings.get("announcement_tts_voice") or ""),
+        "speech_model_warmup": _speech_model_warmup_snapshot(),
         "speech_ui": speech_ui,
         "announcement_speech_ui": announcement_speech_ui,
         "esphome_ui": esphome_ui,
@@ -4773,6 +4978,7 @@ async def preview_speech_tts(payload: SpeechTtsPreviewRequest) -> Response:
             backend=str(payload.backend or current_speech.get("tts_backend") or "").strip(),
             model=str(payload.model or current_speech.get("tts_model") or "").strip(),
             voice=str(payload.voice or current_speech.get("tts_voice") or "").strip(),
+            acceleration=str(payload.acceleration or current_speech.get("acceleration") or "").strip(),
             wyoming_host=str(payload.wyoming_host or current_speech.get("wyoming_tts_host") or "").strip(),
             wyoming_port=str(payload.wyoming_port or current_speech.get("wyoming_tts_port") or "").strip(),
             wyoming_voice=str(payload.wyoming_voice or current_speech.get("wyoming_tts_voice") or "").strip(),
@@ -4813,9 +5019,15 @@ async def get_speech_wyoming_tts_voices(payload: WyomingTtsVoicesRequest) -> Dic
         raise HTTPException(status_code=400, detail=str(exc) or "Failed to fetch Wyoming TTS voices.") from exc
 
 
+@app.get("/api/settings/speech/warmup")
+def get_speech_model_warmup() -> Dict[str, Any]:
+    return _speech_model_warmup_snapshot()
+
+
 @app.post("/api/settings")
 def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str, Any]:
     updates = payload.model_dump(exclude_none=True)
+    speech_warmup_result: Dict[str, Any] = {}
 
     def _bounded_int(
         value: Any,
@@ -4972,6 +5184,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
 
     speech_keys = {
         "speech_stt_backend",
+        "speech_acceleration",
         "speech_wyoming_stt_host",
         "speech_wyoming_stt_port",
         "speech_tts_backend",
@@ -4988,6 +5201,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         current_speech = get_shared_speech_settings()
         save_shared_speech_settings(
             stt_backend=str(updates.get("speech_stt_backend", current_speech.get("stt_backend") or "")).strip(),
+            acceleration=str(updates.get("speech_acceleration", current_speech.get("acceleration") or "")).strip(),
             wyoming_stt_host=str(
                 updates.get("speech_wyoming_stt_host", current_speech.get("wyoming_stt_host") or "")
             ).strip(),
@@ -5016,6 +5230,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
                 updates.get("speech_announcement_tts_voice", current_speech.get("announcement_tts_voice") or "")
             ).strip(),
         )
+        speech_warmup_result = _start_speech_model_warmup(get_shared_speech_settings(), reason="settings-save")
 
     esphome_result: Dict[str, Any] = {}
     if "esphome_settings" in updates:
@@ -5210,4 +5425,9 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         cleaned = sorted(set(values))
         redis_client.set(ADMIN_GATE_KEY, json.dumps(cleaned))
 
-    return {"ok": True, "updated": sorted(updates.keys()), "esphome": esphome_result}
+    return {
+        "ok": True,
+        "updated": sorted(updates.keys()),
+        "esphome": esphome_result,
+        "speech_warmup": speech_warmup_result or _speech_model_warmup_snapshot(),
+    }

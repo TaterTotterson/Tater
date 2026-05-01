@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import importlib
 import importlib.util
 import json
 from typing import Any, Dict, List, Optional, Tuple
@@ -19,6 +20,7 @@ DEFAULT_WYOMING_STT_PORT = 10300
 DEFAULT_WYOMING_TTS_HOST = "127.0.0.1"
 DEFAULT_WYOMING_TTS_PORT = 10200
 DEFAULT_WYOMING_TTS_VOICE = ""
+DEFAULT_SPEECH_ACCELERATION = "auto"
 DEFAULT_KOKORO_MODEL = "v1.0:q8"
 DEFAULT_KOKORO_VOICE = "af_bella"
 DEFAULT_POCKET_TTS_MODEL = "b6369a24"
@@ -106,6 +108,17 @@ def normalize_announcement_tts_backend(value: Any, *, default: str = DEFAULT_ANN
     return _normalize_tts_backend(_clean(value) or default)
 
 
+def normalize_speech_acceleration(value: Any, *, default: str = DEFAULT_SPEECH_ACCELERATION) -> str:
+    token = _clean(value).lower().replace("-", "_").replace(" ", "_")
+    if token in {"", "default", "auto"}:
+        return default
+    if token in {"cpu", "none", "off"}:
+        return "cpu"
+    if token in {"cuda", "gpu", "nvidia", "nvidia_cuda"}:
+        return "cuda"
+    return default
+
+
 def _option_rows_from_values(
     values: List[str],
     *,
@@ -125,6 +138,27 @@ def _option_rows_from_values(
     if current and current not in seen:
         rows.insert(0, {"value": current, "label": _clean((labels or {}).get(current)) or current})
     return rows
+
+
+def _cuda_runtime_available() -> bool:
+    with contextlib.suppress(Exception):
+        ctranslate2_mod = importlib.import_module("ctranslate2")
+        if int(getattr(ctranslate2_mod, "get_cuda_device_count")()) > 0:
+            return True
+    with contextlib.suppress(Exception):
+        torch_mod = importlib.import_module("torch")
+        cuda_mod = getattr(torch_mod, "cuda", None)
+        if cuda_mod is not None and bool(cuda_mod.is_available()):
+            return True
+    return False
+
+
+def _stt_backend_option_rows() -> List[Dict[str, Any]]:
+    return [
+        {"value": "faster_whisper", "label": "Faster Whisper"},
+        {"value": "wyoming", "label": "Wyoming"},
+        {"value": "vosk", "label": "Vosk"},
+    ]
 
 
 def _prefer_value_first(values: List[str], preferred_value: Any) -> List[str]:
@@ -307,6 +341,7 @@ def get_speech_settings() -> Dict[str, Any]:
     current_tts_backend = _normalize_tts_backend(shared.get("tts_backend"))
     return {
         "stt_backend": _normalize_stt_backend(shared.get("stt_backend")),
+        "acceleration": normalize_speech_acceleration(shared.get("acceleration")),
         "wyoming_stt_host": _clean(shared.get("wyoming_stt_host")) or DEFAULT_WYOMING_STT_HOST,
         "wyoming_stt_port": _as_int(shared.get("wyoming_stt_port"), DEFAULT_WYOMING_STT_PORT),
         "tts_backend": current_tts_backend,
@@ -338,12 +373,14 @@ def save_speech_settings(
     announcement_tts_backend: Any,
     announcement_tts_model: Any,
     announcement_tts_voice: Any,
+    acceleration: Any = DEFAULT_SPEECH_ACCELERATION,
 ) -> None:
     direct_tts_backend = _normalize_tts_backend(tts_backend)
     redis_client.hset(
         SPEECH_SETTINGS_KEY,
         mapping={
             "stt_backend": _normalize_stt_backend(stt_backend),
+            "acceleration": normalize_speech_acceleration(acceleration),
             "wyoming_stt_host": _clean(wyoming_stt_host) or DEFAULT_WYOMING_STT_HOST,
             "wyoming_stt_port": str(_as_int(wyoming_stt_port, DEFAULT_WYOMING_STT_PORT)),
             "tts_backend": direct_tts_backend,
@@ -397,10 +434,14 @@ def get_speech_ui_payload(settings: Optional[Dict[str, Any]] = None) -> Dict[str
             )
 
     return {
-        "stt_backend_options": [
-            {"value": "faster_whisper", "label": "Faster Whisper"},
-            {"value": "wyoming", "label": "Wyoming"},
-            {"value": "vosk", "label": "Vosk"},
+        "stt_backend_options": _stt_backend_option_rows(),
+        "capabilities": {
+            "cuda_available": _cuda_runtime_available(),
+        },
+        "acceleration_options": [
+            {"value": "auto", "label": "Auto"},
+            {"value": "cpu", "label": "CPU"},
+            {"value": "cuda", "label": "NVIDIA CUDA"},
         ],
         "tts_backend_options": [
             {"value": "wyoming", "label": "Wyoming"},

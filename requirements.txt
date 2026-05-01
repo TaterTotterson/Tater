@@ -34,6 +34,7 @@ rarfile
 pandas
 wyoming
 silero-vad
+webrtcvad-wheels
 torch
 speechbrain==1.1.0
 faster-whisper
