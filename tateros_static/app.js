@@ -43,6 +43,8 @@ const state = {
     selector: "",
   },
   esphomeFirmwareDrafts: {},
+  esphomeWakeSoundPreviewAudio: null,
+  esphomeWakeSoundPreviewButton: null,
   sidebarCollapsed: String(safeStorageGet("tater_tateros_sidebar_collapsed", "false")).trim().toLowerCase() === "true",
   sidebarCollapseTimer: 0,
   runtimeBreakdownPollTimer: 0,
@@ -1146,6 +1148,25 @@ function parseSettingValue(raw, type) {
 
 function renderToggleRow(inputHtml, statusText = "Enabled") {
   return `<div class="inline-row toggle-row">${inputHtml}<span class="small">${escapeHtml(statusText)}</span></div>`;
+}
+
+function renderSettingsSectionIntro(title, description = "", badge = "", variant = "primary") {
+  const safeTitle = String(title || "").trim();
+  if (!safeTitle) {
+    return "";
+  }
+  const safeBadge = String(badge || safeTitle.slice(0, 2)).trim().slice(0, 4).toUpperCase();
+  const safeDescription = String(description || "").trim();
+  const variantClass = String(variant || "").trim().toLowerCase() === "subtle" ? " is-subtle" : "";
+  return `
+    <div class="settings-section-intro${variantClass}">
+      <span class="settings-section-intro-badge" aria-hidden="true">${escapeHtml(safeBadge || "T")}</span>
+      <div>
+        <h3>${escapeHtml(safeTitle)}</h3>
+        ${safeDescription ? `<p>${escapeHtml(safeDescription)}</p>` : ""}
+      </div>
+    </div>
+  `;
 }
 
 function renderSimpleDataTable(columns, rows, emptyMessage = "No rows.") {
@@ -4996,8 +5017,35 @@ function renderEspHomeAddPanel(addForm, coreKey = "esphome") {
   `;
 }
 
+function orderEspHomeFirmwareSections(sections) {
+  const rows = Array.isArray(sections) ? sections.slice() : [];
+  const titleFor = (section) => String(section?.title || "").trim().toLowerCase();
+  const wakeSoundIndex = rows.findIndex((section) => titleFor(section) === "wake sound");
+  if (wakeSoundIndex < 0) {
+    return rows;
+  }
+  const wakeWordIndex = rows.findIndex((section) => {
+    const title = titleFor(section);
+    return title.includes("micro wake word") || (title.includes("wake word") && title !== "wake sound");
+  });
+  if (wakeWordIndex < 0 || wakeSoundIndex === wakeWordIndex + 1) {
+    return rows;
+  }
+  const reordered = rows.slice();
+  const [wakeSoundSection] = reordered.splice(wakeSoundIndex, 1);
+  const insertAfter = reordered.findIndex((section) => {
+    const title = titleFor(section);
+    return title.includes("micro wake word") || (title.includes("wake word") && title !== "wake sound");
+  });
+  if (insertAfter < 0 || !wakeSoundSection) {
+    return rows;
+  }
+  reordered.splice(insertAfter + 1, 0, wakeSoundSection);
+  return reordered;
+}
+
 function renderEspHomeFirmwareSections(sections) {
-  const rows = Array.isArray(sections) ? sections : [];
+  const rows = orderEspHomeFirmwareSections(sections);
   if (!rows.length) {
     return renderNotice("No firmware substitutions are available for this device.");
   }
@@ -5008,11 +5056,21 @@ function renderEspHomeFirmwareSections(sections) {
       if (!fields.length) {
         return "";
       }
+      const wakeSoundPreviewHtml =
+        title === "Wake Sound"
+          ? `
+            <div class="esphome-wake-sound-preview-row">
+              <button type="button" class="inline-btn esphome-wake-sound-preview">Play Selected Sound</button>
+              <span class="small esphome-wake-sound-preview-status"></span>
+            </div>
+          `
+          : "";
       return `
         <section class="core-inline-section" style="margin-top:12px;">
           <div class="small core-inline-section-title">${escapeHtml(title)}</div>
           <div class="form-grid two-col">
             ${fields.map((field) => renderCoreManagerField(field)).join("")}
+            ${wakeSoundPreviewHtml}
           </div>
         </section>
       `;
@@ -5149,6 +5207,145 @@ function syncEspHomeFirmwareWakeWordCatalog(card, { fromPicker = false } = {}) {
     picker.value = "__custom__";
   }
   captureEspHomeFirmwareDraft(card);
+}
+
+function syncEspHomeFirmwareWakeSoundCatalog(card, { fromPicker = false } = {}) {
+  if (!(card instanceof HTMLElement)) {
+    return;
+  }
+  const picker = card.querySelector('select[data-core-field-key="wake_sound_catalog"]');
+  const urlInput = card.querySelector('input[data-core-field-key="wake_word_triggered_sound_file"]');
+  if (!(picker instanceof HTMLSelectElement) || !(urlInput instanceof HTMLInputElement)) {
+    return;
+  }
+
+  if (fromPicker) {
+    const selectedUrl = String(picker.value || "").trim();
+    if (selectedUrl && selectedUrl !== "__custom__") {
+      urlInput.value = selectedUrl;
+    }
+    captureEspHomeFirmwareDraft(card);
+    return;
+  }
+
+  const currentUrl = String(urlInput.value || "").trim();
+  const optionValues = Array.from(picker.options).map((option) => String(option.value || "").trim());
+  if (currentUrl && optionValues.includes(currentUrl)) {
+    picker.value = currentUrl;
+  } else if (optionValues.includes("__custom__")) {
+    picker.value = "__custom__";
+  }
+  captureEspHomeFirmwareDraft(card);
+}
+
+function getEspHomeWakeSoundPreviewUrl(card) {
+  if (!(card instanceof HTMLElement)) {
+    return "";
+  }
+  const urlInput = card.querySelector('input[data-core-field-key="wake_word_triggered_sound_file"]');
+  const picker = card.querySelector('select[data-core-field-key="wake_sound_catalog"]');
+  const urlValue = String(urlInput instanceof HTMLInputElement ? urlInput.value || "" : "").trim();
+  if (urlValue) {
+    return urlValue;
+  }
+  const pickerValue = String(picker instanceof HTMLSelectElement ? picker.value || "" : "").trim();
+  return pickerValue && pickerValue !== "__custom__" ? pickerValue : "";
+}
+
+function resetEspHomeWakeSoundPreview(message = "") {
+  const audio = state.esphomeWakeSoundPreviewAudio;
+  if (audio instanceof HTMLAudioElement) {
+    try {
+      audio.pause();
+      audio.currentTime = 0;
+    } catch (_error) {
+      // Ignore browser playback cleanup failures.
+    }
+  }
+  const button = state.esphomeWakeSoundPreviewButton;
+  if (button instanceof HTMLButtonElement && document.body.contains(button)) {
+    button.disabled = false;
+    button.textContent = "Play Selected Sound";
+    const row = button.closest(".esphome-wake-sound-preview-row");
+    const status = row?.querySelector?.(".esphome-wake-sound-preview-status");
+    if (status instanceof HTMLElement) {
+      status.textContent = String(message || "").trim();
+    }
+  }
+  state.esphomeWakeSoundPreviewAudio = null;
+  state.esphomeWakeSoundPreviewButton = null;
+}
+
+function bindEspHomeWakeSoundPreview(root = document) {
+  root.querySelectorAll(".esphome-wake-sound-preview").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement) || button.dataset.esphomeWakeSoundPreviewBound === "1") {
+      return;
+    }
+    button.dataset.esphomeWakeSoundPreviewBound = "1";
+    button.addEventListener("click", async () => {
+      const card = button.closest(".esphome-firmware-card");
+      const row = button.closest(".esphome-wake-sound-preview-row");
+      const status = row?.querySelector?.(".esphome-wake-sound-preview-status");
+      const activeAudio = state.esphomeWakeSoundPreviewAudio;
+      const activeButton = state.esphomeWakeSoundPreviewButton;
+      if (activeAudio instanceof HTMLAudioElement && activeButton === button && !activeAudio.paused) {
+        resetEspHomeWakeSoundPreview("Stopped.");
+        return;
+      }
+
+      const url = getEspHomeWakeSoundPreviewUrl(card);
+      if (!url) {
+        if (status instanceof HTMLElement) {
+          status.textContent = "Choose a wake sound or enter a URL first.";
+        }
+        showToast("Choose a wake sound or enter a URL first.", "error", 2600);
+        return;
+      }
+
+      resetEspHomeWakeSoundPreview();
+      const audio = new Audio(url);
+      audio.preload = "auto";
+      state.esphomeWakeSoundPreviewAudio = audio;
+      state.esphomeWakeSoundPreviewButton = button;
+      button.disabled = true;
+      button.textContent = "Loading...";
+      if (status instanceof HTMLElement) {
+        status.textContent = "Loading preview...";
+      }
+
+      const finish = (message) => {
+        if (state.esphomeWakeSoundPreviewAudio !== audio) {
+          return;
+        }
+        if (button instanceof HTMLButtonElement && document.body.contains(button)) {
+          button.disabled = false;
+          button.textContent = "Play Selected Sound";
+        }
+        if (status instanceof HTMLElement) {
+          status.textContent = String(message || "").trim();
+        }
+        state.esphomeWakeSoundPreviewAudio = null;
+        state.esphomeWakeSoundPreviewButton = null;
+      };
+
+      audio.addEventListener("ended", () => finish("Finished."));
+      audio.addEventListener("error", () => finish("Could not play this wake sound."));
+
+      try {
+        await audio.play();
+        if (state.esphomeWakeSoundPreviewAudio === audio) {
+          button.disabled = false;
+          button.textContent = "Stop";
+          if (status instanceof HTMLElement) {
+            status.textContent = "Playing...";
+          }
+        }
+      } catch (error) {
+        finish("Playback blocked or unavailable.");
+        showToast(`Wake sound preview failed: ${String(error?.message || "playback unavailable")}`, "error", 3600);
+      }
+    });
+  });
 }
 
 function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
@@ -6623,6 +6820,7 @@ function rerenderEspHomeFirmwarePanel(root = document) {
   state.esphomeFirmwareSelection = normalizeEspHomeFirmwareSelection(firmware);
   const shell = document.getElementById("settings-esphome-shell");
   const coreKey = String(shell?.dataset?.coreKey || "esphome").trim() || "esphome";
+  resetEspHomeWakeSoundPreview();
   host.innerHTML = renderEspHomeFirmwarePanel(firmware, coreKey);
   bindCoreTabManagers();
 }
@@ -6633,7 +6831,7 @@ function bindEspHomeFirmwareSelectors(root = document) {
       return;
     }
     const key = String(input.dataset.coreFieldKey || "").trim();
-    if (!["template_key", "selector", "wake_word_catalog"].includes(key)) {
+    if (!["template_key", "selector", "wake_word_catalog", "wake_sound_catalog"].includes(key)) {
       return;
     }
     if (input.dataset.esphomeFirmwareSelectBound === "1") {
@@ -6644,6 +6842,10 @@ function bindEspHomeFirmwareSelectors(root = document) {
       const card = input.closest(".esphome-firmware-card");
       if (key === "wake_word_catalog") {
         syncEspHomeFirmwareWakeWordCatalog(card, { fromPicker: true });
+        return;
+      }
+      if (key === "wake_sound_catalog") {
+        syncEspHomeFirmwareWakeSoundCatalog(card, { fromPicker: true });
         return;
       }
       captureEspHomeFirmwareDraft(card);
@@ -6665,6 +6867,20 @@ function bindEspHomeFirmwareSelectors(root = document) {
     const sync = () => {
       const card = input.closest(".esphome-firmware-card");
       syncEspHomeFirmwareWakeWordCatalog(card, { fromPicker: false });
+    };
+    input.addEventListener("input", sync);
+    input.addEventListener("change", sync);
+    sync();
+  });
+
+  root.querySelectorAll('.esphome-firmware-card input[data-core-field-key="wake_word_triggered_sound_file"]').forEach((input) => {
+    if (!(input instanceof HTMLInputElement) || input.dataset.esphomeFirmwareWakeSoundBound === "1") {
+      return;
+    }
+    input.dataset.esphomeFirmwareWakeSoundBound = "1";
+    const sync = () => {
+      const card = input.closest(".esphome-firmware-card");
+      syncEspHomeFirmwareWakeSoundCatalog(card, { fromPicker: false });
     };
     input.addEventListener("input", sync);
     input.addEventListener("change", sync);
@@ -7166,6 +7382,7 @@ function bindCoreTabManagers() {
   bindCoreManagerDependentSelects();
   bindEspHomeEntityControls();
   bindEspHomeFirmwareSelectors();
+  bindEspHomeWakeSoundPreview();
   bindEspHomeFirmwareActions();
   bindEspHomeSpeakerIdActions();
   document.querySelectorAll(".core-tab-refresh-btn[data-core-tab-refresh]").forEach((button) => {
@@ -8917,6 +9134,11 @@ function renderRedisEncryptionStatusSummaryHtml(entry) {
 function renderSettingsRedisSectionHtml(redisStatus, redisEncryptionStatus, { includeEncryption = true } = {}) {
   return `
     <section class="settings-tab-panel active" data-settings-panel="redis">
+      ${renderSettingsSectionIntro(
+        "Redis",
+        "Connection and encryption settings for Tater's shared runtime state.",
+        "DB"
+      )}
       <div class="form-grid">
         <section class="core-inline-section">
           <div class="small core-inline-section-title">Redis Connection</div>
@@ -9454,6 +9676,7 @@ async function loadSettingsView() {
       ? settings.announcement_speech_ui
       : {};
   const speechSttBackendOptions = Array.isArray(speechUi.stt_backend_options) ? speechUi.stt_backend_options : [];
+  const speechAccelerationOptions = Array.isArray(speechUi.acceleration_options) ? speechUi.acceleration_options : [];
   const speechTtsBackendOptions = Array.isArray(speechUi.tts_backend_options) ? speechUi.tts_backend_options : [];
   const speechTtsModelOptionsByBackend =
     speechUi.tts_model_options_by_backend && typeof speechUi.tts_model_options_by_backend === "object"
@@ -9481,19 +9704,28 @@ async function loadSettingsView() {
           .map((row) => ({
             value: String(row?.value || "").trim(),
             label: String(row?.label || row?.value || "").trim(),
+            disabled: Boolean(row?.disabled),
+            reason: String(row?.reason || "").trim(),
+            requiresAcceleration: String(row?.requires_acceleration || "").trim(),
           }))
           .filter((row) => row.value)
       : [];
     if (blankLabel !== null && !normalized.some((row) => row.value === "")) {
-      normalized.unshift({ value: "", label: String(blankLabel || "").trim() || "Default" });
+      normalized.unshift({ value: "", label: String(blankLabel || "").trim() || "Default", disabled: false, reason: "", requiresAcceleration: "" });
     }
     if (current && !normalized.some((row) => row.value === current)) {
-      normalized.push({ value: current, label: current });
+      normalized.push({ value: current, label: current, disabled: false, reason: "", requiresAcceleration: "" });
     }
     return normalized
       .map((row) => {
         const selected = row.value === current ? "selected" : "";
-        return `<option value="${escapeHtml(row.value)}" ${selected}>${escapeHtml(row.label || row.value)}</option>`;
+        const disabled = row.disabled ? "disabled" : "";
+        const reason = row.reason ? `title="${escapeHtml(row.reason)}"` : "";
+        const requiresAcceleration = row.requiresAcceleration
+          ? `data-requires-acceleration="${escapeHtml(row.requiresAcceleration)}"`
+          : "";
+        const label = row.disabled && row.reason ? `${row.label || row.value} (${row.reason})` : row.label || row.value;
+        return `<option value="${escapeHtml(row.value)}" ${selected} ${disabled} ${reason} ${requiresAcceleration}>${escapeHtml(label)}</option>`;
       })
       .join("");
   };
@@ -9533,6 +9765,24 @@ async function loadSettingsView() {
   const esphomePipelineFields = esphomePipelineSections.flatMap((section) =>
     Array.isArray(section?.fields) ? section.fields : []
   );
+  const renderSettingsFieldGroup = (section) => {
+    const label = String(section?.label || "").trim();
+    const fields = Array.isArray(section?.fields) ? section.fields : [];
+    if (!fields.length) {
+      return "";
+    }
+    return `
+      <section class="settings-field-group">
+        ${label ? `<div class="settings-field-group-title">${escapeHtml(label)}</div>` : ""}
+        <div class="form-grid settings-field-list">
+          ${fields.map((field) => renderCoreManagerField(field)).join("")}
+        </div>
+      </section>
+    `;
+  };
+  const esphomePipelineSectionsHtml = esphomePipelineSections.length
+    ? esphomePipelineSections.map((section) => renderSettingsFieldGroup(section)).join("")
+    : "";
   const esphomePipelineFieldsHtml = esphomePipelineFields.length
     ? esphomePipelineFields.map((field) => renderCoreManagerField(field)).join("")
     : esphomeFieldsHtml;
@@ -9559,6 +9809,11 @@ async function loadSettingsView() {
 
       <form id="settings-form">
         <section class="settings-tab-panel active" data-settings-panel="general">
+          ${renderSettingsSectionIntro(
+            "General",
+            "Identity, login, and WebUI presentation settings for the everyday Tater experience.",
+            "UI"
+          )}
           <div class="form-grid">
             <section class="core-inline-section">
               <div class="small core-inline-section-title">General</div>
@@ -9664,11 +9919,12 @@ async function loadSettingsView() {
         </section>
 
         <section class="settings-tab-panel" data-settings-panel="models">
+          ${renderSettingsSectionIntro(
+            "Models",
+            "Shared model routing for base LLM calls, vision, local voice acceleration, STT, and TTS.",
+            "AI"
+          )}
           <div class="form-grid two-col">
-            <div class="settings-section-title">Models</div>
-            <div class="small" style="grid-column: 1 / -1;">
-              Shared model routing for Tater, including base LLM routing, vision, STT, and TTS.
-            </div>
             <div class="hydra-model-mode" style="grid-column: 1 / -1;">
               <div class="small hydra-model-mode-label">Beast Mode Routing</div>
               ${renderToggleRow(
@@ -9726,6 +9982,18 @@ async function loadSettingsView() {
               </div>
 
               <div class="hydra-model-panel is-active">
+                <div class="hydra-model-panel-title">Voice Acceleration</div>
+                <div class="small hydra-model-panel-note">
+                  Shared by local STT and GPU-capable TTS backends.
+                </div>
+                <label>Local Voice Acceleration
+                  <select id="set_speech_acceleration">
+                    ${renderSettingsSelectOptions(speechAccelerationOptions, settings.speech_acceleration || "auto")}
+                  </select>
+                </label>
+              </div>
+
+              <div class="hydra-model-panel is-active">
                 <div class="hydra-model-panel-title">STT</div>
                 <div class="small hydra-model-panel-note">
                   Shared globally across Tater, cores, and verbas.
@@ -9734,6 +10002,7 @@ async function loadSettingsView() {
                   <select id="set_speech_stt_backend">
                     ${renderSettingsSelectOptions(speechSttBackendOptions, settings.speech_stt_backend || "faster_whisper")}
                   </select>
+                  <div id="speech-stt-backend-status" class="small"></div>
                 </label>
                 <label id="speech-wyoming-stt-host-wrap">Wyoming STT Host
                   <input id="set_speech_wyoming_stt_host" type="text" value="${escapeHtml(
@@ -9920,6 +10189,11 @@ async function loadSettingsView() {
         </section>
 
         <section class="settings-tab-panel" data-settings-panel="integrations">
+          ${renderSettingsSectionIntro(
+            "Integrations",
+            "Service endpoints and credentials for search, Home Assistant, UniFi Network, and UniFi Protect.",
+            "API"
+          )}
           <div class="form-grid">
             <section class="core-inline-section">
               <div class="small core-inline-section-title">Web Search</div>
@@ -9977,6 +10251,11 @@ async function loadSettingsView() {
         </section>
 
         <section class="settings-tab-panel" data-settings-panel="esphome">
+          ${renderSettingsSectionIntro(
+            "ESPHome",
+            "Manage satellites, firmware, speaker ID, stats, and native voice runtime settings from one place.",
+            "ESP"
+          )}
           <div
             id="settings-esphome-shell"
             data-core-action-endpoint="/api/settings/esphome/runtime/action"
@@ -9996,9 +10275,12 @@ async function loadSettingsView() {
             </div>
 
             <div class="settings-subpanel active" data-esphome-panel="satellites">
-              <div class="small" style="margin:10px 0 14px;">
-                Live ESPHome satellites connected directly to Tater, including room context, live entities, and device logs.
-              </div>
+              ${renderSettingsSectionIntro(
+                "Satellites",
+                "Live ESPHome satellites connected directly to Tater, including room context, live entities, and device logs.",
+                "SAT",
+                "subtle"
+              )}
               <div id="settings-esphome-runtime-satellites">
                 ${renderNotice("Open the ESPHome tab to load satellites.")}
               </div>
@@ -10014,6 +10296,12 @@ async function loadSettingsView() {
             </div>
 
             <div class="settings-subpanel" data-esphome-panel="platform">
+              ${renderSettingsSectionIntro(
+                "Voice Runtime",
+                "Built-in ESPHome services and native voice pipeline behavior for connected satellites.",
+                "RUN",
+                "subtle"
+              )}
               <div id="settings-esphome-form">
                 <section class="core-inline-section">
                   <div class="small core-inline-section-title">ESPHome Platform</div>
@@ -10049,8 +10337,8 @@ async function loadSettingsView() {
 
                 <section class="core-inline-section">
                   <div class="small core-inline-section-title">Voice Pipeline Settings</div>
-                  <div class="form-grid two-col">
-                    ${esphomePipelineFieldsHtml}
+                  <div class="settings-field-groups">
+                    ${esphomePipelineSectionsHtml || `<div class="form-grid settings-field-list">${esphomePipelineFieldsHtml}</div>`}
                   </div>
                 </section>
 
@@ -10062,27 +10350,36 @@ async function loadSettingsView() {
             </div>
 
             <div class="settings-subpanel" data-esphome-panel="firmware">
-              <div class="small" style="margin:10px 0 14px;">
-                Build or flash Tater firmware for connected VoicePE and Satellite1 devices after reviewing the template substitutions.
-              </div>
+              ${renderSettingsSectionIntro(
+                "Firmware",
+                "Build or flash Tater firmware for connected VoicePE and Satellite1 devices after reviewing template substitutions.",
+                "FW",
+                "subtle"
+              )}
               <div id="settings-esphome-runtime-firmware">
                 ${renderNotice("Open the ESPHome tab to load the firmware builder.")}
               </div>
             </div>
 
             <div class="settings-subpanel" data-esphome-panel="speakerid">
-              <div class="small" style="margin:10px 0 14px;">
-                Enroll voiceprints for people who use your satellites, then let Tater tag the speaker before Hydra runs.
-              </div>
+              ${renderSettingsSectionIntro(
+                "Speaker ID",
+                "Enroll voiceprints for people who use your satellites, then let Tater tag the speaker before Hydra runs.",
+                "ID",
+                "subtle"
+              )}
               <div id="settings-esphome-runtime-speakerid">
                 ${renderNotice("Open the ESPHome tab to load Speaker ID.")}
               </div>
             </div>
 
             <div class="settings-subpanel" data-esphome-panel="stats">
-              <div class="small" style="margin:10px 0 14px;">
-                Voice pipeline quality, latency, fallback, and discovery metrics for tuning ESPHome devices in Tater.
-              </div>
+              ${renderSettingsSectionIntro(
+                "Stats",
+                "Voice pipeline quality, latency, fallback, and discovery metrics for tuning ESPHome devices in Tater.",
+                "QOS",
+                "subtle"
+              )}
               <div id="settings-esphome-runtime-stats">
                 ${renderNotice("Open the ESPHome tab to load stats.")}
               </div>
@@ -10094,6 +10391,11 @@ async function loadSettingsView() {
         ${renderSettingsRedisSectionHtml(redisStatus, redisEncryptionStatus)}
 
         <section class="settings-tab-panel" data-settings-panel="misc">
+          ${renderSettingsSectionIntro(
+            "Misc",
+            "Small interaction and platform behavior settings that do not belong to model routing or integrations.",
+            "FX"
+          )}
           <div class="form-grid">
             <section class="core-inline-section">
               <div class="small core-inline-section-title">Compotato Popup Effects</div>
@@ -10167,6 +10469,11 @@ async function loadSettingsView() {
         </section>
 
         <section class="settings-tab-panel" data-settings-panel="hydra">
+          ${renderSettingsSectionIntro(
+            "Hydra",
+            "Conversation limits, planning behavior, metrics, and stored execution data.",
+            "HYD"
+          )}
           <div class="settings-subtabs">
             <button type="button" class="settings-subtab-btn active" data-hydra-tab="settings">Hydra</button>
             <button type="button" class="settings-subtab-btn" data-hydra-tab="metrics">Hydra Metrics</button>
@@ -10174,8 +10481,13 @@ async function loadSettingsView() {
           </div>
 
           <div class="settings-subpanel active" data-hydra-panel="settings">
+            ${renderSettingsSectionIntro(
+              "Hydra Behavior",
+              "Tune message windows, retry behavior, and optional second-pass planning checks.",
+              "CFG",
+              "subtle"
+            )}
             <div class="form-grid two-col">
-              <div class="settings-section-title">Hydra General</div>
               <label>Messages Shown in WebUI
                 <input id="set_max_display" type="number" min="1" value="${escapeHtml(settings.max_display || 8)}" />
               </label>
@@ -10216,6 +10528,12 @@ async function loadSettingsView() {
           </div>
 
           <div class="settings-subpanel" data-hydra-panel="metrics">
+            ${renderSettingsSectionIntro(
+              "Hydra Metrics",
+              "Inspect recent tool and portal activity so tuning decisions are based on live runtime behavior.",
+              "MET",
+              "subtle"
+            )}
             <div class="form-grid two-col">
               <label>Portal
                 <select id="set_cerb_metrics_platform">
@@ -10251,6 +10569,12 @@ async function loadSettingsView() {
           </div>
 
           <div class="settings-subpanel" data-hydra-panel="data">
+            ${renderSettingsSectionIntro(
+              "Hydra Data",
+              "Clear all or selected portal execution state when you need a clean slate.",
+              "DATA",
+              "subtle"
+            )}
             <div class="form-grid two-col">
               <div class="settings-section-title">All Portals</div>
               <div class="inline-row" style="grid-column: 1 / -1;">
@@ -10276,6 +10600,11 @@ async function loadSettingsView() {
         </section>
 
         <section class="settings-tab-panel" data-settings-panel="advanced">
+          ${renderSettingsSectionIntro(
+            "Advanced",
+            "Administrative gates and destructive maintenance actions. These controls are intentionally separated from everyday settings.",
+            "ADV"
+          )}
           <div class="form-grid">
             <section class="core-inline-section">
               <div class="small core-inline-section-title">Admin Tool Gating</div>
@@ -10606,6 +10935,8 @@ async function loadSettingsView() {
   });
 
   const speechSttBackendEl = document.getElementById("set_speech_stt_backend");
+  const speechSttBackendStatusEl = document.getElementById("speech-stt-backend-status");
+  const speechAccelerationEl = document.getElementById("set_speech_acceleration");
   const speechWyomingSttHostWrapEl = document.getElementById("speech-wyoming-stt-host-wrap");
   const speechWyomingSttPortWrapEl = document.getElementById("speech-wyoming-stt-port-wrap");
   const speechTtsBackendEl = document.getElementById("set_speech_tts_backend");
@@ -10637,6 +10968,36 @@ async function loadSettingsView() {
       return;
     }
     element.style.display = visible ? "" : "none";
+  };
+
+  const speechSttOptionRowsForAcceleration = () => {
+    const acceleration = String(speechAccelerationEl?.value || "auto").trim() || "auto";
+    return speechSttBackendOptions.map((row) => {
+      const nextRow = row && typeof row === "object" ? { ...row } : {};
+      const requiresAcceleration = String(nextRow.requires_acceleration || "").trim();
+      if (requiresAcceleration === "cuda" && acceleration === "cpu") {
+        nextRow.disabled = true;
+        nextRow.reason = "Select Auto or NVIDIA CUDA";
+      }
+      return nextRow;
+    });
+  };
+
+  const syncSpeechSttBackendOptions = () => {
+    if (!speechSttBackendEl) {
+      return;
+    }
+    const rows = speechSttOptionRowsForAcceleration();
+    const current = String(speechSttBackendEl.value || settings.speech_stt_backend || "faster_whisper").trim() || "faster_whisper";
+    const currentRow = rows.find((row) => String(row?.value || "").trim() === current);
+    const firstEnabled = rows.find((row) => String(row?.value || "").trim() && !row?.disabled);
+    const nextValue = currentRow && !currentRow.disabled ? current : String(firstEnabled?.value || "faster_whisper").trim();
+    speechSttBackendEl.innerHTML = renderSettingsSelectOptions(rows, nextValue);
+    speechSttBackendEl.value = nextValue;
+    const selectedRow = rows.find((row) => String(row?.value || "").trim() === nextValue);
+    if (speechSttBackendStatusEl) {
+      speechSttBackendStatusEl.textContent = selectedRow?.disabled ? String(selectedRow?.reason || "").trim() : "";
+    }
   };
 
   const syncSpeechTtsModelOptions = ({ forceReset = false } = {}) => {
@@ -10706,6 +11067,7 @@ async function loadSettingsView() {
   };
 
   const applySpeechSettingsVisibility = ({ resetTtsSelection = false } = {}) => {
+    syncSpeechSttBackendOptions();
     const sttBackend = String(speechSttBackendEl?.value || "").trim();
     const ttsBackend = String(speechTtsBackendEl?.value || "").trim();
     const announcementTtsBackend = String(announcementTtsBackendEl?.value || "").trim();
@@ -10853,6 +11215,7 @@ async function loadSettingsView() {
     backend: String(speechTtsBackendEl?.value || "").trim(),
     model: String(speechTtsModelEl?.value || "").trim(),
     voice: String(speechTtsVoiceEl?.value || "").trim(),
+    acceleration: String(speechAccelerationEl?.value || "").trim(),
     wyoming_host: String(document.getElementById("set_speech_wyoming_tts_host")?.value || "").trim(),
     wyoming_port: String(document.getElementById("set_speech_wyoming_tts_port")?.value || "").trim(),
     wyoming_voice: String(speechWyomingTtsVoiceEl?.value || "").trim(),
@@ -10973,6 +11336,10 @@ async function loadSettingsView() {
   };
 
   speechSttBackendEl?.addEventListener("change", applySpeechSettingsVisibility);
+  speechAccelerationEl?.addEventListener("change", () => {
+    clearSpeechTtsPreviewCache();
+    applySpeechSettingsVisibility();
+  });
   speechTtsBackendEl?.addEventListener("change", () => {
     clearSpeechTtsPreviewCache();
     applySpeechSettingsVisibility({ resetTtsSelection: true });
@@ -11011,6 +11378,7 @@ async function loadSettingsView() {
     const visionModel = String(document.getElementById("set_vision_model")?.value || "").trim();
     const visionApiKey = String(document.getElementById("set_vision_api_key")?.value || "").trim();
     const speechSttBackend = String(document.getElementById("set_speech_stt_backend")?.value || "").trim();
+    const speechAcceleration = String(document.getElementById("set_speech_acceleration")?.value || "").trim();
     const speechWyomingSttHost = String(document.getElementById("set_speech_wyoming_stt_host")?.value || "").trim();
     const speechWyomingSttPort = String(document.getElementById("set_speech_wyoming_stt_port")?.value || "").trim();
     const speechTtsBackend = String(document.getElementById("set_speech_tts_backend")?.value || "").trim();
@@ -11035,6 +11403,7 @@ async function loadSettingsView() {
       vision_model: visionModel,
       vision_api_key: visionApiKey,
       speech_stt_backend: speechSttBackend,
+      speech_acceleration: speechAcceleration,
       speech_wyoming_stt_host: speechWyomingSttHost,
       speech_wyoming_stt_port: speechWyomingSttPort,
       speech_tts_backend: speechTtsBackend,
@@ -11058,12 +11427,19 @@ async function loadSettingsView() {
     });
     statusEl.textContent = "Saving shared model settings...";
     try {
-      await api("/api/settings", {
+      const saveResult = await api("/api/settings", {
         method: "POST",
         body: JSON.stringify(payload),
       });
-      statusEl.textContent = "Shared model settings saved.";
-      showToast("Shared model settings saved.");
+      const warmup = saveResult?.speech_warmup && typeof saveResult.speech_warmup === "object" ? saveResult.speech_warmup : null;
+      let message = "Shared model settings saved.";
+      if (warmup?.started) {
+        message = "Shared model settings saved. Warming selected voice models in the background.";
+      } else if (warmup?.already_running || warmup?.running) {
+        message = "Shared model settings saved. Voice model warmup is already running.";
+      }
+      statusEl.textContent = message;
+      showToast(message);
     } catch (error) {
       statusEl.textContent = `Model save failed: ${error.message}`;
     }
@@ -11082,6 +11458,7 @@ async function loadSettingsView() {
   hydraSubtabButtons.forEach((button) => {
     button.addEventListener("click", () => activateHydraSubtab(button.dataset.hydraTab));
   });
+  activateHydraSubtab("settings");
   bindEspHomeSettingsTabs(root);
 
   const metricsStatusEl = document.getElementById("settings-cerb-metrics-status");

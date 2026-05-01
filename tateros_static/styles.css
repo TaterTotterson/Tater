@@ -1425,6 +1425,30 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   box-shadow: var(--accent-glow);
 }
 
+.view-root[data-view="settings"] > .card {
+  padding: 18px;
+}
+
+.view-root[data-view="settings"] .card-head {
+  margin-bottom: 8px;
+}
+
+.view-root[data-view="settings"] .card-title {
+  font-size: 1.12rem;
+  letter-spacing: 0;
+}
+
+.view-root[data-view="settings"] > .card > .small {
+  line-height: 1.45;
+}
+
+.view-root[data-view="settings"] #settings-status:not(:empty) {
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
 .settings-tab-panel {
   display: none;
   margin-top: 12px;
@@ -1432,6 +1456,162 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 
 .settings-tab-panel.active {
   display: block;
+}
+
+.view-root[data-view="settings"] #settings-form {
+  margin-top: 10px;
+}
+
+.settings-section-intro {
+  position: relative;
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  grid-column: 1 / -1;
+  margin: 0 0 8px;
+  padding: 14px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 138, 42, 0.16);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, rgba(255, 138, 42, 0.1), rgba(255, 255, 255, 0.036) 44%, rgba(255, 255, 255, 0.018));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+}
+
+.settings-section-intro::after {
+  content: "";
+  position: absolute;
+  right: -78px;
+  bottom: -122px;
+  width: 278px;
+  height: 278px;
+  border: 1px solid rgba(255, 138, 42, 0.16);
+  border-radius: 999px;
+  box-shadow: inset 0 0 0 24px rgba(255, 138, 42, 0.035);
+  pointer-events: none;
+}
+
+.settings-section-intro > * {
+  position: relative;
+  z-index: 1;
+}
+
+.settings-section-intro.is-subtle {
+  gap: 8px;
+  margin: 8px 0;
+  padding: 9px 10px;
+  border-color: rgba(255, 255, 255, 0.075);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.028), rgba(0, 0, 0, 0.105));
+  box-shadow: none;
+}
+
+.settings-section-intro.is-subtle::after {
+  right: -52px;
+  bottom: -84px;
+  width: 172px;
+  height: 172px;
+  border-color: rgba(255, 138, 42, 0.105);
+  box-shadow: none;
+}
+
+.settings-section-intro-badge {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid rgba(255, 110, 34, 0.42);
+  border-radius: 10px;
+  background: rgba(255, 110, 34, 0.13);
+  color: #ff9a57;
+  font-size: 0.72rem;
+  font-weight: 850;
+  line-height: 1;
+}
+
+.settings-section-intro.is-subtle .settings-section-intro-badge {
+  width: 28px;
+  height: 28px;
+  border-radius: 9px;
+  border-color: rgba(255, 110, 34, 0.28);
+  background: rgba(255, 110, 34, 0.075);
+  color: #f08a45;
+  font-size: 0.64rem;
+}
+
+.settings-section-intro h3 {
+  margin: 0 0 4px;
+  color: #f7f0e7;
+  font-size: 1rem;
+  font-weight: 850;
+  letter-spacing: 0;
+  line-height: 1.2;
+}
+
+.settings-section-intro.is-subtle h3 {
+  color: #ece5dc;
+  font-size: 0.92rem;
+  font-weight: 800;
+}
+
+.settings-section-intro p {
+  max-width: 760px;
+  margin: 0;
+  color: #bdb4aa;
+  font-size: 0.86rem;
+  line-height: 1.45;
+}
+
+.settings-section-intro.is-subtle p {
+  color: #aaa298;
+  font-size: 0.8rem;
+}
+
+.view-root[data-view="settings"] .settings-tab-panel {
+  margin-top: 10px;
+}
+
+.view-root[data-view="settings"] .settings-tab-panel.active {
+  animation: reveal-up 180ms ease-out both;
+}
+
+.view-root[data-view="settings"] .settings-tab-panel > .form-grid,
+.view-root[data-view="settings"] .settings-subpanel.active > .form-grid,
+.view-root[data-view="settings"] #settings-esphome-form {
+  gap: 6px;
+  margin-top: 0;
+}
+
+.view-root[data-view="settings"] .form-grid.two-col {
+  grid-template-columns: 1fr;
+}
+
+.settings-field-groups {
+  display: grid;
+  gap: 6px;
+}
+
+.settings-field-group {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.settings-field-group + .settings-field-group {
+  padding-top: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.settings-field-group-title {
+  color: #ded6cd;
+  font-size: 0.86rem;
+  font-weight: 800;
+  line-height: 1.25;
+}
+
+.settings-field-list {
+  gap: 0;
+  margin-top: 0;
 }
 
 .settings-subtabs {
@@ -1488,6 +1668,25 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   font-weight: 700;
 }
 
+.view-root[data-view="settings"] .settings-section-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 2px 0 0;
+  color: var(--text);
+  font-size: 1rem;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.view-root[data-view="settings"] .settings-section-title::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  min-width: 44px;
+  background: linear-gradient(90deg, rgba(240, 131, 69, 0.34), rgba(255, 255, 255, 0.06), transparent);
+}
+
 .hydra-model-mode {
   border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 12px;
@@ -1533,10 +1732,55 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   padding: 10px;
 }
 
+.view-root[data-view="settings"] .core-inline-section,
+.view-root[data-view="settings"] .hydra-model-mode,
+.view-root[data-view="settings"] .hydra-model-panel,
+.view-root[data-view="settings"] .settings-avatar-card {
+  border-color: rgba(255, 255, 255, 0.085);
+  border-radius: 8px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(0, 0, 0, 0.14));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+}
+
+.view-root[data-view="settings"] .core-inline-section,
+.view-root[data-view="settings"] .hydra-model-mode,
+.view-root[data-view="settings"] .settings-avatar-card {
+  padding: 14px;
+}
+
+.view-root[data-view="settings"] .hydra-model-panel.is-active {
+  padding: 14px;
+}
+
 .hydra-model-panel-title {
   grid-column: 1 / -1;
   color: var(--accent-soft);
   font-weight: 700;
+}
+
+.view-root[data-view="settings"] .core-inline-section-title,
+.view-root[data-view="settings"] .hydra-model-mode-label,
+.view-root[data-view="settings"] .hydra-model-panel-title,
+.view-root[data-view="settings"] .settings-avatar-card > .small:first-child {
+  color: #f5efe7;
+  font-size: 0.93rem;
+  font-weight: 800;
+  letter-spacing: 0;
+  line-height: 1.25;
+}
+
+.view-root[data-view="settings"] .core-inline-section-title,
+.view-root[data-view="settings"] .hydra-model-panel-title {
+  margin-bottom: 4px;
+}
+
+.view-root[data-view="settings"] .hydra-model-panel-note,
+.view-root[data-view="settings"] .core-inline-section > .small:not(.core-inline-section-title),
+.view-root[data-view="settings"] label .small,
+.view-root[data-view="settings"] .inline-row > .small {
+  color: #b4aca2;
+  font-weight: 500;
+  line-height: 1.25;
 }
 
 .hydra-model-panel-note {
@@ -1585,6 +1829,20 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   font-size: 0.82rem;
   font-weight: 700;
   letter-spacing: 0.01em;
+}
+
+.view-root[data-view="settings"] .hydra-role-title {
+  margin-top: 6px;
+  padding-top: 12px;
+  border-top-color: rgba(255, 255, 255, 0.1);
+  color: #ded6cd;
+  font-size: 0.86rem;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.view-root[data-view="settings"] .hydra-model-panel {
+  grid-template-columns: 1fr;
 }
 
 .settings-multiselect {
@@ -2046,6 +2304,20 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 
 .core-inline-section.tone-danger .core-inline-section-title {
   color: #ffd0d0;
+}
+
+.esphome-wake-sound-preview-row {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.065);
+}
+
+.esphome-wake-sound-preview-status {
+  min-height: 1.2em;
 }
 
 .core-data-table-wrap {
@@ -2881,6 +3153,62 @@ label {
   color: var(--muted);
 }
 
+.view-root[data-view="settings"] label {
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 340px);
+  column-gap: 16px;
+  row-gap: 0;
+  align-items: center;
+  color: #ece5dc;
+  font-weight: 700;
+  line-height: 1.18;
+  padding: 3px 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.065);
+}
+
+.view-root[data-view="settings"] .form-grid > label:first-child,
+.view-root[data-view="settings"] .settings-field-list > label:first-child,
+.view-root[data-view="settings"] .hydra-model-panel > label:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.view-root[data-view="settings"] label > input,
+.view-root[data-view="settings"] label > select,
+.view-root[data-view="settings"] label > .toggle-row {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+}
+
+.view-root[data-view="settings"] label > .toggle-row {
+  justify-content: flex-end;
+}
+
+.view-root[data-view="settings"] label > .small {
+  grid-column: 1;
+}
+
+.view-root[data-view="settings"] label > textarea,
+.view-root[data-view="settings"] label > .core-data-table-wrap,
+.view-root[data-view="settings"] label > .core-bar-chart,
+.view-root[data-view="settings"] label > .core-readonly-text {
+  grid-column: 1 / -1;
+  grid-row: auto;
+}
+
+.view-root[data-view="settings"] .hydra-base-server-row label {
+  grid-template-columns: 1fr;
+  gap: 5px;
+  padding: 0;
+  border-top: 0;
+}
+
+.view-root[data-view="settings"] .hydra-base-server-row label > input,
+.view-root[data-view="settings"] .hydra-base-server-row label > select,
+.view-root[data-view="settings"] .hydra-base-server-row label > .small {
+  grid-column: 1;
+  grid-row: auto;
+}
+
 input,
 select,
 textarea {
@@ -2891,6 +3219,30 @@ textarea {
   color: var(--text);
   padding: 9px 10px;
   font: inherit;
+}
+
+.view-root[data-view="settings"] input,
+.view-root[data-view="settings"] select,
+.view-root[data-view="settings"] textarea {
+  border-radius: 8px;
+  border-color: rgba(255, 255, 255, 0.11);
+  background: rgba(0, 0, 0, 0.26);
+  color: var(--text);
+  padding: 7px 9px;
+}
+
+.view-root[data-view="settings"] input:hover,
+.view-root[data-view="settings"] select:hover,
+.view-root[data-view="settings"] textarea:hover {
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+.view-root[data-view="settings"] input:focus,
+.view-root[data-view="settings"] select:focus,
+.view-root[data-view="settings"] textarea:focus {
+  border-color: rgba(240, 131, 69, 0.62);
+  box-shadow: 0 0 0 3px rgba(240, 131, 69, 0.12);
+  outline: none;
 }
 
 input:disabled,
@@ -2955,13 +3307,15 @@ textarea {
 }
 
 .toggle-input:checked {
-  border-color: rgba(214, 90, 31, 0.68);
-  background: linear-gradient(135deg, rgba(214, 90, 31, 0.68), rgba(214, 90, 31, 0.38));
+  border-color: rgba(240, 131, 69, 0.9);
+  background: linear-gradient(135deg, rgba(240, 131, 69, 0.96), rgba(214, 90, 31, 0.78));
+  box-shadow: 0 0 0 1px rgba(240, 131, 69, 0.16), 0 8px 18px rgba(214, 90, 31, 0.18);
 }
 
 .toggle-input:checked::before {
   transform: translateX(20px);
-  background: #fff;
+  background: #fff7ef;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.34);
 }
 
 .toggle-input:focus-visible {
@@ -4533,6 +4887,23 @@ body[data-popup-effect="melt"] .toast-item.flame-out::after {
 
   .form-grid.two-col {
     grid-template-columns: 1fr;
+  }
+
+  .view-root[data-view="settings"] label {
+    grid-template-columns: 1fr;
+  }
+
+  .view-root[data-view="settings"] label > input,
+  .view-root[data-view="settings"] label > select,
+  .view-root[data-view="settings"] label > textarea,
+  .view-root[data-view="settings"] label > .toggle-row,
+  .view-root[data-view="settings"] label > .small {
+    grid-column: 1;
+    grid-row: auto;
+  }
+
+  .view-root[data-view="settings"] label > .toggle-row {
+    justify-content: flex-start;
   }
 
   .hydra-model-panel {

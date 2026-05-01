@@ -25,6 +25,9 @@ async def startup() -> None:
     effective_stt_backend, stt_backend_note = vp._resolve_stt_backend()
     selected_tts_backend = vp._selected_tts_backend()
     effective_tts_backend, tts_backend_note = vp._resolve_tts_backend()
+    voice_cfg = vp._voice_config_snapshot()
+    eou_cfg = voice_cfg.get("eou") if isinstance(voice_cfg.get("eou"), dict) else {}
+    selected_vad_backend = vp._normalize_vad_backend(eou_cfg.get("backend"))
     vp.logger.info(
         "[voice_core] startup version=%s backend=native_voice_pipeline esphome_native=true",
         vp.__version__,
@@ -48,10 +51,11 @@ async def startup() -> None:
     else:
         vp.logger.info("[native-voice] audioop fast path active")
     vp.logger.info(
-        "[native-voice] vad backend=%s threshold=%.2f neg_threshold=%.2f",
-        vp.DEFAULT_VAD_BACKEND,
-        float(vp.DEFAULT_SILERO_THRESHOLD),
-        float(vp.DEFAULT_SILERO_NEG_THRESHOLD),
+        "[native-voice] vad backend selected=%s threshold=%.2f neg_threshold=%.2f webrtc_aggressiveness=%s",
+        selected_vad_backend,
+        float(eou_cfg.get("silero_threshold") or vp.DEFAULT_SILERO_THRESHOLD),
+        float(eou_cfg.get("silero_neg_threshold") or vp.DEFAULT_SILERO_NEG_THRESHOLD),
+        int(eou_cfg.get("webrtc_aggressiveness") or vp.DEFAULT_WEBRTC_VAD_AGGRESSIVENESS),
     )
     vp.logger.info(
         "[native-voice] stt backend selected=%s effective=%s faster_whisper=%s vosk=%s wyoming=%s",
@@ -62,6 +66,14 @@ async def startup() -> None:
         "available" if vp.AsyncTcpClient is not None else "missing",
     )
     vp.logger.info("[native-voice] stt model root=%s", vp._stt_model_root())
+    vp.logger.info(
+        "[native-voice] acceleration selected=%s effective=%s cuda_available=%s faster_whisper_device=%s kokoro_provider=%s",
+        vp.normalize_speech_acceleration(vp._voice_settings_with_shared_speech().get("VOICE_ACCELERATION")),
+        vp._effective_speech_acceleration(),
+        vp._cuda_runtime_available(),
+        vp._faster_whisper_device(),
+        vp._kokoro_provider(),
+    )
     vp.logger.info(
         "[native-voice] tts backend selected=%s effective=%s kokoro=%s pocket_tts=%s piper=%s wyoming=%s",
         selected_tts_backend,
@@ -77,14 +89,21 @@ async def startup() -> None:
     if tts_backend_note:
         vp.logger.warning("[native-voice] tts backend note: %s", tts_backend_note)
 
-    try:
-        vp.SileroVadBackend._ensure_shared()
-        if vp.SileroVadBackend._shared_ready:
-            vp.logger.info("[native-voice] silero VAD model pre-loaded successfully")
-        else:
-            vp.logger.warning("[native-voice] silero VAD model pre-load failed: %s", vp.SileroVadBackend._shared_error)
-    except Exception as exc:
-        vp.logger.warning("[native-voice] silero VAD model pre-load error: %s", exc)
+    if selected_vad_backend in {"silero", "auto"}:
+        try:
+            vp.SileroVadBackend._ensure_shared()
+            if vp.SileroVadBackend._shared_ready:
+                vp.logger.info("[native-voice] silero VAD model pre-loaded successfully")
+            else:
+                vp.logger.warning("[native-voice] silero VAD model pre-load failed: %s", vp.SileroVadBackend._shared_error)
+        except Exception as exc:
+            vp.logger.warning("[native-voice] silero VAD model pre-load error: %s", exc)
+    if selected_vad_backend in {"webrtc", "auto"}:
+        try:
+            vp.importlib.import_module("webrtcvad")
+            vp.logger.info("[native-voice] webrtc VAD dependency available")
+        except Exception as exc:
+            vp.logger.warning("[native-voice] webrtc VAD dependency unavailable: %s", exc)
 
     if "esphome_bootstrap" not in vp._background_tasks or vp._background_tasks["esphome_bootstrap"].done():
         vp._background_tasks["esphome_bootstrap"] = asyncio.create_task(vp._esphome_bootstrap_reconnect())
@@ -135,6 +154,14 @@ async def native_status(x_tater_token: Optional[str] = Header(None)) -> Dict[str
     effective_stt_backend, stt_backend_note = vp._resolve_stt_backend()
     selected_tts_backend = vp._selected_tts_backend()
     effective_tts_backend, tts_backend_note = vp._resolve_tts_backend()
+    voice_cfg = vp._voice_config_snapshot()
+    eou_cfg = voice_cfg.get("eou") if isinstance(voice_cfg.get("eou"), dict) else {}
+    selected_vad_backend = vp._normalize_vad_backend(eou_cfg.get("backend"))
+    webrtc_vad_error = ""
+    try:
+        vp.importlib.import_module("webrtcvad")
+    except Exception as exc:
+        webrtc_vad_error = str(exc)
     selectors = []
     for key, row in vp._voice_selector_runtime.items():
         if not isinstance(row, dict):
@@ -155,6 +182,13 @@ async def native_status(x_tater_token: Optional[str] = Header(None)) -> Dict[str
         "stt_backend_selected": selected_stt_backend,
         "stt_backend_effective": effective_stt_backend,
         "stt_backend_note": vp._text(stt_backend_note),
+        "acceleration": voice_cfg.get("acceleration"),
+        "vad": eou_cfg,
+        "vad_backend_selected": selected_vad_backend,
+        "silero_vad_available": bool(vp.SileroVadBackend._shared_ready),
+        "silero_vad_error": vp._text(vp.SileroVadBackend._shared_error),
+        "webrtc_vad_available": not bool(webrtc_vad_error),
+        "webrtc_vad_error": vp._text(webrtc_vad_error),
         "stt_model_root": vp._stt_model_root(),
         "tts_backend_selected": selected_tts_backend,
         "tts_backend_effective": effective_tts_backend,

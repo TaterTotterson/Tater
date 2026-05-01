@@ -1,0 +1,16 @@
+services:
+  tater:
+    build:
+      context: .
+      dockerfile: Dockerfile.nvidia
+    environment:
+      TATER_SPEECH_ACCELERATION: ${TATER_SPEECH_ACCELERATION:-auto}
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

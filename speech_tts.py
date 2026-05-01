@@ -37,7 +37,9 @@ from speech_settings import (
     DEFAULT_WYOMING_TTS_HOST,
     DEFAULT_WYOMING_TTS_PORT,
     DEFAULT_WYOMING_TTS_VOICE,
+    get_speech_settings,
     normalize_announcement_tts_backend,
+    normalize_speech_acceleration,
 )
 
 try:
@@ -96,6 +98,7 @@ DEFAULT_TTS_MODEL_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "agent_lab", "models", "tts")
 )
 DEFAULT_KOKORO_PROVIDER = "cpu"
+DEFAULT_KOKORO_OUTPUT_GAIN = 1.5
 DEFAULT_WYOMING_TIMEOUT_SECONDS = 45.0
 DEFAULT_PIPER_SENTENCE_PAUSE_SECONDS = 0.24
 DEFAULT_PIPER_PARAGRAPH_PAUSE_SECONDS = 0.46
@@ -127,6 +130,44 @@ _runtime_tts_assets: Dict[str, Dict[str, Any]] = {}
 _runtime_tts_assets_lock = threading.Lock()
 logger = logging.getLogger("speech_tts")
 RUNTIME_TTS_ASSET_TTL_SECONDS = 15 * 60.0
+
+
+def _cuda_runtime_available() -> bool:
+    with contextlib.suppress(Exception):
+        ctranslate2_mod = importlib.import_module("ctranslate2")
+        if int(getattr(ctranslate2_mod, "get_cuda_device_count")()) > 0:
+            return True
+    with contextlib.suppress(Exception):
+        torch_mod = importlib.import_module("torch")
+        cuda_mod = getattr(torch_mod, "cuda", None)
+        if cuda_mod is not None and bool(cuda_mod.is_available()):
+            return True
+    return False
+
+
+def _effective_speech_acceleration(override: Any = None) -> str:
+    selected = normalize_speech_acceleration(override)
+    if selected == "auto" and override in (None, ""):
+        with contextlib.suppress(Exception):
+            selected = normalize_speech_acceleration(get_speech_settings().get("acceleration"))
+    if selected != "auto":
+        return selected
+
+    env_selected = normalize_speech_acceleration(
+        os.getenv("TATER_SPEECH_ACCELERATION") or os.getenv("TATER_VOICE_ACCELERATION")
+    )
+    if env_selected != "auto":
+        return env_selected
+    return "cuda" if _cuda_runtime_available() else "cpu"
+
+
+def _kokoro_provider(acceleration: Any = None) -> str:
+    env_provider = _text(os.getenv("TATER_KOKORO_PROVIDER")).lower().replace("-", "_")
+    if env_provider in {"cuda", "gpu", "nvidia", "nvidia_cuda"}:
+        return "cuda"
+    if env_provider in {"cpu", "none", "off"}:
+        return "cpu"
+    return "cuda" if _effective_speech_acceleration(acceleration) == "cuda" else DEFAULT_KOKORO_PROVIDER
 HOMEASSISTANT_MEDIA_SOURCE_TARGET = "media-source://media_source/local/tater_announcements"
 HOMEASSISTANT_MEDIA_SOURCE_CLEANUP_SECONDS = 15 * 60.0
 
@@ -306,6 +347,10 @@ def _as_float(value: Any, default: float, *, minimum: Optional[float] = None) ->
     return out
 
 
+def _kokoro_output_gain() -> float:
+    return min(4.0, _as_float(os.getenv("TATER_KOKORO_OUTPUT_GAIN"), DEFAULT_KOKORO_OUTPUT_GAIN, minimum=0.1))
+
+
 def _append_pcm_silence(audio_bytes: bytes, audio_format: Dict[str, Any], *, seconds: float) -> bytes:
     pcm = bytes(audio_bytes or b"")
     if seconds <= 0:
@@ -463,7 +508,7 @@ def _patch_kokoro_ssmd_parser() -> None:
     _kokoro_ssmd_patch_applied = True
 
 
-def _float_audio_to_pcm16_bytes(audio: Any) -> bytes:
+def _float_audio_to_pcm16_bytes(audio: Any, *, gain: float = 1.0) -> bytes:
     np_mod = importlib.import_module("numpy")
     array = np_mod.asarray(audio, dtype=np_mod.float32)
     if array.ndim > 1:
@@ -472,7 +517,11 @@ def _float_audio_to_pcm16_bytes(audio: Any) -> bytes:
         array = array.reshape(-1)
     if not array.size:
         return b""
-    array = np_mod.clip(array, -1.0, 1.0)
+    array = np_mod.nan_to_num(array, nan=0.0, posinf=1.0, neginf=-1.0)
+    factor = min(4.0, _as_float(gain, 1.0, minimum=0.0))
+    if factor != 1.0:
+        array = array * factor
+    array = np_mod.clip(array, -0.98, 0.98)
     return (array * 32767.0).astype(np_mod.int16).tobytes()
 
 
@@ -663,7 +712,7 @@ async def _wyoming_synthesize(
     return bytes(audio_out), audio_format
 
 
-def _load_kokoro_pipeline(model_id: str) -> Any:
+def _load_kokoro_pipeline(model_id: str, acceleration: Any = None) -> Any:
     if build_kokoro_pipeline is None or KokoroPipelineConfig is None:
         raise RuntimeError(f"kokoro dependency unavailable: {KOKORO_IMPORT_ERROR or 'unknown import error'}")
 
@@ -671,7 +720,8 @@ def _load_kokoro_pipeline(model_id: str) -> Any:
     variant, _, quality = model_token.partition(":")
     variant = variant or "v1.0"
     quality = quality or "q8"
-    key = (variant, quality)
+    provider = _kokoro_provider(acceleration)
+    key = (variant, quality, provider)
 
     with _kokoro_pipeline_lock:
         pipeline = _kokoro_pipeline_cache.get(key)
@@ -693,13 +743,14 @@ def _load_kokoro_pipeline(model_id: str) -> Any:
                 model_source="huggingface",
                 model_variant=variant,
                 model_quality=quality,
-                provider=DEFAULT_KOKORO_PROVIDER,
+                provider=provider,
                 tokenizer_config=(
                     KokoroTokenizerConfig(use_spacy=False)
                     if KokoroTokenizerConfig is not None
                     else None
                 ),
             )
+            logger.info("[speech_tts] kokoro model source=%s model=%s provider=%s", root, model_token, provider)
             pipeline = build_kokoro_pipeline(config=cfg, eager=True)
             _kokoro_pipeline_cache[key] = pipeline
         return pipeline
@@ -749,10 +800,10 @@ def _load_piper_voice_model(model_id: str) -> Any:
         return voice
 
 
-def _synthesize_kokoro_sync(text: str, model_id: str, voice: str) -> Tuple[bytes, Dict[str, Any]]:
-    pipeline = _load_kokoro_pipeline(model_id)
+def _synthesize_kokoro_sync(text: str, model_id: str, voice: str, acceleration: Any = None) -> Tuple[bytes, Dict[str, Any]]:
+    pipeline = _load_kokoro_pipeline(model_id, acceleration=acceleration)
     result = pipeline.run(_text(text), voice=_text(voice) or DEFAULT_KOKORO_VOICE)
-    audio_bytes = _float_audio_to_pcm16_bytes(getattr(result, "audio", None))
+    audio_bytes = _float_audio_to_pcm16_bytes(getattr(result, "audio", None), gain=_kokoro_output_gain())
     sample_rate = int(getattr(result, "sample_rate", 24000) or 24000)
     return audio_bytes, {"rate": sample_rate, "width": 2, "channels": 1}
 
@@ -827,6 +878,7 @@ async def synthesize_tts_wav(
     wyoming_host: str = "",
     wyoming_port: Any = None,
     wyoming_voice: str = "",
+    acceleration: Any = None,
 ) -> bytes:
     selected_backend = normalize_tts_backend(backend)
     prompt = _text(text)
@@ -839,6 +891,7 @@ async def synthesize_tts_wav(
             prompt,
             _text(model) or DEFAULT_KOKORO_MODEL,
             _text(voice) or DEFAULT_KOKORO_VOICE,
+            acceleration,
         )
         return pcm_to_wav(audio_bytes, audio_format)
 
@@ -877,6 +930,7 @@ async def synthesize_preview_wav(
     wyoming_host: str = "",
     wyoming_port: Any = None,
     wyoming_voice: str = "",
+    acceleration: Any = None,
 ) -> bytes:
     return await synthesize_tts_wav(
         text=text,
@@ -886,6 +940,7 @@ async def synthesize_preview_wav(
         wyoming_host=wyoming_host,
         wyoming_port=wyoming_port,
         wyoming_voice=wyoming_voice,
+        acceleration=acceleration,
     )
 
 

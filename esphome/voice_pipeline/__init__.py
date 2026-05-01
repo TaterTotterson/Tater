@@ -57,7 +57,10 @@ from helpers import extract_json, get_llm_client_from_env, redis_client
 import verba_registry
 from verba_settings import get_verba_enabled
 from hydra import run_hydra_turn, resolve_agent_limits
-from speech_settings import get_speech_settings as get_shared_speech_settings
+from speech_settings import (
+    get_speech_settings as get_shared_speech_settings,
+    normalize_speech_acceleration,
+)
 # Compatibility re-exports for package-level callers while the implementation
 # lives in smaller modules.
 from .conversation import (
@@ -265,6 +268,7 @@ DEFAULT_TTS_MODEL_ROOT = os.path.abspath(
 DEFAULT_KOKORO_MODEL = "v1.0:q8"
 DEFAULT_KOKORO_VOICE = "af_bella"
 DEFAULT_KOKORO_PROVIDER = "cpu"
+DEFAULT_KOKORO_OUTPUT_GAIN = 1.5
 DEFAULT_POCKET_TTS_MODEL = "b6369a24"
 DEFAULT_POCKET_TTS_VOICE = "alba"
 DEFAULT_PIPER_MODEL = "en_US-lessac-medium"
@@ -306,6 +310,7 @@ DEFAULT_WAKE_STARTUP_GATE_S = 0.40
 DEFAULT_WAKE_MIN_SPEECH_FRAMES = 3
 DEFAULT_WAKE_MIN_SILENCE_LONG_S = 0.74
 DEFAULT_TTS_URL_TTL_S = 180
+DEFAULT_TTS_ANNOUNCEMENT_TIMEOUT_MAX_S = 170.0
 
 DEFAULT_EOU_MODE = "server"
 DEFAULT_VAD_BACKEND = "silero"
@@ -317,6 +322,8 @@ DEFAULT_SILERO_NEG_THRESHOLD = 0.18
 DEFAULT_SILERO_FRAME_SAMPLES = 512
 DEFAULT_SILERO_MIN_SPEECH_FRAMES = 2
 DEFAULT_SILERO_MIN_SILENCE_FRAMES = 4
+DEFAULT_WEBRTC_VAD_AGGRESSIVENESS = 2
+DEFAULT_WEBRTC_VAD_FRAME_MS = 30
 DEFAULT_VAD_MIN_SILENCE_SHORT_S = 0.50
 DEFAULT_VAD_MIN_SILENCE_LONG_S = 0.62
 DEFAULT_AUDIO_INPUT_GAIN = 1.6
@@ -1109,6 +1116,7 @@ def _shared_speech_voice_settings() -> Dict[str, Any]:
     shared = get_shared_speech_settings() or {}
     return {
         "VOICE_STT_BACKEND": shared.get("stt_backend"),
+        "VOICE_ACCELERATION": shared.get("acceleration"),
         "VOICE_WYOMING_STT_HOST": shared.get("wyoming_stt_host"),
         "VOICE_WYOMING_STT_PORT": shared.get("wyoming_stt_port"),
         "VOICE_TTS_BACKEND": shared.get("tts_backend"),
@@ -1126,6 +1134,51 @@ def _voice_settings_with_shared_speech(extra_values: Optional[Dict[str, Any]] = 
     if isinstance(extra_values, dict):
         merged.update({key: value for key, value in extra_values.items() if value is not None})
     return merged
+
+
+def _cuda_runtime_available() -> bool:
+    with contextlib.suppress(Exception):
+        ctranslate2_mod = importlib.import_module("ctranslate2")
+        if int(getattr(ctranslate2_mod, "get_cuda_device_count")()) > 0:
+            return True
+    with contextlib.suppress(Exception):
+        torch_mod = importlib.import_module("torch")
+        cuda_mod = getattr(torch_mod, "cuda", None)
+        if cuda_mod is not None and bool(cuda_mod.is_available()):
+            return True
+    return False
+
+
+def _effective_speech_acceleration() -> str:
+    selected = normalize_speech_acceleration(_voice_settings_with_shared_speech().get("VOICE_ACCELERATION"))
+    if selected != "auto":
+        return selected
+    env_selected = normalize_speech_acceleration(
+        os.getenv("TATER_SPEECH_ACCELERATION") or os.getenv("TATER_VOICE_ACCELERATION")
+    )
+    if env_selected != "auto":
+        return env_selected
+    return "cuda" if _cuda_runtime_available() else "cpu"
+
+
+def _faster_whisper_device() -> str:
+    return "cuda" if _effective_speech_acceleration() == "cuda" else DEFAULT_FASTER_WHISPER_DEVICE
+
+
+def _faster_whisper_compute_type() -> str:
+    env_compute_type = _text(os.getenv("TATER_FASTER_WHISPER_COMPUTE_TYPE"))
+    if env_compute_type:
+        return env_compute_type
+    return "float16" if _faster_whisper_device() == "cuda" else DEFAULT_FASTER_WHISPER_COMPUTE_TYPE
+
+
+def _kokoro_provider() -> str:
+    env_provider = _text(os.getenv("TATER_KOKORO_PROVIDER")).lower().replace("-", "_")
+    if env_provider in {"cuda", "gpu", "nvidia", "nvidia_cuda"}:
+        return "cuda"
+    if env_provider in {"cpu", "none", "off"}:
+        return "cpu"
+    return "cuda" if _effective_speech_acceleration() == "cuda" else DEFAULT_KOKORO_PROVIDER
 
 
 def _get_bool_setting(name: str, default: bool) -> bool:
@@ -1151,6 +1204,22 @@ def _normalize_stt_backend(value: Any) -> str:
     if token == "wyoming":
         return "wyoming"
     return DEFAULT_STT_BACKEND
+
+
+def _normalize_vad_backend(value: Any, *, default: str = DEFAULT_VAD_BACKEND) -> str:
+    token = _lower(value).replace("-", "_").replace(" ", "_")
+    fallback = _lower(default).replace("-", "_").replace(" ", "_")
+    if fallback not in {"silero", "webrtc", "auto"}:
+        fallback = DEFAULT_VAD_BACKEND
+    if token in {"", "default"}:
+        return fallback
+    if token in {"silero", "silero_vad"}:
+        return "silero"
+    if token in {"webrtc", "webrtcvad", "webrtc_vad", "web_rtc"}:
+        return "webrtc"
+    if token == "auto":
+        return "auto"
+    return fallback
 
 
 KOKORO_MODEL_SPECS: Dict[str, Dict[str, str]] = {
@@ -1531,9 +1600,17 @@ def _voice_config_snapshot() -> Dict[str, Any]:
     tts_backend = _normalize_tts_backend(settings.get("VOICE_TTS_BACKEND"))
     tts_model = _text(settings.get("VOICE_TTS_MODEL"))
     tts_voice = _text(settings.get("VOICE_TTS_VOICE"))
+    vad_backend = _normalize_vad_backend(settings.get("VOICE_VAD_BACKEND"))
+    selected_acceleration = normalize_speech_acceleration(settings.get("VOICE_ACCELERATION"))
+    effective_acceleration = _effective_speech_acceleration()
     return {
         "native_debug": _native_debug_enabled(),
         "wyoming_timeout_s": _get_float_setting("VOICE_NATIVE_WYOMING_TIMEOUT_S", DEFAULT_WYOMING_TIMEOUT_SECONDS, minimum=5.0, maximum=180.0),
+        "acceleration": {
+            "selected": selected_acceleration,
+            "effective": effective_acceleration,
+            "cuda_available": _cuda_runtime_available(),
+        },
         "wyoming_stt": {
             "host": _text(settings.get("VOICE_WYOMING_STT_HOST")) or DEFAULT_WYOMING_STT_HOST,
             "port": _get_int_setting("VOICE_WYOMING_STT_PORT", DEFAULT_WYOMING_STT_PORT, minimum=1, maximum=65535),
@@ -1543,8 +1620,8 @@ def _voice_config_snapshot() -> Dict[str, Any]:
             "model_root": DEFAULT_STT_MODEL_ROOT,
             "faster_whisper": {
                 "model": DEFAULT_FASTER_WHISPER_MODEL,
-                "device": DEFAULT_FASTER_WHISPER_DEVICE,
-                "compute_type": DEFAULT_FASTER_WHISPER_COMPUTE_TYPE,
+                "device": _faster_whisper_device(),
+                "compute_type": _faster_whisper_compute_type(),
                 "model_root": _stt_backend_model_root("faster_whisper"),
             },
             "vosk": {
@@ -1573,6 +1650,7 @@ def _voice_config_snapshot() -> Dict[str, Any]:
             "kokoro": {
                 "model": _text(settings.get("VOICE_TTS_MODEL")) or DEFAULT_KOKORO_MODEL,
                 "voice": _text(settings.get("VOICE_TTS_VOICE")) or DEFAULT_KOKORO_VOICE,
+                "provider": _kokoro_provider(),
                 "model_root": _tts_backend_model_root("kokoro"),
             },
             "pocket_tts": {
@@ -1604,7 +1682,7 @@ def _voice_config_snapshot() -> Dict[str, Any]:
         },
         "eou": {
             "mode": DEFAULT_EOU_MODE,
-            "backend": DEFAULT_VAD_BACKEND,
+            "backend": vad_backend,
             "silence_s": float(DEFAULT_VAD_SILENCE_SECONDS),
             "timeout_s": float(DEFAULT_VAD_TIMEOUT_SECONDS),
             "startup_gate_s": float(DEFAULT_STARTUP_GATE_S),
@@ -1613,6 +1691,13 @@ def _voice_config_snapshot() -> Dict[str, Any]:
             "silero_neg_threshold": float(DEFAULT_SILERO_NEG_THRESHOLD),
             "min_speech_frames": int(DEFAULT_SILERO_MIN_SPEECH_FRAMES),
             "min_silence_frames": int(DEFAULT_SILERO_MIN_SILENCE_FRAMES),
+            "webrtc_aggressiveness": _get_int_setting(
+                "VOICE_WEBRTC_VAD_AGGRESSIVENESS",
+                DEFAULT_WEBRTC_VAD_AGGRESSIVENESS,
+                minimum=0,
+                maximum=3,
+            ),
+            "webrtc_frame_ms": int(DEFAULT_WEBRTC_VAD_FRAME_MS),
         },
         "limits": {
             "max_audio_bytes": _get_int_setting("VOICE_NATIVE_MAX_AUDIO_BYTES", DEFAULT_MAX_AUDIO_BYTES, minimum=4096, maximum=16 * 1024 * 1024),
@@ -2045,6 +2130,103 @@ class SileroVadBackend(VadBackendBase):
             }
 
 
+class WebRtcVadBackend(VadBackendBase):
+    """Tiny WebRTC VAD backend for low-power hosts.
+
+    WebRTC VAD is binary, so we expose a 1.0/0.0 score and let the existing
+    segmenter smooth speech start/end with its frame counters and silence timers.
+    """
+
+    def __init__(self, cfg: Dict[str, Any]):
+        self.mode = _as_int(
+            cfg.get("webrtc_aggressiveness"),
+            DEFAULT_WEBRTC_VAD_AGGRESSIVENESS,
+            minimum=0,
+            maximum=3,
+        )
+        frame_ms = _as_int(cfg.get("webrtc_frame_ms"), DEFAULT_WEBRTC_VAD_FRAME_MS, minimum=10, maximum=30)
+        self.frame_ms = frame_ms if frame_ms in {10, 20, 30} else DEFAULT_WEBRTC_VAD_FRAME_MS
+        self._available = False
+        self._load_error = ""
+        self._ratecv_state = None
+        self._buffer = b""
+        self._frame_samples = int(16000 * self.frame_ms / 1000)
+        self._frame_bytes = int(self._frame_samples * 2)
+        try:
+            webrtcvad_mod = importlib.import_module("webrtcvad")
+            self._vad = webrtcvad_mod.Vad(int(self.mode))
+            self._available = True
+        except Exception as exc:
+            self._vad = None
+            self._load_error = str(exc)
+            self._available = False
+
+    def reset_state(self) -> None:
+        self._buffer = b""
+        self._ratecv_state = None
+
+    def _to_pcm16_mono_16k(self, audio_bytes: bytes, audio_format: Dict[str, int]) -> bytes:
+        data, self._ratecv_state = _pcm_to_pcm16_mono_16k(
+            audio_bytes,
+            audio_format,
+            ratecv_state=self._ratecv_state,
+        )
+        return data
+
+    def process(self, audio_bytes: bytes, audio_format: Dict[str, int]) -> Dict[str, Any]:
+        if not self._available or self._vad is None:
+            return {
+                "backend": "webrtc",
+                "probability": 0.0,
+                "is_speech": False,
+                "frames": 0,
+                "error": self._load_error or "webrtcvad unavailable",
+            }
+
+        pcm16 = self._to_pcm16_mono_16k(audio_bytes, audio_format)
+        if not pcm16:
+            return {"backend": "webrtc", "probability": 0.0, "is_speech": False, "frames": 0}
+
+        try:
+            payload = self._buffer + pcm16
+            if len(payload) < self._frame_bytes:
+                self._buffer = payload
+                return {"backend": "webrtc", "probability": 0.0, "is_speech": False, "frames": 0}
+
+            offset = 0
+            total_frames = 0
+            speech_frames = 0
+            while (offset + self._frame_bytes) <= len(payload):
+                frame = payload[offset: offset + self._frame_bytes]
+                offset += self._frame_bytes
+                total_frames += 1
+                if bool(self._vad.is_speech(frame, 16000)):
+                    speech_frames += 1
+            self._buffer = payload[offset:]
+
+            is_speech = speech_frames > 0
+            ratio = float(speech_frames) / float(total_frames) if total_frames > 0 else 0.0
+            probability = 1.0 if is_speech else 0.0
+            return {
+                "backend": "webrtc",
+                "probability": probability,
+                "max_probability": probability,
+                "speech_ratio": round(ratio, 4),
+                "is_speech": is_speech,
+                "frames": total_frames,
+                "speech_frames": speech_frames,
+                "mode": int(self.mode),
+            }
+        except Exception as exc:
+            return {
+                "backend": "webrtc",
+                "probability": 0.0,
+                "is_speech": False,
+                "frames": 0,
+                "error": str(exc),
+            }
+
+
 # Segmenter modelled after Home Assistant's pipeline VAD.
 #
 # Two paths to finalization (whichever fires first):
@@ -2272,13 +2454,46 @@ def _build_eou_engine(
 ) -> EouEngine:
     cfg = _voice_config_snapshot()
     eou = cfg.get("eou") if isinstance(cfg.get("eou"), dict) else {}
-    backend_name = DEFAULT_VAD_BACKEND
+    selected_backend = _normalize_vad_backend(eou.get("backend"))
+    backend_name = selected_backend if selected_backend != "auto" else DEFAULT_VAD_BACKEND
     mode = DEFAULT_EOU_MODE
 
     threshold = float(eou.get("silero_threshold") or DEFAULT_SILERO_THRESHOLD)
     neg_threshold = float(eou.get("silero_neg_threshold") or DEFAULT_SILERO_NEG_THRESHOLD)
 
-    backend: VadBackendBase = SileroVadBackend(eou)
+    backend: VadBackendBase
+    backend_note = ""
+    if selected_backend in {"silero", "auto"}:
+        silero_backend = SileroVadBackend(eou)
+        if bool(getattr(silero_backend, "_available", False)):
+            backend = silero_backend
+            backend_name = "silero"
+        else:
+            backend_note = _text(getattr(silero_backend, "_load_error", "")) or "silero unavailable"
+            webrtc_backend = WebRtcVadBackend(eou)
+            if bool(getattr(webrtc_backend, "_available", False)):
+                backend = webrtc_backend
+                backend_name = "webrtc"
+                if selected_backend == "silero":
+                    logger.warning("[native-voice] Silero VAD unavailable; falling back to WebRTC VAD: %s", backend_note)
+            else:
+                backend = silero_backend
+                backend_name = "silero"
+    else:
+        webrtc_backend = WebRtcVadBackend(eou)
+        if bool(getattr(webrtc_backend, "_available", False)):
+            backend = webrtc_backend
+            backend_name = "webrtc"
+        else:
+            backend_note = _text(getattr(webrtc_backend, "_load_error", "")) or "webrtcvad unavailable"
+            silero_backend = SileroVadBackend(eou)
+            if bool(getattr(silero_backend, "_available", False)):
+                backend = silero_backend
+                backend_name = "silero"
+                logger.warning("[native-voice] WebRTC VAD unavailable; falling back to Silero VAD: %s", backend_note)
+            else:
+                backend = webrtc_backend
+                backend_name = "webrtc"
 
     segmenter = SegmenterState(
         silence_s=float(eou.get("silence_s") or DEFAULT_VAD_SILENCE_SECONDS),
@@ -2324,6 +2539,8 @@ def _build_eou_engine(
             float(DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_LONG_S),
         )
 
+    if backend_note:
+        setattr(backend, "_fallback_note", backend_note)
     return EouEngine(mode=mode, backend_name=backend_name, backend=backend, segmenter=segmenter)
 
 
@@ -2793,7 +3010,13 @@ def _append_pcm_silence(audio_bytes: bytes, audio_format: Dict[str, Any], *, sec
 def _run_end_timeout_s(audio_bytes: bytes, audio_format: Dict[str, Any]) -> float:
     # Leave a little extra headroom for media-player startup and network jitter so
     # a late `announcement_finished` doesn't force an early RUN_END.
-    return max(2.25, min(30.0, _estimate_pcm_duration_s(audio_bytes, audio_format) + 1.75))
+    return max(
+        2.25,
+        min(
+            float(DEFAULT_TTS_ANNOUNCEMENT_TIMEOUT_MAX_S),
+            _estimate_pcm_duration_s(audio_bytes, audio_format) + 1.75,
+        ),
+    )
 
 
 def _set_awaiting_announcement_state(
@@ -2858,6 +3081,59 @@ _esphome_status = _esphome_device_runtime.status
 _esphome_entities_for_selector = _esphome_device_runtime.entities_for_selector
 _esphome_command_entity = _esphome_device_runtime.command_entity
 _esphome_client_row_snapshot_sync = _esphome_device_runtime.client_row_snapshot_sync
+
+
+async def _send_voice_run_end(
+    client: Any,
+    module: Any,
+    *,
+    selector: str = "",
+    session_id: str = "",
+    reason: str = "",
+    skip_if_active_session_mismatch: bool = True,
+    skip_if_pending_followup: bool = False,
+) -> bool:
+    token = _text(selector)
+    sid = _text(session_id)
+    reason_token = _text(reason)
+    stale_session = False
+    pending_followup = False
+
+    if token and (sid or skip_if_pending_followup):
+        runtime = _selector_runtime(token)
+        lock = runtime.get("lock")
+        if lock is not None and hasattr(lock, "acquire"):
+            async with lock:
+                if sid and skip_if_active_session_mismatch:
+                    active = runtime.get("session")
+                    active_sid = _text(active.session_id) if isinstance(active, VoiceSessionRuntime) else ""
+                    stale_session = bool(active_sid and active_sid != sid)
+                if skip_if_pending_followup:
+                    followup_conv = _text(runtime.get("pending_followup_conversation_id"))
+                    followup_until = _as_float(runtime.get("pending_followup_until_ts"), 0.0)
+                    pending_followup = bool(followup_conv) and _now() <= followup_until
+
+    if stale_session:
+        _native_debug(
+            f"esphome run_end skipped selector={token or '-'} session_id={sid or '-'} "
+            f"reason={reason_token or '-'} stale_session=1"
+        )
+        return False
+
+    if pending_followup:
+        _native_debug(
+            f"esphome run_end skipped selector={token or '-'} session_id={sid or '-'} "
+            f"reason={reason_token or '-'} pending_followup=1"
+        )
+        return False
+
+    ok = await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+    _native_debug(
+        f"esphome run_end sent selector={token or '-'} session_id={sid or '-'} "
+        f"reason={reason_token or '-'} ok={1 if ok else 0}"
+    )
+    return ok
+
 
 async def _prepare_streamed_tts_segments(
     selector: str,
@@ -2939,12 +3215,6 @@ async def _send_streamed_tts_segment(
         ("VOICE_ASSISTANT_TTS_START", "TTS_START"),
         {"text": _text(segment.get("text")) or "Continuing response."},
     )
-    await _esphome_send_event(
-        client,
-        module,
-        ("VOICE_ASSISTANT_TTS_END", "TTS_END"),
-        {"url": _text(segment.get("url"))},
-    )
     async with lock:
         _set_awaiting_announcement_state(
             runtime,
@@ -2955,6 +3225,12 @@ async def _send_streamed_tts_segment(
         )
         _cancel_announcement_wait(runtime)
         _schedule_announcement_timeout(token, client, module, timeout_s)
+    await _esphome_send_event(
+        client,
+        module,
+        ("VOICE_ASSISTANT_TTS_END", "TTS_END"),
+        {"url": _text(segment.get("url"))},
+    )
     _native_debug(
         f"streamed tts segment queued selector={token} session_id={session_id} timeout_s={timeout_s:.2f} url={_text(segment.get('url'))}"
     )
@@ -2999,13 +3275,25 @@ async def _await_and_dispatch_streamed_tts_segment(
             )
             return
         if should_finalize:
-            await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+            await _send_voice_run_end(
+                client,
+                module,
+                selector=token,
+                session_id=session_id,
+                reason="streamed_tts_dispatch_done",
+            )
     except asyncio.CancelledError:
         return
     except Exception as exc:
         _native_debug(f"streamed tts dispatch failed selector={token} session_id={session_id} error={exc}")
         with contextlib.suppress(Exception):
-            await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+            await _send_voice_run_end(
+                client,
+                module,
+                selector=token,
+                session_id=session_id,
+                reason="streamed_tts_dispatch_error",
+            )
     finally:
         async with lock:
             task = runtime.get("streamed_tts_dispatch_task")
@@ -3070,7 +3358,13 @@ async def _maybe_continue_streamed_tts(
         return True
 
     if should_finalize:
-        await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+        await _send_voice_run_end(
+            client,
+            module,
+            selector=token,
+            session_id=session_id,
+            reason=_text(reason) or "streamed_tts_segment_complete",
+        )
         _native_debug(
             f"streamed tts finalize selector={token} session_id={session_id} reason={_text(reason) or 'segment_complete'}"
         )
@@ -3091,6 +3385,7 @@ async def _finalize_after_announcement(selector: str, client: Any, module: Any, 
         return True
 
     future: Optional[asyncio.Future[Any]] = None
+    skip_run_end_for_followup = False
     async with lock:
         waiting = bool(runtime.get("awaiting_announcement"))
         session_id = _text(runtime.get("awaiting_session_id"))
@@ -3104,6 +3399,14 @@ async def _finalize_after_announcement(selector: str, client: Any, module: Any, 
             runtime["last_announcement_timeout_ts"] = _now()
         else:
             runtime["last_announcement_timeout_ts"] = 0.0
+        pending_followup = _text(runtime.get("pending_followup_conversation_id"))
+        pending_followup_until = _as_float(runtime.get("pending_followup_until_ts"), 0.0)
+        skip_run_end_for_followup = (
+            reason == "announcement_finished"
+            and kind == "response"
+            and bool(pending_followup)
+            and _now() <= pending_followup_until
+        )
         _clear_awaiting_announcement_state(runtime)
         _cancel_announcement_wait(runtime)
 
@@ -3117,7 +3420,15 @@ async def _finalize_after_announcement(selector: str, client: Any, module: Any, 
         )
         return True
 
-    await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+    await _send_voice_run_end(
+        client,
+        module,
+        selector=token,
+        session_id=session_id,
+        reason=f"announcement:{reason}",
+        skip_if_active_session_mismatch=(kind != "external"),
+        skip_if_pending_followup=skip_run_end_for_followup,
+    )
     _native_debug(f"esphome announcement finalize selector={token} session_id={session_id} reason={reason}")
     return True
 
@@ -3204,7 +3515,14 @@ async def _queue_selector_audio_url(
             _cancel_announcement_wait(runtime)
             _clear_awaiting_announcement_state(runtime)
         with contextlib.suppress(Exception):
-            await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+            await _send_voice_run_end(
+                client,
+                module,
+                selector=token,
+                session_id=playback_id,
+                reason="external_audio_queue_error",
+                skip_if_active_session_mismatch=False,
+            )
         raise
 
     logger.info(
@@ -3396,7 +3714,13 @@ async def _finalize_session(
             _text(reason) or "device_stopped",
         )
         with contextlib.suppress(Exception):
-            await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+            await _send_voice_run_end(
+                client,
+                module,
+                selector=token,
+                session_id=session_id,
+                reason=_text(reason) or "device_stopped",
+            )
         return
 
     no_speech_reason = _text(reason)
@@ -3463,7 +3787,13 @@ async def _finalize_session(
                     turn_latency_ms=max(0.0, (_now() - float(session.started_ts or _now())) * 1000.0),
                 )
                 with contextlib.suppress(Exception):
-                    await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+                    await _send_voice_run_end(
+                        client,
+                        module,
+                        selector=token,
+                        session_id=session_id,
+                        reason=no_speech_reason,
+                    )
                 return
 
     try:
@@ -3510,7 +3840,13 @@ async def _finalize_session(
                 silence_s=float(session.silence_duration_s or 0.0),
                 turn_latency_ms=max(0.0, (_now() - float(session.started_ts or _now())) * 1000.0),
             )
-            await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+            await _send_voice_run_end(
+                client,
+                module,
+                selector=token,
+                session_id=session.session_id,
+                reason=no_op_reason or "no_op",
+            )
             return
 
         response_text = _text(result.get("response_text"))
@@ -3593,8 +3929,6 @@ async def _finalize_session(
             if not tts_url:
                 tts_url = "voice-assistant://stream"
 
-            await _esphome_send_event(client, module, ("VOICE_ASSISTANT_TTS_END", "TTS_END"), {"url": tts_url})
-
             wait_for_announcement = tts_url.startswith(("http://", "https://"))
             if wait_for_announcement:
                 timeout_s = _run_end_timeout_s(tts_audio, tts_format)
@@ -3613,8 +3947,17 @@ async def _finalize_session(
                 )
                 tts_mode = "url"
                 run_end_mode = "announcement"
-            else:
-                await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+
+            await _esphome_send_event(client, module, ("VOICE_ASSISTANT_TTS_END", "TTS_END"), {"url": tts_url})
+
+            if not wait_for_announcement:
+                await _send_voice_run_end(
+                    client,
+                    module,
+                    selector=token,
+                    session_id=session.session_id,
+                    reason="tts_immediate",
+                )
                 tts_mode = "stream"
                 run_end_mode = "immediate"
             tts_bytes = len(tts_audio)
@@ -3675,7 +4018,13 @@ async def _finalize_session(
                 {"code": code, "message": msg or "Voice pipeline error"},
             )
         with contextlib.suppress(Exception):
-            await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+            await _send_voice_run_end(
+                client,
+                module,
+                selector=token,
+                session_id=session.session_id,
+                reason="pipeline_error",
+            )
 
 
 async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module: Any, *, api_audio_supported: bool) -> Callable[[], None]:
@@ -3697,7 +4046,7 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                 ("VOICE_ASSISTANT_ERROR", "ERROR"),
                 {"code": "api_audio_not_supported", "message": msg},
             )
-            await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+            await _send_voice_run_end(client, module, selector=token, reason="api_audio_not_supported")
             return None
 
         old = runtime.get("session")
@@ -3727,7 +4076,7 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                 wake_word_session=bool(wake_phrase),
             )
         except Exception as exc:
-            msg = f"Failed to initialize Silero VAD: {exc}"
+            msg = f"Failed to initialize VAD: {exc}"
             logger.warning("[native-voice] %s selector=%s", msg, token)
             await _esphome_send_event(
                 client,
@@ -3735,13 +4084,13 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                 ("VOICE_ASSISTANT_ERROR", "ERROR"),
                 {"code": "vad_unavailable", "message": msg},
             )
-            await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+            await _send_voice_run_end(client, module, selector=token, reason="vad_init_failed")
             return None
 
         backend_ready = bool(getattr(eou_engine.backend, "_available", True))
         backend_error = _text(getattr(eou_engine.backend, "_load_error", ""))
         if not backend_ready:
-            msg = f"Silero VAD unavailable: {backend_error or 'unknown error'}"
+            msg = f"{eou_engine.backend_name} VAD unavailable: {backend_error or 'unknown error'}"
             logger.warning("[native-voice] %s selector=%s", msg, token)
             await _esphome_send_event(
                 client,
@@ -3749,7 +4098,7 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                 ("VOICE_ASSISTANT_ERROR", "ERROR"),
                 {"code": "vad_unavailable", "message": msg},
             )
-            await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+            await _send_voice_run_end(client, module, selector=token, reason="vad_unavailable")
             return None
 
         start_ts = _now()
@@ -3832,7 +4181,7 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
         _schedule_audio_stall_watch(token, client, module, session_id=sid)
 
         logger.info(
-            "[native-voice] session start selector=%s conversation_id=%s session_id=%s wake_word=%s followup=%s area=%s stt=%s tts=%s rate=%s width=%s ch=%s",
+            "[native-voice] session start selector=%s conversation_id=%s session_id=%s wake_word=%s followup=%s area=%s stt=%s tts=%s vad=%s rate=%s width=%s ch=%s",
             token,
             conv,
             sid,
@@ -3841,6 +4190,7 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             area_name,
             effective_stt_backend,
             effective_tts_backend,
+            eou_engine.backend_name if isinstance(eou_engine, EouEngine) else "",
             int(fmt.get("rate") or 0),
             int(fmt.get("width") or 0),
             int(fmt.get("channels") or 0),
@@ -3872,7 +4222,8 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                 f"no_speech_timeout_s={seg.no_speech_timeout_s:.2f} "
                 f"threshold={seg.threshold:.2f} neg_threshold={seg.neg_threshold:.2f} "
                 f"min_speech_frames={seg.min_speech_frames} min_silence_frames={seg.min_silence_frames} "
-                f"silero_threshold={float(getattr(eou_engine.backend, 'threshold', DEFAULT_SILERO_THRESHOLD)):.2f}"
+                f"silero_threshold={float(getattr(eou_engine.backend, 'threshold', DEFAULT_SILERO_THRESHOLD)):.2f} "
+                f"webrtc_aggressiveness={int(getattr(eou_engine.backend, 'mode', DEFAULT_WEBRTC_VAD_AGGRESSIVENESS))}"
             )
 
         await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_START", "RUN_START"), None)

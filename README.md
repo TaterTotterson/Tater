@@ -171,6 +171,12 @@ Docker-style launcher (also disables access logs by default):
 sh run_ui.sh
 ```
 
+The launcher listens on `0.0.0.0:8501` by default. To change it, set `HTMLUI_PORT`:
+
+```bash
+HTMLUI_PORT=8601 sh run_ui.sh
+```
+
 Then open:
 
 ```text
@@ -197,6 +203,8 @@ Recommended Docker networking:
 - Use `--network host` so Tater shares the host network directly.
 - This avoids managing a growing list of `-p` mappings for WebUI, voice, and other runtime surfaces.
 - With host networking, Tater listens on the host directly, so you do not need to publish Tater ports manually.
+- To change the WebUI port, set `HTMLUI_PORT`, for example `-e HTMLUI_PORT=8601`.
+- If you are not using host networking, publish the same container port, for example `-p 8601:8601`.
 
 Important for Docker persistence:
 - Add a path mapping for `/app/agent_lab` (container) -> `/mnt/user/appdata/tater/agent_lab` (host example).
@@ -211,12 +219,43 @@ Example: Docker setup
 docker run -d --name tater_webui \
   --network host \
   -e TZ=America/Chicago \
+  -e HTMLUI_PORT=8501 \
   -v /etc/localtime:/etc/localtime:ro \
   -v /etc/timezone:/etc/timezone:ro \
   -v /agent_lab:/app/agent_lab \
   -v /tater_runtime:/app/.runtime \
   ghcr.io/tatertotterson/tater:latest
 ```
+
+Optional NVIDIA GPU build for Faster Whisper STT plus Kokoro TTS:
+```
+docker compose -f docker-compose.yml -f docker-compose.nvidia.yml up --build
+```
+
+Prebuilt NVIDIA image:
+```bash
+docker pull ghcr.io/tatertotterson/tater:nvidia
+```
+
+Build and push the NVIDIA image:
+```bash
+docker buildx build \
+  --platform linux/amd64 \
+  -f Dockerfile.nvidia \
+  -t ghcr.io/tatertotterson/tater:nvidia \
+  --push .
+```
+
+The NVIDIA image is amd64-only. Use the default `latest` image for CPU-first installs and ARM hosts.
+
+The NVIDIA build uses CUDA 12.8 PyTorch wheels plus CUDA/cuDNN runtime packages for RTX 30, 40, and 50 series cards. Piper and Pocket TTS remain CPU-backed. In TaterOS, use **Settings → Models → Voice Acceleration** to select Auto, CPU, or NVIDIA CUDA. Tater starts a background warmup for the selected local STT and TTS models during app startup and after saving voice model settings so the first real voice turn is less likely to pause on model loading. Set `TATER_SPEECH_WARMUP_ON_STARTUP=false` to disable startup warmup.
+
+Kokoro output is boosted slightly by default for clearer satellite playback. Tune it with `TATER_KOKORO_OUTPUT_GAIN` if needed; the default is `1.5`.
+
+Voice activity detection defaults to Silero VAD. Low-power hosts can switch the Voice Pipeline Settings VAD backend to WebRTC, which uses the lightweight `webrtcvad-wheels` package.
+
+Host requirement: install the NVIDIA driver and NVIDIA Container Toolkit before starting the compose override.
+
 ---
 
 ### 3. Access the Web UI
@@ -225,6 +264,8 @@ Once the container is running with host networking, open your browser and naviga
 
 - [http://localhost:8501](http://localhost:8501) from the same machine
 - `http://<host-ip>:8501` from another device on your network
+
+If you changed `HTMLUI_PORT`, use that port in the URL.
 
 Once the WebUI is up, continue to **Post-Install Setup** below.
 

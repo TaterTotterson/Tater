@@ -17,6 +17,19 @@ def _vp():
     return sys.modules[__package__]
 
 
+_LOCAL_STT_TRANSCRIBE_LOCK = asyncio.Lock()
+
+
+async def _run_local_stt_thread(func: Any, *args: Any) -> str:
+    task = asyncio.create_task(asyncio.to_thread(func, *args))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        with contextlib.suppress(Exception):
+            await task
+        raise
+
+
 def _resolve_stt_backend() -> Tuple[str, str]:
     vp = _vp()
     selected = vp._selected_stt_backend()
@@ -126,9 +139,13 @@ def _load_faster_whisper_model() -> Any:
         raise RuntimeError(f"faster-whisper dependency unavailable: {vp.FASTER_WHISPER_IMPORT_ERROR or 'unknown import error'}")
 
     model_source = vp._resolve_faster_whisper_model_source()
-    device = vp.DEFAULT_FASTER_WHISPER_DEVICE
-    compute_type = vp.DEFAULT_FASTER_WHISPER_COMPUTE_TYPE
+    device = vp._faster_whisper_device()
+    compute_type = vp._faster_whisper_compute_type()
     key = (model_source, device, compute_type)
+    ctranslate2_cuda_devices = "unknown"
+    with contextlib.suppress(Exception):
+        ctranslate2_mod = importlib.import_module("ctranslate2")
+        ctranslate2_cuda_devices = str(int(getattr(ctranslate2_mod, "get_cuda_device_count")()))
 
     with vp._faster_whisper_model_lock:
         model = vp._faster_whisper_model_cache.get(key)
@@ -137,9 +154,12 @@ def _load_faster_whisper_model() -> Any:
             if not os.path.isdir(model_source):
                 kwargs["download_root"] = vp._ensure_stt_backend_model_root("faster_whisper")
             vp.logger.info(
-                "[native-voice] faster-whisper model source=%s kind=%s",
+                "[native-voice] faster-whisper model source=%s kind=%s device=%s compute_type=%s ctranslate2_cuda_devices=%s",
                 model_source,
                 "local" if os.path.isdir(model_source) else "alias",
+                device,
+                compute_type,
+                ctranslate2_cuda_devices,
             )
             model = vp.WhisperModel(model_source, **kwargs)
             vp._faster_whisper_model_cache[key] = model
@@ -499,14 +519,15 @@ async def _native_transcribe_local_audio_bytes(
         return ""
 
     mode_label = "partial" if partial else "final"
-    if token == "faster_whisper":
-        vp._native_debug(f"STT ({mode_label} faster-whisper) local selector={selector} session_id={session_id} bytes={len(data)}")
-        transcript = await asyncio.to_thread(_transcribe_faster_whisper_sync, data, audio_format, language)
-    elif token == "vosk":
-        vp._native_debug(f"STT ({mode_label} vosk) local selector={selector} session_id={session_id} bytes={len(data)}")
-        transcript = await asyncio.to_thread(_transcribe_vosk_sync, data, audio_format)
-    else:
-        raise RuntimeError(f"Unsupported local STT backend: {token}")
+    async with _LOCAL_STT_TRANSCRIBE_LOCK:
+        if token == "faster_whisper":
+            vp._native_debug(f"STT ({mode_label} faster-whisper) local selector={selector} session_id={session_id} bytes={len(data)}")
+            transcript = await _run_local_stt_thread(_transcribe_faster_whisper_sync, data, audio_format, language)
+        elif token == "vosk":
+            vp._native_debug(f"STT ({mode_label} vosk) local selector={selector} session_id={session_id} bytes={len(data)}")
+            transcript = await _run_local_stt_thread(_transcribe_vosk_sync, data, audio_format)
+        else:
+            raise RuntimeError(f"Unsupported local STT backend: {token}")
 
     return vp._text(transcript)
 
@@ -678,7 +699,12 @@ async def _native_wyoming_synthesize(
     return bytes(audio_out), audio_format
 
 
-def _float_audio_to_pcm16_bytes(audio: Any) -> bytes:
+def _kokoro_output_gain() -> float:
+    vp = _vp()
+    return vp._as_float(os.getenv("TATER_KOKORO_OUTPUT_GAIN"), vp.DEFAULT_KOKORO_OUTPUT_GAIN, minimum=0.1, maximum=4.0)
+
+
+def _float_audio_to_pcm16_bytes(audio: Any, *, gain: float = 1.0) -> bytes:
     np_mod = importlib.import_module("numpy")
     array = np_mod.asarray(audio, dtype=np_mod.float32)
     if array.ndim > 1:
@@ -687,7 +713,11 @@ def _float_audio_to_pcm16_bytes(audio: Any) -> bytes:
         array = array.reshape(-1)
     if not array.size:
         return b""
-    array = np_mod.clip(array, -1.0, 1.0)
+    array = np_mod.nan_to_num(array, nan=0.0, posinf=1.0, neginf=-1.0)
+    factor = _vp()._as_float(gain, 1.0, minimum=0.0, maximum=4.0)
+    if factor != 1.0:
+        array = array * factor
+    array = np_mod.clip(array, -0.98, 0.98)
     return (array * 32767.0).astype(np_mod.int16).tobytes()
 
 
@@ -719,7 +749,8 @@ def _load_kokoro_pipeline(model_id: str) -> Any:
     spec = vp._kokoro_model_spec(model_id)
     variant = vp._text(spec.get("variant")) or "v1.0"
     quality = vp._text(spec.get("quality")) or "q8"
-    key = (variant, quality)
+    provider = vp._kokoro_provider()
+    key = (variant, quality, provider)
 
     with vp._kokoro_pipeline_lock:
         pipeline = vp._kokoro_pipeline_cache.get(key)
@@ -742,10 +773,10 @@ def _load_kokoro_pipeline(model_id: str) -> Any:
                 model_source="huggingface",
                 model_variant=variant,
                 model_quality=quality,
-                provider=vp.DEFAULT_KOKORO_PROVIDER,
+                provider=provider,
                 tokenizer_config=(vp.KokoroTokenizerConfig(use_spacy=False) if vp.KokoroTokenizerConfig is not None else None),
             )
-            vp.logger.info("[native-voice] kokoro model source=%s model=%s", root, model_id)
+            vp.logger.info("[native-voice] kokoro model source=%s model=%s provider=%s", root, model_id, provider)
             pipeline = vp.build_kokoro_pipeline(config=cfg, eager=True)
             vp._kokoro_pipeline_cache[key] = pipeline
         return pipeline
@@ -802,7 +833,7 @@ def _synthesize_kokoro_sync(text: str, model_id: str, voice: str) -> Tuple[bytes
     vp = _vp()
     pipeline = _load_kokoro_pipeline(model_id)
     result = pipeline.run(vp._text(text), voice=vp._text(voice) or vp.DEFAULT_KOKORO_VOICE)
-    audio_bytes = _float_audio_to_pcm16_bytes(getattr(result, "audio", None))
+    audio_bytes = _float_audio_to_pcm16_bytes(getattr(result, "audio", None), gain=_kokoro_output_gain())
     sample_rate = int(getattr(result, "sample_rate", 24000) or 24000)
     return audio_bytes, {"rate": sample_rate, "width": 2, "channels": 1}
 
