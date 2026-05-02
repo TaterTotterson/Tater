@@ -79,6 +79,55 @@ from speech_settings import (
     save_speech_settings as save_shared_speech_settings,
 )
 from speech_tts import fetch_wyoming_tts_voice_options, get_runtime_tts_wav, synthesize_preview_wav
+from integration_registry import (
+    get_integration_catalog,
+    get_integration_device_group,
+    get_integration_devices,
+    run_integration_action as run_registered_integration_action,
+    save_integration_settings as save_registered_integration_settings,
+)
+from integration_runtime import (
+    integration_runtime_events,
+    integration_runtime_states,
+    integration_runtime_status,
+    start_integration_runtime,
+    stop_integration_runtime,
+)
+from integrations.aladdin import (
+    ALADDIN_DEFAULT_TIMEOUT_SECONDS,
+    read_aladdin_settings,
+    save_aladdin_settings,
+    test_aladdin_connection,
+)
+from integrations.hue import (
+    HUE_DEFAULT_BRIDGE_HOST,
+    HUE_DEFAULT_DEVICE_TYPE,
+    HUE_DEFAULT_TIMEOUT_SECONDS,
+    pair_hue_bridge,
+    read_hue_settings,
+    save_hue_settings,
+)
+from integrations.homeassistant import (
+    HOMEASSISTANT_DEFAULT_BASE_URL,
+    load_homeassistant_config,
+    save_homeassistant_config,
+)
+from integrations.sonos import (
+    SONOS_DEFAULT_DISCOVERY_TIMEOUT_SECONDS,
+    SONOS_DEFAULT_ENABLED,
+    read_sonos_settings,
+    save_sonos_settings,
+)
+from integrations.unifi_network import (
+    UNIFI_NETWORK_DEFAULT_BASE_URL,
+    read_unifi_network_settings,
+    save_unifi_network_settings,
+)
+from integrations.unifi_protect import (
+    UNIFI_PROTECT_DEFAULT_BASE_URL,
+    read_unifi_protect_settings,
+    save_unifi_protect_settings,
+)
 from vision_settings import get_vision_settings as get_shared_vision_settings, save_vision_settings as save_shared_vision_settings
 from tateros import core_store as core_store_module
 from tateros import verba_store as verba_store_module
@@ -111,12 +160,6 @@ LAST_LLM_STATS_KEY = "webui:last_llm_stats"
 WEBUI_POPUP_EFFECT_STYLE_KEY = "tater:webui:popup_effect_style"
 DEFAULT_WEBUI_POPUP_EFFECT_STYLE = "flame"
 WEBUI_POPUP_EFFECT_STYLE_CHOICES = {"disabled", "flame", "dust", "glitch", "portal", "melt"}
-UNIFI_NETWORK_BASE_URL_KEY = "tater:unifi_network:base_url"
-UNIFI_NETWORK_API_KEY_KEY = "tater:unifi_network:api_key"
-UNIFI_PROTECT_BASE_URL_KEY = "tater:unifi_protect:base_url"
-UNIFI_PROTECT_API_KEY_KEY = "tater:unifi_protect:api_key"
-UNIFI_NETWORK_DEFAULT_BASE_URL = "https://10.4.20.1"
-UNIFI_PROTECT_DEFAULT_BASE_URL = "https://10.4.20.127"
 WEBUI_AUTH_PASSWORD_HASH_KEY = "tater:webui_auth:password_hash"
 WEBUI_AUTH_SESSIONS_KEY = "tater:webui_auth:sessions"
 WEBUI_AUTH_COOKIE_NAME = "tater_webui_session"
@@ -1895,6 +1938,21 @@ def _normalize_repo_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     return out
 
 
+def _shop_payload_sort_key(item: Dict[str, Any]) -> tuple[str, str]:
+    name = str(
+        item.get("name")
+        or item.get("display_name")
+        or item.get("label")
+        or item.get("title")
+        or item.get("id")
+        or item.get("module_key")
+        or item.get("key")
+        or ""
+    ).strip()
+    item_id = str(item.get("id") or item.get("module_key") or item.get("key") or name).strip()
+    return (name.casefold(), item_id.casefold())
+
+
 def _plugin_platforms(item: Dict[str, Any]) -> List[str]:
     helper = getattr(verba_store_module, "_get_item_platforms", None)
     if callable(helper):
@@ -1970,6 +2028,9 @@ def _verba_shop_raw() -> Dict[str, Any]:
             }
         )
 
+    installed_payload.sort(key=_shop_payload_sort_key)
+    catalog_payload.sort(key=_shop_payload_sort_key)
+
     return {
         "repos": {
             "configured": manifest_repos,
@@ -2036,6 +2097,9 @@ def _core_shop_raw() -> Dict[str, Any]:
             }
         )
 
+    installed_payload.sort(key=_shop_payload_sort_key)
+    catalog_payload.sort(key=_shop_payload_sort_key)
+
     return {
         "repos": {
             "configured": manifest_repos,
@@ -2101,6 +2165,9 @@ def _portal_shop_raw() -> Dict[str, Any]:
                 "installed": portal_id in installed_ids,
             }
         )
+
+    installed_payload.sort(key=_shop_payload_sort_key)
+    catalog_payload.sort(key=_shop_payload_sort_key)
 
     return {
         "repos": {
@@ -2727,6 +2794,16 @@ class AppSettingsRequest(BaseModel):
     web_search_google_cx: Optional[str] = None
     homeassistant_base_url: Optional[str] = None
     homeassistant_token: Optional[str] = None
+    hue_bridge_host: Optional[str] = None
+    hue_app_key: Optional[str] = None
+    hue_device_type: Optional[str] = None
+    hue_timeout_seconds: Optional[int] = None
+    aladdin_username: Optional[str] = None
+    aladdin_password: Optional[str] = None
+    aladdin_timeout_seconds: Optional[int] = None
+    sonos_enabled: Optional[bool] = None
+    sonos_discovery_timeout_seconds: Optional[int] = None
+    sonos_speaker_hosts: Optional[str] = None
     unifi_network_base_url: Optional[str] = None
     unifi_network_api_key: Optional[str] = None
     unifi_protect_base_url: Optional[str] = None
@@ -2783,6 +2860,26 @@ class AppSettingsRequest(BaseModel):
     webui_password: Optional[str] = None
     webui_password_confirm: Optional[str] = None
     clear_webui_password: Optional[bool] = None
+
+
+class HueLinkRequest(BaseModel):
+    hue_bridge_host: Optional[str] = None
+    hue_device_type: Optional[str] = None
+    hue_timeout_seconds: Optional[int] = None
+
+
+class AladdinTestRequest(BaseModel):
+    aladdin_username: Optional[str] = None
+    aladdin_password: Optional[str] = None
+    aladdin_timeout_seconds: Optional[int] = None
+
+
+class IntegrationSettingsRequest(BaseModel):
+    settings: Dict[str, Any] = Field(default_factory=dict)
+
+
+class IntegrationActionRequest(BaseModel):
+    payload: Dict[str, Any] = Field(default_factory=dict)
 
 
 class SpeechTtsPreviewRequest(BaseModel):
@@ -2865,6 +2962,7 @@ async def _startup_event() -> None:
             bootstrap_state["restore_error"] = redis_error or "Redis is unavailable."
             logger.warning("Redis unavailable during startup bootstrap: %s", bootstrap_state["restore_error"])
         else:
+            start_integration_runtime(redis_client)
             if restore_enabled:
                 bootstrap_state["restore_in_progress"] = True
                 summary = _restore_enabled_surfaces()
@@ -2896,6 +2994,7 @@ async def _shutdown_event() -> None:
     core_runtime.stop_all()
     await esphome_home_module.shutdown()
     portal_runtime.stop_all()
+    await stop_integration_runtime()
     logger.info("TaterOS backend stopped")
 
 
@@ -2915,6 +3014,13 @@ def index() -> FileResponse:
 @app.middleware("http")
 async def _webui_auth_middleware(request: Request, call_next):
     path = str(request.url.path or "")
+    if path.startswith("/api/speech/tts/runtime/"):
+        return await call_next(request)
+    path_parts = [part for part in path.strip("/").split("/") if part]
+    if len(path_parts) == 5 and path_parts[0] == "api" and path_parts[1] == "cores" and path_parts[3] == "webhook":
+        return await call_next(request)
+    if len(path_parts) >= 4 and path_parts[0] == "api" and path_parts[1] == "portals" and path_parts[3] in {"api", "webhook"}:
+        return await call_next(request)
     if not path.startswith("/api/") or path.startswith("/api/auth/"):
         return await call_next(request)
 
@@ -3795,6 +3901,255 @@ def run_core_tab_action(core_key: str, payload: CoreTabActionRequest) -> Dict[st
         raise HTTPException(status_code=404, detail=f"Unknown core: {key}")
 
     return _run_surface_htmlui_tab_action(tab, payload)
+
+
+async def _surface_request_payload(request: Request) -> Tuple[Dict[str, Any], str]:
+    body_text = ""
+    payload: Dict[str, Any] = {}
+    if request.method.upper() not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return payload, body_text
+
+    content_type = str(request.headers.get("content-type") or "").lower()
+    if "application/json" in content_type:
+        try:
+            parsed = await request.json()
+        except Exception:
+            parsed = {}
+        if isinstance(parsed, dict):
+            payload = parsed
+        else:
+            body_text = json.dumps(parsed)
+    elif "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+        try:
+            form = await request.form()
+            payload = dict(form)
+        except Exception:
+            body_text = (await request.body()).decode("utf-8", "ignore")
+    else:
+        body_text = (await request.body()).decode("utf-8", "ignore")
+    return payload, body_text
+
+
+async def _maybe_await_result(result: Any) -> Any:
+    if asyncio.iscoroutine(result):
+        return await result
+    return result
+
+
+def _coerce_surface_result(result: Any) -> Any:
+    if result is None:
+        return {"ok": True}
+    if isinstance(result, Response):
+        return result
+    if not isinstance(result, dict):
+        return {"ok": True, "result": result}
+    return result
+
+
+async def _call_portal_asgi_app(module: Any, request: Request, api_path: str) -> Response:
+    app_obj = getattr(module, "app", None)
+    if not callable(app_obj):
+        raise HTTPException(status_code=404, detail="Portal does not expose an API handler.")
+
+    ready_hook = getattr(module, "ensure_portal_api_ready", None)
+    if callable(ready_hook):
+        try:
+            await _maybe_await_result(ready_hook(redis_client=redis_client))
+        except TypeError:
+            await _maybe_await_result(ready_hook())
+
+    body = await request.body()
+    forwarded_path = "/" + str(api_path or "").strip("/")
+    if forwarded_path == "/":
+        forwarded_path = "/"
+
+    scope = dict(request.scope)
+    scope["path"] = forwarded_path
+    scope["raw_path"] = forwarded_path.encode("utf-8")
+    scope["root_path"] = ""
+    scope["headers"] = list(request.scope.get("headers") or [])
+    scope.pop("route", None)
+    scope.pop("endpoint", None)
+    scope["path_params"] = {}
+
+    sent_body = False
+
+    async def receive() -> Dict[str, Any]:
+        nonlocal sent_body
+        if not sent_body:
+            sent_body = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    status_code = 500
+    response_headers: List[Tuple[bytes, bytes]] = []
+    chunks: List[bytes] = []
+
+    async def send(message: Dict[str, Any]) -> None:
+        nonlocal status_code, response_headers
+        msg_type = str(message.get("type") or "")
+        if msg_type == "http.response.start":
+            status_code = int(message.get("status") or 500)
+            response_headers = list(message.get("headers") or [])
+        elif msg_type == "http.response.body":
+            chunk = message.get("body") or b""
+            if isinstance(chunk, str):
+                chunk = chunk.encode("utf-8")
+            chunks.append(chunk)
+
+    await app_obj(scope, receive, send)
+
+    headers: Dict[str, str] = {}
+    media_type = None
+    for raw_key, raw_value in response_headers:
+        key = raw_key.decode("latin-1")
+        value = raw_value.decode("latin-1")
+        key_l = key.lower()
+        if key_l == "content-type":
+            media_type = value
+            continue
+        if key_l in {"content-length", "transfer-encoding", "connection"}:
+            continue
+        headers[key] = value
+    return Response(content=b"".join(chunks), status_code=status_code, headers=headers, media_type=media_type)
+
+
+@app.api_route("/api/cores/{core_key}/webhook/{webhook_name}", methods=["GET", "POST"])
+async def run_core_webhook(core_key: str, webhook_name: str, request: Request) -> Dict[str, Any]:
+    key = str(core_key or "").strip()
+    hook = str(webhook_name or "").strip()
+    if not key or not hook:
+        raise HTTPException(status_code=400, detail="Missing core key or webhook name.")
+
+    client_host = request.client.host if request.client else "unknown"
+    logger.info("[core-webhook] %s %s/%s from %s", request.method.upper(), key, hook, client_host)
+
+    try:
+        module = core_runtime._import_module(key, reload_module=False)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown core: {key} ({exc})")
+
+    handler = getattr(module, "handle_core_webhook", None)
+    if not callable(handler):
+        raise HTTPException(status_code=404, detail=f"{key} does not expose core webhooks.")
+
+    payload, body_text = await _surface_request_payload(request)
+
+    query = dict(request.query_params)
+    try:
+        result = handler(
+            webhook=hook,
+            payload=payload,
+            query=query,
+            body=body_text,
+            method=request.method,
+            headers=dict(request.headers),
+            redis_client=redis_client,
+            core_key=key,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Core webhook failed: {exc}")
+
+    return _coerce_surface_result(result)
+
+
+@app.api_route("/api/portals/{portal_key}/webhook/{webhook_name}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+async def run_portal_webhook(portal_key: str, webhook_name: str, request: Request) -> Any:
+    key = str(portal_key or "").strip()
+    hook = str(webhook_name or "").strip()
+    if not key or not hook:
+        raise HTTPException(status_code=400, detail="Missing portal key or webhook name.")
+
+    client_host = request.client.host if request.client else "unknown"
+    logger.info("[portal-webhook] %s %s/%s from %s", request.method.upper(), key, hook, client_host)
+
+    try:
+        module = portal_runtime._import_module(key, reload_module=False)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown portal: {key} ({exc})")
+
+    handler = getattr(module, "handle_portal_webhook", None)
+    if not callable(handler):
+        raise HTTPException(status_code=404, detail=f"{key} does not expose portal webhooks.")
+
+    payload, body_text = await _surface_request_payload(request)
+    query = dict(request.query_params)
+    try:
+        result = handler(
+            webhook=hook,
+            payload=payload,
+            query=query,
+            body=body_text,
+            method=request.method,
+            headers=dict(request.headers),
+            redis_client=redis_client,
+            portal_key=key,
+        )
+        result = await _maybe_await_result(result)
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Portal webhook failed: {exc}")
+
+    return _coerce_surface_result(result)
+
+
+@app.api_route("/api/portals/{portal_key}/api", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+@app.api_route("/api/portals/{portal_key}/api/{api_path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+async def run_portal_api(portal_key: str, request: Request, api_path: str = "") -> Any:
+    key = str(portal_key or "").strip()
+    route_path = str(api_path or "").strip("/")
+    if not key:
+        raise HTTPException(status_code=400, detail="Missing portal key.")
+
+    client_host = request.client.host if request.client else "unknown"
+    logger.info("[portal-api] %s %s/%s from %s", request.method.upper(), key, route_path or "-", client_host)
+
+    try:
+        module = portal_runtime._import_module(key, reload_module=False)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown portal: {key} ({exc})")
+
+    handler = getattr(module, "handle_portal_api", None)
+    if callable(handler):
+        payload, body_text = await _surface_request_payload(request)
+        query = dict(request.query_params)
+        try:
+            result = handler(
+                path=route_path,
+                payload=payload,
+                query=query,
+                body=body_text,
+                method=request.method,
+                headers=dict(request.headers),
+                redis_client=redis_client,
+                portal_key=key,
+            )
+            result = await _maybe_await_result(result)
+        except HTTPException:
+            raise
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Portal API failed: {exc}")
+        return _coerce_surface_result(result)
+
+    try:
+        return await _call_portal_asgi_app(module, request, route_path)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Portal API failed: {exc}")
 
 
 @app.get("/api/settings/esphome/runtime")
@@ -4819,11 +5174,12 @@ def clear_hydra_data(payload: HydraDataClearRequest) -> Dict[str, Any]:
 def get_settings() -> Dict[str, Any]:
     chat_settings = redis_client.hgetall("chat_settings") or {}
     legacy_web_search = redis_client.hgetall("verba_settings:Web Search") or {}
-    homeassistant_settings = redis_client.hgetall("homeassistant_settings") or {}
-    unifi_network_base_url = _trim(redis_client.get(UNIFI_NETWORK_BASE_URL_KEY))
-    unifi_network_api_key = _trim(redis_client.get(UNIFI_NETWORK_API_KEY_KEY))
-    unifi_protect_base_url = _trim(redis_client.get(UNIFI_PROTECT_BASE_URL_KEY))
-    unifi_protect_api_key = _trim(redis_client.get(UNIFI_PROTECT_API_KEY_KEY))
+    homeassistant_settings = load_homeassistant_config(required=False)
+    hue_settings = read_hue_settings()
+    aladdin_settings = read_aladdin_settings()
+    sonos_settings = read_sonos_settings()
+    unifi_network_settings = read_unifi_network_settings()
+    unifi_protect_settings = read_unifi_protect_settings()
 
     vision_settings = get_shared_vision_settings(
         default_api_base="http://127.0.0.1:1234",
@@ -4915,12 +5271,28 @@ def get_settings() -> Dict[str, Any]:
         "web_search_google_cx": redis_client.get("tater:web_search:google_cx")
         or legacy_web_search.get("GOOGLE_CX")
         or "",
-        "homeassistant_base_url": homeassistant_settings.get("HA_BASE_URL", "http://homeassistant.local:8123"),
-        "homeassistant_token": homeassistant_settings.get("HA_TOKEN", ""),
-        "unifi_network_base_url": unifi_network_base_url or UNIFI_NETWORK_DEFAULT_BASE_URL,
-        "unifi_network_api_key": unifi_network_api_key,
-        "unifi_protect_base_url": unifi_protect_base_url or UNIFI_PROTECT_DEFAULT_BASE_URL,
-        "unifi_protect_api_key": unifi_protect_api_key,
+        "homeassistant_base_url": homeassistant_settings.get("base") or HOMEASSISTANT_DEFAULT_BASE_URL,
+        "homeassistant_token": homeassistant_settings.get("token", ""),
+        "hue_bridge_host": hue_settings.get("HUE_BRIDGE_HOST", HUE_DEFAULT_BRIDGE_HOST),
+        "hue_app_key": hue_settings.get("HUE_APP_KEY", ""),
+        "hue_device_type": hue_settings.get("HUE_DEVICE_TYPE", HUE_DEFAULT_DEVICE_TYPE),
+        "hue_timeout_seconds": int(hue_settings.get("HUE_TIMEOUT_SECONDS") or HUE_DEFAULT_TIMEOUT_SECONDS),
+        "aladdin_username": aladdin_settings.get("ALADDIN_USERNAME", ""),
+        "aladdin_password": aladdin_settings.get("ALADDIN_PASSWORD", ""),
+        "aladdin_timeout_seconds": int(
+            aladdin_settings.get("ALADDIN_TIMEOUT_SECONDS") or ALADDIN_DEFAULT_TIMEOUT_SECONDS
+        ),
+        "sonos_enabled": _as_bool_flag(sonos_settings.get("SONOS_ENABLED"), default=SONOS_DEFAULT_ENABLED),
+        "sonos_discovery_timeout_seconds": int(
+            sonos_settings.get("SONOS_DISCOVERY_TIMEOUT_SECONDS") or SONOS_DEFAULT_DISCOVERY_TIMEOUT_SECONDS
+        ),
+        "sonos_speaker_hosts": str(sonos_settings.get("SONOS_SPEAKER_HOSTS") or ""),
+        "unifi_network_base_url": unifi_network_settings.get("UNIFI_BASE_URL") or UNIFI_NETWORK_DEFAULT_BASE_URL,
+        "unifi_network_api_key": unifi_network_settings.get("UNIFI_API_KEY", ""),
+        "unifi_protect_base_url": unifi_protect_settings.get("base") or UNIFI_PROTECT_DEFAULT_BASE_URL,
+        "unifi_protect_api_key": unifi_protect_settings.get("api_key", ""),
+        "integrations": get_integration_catalog(),
+        "integration_runtime": integration_runtime_status(redis_client),
         "vision_api_base": str(vision_settings.get("api_base") or "http://127.0.0.1:1234"),
         "vision_model": str(vision_settings.get("model") or "qwen2.5-vl-7b-instruct"),
         "vision_api_key": str(vision_settings.get("api_key") or ""),
@@ -5022,6 +5394,93 @@ async def get_speech_wyoming_tts_voices(payload: WyomingTtsVoicesRequest) -> Dic
 @app.get("/api/settings/speech/warmup")
 def get_speech_model_warmup() -> Dict[str, Any]:
     return _speech_model_warmup_snapshot()
+
+
+@app.get("/api/settings/integrations")
+def get_settings_integrations() -> Dict[str, Any]:
+    return {"integrations": get_integration_catalog()}
+
+
+@app.get("/api/settings/integrations/runtime")
+def get_settings_integrations_runtime() -> Dict[str, Any]:
+    return {"runtime": integration_runtime_status(redis_client)}
+
+
+@app.get("/api/settings/integrations/runtime/events")
+def get_settings_integrations_runtime_events(after_seq: int = 0, limit: int = 200) -> Dict[str, Any]:
+    return integration_runtime_events(redis_client, after_seq=after_seq, limit=limit)
+
+
+@app.get("/api/settings/integrations/runtime/states")
+def get_settings_integrations_runtime_states() -> Dict[str, Any]:
+    return integration_runtime_states(redis_client)
+
+
+@app.get("/api/settings/integrations/devices")
+def get_settings_integrations_devices() -> Dict[str, Any]:
+    return get_integration_devices()
+
+
+@app.get("/api/settings/integrations/{integration_id}/devices")
+def get_settings_integration_devices(integration_id: str) -> Dict[str, Any]:
+    try:
+        return get_integration_device_group(integration_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc) or "Integration device load failed.") from exc
+
+
+@app.post("/api/settings/integrations/{integration_id}/settings")
+def update_registered_integration_settings(
+    integration_id: str,
+    payload: IntegrationSettingsRequest,
+) -> Dict[str, Any]:
+    try:
+        return save_registered_integration_settings(integration_id, payload.settings)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc) or "Integration settings save failed.") from exc
+
+
+@app.post("/api/settings/integrations/{integration_id}/actions/{action_id}")
+def run_registered_settings_integration_action(
+    integration_id: str,
+    action_id: str,
+    payload: IntegrationActionRequest,
+) -> Dict[str, Any]:
+    try:
+        return run_registered_integration_action(integration_id, action_id, payload.payload)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc) or "Integration action failed.") from exc
+
+
+@app.post("/api/settings/hue/link")
+def link_hue_bridge(payload: HueLinkRequest) -> Dict[str, Any]:
+    return pair_hue_bridge(
+        bridge_host=payload.hue_bridge_host,
+        device_type=payload.hue_device_type,
+        timeout_seconds=payload.hue_timeout_seconds,
+    )
+
+
+@app.post("/api/settings/aladdin/test")
+def test_aladdin_settings(payload: AladdinTestRequest) -> Dict[str, Any]:
+    try:
+        return test_aladdin_connection(
+            username=payload.aladdin_username,
+            password=payload.aladdin_password,
+            timeout_seconds=payload.aladdin_timeout_seconds,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc) or "Aladdin Connect test failed.") from exc
 
 
 @app.post("/api/settings")
@@ -5144,32 +5603,56 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         redis_client.set("tater:web_search:google_cx", str(updates["web_search_google_cx"]).strip())
 
     if "homeassistant_base_url" in updates or "homeassistant_token" in updates:
-        current_ha = redis_client.hgetall("homeassistant_settings") or {}
-        base_url = str(updates.get("homeassistant_base_url", current_ha.get("HA_BASE_URL") or "")).strip()
-        token = str(updates.get("homeassistant_token", current_ha.get("HA_TOKEN") or "")).strip()
-        redis_client.hset(
-            "homeassistant_settings",
-            mapping={
-                "HA_BASE_URL": base_url or "http://homeassistant.local:8123",
-                "HA_TOKEN": token,
-            },
+        current_ha = load_homeassistant_config(required=False)
+        save_homeassistant_config(
+            base_url=updates.get("homeassistant_base_url", current_ha.get("base")),
+            token=updates.get("homeassistant_token", current_ha.get("token")),
+        )
+
+    hue_update_keys = {"hue_bridge_host", "hue_app_key", "hue_device_type", "hue_timeout_seconds"}
+    if any(key in updates for key in hue_update_keys):
+        current_hue = read_hue_settings()
+        save_hue_settings(
+            bridge_host=updates.get("hue_bridge_host", current_hue.get("HUE_BRIDGE_HOST")),
+            app_key=updates.get("hue_app_key", current_hue.get("HUE_APP_KEY")),
+            device_type=updates.get("hue_device_type", current_hue.get("HUE_DEVICE_TYPE")),
+            timeout_seconds=updates.get("hue_timeout_seconds", current_hue.get("HUE_TIMEOUT_SECONDS")),
+        )
+
+    aladdin_update_keys = {"aladdin_username", "aladdin_password", "aladdin_timeout_seconds"}
+    if any(key in updates for key in aladdin_update_keys):
+        current_aladdin = read_aladdin_settings()
+        save_aladdin_settings(
+            username=updates.get("aladdin_username", current_aladdin.get("ALADDIN_USERNAME")),
+            password=updates.get("aladdin_password", current_aladdin.get("ALADDIN_PASSWORD")),
+            timeout_seconds=updates.get("aladdin_timeout_seconds", current_aladdin.get("ALADDIN_TIMEOUT_SECONDS")),
+        )
+
+    sonos_update_keys = {"sonos_enabled", "sonos_discovery_timeout_seconds", "sonos_speaker_hosts"}
+    if any(key in updates for key in sonos_update_keys):
+        current_sonos = read_sonos_settings()
+        save_sonos_settings(
+            enabled=updates.get("sonos_enabled", current_sonos.get("SONOS_ENABLED")),
+            discovery_timeout_seconds=updates.get(
+                "sonos_discovery_timeout_seconds",
+                current_sonos.get("SONOS_DISCOVERY_TIMEOUT_SECONDS"),
+            ),
+            speaker_hosts=updates.get("sonos_speaker_hosts", current_sonos.get("SONOS_SPEAKER_HOSTS")),
         )
 
     if "unifi_network_base_url" in updates or "unifi_network_api_key" in updates:
-        current_network_base = _trim(redis_client.get(UNIFI_NETWORK_BASE_URL_KEY))
-        current_network_api = _trim(redis_client.get(UNIFI_NETWORK_API_KEY_KEY))
-        next_network_base = _trim(updates.get("unifi_network_base_url", current_network_base)) or UNIFI_NETWORK_DEFAULT_BASE_URL
-        next_network_api = _trim(updates.get("unifi_network_api_key", current_network_api))
-        redis_client.set(UNIFI_NETWORK_BASE_URL_KEY, next_network_base)
-        redis_client.set(UNIFI_NETWORK_API_KEY_KEY, next_network_api)
+        current_network = read_unifi_network_settings()
+        save_unifi_network_settings(
+            base_url=updates.get("unifi_network_base_url", current_network.get("UNIFI_BASE_URL")),
+            api_key=updates.get("unifi_network_api_key", current_network.get("UNIFI_API_KEY")),
+        )
 
     if "unifi_protect_base_url" in updates or "unifi_protect_api_key" in updates:
-        current_protect_base = _trim(redis_client.get(UNIFI_PROTECT_BASE_URL_KEY))
-        current_protect_api = _trim(redis_client.get(UNIFI_PROTECT_API_KEY_KEY))
-        next_protect_base = _trim(updates.get("unifi_protect_base_url", current_protect_base)) or UNIFI_PROTECT_DEFAULT_BASE_URL
-        next_protect_api = _trim(updates.get("unifi_protect_api_key", current_protect_api))
-        redis_client.set(UNIFI_PROTECT_BASE_URL_KEY, next_protect_base)
-        redis_client.set(UNIFI_PROTECT_API_KEY_KEY, next_protect_api)
+        current_protect = read_unifi_protect_settings()
+        save_unifi_protect_settings(
+            base_url=updates.get("unifi_protect_base_url", current_protect.get("base")),
+            api_key=updates.get("unifi_protect_api_key", current_protect.get("api_key")),
+        )
 
     if "vision_api_base" in updates or "vision_model" in updates or "vision_api_key" in updates:
         current_vision = get_shared_vision_settings(

@@ -37,10 +37,9 @@ nest_asyncio.apply()
 
 _INTERNAL_PORTAL_LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
 _INTERNAL_PORTAL_AUTH_TARGETS = (
-    ("homeassistant_portal_settings", 8787, "/tater-ha/v1", None),
-    ("homekit_portal_settings", 8789, "/tater-homekit/v1", "AUTH_TOKEN"),
-    ("xbmc_portal_settings", 8790, "/tater-xbmc/v1", None),
-    ("macos_portal_settings", 8791, "/macos", "AUTH_TOKEN"),
+    ("homekit_portal_settings", 8501, "/api/portals/homekit_portal/api/tater-homekit/v1", "AUTH_TOKEN"),
+    ("xbmc_portal_settings", 8501, "/api/portals/xbmc_portal/api/tater-xbmc/v1", None),
+    ("macos_portal_settings", 8501, "/api/portals/macos_portal/api/macos", "AUTH_TOKEN"),
     ("voice_core_settings", 8501, "/tater-ha/v1/voice", None),
 )
 _INTERNAL_PORTAL_AUTH_CACHE_TTL_SECONDS = max(
@@ -117,7 +116,7 @@ def _load_internal_portal_auth_rows() -> List[Dict[str, Any]]:
             if not isinstance(settings, dict):
                 settings = {}
 
-            if settings_key == "voice_core_settings":
+            if str(path_prefix or "").startswith("/api/portals/") or settings_key == "voice_core_settings":
                 port = _main_app_port(default_port)
             else:
                 port = _port_or_default(settings.get("bind_port"), default_port)

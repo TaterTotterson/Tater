@@ -1169,6 +1169,621 @@ function renderSettingsSectionIntro(title, description = "", badge = "", variant
   `;
 }
 
+function settingsIntegrationDomPart(value) {
+  return String(value || "")
+    .trim()
+    .replace(/[^a-zA-Z0-9_-]+/g, "_")
+    .replace(/^_+|_+$/g, "") || "integration";
+}
+
+function settingsIntegrationFieldId(integrationId, fieldKey) {
+  return `set_integration_${settingsIntegrationDomPart(integrationId)}_${settingsIntegrationDomPart(fieldKey)}`;
+}
+
+function settingsIntegrationStatusId(integrationId) {
+  return `settings-integration-status-${settingsIntegrationDomPart(integrationId)}`;
+}
+
+function settingsIntegrationActionId(integrationId, actionId) {
+  return `settings-integration-action-${settingsIntegrationDomPart(integrationId)}-${settingsIntegrationDomPart(actionId)}`;
+}
+
+function settingsIntegrationValue(integration, field) {
+  const values = integration?.values && typeof integration.values === "object" ? integration.values : {};
+  const key = String(field?.key || "").trim();
+  if (key && Object.prototype.hasOwnProperty.call(values, key)) {
+    return values[key];
+  }
+  return field?.default ?? "";
+}
+
+function renderSettingsIntegrationField(integration, field) {
+  const integrationId = String(integration?.id || "").trim();
+  const key = String(field?.key || "").trim();
+  if (!integrationId || !key) {
+    return "";
+  }
+  const label = String(field?.label || key).trim() || key;
+  const type = String(field?.type || "text").trim().toLowerCase();
+  const value = settingsIntegrationValue(integration, field);
+  const inputId = settingsIntegrationFieldId(integrationId, key);
+  const description = String(field?.description || "").trim();
+  const descHtml = description ? `<div class="small">${escapeHtml(description)}</div>` : "";
+  const placeholder = String(field?.placeholder || "").trim();
+  const placeholderAttr = placeholder ? ` placeholder="${escapeHtml(placeholder).replace(/\n/g, "&#10;")}"` : "";
+  const minAttr = field?.min !== undefined ? ` min="${escapeHtml(String(field.min))}"` : "";
+  const maxAttr = field?.max !== undefined ? ` max="${escapeHtml(String(field.max))}"` : "";
+  const stepAttr = field?.step !== undefined ? ` step="${escapeHtml(String(field.step))}"` : "";
+  const fullWidth = boolFromAny(field?.full_width, false) || type === "textarea";
+  const styleAttr = fullWidth ? ` style="grid-column: 1 / -1;"` : "";
+
+  if (type === "checkbox") {
+    return `<label${styleAttr}>${escapeHtml(label)}
+      ${renderToggleRow(
+        `<input id="${escapeHtml(inputId)}" class="toggle-input" type="checkbox" ${
+          boolFromAny(value, boolFromAny(field?.default, false)) ? "checked" : ""
+        } />`
+      )}
+      ${descHtml}
+    </label>`;
+  }
+
+  if (type === "textarea") {
+    const rows = Number(field?.rows || 3);
+    return `<label${styleAttr}>${escapeHtml(label)}
+      <textarea id="${escapeHtml(inputId)}" rows="${escapeHtml(String(Math.max(2, rows)))}"${placeholderAttr}>${escapeHtml(
+        String(value ?? "")
+      )}</textarea>
+      ${descHtml}
+    </label>`;
+  }
+
+  const inputType = type === "password" || type === "number" || type === "email" || type === "url" ? type : "text";
+  return `<label${styleAttr}>${escapeHtml(label)}
+    <input
+      id="${escapeHtml(inputId)}"
+      type="${escapeHtml(inputType)}"
+      value="${escapeHtml(String(value ?? ""))}"
+      ${placeholderAttr}${minAttr}${maxAttr}${stepAttr}
+    />
+    ${descHtml}
+  </label>`;
+}
+
+function renderSettingsIntegrationSection(integration) {
+  const integrationId = String(integration?.id || "").trim();
+  if (!integrationId) {
+    return "";
+  }
+  const name = String(integration?.name || integrationId).trim() || integrationId;
+  const fields = Array.isArray(integration?.fields) ? integration.fields : [];
+  const actions = Array.isArray(integration?.actions) ? integration.actions : [];
+  const description = String(integration?.description || "").trim();
+  const status = integration?.status && typeof integration.status === "object" ? integration.status : {};
+  const initialStatus = String(status.message || actions[0]?.status || "").trim();
+  return `
+    <section class="core-inline-section" data-settings-integration="${escapeHtml(integrationId)}">
+      <div class="small core-inline-section-title">${escapeHtml(name)}</div>
+      ${description ? `<div class="small">${escapeHtml(description)}</div>` : ""}
+      <div class="form-grid two-col" style="margin-top: 10px;">
+        ${fields.map((field) => renderSettingsIntegrationField(integration, field)).join("")}
+      </div>
+      ${
+        actions.length
+          ? `<div class="inline-row">
+              ${actions
+                .map((action) => {
+                  const actionId = String(action?.id || "").trim();
+                  if (!actionId) {
+                    return "";
+                  }
+                  const label = String(action?.label || actionId).trim() || actionId;
+                  return `<button type="button" id="${escapeHtml(
+                    settingsIntegrationActionId(integrationId, actionId)
+                  )}" class="action-btn">${escapeHtml(label)}</button>`;
+                })
+                .join("")}
+              <span id="${escapeHtml(settingsIntegrationStatusId(integrationId))}" class="small">${escapeHtml(initialStatus)}</span>
+            </div>`
+          : ""
+      }
+    </section>
+  `;
+}
+
+function renderSettingsIntegrationSections(settings) {
+  const integrations = Array.isArray(settings?.integrations) ? settings.integrations : [];
+  if (!integrations.length) {
+    return renderNotice("No direct integrations are registered.");
+  }
+  return integrations.map((integration) => renderSettingsIntegrationSection(integration)).join("");
+}
+
+function integrationRuntimeStatusLabel(runtime, prefix) {
+  const configured = runtime?.[`${prefix}_configured`];
+  const connected = boolFromAny(runtime?.[`${prefix}_ws_connected`], false) || boolFromAny(runtime?.[`${prefix}_connected`], false);
+  if (connected) {
+    return "Connected";
+  }
+  if (configured === false || String(configured).toLowerCase() === "false") {
+    return "Not configured";
+  }
+  return "Disconnected";
+}
+
+function integrationRuntimeTimeLabel(epochRaw) {
+  const epoch = Number(epochRaw || 0);
+  if (!Number.isFinite(epoch) || epoch <= 0) {
+    return "-";
+  }
+  return `${_runtimeAgeLabel(Math.max(0, Date.now() / 1000 - epoch))} ago`;
+}
+
+function renderSettingsIntegrationRuntimeSummary(runtime) {
+  const row = runtime && typeof runtime === "object" ? runtime : {};
+  return `
+    <div class="core-metric-row">
+      <div class="core-metric-pill">
+        <div class="small">Home Assistant</div>
+        <strong>${escapeHtml(integrationRuntimeStatusLabel(row, "homeassistant"))}</strong>
+      </div>
+      <div class="core-metric-pill">
+        <div class="small">UniFi Protect</div>
+        <strong>${escapeHtml(integrationRuntimeStatusLabel(row, "unifi_protect"))}</strong>
+      </div>
+      <div class="core-metric-pill">
+        <div class="small">UniFi Network</div>
+        <strong>${escapeHtml(integrationRuntimeStatusLabel(row, "unifi_network"))}</strong>
+      </div>
+      <div class="core-metric-pill">
+        <div class="small">Philips Hue</div>
+        <strong>${escapeHtml(integrationRuntimeStatusLabel(row, "hue"))}</strong>
+      </div>
+      <div class="core-metric-pill">
+        <div class="small">Ecobee</div>
+        <strong>${escapeHtml(integrationRuntimeStatusLabel(row, "ecobee_homekit"))}</strong>
+      </div>
+      <div class="core-metric-pill">
+        <div class="small">Events</div>
+        <strong>${escapeHtml(String(row.last_event_seq || 0))}</strong>
+      </div>
+      <div class="core-metric-pill">
+        <div class="small">Live States</div>
+        <strong>${escapeHtml(String(row.state_count || 0))}</strong>
+      </div>
+    </div>
+    ${
+      row.last_event_ts
+        ? `<div class="small" style="margin-top: 8px;">Last event ${escapeHtml(
+            integrationRuntimeTimeLabel(row.last_event_ts)
+          )}</div>`
+        : ""
+    }
+  `;
+}
+
+function renderSettingsIntegrationRuntimeStates(payload) {
+  const states = Array.isArray(payload?.states) ? payload.states : [];
+  if (!states.length) {
+    return `<div class="small">No live device states have been seen yet.</div>`;
+  }
+  return `
+    <div class="core-data-table-wrap">
+      <table class="core-data-table">
+        <thead>
+          <tr>
+            <th>Provider</th>
+            <th>Device / Sensor</th>
+            <th>State</th>
+            <th>Updated</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${states
+            .slice(0, 80)
+            .map((row) => {
+              const payload = row?.payload && typeof row.payload === "object" ? row.payload : {};
+              const provider = String(row?.provider || "").replace(/_/g, " ");
+              const stateText = String(payload.state ?? payload.event_type ?? payload.id ?? "").trim() || "-";
+              return `
+                <tr>
+                  <td>${escapeHtml(provider || "-")}</td>
+                  <td>${escapeHtml(String(row?.id || row?.key || "-"))}</td>
+                  <td>${escapeHtml(stateText)}</td>
+                  <td>${escapeHtml(integrationRuntimeTimeLabel(row?.updated_at))}</td>
+                </tr>
+              `;
+            })
+            .join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderSettingsIntegrationRuntime(settings) {
+  return `
+    <section class="core-inline-section" id="settings-integration-runtime">
+      <div class="inline-row" style="justify-content: space-between; align-items: center;">
+        <div>
+          <div class="small core-inline-section-title">Live Runtime</div>
+          <div class="small">Shared integration streams, pollers, and live device state.</div>
+        </div>
+        <button type="button" id="settings-integration-runtime-refresh" class="action-btn">Refresh</button>
+      </div>
+      <div id="settings-integration-runtime-summary">
+        ${renderSettingsIntegrationRuntimeSummary(settings?.integration_runtime || {})}
+      </div>
+      <div id="settings-integration-runtime-states" style="margin-top: 10px;">
+        <div class="small">Loading live device states...</div>
+      </div>
+    </section>
+  `;
+}
+
+function integrationDeviceValueText(value) {
+  if (value === null || value === undefined || value === "") {
+    return "";
+  }
+  if (typeof value === "boolean") {
+    return value ? "yes" : "no";
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? String(value) : "";
+  }
+  if (typeof value === "object") {
+    try {
+      const text = JSON.stringify(value);
+      return text.length > 180 ? `${text.slice(0, 177)}...` : text;
+    } catch {
+      return "";
+    }
+  }
+  return String(value);
+}
+
+function integrationDeviceDetailsHtml(details) {
+  const row = details && typeof details === "object" ? details : {};
+  const items = Object.entries(row)
+    .map(([key, value]) => [String(key || "").trim(), integrationDeviceValueText(value)])
+    .filter(([key, value]) => key && value);
+  if (!items.length) {
+    return "-";
+  }
+  return items
+    .map(([key, value]) => `<div><strong>${escapeHtml(key)}:</strong> ${escapeHtml(value)}</div>`)
+    .join("");
+}
+
+function renderSettingsIntegrationDeviceGroup(group) {
+  const devices = Array.isArray(group?.devices) ? group.devices : [];
+  const name = String(group?.name || group?.id || "Integration").trim();
+  const message = String(group?.error || group?.message || "").trim();
+  return `
+    <section class="core-inline-section" data-integration-devices="${escapeHtml(String(group?.id || ""))}">
+      <div class="inline-row" style="justify-content: space-between; align-items: center;">
+        <div>
+          <div class="small core-inline-section-title">${escapeHtml(name)}</div>
+          ${message ? `<div class="small">${escapeHtml(message)}</div>` : ""}
+        </div>
+        <span class="small">${escapeHtml(String(devices.length))} device${devices.length === 1 ? "" : "s"}</span>
+      </div>
+      ${
+        devices.length
+          ? `<div class="core-data-table-wrap" style="margin-top: 10px;">
+              <table class="core-data-table">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Type</th>
+                    <th>Current</th>
+                    <th>Area</th>
+                    <th>Info</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${devices
+                    .map((device) => {
+                      const current = String(device?.state || device?.status || "").trim() || "-";
+                      return `
+                        <tr>
+                          <td>${escapeHtml(String(device?.name || device?.id || "Device"))}</td>
+                          <td>${escapeHtml(String(device?.type || "device"))}</td>
+                          <td>${escapeHtml(current)}</td>
+                          <td>${escapeHtml(String(device?.area || "-"))}</td>
+                          <td>${integrationDeviceDetailsHtml(device?.details)}</td>
+                        </tr>
+                      `;
+                    })
+                    .join("")}
+                </tbody>
+              </table>
+            </div>`
+          : `<div class="small" style="margin-top: 8px;">No devices returned from this integration.</div>`
+      }
+    </section>
+  `;
+}
+
+function renderSettingsIntegrationDevices(payload) {
+  const groups = Array.isArray(payload?.groups) ? payload.groups : [];
+  if (!groups.length) {
+    return renderNotice("No integrations are registered.");
+  }
+  return groups.map((group) => renderSettingsIntegrationDeviceGroup(group)).join("");
+}
+
+function renderSettingsIntegrationDeviceTabs(integrations) {
+  const rows = (Array.isArray(integrations) ? integrations : [])
+    .map((integration) => ({
+      id: String(integration?.id || "").trim(),
+      name: String(integration?.name || integration?.id || "Integration").trim(),
+      badge: String(integration?.badge || "").trim(),
+    }))
+    .filter((integration) => integration.id);
+  if (!rows.length) {
+    return `<div class="small">No integrations are registered.</div>`;
+  }
+  return `
+    <div class="settings-subtabs settings-integration-device-tabs">
+      ${rows
+        .map(
+          (integration, index) => `
+            <button
+              type="button"
+              class="settings-subtab-btn${index === 0 ? " active" : ""}"
+              data-integration-device-tab="${escapeHtml(integration.id)}"
+            >
+              ${integration.badge ? `<span>${escapeHtml(integration.badge)}</span> ` : ""}${escapeHtml(integration.name || integration.id)}
+            </button>
+          `
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function renderSettingsIntegrationDevicesShell(integrations = []) {
+  const rows = (Array.isArray(integrations) ? integrations : []).filter((integration) =>
+    String(integration?.id || "").trim()
+  );
+  const firstId = String(rows[0]?.id || "").trim();
+  return `
+    <section class="core-inline-section" id="settings-integration-devices" data-active-device-integration="${escapeHtml(firstId)}">
+      <div class="inline-row" style="justify-content: space-between; align-items: center;">
+        <div>
+          <div class="small core-inline-section-title">Devices</div>
+          <div class="small">Current devices and entities by integration.</div>
+        </div>
+        <button type="button" id="settings-integration-devices-refresh" class="action-btn"${firstId ? "" : " disabled"}>Refresh</button>
+      </div>
+      ${renderSettingsIntegrationDeviceTabs(rows)}
+      <div id="settings-integration-devices-content" style="margin-top: 10px;">
+        <div class="small">${firstId ? "Open or refresh this tab to load devices." : "No integrations are registered."}</div>
+      </div>
+    </section>
+  `;
+}
+
+function bindSettingsIntegrationDevices() {
+  const host = document.getElementById("settings-integration-devices");
+  const contentEl = document.getElementById("settings-integration-devices-content");
+  const button = document.getElementById("settings-integration-devices-refresh");
+  const tabButtons = Array.from(document.querySelectorAll("[data-integration-device-tab]"));
+  if (!host || !contentEl || !button) {
+    return;
+  }
+
+  const loadIntegrationDevices = async (integrationIdRaw) => {
+    const integrationId = String(integrationIdRaw || host.dataset.activeDeviceIntegration || "").trim();
+    if (!integrationId) {
+      contentEl.innerHTML = `<div class="small">Choose an integration to load devices.</div>`;
+      return;
+    }
+    host.dataset.activeDeviceIntegration = integrationId;
+    tabButtons.forEach((tabButton) => {
+      tabButton.classList.toggle("active", tabButton.dataset.integrationDeviceTab === integrationId);
+    });
+    button.disabled = true;
+    button.textContent = "Refreshing...";
+    contentEl.innerHTML = `<div class="small">Loading devices...</div>`;
+    try {
+      const payload = await api(`/api/settings/integrations/${encodeURIComponent(integrationId)}/devices`);
+      contentEl.innerHTML = renderSettingsIntegrationDeviceGroup(payload?.group || {});
+    } catch (error) {
+      contentEl.innerHTML = `<div class="notice error">Device refresh failed: ${escapeHtml(error.message)}</div>`;
+    } finally {
+      button.disabled = false;
+      button.textContent = "Refresh";
+    }
+  };
+
+  tabButtons.forEach((tabButton) => {
+    tabButton.addEventListener("click", () => loadIntegrationDevices(tabButton.dataset.integrationDeviceTab));
+  });
+  button.addEventListener("click", () => loadIntegrationDevices(host.dataset.activeDeviceIntegration));
+}
+
+function bindSettingsIntegrationRuntime() {
+  const summaryEl = document.getElementById("settings-integration-runtime-summary");
+  const statesEl = document.getElementById("settings-integration-runtime-states");
+  const button = document.getElementById("settings-integration-runtime-refresh");
+  if (!summaryEl || !statesEl) {
+    return;
+  }
+  const refresh = async () => {
+    if (button) {
+      button.disabled = true;
+      button.textContent = "Refreshing...";
+    }
+    try {
+      const [runtimePayload, statesPayload] = await Promise.all([
+        api("/api/settings/integrations/runtime"),
+        api("/api/settings/integrations/runtime/states"),
+      ]);
+      summaryEl.innerHTML = renderSettingsIntegrationRuntimeSummary(runtimePayload?.runtime || {});
+      statesEl.innerHTML = renderSettingsIntegrationRuntimeStates(statesPayload || {});
+    } catch (error) {
+      statesEl.innerHTML = `<div class="notice error">Runtime refresh failed: ${escapeHtml(error.message)}</div>`;
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.textContent = "Refresh";
+      }
+    }
+  };
+  button?.addEventListener("click", refresh);
+  refresh();
+}
+
+function bindSettingsIntegrationTabs(root = document) {
+  const host =
+    root instanceof HTMLElement
+      ? root.querySelector("#settings-integrations-shell")
+      : document.getElementById("settings-integrations-shell");
+  if (!(host instanceof HTMLElement)) {
+    return;
+  }
+  const buttons = Array.from(host.querySelectorAll(".settings-subtab-btn[data-integrations-tab]"));
+  const panels = Array.from(host.querySelectorAll(".settings-subpanel[data-integrations-panel]"));
+  if (!buttons.length || !panels.length) {
+    return;
+  }
+  const activate = (tabKey) => {
+    const key = String(tabKey || "setup").trim() || "setup";
+    host.dataset.integrationsActiveTab = key;
+    buttons.forEach((button) => {
+      button.classList.toggle("active", button.dataset.integrationsTab === key);
+    });
+    panels.forEach((panel) => {
+      panel.classList.toggle("active", panel.dataset.integrationsPanel === key);
+    });
+    if (key === "runtime") {
+      document.getElementById("settings-integration-runtime-refresh")?.click();
+    } else if (key === "devices") {
+      document.getElementById("settings-integration-devices-refresh")?.click();
+    }
+  };
+  buttons.forEach((button) => {
+    if (button.dataset.integrationsTabBound === "1") {
+      return;
+    }
+    button.dataset.integrationsTabBound = "1";
+    button.addEventListener("click", () => activate(button.dataset.integrationsTab));
+  });
+  activate(String(host.dataset.integrationsActiveTab || "setup").trim() || "setup");
+}
+
+function collectSettingsIntegrationPayload(integration) {
+  const out = {};
+  const integrationId = String(integration?.id || "").trim();
+  const fields = Array.isArray(integration?.fields) ? integration.fields : [];
+  fields.forEach((field) => {
+    const key = String(field?.key || "").trim();
+    if (!integrationId || !key) {
+      return;
+    }
+    const el = document.getElementById(settingsIntegrationFieldId(integrationId, key));
+    if (!el) {
+      return;
+    }
+    const type = String(field?.type || "text").trim().toLowerCase();
+    if (type === "checkbox") {
+      out[key] = Boolean(el.checked);
+    } else if (type === "number") {
+      out[key] = Number(el.value || field?.default || 0);
+    } else {
+      out[key] = el.value;
+    }
+  });
+  return out;
+}
+
+function applySettingsIntegrationResult(integration, result) {
+  const values = {
+    ...(result && typeof result === "object" ? result : {}),
+    ...(result?.values && typeof result.values === "object" ? result.values : {}),
+  };
+  const integrationId = String(integration?.id || "").trim();
+  const fields = Array.isArray(integration?.fields) ? integration.fields : [];
+  fields.forEach((field) => {
+    const key = String(field?.key || "").trim();
+    if (!integrationId || !key || !Object.prototype.hasOwnProperty.call(values, key)) {
+      return;
+    }
+    const el = document.getElementById(settingsIntegrationFieldId(integrationId, key));
+    if (!el) {
+      return;
+    }
+    const type = String(field?.type || "text").trim().toLowerCase();
+    if (type === "checkbox") {
+      el.checked = boolFromAny(values[key], false);
+    } else {
+      el.value = String(values[key] ?? "");
+    }
+  });
+}
+
+function bindSettingsIntegrationActions(integrations, statusEl) {
+  (Array.isArray(integrations) ? integrations : []).forEach((integration) => {
+    const integrationId = String(integration?.id || "").trim();
+    const actions = Array.isArray(integration?.actions) ? integration.actions : [];
+    actions.forEach((action) => {
+      const actionId = String(action?.id || "").trim();
+      if (!integrationId || !actionId) {
+        return;
+      }
+      const button = document.getElementById(settingsIntegrationActionId(integrationId, actionId));
+      if (!button) {
+        return;
+      }
+      const sectionStatusEl = document.getElementById(settingsIntegrationStatusId(integrationId));
+      const originalText = button.textContent || String(action?.label || actionId || "Run");
+      button.addEventListener("click", async () => {
+        button.disabled = true;
+        button.textContent = "Working...";
+        const pending = String(action?.status || `Running ${originalText}...`).trim();
+        if (sectionStatusEl) {
+          sectionStatusEl.textContent = pending;
+        }
+        if (statusEl) {
+          statusEl.textContent = pending;
+        }
+        try {
+          const result = await api(
+            `/api/settings/integrations/${encodeURIComponent(integrationId)}/actions/${encodeURIComponent(actionId)}`,
+            {
+              method: "POST",
+              body: JSON.stringify({ payload: collectSettingsIntegrationPayload(integration) }),
+            }
+          );
+          applySettingsIntegrationResult(integration, result);
+          const message = String(result?.message || (result?.ok === false ? `${originalText} failed.` : `${originalText} complete.`));
+          if (sectionStatusEl) {
+            sectionStatusEl.textContent = message;
+          }
+          if (statusEl) {
+            statusEl.textContent = message;
+          }
+          showToast(message, result?.ok === false ? "error" : "success", result?.ok === false ? 4200 : 2800);
+        } catch (error) {
+          const message = `${originalText} failed: ${error.message}`;
+          if (sectionStatusEl) {
+            sectionStatusEl.textContent = message;
+          }
+          if (statusEl) {
+            statusEl.textContent = message;
+          }
+          showToast(message, "error", 5200);
+        } finally {
+          button.disabled = false;
+          button.textContent = originalText;
+        }
+      });
+    });
+  });
+}
+
 function renderSimpleDataTable(columns, rows, emptyMessage = "No rows.") {
   const cols = Array.isArray(columns) ? columns : [];
   const list = Array.isArray(rows) ? rows : [];
@@ -2900,14 +3515,79 @@ function activateShopTab(kind, tabName) {
   });
 }
 
+const shopNameCollator = typeof Intl !== "undefined"
+  ? new Intl.Collator(undefined, { sensitivity: "base", numeric: true })
+  : null;
+
+function compareShopText(a, b) {
+  const left = String(a || "").trim();
+  const right = String(b || "").trim();
+  if (shopNameCollator) {
+    return shopNameCollator.compare(left, right);
+  }
+  const leftLower = left.toLowerCase();
+  const rightLower = right.toLowerCase();
+  if (leftLower < rightLower) {
+    return -1;
+  }
+  if (leftLower > rightLower) {
+    return 1;
+  }
+  return 0;
+}
+
+function shopItemDisplayName(item) {
+  if (!item || typeof item !== "object") {
+    return "";
+  }
+  return String(
+    item.name ||
+    item.display_name ||
+    item.label ||
+    item.title ||
+    item.id ||
+    item.module_key ||
+    item.key ||
+    ""
+  ).trim();
+}
+
+function shopItemStableId(item) {
+  if (!item || typeof item !== "object") {
+    return "";
+  }
+  return String(item.id || item.module_key || item.key || item.name || item.label || "").trim();
+}
+
+function compareShopNames(leftName, rightName, leftId = "", rightId = "") {
+  const nameCompare = compareShopText(leftName, rightName);
+  if (nameCompare !== 0) {
+    return nameCompare;
+  }
+  return compareShopText(leftId, rightId);
+}
+
+function compareShopItemsByDisplayName(left, right) {
+  return compareShopNames(
+    shopItemDisplayName(left),
+    shopItemDisplayName(right),
+    shopItemStableId(left),
+    shopItemStableId(right)
+  );
+}
+
+function sortedShopItems(items) {
+  return (Array.isArray(items) ? items : []).slice().sort(compareShopItemsByDisplayName);
+}
+
 function renderShopManager(kind, data) {
   const noun = shopLabel(kind);
   const repos = data?.repos || {};
   const defaultRepo = repos.default || { name: "", url: "" };
   const additionalRepos = Array.isArray(repos.additional) ? repos.additional : [];
-  const installed = Array.isArray(data?.installed) ? data.installed : [];
-  const catalog = Array.isArray(data?.catalog) ? data.catalog : [];
-  const available = catalog.filter((item) => !item.installed);
+  const installed = sortedShopItems(data?.installed);
+  const catalog = sortedShopItems(data?.catalog);
+  const available = sortedShopItems(catalog.filter((item) => !item.installed));
   const errors = Array.isArray(data?.errors) ? data.errors : [];
   const updatesAvailable = Number(data?.updates_available || 0);
 
@@ -3002,10 +3682,10 @@ function renderShopTabbedManager(kind, data, options = {}) {
   const repos = data?.repos || {};
   const defaultRepo = repos.default || { name: "", url: "" };
   const additionalRepos = Array.isArray(repos.additional) ? repos.additional : [];
-  const installed = Array.isArray(data?.installed) ? data.installed : [];
-  const catalog = Array.isArray(data?.catalog) ? data.catalog : [];
-  const available = catalog.filter((item) => !item.installed);
-  const updates = installed.filter((item) => item.update_available);
+  const installed = sortedShopItems(data?.installed);
+  const catalog = sortedShopItems(data?.catalog);
+  const available = sortedShopItems(catalog.filter((item) => !item.installed));
+  const updates = sortedShopItems(installed.filter((item) => item.update_available));
   const errors = Array.isArray(data?.errors) ? data.errors : [];
   const updatesAvailable = Number(data?.updates_available || updates.length || 0);
   const runtimeHtml = String(options.runtimeHtml || "").trim();
@@ -3204,7 +3884,17 @@ function buildVerbaRuntimeHtml(runtimeData, shopData) {
 
   resetRuntimeSettingsCatalog("verbas");
 
-  return items
+  const sortedItems = items.slice().sort((left, right) => {
+    const leftId = String(left?.id || "").trim();
+    const rightId = String(right?.id || "").trim();
+    const leftShopEntry = shopById.get(leftId) || {};
+    const rightShopEntry = shopById.get(rightId) || {};
+    const leftName = String(left?.name || leftShopEntry.name || leftId).trim() || leftId;
+    const rightName = String(right?.name || rightShopEntry.name || rightId).trim() || rightId;
+    return compareShopNames(leftName, rightName, leftId, rightId);
+  });
+
+  return sortedItems
     .map((item) => {
       const shopEntry = shopById.get(String(item.id || "").trim()) || {};
       const settings = Array.isArray(item.settings) ? item.settings : [];
@@ -3287,7 +3977,17 @@ function buildSurfaceRuntimeHtml(kind, runtimeData, shopData) {
 
   resetRuntimeSettingsCatalog(kind);
 
-  return items
+  const sortedItems = items.slice().sort((left, right) => {
+    const leftKey = String(left?.key || "").trim();
+    const rightKey = String(right?.key || "").trim();
+    const leftShopEntry = resolveShopEntry(leftKey) || {};
+    const rightShopEntry = resolveShopEntry(rightKey) || {};
+    const leftName = String(left?.label || leftShopEntry.name || leftKey).trim() || leftKey;
+    const rightName = String(right?.label || rightShopEntry.name || rightKey).trim() || rightKey;
+    return compareShopNames(leftName, rightName, leftKey, rightKey);
+  });
+
+  return sortedItems
     .map((item) => {
       const shopEntry = resolveShopEntry(item.key) || {};
       const settings = Array.isArray(item.settings) ? item.settings : [];
@@ -4116,7 +4816,7 @@ function renderCoreSettingsManager(body, tabSpec) {
 
     const summaryBlockHtml = hasSatelliteSummary
       ? `
-        <div class="core-satellite-summary">
+        <div class="core-satellite-summary${heroImageSrc ? "" : " no-image"}">
           ${
             heroImageSrc
               ? `<div class="core-satellite-image-wrap"><img class="core-satellite-image" src="${escapeHtml(heroImageSrc)}" alt="${escapeHtml(
@@ -10191,61 +10891,45 @@ async function loadSettingsView() {
         <section class="settings-tab-panel" data-settings-panel="integrations">
           ${renderSettingsSectionIntro(
             "Integrations",
-            "Service endpoints and credentials for search, Home Assistant, UniFi Network, and UniFi Protect.",
+            "Service endpoints and credentials for search and direct Tater integrations.",
             "API"
           )}
-          <div class="form-grid">
-            <section class="core-inline-section">
-              <div class="small core-inline-section-title">Web Search</div>
-              <div class="form-grid two-col">
-                <label>Google API Key
-                  <input id="set_web_search_google_api_key" type="password" value="${escapeHtml(settings.web_search_google_api_key || "")}" />
-                </label>
-                <label>Google Search CX
-                  <input id="set_web_search_google_cx" type="text" value="${escapeHtml(settings.web_search_google_cx || "")}" />
-                </label>
-              </div>
-            </section>
+          <div id="settings-integrations-shell">
+            <div class="settings-subtabs">
+              <button type="button" class="settings-subtab-btn active" data-integrations-tab="setup">Setup</button>
+              <button type="button" class="settings-subtab-btn" data-integrations-tab="devices">Devices</button>
+              <button type="button" class="settings-subtab-btn" data-integrations-tab="runtime">Live Runtime</button>
+            </div>
 
-            <section class="core-inline-section">
-              <div class="small core-inline-section-title">Home Assistant</div>
-              <div class="form-grid two-col">
-                <label>Base URL
-                  <input id="set_homeassistant_base_url" type="text" value="${escapeHtml(settings.homeassistant_base_url || "http://homeassistant.local:8123")}" />
-                </label>
-                <label>Long-Lived Access Token
-                  <input id="set_homeassistant_token" type="password" value="${escapeHtml(settings.homeassistant_token || "")}" />
-                </label>
-              </div>
-            </section>
+            <div class="settings-subpanel active" data-integrations-panel="setup">
+              <div class="form-grid">
+                <section class="core-inline-section">
+                  <div class="small core-inline-section-title">Web Search</div>
+                  <div class="form-grid two-col">
+                    <label>Google API Key
+                      <input id="set_web_search_google_api_key" type="password" value="${escapeHtml(settings.web_search_google_api_key || "")}" />
+                    </label>
+                    <label>Google Search CX
+                      <input id="set_web_search_google_cx" type="text" value="${escapeHtml(settings.web_search_google_cx || "")}" />
+                    </label>
+                  </div>
+                </section>
 
-            <section class="core-inline-section">
-              <div class="small core-inline-section-title">UniFi Network</div>
-              <div class="form-grid two-col">
-                <label>Console Base URL
-                  <input id="set_unifi_network_base_url" type="text" value="${escapeHtml(settings.unifi_network_base_url || "https://10.4.20.1")}" />
-                </label>
-                <label>API Key
-                  <input id="set_unifi_network_api_key" type="password" value="${escapeHtml(settings.unifi_network_api_key || "")}" />
-                </label>
-              </div>
-            </section>
+                ${renderSettingsIntegrationSections(settings)}
 
-            <section class="core-inline-section">
-              <div class="small core-inline-section-title">UniFi Protect</div>
-              <div class="form-grid two-col">
-                <label>Console Base URL
-                  <input id="set_unifi_protect_base_url" type="text" value="${escapeHtml(settings.unifi_protect_base_url || "https://10.4.20.127")}" />
-                </label>
-                <label>API Key
-                  <input id="set_unifi_protect_api_key" type="password" value="${escapeHtml(settings.unifi_protect_api_key || "")}" />
-                </label>
+                <div class="inline-row" style="grid-column: 1 / -1;">
+                  <button type="button" id="settings-save-integrations" class="action-btn">Save Settings</button>
+                  <span class="small">Saves Integrations and non-model settings.</span>
+                </div>
               </div>
-            </section>
+            </div>
 
-            <div class="inline-row" style="grid-column: 1 / -1;">
-              <button type="button" id="settings-save-integrations" class="action-btn">Save Settings</button>
-              <span class="small">Saves Integrations and non-model settings.</span>
+            <div class="settings-subpanel" data-integrations-panel="devices">
+              ${renderSettingsIntegrationDevicesShell(settings.integrations)}
+            </div>
+
+            <div class="settings-subpanel" data-integrations-panel="runtime">
+              ${renderSettingsIntegrationRuntime(settings)}
             </div>
           </div>
         </section>
@@ -11914,6 +12598,11 @@ async function loadSettingsView() {
     statusEl.textContent = "Default admin tool list loaded. Click Save Settings to apply.";
   });
 
+  bindSettingsIntegrationActions(settings.integrations, statusEl);
+  bindSettingsIntegrationDevices();
+  bindSettingsIntegrationTabs(root);
+  bindSettingsIntegrationRuntime();
+
   document.getElementById("settings-form").addEventListener("submit", (event) => {
     event.preventDefault();
   });
@@ -11952,6 +12641,12 @@ async function loadSettingsView() {
     }
 
     const esphomeFormEl = document.getElementById("settings-esphome-form");
+    const integrationPayloads = (Array.isArray(settings.integrations) ? settings.integrations : [])
+      .map((integration) => ({
+        id: String(integration?.id || "").trim(),
+        settings: collectSettingsIntegrationPayload(integration),
+      }))
+      .filter((item) => item.id);
     const payload = {
       username: document.getElementById("set_username").value,
       max_display: Number(document.getElementById("set_max_display").value || 8),
@@ -11963,12 +12658,6 @@ async function loadSettingsView() {
       show_speed_stats: document.getElementById("set_show_speed_stats").checked,
       web_search_google_api_key: document.getElementById("set_web_search_google_api_key").value,
       web_search_google_cx: document.getElementById("set_web_search_google_cx").value,
-      homeassistant_base_url: document.getElementById("set_homeassistant_base_url").value,
-      homeassistant_token: document.getElementById("set_homeassistant_token").value,
-      unifi_network_base_url: document.getElementById("set_unifi_network_base_url").value,
-      unifi_network_api_key: document.getElementById("set_unifi_network_api_key").value,
-      unifi_protect_base_url: document.getElementById("set_unifi_protect_base_url").value,
-      unifi_protect_api_key: document.getElementById("set_unifi_protect_api_key").value,
       vision_api_base: document.getElementById("set_vision_api_base").value,
       vision_model: document.getElementById("set_vision_model").value,
       vision_api_key: document.getElementById("set_vision_api_key").value,
@@ -12024,6 +12713,15 @@ async function loadSettingsView() {
         method: "POST",
         body: JSON.stringify(payload),
       });
+      if (integrationPayloads.length) {
+        statusEl.textContent = "Saving integrations...";
+        for (const item of integrationPayloads) {
+          await api(`/api/settings/integrations/${encodeURIComponent(item.id)}/settings`, {
+            method: "POST",
+            body: JSON.stringify({ settings: item.settings }),
+          });
+        }
+      }
       applyPopupEffectStyle(payload.popup_effect_style);
       if (webuiPasswordEl) {
         webuiPasswordEl.value = "";

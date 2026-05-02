@@ -21,11 +21,14 @@ from urllib.parse import urlparse
 import requests
 
 from announcement_targets import split_announcement_targets
-from ha_ws import (
+from helpers import redis_client
+from integrations.homeassistant import (
     call_service_sync as ha_call_service_sync,
     remove_local_media_source_sync as ha_remove_local_media_source_sync,
     upload_local_media_source_file_sync as ha_upload_local_media_source_file_sync,
 )
+from integrations.sonos import SONOS_DEFAULT_PLAY_TIMEOUT_SECONDS, sonos_play_media_sync
+from integrations.unifi_protect import DEFAULT_UNIFI_PROTECT_AUDIO_TIMEOUT_SECONDS, play_unifi_protect_audio_sync
 from speech_settings import (
     DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
     DEFAULT_KOKORO_MODEL,
@@ -1096,13 +1099,17 @@ async def speak_announcement_targets(
     grouped = split_announcement_targets(targets)
     homeassistant_players = list(grouped.get("homeassistant_media_players") or [])
     voice_core_selectors = list(grouped.get("voice_core_selectors") or [])
-    target_count = len(homeassistant_players) + len(voice_core_selectors)
+    unifi_protect_cameras = list(grouped.get("unifi_protect_cameras") or [])
+    sonos_speakers = list(grouped.get("sonos_speakers") or [])
+    target_count = len(homeassistant_players) + len(voice_core_selectors) + len(unifi_protect_cameras) + len(sonos_speakers)
     logger.info(
-        "[speech_tts] speak_announcement_targets backend=%s raw_targets=%s ha_players=%s voice_core_selectors=%s",
+        "[speech_tts] speak_announcement_targets backend=%s raw_targets=%s ha_players=%s voice_core_selectors=%s unifi_cameras=%s sonos_speakers=%s",
         normalize_announcement_tts_backend(backend, default=default_backend),
         raw_targets,
         homeassistant_players,
         voice_core_selectors,
+        unifi_protect_cameras,
+        sonos_speakers,
     )
     if target_count <= 0:
         return {"ok": False, "sent_count": 0, "error": "No announcement targets selected."}
@@ -1115,6 +1122,8 @@ async def speak_announcement_targets(
         "target_count": target_count,
         "homeassistant_target_count": len(homeassistant_players),
         "voice_core_target_count": len(voice_core_selectors),
+        "unifi_protect_target_count": len(unifi_protect_cameras),
+        "sonos_target_count": len(sonos_speakers),
     }
 
     wav_bytes = await synthesize_tts_wav(
@@ -1128,11 +1137,13 @@ async def speak_announcement_targets(
     )
     result["bytes"] = len(wav_bytes or b"")
     logger.info(
-        "[speech_tts] announcement synthesized backend=%s bytes=%s ha_players=%s voice_core_selectors=%s",
+        "[speech_tts] announcement synthesized backend=%s bytes=%s ha_players=%s voice_core_selectors=%s unifi_cameras=%s sonos_speakers=%s",
         selected_backend,
         len(wav_bytes or b""),
         homeassistant_players,
         voice_core_selectors,
+        unifi_protect_cameras,
+        sonos_speakers,
     )
 
     if homeassistant_players:
@@ -1192,6 +1203,43 @@ async def speak_announcement_targets(
         warnings.extend([_text(item) for item in list(voice_result.get("warnings") or []) if _text(item)])
         if not voice_result.get("ok") and _text(voice_result.get("error")):
             warnings.append(_text(voice_result.get("error")))
+
+    if sonos_speakers:
+        try:
+            asset_id = store_runtime_tts_wav(wav_bytes)
+            if not asset_id:
+                raise RuntimeError("failed to store Sonos announcement audio")
+            if _text(public_base_url):
+                sonos_source_url = f"{_text(public_base_url).rstrip('/')}/api/speech/tts/runtime/{asset_id}.wav"
+            else:
+                sonos_source_url = build_runtime_tts_asset_url(asset_id)
+            result["sonos_source_url"] = sonos_source_url
+            sonos_result = await asyncio.to_thread(
+                sonos_play_media_sync,
+                speakers=sonos_speakers,
+                source_url=sonos_source_url,
+                timeout_s=SONOS_DEFAULT_PLAY_TIMEOUT_SECONDS,
+            )
+            result["sonos_sent_count"] = int(sonos_result.get("sent_count") or 0)
+            sent_count += int(sonos_result.get("sent_count") or 0)
+            warnings.extend([_text(item) for item in list(sonos_result.get("warnings") or []) if _text(item)])
+            if not sonos_result.get("ok") and _text(sonos_result.get("error")):
+                warnings.append(_text(sonos_result.get("error")))
+        except Exception as exc:
+            warnings.append(f"Sonos playback failed: {exc}")
+
+    if unifi_protect_cameras:
+        unifi_result = await asyncio.to_thread(
+            play_unifi_protect_audio_sync,
+            cameras=unifi_protect_cameras,
+            audio_bytes=wav_bytes,
+            timeout_s=DEFAULT_UNIFI_PROTECT_AUDIO_TIMEOUT_SECONDS,
+        )
+        result["unifi_protect_sent_count"] = int(unifi_result.get("sent_count") or 0)
+        sent_count += int(unifi_result.get("sent_count") or 0)
+        warnings.extend([_text(item) for item in list(unifi_result.get("warnings") or []) if _text(item)])
+        if not unifi_result.get("ok") and _text(unifi_result.get("error")):
+            warnings.append(_text(unifi_result.get("error")))
 
     result["sent_count"] = sent_count
     if sent_count > 0:

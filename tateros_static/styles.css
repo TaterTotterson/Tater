@@ -1774,6 +1774,18 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   margin-bottom: 4px;
 }
 
+.view-root[data-view="settings"] .core-inline-section-title,
+.view-root[data-view="settings"] .hydra-model-mode-label,
+.view-root[data-view="settings"] .hydra-model-panel-title,
+.view-root[data-view="settings"] .settings-field-group-title,
+.view-root[data-view="settings"] .settings-section-title {
+  color: var(--accent-soft);
+}
+
+.view-root[data-view="settings"] .settings-avatar-card > .small:first-child {
+  color: #f5efe7;
+}
+
 .view-root[data-view="settings"] .hydra-model-panel-note,
 .view-root[data-view="settings"] .core-inline-section > .small:not(.core-inline-section-title),
 .view-root[data-view="settings"] label .small,
@@ -2077,6 +2089,10 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   gap: 14px;
   align-items: start;
   margin-top: 8px;
+}
+
+.core-satellite-summary.no-image {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .core-satellite-image-wrap {
