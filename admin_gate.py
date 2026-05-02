@@ -12,7 +12,6 @@ DEFAULT_ADMIN_ONLY_PLUGINS = {
     "discord_admin",
     "events_query",
     "find_my_phone",
-    "get_notifications",
     "ha_control",
     "music_assistant",
     "overseerr_request",

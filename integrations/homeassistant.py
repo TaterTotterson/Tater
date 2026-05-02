@@ -10,20 +10,109 @@ import requests
 
 from helpers import redis_client
 
+HOMEASSISTANT_SETTINGS_KEY = "homeassistant_settings"
+HOMEASSISTANT_DEFAULT_BASE_URL = "http://homeassistant.local:8123"
+
+INTEGRATION = {
+    "id": "homeassistant",
+    "name": "Home Assistant",
+    "description": "Shared Home Assistant endpoint and token for portals, verbas, and announcement paths.",
+    "badge": "HA",
+    "order": 10,
+    "fields": [
+        {
+            "key": "homeassistant_base_url",
+            "label": "Base URL",
+            "type": "text",
+            "default": HOMEASSISTANT_DEFAULT_BASE_URL,
+            "placeholder": HOMEASSISTANT_DEFAULT_BASE_URL,
+        },
+        {
+            "key": "homeassistant_token",
+            "label": "Long-Lived Access Token",
+            "type": "password",
+            "default": "",
+        },
+    ],
+    "actions": [
+        {
+            "id": "test",
+            "label": "Test Home Assistant",
+            "status": "Checks the Home Assistant REST API with the current form values.",
+        },
+    ],
+}
+
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
 def load_homeassistant_config(*, required: bool = False, client: Any = None) -> Dict[str, str]:
-    settings = (client or redis_client).hgetall("homeassistant_settings") or {}
-    base = _text(settings.get("HA_BASE_URL") or "http://homeassistant.local:8123").rstrip("/")
+    settings = (client or redis_client).hgetall(HOMEASSISTANT_SETTINGS_KEY) or {}
+    base = _text(settings.get("HA_BASE_URL") or HOMEASSISTANT_DEFAULT_BASE_URL).rstrip("/")
     token = _text(settings.get("HA_TOKEN"))
     if required and not token:
         raise ValueError(
             "Home Assistant token is not set. Open WebUI -> Settings -> Home Assistant Settings and add HA_TOKEN."
         )
     return {"base": base, "token": token}
+
+
+def save_homeassistant_config(*, base_url: Any = None, token: Any = None, client: Any = None) -> Dict[str, str]:
+    store = client or redis_client
+    current = load_homeassistant_config(required=False, client=store)
+    next_base = _text(current.get("base") if base_url is None else base_url) or HOMEASSISTANT_DEFAULT_BASE_URL
+    next_token = _text(current.get("token") if token is None else token)
+    store.hset(
+        HOMEASSISTANT_SETTINGS_KEY,
+        mapping={
+            "HA_BASE_URL": next_base.rstrip("/"),
+            "HA_TOKEN": next_token,
+        },
+    )
+    return load_homeassistant_config(required=False, client=store)
+
+
+def read_integration_settings() -> Dict[str, Any]:
+    config = load_homeassistant_config(required=False)
+    return {
+        "homeassistant_base_url": config.get("base") or HOMEASSISTANT_DEFAULT_BASE_URL,
+        "homeassistant_token": config.get("token", ""),
+    }
+
+
+def save_integration_settings(payload: Dict[str, Any]) -> Dict[str, Any]:
+    saved = save_homeassistant_config(
+        base_url=(payload or {}).get("homeassistant_base_url"),
+        token=(payload or {}).get("homeassistant_token"),
+    )
+    return {
+        "homeassistant_base_url": saved.get("base") or HOMEASSISTANT_DEFAULT_BASE_URL,
+        "homeassistant_token": saved.get("token", ""),
+    }
+
+
+def run_integration_action(action_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    if _text(action_id) != "test":
+        raise KeyError(f"Unsupported Home Assistant action: {action_id}")
+
+    current = read_integration_settings()
+    base = _text((payload or {}).get("homeassistant_base_url") or current.get("homeassistant_base_url")).rstrip("/")
+    token = _text((payload or {}).get("homeassistant_token") or current.get("homeassistant_token"))
+    if not base:
+        raise ValueError("Home Assistant base URL is required.")
+    if not token:
+        raise ValueError("Home Assistant token is required.")
+
+    response = requests.get(
+        f"{base}/api/",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+        timeout=10,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"Home Assistant test failed: HTTP {response.status_code}: {response.text[:200]}")
+    return {"ok": True, "message": "Home Assistant connection worked."}
 
 
 def ws_url(base_url: Any) -> str:
@@ -171,6 +260,75 @@ def device_registry_list_sync(base_url: Any, token: Any, *, timeout_s: float = 3
     return _run_sync(
         device_registry_list(base_url, token, timeout_s=timeout_s)
     )
+
+
+def _homeassistant_rest_get(base_url: Any, token: Any, path: str, *, timeout_s: float = 20.0) -> Any:
+    base = _text(base_url).rstrip("/")
+    bearer = _text(token)
+    if not base or not bearer:
+        return []
+    response = requests.get(
+        f"{base}{path if _text(path).startswith('/') else '/' + _text(path)}",
+        headers={"Authorization": f"Bearer {bearer}", "Accept": "application/json"},
+        timeout=max(5.0, float(timeout_s or 20.0)),
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"Home Assistant HTTP {response.status_code}: {response.text[:200]}")
+    try:
+        return response.json()
+    except Exception:
+        return []
+
+
+def _homeassistant_entity_details(row: Dict[str, Any]) -> Dict[str, Any]:
+    attrs = row.get("attributes") if isinstance(row.get("attributes"), dict) else {}
+    details: Dict[str, Any] = {}
+    for key in (
+        "unit_of_measurement",
+        "device_class",
+        "state_class",
+        "battery_level",
+        "last_changed",
+        "last_updated",
+    ):
+        value = attrs.get(key) if key in attrs else row.get(key)
+        if value not in (None, ""):
+            details[key] = value
+    for key in ("temperature", "humidity", "illuminance", "pressure", "voltage", "power", "energy"):
+        value = attrs.get(key)
+        if value not in (None, ""):
+            details[key] = value
+    return details
+
+
+def integration_devices() -> Dict[str, Any]:
+    config = load_homeassistant_config(required=False)
+    base = _text(config.get("base"))
+    token = _text(config.get("token"))
+    if not token:
+        return {"devices": [], "message": "Home Assistant is not configured."}
+    states = _homeassistant_rest_get(base, token, "/api/states", timeout_s=20.0)
+    devices: list[dict] = []
+    for row in states if isinstance(states, list) else []:
+        if not isinstance(row, dict):
+            continue
+        entity_id = _text(row.get("entity_id"))
+        if not entity_id:
+            continue
+        attrs = row.get("attributes") if isinstance(row.get("attributes"), dict) else {}
+        domain = entity_id.split(".", 1)[0] if "." in entity_id else "entity"
+        state = _text(row.get("state"))
+        devices.append(
+            {
+                "id": entity_id,
+                "name": _text(attrs.get("friendly_name")) or entity_id,
+                "type": domain,
+                "state": state,
+                "status": state,
+                "details": _homeassistant_entity_details(row),
+            }
+        )
+    return {"devices": devices, "message": f"Home Assistant returned {len(devices)} current entities."}
 
 
 def call_service_sync(

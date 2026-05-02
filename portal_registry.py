@@ -14,7 +14,6 @@ _SAFE_MODULE_RE = re.compile(r"^[A-Za-z0-9_]+_portal$")
 _DEFAULT_PORTAL_ORDER = [
     "macos_portal",
     "discord_portal",
-    "homeassistant_portal",
     "homekit_portal",
     "irc_portal",
     "matrix_portal",
@@ -25,7 +24,6 @@ _DEFAULT_PORTAL_ORDER = [
 _DEFAULT_PORTAL_LABELS = {
     "macos_portal": "macOS Portal Settings",
     "discord_portal": "Discord Portal Settings",
-    "homeassistant_portal": "Home Assistant Portal Settings",
     "homekit_portal": "HomeKit / Siri Portal Settings",
     "irc_portal": "IRC Portal Settings",
     "matrix_portal": "Matrix Portal Settings",

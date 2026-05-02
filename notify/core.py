@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, urlparse, urlunparse
 import requests
 
 from helpers import redis_client
+from integrations.homeassistant import load_homeassistant_config
 from notify.media import store_queue_attachments
 from notify.queue import (
     build_queue_item,
@@ -269,10 +270,8 @@ def _enqueue_queue_notification(
 
 
 def _ha_settings() -> Tuple[str, str]:
-    settings = redis_client.hgetall("homeassistant_settings") or {}
-    base = (settings.get("HA_BASE_URL") or "http://homeassistant.local:8123").strip().rstrip("/")
-    token = (settings.get("HA_TOKEN") or "").strip()
-    return base, token
+    ha = load_homeassistant_config(required=False)
+    return ha.get("base", ""), ha.get("token", "")
 
 
 def _ha_call_service(domain: str, service: str, data: Dict[str, Any]) -> None:
@@ -282,38 +281,6 @@ def _ha_call_service(domain: str, service: str, data: Dict[str, Any]) -> None:
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     url = f"{base}/api/services/{domain}/{service}"
     resp = requests.post(url, headers=headers, json=data, timeout=10)
-    if resp.status_code >= 400:
-        raise RuntimeError(f"HTTP {resp.status_code}: {resp.text}")
-
-
-def _ha_bridge_port() -> int:
-    try:
-        raw_port = redis_client.hget("homeassistant_portal_settings", "bind_port")
-        return int(raw_port) if raw_port is not None else 8787
-    except Exception:
-        return 8787
-
-
-def _post_ha_notification(
-    title: Optional[str],
-    message: str,
-    source: str,
-    level: str,
-    data: Optional[Dict[str, Any]] = None,
-) -> None:
-    port = _ha_bridge_port()
-    url = f"http://127.0.0.1:{port}/tater-ha/v1/notifications/add"
-    payload = {
-        "source": (source or "notify").strip(),
-        "title": (title or "Notification").strip(),
-        "type": "notify",
-        "message": (message or "").strip(),
-        "entity_id": "",
-        "ha_time": "",
-        "level": (level or "info").strip(),
-        "data": data or {},
-    }
-    resp = requests.post(url, json=payload, timeout=5)
     if resp.status_code >= 400:
         raise RuntimeError(f"HTTP {resp.status_code}: {resp.text}")
 
@@ -358,26 +325,6 @@ def _dispatch_homeassistant(
     resolved, err = resolve_targets("homeassistant", targets, origin, defaults=None)
     if err:
         return err
-
-    source = (origin or {}).get("platform") or "notify"
-    priority = (meta or {}).get("priority") or "normal"
-    level = "warn" if str(priority).lower() == "high" else "info"
-
-    api_notification_enabled = True
-    if isinstance(resolved, dict) and "api_notification" in resolved:
-        api_notification_enabled = _boolish(resolved.get("api_notification"), True)
-
-    if api_notification_enabled:
-        try:
-            _post_ha_notification(
-                title,
-                message,
-                source=source,
-                level=level,
-                data={"origin": origin, "targets": resolved},
-            )
-        except Exception as exc:
-            logger.warning("[notify] HA notifications add failed: %s", exc)
 
     persistent_enabled = True
     if isinstance(resolved, dict) and "persistent" in resolved:
