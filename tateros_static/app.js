@@ -4879,9 +4879,51 @@ function renderCoreSettingsManager(body, tabSpec) {
     const groupClass = groupToken ? ` core-tab-items-group-${groupToken}` : "";
     const pageSizeRaw = Number(options?.page_size ?? 0);
     const pageSize = Number.isFinite(pageSizeRaw) ? Math.max(0, Math.floor(pageSizeRaw)) : 0;
+    const serverPagination =
+      options?.server_pagination && typeof options.server_pagination === "object" ? options.server_pagination : null;
 
     if (!rows.length) {
       return renderNotice(sectionEmptyMessage);
+    }
+
+    if (!selector && serverPagination && boolFromAny(serverPagination?.enabled, false)) {
+      const serverPageSizeRaw = Number(serverPagination?.page_size ?? (pageSize || 0));
+      const serverPageSize = Number.isFinite(serverPageSizeRaw)
+        ? Math.max(1, Math.floor(serverPageSizeRaw))
+        : Math.max(1, pageSize || 1);
+      const serverPageCountRaw = Number(serverPagination?.page_count ?? 1);
+      const serverPageCount = Number.isFinite(serverPageCountRaw) ? Math.max(1, Math.floor(serverPageCountRaw)) : 1;
+      const serverCurrentRaw = Number(serverPagination?.page ?? 1);
+      const serverCurrentPage = Math.min(
+        serverPageCount,
+        Number.isFinite(serverCurrentRaw) ? Math.max(1, Math.floor(serverCurrentRaw)) : 1
+      );
+      const serverAction = String(serverPagination?.action || "").trim();
+      const serverTotalRaw = Number(serverPagination?.total ?? 0);
+      const serverTotal = Number.isFinite(serverTotalRaw) ? Math.max(0, Math.floor(serverTotalRaw)) : 0;
+      const cardsHtml = rows.map((item) => renderCoreManagerItemCard(item)).join("");
+      const prevDisabled = serverCurrentPage <= 1 ? " disabled" : "";
+      const nextDisabled = serverCurrentPage >= serverPageCount ? " disabled" : "";
+      return `
+        <div
+          class="core-manager-pagination"
+          data-core-pagination
+          data-core-pagination-mode="server"
+          data-core-key="${safeCoreKey}"
+          data-core-page-action="${escapeHtml(serverAction)}"
+          data-core-page-count="${serverPageCount}"
+          data-core-current-page="${serverCurrentPage}"
+          data-core-page-size="${serverPageSize}"
+          data-core-page-total="${serverTotal}"
+          data-core-item-group="${escapeHtml(itemGroup)}">
+          <div class="core-tab-items${groupClass}" style="margin-top:10px;">${cardsHtml}</div>
+          <div class="inline-row" style="margin-top:10px;">
+            <button type="button" class="action-btn" data-core-page-prev${prevDisabled}>Previous</button>
+            <span class="small" data-core-page-label>Page ${serverCurrentPage} of ${serverPageCount}</span>
+            <button type="button" class="action-btn" data-core-page-next${nextDisabled}>Next</button>
+          </div>
+        </div>
+      `;
     }
 
     if (!selector && pageSize > 0 && rows.length > pageSize) {
@@ -5043,6 +5085,33 @@ function renderCoreSettingsManager(body, tabSpec) {
           const parsed = Number(raw?.page_size ?? 0);
           return Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : 0;
         })(),
+        serverPagination: (() => {
+          const rawPagination =
+            raw?.server_pagination && typeof raw.server_pagination === "object" ? raw.server_pagination : null;
+          if (!rawPagination) {
+            return null;
+          }
+          return {
+            enabled: boolFromAny(rawPagination?.enabled, false),
+            action: String(rawPagination?.action || "").trim(),
+            page: (() => {
+              const parsed = Number(rawPagination?.page ?? 1);
+              return Number.isFinite(parsed) ? Math.max(1, Math.floor(parsed)) : 1;
+            })(),
+            page_size: (() => {
+              const parsed = Number(rawPagination?.page_size ?? 0);
+              return Number.isFinite(parsed) ? Math.max(1, Math.floor(parsed)) : 1;
+            })(),
+            page_count: (() => {
+              const parsed = Number(rawPagination?.page_count ?? 1);
+              return Number.isFinite(parsed) ? Math.max(1, Math.floor(parsed)) : 1;
+            })(),
+            total: (() => {
+              const parsed = Number(rawPagination?.total ?? 0);
+              return Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : 0;
+            })(),
+          };
+        })(),
         emptyMessage: String(raw?.empty_message || "").trim(),
       };
     })
@@ -5064,6 +5133,7 @@ function renderCoreSettingsManager(body, tabSpec) {
       selector_label: tab.selectorLabel,
       item_group: tab.itemGroup,
       page_size: tab.pageSize,
+      server_pagination: tab.serverPagination,
       empty_message: tab.emptyMessage || emptyMessage,
     });
   }
@@ -6646,11 +6716,6 @@ function bindCoreManagerPagination() {
     }
     block.dataset.corePaginationBound = "1";
 
-    const cards = Array.from(block.querySelectorAll(".core-manager-item[data-core-page-index]"));
-    if (!cards.length) {
-      return;
-    }
-
     const pageCountRaw = Number(block.dataset.corePageCount || 1);
     const pageCount = Number.isFinite(pageCountRaw) ? Math.max(1, Math.floor(pageCountRaw)) : 1;
     const currentRaw = Number(block.dataset.coreCurrentPage || 1);
@@ -6660,6 +6725,64 @@ function bindCoreManagerPagination() {
     const prevBtn = block.querySelector("[data-core-page-prev]");
     const nextBtn = block.querySelector("[data-core-page-next]");
     const label = block.querySelector("[data-core-page-label]");
+    const mode = String(block.dataset.corePaginationMode || "client").trim().toLowerCase();
+
+    if (mode === "server") {
+      const action = String(block.dataset.corePageAction || "").trim();
+      const coreKey = String(block.dataset.coreKey || "").trim();
+      const pageSizeRaw = Number(block.dataset.corePageSize || 0);
+      const pageSize = Number.isFinite(pageSizeRaw) ? Math.max(1, Math.floor(pageSizeRaw)) : 1;
+      let loading = false;
+
+      const paintServer = (loadingPage = 0) => {
+        if (label instanceof HTMLElement) {
+          label.textContent = loadingPage > 0 ? `Loading page ${loadingPage}...` : `Page ${currentPage} of ${pageCount}`;
+        }
+        if (prevBtn instanceof HTMLButtonElement) {
+          prevBtn.disabled = loading || currentPage <= 1;
+        }
+        if (nextBtn instanceof HTMLButtonElement) {
+          nextBtn.disabled = loading || currentPage >= pageCount;
+        }
+        block.dataset.coreCurrentPage = String(currentPage);
+      };
+
+      const loadPage = async (targetPage) => {
+        const nextPage = Math.min(pageCount, Math.max(1, Math.floor(Number(targetPage) || 1)));
+        if (loading || nextPage === currentPage || !action || !coreKey) {
+          return;
+        }
+        loading = true;
+        const activeTab = persistCoreTabFromNode(block);
+        paintServer(nextPage);
+        try {
+          await runCoreManagerAction(block, coreKey, action, { page: nextPage, page_size: pageSize });
+          currentPage = nextPage;
+          block.dataset.coreCurrentPage = String(currentPage);
+          await refreshCoreManagerInPlace(block, activeTab);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error || "Page load failed.");
+          showToast(`Page load failed: ${message}`, "error", 3600);
+          loading = false;
+          paintServer();
+        }
+      };
+
+      if (prevBtn instanceof HTMLButtonElement) {
+        prevBtn.addEventListener("click", () => loadPage(currentPage - 1));
+      }
+      if (nextBtn instanceof HTMLButtonElement) {
+        nextBtn.addEventListener("click", () => loadPage(currentPage + 1));
+      }
+
+      paintServer();
+      return;
+    }
+
+    const cards = Array.from(block.querySelectorAll(".core-manager-item[data-core-page-index]"));
+    if (!cards.length) {
+      return;
+    }
 
     const paint = () => {
       cards.forEach((card) => {
