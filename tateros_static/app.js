@@ -5065,6 +5065,13 @@ function renderCoreSettingsManager(body, tabSpec) {
 
   const itemCardsHtml = renderCoreManagerItemsContent(itemForms, { selector: false, empty_message: emptyMessage });
 
+  const getManagerTabSortLabel = (tab) => String(tab?.label || tab?.key || "");
+  const isManagerSettingsTab = (tab) => {
+    const key = String(tab?.key || "").trim().toLowerCase();
+    const label = String(tab?.label || "").trim().toLowerCase();
+    return key === "settings" || label === "settings";
+  };
+
   const managerTabs = managerTabsRaw
     .map((raw, index) => {
       const key = String(raw?.key || `tab_${index + 1}`).trim();
@@ -5115,7 +5122,18 @@ function renderCoreSettingsManager(body, tabSpec) {
         emptyMessage: String(raw?.empty_message || "").trim(),
       };
     })
-    .filter(Boolean);
+    .filter(Boolean)
+    .sort((a, b) => {
+      const aSettings = isManagerSettingsTab(a);
+      const bSettings = isManagerSettingsTab(b);
+      if (aSettings !== bSettings) {
+        return aSettings ? 1 : -1;
+      }
+      return getManagerTabSortLabel(a).localeCompare(getManagerTabSortLabel(b), undefined, {
+        sensitivity: "base",
+        numeric: true,
+      });
+    });
 
   function renderManagerTabContent(tab) {
     if (!tab || typeof tab !== "object") {
