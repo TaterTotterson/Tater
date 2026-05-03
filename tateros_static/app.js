@@ -6527,7 +6527,12 @@ function renderCoreTabPending(tabSpec, message = "Open this tab to load data.") 
 }
 
 function renderCoreTopTabs(dynamicTabs, manageHtml, manageLabel = "Manage") {
-  const tabs = Array.isArray(dynamicTabs) ? dynamicTabs : [];
+  const tabs = (Array.isArray(dynamicTabs) ? dynamicTabs : []).slice().sort((a, b) =>
+    String(a?.label || a?.core_key || "").localeCompare(String(b?.label || b?.core_key || ""), undefined, {
+      sensitivity: "base",
+      numeric: true,
+    })
+  );
   const safeManageLabel = escapeHtml(String(manageLabel || "Manage"));
   const dynamicButtons = tabs
     .map(
