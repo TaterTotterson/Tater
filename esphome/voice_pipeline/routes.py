@@ -75,9 +75,10 @@ async def startup() -> None:
         vp._kokoro_provider(),
     )
     vp.logger.info(
-        "[native-voice] tts backend selected=%s effective=%s kokoro=%s pocket_tts=%s piper=%s wyoming=%s",
+        "[native-voice] tts backend selected=%s effective=%s openai_compatible=%s kokoro=%s pocket_tts=%s piper=%s wyoming=%s",
         selected_tts_backend,
         effective_tts_backend,
+        "configured" if vp._text(((vp._tts_config_snapshot().get("openai_compatible") or {}).get("base_url"))) else "missing",
         "available" if vp.build_kokoro_pipeline is not None else "missing",
         "available" if vp.PocketTTSModel is not None else "missing",
         "available" if vp.PiperVoice is not None else "missing",
@@ -206,6 +207,7 @@ async def native_status(x_tater_token: Optional[str] = Header(None)) -> Dict[str
         "piper_error": vp._text(vp.PIPER_IMPORT_ERROR),
         "wyoming_available": vp.WYOMING_IMPORT_ERROR is None,
         "wyoming_error": vp._text(vp.WYOMING_IMPORT_ERROR),
+        "openai_compatible_available": bool(vp._text(((vp._tts_config_snapshot().get("openai_compatible") or {}).get("base_url")))),
         "selectors": selectors,
         "discovery": dict(vp._esphome_device_runtime.discovery_stats()),
         "esphome": vp._esphome_status(),

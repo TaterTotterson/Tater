@@ -15,7 +15,7 @@ import time
 import uuid
 import wave
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import requests
@@ -33,6 +33,10 @@ from speech_settings import (
     DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
     DEFAULT_KOKORO_MODEL,
     DEFAULT_KOKORO_VOICE,
+    DEFAULT_OPENAI_COMPATIBLE_TTS_API_KEY,
+    DEFAULT_OPENAI_COMPATIBLE_TTS_BASE_URL,
+    DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL,
+    DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE,
     DEFAULT_PIPER_MODEL,
     DEFAULT_POCKET_TTS_MODEL,
     DEFAULT_POCKET_TTS_VOICE,
@@ -102,6 +106,7 @@ DEFAULT_TTS_MODEL_ROOT = os.path.abspath(
 )
 DEFAULT_KOKORO_PROVIDER = "cpu"
 DEFAULT_KOKORO_OUTPUT_GAIN = 1.5
+DEFAULT_OPENAI_COMPATIBLE_TTS_TIMEOUT_SECONDS = 90.0
 DEFAULT_WYOMING_TIMEOUT_SECONDS = 45.0
 DEFAULT_PIPER_SENTENCE_PAUSE_SECONDS = 0.24
 DEFAULT_PIPER_PARAGRAPH_PAUSE_SECONDS = 0.46
@@ -319,6 +324,8 @@ def normalize_tts_backend(value: Any) -> str:
         return DEFAULT_TTS_BACKEND
     if token == "wyoming":
         return "wyoming"
+    if token in {"openai_compatible", "openai", "openai_api"}:
+        return "openai_compatible"
     if token == "kokoro":
         return "kokoro"
     if token in {"pocket_tts", "pockettts", "pocket"}:
@@ -465,6 +472,7 @@ def _tts_backend_model_root(backend: str) -> str:
         "kokoro": "kokoro",
         "pocket_tts": "pocket-tts",
         "piper": "piper",
+        "openai_compatible": "openai-compatible",
         "wyoming": "wyoming",
     }
     dirname = dirname_map.get(token, token or DEFAULT_TTS_BACKEND)
@@ -549,6 +557,444 @@ def _temporary_env(overrides: Dict[str, Any]):
 
 def _native_wyoming_timeout_s() -> float:
     return float(DEFAULT_WYOMING_TIMEOUT_SECONDS)
+
+
+def _openai_compatible_tts_timeout_s() -> float:
+    return float(DEFAULT_OPENAI_COMPATIBLE_TTS_TIMEOUT_SECONDS)
+
+
+def _looks_like_wav_bytes(payload: bytes) -> bool:
+    raw = bytes(payload or b"")
+    return len(raw) >= 12 and raw[:4] == b"RIFF" and raw[8:12] == b"WAVE"
+
+
+def _openai_compatible_tts_endpoint(base_url: Any) -> str:
+    base = _text(base_url).rstrip("/")
+    if not base:
+        return ""
+    if base.endswith("/v1/audio/speech"):
+        return base
+    if base.endswith("/v1/models"):
+        return f"{base.rsplit('/', 1)[0]}/audio/speech"
+    if base.endswith("/models") and not base.endswith("/v1/models"):
+        root = _openai_compatible_tts_service_root(base)
+        return f"{root}/v1/audio/speech" if root else ""
+    if base.endswith("/v1"):
+        return f"{base}/audio/speech"
+    return f"{base}/v1/audio/speech"
+
+
+def _openai_compatible_tts_voices_endpoint(base_url: Any) -> str:
+    base = _text(base_url).rstrip("/")
+    if not base:
+        return ""
+    if base.endswith("/v1/audio/voices") or base.endswith("/audio/voices"):
+        return base
+    if base.endswith("/v1/models"):
+        return f"{base.rsplit('/', 1)[0]}/audio/voices"
+    if base.endswith("/models") and not base.endswith("/v1/models"):
+        root = _openai_compatible_tts_service_root(base)
+        return f"{root}/v1/audio/voices" if root else ""
+    if base.endswith("/v1/audio/speech") or base.endswith("/audio/speech"):
+        return f"{base.rsplit('/', 1)[0]}/voices"
+    if base.endswith("/v1"):
+        return f"{base}/audio/voices"
+    return f"{base}/v1/audio/voices"
+
+
+def _openai_compatible_tts_models_endpoint(base_url: Any) -> str:
+    base = _text(base_url).rstrip("/")
+    if not base:
+        return ""
+    if base.endswith("/v1/models"):
+        return base
+    if base.endswith("/models") and not base.endswith("/v1/models"):
+        return base
+    root = _openai_compatible_tts_service_root(base)
+    if not root:
+        return ""
+    return f"{root}/v1/models"
+
+
+def _openai_compatible_tts_service_root(base_url: Any) -> str:
+    base = _text(base_url).rstrip("/")
+    if not base:
+        return ""
+    for suffix in (
+        "/v1/audio/speech",
+        "/v1/audio/voices",
+        "/v1/models",
+        "/audio/speech",
+        "/audio/voices",
+        "/models",
+        "/v1",
+    ):
+        if base.endswith(suffix):
+            trimmed = base[: -len(suffix)].rstrip("/")
+            return trimmed or base
+    return base
+
+
+def _openai_compatible_tts_helper_endpoint(base_url: Any, helper_path: str) -> str:
+    root = _openai_compatible_tts_service_root(base_url)
+    helper = _text(helper_path).strip()
+    if not root or not helper:
+        return ""
+    if not helper.startswith("/"):
+        helper = f"/{helper}"
+    return f"{root}{helper}"
+
+
+def _resolve_openai_compatible_tts_settings(
+    *,
+    base_url: Any = None,
+    api_key: Any = None,
+) -> Tuple[str, str]:
+    resolved_base = _text(base_url) if base_url is not None else ""
+    resolved_key = _text(api_key) if api_key is not None else ""
+    if base_url is not None and api_key is not None:
+        return resolved_base, resolved_key
+    shared = get_speech_settings() or {}
+    if base_url is None:
+        resolved_base = _text(shared.get("openai_tts_base_url")) or DEFAULT_OPENAI_COMPATIBLE_TTS_BASE_URL
+    if api_key is None:
+        resolved_key = _text(shared.get("openai_tts_api_key")) or DEFAULT_OPENAI_COMPATIBLE_TTS_API_KEY
+    return resolved_base, resolved_key
+
+
+def _response_error_text(response: Any) -> str:
+    with contextlib.suppress(Exception):
+        payload = response.json()
+        if isinstance(payload, dict):
+            detail = _text(payload.get("detail"))
+            if detail:
+                return detail
+            error = payload.get("error")
+            if isinstance(error, dict):
+                message = _text(error.get("message"))
+                if message:
+                    return message
+            message = _text(payload.get("message"))
+            if message:
+                return message
+    with contextlib.suppress(Exception):
+        body = _text(response.text)
+        if body:
+            return body[:500]
+    return f"HTTP {int(getattr(response, 'status_code', 0) or 0)}"
+
+
+def _extract_openai_compatible_voice_items(payload: Any) -> List[Any]:
+    if isinstance(payload, list):
+        return list(payload)
+    if isinstance(payload, dict):
+        for key in ("voices", "data", "items", "results"):
+            rows = payload.get(key)
+            if isinstance(rows, list):
+                return list(rows)
+    return []
+
+
+def _extract_openai_compatible_model_items(payload: Any) -> List[Any]:
+    if isinstance(payload, list):
+        return list(payload)
+    if isinstance(payload, dict):
+        for key in ("data", "models", "items", "results"):
+            rows = payload.get(key)
+            if isinstance(rows, list):
+                return list(rows)
+    return []
+
+
+def _normalize_openai_compatible_voice_row(item: Any) -> Optional[Dict[str, str]]:
+    if item is None:
+        return None
+    if isinstance(item, str):
+        value = _text(item)
+        if not value:
+            return None
+        return {"value": value, "label": value}
+    if isinstance(item, dict):
+        value = (
+            _text(item.get("voice_id"))
+            or _text(item.get("id"))
+            or _text(item.get("value"))
+            or _text(item.get("voice"))
+            or _text(item.get("name"))
+        )
+        name = (
+            _text(item.get("name"))
+            or _text(item.get("display_name"))
+            or _text(item.get("title"))
+            or _text(item.get("label"))
+        )
+        label = _text(item.get("label")) or _text(item.get("display_name")) or _text(item.get("title"))
+        if value and not label:
+            label = f"{name} ({value})" if name and name != value else (name or value)
+        if not value:
+            return None
+        return {"value": value, "label": label or value}
+    value = _text(item)
+    if not value:
+        return None
+    return {"value": value, "label": value}
+
+
+def _normalize_openai_compatible_model_row(item: Any) -> Optional[Dict[str, Any]]:
+    if item is None:
+        return None
+    if isinstance(item, str):
+        value = _text(item)
+        if not value:
+            return None
+        return {"value": value, "label": value}
+    if isinstance(item, dict):
+        value = (
+            _text(item.get("id"))
+            or _text(item.get("model"))
+            or _text(item.get("model_id"))
+            or _text(item.get("selector"))
+            or _text(item.get("value"))
+            or _text(item.get("name"))
+            or _text(item.get("repo_id"))
+        )
+        name = (
+            _text(item.get("display_name"))
+            or _text(item.get("name"))
+            or _text(item.get("title"))
+            or _text(item.get("label"))
+            or _text(item.get("repo_id"))
+        )
+        label = _text(item.get("label")) or name or value
+        if not value:
+            return None
+        row: Dict[str, Any] = {"value": value, "label": label or value}
+        voice_rows = _voice_rows_from_items(
+            item.get("voices") if isinstance(item.get("voices"), list) else item.get("available_voices"),
+            default_voice=_text(item.get("default_voice")),
+        )
+        if voice_rows:
+            row["voices"] = voice_rows
+        return row
+    value = _text(item)
+    if not value:
+        return None
+    return {"value": value, "label": value}
+
+
+def _normalize_dia_predefined_voice_row(item: Any) -> Optional[Dict[str, str]]:
+    if not isinstance(item, dict):
+        return None
+    filename = _text(item.get("filename"))
+    display_name = _text(item.get("display_name")) or _text(item.get("name"))
+    if not filename:
+        return None
+    label = f"{display_name} ({filename})" if display_name and display_name != filename else (display_name or filename)
+    return {"value": filename, "label": label}
+
+
+def _normalize_named_string_voice_row(item: Any, *, prefix: str = "") -> Optional[Dict[str, str]]:
+    value = _text(item)
+    if not value:
+        return None
+    label_prefix = _text(prefix)
+    label = f"{label_prefix}: {value}" if label_prefix else value
+    return {"value": value, "label": label}
+
+
+def _voice_rows_from_items(items: Any, *, default_voice: str = "") -> List[Dict[str, str]]:
+    rows: List[Dict[str, str]] = []
+    seen = set()
+    normalized_rows: List[Optional[Dict[str, str]]] = []
+    for item in items if isinstance(items, list) else []:
+        row = _normalize_openai_compatible_voice_row(item)
+        if row and default_voice and _text(row.get("value")) == default_voice:
+            label = _text(row.get("label")) or default_voice
+            if "(default)" not in label.lower():
+                row = {"value": _text(row.get("value")), "label": f"{label} (default)"}
+        normalized_rows.append(row)
+    _append_unique_voice_rows(rows, seen, normalized_rows)
+    if default_voice and default_voice not in seen:
+        rows.append({"value": default_voice, "label": f"{default_voice} (default)"})
+    return rows
+
+
+def _normalize_kitten_voice_rows(payload: Any) -> List[Optional[Dict[str, str]]]:
+    if not isinstance(payload, dict):
+        return []
+    model_info = payload.get("model_info")
+    model_info = model_info if isinstance(model_info, dict) else {}
+    default_voice = _text(payload.get("default_voice")) or _text(model_info.get("default_voice"))
+    voice_items = payload.get("available_voices")
+    if not isinstance(voice_items, list):
+        voice_items = model_info.get("voices")
+    if not isinstance(voice_items, list):
+        voice_items = payload.get("voices")
+    rows: List[Optional[Dict[str, str]]] = []
+    for item in voice_items if isinstance(voice_items, list) else []:
+        row = _normalize_openai_compatible_voice_row(item)
+        if row and default_voice and _text(row.get("value")) == default_voice:
+            label = _text(row.get("label")) or default_voice
+            if "(default)" not in label.lower():
+                row = {"value": _text(row.get("value")), "label": f"{label} (default)"}
+        rows.append(row)
+    if not rows and default_voice:
+        rows.append({"value": default_voice, "label": f"{default_voice} (default)"})
+    return rows
+
+
+def _normalize_kitten_model_registry_rows(payload: Any) -> List[Optional[Dict[str, Any]]]:
+    if not isinstance(payload, dict):
+        return []
+    registry = payload.get("model_registry")
+    if not isinstance(registry, dict):
+        has_registry_shape = any(
+            isinstance(value, dict)
+            and any(key in value for key in ("display_name", "voices", "default_voice", "repo_id"))
+            for value in payload.values()
+        )
+        registry = payload if has_registry_shape else {}
+    rows: List[Optional[Dict[str, Any]]] = []
+    for selector, item in registry.items():
+        if not isinstance(item, dict):
+            rows.append(_normalize_openai_compatible_model_row(selector))
+            continue
+        value = _text(item.get("selector")) or _text(selector)
+        if not value:
+            continue
+        display_name = (
+            _text(item.get("display_name"))
+            or _text(item.get("name"))
+            or _text(item.get("label"))
+            or _text(item.get("repo_id"))
+        )
+        label = display_name or value
+        row: Dict[str, Any] = {"value": value, "label": label}
+        voice_rows = _voice_rows_from_items(item.get("voices"), default_voice=_text(item.get("default_voice")))
+        if voice_rows:
+            row["voices"] = voice_rows
+        default_voice = _text(item.get("default_voice"))
+        if default_voice:
+            row["default_voice"] = default_voice
+        rows.append(row)
+    return rows
+
+
+def _normalize_kitten_model_info_rows(payload: Any) -> List[Optional[Dict[str, Any]]]:
+    if not isinstance(payload, dict):
+        return []
+    model_info = payload.get("model_info")
+    model_info = model_info if isinstance(model_info, dict) else payload
+    value = (
+        _text(payload.get("current_model"))
+        or _text(payload.get("model"))
+        or _text(payload.get("model_id"))
+        or _text(model_info.get("selector"))
+        or _text(model_info.get("model"))
+        or _text(model_info.get("model_id"))
+        or _text(model_info.get("name"))
+        or _text(model_info.get("repo_id"))
+    )
+    if not value:
+        return []
+    label = (
+        _text(model_info.get("display_name"))
+        or _text(model_info.get("name"))
+        or _text(model_info.get("label"))
+        or _text(model_info.get("repo_id"))
+        or value
+    )
+    row: Dict[str, Any] = {"value": value, "label": label}
+    voice_rows = _normalize_kitten_voice_rows(payload)
+    if voice_rows:
+        rows: List[Dict[str, str]] = []
+        seen = set()
+        _append_unique_voice_rows(rows, seen, voice_rows)
+        row["voices"] = rows
+    default_voice = _text(payload.get("default_voice")) or _text(model_info.get("default_voice"))
+    if default_voice:
+        row["default_voice"] = default_voice
+    return [row]
+
+
+def _append_unique_voice_rows(rows: List[Dict[str, str]], seen: set, items: List[Optional[Dict[str, str]]]) -> None:
+    for row in items:
+        value = _text((row or {}).get("value"))
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        rows.append({"value": value, "label": _text((row or {}).get("label")) or value})
+
+
+def _append_unique_model_rows(rows: List[Dict[str, Any]], seen: set, items: List[Optional[Dict[str, Any]]]) -> None:
+    for row in items:
+        value = _text((row or {}).get("value"))
+        if not value:
+            continue
+        if value in seen:
+            existing = next((item for item in rows if _text(item.get("value")) == value), None)
+            if existing is not None and not existing.get("voices") and isinstance((row or {}).get("voices"), list):
+                existing["voices"] = list((row or {}).get("voices") or [])
+            continue
+        seen.add(value)
+        next_row: Dict[str, Any] = {"value": value, "label": _text((row or {}).get("label")) or value}
+        if isinstance((row or {}).get("voices"), list):
+            next_row["voices"] = list((row or {}).get("voices") or [])
+        default_voice = _text((row or {}).get("default_voice"))
+        if default_voice:
+            next_row["default_voice"] = default_voice
+        rows.append(next_row)
+
+
+def _request_openai_compatible_json(endpoint: str, *, headers: Dict[str, str]) -> Any:
+    response = requests.get(
+        endpoint,
+        headers=headers,
+        timeout=_openai_compatible_tts_timeout_s(),
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"{response.status_code}: {_response_error_text(response)}")
+    return response.json()
+
+
+def _request_openai_compatible_voice_json(endpoint: str, *, headers: Dict[str, str]) -> Any:
+    return _request_openai_compatible_json(endpoint, headers=headers)
+
+
+def _collect_voice_rows_from_endpoint(
+    endpoint: str,
+    *,
+    headers: Dict[str, str],
+    normalizer: Any,
+) -> Tuple[List[Dict[str, str]], str]:
+    if not endpoint:
+        return [], ""
+    try:
+        payload = _request_openai_compatible_voice_json(endpoint, headers=headers)
+    except Exception as exc:
+        return [], str(exc) or "Voice probe failed."
+    rows: List[Dict[str, str]] = []
+    seen = set()
+    _append_unique_voice_rows(rows, seen, normalizer(payload))
+    return rows, ""
+
+
+def _collect_model_rows_from_endpoint(
+    endpoint: str,
+    *,
+    headers: Dict[str, str],
+    normalizer: Any,
+) -> Tuple[List[Dict[str, Any]], str]:
+    if not endpoint:
+        return [], ""
+    try:
+        payload = _request_openai_compatible_json(endpoint, headers=headers)
+    except Exception as exc:
+        return [], str(exc) or "Model probe failed."
+    rows: List[Dict[str, Any]] = []
+    seen = set()
+    _append_unique_model_rows(rows, seen, normalizer(payload))
+    return rows, ""
 
 
 def _voice_selection_to_value(selection: Dict[str, Any]) -> str:
@@ -653,6 +1099,242 @@ async def fetch_wyoming_tts_voice_options(
     return {"host": resolved_host, "port": resolved_port, "voices": rows, "count": max(0, len(rows) - 1)}
 
 
+def _fetch_openai_compatible_tts_model_options_sync(
+    *,
+    base_url: str,
+    api_key: str,
+) -> Dict[str, Any]:
+    primary_endpoint = _openai_compatible_tts_models_endpoint(base_url)
+    service_root = _openai_compatible_tts_service_root(base_url)
+    if not primary_endpoint:
+        raise RuntimeError("OpenAI-compatible TTS base URL is required.")
+
+    headers = {"Accept": "application/json"}
+    bearer = _text(api_key)
+    if bearer:
+        headers["Authorization"] = f"Bearer {bearer}"
+
+    rows: List[Dict[str, Any]] = []
+    seen = set()
+    endpoints_tried: List[str] = []
+    last_error = ""
+    source = ""
+
+    def run_probe(endpoint: str, normalizer: Any) -> List[Dict[str, Any]]:
+        nonlocal last_error
+        if endpoint:
+            endpoints_tried.append(endpoint)
+        probe_rows, error_text = _collect_model_rows_from_endpoint(
+            endpoint,
+            headers=headers,
+            normalizer=normalizer,
+        )
+        if error_text:
+            last_error = error_text or last_error
+        return probe_rows
+
+    def merge_probe_rows(probe_rows: List[Dict[str, Any]], next_source: str) -> None:
+        nonlocal source
+        before_count = len(rows)
+        _append_unique_model_rows(rows, seen, probe_rows)
+        if len(rows) > before_count or any(isinstance((row or {}).get("voices"), list) for row in probe_rows):
+            source = f"{source}+{next_source}" if source and next_source not in source else next_source
+
+    merge_probe_rows(
+        run_probe(
+            primary_endpoint,
+            lambda payload: [
+                _normalize_openai_compatible_model_row(item)
+                for item in _extract_openai_compatible_model_items(payload)
+            ],
+        ),
+        "openai-compatible",
+    )
+
+    # Kitten exposes model-to-voice mapping in helper endpoints; merge it even
+    # when /v1/models exists so the UI can filter voices by selected model.
+    kitten_registry_endpoint = _openai_compatible_tts_helper_endpoint(service_root, "/api/model-registry")
+    merge_probe_rows(run_probe(kitten_registry_endpoint, _normalize_kitten_model_registry_rows), "kitten-registry")
+
+    if not any(isinstance(row.get("voices"), list) and row.get("voices") for row in rows):
+        kitten_initial_data_endpoint = _openai_compatible_tts_helper_endpoint(service_root, "/api/ui/initial-data")
+        merge_probe_rows(run_probe(kitten_initial_data_endpoint, _normalize_kitten_model_registry_rows), "kitten-ui")
+
+    if not rows or not any(isinstance(row.get("voices"), list) and row.get("voices") for row in rows):
+        kitten_model_info_endpoint = _openai_compatible_tts_helper_endpoint(service_root, "/api/model-info")
+        merge_probe_rows(run_probe(kitten_model_info_endpoint, _normalize_kitten_model_info_rows), "kitten-model-info")
+
+    rows.sort(key=lambda row: _text(row.get("label")).lower())
+    model_rows: List[Dict[str, str]] = []
+    voices_by_model: Dict[str, List[Dict[str, str]]] = {}
+    for row in rows:
+        value = _text(row.get("value"))
+        if not value:
+            continue
+        model_rows.append({"value": value, "label": _text(row.get("label")) or value})
+        voice_rows = row.get("voices")
+        if isinstance(voice_rows, list) and voice_rows:
+            compact_voices: List[Dict[str, str]] = []
+            seen_voices = set()
+            _append_unique_voice_rows(compact_voices, seen_voices, voice_rows)
+            if compact_voices:
+                voices_by_model[value] = compact_voices
+
+    return {
+        "base_url": _text(base_url),
+        "endpoint": primary_endpoint,
+        "service_root": service_root,
+        "source": source or "openai-compatible",
+        "models": model_rows,
+        "voices_by_model": voices_by_model,
+        "count": len(model_rows),
+        "endpoints_tried": endpoints_tried,
+        "error": "" if model_rows else last_error,
+    }
+
+
+async def fetch_openai_compatible_tts_model_options(
+    *,
+    base_url: Any = None,
+    api_key: Any = None,
+) -> Dict[str, Any]:
+    resolved_base_url, resolved_api_key = _resolve_openai_compatible_tts_settings(
+        base_url=base_url,
+        api_key=api_key,
+    )
+    return await asyncio.to_thread(
+        _fetch_openai_compatible_tts_model_options_sync,
+        base_url=resolved_base_url,
+        api_key=resolved_api_key,
+    )
+
+
+def _fetch_openai_compatible_tts_voice_options_sync(
+    *,
+    base_url: str,
+    api_key: str,
+) -> Dict[str, Any]:
+    primary_endpoint = _openai_compatible_tts_voices_endpoint(base_url)
+    service_root = _openai_compatible_tts_service_root(base_url)
+    if not primary_endpoint:
+        raise RuntimeError("OpenAI-compatible TTS base URL is required.")
+
+    headers = {"Accept": "application/json"}
+    bearer = _text(api_key)
+    if bearer:
+        headers["Authorization"] = f"Bearer {bearer}"
+
+    rows: List[Dict[str, str]] = []
+    endpoints_tried: List[str] = []
+    last_error = ""
+    source = ""
+
+    def run_probe(endpoint: str, normalizer: Any) -> List[Dict[str, str]]:
+        nonlocal last_error
+        if endpoint:
+            endpoints_tried.append(endpoint)
+        probe_rows, error_text = _collect_voice_rows_from_endpoint(
+            endpoint,
+            headers=headers,
+            normalizer=normalizer,
+        )
+        if error_text:
+            last_error = error_text or last_error
+        return probe_rows
+
+    # Standard OpenAI-compatible discovery.
+    rows = run_probe(
+        primary_endpoint,
+        lambda payload: [_normalize_openai_compatible_voice_row(item) for item in _extract_openai_compatible_voice_items(payload)],
+    )
+    if rows:
+        source = "openai-compatible"
+
+    # Dia compatibility helpers.
+    if not rows:
+        dia_rows: List[Dict[str, str]] = []
+        dia_seen = set()
+        dia_predefined_endpoint = _openai_compatible_tts_helper_endpoint(service_root, "/get_predefined_voices")
+        _append_unique_voice_rows(
+            dia_rows,
+            dia_seen,
+            run_probe(
+                dia_predefined_endpoint,
+                lambda payload: [
+                    _normalize_dia_predefined_voice_row(item)
+                    for item in (payload if isinstance(payload, list) else [])
+                ],
+            ),
+        )
+        dia_reference_endpoint = _openai_compatible_tts_helper_endpoint(service_root, "/get_reference_files")
+        _append_unique_voice_rows(
+            dia_rows,
+            dia_seen,
+            run_probe(
+                dia_reference_endpoint,
+                lambda payload: [
+                    _normalize_named_string_voice_row(item, prefix="Reference")
+                    for item in (payload if isinstance(payload, list) else [])
+                ],
+            ),
+        )
+        if dia_rows:
+            _append_unique_voice_rows(
+                dia_rows,
+                dia_seen,
+                [
+                    {"value": "dialogue", "label": "Dia Dialogue"},
+                    {"value": "S1", "label": "Dia Speaker 1"},
+                    {"value": "S2", "label": "Dia Speaker 2"},
+                ],
+            )
+            rows = dia_rows
+            source = "dia-compatible"
+
+    # Kitten compatibility helpers.
+    if not rows:
+        kitten_initial_data_endpoint = _openai_compatible_tts_helper_endpoint(service_root, "/api/ui/initial-data")
+        rows = run_probe(kitten_initial_data_endpoint, _normalize_kitten_voice_rows)
+        if rows:
+            source = "kitten-ui"
+    if not rows:
+        kitten_model_info_endpoint = _openai_compatible_tts_helper_endpoint(service_root, "/api/model-info")
+        rows = run_probe(kitten_model_info_endpoint, _normalize_kitten_voice_rows)
+        if rows:
+            source = "kitten-model-info"
+
+    if rows:
+        rows.sort(key=lambda row: _text(row.get("label")).lower())
+        return {
+            "base_url": _text(base_url),
+            "endpoint": primary_endpoint,
+            "service_root": service_root,
+            "source": source or "openai-compatible",
+            "voices": rows,
+            "count": len(rows),
+            "endpoints_tried": endpoints_tried,
+        }
+
+    detail = last_error or "OpenAI-compatible TTS server did not report voices."
+    raise RuntimeError(detail)
+
+
+async def fetch_openai_compatible_tts_voice_options(
+    *,
+    base_url: Any = None,
+    api_key: Any = None,
+) -> Dict[str, Any]:
+    resolved_base_url, resolved_api_key = _resolve_openai_compatible_tts_settings(
+        base_url=base_url,
+        api_key=api_key,
+    )
+    return await asyncio.to_thread(
+        _fetch_openai_compatible_tts_voice_options_sync,
+        base_url=resolved_base_url,
+        api_key=resolved_api_key,
+    )
+
+
 async def _wyoming_synthesize(
     text: str,
     *,
@@ -713,6 +1395,50 @@ async def _wyoming_synthesize(
     if not saw_start:
         raise RuntimeError("Wyoming TTS did not emit audio-start")
     return bytes(audio_out), audio_format
+
+
+def _synthesize_openai_compatible_tts_wav_sync(
+    text: str,
+    *,
+    model: str,
+    voice: str,
+    base_url: str,
+    api_key: str,
+) -> bytes:
+    prompt = _text(text)
+    if not prompt:
+        return b""
+
+    endpoint = _openai_compatible_tts_endpoint(base_url)
+    if not endpoint:
+        raise RuntimeError("OpenAI-compatible TTS base URL is required.")
+
+    headers = {"Content-Type": "application/json"}
+    bearer = _text(api_key)
+    if bearer:
+        headers["Authorization"] = f"Bearer {bearer}"
+
+    payload = {
+        "model": _text(model) or DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL,
+        "input": prompt,
+        "voice": _text(voice) or DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE,
+        "response_format": "wav",
+    }
+
+    response = requests.post(
+        endpoint,
+        json=payload,
+        headers=headers,
+        timeout=_openai_compatible_tts_timeout_s(),
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"OpenAI-compatible TTS request failed: {_response_error_text(response)}")
+    wav_bytes = bytes(response.content or b"")
+    if not wav_bytes:
+        raise RuntimeError("OpenAI-compatible TTS returned no audio.")
+    if not _looks_like_wav_bytes(wav_bytes):
+        raise RuntimeError("OpenAI-compatible TTS did not return WAV audio.")
+    return wav_bytes
 
 
 def _load_kokoro_pipeline(model_id: str, acceleration: Any = None) -> Any:
@@ -881,6 +1607,8 @@ async def synthesize_tts_wav(
     wyoming_host: str = "",
     wyoming_port: Any = None,
     wyoming_voice: str = "",
+    openai_base_url: Optional[str] = None,
+    openai_api_key: Optional[str] = None,
     acceleration: Any = None,
 ) -> bytes:
     selected_backend = normalize_tts_backend(backend)
@@ -915,6 +1643,20 @@ async def synthesize_tts_wav(
         )
         return pcm_to_wav(audio_bytes, audio_format)
 
+    if selected_backend == "openai_compatible":
+        resolved_base_url, resolved_api_key = _resolve_openai_compatible_tts_settings(
+            base_url=openai_base_url,
+            api_key=openai_api_key,
+        )
+        return await asyncio.to_thread(
+            _synthesize_openai_compatible_tts_wav_sync,
+            prompt,
+            model=_text(model) or DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL,
+            voice=_text(voice) or DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE,
+            base_url=resolved_base_url,
+            api_key=resolved_api_key,
+        )
+
     audio_bytes, audio_format = await _wyoming_synthesize(
         prompt,
         host=_text(wyoming_host) or DEFAULT_WYOMING_TTS_HOST,
@@ -933,6 +1675,8 @@ async def synthesize_preview_wav(
     wyoming_host: str = "",
     wyoming_port: Any = None,
     wyoming_voice: str = "",
+    openai_base_url: Optional[str] = None,
+    openai_api_key: Optional[str] = None,
     acceleration: Any = None,
 ) -> bytes:
     return await synthesize_tts_wav(
@@ -943,6 +1687,8 @@ async def synthesize_preview_wav(
         wyoming_host=wyoming_host,
         wyoming_port=wyoming_port,
         wyoming_voice=wyoming_voice,
+        openai_base_url=openai_base_url,
+        openai_api_key=openai_api_key,
         acceleration=acceleration,
     )
 
@@ -1083,6 +1829,8 @@ async def speak_announcement_targets(
     wyoming_host: str = "",
     wyoming_port: Any = None,
     wyoming_voice: str = "",
+    openai_base_url: Optional[str] = None,
+    openai_api_key: Optional[str] = None,
     voice_core_backend: str = DEFAULT_TTS_BACKEND,
     voice_core_model: str = "",
     voice_core_voice: str = "",
@@ -1134,6 +1882,8 @@ async def speak_announcement_targets(
         wyoming_host=wyoming_host,
         wyoming_port=wyoming_port,
         wyoming_voice=wyoming_voice,
+        openai_base_url=openai_base_url,
+        openai_api_key=openai_api_key,
     )
     result["bytes"] = len(wav_bytes or b"")
     logger.info(

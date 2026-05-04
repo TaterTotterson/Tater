@@ -158,8 +158,15 @@ def get_runtime_payload(
     if include_stats:
         voice_rows, voices_meta = esphome_runtime.load_wyoming_tts_voice_catalog()
         piper_rows, piper_meta = esphome_runtime.load_piper_tts_model_catalog()
-        tts_catalog_count = len(piper_rows) if effective_tts_backend == "piper" else len(voice_rows)
-        tts_catalog_updated = piper_meta.get("updated_ts") if effective_tts_backend == "piper" else voices_meta.get("updated_ts")
+        if effective_tts_backend == "piper":
+            tts_catalog_count = len(piper_rows)
+            tts_catalog_updated = piper_meta.get("updated_ts")
+        elif effective_tts_backend == "wyoming":
+            tts_catalog_count = len(voice_rows)
+            tts_catalog_updated = voices_meta.get("updated_ts")
+        else:
+            tts_catalog_count = 0
+            tts_catalog_updated = None
         discovery_stats = esphome_runtime.discovery_stats()
         stt_backend_rows = [
             {"backend": esphome_runtime.text(name) or "unknown", "avg_ms": f"{float(value or 0.0):.1f}"}

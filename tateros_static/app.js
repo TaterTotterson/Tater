@@ -10855,15 +10855,61 @@ async function loadSettingsView() {
                     ${renderSettingsSelectOptions(speechTtsBackendOptions, currentSpeechTtsBackend)}
                   </select>
                 </label>
+                <label id="speech-openai-tts-base-url-wrap" style="grid-column: 1 / -1;">OpenAI-Compatible TTS Base URL
+                  <input id="set_speech_openai_tts_base_url" type="text" value="${escapeHtml(
+                    settings.speech_openai_tts_base_url || ""
+                  )}" placeholder="http://127.0.0.1:8000" />
+                </label>
+                <label id="speech-openai-tts-api-key-wrap" style="grid-column: 1 / -1;">OpenAI-Compatible TTS API Key (optional)
+                  <input id="set_speech_openai_tts_api_key" type="password" value="${escapeHtml(
+                    settings.speech_openai_tts_api_key || ""
+                  )}" />
+                </label>
+                <div id="speech-openai-tts-models-tools-wrap" class="inline-row" style="grid-column: 1 / -1;">
+                  <button type="button" id="settings-speech-openai-tts-load-models" class="inline-btn">Load Remote Models</button>
+                  <span id="speech-openai-tts-model-status" class="small"></span>
+                </div>
+                <div id="speech-openai-tts-voices-tools-wrap" class="inline-row" style="grid-column: 1 / -1;">
+                  <button type="button" id="settings-speech-openai-tts-load-voices" class="inline-btn">Load Remote Voices</button>
+                  <span id="speech-openai-tts-voice-status" class="small"></span>
+                </div>
                 <label id="speech-tts-model-wrap">TTS Model
                   <select id="set_speech_tts_model">
                     ${renderSettingsSelectOptions(initialSpeechTtsModelOptions, settings.speech_tts_model || "")}
                   </select>
                 </label>
+                <label id="speech-openai-tts-model-wrap">OpenAI-Compatible Model
+                  <select id="set_speech_openai_tts_model">
+                    ${renderSettingsSelectOptions(
+                      settings.speech_tts_model
+                        ? [{ value: settings.speech_tts_model, label: `${settings.speech_tts_model} (saved)` }]
+                        : [],
+                      settings.speech_tts_model || "",
+                      { blankLabel: "Load remote models" }
+                    )}
+                  </select>
+                </label>
+                <label id="speech-openai-tts-manual-model-wrap">Manual Model Override (optional)
+                  <input id="set_speech_openai_tts_manual_model" type="text" value="" placeholder="Type a custom model id" />
+                </label>
                 <label id="speech-tts-voice-wrap">TTS Voice
                   <select id="set_speech_tts_voice">
                     ${renderSettingsSelectOptions(initialSpeechTtsVoiceOptions, settings.speech_tts_voice || "")}
                   </select>
+                </label>
+                <label id="speech-openai-tts-voice-wrap">OpenAI-Compatible Voice
+                  <select id="set_speech_openai_tts_voice">
+                    ${renderSettingsSelectOptions(
+                      settings.speech_tts_voice
+                        ? [{ value: settings.speech_tts_voice, label: `${settings.speech_tts_voice} (saved)` }]
+                        : [],
+                      settings.speech_tts_voice || "",
+                      { blankLabel: "Load remote voices" }
+                    )}
+                  </select>
+                </label>
+                <label id="speech-openai-tts-manual-voice-wrap">Manual Voice Override (optional)
+                  <input id="set_speech_openai_tts_manual_voice" type="text" value="" placeholder="Type a custom voice id" />
                 </label>
                 <label id="speech-wyoming-tts-host-wrap">Wyoming TTS Host
                   <input id="set_speech_wyoming_tts_host" type="text" value="${escapeHtml(
@@ -10898,15 +10944,94 @@ async function loadSettingsView() {
                     ${renderSettingsSelectOptions(announcementTtsBackendOptions, currentAnnouncementTtsBackend)}
                   </select>
                 </label>
+                <label id="speech-announcement-openai-tts-base-url-wrap" style="grid-column: 1 / -1;">OpenAI-Compatible TTS Base URL
+                  <input id="set_speech_announcement_openai_tts_base_url" type="text" value="${escapeHtml(
+                    settings.speech_announcement_openai_tts_base_url || ""
+                  )}" placeholder="http://127.0.0.1:8000" />
+                </label>
+                <label id="speech-announcement-openai-tts-api-key-wrap" style="grid-column: 1 / -1;">OpenAI-Compatible TTS API Key (optional)
+                  <input id="set_speech_announcement_openai_tts_api_key" type="password" value="${escapeHtml(
+                    settings.speech_announcement_openai_tts_api_key || ""
+                  )}" />
+                </label>
+                <div id="speech-announcement-openai-tts-models-tools-wrap" class="inline-row" style="grid-column: 1 / -1;">
+                  <button type="button" id="settings-speech-announcement-openai-tts-load-models" class="inline-btn">Load Remote Models</button>
+                  <span id="speech-announcement-openai-tts-model-status" class="small"></span>
+                </div>
+                <div id="speech-announcement-openai-tts-voices-tools-wrap" class="inline-row" style="grid-column: 1 / -1;">
+                  <button type="button" id="settings-speech-announcement-openai-tts-load-voices" class="inline-btn">Load Remote Voices</button>
+                  <span id="speech-announcement-openai-tts-voice-status" class="small"></span>
+                </div>
                 <label id="speech-announcement-tts-model-wrap">Announcement Model
                   <select id="set_speech_announcement_tts_model">
                     ${renderSettingsSelectOptions(initialAnnouncementTtsModelOptions, settings.speech_announcement_tts_model || "")}
                   </select>
                 </label>
+                <label id="speech-announcement-openai-tts-model-wrap">Announcement Model
+                  <select id="set_speech_announcement_openai_tts_model">
+                    ${renderSettingsSelectOptions(
+                      settings.speech_announcement_tts_model
+                        ? [
+                            {
+                              value: settings.speech_announcement_tts_model,
+                              label: `${settings.speech_announcement_tts_model} (saved)`,
+                            },
+                          ]
+                        : [],
+                      settings.speech_announcement_tts_model || "",
+                      { blankLabel: "Load remote models" }
+                    )}
+                  </select>
+                </label>
+                <label id="speech-announcement-openai-tts-manual-model-wrap">Manual Announcement Model (optional)
+                  <input id="set_speech_announcement_openai_tts_manual_model" type="text" value="" placeholder="Type a custom model id" />
+                </label>
                 <label id="speech-announcement-tts-voice-wrap">Announcement Voice
                   <select id="set_speech_announcement_tts_voice">
                     ${renderSettingsSelectOptions(initialAnnouncementTtsVoiceOptions, settings.speech_announcement_tts_voice || "")}
                   </select>
+                </label>
+                <label id="speech-announcement-openai-tts-voice-wrap">Announcement Voice
+                  <select id="set_speech_announcement_openai_tts_voice">
+                    ${renderSettingsSelectOptions(
+                      settings.speech_announcement_tts_voice
+                        ? [
+                            {
+                              value: settings.speech_announcement_tts_voice,
+                              label: `${settings.speech_announcement_tts_voice} (saved)`,
+                            },
+                          ]
+                        : [],
+                      settings.speech_announcement_tts_voice || "",
+                      { blankLabel: "Load remote voices" }
+                    )}
+                  </select>
+                </label>
+                <label id="speech-announcement-openai-tts-manual-voice-wrap">Manual Announcement Voice (optional)
+                  <input id="set_speech_announcement_openai_tts_manual_voice" type="text" value="" placeholder="Type a custom voice id" />
+                </label>
+                <label id="speech-announcement-wyoming-tts-host-wrap">Announcement Wyoming TTS Host
+                  <input id="set_speech_announcement_wyoming_tts_host" type="text" value="${escapeHtml(
+                    settings.speech_announcement_wyoming_tts_host || "127.0.0.1"
+                  )}" />
+                </label>
+                <label id="speech-announcement-wyoming-tts-port-wrap">Announcement Wyoming TTS Port
+                  <input id="set_speech_announcement_wyoming_tts_port" type="number" min="1" max="65535" value="${escapeHtml(
+                    settings.speech_announcement_wyoming_tts_port || "10200"
+                  )}" />
+                </label>
+                <label id="speech-announcement-wyoming-tts-voice-wrap" style="grid-column: 1 / -1;">Announcement Wyoming TTS Voice (optional)
+                  <select id="set_speech_announcement_wyoming_tts_voice">
+                    <option value="">Default</option>
+                    ${
+                      settings.speech_announcement_wyoming_tts_voice
+                        ? `<option value="${escapeHtml(settings.speech_announcement_wyoming_tts_voice)}" selected>${escapeHtml(
+                            `${settings.speech_announcement_wyoming_tts_voice} (saved)`
+                          )}</option>`
+                        : ""
+                    }
+                  </select>
+                  <div id="speech-announcement-wyoming-tts-voice-status" class="small"></div>
                 </label>
                 <label style="grid-column: 1 / -1;">TTS Sample Text
                   <textarea id="set_speech_tts_sample_text" rows="3">Hello from Tater. This is a voice preview.</textarea>
@@ -11754,13 +11879,50 @@ async function loadSettingsView() {
   const speechTtsBackendEl = document.getElementById("set_speech_tts_backend");
   const speechTtsModelWrapEl = document.getElementById("speech-tts-model-wrap");
   const speechTtsModelEl = document.getElementById("set_speech_tts_model");
+  const speechOpenAiTtsModelWrapEl = document.getElementById("speech-openai-tts-model-wrap");
+  const speechOpenAiTtsModelEl = document.getElementById("set_speech_openai_tts_model");
+  const speechOpenAiTtsManualModelWrapEl = document.getElementById("speech-openai-tts-manual-model-wrap");
+  const speechOpenAiTtsManualModelEl = document.getElementById("set_speech_openai_tts_manual_model");
   const speechTtsVoiceWrapEl = document.getElementById("speech-tts-voice-wrap");
   const speechTtsVoiceEl = document.getElementById("set_speech_tts_voice");
+  const speechOpenAiTtsVoiceWrapEl = document.getElementById("speech-openai-tts-voice-wrap");
+  const speechOpenAiTtsVoiceEl = document.getElementById("set_speech_openai_tts_voice");
+  const speechOpenAiTtsManualVoiceWrapEl = document.getElementById("speech-openai-tts-manual-voice-wrap");
+  const speechOpenAiTtsManualVoiceEl = document.getElementById("set_speech_openai_tts_manual_voice");
   const announcementTtsBackendEl = document.getElementById("set_speech_announcement_tts_backend");
+  const announcementOpenAiTtsBaseUrlWrapEl = document.getElementById("speech-announcement-openai-tts-base-url-wrap");
+  const announcementOpenAiTtsBaseUrlEl = document.getElementById("set_speech_announcement_openai_tts_base_url");
+  const announcementOpenAiTtsApiKeyWrapEl = document.getElementById("speech-announcement-openai-tts-api-key-wrap");
+  const announcementOpenAiTtsApiKeyEl = document.getElementById("set_speech_announcement_openai_tts_api_key");
+  const announcementOpenAiTtsModelsToolsWrapEl = document.getElementById("speech-announcement-openai-tts-models-tools-wrap");
+  const announcementOpenAiTtsModelRefreshBtnEl = document.getElementById(
+    "settings-speech-announcement-openai-tts-load-models"
+  );
+  const announcementOpenAiTtsModelStatusEl = document.getElementById("speech-announcement-openai-tts-model-status");
+  const announcementOpenAiTtsVoicesToolsWrapEl = document.getElementById("speech-announcement-openai-tts-voices-tools-wrap");
+  const announcementOpenAiTtsVoiceRefreshBtnEl = document.getElementById(
+    "settings-speech-announcement-openai-tts-load-voices"
+  );
+  const announcementOpenAiTtsVoiceStatusEl = document.getElementById("speech-announcement-openai-tts-voice-status");
   const announcementTtsModelWrapEl = document.getElementById("speech-announcement-tts-model-wrap");
   const announcementTtsModelEl = document.getElementById("set_speech_announcement_tts_model");
+  const announcementOpenAiTtsModelWrapEl = document.getElementById("speech-announcement-openai-tts-model-wrap");
+  const announcementOpenAiTtsModelEl = document.getElementById("set_speech_announcement_openai_tts_model");
+  const announcementOpenAiTtsManualModelWrapEl = document.getElementById("speech-announcement-openai-tts-manual-model-wrap");
+  const announcementOpenAiTtsManualModelEl = document.getElementById("set_speech_announcement_openai_tts_manual_model");
   const announcementTtsVoiceWrapEl = document.getElementById("speech-announcement-tts-voice-wrap");
   const announcementTtsVoiceEl = document.getElementById("set_speech_announcement_tts_voice");
+  const announcementOpenAiTtsVoiceWrapEl = document.getElementById("speech-announcement-openai-tts-voice-wrap");
+  const announcementOpenAiTtsVoiceEl = document.getElementById("set_speech_announcement_openai_tts_voice");
+  const announcementOpenAiTtsManualVoiceWrapEl = document.getElementById("speech-announcement-openai-tts-manual-voice-wrap");
+  const announcementOpenAiTtsManualVoiceEl = document.getElementById("set_speech_announcement_openai_tts_manual_voice");
+  const announcementWyomingTtsHostWrapEl = document.getElementById("speech-announcement-wyoming-tts-host-wrap");
+  const announcementWyomingTtsHostEl = document.getElementById("set_speech_announcement_wyoming_tts_host");
+  const announcementWyomingTtsPortWrapEl = document.getElementById("speech-announcement-wyoming-tts-port-wrap");
+  const announcementWyomingTtsPortEl = document.getElementById("set_speech_announcement_wyoming_tts_port");
+  const announcementWyomingTtsVoiceWrapEl = document.getElementById("speech-announcement-wyoming-tts-voice-wrap");
+  const announcementWyomingTtsVoiceEl = document.getElementById("set_speech_announcement_wyoming_tts_voice");
+  const announcementWyomingTtsVoiceStatusEl = document.getElementById("speech-announcement-wyoming-tts-voice-status");
   const speechTtsSampleTextEl = document.getElementById("set_speech_tts_sample_text");
   const speechTtsPreviewBtnEl = document.getElementById("settings-speech-tts-preview");
   const speechTtsDownloadBtnEl = document.getElementById("settings-speech-tts-download");
@@ -11770,10 +11932,36 @@ async function loadSettingsView() {
   const speechWyomingTtsVoiceWrapEl = document.getElementById("speech-wyoming-tts-voice-wrap");
   const speechWyomingTtsVoiceEl = document.getElementById("set_speech_wyoming_tts_voice");
   const speechWyomingTtsVoiceStatusEl = document.getElementById("speech-wyoming-tts-voice-status");
+  const speechOpenAiTtsBaseUrlWrapEl = document.getElementById("speech-openai-tts-base-url-wrap");
+  const speechOpenAiTtsBaseUrlEl = document.getElementById("set_speech_openai_tts_base_url");
+  const speechOpenAiTtsApiKeyWrapEl = document.getElementById("speech-openai-tts-api-key-wrap");
+  const speechOpenAiTtsApiKeyEl = document.getElementById("set_speech_openai_tts_api_key");
+  const speechOpenAiTtsModelsToolsWrapEl = document.getElementById("speech-openai-tts-models-tools-wrap");
+  const speechOpenAiTtsModelRefreshBtnEl = document.getElementById("settings-speech-openai-tts-load-models");
+  const speechOpenAiTtsModelStatusEl = document.getElementById("speech-openai-tts-model-status");
+  const speechOpenAiTtsVoicesToolsWrapEl = document.getElementById("speech-openai-tts-voices-tools-wrap");
+  const speechOpenAiTtsVoiceRefreshBtnEl = document.getElementById("settings-speech-openai-tts-load-voices");
+  const speechOpenAiTtsVoiceStatusEl = document.getElementById("speech-openai-tts-voice-status");
   let speechTtsPreviewUrl = "";
   let speechTtsPreviewBlob = null;
   let speechWyomingTtsRefreshSeq = 0;
   let speechWyomingTtsRefreshTimer = 0;
+  let announcementWyomingTtsRefreshSeq = 0;
+  let announcementWyomingTtsRefreshTimer = 0;
+  let speechOpenAiTtsRefreshSeq = 0;
+  let speechOpenAiTtsRefreshTimer = 0;
+  let speechOpenAiTtsModelRefreshSeq = 0;
+  let speechOpenAiTtsModelRefreshTimer = 0;
+  let speechOpenAiTtsModelRows = [];
+  let speechOpenAiTtsVoiceRows = [];
+  let speechOpenAiTtsVoicesByModel = {};
+  let announcementOpenAiTtsRefreshSeq = 0;
+  let announcementOpenAiTtsRefreshTimer = 0;
+  let announcementOpenAiTtsModelRefreshSeq = 0;
+  let announcementOpenAiTtsModelRefreshTimer = 0;
+  let announcementOpenAiTtsModelRows = [];
+  let announcementOpenAiTtsVoiceRows = [];
+  let announcementOpenAiTtsVoicesByModel = {};
 
   const setElementVisible = (element, visible) => {
     if (!element) {
@@ -11781,6 +11969,78 @@ async function loadSettingsView() {
     }
     element.style.display = visible ? "" : "none";
   };
+
+  const isOpenAiCompatibleTtsBackend = (value) => String(value || "").trim() === "openai_compatible";
+
+  const isAnnouncementOpenAiTtsScope = (scope) => String(scope || "").trim() === "announcement";
+
+  const getOpenAiTtsBaseUrlValue = (scope = "direct") =>
+    String(
+      isAnnouncementOpenAiTtsScope(scope)
+        ? announcementOpenAiTtsBaseUrlEl?.value || ""
+        : speechOpenAiTtsBaseUrlEl?.value || ""
+    ).trim();
+
+  const getOpenAiTtsApiKeyValue = (scope = "direct") =>
+    String(
+      isAnnouncementOpenAiTtsScope(scope)
+        ? announcementOpenAiTtsApiKeyEl?.value || ""
+        : speechOpenAiTtsApiKeyEl?.value || ""
+    ).trim();
+
+  const setOpenAiTtsModelStatus = (scope = "direct", message = "") => {
+    const text = String(message || "");
+    if (isAnnouncementOpenAiTtsScope(scope) && announcementOpenAiTtsModelStatusEl) {
+      announcementOpenAiTtsModelStatusEl.textContent = text;
+    } else if (speechOpenAiTtsModelStatusEl) {
+      speechOpenAiTtsModelStatusEl.textContent = text;
+    }
+  };
+
+  const setOpenAiTtsVoiceStatus = (scope = "direct", message = "") => {
+    const text = String(message || "");
+    if (isAnnouncementOpenAiTtsScope(scope) && announcementOpenAiTtsVoiceStatusEl) {
+      announcementOpenAiTtsVoiceStatusEl.textContent = text;
+    } else if (speechOpenAiTtsVoiceStatusEl) {
+      speechOpenAiTtsVoiceStatusEl.textContent = text;
+    }
+  };
+
+  const setOpenAiTtsModelRefreshDisabled = (scope = "direct", disabled) => {
+    if (isAnnouncementOpenAiTtsScope(scope) && announcementOpenAiTtsModelRefreshBtnEl) {
+      announcementOpenAiTtsModelRefreshBtnEl.disabled = Boolean(disabled);
+    } else if (speechOpenAiTtsModelRefreshBtnEl) {
+      speechOpenAiTtsModelRefreshBtnEl.disabled = Boolean(disabled);
+    }
+  };
+
+  const setOpenAiTtsVoiceRefreshDisabled = (scope = "direct", disabled) => {
+    if (isAnnouncementOpenAiTtsScope(scope) && announcementOpenAiTtsVoiceRefreshBtnEl) {
+      announcementOpenAiTtsVoiceRefreshBtnEl.disabled = Boolean(disabled);
+    } else if (speechOpenAiTtsVoiceRefreshBtnEl) {
+      speechOpenAiTtsVoiceRefreshBtnEl.disabled = Boolean(disabled);
+    }
+  };
+
+  const getSpeechTtsModelValue = () =>
+    isOpenAiCompatibleTtsBackend(speechTtsBackendEl?.value)
+      ? String(speechOpenAiTtsManualModelEl?.value || "").trim() || String(speechOpenAiTtsModelEl?.value || "").trim()
+      : String(speechTtsModelEl?.value || "").trim();
+
+  const getSpeechTtsVoiceValue = () =>
+    isOpenAiCompatibleTtsBackend(speechTtsBackendEl?.value)
+      ? String(speechOpenAiTtsManualVoiceEl?.value || "").trim() || String(speechOpenAiTtsVoiceEl?.value || "").trim()
+      : String(speechTtsVoiceEl?.value || "").trim();
+
+  const getAnnouncementTtsModelValue = () =>
+    isOpenAiCompatibleTtsBackend(announcementTtsBackendEl?.value)
+      ? String(announcementOpenAiTtsManualModelEl?.value || "").trim() || String(announcementOpenAiTtsModelEl?.value || "").trim()
+      : String(announcementTtsModelEl?.value || "").trim();
+
+  const getAnnouncementTtsVoiceValue = () =>
+    isOpenAiCompatibleTtsBackend(announcementTtsBackendEl?.value)
+      ? String(announcementOpenAiTtsManualVoiceEl?.value || "").trim() || String(announcementOpenAiTtsVoiceEl?.value || "").trim()
+      : String(announcementTtsVoiceEl?.value || "").trim();
 
   const speechSttOptionRowsForAcceleration = () => {
     const acceleration = String(speechAccelerationEl?.value || "auto").trim() || "auto";
@@ -11888,30 +12148,73 @@ async function loadSettingsView() {
 
     const showsLocalModel = ["kokoro", "pocket_tts", "piper"].includes(ttsBackend);
     const showsVoiceSelect = ["kokoro", "pocket_tts"].includes(ttsBackend);
+    const showsOpenAiCompatible = isOpenAiCompatibleTtsBackend(ttsBackend);
     const showsWyoming = ttsBackend === "wyoming";
+    const showsSharedOpenAiConfig = showsOpenAiCompatible || isOpenAiCompatibleTtsBackend(announcementTtsBackend);
 
     syncSpeechTtsModelOptions({ forceReset: resetTtsSelection });
     syncSpeechTtsVoiceOptions({ forceReset: resetTtsSelection });
 
     setElementVisible(speechTtsModelWrapEl, showsLocalModel);
     setElementVisible(speechTtsVoiceWrapEl, showsVoiceSelect);
+    setElementVisible(speechOpenAiTtsModelWrapEl, showsOpenAiCompatible);
+    setElementVisible(speechOpenAiTtsManualModelWrapEl, showsOpenAiCompatible);
+    setElementVisible(speechOpenAiTtsVoiceWrapEl, showsOpenAiCompatible);
+    setElementVisible(speechOpenAiTtsManualVoiceWrapEl, showsOpenAiCompatible);
     setElementVisible(speechWyomingTtsHostWrapEl, showsWyoming);
     setElementVisible(speechWyomingTtsPortWrapEl, showsWyoming);
     setElementVisible(speechWyomingTtsVoiceWrapEl, showsWyoming);
+    setElementVisible(speechOpenAiTtsBaseUrlWrapEl, showsOpenAiCompatible);
+    setElementVisible(speechOpenAiTtsApiKeyWrapEl, showsOpenAiCompatible);
+    setElementVisible(speechOpenAiTtsModelsToolsWrapEl, showsOpenAiCompatible);
+    setElementVisible(speechOpenAiTtsVoicesToolsWrapEl, showsOpenAiCompatible);
     if (showsWyoming) {
       queueRefreshSpeechWyomingTtsVoices();
     } else if (speechWyomingTtsVoiceStatusEl) {
       speechWyomingTtsVoiceStatusEl.textContent = "";
     }
+    if (showsSharedOpenAiConfig) {
+      if (showsOpenAiCompatible) {
+        queueRefreshSpeechOpenAiTtsModels();
+        queueRefreshSpeechOpenAiTtsVoices();
+      }
+      if (isOpenAiCompatibleTtsBackend(announcementTtsBackend)) {
+        queueRefreshAnnouncementOpenAiTtsModels();
+        queueRefreshAnnouncementOpenAiTtsVoices();
+      }
+    } else {
+      setOpenAiTtsVoiceStatus("direct", "");
+      setOpenAiTtsModelStatus("direct", "");
+      setOpenAiTtsVoiceStatus("announcement", "");
+      setOpenAiTtsModelStatus("announcement", "");
+    }
 
     const showsAnnouncementLocalModel = ["kokoro", "pocket_tts", "piper"].includes(announcementTtsBackend);
     const showsAnnouncementVoiceSelect = ["kokoro", "pocket_tts"].includes(announcementTtsBackend);
+    const showsAnnouncementOpenAiCompatible = isOpenAiCompatibleTtsBackend(announcementTtsBackend);
+    const showsAnnouncementWyoming = announcementTtsBackend === "wyoming";
 
     syncAnnouncementTtsModelOptions({ forceReset: resetTtsSelection });
     syncAnnouncementTtsVoiceOptions({ forceReset: resetTtsSelection });
 
     setElementVisible(announcementTtsModelWrapEl, showsAnnouncementLocalModel);
     setElementVisible(announcementTtsVoiceWrapEl, showsAnnouncementVoiceSelect);
+    setElementVisible(announcementOpenAiTtsBaseUrlWrapEl, showsAnnouncementOpenAiCompatible);
+    setElementVisible(announcementOpenAiTtsApiKeyWrapEl, showsAnnouncementOpenAiCompatible);
+    setElementVisible(announcementOpenAiTtsModelsToolsWrapEl, showsAnnouncementOpenAiCompatible);
+    setElementVisible(announcementOpenAiTtsVoicesToolsWrapEl, showsAnnouncementOpenAiCompatible);
+    setElementVisible(announcementOpenAiTtsModelWrapEl, showsAnnouncementOpenAiCompatible);
+    setElementVisible(announcementOpenAiTtsManualModelWrapEl, showsAnnouncementOpenAiCompatible);
+    setElementVisible(announcementOpenAiTtsVoiceWrapEl, showsAnnouncementOpenAiCompatible);
+    setElementVisible(announcementOpenAiTtsManualVoiceWrapEl, showsAnnouncementOpenAiCompatible);
+    setElementVisible(announcementWyomingTtsHostWrapEl, showsAnnouncementWyoming);
+    setElementVisible(announcementWyomingTtsPortWrapEl, showsAnnouncementWyoming);
+    setElementVisible(announcementWyomingTtsVoiceWrapEl, showsAnnouncementWyoming);
+    if (showsAnnouncementWyoming) {
+      queueRefreshAnnouncementWyomingTtsVoices();
+    } else if (announcementWyomingTtsVoiceStatusEl) {
+      announcementWyomingTtsVoiceStatusEl.textContent = "";
+    }
   };
 
   const setSpeechTtsDownloadEnabled = (enabled) => {
@@ -11921,8 +12224,8 @@ async function loadSettingsView() {
     speechTtsDownloadBtnEl.disabled = !enabled;
   };
 
-  const renderSpeechWyomingTtsVoiceOptions = (rows, currentValue = "") => {
-    if (!speechWyomingTtsVoiceEl) {
+  const renderWyomingTtsVoiceOptions = (voiceEl, rows, currentValue = "") => {
+    if (!voiceEl) {
       return;
     }
     const options = [{ value: "", label: "Default" }];
@@ -11941,28 +12244,42 @@ async function loadSettingsView() {
     if (current && !seen.has(current)) {
       options.push({ value: current, label: `${current} (saved)` });
     }
-    speechWyomingTtsVoiceEl.innerHTML = renderSettingsSelectOptions(options, current);
-    speechWyomingTtsVoiceEl.value = current;
+    voiceEl.innerHTML = renderSettingsSelectOptions(options, current);
+    voiceEl.value = current;
   };
 
-  const refreshSpeechWyomingTtsVoices = async () => {
-    if (!speechWyomingTtsVoiceEl || String(speechTtsBackendEl?.value || "").trim() !== "wyoming") {
+  const renderSpeechWyomingTtsVoiceOptions = (rows, currentValue = "") =>
+    renderWyomingTtsVoiceOptions(speechWyomingTtsVoiceEl, rows, currentValue);
+
+  const renderAnnouncementWyomingTtsVoiceOptions = (rows, currentValue = "") =>
+    renderWyomingTtsVoiceOptions(announcementWyomingTtsVoiceEl, rows, currentValue);
+
+  const refreshWyomingTtsVoices = async (scope = "direct") => {
+    const isAnnouncement = String(scope || "").trim() === "announcement";
+    const backendEl = isAnnouncement ? announcementTtsBackendEl : speechTtsBackendEl;
+    const hostEl = isAnnouncement ? announcementWyomingTtsHostEl : document.getElementById("set_speech_wyoming_tts_host");
+    const portEl = isAnnouncement ? announcementWyomingTtsPortEl : document.getElementById("set_speech_wyoming_tts_port");
+    const voiceEl = isAnnouncement ? announcementWyomingTtsVoiceEl : speechWyomingTtsVoiceEl;
+    const statusEl = isAnnouncement ? announcementWyomingTtsVoiceStatusEl : speechWyomingTtsVoiceStatusEl;
+    const renderOptions = isAnnouncement ? renderAnnouncementWyomingTtsVoiceOptions : renderSpeechWyomingTtsVoiceOptions;
+
+    if (!voiceEl || String(backendEl?.value || "").trim() !== "wyoming") {
       return;
     }
-    const host = String(document.getElementById("set_speech_wyoming_tts_host")?.value || "").trim();
-    const port = String(document.getElementById("set_speech_wyoming_tts_port")?.value || "").trim();
-    const currentVoice = String(speechWyomingTtsVoiceEl.value || "").trim();
+    const host = String(hostEl?.value || "").trim();
+    const port = String(portEl?.value || "").trim();
+    const currentVoice = String(voiceEl.value || "").trim();
     if (!host || !port) {
-      renderSpeechWyomingTtsVoiceOptions([], currentVoice);
-      if (speechWyomingTtsVoiceStatusEl) {
-        speechWyomingTtsVoiceStatusEl.textContent = "Enter Wyoming host and port to load voices.";
+      renderOptions([], currentVoice);
+      if (statusEl) {
+        statusEl.textContent = "Enter Wyoming host and port to load voices.";
       }
       return;
     }
 
-    const requestId = ++speechWyomingTtsRefreshSeq;
-    if (speechWyomingTtsVoiceStatusEl) {
-      speechWyomingTtsVoiceStatusEl.textContent = "Loading Wyoming voices...";
+    const requestId = isAnnouncement ? ++announcementWyomingTtsRefreshSeq : ++speechWyomingTtsRefreshSeq;
+    if (statusEl) {
+      statusEl.textContent = "Loading Wyoming voices...";
     }
     try {
       const result = await api("/api/settings/speech/wyoming-tts-voices", {
@@ -11974,27 +12291,32 @@ async function loadSettingsView() {
         }),
         _timeoutMs: 15000,
       });
-      if (requestId !== speechWyomingTtsRefreshSeq) {
+      const activeRequestId = isAnnouncement ? announcementWyomingTtsRefreshSeq : speechWyomingTtsRefreshSeq;
+      if (requestId !== activeRequestId) {
         return;
       }
       const voices = Array.isArray(result?.voices) ? result.voices : [];
-      renderSpeechWyomingTtsVoiceOptions(voices, currentVoice);
-      if (speechWyomingTtsVoiceStatusEl) {
+      renderOptions(voices, currentVoice);
+      if (statusEl) {
         const count = Math.max(0, Number(result?.count || 0));
-        speechWyomingTtsVoiceStatusEl.textContent = count
+        statusEl.textContent = count
           ? `Loaded ${count} Wyoming voice${count === 1 ? "" : "s"}.`
           : "No Wyoming voices reported by server.";
       }
     } catch (error) {
-      if (requestId !== speechWyomingTtsRefreshSeq) {
+      const activeRequestId = isAnnouncement ? announcementWyomingTtsRefreshSeq : speechWyomingTtsRefreshSeq;
+      if (requestId !== activeRequestId) {
         return;
       }
-      renderSpeechWyomingTtsVoiceOptions([], currentVoice);
-      if (speechWyomingTtsVoiceStatusEl) {
-        speechWyomingTtsVoiceStatusEl.textContent = error?.message || "Failed to load Wyoming voices.";
+      renderOptions([], currentVoice);
+      if (statusEl) {
+        statusEl.textContent = error?.message || "Failed to load Wyoming voices.";
       }
     }
   };
+
+  const refreshSpeechWyomingTtsVoices = () => refreshWyomingTtsVoices("direct");
+  const refreshAnnouncementWyomingTtsVoices = () => refreshWyomingTtsVoices("announcement");
 
   const queueRefreshSpeechWyomingTtsVoices = () => {
     if (speechWyomingTtsRefreshTimer) {
@@ -12004,6 +12326,378 @@ async function loadSettingsView() {
       speechWyomingTtsRefreshTimer = 0;
       refreshSpeechWyomingTtsVoices();
     }, 250);
+  };
+
+  const queueRefreshAnnouncementWyomingTtsVoices = () => {
+    if (announcementWyomingTtsRefreshTimer) {
+      window.clearTimeout(announcementWyomingTtsRefreshTimer);
+    }
+    announcementWyomingTtsRefreshTimer = window.setTimeout(() => {
+      announcementWyomingTtsRefreshTimer = 0;
+      refreshAnnouncementWyomingTtsVoices();
+    }, 250);
+  };
+
+  const buildOpenAiTtsModelOptions = (rows, currentValue = "") => {
+    const options = [];
+    const seen = new Set();
+    const appendOption = (value, label = "") => {
+      const nextValue = String(value || "").trim();
+      const nextLabel = String(label || nextValue).trim();
+      if (!nextValue || seen.has(nextValue)) {
+        return;
+      }
+      seen.add(nextValue);
+      options.push({ value: nextValue, label: nextLabel || nextValue });
+    };
+
+    const inputRows = Array.isArray(rows) ? rows : [];
+    inputRows.forEach((row) => appendOption(row?.value, row?.label));
+    const current = String(currentValue || "").trim();
+    if (current && !seen.has(current)) {
+      appendOption(current, `${current} (saved)`);
+    }
+    return options;
+  };
+
+  const openAiTtsModelRowsForScope = (scope = "direct") =>
+    isAnnouncementOpenAiTtsScope(scope) ? announcementOpenAiTtsModelRows : speechOpenAiTtsModelRows;
+
+  const setOpenAiTtsModelRowsForScope = (scope = "direct", rows = []) => {
+    if (isAnnouncementOpenAiTtsScope(scope)) {
+      announcementOpenAiTtsModelRows = Array.isArray(rows) ? rows : [];
+    } else {
+      speechOpenAiTtsModelRows = Array.isArray(rows) ? rows : [];
+    }
+  };
+
+  const openAiTtsVoiceRowsForScope = (scope = "direct") =>
+    isAnnouncementOpenAiTtsScope(scope) ? announcementOpenAiTtsVoiceRows : speechOpenAiTtsVoiceRows;
+
+  const setOpenAiTtsVoiceRowsForScope = (scope = "direct", rows = []) => {
+    if (isAnnouncementOpenAiTtsScope(scope)) {
+      announcementOpenAiTtsVoiceRows = Array.isArray(rows) ? rows : [];
+    } else {
+      speechOpenAiTtsVoiceRows = Array.isArray(rows) ? rows : [];
+    }
+  };
+
+  const openAiTtsVoicesByModelForScope = (scope = "direct") =>
+    isAnnouncementOpenAiTtsScope(scope) ? announcementOpenAiTtsVoicesByModel : speechOpenAiTtsVoicesByModel;
+
+  const setOpenAiTtsVoicesByModelForScope = (scope = "direct", rows = {}) => {
+    if (isAnnouncementOpenAiTtsScope(scope)) {
+      announcementOpenAiTtsVoicesByModel = rows && typeof rows === "object" ? rows : {};
+    } else {
+      speechOpenAiTtsVoicesByModel = rows && typeof rows === "object" ? rows : {};
+    }
+  };
+
+  const openAiTtsModelElForScope = (scope = "direct") =>
+    isAnnouncementOpenAiTtsScope(scope) ? announcementOpenAiTtsModelEl : speechOpenAiTtsModelEl;
+
+  const openAiTtsVoiceElForScope = (scope = "direct") =>
+    isAnnouncementOpenAiTtsScope(scope) ? announcementOpenAiTtsVoiceEl : speechOpenAiTtsVoiceEl;
+
+  const savedOpenAiTtsModelValueForScope = (scope = "direct") =>
+    isAnnouncementOpenAiTtsScope(scope) ? settings.speech_announcement_tts_model || "" : settings.speech_tts_model || "";
+
+  const savedOpenAiTtsVoiceValueForScope = (scope = "direct") =>
+    isAnnouncementOpenAiTtsScope(scope) ? settings.speech_announcement_tts_voice || "" : settings.speech_tts_voice || "";
+
+  const currentOpenAiTtsModelValueForScope = (scope = "direct") =>
+    isAnnouncementOpenAiTtsScope(scope) ? getAnnouncementTtsModelValue() : getSpeechTtsModelValue();
+
+  const preferredOpenAiTtsModelValue = (element, savedValue = "", rows = []) => {
+    const current = String(element?.value || savedValue || "").trim();
+    const inputRows = Array.isArray(rows) ? rows : [];
+    const allowed = new Set(inputRows.map((row) => String(row?.value || "").trim()).filter(Boolean));
+    if (current && (!allowed.size || allowed.has(current))) {
+      return current;
+    }
+    return String(inputRows[0]?.value || "").trim();
+  };
+
+  const renderOpenAiTtsModelOptions = (scope = "direct", rows = openAiTtsModelRowsForScope(scope)) => {
+    const modelRows = Array.isArray(rows) ? rows : [];
+    setOpenAiTtsModelRowsForScope(scope, modelRows);
+    const modelEl = openAiTtsModelElForScope(scope);
+    if (!modelEl) {
+      return;
+    }
+    const blankLabel = modelRows.length ? "Select a remote model" : "Load remote models";
+    const current = preferredOpenAiTtsModelValue(
+      modelEl,
+      savedOpenAiTtsModelValueForScope(scope),
+      modelRows
+    );
+    const options = buildOpenAiTtsModelOptions(modelRows, current);
+    modelEl.innerHTML = renderSettingsSelectOptions(options, current, { blankLabel });
+    modelEl.value = current;
+  };
+
+  const voiceRowsForOpenAiTtsModel = (scope = "direct", modelValue = "") => {
+    const model = String(modelValue || "").trim();
+    const voicesByModel = openAiTtsVoicesByModelForScope(scope);
+    const modelRows =
+      model && voicesByModel && Array.isArray(voicesByModel[model])
+        ? voicesByModel[model]
+        : null;
+    return modelRows || openAiTtsVoiceRowsForScope(scope);
+  };
+
+  const hasOpenAiTtsModelVoiceRows = (scope = "direct") =>
+    Object.values(openAiTtsVoicesByModelForScope(scope) || {}).some((rows) => Array.isArray(rows) && rows.length);
+
+  const buildOpenAiTtsVoiceOptions = (rows, currentValue = "") => {
+    const options = [];
+    const seen = new Set();
+    const appendOption = (value, label = "") => {
+      const nextValue = String(value || "").trim();
+      const nextLabel = String(label || nextValue).trim();
+      if (!nextValue || seen.has(nextValue)) {
+        return;
+      }
+      seen.add(nextValue);
+      options.push({ value: nextValue, label: nextLabel || nextValue });
+    };
+
+    const inputRows = Array.isArray(rows) ? rows : [];
+    inputRows.forEach((row) => appendOption(row?.value, row?.label));
+    const current = String(currentValue || "").trim();
+    if (current && !seen.has(current)) {
+      appendOption(current, `${current} (saved)`);
+    }
+    return options;
+  };
+
+  const preferredOpenAiTtsVoiceValue = (element, savedValue = "", rows = [], { forceReset = false } = {}) => {
+    const inputRows = Array.isArray(rows) ? rows : [];
+    const allowed = new Set(inputRows.map((row) => String(row?.value || "").trim()).filter(Boolean));
+    const current = forceReset ? "" : String(element?.value || savedValue || "").trim();
+    if (current && allowed.has(current)) {
+      return current;
+    }
+    if (current && !forceReset && !allowed.size) {
+      return current;
+    }
+    return String(inputRows[0]?.value || "").trim();
+  };
+
+  const renderOpenAiTtsVoiceOptions = (
+    scope = "direct",
+    rows = null,
+    { forceReset = false } = {}
+  ) => {
+    if (Array.isArray(rows)) {
+      setOpenAiTtsVoiceRowsForScope(scope, rows);
+    }
+    const voiceEl = openAiTtsVoiceElForScope(scope);
+    if (!voiceEl) {
+      return;
+    }
+    const voiceRows = voiceRowsForOpenAiTtsModel(scope, currentOpenAiTtsModelValueForScope(scope));
+    const blankLabel = voiceRows.length ? "Select a remote voice" : "Load remote voices";
+    const current = preferredOpenAiTtsVoiceValue(
+      voiceEl,
+      savedOpenAiTtsVoiceValueForScope(scope),
+      voiceRows,
+      { forceReset }
+    );
+    const options = buildOpenAiTtsVoiceOptions(voiceRows, current);
+    voiceEl.innerHTML = renderSettingsSelectOptions(options, current, { blankLabel });
+    voiceEl.value = current;
+  };
+
+  const renderSpeechOpenAiTtsVoiceOptions = (rows = null, { forceReset = false, resetDirect = forceReset } = {}) =>
+    renderOpenAiTtsVoiceOptions("direct", rows, { forceReset: resetDirect });
+
+  const renderAnnouncementOpenAiTtsVoiceOptions = (
+    rows = null,
+    { forceReset = false, resetAnnouncement = forceReset } = {}
+  ) => renderOpenAiTtsVoiceOptions("announcement", rows, { forceReset: resetAnnouncement });
+
+  const refreshOpenAiTtsModels = async (scope = "direct") => {
+    const backendEl = isAnnouncementOpenAiTtsScope(scope) ? announcementTtsBackendEl : speechTtsBackendEl;
+    const modelEl = openAiTtsModelElForScope(scope);
+    if (!modelEl || !isOpenAiCompatibleTtsBackend(backendEl?.value)) {
+      return;
+    }
+
+    const baseUrl = getOpenAiTtsBaseUrlValue(scope);
+    const apiKey = getOpenAiTtsApiKeyValue(scope);
+    if (!baseUrl) {
+      renderOpenAiTtsModelOptions(scope, []);
+      setOpenAiTtsVoicesByModelForScope(scope, {});
+      renderOpenAiTtsVoiceOptions(scope, null, { forceReset: true });
+      setOpenAiTtsModelStatus(scope, "Enter an OpenAI-compatible TTS base URL to load models.");
+      return;
+    }
+
+    const requestId = isAnnouncementOpenAiTtsScope(scope)
+      ? ++announcementOpenAiTtsModelRefreshSeq
+      : ++speechOpenAiTtsModelRefreshSeq;
+    setOpenAiTtsModelStatus(scope, "Loading remote models...");
+    setOpenAiTtsModelRefreshDisabled(scope, true);
+    try {
+      const result = await api("/api/settings/speech/openai-compatible-tts-models", {
+        method: "POST",
+        body: JSON.stringify({
+          base_url: baseUrl,
+          api_key: apiKey,
+        }),
+        _timeoutMs: 15000,
+      });
+      const activeRequestId = isAnnouncementOpenAiTtsScope(scope)
+        ? announcementOpenAiTtsModelRefreshSeq
+        : speechOpenAiTtsModelRefreshSeq;
+      if (requestId !== activeRequestId) {
+        return;
+      }
+      const models = Array.isArray(result?.models) ? result.models : [];
+      const voicesByModel =
+        result?.voices_by_model && typeof result.voices_by_model === "object" ? result.voices_by_model : {};
+      setOpenAiTtsVoicesByModelForScope(scope, voicesByModel);
+      renderOpenAiTtsModelOptions(scope, models);
+      renderOpenAiTtsVoiceOptions(scope);
+      const count = Math.max(0, Number(result?.count || 0));
+      const errorText = String(result?.error || "").trim();
+      setOpenAiTtsModelStatus(
+        scope,
+        count
+          ? `Loaded ${count} remote model${count === 1 ? "" : "s"}.`
+          : errorText
+            ? `No model list reported. Manual model override is still available. ${errorText}`
+            : "No model list reported. Manual model override is still available."
+      );
+    } catch (error) {
+      const activeRequestId = isAnnouncementOpenAiTtsScope(scope)
+        ? announcementOpenAiTtsModelRefreshSeq
+        : speechOpenAiTtsModelRefreshSeq;
+      if (requestId !== activeRequestId) {
+        return;
+      }
+      renderOpenAiTtsModelOptions(scope, []);
+      setOpenAiTtsVoicesByModelForScope(scope, {});
+      renderOpenAiTtsVoiceOptions(scope);
+      setOpenAiTtsModelStatus(scope, error?.message || "Failed to load remote OpenAI-compatible TTS models.");
+    } finally {
+      const activeRequestId = isAnnouncementOpenAiTtsScope(scope)
+        ? announcementOpenAiTtsModelRefreshSeq
+        : speechOpenAiTtsModelRefreshSeq;
+      if (requestId === activeRequestId) {
+        setOpenAiTtsModelRefreshDisabled(scope, false);
+      }
+    }
+  };
+
+  const refreshSpeechOpenAiTtsModels = () => refreshOpenAiTtsModels("direct");
+  const refreshAnnouncementOpenAiTtsModels = () => refreshOpenAiTtsModels("announcement");
+
+  const queueRefreshSpeechOpenAiTtsModels = () => {
+    if (speechOpenAiTtsModelRefreshTimer) {
+      window.clearTimeout(speechOpenAiTtsModelRefreshTimer);
+    }
+    speechOpenAiTtsModelRefreshTimer = window.setTimeout(() => {
+      speechOpenAiTtsModelRefreshTimer = 0;
+      refreshSpeechOpenAiTtsModels();
+    }, 300);
+  };
+
+  const queueRefreshAnnouncementOpenAiTtsModels = () => {
+    if (announcementOpenAiTtsModelRefreshTimer) {
+      window.clearTimeout(announcementOpenAiTtsModelRefreshTimer);
+    }
+    announcementOpenAiTtsModelRefreshTimer = window.setTimeout(() => {
+      announcementOpenAiTtsModelRefreshTimer = 0;
+      refreshAnnouncementOpenAiTtsModels();
+    }, 300);
+  };
+
+  const refreshOpenAiTtsVoices = async (scope = "direct") => {
+    const backendEl = isAnnouncementOpenAiTtsScope(scope) ? announcementTtsBackendEl : speechTtsBackendEl;
+    const voiceEl = openAiTtsVoiceElForScope(scope);
+    if (!voiceEl || !isOpenAiCompatibleTtsBackend(backendEl?.value)) {
+      return;
+    }
+
+    const baseUrl = getOpenAiTtsBaseUrlValue(scope);
+    const apiKey = getOpenAiTtsApiKeyValue(scope);
+    if (!baseUrl) {
+      setOpenAiTtsVoicesByModelForScope(scope, {});
+      renderOpenAiTtsVoiceOptions(scope, [], { forceReset: true });
+      setOpenAiTtsVoiceStatus(scope, "Enter an OpenAI-compatible TTS base URL to load voices.");
+      return;
+    }
+
+    const requestId = isAnnouncementOpenAiTtsScope(scope) ? ++announcementOpenAiTtsRefreshSeq : ++speechOpenAiTtsRefreshSeq;
+    setOpenAiTtsVoiceStatus(scope, "Loading remote voices...");
+    setOpenAiTtsVoiceRefreshDisabled(scope, true);
+    try {
+      const result = await api("/api/settings/speech/openai-compatible-tts-voices", {
+        method: "POST",
+        body: JSON.stringify({
+          base_url: baseUrl,
+          api_key: apiKey,
+        }),
+        _timeoutMs: 15000,
+      });
+      const activeRequestId = isAnnouncementOpenAiTtsScope(scope) ? announcementOpenAiTtsRefreshSeq : speechOpenAiTtsRefreshSeq;
+      if (requestId !== activeRequestId) {
+        return;
+      }
+      const voices = Array.isArray(result?.voices) ? result.voices : [];
+      renderOpenAiTtsVoiceOptions(scope, voices);
+      const count = Math.max(0, Number(result?.count || 0));
+      setOpenAiTtsVoiceStatus(
+        scope,
+        count
+          ? `Loaded ${count} remote voice${count === 1 ? "" : "s"}. Choose one below.`
+          : hasOpenAiTtsModelVoiceRows(scope)
+            ? "Using model-specific remote voices from the model list."
+          : "No voices reported by server. You can still type a voice id manually."
+      );
+    } catch (error) {
+      const activeRequestId = isAnnouncementOpenAiTtsScope(scope) ? announcementOpenAiTtsRefreshSeq : speechOpenAiTtsRefreshSeq;
+      if (requestId !== activeRequestId) {
+        return;
+      }
+      renderOpenAiTtsVoiceOptions(scope, []);
+      setOpenAiTtsVoiceStatus(
+        scope,
+        hasOpenAiTtsModelVoiceRows(scope)
+          ? "Using model-specific remote voices from the model list."
+          : error?.message || "Failed to load remote OpenAI-compatible TTS voices."
+      );
+    } finally {
+      const activeRequestId = isAnnouncementOpenAiTtsScope(scope) ? announcementOpenAiTtsRefreshSeq : speechOpenAiTtsRefreshSeq;
+      if (requestId === activeRequestId) {
+        setOpenAiTtsVoiceRefreshDisabled(scope, false);
+      }
+    }
+  };
+
+  const refreshSpeechOpenAiTtsVoices = () => refreshOpenAiTtsVoices("direct");
+  const refreshAnnouncementOpenAiTtsVoices = () => refreshOpenAiTtsVoices("announcement");
+
+  const queueRefreshSpeechOpenAiTtsVoices = () => {
+    if (speechOpenAiTtsRefreshTimer) {
+      window.clearTimeout(speechOpenAiTtsRefreshTimer);
+    }
+    speechOpenAiTtsRefreshTimer = window.setTimeout(() => {
+      speechOpenAiTtsRefreshTimer = 0;
+      refreshSpeechOpenAiTtsVoices();
+    }, 300);
+  };
+
+  const queueRefreshAnnouncementOpenAiTtsVoices = () => {
+    if (announcementOpenAiTtsRefreshTimer) {
+      window.clearTimeout(announcementOpenAiTtsRefreshTimer);
+    }
+    announcementOpenAiTtsRefreshTimer = window.setTimeout(() => {
+      announcementOpenAiTtsRefreshTimer = 0;
+      refreshAnnouncementOpenAiTtsVoices();
+    }, 300);
   };
 
   const stopSpeechTtsPreviewPlayback = () => {
@@ -12025,12 +12719,14 @@ async function loadSettingsView() {
 
   const buildSpeechTtsPreviewPayload = () => ({
     backend: String(speechTtsBackendEl?.value || "").trim(),
-    model: String(speechTtsModelEl?.value || "").trim(),
-    voice: String(speechTtsVoiceEl?.value || "").trim(),
+    model: getSpeechTtsModelValue(),
+    voice: getSpeechTtsVoiceValue(),
     acceleration: String(speechAccelerationEl?.value || "").trim(),
     wyoming_host: String(document.getElementById("set_speech_wyoming_tts_host")?.value || "").trim(),
     wyoming_port: String(document.getElementById("set_speech_wyoming_tts_port")?.value || "").trim(),
     wyoming_voice: String(speechWyomingTtsVoiceEl?.value || "").trim(),
+    openai_base_url: getOpenAiTtsBaseUrlValue(),
+    openai_api_key: getOpenAiTtsApiKeyValue(),
     text: String(speechTtsSampleTextEl?.value || "").trim() || "Hello from Tater. This is a voice preview.",
   });
 
@@ -12060,8 +12756,11 @@ async function loadSettingsView() {
 
   const buildSpeechTtsSampleFilename = () => {
     const backend = sanitizeFilenamePart(speechTtsBackendEl?.value, "tts");
-    const model = sanitizeFilenamePart(speechTtsModelEl?.value, "default-model");
-    const voice = sanitizeFilenamePart(speechTtsVoiceEl?.value || speechWyomingTtsVoiceEl?.value, "default-voice");
+    const model = sanitizeFilenamePart(getSpeechTtsModelValue(), "default-model");
+    const voice = sanitizeFilenamePart(
+      getSpeechTtsVoiceValue() || speechWyomingTtsVoiceEl?.value,
+      "default-voice"
+    );
     return `tater-tts-sample-${backend}-${model}-${voice}.wav`;
   };
 
@@ -12147,6 +12846,17 @@ async function loadSettingsView() {
     }
   };
 
+  const handleOpenAiTtsConfigInput = (source) => {
+    clearSpeechTtsPreviewCache();
+    if (source === announcementOpenAiTtsBaseUrlEl || source === announcementOpenAiTtsApiKeyEl) {
+      queueRefreshAnnouncementOpenAiTtsModels();
+      queueRefreshAnnouncementOpenAiTtsVoices();
+      return;
+    }
+    queueRefreshSpeechOpenAiTtsModels();
+    queueRefreshSpeechOpenAiTtsVoices();
+  };
+
   speechSttBackendEl?.addEventListener("change", applySpeechSettingsVisibility);
   speechAccelerationEl?.addEventListener("change", () => {
     clearSpeechTtsPreviewCache();
@@ -12161,12 +12871,56 @@ async function loadSettingsView() {
     syncSpeechTtsVoiceOptions({ forceReset: true });
   });
   speechTtsVoiceEl?.addEventListener("change", clearSpeechTtsPreviewCache);
+  speechOpenAiTtsModelEl?.addEventListener("change", () => {
+    if (speechOpenAiTtsManualModelEl) {
+      speechOpenAiTtsManualModelEl.value = "";
+    }
+    if (speechOpenAiTtsManualVoiceEl) {
+      speechOpenAiTtsManualVoiceEl.value = "";
+    }
+    renderSpeechOpenAiTtsVoiceOptions(null, { resetDirect: true });
+    clearSpeechTtsPreviewCache();
+  });
+  speechOpenAiTtsManualModelEl?.addEventListener("input", () => {
+    renderSpeechOpenAiTtsVoiceOptions(null, { resetDirect: true });
+    clearSpeechTtsPreviewCache();
+  });
+  speechOpenAiTtsVoiceEl?.addEventListener("change", () => {
+    if (speechOpenAiTtsManualVoiceEl) {
+      speechOpenAiTtsManualVoiceEl.value = "";
+    }
+    clearSpeechTtsPreviewCache();
+  });
+  speechOpenAiTtsManualVoiceEl?.addEventListener("input", clearSpeechTtsPreviewCache);
   announcementTtsBackendEl?.addEventListener("change", () => {
+    clearSpeechTtsPreviewCache();
     applySpeechSettingsVisibility({ resetTtsSelection: true });
   });
   announcementTtsModelEl?.addEventListener("change", () => {
+    clearSpeechTtsPreviewCache();
     syncAnnouncementTtsVoiceOptions({ forceReset: true });
   });
+  announcementOpenAiTtsModelEl?.addEventListener("change", () => {
+    if (announcementOpenAiTtsManualModelEl) {
+      announcementOpenAiTtsManualModelEl.value = "";
+    }
+    if (announcementOpenAiTtsManualVoiceEl) {
+      announcementOpenAiTtsManualVoiceEl.value = "";
+    }
+    renderAnnouncementOpenAiTtsVoiceOptions(null, { resetAnnouncement: true });
+    clearSpeechTtsPreviewCache();
+  });
+  announcementOpenAiTtsManualModelEl?.addEventListener("input", () => {
+    renderAnnouncementOpenAiTtsVoiceOptions(null, { resetAnnouncement: true });
+    clearSpeechTtsPreviewCache();
+  });
+  announcementOpenAiTtsVoiceEl?.addEventListener("change", () => {
+    if (announcementOpenAiTtsManualVoiceEl) {
+      announcementOpenAiTtsManualVoiceEl.value = "";
+    }
+    clearSpeechTtsPreviewCache();
+  });
+  announcementOpenAiTtsManualVoiceEl?.addEventListener("input", clearSpeechTtsPreviewCache);
   speechTtsSampleTextEl?.addEventListener("input", clearSpeechTtsPreviewCache);
   document.getElementById("set_speech_wyoming_tts_host")?.addEventListener("input", () => {
     clearSpeechTtsPreviewCache();
@@ -12177,6 +12931,27 @@ async function loadSettingsView() {
     queueRefreshSpeechWyomingTtsVoices();
   });
   speechWyomingTtsVoiceEl?.addEventListener("change", clearSpeechTtsPreviewCache);
+  announcementWyomingTtsHostEl?.addEventListener("input", () => {
+    clearSpeechTtsPreviewCache();
+    queueRefreshAnnouncementWyomingTtsVoices();
+  });
+  announcementWyomingTtsPortEl?.addEventListener("input", () => {
+    clearSpeechTtsPreviewCache();
+    queueRefreshAnnouncementWyomingTtsVoices();
+  });
+  announcementWyomingTtsVoiceEl?.addEventListener("change", clearSpeechTtsPreviewCache);
+  speechOpenAiTtsBaseUrlEl?.addEventListener("input", () => handleOpenAiTtsConfigInput(speechOpenAiTtsBaseUrlEl));
+  speechOpenAiTtsApiKeyEl?.addEventListener("input", () => handleOpenAiTtsConfigInput(speechOpenAiTtsApiKeyEl));
+  announcementOpenAiTtsBaseUrlEl?.addEventListener("input", () =>
+    handleOpenAiTtsConfigInput(announcementOpenAiTtsBaseUrlEl)
+  );
+  announcementOpenAiTtsApiKeyEl?.addEventListener("input", () =>
+    handleOpenAiTtsConfigInput(announcementOpenAiTtsApiKeyEl)
+  );
+  speechOpenAiTtsModelRefreshBtnEl?.addEventListener("click", refreshSpeechOpenAiTtsModels);
+  speechOpenAiTtsVoiceRefreshBtnEl?.addEventListener("click", refreshSpeechOpenAiTtsVoices);
+  announcementOpenAiTtsModelRefreshBtnEl?.addEventListener("click", refreshAnnouncementOpenAiTtsModels);
+  announcementOpenAiTtsVoiceRefreshBtnEl?.addEventListener("click", refreshAnnouncementOpenAiTtsVoices);
   speechTtsPreviewBtnEl?.addEventListener("click", previewSpeechTts);
   speechTtsDownloadBtnEl?.addEventListener("click", downloadSpeechTtsSample);
   setSpeechTtsDownloadEnabled(false);
@@ -12194,14 +12969,21 @@ async function loadSettingsView() {
     const speechWyomingSttHost = String(document.getElementById("set_speech_wyoming_stt_host")?.value || "").trim();
     const speechWyomingSttPort = String(document.getElementById("set_speech_wyoming_stt_port")?.value || "").trim();
     const speechTtsBackend = String(document.getElementById("set_speech_tts_backend")?.value || "").trim();
-    const speechTtsModel = String(document.getElementById("set_speech_tts_model")?.value || "").trim();
-    const speechTtsVoice = String(document.getElementById("set_speech_tts_voice")?.value || "").trim();
+    const speechTtsModel = getSpeechTtsModelValue();
+    const speechTtsVoice = getSpeechTtsVoiceValue();
     const speechWyomingTtsHost = String(document.getElementById("set_speech_wyoming_tts_host")?.value || "").trim();
     const speechWyomingTtsPort = String(document.getElementById("set_speech_wyoming_tts_port")?.value || "").trim();
     const speechWyomingTtsVoice = String(speechWyomingTtsVoiceEl?.value || "").trim();
+    const speechOpenAiTtsBaseUrl = getOpenAiTtsBaseUrlValue();
+    const speechOpenAiTtsApiKey = getOpenAiTtsApiKeyValue();
     const speechAnnouncementTtsBackend = String(document.getElementById("set_speech_announcement_tts_backend")?.value || "").trim();
-    const speechAnnouncementTtsModel = String(document.getElementById("set_speech_announcement_tts_model")?.value || "").trim();
-    const speechAnnouncementTtsVoice = String(document.getElementById("set_speech_announcement_tts_voice")?.value || "").trim();
+    const speechAnnouncementTtsModel = getAnnouncementTtsModelValue();
+    const speechAnnouncementTtsVoice = getAnnouncementTtsVoiceValue();
+    const speechAnnouncementWyomingTtsHost = String(announcementWyomingTtsHostEl?.value || "").trim();
+    const speechAnnouncementWyomingTtsPort = String(announcementWyomingTtsPortEl?.value || "").trim();
+    const speechAnnouncementWyomingTtsVoice = String(announcementWyomingTtsVoiceEl?.value || "").trim();
+    const speechAnnouncementOpenAiTtsBaseUrl = getOpenAiTtsBaseUrlValue("announcement");
+    const speechAnnouncementOpenAiTtsApiKey = getOpenAiTtsApiKeyValue("announcement");
     const additionalBaseRows = readHydraAdditionalBaseRows();
     const hydraBaseServersPayload = [normalizeHydraBaseRowInput({ host: baseHost, port: basePort, model: baseModel })];
     additionalBaseRows.forEach((row) => hydraBaseServersPayload.push(normalizeHydraBaseRowInput(row)));
@@ -12224,9 +13006,16 @@ async function loadSettingsView() {
       speech_wyoming_tts_host: speechWyomingTtsHost,
       speech_wyoming_tts_port: speechWyomingTtsPort,
       speech_wyoming_tts_voice: speechWyomingTtsVoice,
+      speech_openai_tts_base_url: speechOpenAiTtsBaseUrl,
+      speech_openai_tts_api_key: speechOpenAiTtsApiKey,
       speech_announcement_tts_backend: speechAnnouncementTtsBackend,
       speech_announcement_tts_model: speechAnnouncementTtsModel,
       speech_announcement_tts_voice: speechAnnouncementTtsVoice,
+      speech_announcement_wyoming_tts_host: speechAnnouncementWyomingTtsHost,
+      speech_announcement_wyoming_tts_port: speechAnnouncementWyomingTtsPort,
+      speech_announcement_wyoming_tts_voice: speechAnnouncementWyomingTtsVoice,
+      speech_announcement_openai_tts_base_url: speechAnnouncementOpenAiTtsBaseUrl,
+      speech_announcement_openai_tts_api_key: speechAnnouncementOpenAiTtsApiKey,
     };
     const hydraRoleIds = ["chat", "astraeus", "thanatos", "minos", "hermes"];
     hydraRoleIds.forEach((role) => {

@@ -249,6 +249,7 @@ DEFAULT_WYOMING_TTS_HOST = "127.0.0.1"
 DEFAULT_WYOMING_TTS_PORT = 10200
 DEFAULT_WYOMING_TTS_VOICE = ""
 DEFAULT_WYOMING_TIMEOUT_SECONDS = 45.0
+DEFAULT_OPENAI_COMPATIBLE_TTS_TIMEOUT_SECONDS = 90.0
 DEFAULT_STT_BACKEND = "faster_whisper"
 DEFAULT_TTS_BACKEND = "wyoming"
 DEFAULT_PIPER_SENTENCE_PAUSE_SECONDS = 0.24
@@ -269,6 +270,10 @@ DEFAULT_KOKORO_MODEL = "v1.0:q8"
 DEFAULT_KOKORO_VOICE = "af_bella"
 DEFAULT_KOKORO_PROVIDER = "cpu"
 DEFAULT_KOKORO_OUTPUT_GAIN = 1.5
+DEFAULT_OPENAI_COMPATIBLE_TTS_BASE_URL = ""
+DEFAULT_OPENAI_COMPATIBLE_TTS_API_KEY = ""
+DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL = "tts-1"
+DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE = "alloy"
 DEFAULT_POCKET_TTS_MODEL = "b6369a24"
 DEFAULT_POCKET_TTS_VOICE = "alba"
 DEFAULT_PIPER_MODEL = "en_US-lessac-medium"
@@ -1125,6 +1130,8 @@ def _shared_speech_voice_settings() -> Dict[str, Any]:
         "VOICE_WYOMING_TTS_HOST": shared.get("wyoming_tts_host"),
         "VOICE_WYOMING_TTS_PORT": shared.get("wyoming_tts_port"),
         "VOICE_WYOMING_TTS_VOICE": shared.get("wyoming_tts_voice"),
+        "VOICE_OPENAI_TTS_BASE_URL": shared.get("openai_tts_base_url"),
+        "VOICE_OPENAI_TTS_API_KEY": shared.get("openai_tts_api_key"),
     }
 
 
@@ -1247,6 +1254,8 @@ def _normalize_tts_backend(value: Any) -> str:
         return DEFAULT_TTS_BACKEND
     if token == "wyoming":
         return "wyoming"
+    if token in {"openai_compatible", "openai", "openai_api"}:
+        return "openai_compatible"
     if token == "kokoro":
         return "kokoro"
     if token in {"pocket_tts", "pockettts", "pocket"}:
@@ -1274,6 +1283,7 @@ def _tts_backend_model_root(backend: str) -> str:
         "kokoro": "kokoro",
         "pocket_tts": "pocket-tts",
         "piper": "piper",
+        "openai_compatible": "openai-compatible",
         "wyoming": "wyoming",
     }
     dirname = dirname_map.get(token, token or DEFAULT_TTS_BACKEND)
@@ -1636,7 +1646,13 @@ def _voice_config_snapshot() -> Dict[str, Any]:
                 or (
                     DEFAULT_KOKORO_MODEL
                     if tts_backend == "kokoro"
-                    else DEFAULT_POCKET_TTS_MODEL if tts_backend == "pocket_tts" else DEFAULT_PIPER_MODEL
+                    else DEFAULT_POCKET_TTS_MODEL
+                    if tts_backend == "pocket_tts"
+                    else DEFAULT_PIPER_MODEL
+                    if tts_backend == "piper"
+                    else DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL
+                    if tts_backend == "openai_compatible"
+                    else ""
                 )
             ),
             "voice": (
@@ -1644,9 +1660,19 @@ def _voice_config_snapshot() -> Dict[str, Any]:
                 or (
                     DEFAULT_KOKORO_VOICE
                     if tts_backend == "kokoro"
-                    else DEFAULT_POCKET_TTS_VOICE if tts_backend == "pocket_tts" else ""
+                    else DEFAULT_POCKET_TTS_VOICE
+                    if tts_backend == "pocket_tts"
+                    else DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE
+                    if tts_backend == "openai_compatible"
+                    else ""
                 )
             ),
+            "openai_compatible": {
+                "base_url": _text(settings.get("VOICE_OPENAI_TTS_BASE_URL")) or DEFAULT_OPENAI_COMPATIBLE_TTS_BASE_URL,
+                "api_key_set": bool(_text(settings.get("VOICE_OPENAI_TTS_API_KEY"))),
+                "model": _text(settings.get("VOICE_TTS_MODEL")) or DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL,
+                "voice": _text(settings.get("VOICE_TTS_VOICE")) or DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE,
+            },
             "kokoro": {
                 "model": _text(settings.get("VOICE_TTS_MODEL")) or DEFAULT_KOKORO_MODEL,
                 "voice": _text(settings.get("VOICE_TTS_VOICE")) or DEFAULT_KOKORO_VOICE,
