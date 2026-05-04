@@ -20,6 +20,10 @@ DEFAULT_WYOMING_STT_PORT = 10300
 DEFAULT_WYOMING_TTS_HOST = "127.0.0.1"
 DEFAULT_WYOMING_TTS_PORT = 10200
 DEFAULT_WYOMING_TTS_VOICE = ""
+DEFAULT_OPENAI_COMPATIBLE_TTS_BASE_URL = ""
+DEFAULT_OPENAI_COMPATIBLE_TTS_API_KEY = ""
+DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL = "tts-1"
+DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE = "alloy"
 DEFAULT_SPEECH_ACCELERATION = "auto"
 DEFAULT_KOKORO_MODEL = "v1.0:q8"
 DEFAULT_KOKORO_VOICE = "af_bella"
@@ -95,6 +99,8 @@ def _normalize_tts_backend(value: Any) -> str:
         return DEFAULT_TTS_BACKEND
     if token == "wyoming":
         return "wyoming"
+    if token in {"openai_compatible", "openai", "openai_api"}:
+        return "openai_compatible"
     if token == "kokoro":
         return "kokoro"
     if token in {"pocket_tts", "pockettts", "pocket"}:
@@ -339,6 +345,11 @@ def _piper_tts_model_option_rows(*, current_value: Any = "", ensure_catalog: boo
 def get_speech_settings() -> Dict[str, Any]:
     shared = redis_client.hgetall(SPEECH_SETTINGS_KEY) or {}
     current_tts_backend = _normalize_tts_backend(shared.get("tts_backend"))
+    has_announcement_wyoming_host = "announcement_wyoming_tts_host" in shared
+    has_announcement_wyoming_port = "announcement_wyoming_tts_port" in shared
+    has_announcement_wyoming_voice = "announcement_wyoming_tts_voice" in shared
+    has_announcement_openai_base_url = "announcement_openai_tts_base_url" in shared
+    has_announcement_openai_api_key = "announcement_openai_tts_api_key" in shared
     return {
         "stt_backend": _normalize_stt_backend(shared.get("stt_backend")),
         "acceleration": normalize_speech_acceleration(shared.get("acceleration")),
@@ -350,12 +361,40 @@ def get_speech_settings() -> Dict[str, Any]:
         "wyoming_tts_host": _clean(shared.get("wyoming_tts_host")) or DEFAULT_WYOMING_TTS_HOST,
         "wyoming_tts_port": _as_int(shared.get("wyoming_tts_port"), DEFAULT_WYOMING_TTS_PORT),
         "wyoming_tts_voice": _clean(shared.get("wyoming_tts_voice")) or DEFAULT_WYOMING_TTS_VOICE,
+        "openai_tts_base_url": _clean(shared.get("openai_tts_base_url")) or DEFAULT_OPENAI_COMPATIBLE_TTS_BASE_URL,
+        "openai_tts_api_key": _clean(shared.get("openai_tts_api_key")) or DEFAULT_OPENAI_COMPATIBLE_TTS_API_KEY,
         "announcement_tts_backend": normalize_announcement_tts_backend(
             shared.get("announcement_tts_backend"),
             default=DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
         ),
         "announcement_tts_model": _clean(shared.get("announcement_tts_model")),
         "announcement_tts_voice": _clean(shared.get("announcement_tts_voice")),
+        "announcement_wyoming_tts_host": (
+            _clean(shared.get("announcement_wyoming_tts_host"))
+            if has_announcement_wyoming_host
+            else _clean(shared.get("wyoming_tts_host"))
+        ) or DEFAULT_WYOMING_TTS_HOST,
+        "announcement_wyoming_tts_port": _as_int(
+            shared.get("announcement_wyoming_tts_port")
+            if has_announcement_wyoming_port
+            else shared.get("wyoming_tts_port"),
+            DEFAULT_WYOMING_TTS_PORT,
+        ),
+        "announcement_wyoming_tts_voice": (
+            _clean(shared.get("announcement_wyoming_tts_voice"))
+            if has_announcement_wyoming_voice
+            else _clean(shared.get("wyoming_tts_voice"))
+        ),
+        "announcement_openai_tts_base_url": (
+            _clean(shared.get("announcement_openai_tts_base_url"))
+            if has_announcement_openai_base_url
+            else _clean(shared.get("openai_tts_base_url"))
+        ) or DEFAULT_OPENAI_COMPATIBLE_TTS_BASE_URL,
+        "announcement_openai_tts_api_key": (
+            _clean(shared.get("announcement_openai_tts_api_key"))
+            if has_announcement_openai_api_key
+            else _clean(shared.get("openai_tts_api_key"))
+        ) or DEFAULT_OPENAI_COMPATIBLE_TTS_API_KEY,
     }
 
 
@@ -370,9 +409,16 @@ def save_speech_settings(
     wyoming_tts_host: Any,
     wyoming_tts_port: Any,
     wyoming_tts_voice: Any,
+    openai_tts_base_url: Any,
+    openai_tts_api_key: Any,
     announcement_tts_backend: Any,
     announcement_tts_model: Any,
     announcement_tts_voice: Any,
+    announcement_wyoming_tts_host: Any = None,
+    announcement_wyoming_tts_port: Any = None,
+    announcement_wyoming_tts_voice: Any = None,
+    announcement_openai_tts_base_url: Any = None,
+    announcement_openai_tts_api_key: Any = None,
     acceleration: Any = DEFAULT_SPEECH_ACCELERATION,
 ) -> None:
     direct_tts_backend = _normalize_tts_backend(tts_backend)
@@ -389,12 +435,40 @@ def save_speech_settings(
             "wyoming_tts_host": _clean(wyoming_tts_host) or DEFAULT_WYOMING_TTS_HOST,
             "wyoming_tts_port": str(_as_int(wyoming_tts_port, DEFAULT_WYOMING_TTS_PORT)),
             "wyoming_tts_voice": _clean(wyoming_tts_voice),
+            "openai_tts_base_url": _clean(openai_tts_base_url),
+            "openai_tts_api_key": _clean(openai_tts_api_key),
             "announcement_tts_backend": normalize_announcement_tts_backend(
                 announcement_tts_backend,
                 default=DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
             ),
             "announcement_tts_model": _clean(announcement_tts_model),
             "announcement_tts_voice": _clean(announcement_tts_voice),
+            "announcement_wyoming_tts_host": (
+                _clean(announcement_wyoming_tts_host)
+                if announcement_wyoming_tts_host is not None
+                else _clean(wyoming_tts_host)
+            ) or DEFAULT_WYOMING_TTS_HOST,
+            "announcement_wyoming_tts_port": str(
+                _as_int(
+                    announcement_wyoming_tts_port if announcement_wyoming_tts_port is not None else wyoming_tts_port,
+                    DEFAULT_WYOMING_TTS_PORT,
+                )
+            ),
+            "announcement_wyoming_tts_voice": (
+                _clean(announcement_wyoming_tts_voice)
+                if announcement_wyoming_tts_voice is not None
+                else _clean(wyoming_tts_voice)
+            ),
+            "announcement_openai_tts_base_url": (
+                _clean(announcement_openai_tts_base_url)
+                if announcement_openai_tts_base_url is not None
+                else _clean(openai_tts_base_url)
+            ),
+            "announcement_openai_tts_api_key": (
+                _clean(announcement_openai_tts_api_key)
+                if announcement_openai_tts_api_key is not None
+                else _clean(openai_tts_api_key)
+            ),
         },
     )
     with contextlib.suppress(Exception):
@@ -445,11 +519,13 @@ def get_speech_ui_payload(settings: Optional[Dict[str, Any]] = None) -> Dict[str
         ],
         "tts_backend_options": [
             {"value": "wyoming", "label": "Wyoming"},
+            {"value": "openai_compatible", "label": "OpenAI-Compatible"},
             {"value": "kokoro", "label": "Kokoro"},
             {"value": "pocket_tts", "label": "Pocket TTS"},
             {"value": "piper", "label": "Piper"},
         ],
         "tts_model_options_by_backend": {
+            "openai_compatible": [],
             "kokoro": kokoro_model_rows,
             "pocket_tts": pocket_model_rows,
             "piper": piper_model_rows,

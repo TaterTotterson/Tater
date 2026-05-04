@@ -78,7 +78,13 @@ from speech_settings import (
     get_speech_ui_payload,
     save_speech_settings as save_shared_speech_settings,
 )
-from speech_tts import fetch_wyoming_tts_voice_options, get_runtime_tts_wav, synthesize_preview_wav
+from speech_tts import (
+    fetch_openai_compatible_tts_model_options,
+    fetch_openai_compatible_tts_voice_options,
+    fetch_wyoming_tts_voice_options,
+    get_runtime_tts_wav,
+    synthesize_preview_wav,
+)
 from integration_registry import (
     get_integration_catalog,
     get_integration_device_group,
@@ -608,6 +614,8 @@ def _warm_speech_model_item(item: Dict[str, str]) -> str:
         model = str(item.get("model") or "").strip()
         if token == "wyoming":
             return "skipped remote Wyoming TTS"
+        if token == "openai_compatible":
+            return "skipped remote OpenAI-compatible TTS"
         if token == "kokoro":
             _load_kokoro_pipeline(model, acceleration=item.get("acceleration"))
         elif token == "piper":
@@ -2821,9 +2829,16 @@ class AppSettingsRequest(BaseModel):
     speech_wyoming_tts_host: Optional[str] = None
     speech_wyoming_tts_port: Optional[str] = None
     speech_wyoming_tts_voice: Optional[str] = None
+    speech_openai_tts_base_url: Optional[str] = None
+    speech_openai_tts_api_key: Optional[str] = None
     speech_announcement_tts_backend: Optional[str] = None
     speech_announcement_tts_model: Optional[str] = None
     speech_announcement_tts_voice: Optional[str] = None
+    speech_announcement_wyoming_tts_host: Optional[str] = None
+    speech_announcement_wyoming_tts_port: Optional[str] = None
+    speech_announcement_wyoming_tts_voice: Optional[str] = None
+    speech_announcement_openai_tts_base_url: Optional[str] = None
+    speech_announcement_openai_tts_api_key: Optional[str] = None
     esphome_settings: Optional[Dict[str, Any]] = None
     emoji_enable_on_reaction_add: Optional[bool] = None
     emoji_enable_auto_reaction_on_reply: Optional[bool] = None
@@ -2890,6 +2905,8 @@ class SpeechTtsPreviewRequest(BaseModel):
     wyoming_host: Optional[str] = None
     wyoming_port: Optional[str] = None
     wyoming_voice: Optional[str] = None
+    openai_base_url: Optional[str] = None
+    openai_api_key: Optional[str] = None
     text: Optional[str] = None
 
 
@@ -2897,6 +2914,16 @@ class WyomingTtsVoicesRequest(BaseModel):
     host: Optional[str] = None
     port: Optional[str] = None
     current_voice: Optional[str] = None
+
+
+class OpenAiCompatibleTtsVoicesRequest(BaseModel):
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None
+
+
+class OpenAiCompatibleTtsModelsRequest(BaseModel):
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None
 
 
 class RedisSetupRequest(BaseModel):
@@ -5306,9 +5333,16 @@ def get_settings() -> Dict[str, Any]:
         "speech_wyoming_tts_host": str(speech_settings.get("wyoming_tts_host") or ""),
         "speech_wyoming_tts_port": str(speech_settings.get("wyoming_tts_port") or ""),
         "speech_wyoming_tts_voice": str(speech_settings.get("wyoming_tts_voice") or ""),
+        "speech_openai_tts_base_url": str(speech_settings.get("openai_tts_base_url") or ""),
+        "speech_openai_tts_api_key": str(speech_settings.get("openai_tts_api_key") or ""),
         "speech_announcement_tts_backend": str(speech_settings.get("announcement_tts_backend") or ""),
         "speech_announcement_tts_model": str(speech_settings.get("announcement_tts_model") or ""),
         "speech_announcement_tts_voice": str(speech_settings.get("announcement_tts_voice") or ""),
+        "speech_announcement_wyoming_tts_host": str(speech_settings.get("announcement_wyoming_tts_host") or ""),
+        "speech_announcement_wyoming_tts_port": str(speech_settings.get("announcement_wyoming_tts_port") or ""),
+        "speech_announcement_wyoming_tts_voice": str(speech_settings.get("announcement_wyoming_tts_voice") or ""),
+        "speech_announcement_openai_tts_base_url": str(speech_settings.get("announcement_openai_tts_base_url") or ""),
+        "speech_announcement_openai_tts_api_key": str(speech_settings.get("announcement_openai_tts_api_key") or ""),
         "speech_model_warmup": _speech_model_warmup_snapshot(),
         "speech_ui": speech_ui,
         "announcement_speech_ui": announcement_speech_ui,
@@ -5354,6 +5388,16 @@ async def preview_speech_tts(payload: SpeechTtsPreviewRequest) -> Response:
             wyoming_host=str(payload.wyoming_host or current_speech.get("wyoming_tts_host") or "").strip(),
             wyoming_port=str(payload.wyoming_port or current_speech.get("wyoming_tts_port") or "").strip(),
             wyoming_voice=str(payload.wyoming_voice or current_speech.get("wyoming_tts_voice") or "").strip(),
+            openai_base_url=(
+                str(payload.openai_base_url).strip()
+                if payload.openai_base_url is not None
+                else str(current_speech.get("openai_tts_base_url") or "").strip()
+            ),
+            openai_api_key=(
+                str(payload.openai_api_key).strip()
+                if payload.openai_api_key is not None
+                else str(current_speech.get("openai_tts_api_key") or "").strip()
+            ),
         )
     except HTTPException:
         raise
@@ -5389,6 +5433,50 @@ async def get_speech_wyoming_tts_voices(payload: WyomingTtsVoicesRequest) -> Dic
         raise
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc) or "Failed to fetch Wyoming TTS voices.") from exc
+
+
+@app.post("/api/settings/speech/openai-compatible-tts-voices")
+async def get_speech_openai_compatible_tts_voices(payload: OpenAiCompatibleTtsVoicesRequest) -> Dict[str, Any]:
+    current_speech = get_shared_speech_settings()
+    try:
+        return await fetch_openai_compatible_tts_voice_options(
+            base_url=(
+                str(payload.base_url).strip()
+                if payload.base_url is not None
+                else str(current_speech.get("openai_tts_base_url") or "").strip()
+            ),
+            api_key=(
+                str(payload.api_key).strip()
+                if payload.api_key is not None
+                else str(current_speech.get("openai_tts_api_key") or "").strip()
+            ),
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc) or "Failed to fetch OpenAI-compatible TTS voices.") from exc
+
+
+@app.post("/api/settings/speech/openai-compatible-tts-models")
+async def get_speech_openai_compatible_tts_models(payload: OpenAiCompatibleTtsModelsRequest) -> Dict[str, Any]:
+    current_speech = get_shared_speech_settings()
+    try:
+        return await fetch_openai_compatible_tts_model_options(
+            base_url=(
+                str(payload.base_url).strip()
+                if payload.base_url is not None
+                else str(current_speech.get("openai_tts_base_url") or "").strip()
+            ),
+            api_key=(
+                str(payload.api_key).strip()
+                if payload.api_key is not None
+                else str(current_speech.get("openai_tts_api_key") or "").strip()
+            ),
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc) or "Failed to fetch OpenAI-compatible TTS models.") from exc
 
 
 @app.get("/api/settings/speech/warmup")
@@ -5676,9 +5764,16 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "speech_wyoming_tts_host",
         "speech_wyoming_tts_port",
         "speech_wyoming_tts_voice",
+        "speech_openai_tts_base_url",
+        "speech_openai_tts_api_key",
         "speech_announcement_tts_backend",
         "speech_announcement_tts_model",
         "speech_announcement_tts_voice",
+        "speech_announcement_wyoming_tts_host",
+        "speech_announcement_wyoming_tts_port",
+        "speech_announcement_wyoming_tts_voice",
+        "speech_announcement_openai_tts_base_url",
+        "speech_announcement_openai_tts_api_key",
     }
     if any(key in updates for key in speech_keys):
         current_speech = get_shared_speech_settings()
@@ -5703,6 +5798,12 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
             wyoming_tts_voice=str(
                 updates.get("speech_wyoming_tts_voice", current_speech.get("wyoming_tts_voice") or "")
             ).strip(),
+            openai_tts_base_url=str(
+                updates.get("speech_openai_tts_base_url", current_speech.get("openai_tts_base_url") or "")
+            ).strip(),
+            openai_tts_api_key=str(
+                updates.get("speech_openai_tts_api_key", current_speech.get("openai_tts_api_key") or "")
+            ).strip(),
             announcement_tts_backend=str(
                 updates.get("speech_announcement_tts_backend", current_speech.get("announcement_tts_backend") or "")
             ).strip(),
@@ -5711,6 +5812,36 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
             ).strip(),
             announcement_tts_voice=str(
                 updates.get("speech_announcement_tts_voice", current_speech.get("announcement_tts_voice") or "")
+            ).strip(),
+            announcement_wyoming_tts_host=str(
+                updates.get(
+                    "speech_announcement_wyoming_tts_host",
+                    current_speech.get("announcement_wyoming_tts_host") or "",
+                )
+            ).strip(),
+            announcement_wyoming_tts_port=str(
+                updates.get(
+                    "speech_announcement_wyoming_tts_port",
+                    current_speech.get("announcement_wyoming_tts_port") or "",
+                )
+            ).strip(),
+            announcement_wyoming_tts_voice=str(
+                updates.get(
+                    "speech_announcement_wyoming_tts_voice",
+                    current_speech.get("announcement_wyoming_tts_voice") or "",
+                )
+            ).strip(),
+            announcement_openai_tts_base_url=str(
+                updates.get(
+                    "speech_announcement_openai_tts_base_url",
+                    current_speech.get("announcement_openai_tts_base_url") or "",
+                )
+            ).strip(),
+            announcement_openai_tts_api_key=str(
+                updates.get(
+                    "speech_announcement_openai_tts_api_key",
+                    current_speech.get("announcement_openai_tts_api_key") or "",
+                )
             ).strip(),
         )
         speech_warmup_result = _start_speech_model_warmup(get_shared_speech_settings(), reason="settings-save")

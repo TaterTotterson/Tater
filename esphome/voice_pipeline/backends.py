@@ -3,12 +3,16 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib
+import io
 import json
 import os
 import re
 import sys
 import time
+import wave
 from typing import Any, Dict, List, Optional, Tuple
+
+import requests
 
 from .conversation import VoiceSessionRuntime
 
@@ -76,6 +80,9 @@ def _tts_selection_from_values(values: Optional[Dict[str, Any]] = None) -> Dict[
         model = model or vp.DEFAULT_POCKET_TTS_MODEL
         allowed_voices = set(vp.POCKET_TTS_PREDEFINED_VOICES.keys())
         voice = voice if voice in allowed_voices else vp.DEFAULT_POCKET_TTS_VOICE
+    elif backend == "openai_compatible":
+        model = model or vp.DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL
+        voice = voice or vp.DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE
     elif backend == "piper":
         model = model or vp.DEFAULT_PIPER_MODEL
         voice = ""
@@ -90,6 +97,8 @@ def _tts_selection_from_values(values: Optional[Dict[str, Any]] = None) -> Dict[
         "wyoming_host": vp._text(merged.get("VOICE_WYOMING_TTS_HOST")) or vp.DEFAULT_WYOMING_TTS_HOST,
         "wyoming_port": vp._as_int(merged.get("VOICE_WYOMING_TTS_PORT"), vp.DEFAULT_WYOMING_TTS_PORT, minimum=1, maximum=65535),
         "wyoming_voice": vp._text(merged.get("VOICE_WYOMING_TTS_VOICE")) or vp.DEFAULT_WYOMING_TTS_VOICE,
+        "openai_base_url": vp._text(merged.get("VOICE_OPENAI_TTS_BASE_URL")) or vp.DEFAULT_OPENAI_COMPATIBLE_TTS_BASE_URL,
+        "openai_api_key": vp._text(merged.get("VOICE_OPENAI_TTS_API_KEY")) or vp.DEFAULT_OPENAI_COMPATIBLE_TTS_API_KEY,
     }
 
 
@@ -106,6 +115,10 @@ def _tts_backend_available(backend: str) -> Tuple[bool, str]:
             and vp.WyomingError is not None
         )
         return ok, vp._text(vp.WYOMING_IMPORT_ERROR) or "wyoming dependency unavailable"
+    if token == "openai_compatible":
+        cfg = _tts_config_snapshot()
+        base_url = vp._text((cfg.get("openai_compatible") or {}).get("base_url"))
+        return bool(base_url), "OpenAI-compatible TTS base URL is not configured."
     if token == "kokoro":
         return (
             vp.build_kokoro_pipeline is not None and vp.KokoroPipelineConfig is not None,
@@ -249,6 +262,66 @@ def _transcribe_vosk_sync(audio_bytes: bytes, audio_format: Dict[str, int]) -> s
 def _wyoming_timeout_s() -> float:
     vp = _vp()
     return vp._get_float_setting("VOICE_NATIVE_WYOMING_TIMEOUT_S", vp.DEFAULT_WYOMING_TIMEOUT_SECONDS, minimum=5.0, maximum=180.0)
+
+
+def _openai_compatible_tts_timeout_s() -> float:
+    vp = _vp()
+    return float(vp.DEFAULT_OPENAI_COMPATIBLE_TTS_TIMEOUT_SECONDS)
+
+
+def _openai_compatible_tts_endpoint(base_url: Any) -> str:
+    vp = _vp()
+    base = vp._text(base_url).rstrip("/")
+    if not base:
+        return ""
+    if base.endswith("/v1/audio/speech"):
+        return base
+    if base.endswith("/v1"):
+        return f"{base}/audio/speech"
+    return f"{base}/v1/audio/speech"
+
+
+def _looks_like_wav_bytes(payload: bytes) -> bool:
+    raw = bytes(payload or b"")
+    return len(raw) >= 12 and raw[:4] == b"RIFF" and raw[8:12] == b"WAVE"
+
+
+def _response_error_text(response: Any) -> str:
+    vp = _vp()
+    with contextlib.suppress(Exception):
+        payload = response.json()
+        if isinstance(payload, dict):
+            detail = vp._text(payload.get("detail"))
+            if detail:
+                return detail
+            error = payload.get("error")
+            if isinstance(error, dict):
+                message = vp._text(error.get("message"))
+                if message:
+                    return message
+            message = vp._text(payload.get("message"))
+            if message:
+                return message
+    with contextlib.suppress(Exception):
+        body = vp._text(response.text)
+        if body:
+            return body[:500]
+    return f"HTTP {int(getattr(response, 'status_code', 0) or 0)}"
+
+
+def _decode_wav_bytes(wav_bytes: bytes) -> Tuple[bytes, Dict[str, Any]]:
+    raw = bytes(wav_bytes or b"")
+    if not raw:
+        return b"", {}
+    if not _looks_like_wav_bytes(raw):
+        raise RuntimeError("OpenAI-compatible TTS did not return WAV audio.")
+    with wave.open(io.BytesIO(raw), "rb") as wav_file:
+        frames = wav_file.readframes(wav_file.getnframes())
+        return frames, {
+            "rate": int(wav_file.getframerate() or 24000),
+            "width": int(wav_file.getsampwidth() or 2),
+            "channels": int(wav_file.getnchannels() or 1),
+        }
 
 
 def _wyoming_stt_endpoint() -> Tuple[str, int]:
@@ -699,6 +772,49 @@ async def _native_wyoming_synthesize(
     return bytes(audio_out), audio_format
 
 
+def _native_openai_compatible_synthesize_sync(
+    text: str,
+    *,
+    model: str,
+    voice: str,
+    base_url: str,
+    api_key: str,
+) -> Tuple[bytes, Dict[str, Any]]:
+    vp = _vp()
+    prompt = vp._text(text)
+    if not prompt:
+        return b"", {}
+
+    endpoint = _openai_compatible_tts_endpoint(base_url)
+    if not endpoint:
+        raise RuntimeError("OpenAI-compatible TTS base URL is required.")
+
+    headers = {"Content-Type": "application/json"}
+    bearer = vp._text(api_key)
+    if bearer:
+        headers["Authorization"] = f"Bearer {bearer}"
+
+    payload = {
+        "model": vp._text(model) or vp.DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL,
+        "input": prompt,
+        "voice": vp._text(voice) or vp.DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE,
+        "response_format": "wav",
+    }
+
+    response = requests.post(
+        endpoint,
+        json=payload,
+        headers=headers,
+        timeout=_openai_compatible_tts_timeout_s(),
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"OpenAI-compatible TTS request failed: {_response_error_text(response)}")
+    wav_bytes = bytes(response.content or b"")
+    if not wav_bytes:
+        raise RuntimeError("OpenAI-compatible TTS returned no audio.")
+    return _decode_wav_bytes(wav_bytes)
+
+
 def _kokoro_output_gain() -> float:
     vp = _vp()
     return vp._as_float(os.getenv("TATER_KOKORO_OUTPUT_GAIN"), vp.DEFAULT_KOKORO_OUTPUT_GAIN, minimum=0.1, maximum=4.0)
@@ -1020,6 +1136,21 @@ async def _native_synthesize_text(
         if effective_backend == "piper":
             vp._native_debug(f"TTS (piper) local model={selection.get('model') or vp.DEFAULT_PIPER_MODEL}")
             audio_bytes, audio_format = await asyncio.to_thread(_synthesize_piper_sync, prompt, vp._text(selection.get("model")) or vp.DEFAULT_PIPER_MODEL)
+            return audio_bytes, audio_format, effective_backend, backend_note
+        if effective_backend == "openai_compatible":
+            vp._native_debug(
+                f"TTS (openai-compatible) remote base={selection.get('openai_base_url')} "
+                f"model={selection.get('model') or vp.DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL} "
+                f"voice={selection.get('voice') or vp.DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE}"
+            )
+            audio_bytes, audio_format = await asyncio.to_thread(
+                _native_openai_compatible_synthesize_sync,
+                prompt,
+                model=vp._text(selection.get("model")) or vp.DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL,
+                voice=vp._text(selection.get("voice")) or vp.DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE,
+                base_url=vp._text(selection.get("openai_base_url")) or vp.DEFAULT_OPENAI_COMPATIBLE_TTS_BASE_URL,
+                api_key=vp._text(selection.get("openai_api_key")) or vp.DEFAULT_OPENAI_COMPATIBLE_TTS_API_KEY,
+            )
             return audio_bytes, audio_format, effective_backend, backend_note
         audio_bytes, audio_format = await _native_wyoming_synthesize(
             prompt,
