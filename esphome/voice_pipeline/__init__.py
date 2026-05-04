@@ -197,7 +197,13 @@ except Exception as exc:  # pragma: no cover - runtime dependency guard
 
 try:
     from pocket_tts import TTSModel as PocketTTSModel
-    from pocket_tts.utils.utils import PREDEFINED_VOICES as POCKET_TTS_PREDEFINED_VOICES
+    from pocket_tts.utils import utils as pocket_tts_utils
+
+    POCKET_TTS_PREDEFINED_VOICES = (
+        getattr(pocket_tts_utils, "PREDEFINED_VOICES", None)
+        or getattr(pocket_tts_utils, "_ORIGINS_OF_PREDEFINED_VOICES", None)
+        or {}
+    )
     POCKET_TTS_IMPORT_ERROR: Optional[str] = None
 except Exception as exc:  # pragma: no cover - runtime dependency guard
     PocketTTSModel = None

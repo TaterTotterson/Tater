@@ -56,7 +56,13 @@ except Exception:  # pragma: no cover - optional dependency
     KOKORO_VOICE_NAMES_BY_VARIANT = {}
 
 try:
-    from pocket_tts.utils.utils import PREDEFINED_VOICES as POCKET_TTS_PREDEFINED_VOICES
+    from pocket_tts.utils import utils as pocket_tts_utils
+
+    POCKET_TTS_PREDEFINED_VOICES = (
+        getattr(pocket_tts_utils, "PREDEFINED_VOICES", None)
+        or getattr(pocket_tts_utils, "_ORIGINS_OF_PREDEFINED_VOICES", None)
+        or {}
+    )
 except Exception:  # pragma: no cover - optional dependency
     POCKET_TTS_PREDEFINED_VOICES = {}
 
