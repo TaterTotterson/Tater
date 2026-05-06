@@ -51,6 +51,7 @@ SPEAKER_ID_MODEL_ROOT = Path(__file__).resolve().parents[1] / "agent_lab" / "mod
 SPEAKER_ID_PROFILES_PATH = SPEAKER_ID_AGENT_LABS_ROOT / "profiles.json"
 
 DEFAULT_SPEAKER_ID_ENABLED = False
+DEFAULT_SPEAKER_ID_BEST_MATCH = False
 DEFAULT_SPEAKER_ID_MODEL_SOURCE = "speechbrain/spkrec-ecapa-voxceleb"
 DEFAULT_SPEAKER_ID_MATCH_THRESHOLD = 0.68
 DEFAULT_SPEAKER_ID_MATCH_MARGIN = 0.05
@@ -88,6 +89,16 @@ def _setting_specs() -> List[Dict[str, Any]]:
             "description": "Try to identify which enrolled person is speaking before Hydra runs.",
         },
         {
+            "key": "VOICE_SPEAKER_ID_BEST_MATCH",
+            "label": "Best Match Mode",
+            "type": "checkbox",
+            "default": DEFAULT_SPEAKER_ID_BEST_MATCH,
+            "description": (
+                "Always use the closest enrolled speaker instead of requiring the threshold and margin. "
+                "Warning: unknown voices can be assigned to someone who is enrolled."
+            ),
+        },
+        {
             "key": "VOICE_SPEAKER_ID_MATCH_THRESHOLD",
             "label": "Match Threshold",
             "type": "number",
@@ -95,17 +106,23 @@ def _setting_specs() -> List[Dict[str, Any]]:
             "min": 0.0,
             "max": 1.0,
             "step": 0.01,
-            "description": "Higher values are stricter and reduce false matches.",
+            "description": (
+                "Higher values are stricter and reduce false matches. "
+                "Ignored when Best Match Mode is enabled."
+            ),
         },
         {
             "key": "VOICE_SPEAKER_ID_MATCH_MARGIN",
-            "label": "Best Match Margin",
+            "label": "Runner-up Margin",
             "type": "number",
             "default": DEFAULT_SPEAKER_ID_MATCH_MARGIN,
             "min": 0.0,
             "max": 1.0,
             "step": 0.01,
-            "description": "Require the best speaker score to beat the runner-up by at least this amount.",
+            "description": (
+                "Require the best speaker score to beat the runner-up by at least this amount. "
+                "Ignored when Best Match Mode is enabled."
+            ),
         },
         {
             "key": "VOICE_SPEAKER_ID_MIN_SPEECH_S",
@@ -171,6 +188,10 @@ def _get_text_setting(name: str, default: str) -> str:
 
 def speaker_id_enabled() -> bool:
     return _get_bool_setting("VOICE_SPEAKER_ID_ENABLED", DEFAULT_SPEAKER_ID_ENABLED)
+
+
+def _best_match_enabled() -> bool:
+    return _get_bool_setting("VOICE_SPEAKER_ID_BEST_MATCH", DEFAULT_SPEAKER_ID_BEST_MATCH)
 
 
 def _match_threshold() -> float:
@@ -315,6 +336,19 @@ def _all_speakers() -> List[Dict[str, Any]]:
     payload = _load_profiles()
     rows = payload.get("speakers") if isinstance(payload.get("speakers"), list) else []
     return [_normalize_speaker_row(row) for row in rows if isinstance(row, dict)]
+
+
+def speaker_identity_aliases() -> List[Dict[str, Any]]:
+    return [
+        {
+            "platform": "voice_core",
+            "external_id": _vp()._text(row.get("id")),
+            "label": _vp()._text(row.get("name")) or _vp()._text(row.get("id")),
+            "kind": "speaker_id",
+        }
+        for row in _all_speakers()
+        if _vp()._text(row.get("id"))
+    ]
 
 
 def _save_speakers(rows: List[Dict[str, Any]]) -> None:
@@ -684,12 +718,25 @@ def match_speaker_for_audio(
     best = scored[0]
     second_score = float(scored[1].get("score") or 0.0) if len(scored) > 1 else -1.0
     margin = float(best.get("score") or 0.0) - second_score
-    matched = bool(float(best.get("score") or 0.0) >= _match_threshold() and margin >= _match_margin())
+    best_match = _best_match_enabled()
+    matched = bool(
+        best_match
+        or (float(best.get("score") or 0.0) >= _match_threshold() and margin >= _match_margin())
+    )
     top_name = _vp()._text(best.get("speaker_name")) or "unknown"
     top_score = float(best.get("score") or 0.0)
     if matched:
-        _log_info("match success speaker=%s score=%.3f margin=%.3f", top_name, top_score, float(margin))
-        _debug(f"match success speaker={top_name!r} score={top_score:.3f} margin={float(margin):.3f}")
+        _log_info(
+            "match success speaker=%s score=%.3f margin=%.3f best_match=%s",
+            top_name,
+            top_score,
+            float(margin),
+            bool(best_match),
+        )
+        _debug(
+            f"match success speaker={top_name!r} score={top_score:.3f} "
+            f"margin={float(margin):.3f} best_match={bool(best_match)}"
+        )
     else:
         _log_info(
             "match no-hit top_speaker=%s score=%.3f margin=%.3f threshold=%.3f required_margin=%.3f",
@@ -705,13 +752,14 @@ def match_speaker_for_audio(
         )
     return {
         "matched": matched,
-        "reason": "matched" if matched else "below_threshold",
+        "reason": "best_match" if matched and best_match else ("matched" if matched else "below_threshold"),
         "speaker_id": _vp()._text(best.get("speaker_id")),
         "speaker_name": _vp()._text(best.get("speaker_name")),
         "score": float(best.get("score") or 0.0),
         "margin": float(margin),
         "threshold": _match_threshold(),
         "match_margin": _match_margin(),
+        "best_match": bool(best_match),
         "sample_count": int(best.get("sample_count") or 0),
         "candidates": scored[:3],
     }
@@ -809,6 +857,7 @@ def panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
         "availability": availability,
         "summary_metrics": [
             {"label": "Enabled", "value": "Yes" if speaker_id_enabled() else "No"},
+            {"label": "Mode", "value": "Best match" if _best_match_enabled() else "Threshold"},
             {"label": "Enrolled Speakers", "value": len(speakers)},
             {"label": "Pending Capture", "value": pending.get("speaker_name") or "-"},
             {"label": "Model", "value": _model_source()},
