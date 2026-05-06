@@ -803,7 +803,6 @@ function _isLikelyRedisFailureDetail(detail) {
   }
   return (
     message.includes("redis") ||
-    message.includes("authentication required") ||
     message.includes("noauth") ||
     message.includes("wrongpass")
   );
@@ -13748,21 +13747,21 @@ async function init() {
   bindNav();
   bindRuntimeSummary();
   state.settingsTab = normalizeSettingsTab(state.settingsTab || "general");
-  const redisStatus = await ensureRedisSetup();
-  if (!redisStatus?.connected) {
-    const root = document.getElementById("view-root");
-    renderRedisBootstrapView(root, redisStatus, normalizeRedisEncryptionStatusPayload({}));
-    return;
-  }
   try {
     await ensureWebuiAuth();
   } catch (error) {
     if (error?.code === "REDIS_SETUP_REQUIRED" || _isLikelyRedisFailureDetail(error?.message || "")) {
       const root = document.getElementById("view-root");
-      renderRedisBootstrapView(root, state.redisStatus || redisStatus, normalizeRedisEncryptionStatusPayload({}));
+      renderRedisBootstrapView(root, state.redisStatus || {}, normalizeRedisEncryptionStatusPayload({}));
       return;
     }
     throw error;
+  }
+  const redisStatus = await ensureRedisSetup();
+  if (!redisStatus?.connected) {
+    const root = document.getElementById("view-root");
+    renderRedisBootstrapView(root, redisStatus, normalizeRedisEncryptionStatusPayload({}));
+    return;
   }
   await refreshBranding();
   await refreshHealth();
