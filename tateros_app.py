@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 from redis.exceptions import RedisError
 
 import core_registry as core_registry_module
+import people as people_module
 import verba_registry as verba_registry_module
 import portal_registry as portal_registry_module
 from esphome import home as esphome_home_module
@@ -2785,6 +2786,11 @@ class CoreTabActionRequest(BaseModel):
     payload: Dict[str, Any] = Field(default_factory=dict)
 
 
+class PeopleActionRequest(BaseModel):
+    action: str = Field(min_length=1)
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
+
 class AppSettingsRequest(BaseModel):
     username: Optional[str] = None
     user_avatar: Optional[str] = None
@@ -5197,6 +5203,24 @@ def clear_hydra_data(payload: HydraDataClearRequest) -> Dict[str, Any]:
     }
 
 
+@app.get("/api/settings/people")
+def get_people_settings() -> Dict[str, Any]:
+    return people_module.panel_payload(redis_client)
+
+
+@app.post("/api/settings/people/action")
+def run_people_settings_action(payload: PeopleActionRequest) -> Dict[str, Any]:
+    try:
+        return people_module.handle_action(payload.action, payload.payload, redis_client)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc) or "People item not found.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc) or "Invalid People action.") from exc
+    except Exception as exc:
+        logger.exception("[people] action failed action=%s", payload.action)
+        raise HTTPException(status_code=500, detail=str(exc) or "People action failed.") from exc
+
+
 @app.get("/api/settings")
 def get_settings() -> Dict[str, Any]:
     chat_settings = redis_client.hgetall("chat_settings") or {}
@@ -5320,6 +5344,7 @@ def get_settings() -> Dict[str, Any]:
         "unifi_protect_api_key": unifi_protect_settings.get("api_key", ""),
         "integrations": get_integration_catalog(),
         "integration_runtime": integration_runtime_status(redis_client),
+        "people": people_module.panel_payload(redis_client),
         "vision_api_base": str(vision_settings.get("api_base") or "http://127.0.0.1:1234"),
         "vision_model": str(vision_settings.get("model") or "qwen2.5-vl-7b-instruct"),
         "vision_api_key": str(vision_settings.get("api_key") or ""),

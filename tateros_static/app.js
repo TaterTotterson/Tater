@@ -135,7 +135,7 @@ const VIEW_META = {
   settings: { title: "Settings", subtitle: "Global WebUI and Tater runtime configuration." },
 };
 
-const SETTINGS_TAB_KEYS = ["general", "models", "hydra", "integrations", "esphome", "redis", "misc", "advanced"];
+const SETTINGS_TAB_KEYS = ["general", "people", "models", "hydra", "integrations", "esphome", "redis", "misc", "advanced"];
 
 const POPUP_EFFECT_STYLE_CHOICES = ["disabled", "flame", "dust", "glitch", "portal", "melt"];
 const POPUP_EFFECT_CLOSE_MS = {
@@ -10392,6 +10392,378 @@ function renderRedisBootstrapView(root, redisStatus, redisEncryptionStatus) {
   });
 }
 
+function renderPeopleSummaryMetrics(metrics = []) {
+  const rows = Array.isArray(metrics) ? metrics : [];
+  if (!rows.length) {
+    return "";
+  }
+  return `
+    <div class="core-manager-summary-grid">
+      ${rows
+        .map(
+          (row) => `
+            <div class="core-manager-summary-item">
+              <div class="small">${escapeHtml(String(row?.label || ""))}</div>
+              <strong>${escapeHtml(String(row?.value ?? "-"))}</strong>
+            </div>
+          `
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function renderPeoplePersonOptions(people = [], selectedId = "") {
+  const selected = String(selectedId || "").trim();
+  const rows = Array.isArray(people) ? people : [];
+  return rows
+    .map((person) => {
+      const personId = String(person?.id || "").trim();
+      const label = String(person?.display_name || personId || "Person").trim() || "Person";
+      return `<option value="${escapeHtml(personId)}" ${personId === selected ? "selected" : ""}>${escapeHtml(label)}</option>`;
+    })
+    .join("");
+}
+
+function renderPeopleAliasList(person) {
+  const personId = String(person?.id || "").trim();
+  const aliases = Array.isArray(person?.aliases) ? person.aliases : [];
+  if (!aliases.length) {
+    return `<div class="small">No linked identities yet.</div>`;
+  }
+  return `
+    <div class="core-data-table-wrap">
+      <table class="core-data-table">
+        <thead>
+          <tr><th>Platform</th><th>Identity</th><th>Type</th><th></th></tr>
+        </thead>
+        <tbody>
+          ${aliases
+            .map((alias) => {
+              const platform = String(alias?.platform || "").trim();
+              const portalLabel = hydraPlatformLabel(platform) || platform;
+              const externalId = String(alias?.external_id || "").trim();
+              const label = String(alias?.label || externalId || "").trim();
+              const kind = String(alias?.kind || "user").trim() || "user";
+              return `
+                <tr>
+                  <td>${escapeHtml(portalLabel)}</td>
+                  <td>
+                    <strong>${escapeHtml(`${portalLabel}: ${label || externalId}`)}</strong>
+                    <div class="small">${escapeHtml(externalId)}</div>
+                  </td>
+                  <td>${escapeHtml(kind)}</td>
+                  <td>
+                    <button
+                      type="button"
+                      class="inline-btn danger people-alias-detach"
+                      data-person-id="${escapeHtml(personId)}"
+                      data-platform="${escapeHtml(platform)}"
+                      data-external-id="${escapeHtml(externalId)}"
+                    >Unlink</button>
+                  </td>
+                </tr>
+              `;
+            })
+            .join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderPeopleSettingsPanel(peoplePayload = {}) {
+  const payload = peoplePayload && typeof peoplePayload === "object" ? peoplePayload : {};
+  const settings = payload.settings && typeof payload.settings === "object" ? payload.settings : {};
+  const people = Array.isArray(payload.people) ? payload.people : [];
+  const identities = Array.isArray(payload.identities) ? payload.identities : [];
+  const personOptions = renderPeoplePersonOptions(people);
+  const manualMatchOnly = boolFromAny(settings.manual_match_only, true);
+  const peopleHtml = people.length
+    ? people
+        .map((person) => {
+          const personId = String(person?.id || "").trim();
+          const displayName = String(person?.display_name || "Person").trim() || "Person";
+          const isAdmin = boolFromAny(person?.is_admin, false);
+          const notes = String(person?.notes || "").trim();
+          return `
+            <article class="card core-manager-item people-person-card" data-person-id="${escapeHtml(personId)}">
+              <div class="card-head">
+                <h3 class="card-title">${escapeHtml(displayName)}</h3>
+              </div>
+              <div class="form-grid two-col">
+                <label>Display Name
+                  <input type="text" data-people-field="display_name" value="${escapeHtml(displayName)}" />
+                </label>
+                <label>Notes
+                  <input type="text" data-people-field="notes" value="${escapeHtml(notes)}" />
+                </label>
+              </div>
+              <label style="margin-top:12px;">
+                Admin
+                ${renderToggleRow(
+                  `<input class="toggle-input" type="checkbox" data-people-field="is_admin" ${isAdmin ? "checked" : ""} />`
+                )}
+                <div class="small">Admin people can run admin-only tools from any linked portal identity.</div>
+              </label>
+              <div class="inline-row" style="margin-top:12px;">
+                <button type="button" class="action-btn people-person-save">Save Person</button>
+                <button type="button" class="inline-btn danger people-person-delete">Delete</button>
+                <span class="small core-manager-status"></span>
+              </div>
+              <section class="core-inline-section" style="margin-top:12px;">
+                <div class="small core-inline-section-title">Linked Identities</div>
+                ${renderPeopleAliasList(person)}
+              </section>
+            </article>
+          `;
+        })
+        .join("")
+    : renderNotice("No people yet. Create a person, then link portal or voice identities to them.");
+
+  const identitiesHtml = identities.length
+    ? `
+        <div class="core-data-table-wrap">
+          <table class="core-data-table">
+            <thead>
+              <tr><th>Platform</th><th>Identity</th><th>Linked Person</th><th>Attach</th></tr>
+            </thead>
+            <tbody>
+              ${identities
+                .map((identity) => {
+                  const platform = String(identity?.platform || "").trim();
+                  const portalLabel = hydraPlatformLabel(platform) || platform;
+                  const externalId = String(identity?.external_id || "").trim();
+                  const label = String(identity?.label || externalId || "").trim();
+                  const kind = String(identity?.kind || "user").trim() || "user";
+                  const source = String(identity?.source || "").trim();
+                  const factCountRaw = Number(identity?.fact_count ?? 0);
+                  const factCount = Number.isFinite(factCountRaw) ? Math.max(0, Math.floor(factCountRaw)) : 0;
+                  const personId = String(identity?.person_id || "").trim();
+                  const personName = String(identity?.person_name || "").trim();
+                  const metaParts = [kind, source, factCount > 0 ? `${factCount} facts` : ""].filter(Boolean);
+                  return `
+                    <tr
+                      class="people-identity-row"
+                      data-platform="${escapeHtml(platform)}"
+                      data-external-id="${escapeHtml(externalId)}"
+                      data-label="${escapeHtml(label)}"
+                      data-kind="${escapeHtml(kind)}"
+                    >
+                      <td>${escapeHtml(portalLabel)}</td>
+                      <td>
+                        <strong>${escapeHtml(`${portalLabel}: ${label || externalId}`)}</strong>
+                        <div class="small">${escapeHtml(externalId)}${metaParts.length ? ` • ${escapeHtml(metaParts.join(" • "))}` : ""}</div>
+                      </td>
+                      <td>${personName ? escapeHtml(personName) : '<span class="small">Unlinked</span>'}</td>
+                      <td>
+                        <div class="inline-row">
+                          <select class="people-identity-person-select">
+                            <option value="">Choose person...</option>
+                            ${renderPeoplePersonOptions(people, personId)}
+                          </select>
+                          <button type="button" class="inline-btn people-identity-attach" ${people.length ? "" : "disabled"}>Link</button>
+                        </div>
+                      </td>
+                    </tr>
+                  `;
+                })
+                .join("")}
+            </tbody>
+          </table>
+        </div>
+      `
+    : renderNotice("No portal or voice identities discovered yet.");
+
+  return `
+    <section class="settings-tab-panel" data-settings-panel="people">
+      ${renderSettingsSectionIntro(
+        "People",
+        "Map portal users and voice speakers to one person so memory, personal tools, and multi-user verbs can share the right context.",
+        "ID"
+      )}
+      <div class="form-grid">
+        <section class="core-inline-section">
+          <div class="small core-inline-section-title">Identity Matching</div>
+          ${renderPeopleSummaryMetrics(Array.isArray(payload.summary_metrics) ? payload.summary_metrics : [])}
+          <label style="margin-top:12px;">
+            Manual Matches Only
+            ${renderToggleRow(
+              `<input id="people_manual_match_only" class="toggle-input" type="checkbox" ${manualMatchOnly ? "checked" : ""} />`
+            )}
+            <div class="small">
+              When enabled, Tater only resolves a person from identities you explicitly link here. Disable it to allow exact display-name fallback.
+            </div>
+          </label>
+          <div class="inline-row" style="margin-top:12px;">
+            <button type="button" id="people-settings-save" class="action-btn">Save People Settings</button>
+            <span class="small core-manager-status"></span>
+          </div>
+        </section>
+
+        <section class="core-inline-section">
+          <div class="small core-inline-section-title">Create Person</div>
+          <div class="form-grid two-col">
+            <label>Display Name
+              <input id="people_create_display_name" type="text" placeholder="Brandon" />
+            </label>
+          </div>
+          <div class="inline-row" style="margin-top:12px;">
+            <button type="button" id="people-create-person" class="action-btn">Create Person</button>
+            <span class="small core-manager-status"></span>
+          </div>
+        </section>
+
+        <section class="core-inline-section">
+          <div class="small core-inline-section-title">Manual Link</div>
+          <div class="form-grid two-col">
+            <label>Person
+              <select id="people_manual_person" ${people.length ? "" : "disabled"}>
+                <option value="">Choose person...</option>
+                ${personOptions}
+              </select>
+            </label>
+            <label>Platform
+              <input id="people_manual_platform" type="text" placeholder="discord" />
+            </label>
+            <label>External ID
+              <input id="people_manual_external_id" type="text" placeholder="123456789" />
+            </label>
+            <label>Label
+              <input id="people_manual_label" type="text" placeholder="Brandon" />
+            </label>
+          </div>
+          <div class="inline-row" style="margin-top:12px;">
+            <button type="button" id="people-manual-link" class="action-btn" ${people.length ? "" : "disabled"}>Link Identity</button>
+            <span class="small core-manager-status"></span>
+          </div>
+        </section>
+
+        <section class="core-inline-section">
+          <div class="small core-inline-section-title">People</div>
+          <div class="core-tab-items">${peopleHtml}</div>
+        </section>
+
+        <section class="core-inline-section">
+          <div class="small core-inline-section-title">Discovered Identities</div>
+          ${identitiesHtml}
+        </section>
+      </div>
+    </section>
+  `;
+}
+
+function bindSettingsPeopleActions() {
+  const runPeopleAction = async (host, action, payload, fallbackMessage = "People updated.") => {
+    const statusHost = host instanceof HTMLElement ? host : null;
+    setCoreManagerStatus(statusHost, "Working...");
+    try {
+      const result = await api("/api/settings/people/action", {
+        method: "POST",
+        body: JSON.stringify({ action, payload }),
+      });
+      state.settingsTab = "people";
+      showToast(String(result?.message || fallbackMessage).trim() || fallbackMessage);
+      await loadSettingsView();
+      return result;
+    } catch (error) {
+      const message = String(error?.message || "People action failed.");
+      setCoreManagerStatus(statusHost, `Failed: ${message}`);
+      showToast(`Failed: ${message}`, "error", 3600);
+      throw error;
+    }
+  };
+
+  document.getElementById("people-settings-save")?.addEventListener("click", async (event) => {
+    const host = event.currentTarget?.closest?.(".core-inline-section");
+    await runPeopleAction(
+      host,
+      "people_settings_save",
+      { values: { manual_match_only: Boolean(document.getElementById("people_manual_match_only")?.checked) } },
+      "People settings saved."
+    );
+  });
+
+  document.getElementById("people-create-person")?.addEventListener("click", async (event) => {
+    const host = event.currentTarget?.closest?.(".core-inline-section");
+    const displayName = String(document.getElementById("people_create_display_name")?.value || "").trim();
+    await runPeopleAction(host, "people_create", { values: { display_name: displayName } }, "Person created.");
+  });
+
+  document.getElementById("people-manual-link")?.addEventListener("click", async (event) => {
+    const host = event.currentTarget?.closest?.(".core-inline-section");
+    await runPeopleAction(
+      host,
+      "people_alias_attach",
+      {
+        person_id: String(document.getElementById("people_manual_person")?.value || "").trim(),
+        platform: String(document.getElementById("people_manual_platform")?.value || "").trim(),
+        external_id: String(document.getElementById("people_manual_external_id")?.value || "").trim(),
+        label: String(document.getElementById("people_manual_label")?.value || "").trim(),
+        kind: "user",
+      },
+      "Identity linked."
+    );
+  });
+
+  document.querySelectorAll(".people-person-save").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      const card = event.currentTarget?.closest?.(".people-person-card");
+      const personId = String(card?.dataset?.personId || "").trim();
+      const values = {};
+      card?.querySelectorAll?.("[data-people-field]").forEach((input) => {
+        const key = String(input?.dataset?.peopleField || "").trim();
+        if (key) {
+          values[key] = input.type === "checkbox" ? Boolean(input.checked) : input.value;
+        }
+      });
+      await runPeopleAction(card, "people_save", { person_id: personId, values }, "Person saved.");
+    });
+  });
+
+  document.querySelectorAll(".people-person-delete").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      const card = event.currentTarget?.closest?.(".people-person-card");
+      const personId = String(card?.dataset?.personId || "").trim();
+      const title = String(card?.querySelector?.(".card-title")?.textContent || "this person").trim() || "this person";
+      if (!personId || !window.confirm(`Delete ${title}? Identity links will be removed.`)) {
+        return;
+      }
+      await runPeopleAction(card, "people_delete", { person_id: personId }, "Person deleted.");
+    });
+  });
+
+  document.querySelectorAll(".people-alias-detach").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      const buttonEl = event.currentTarget;
+      const personId = String(buttonEl?.dataset?.personId || "").trim();
+      const platform = String(buttonEl?.dataset?.platform || "").trim();
+      const externalId = String(buttonEl?.dataset?.externalId || "").trim();
+      const host = buttonEl?.closest?.(".people-person-card");
+      await runPeopleAction(host, "people_alias_detach", { person_id: personId, platform, external_id: externalId }, "Identity unlinked.");
+    });
+  });
+
+  document.querySelectorAll(".people-identity-attach").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      const row = event.currentTarget?.closest?.(".people-identity-row");
+      const personId = String(row?.querySelector?.(".people-identity-person-select")?.value || "").trim();
+      await runPeopleAction(
+        row,
+        "people_alias_attach",
+        {
+          person_id: personId,
+          platform: String(row?.dataset?.platform || "").trim(),
+          external_id: String(row?.dataset?.externalId || "").trim(),
+          label: String(row?.dataset?.label || "").trim(),
+          kind: String(row?.dataset?.kind || "user").trim() || "user",
+        },
+        "Identity linked."
+      );
+    });
+  });
+}
+
 async function loadSettingsView() {
   const root = document.getElementById("view-root");
   setRedisBootstrapMode(false);
@@ -10418,6 +10790,7 @@ async function loadSettingsView() {
   );
   const hydraDefaults =
     settings?.hydra_defaults && typeof settings.hydra_defaults === "object" ? settings.hydra_defaults : {};
+  const peoplePayload = settings?.people && typeof settings.people === "object" ? settings.people : {};
   const normalizeHydraBaseRow = (row) => ({
     host: String(row?.host || "").trim(),
     port: String(row?.port || "").trim(),
@@ -10620,11 +10993,12 @@ async function loadSettingsView() {
       <div class="card-head">
         <h3 class="card-title">Settings</h3>
       </div>
-      <div class="small">Categories: General, Models, Hydra, Integrations, ESPHome, Redis, Misc, Advanced.</div>
+      <div class="small">Categories: General, People, Models, Hydra, Integrations, ESPHome, Redis, Misc, Advanced.</div>
       <div id="settings-status" class="small" style="margin-top: 6px;"></div>
 
       <div class="settings-tabs">
         <button type="button" class="settings-tab-btn active" data-settings-tab="general">General</button>
+        <button type="button" class="settings-tab-btn" data-settings-tab="people">People</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="models">Models</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="hydra">Hydra</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="integrations">Integrations</button>
@@ -10744,6 +11118,8 @@ async function loadSettingsView() {
             </div>
           </div>
         </section>
+
+        ${renderPeopleSettingsPanel(peoplePayload)}
 
         <section class="settings-tab-panel" data-settings-panel="models">
           ${renderSettingsSectionIntro(
@@ -11550,7 +11926,7 @@ async function loadSettingsView() {
                   <select id="set_admin_only_plugins" class="settings-multiselect" multiple size="14">
                     ${adminOptionHtml}
                   </select>
-                  <div class="small">Selected plugins can only run for portal admin users.</div>
+                  <div class="small">Selected plugins can only run for linked People marked as admin.</div>
                 </label>
                 <div class="inline-row">
                   <button type="button" id="settings-admin-defaults" class="inline-btn">Reset To Defaults</button>
@@ -13518,6 +13894,7 @@ async function loadSettingsView() {
   bindSettingsIntegrationDevices();
   bindSettingsIntegrationTabs(root);
   bindSettingsIntegrationRuntime();
+  bindSettingsPeopleActions();
 
   document.getElementById("settings-form").addEventListener("submit", (event) => {
     event.preventDefault();

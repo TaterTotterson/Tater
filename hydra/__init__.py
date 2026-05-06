@@ -2437,6 +2437,12 @@ async def _run_astraeus_plan(
         room_ctx = memory_context.get("room") if isinstance(memory_context.get("room"), dict) else {}
         payload["memory_context"] = {
             "user_memory": _short_text(user_ctx.get("summary"), limit=1200),
+            "user_name": _short_text(
+                user_ctx.get("person_name") or user_ctx.get("display_name") or user_ctx.get("user_id"),
+                limit=120,
+            ),
+            "person_id": _short_text(user_ctx.get("person_id"), limit=120),
+            "source_user_id": _short_text(user_ctx.get("source_user_id") or user_ctx.get("user_id"), limit=120),
             "room_memory": _short_text(room_ctx.get("summary"), limit=1200),
         }
     if capability_catalog:
@@ -4449,6 +4455,16 @@ async def _run_hydra_turn_impl(
     r = redis_client or default_redis
     platform = normalize_platform(platform)
     origin_payload = dict(origin) if isinstance(origin, dict) else {}
+    try:
+        import people as people_identity
+
+        people_identity.apply_resolution_to_origin(
+            platform=platform,
+            origin=origin_payload,
+            redis_client=r,
+        )
+    except Exception:
+        pass
     scope = _resolve_hydra_scope(platform, scope, origin_payload)
     input_artifacts = origin_payload.get("input_artifacts") if isinstance(origin_payload.get("input_artifacts"), list) else []
     if input_artifacts:

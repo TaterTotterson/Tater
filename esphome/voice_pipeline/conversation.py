@@ -171,8 +171,12 @@ async def _run_hydra_turn_for_voice(*, transcript: str, conv_id: str, session: V
     if not isinstance(context, dict):
         context = {}
     session_context = session.context if isinstance(session.context, dict) else {}
+    session_has_speaker = bool(vp._text(session_context.get("speaker_id")) or vp._text(session_context.get("speaker_name")))
     if session_context:
         context.update(session_context)
+    if not session_has_speaker:
+        for key in ("speaker_id", "speaker_name", "speaker_score"):
+            context.pop(key, None)
 
     registry = dict(vp.verba_registry.get_verba_registry() or {})
     max_rounds, max_tool_calls = vp.resolve_agent_limits(vp.redis_client)
@@ -185,22 +189,36 @@ async def _run_hydra_turn_for_voice(*, transcript: str, conv_id: str, session: V
     }
     device_name = vp._text(context.get("device_name"))
     area_name = vp._text(context.get("area_name")) or vp._text(context.get("room_name"))
+    speaker_id = vp._text(context.get("speaker_id"))
     speaker_name = vp._text(context.get("speaker_name"))
     if device_name:
         origin["device_name"] = device_name
     if area_name:
         origin["area_name"] = area_name
+    if speaker_id:
+        origin["speaker_id"] = speaker_id
     if speaker_name:
         origin["speaker_name"] = speaker_name
+    with contextlib.suppress(Exception):
+        import people as people_identity
+
+        people_identity.apply_resolution_to_origin(
+            platform="voice_core",
+            origin=origin,
+            redis_client=vp.redis_client,
+        )
 
     platform_preamble = ""
-    if device_name or area_name or speaker_name:
+    person_name = vp._text(origin.get("person_name"))
+    if device_name or area_name or speaker_name or person_name:
         speaker_line = f"- Speaker: {speaker_name}\n" if speaker_name else ""
+        person_line = f"- Person: {person_name}\n" if person_name else ""
         platform_preamble = (
             "VOICE CONTEXT:\n"
             f"- Device: {device_name or '(unknown)'}\n"
             f"- Area/Room: {area_name or '(unknown)'}\n"
-            f"{speaker_line}\n"
+            f"{speaker_line}"
+            f"{person_line}\n"
             "DEFAULT ROOM RULE:\n"
             "If the user asks to control lights, switches, fans, speakers, or similar devices and does not specify a room, "
             "assume they mean the Area/Room shown above.\n\n"
