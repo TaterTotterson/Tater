@@ -10589,7 +10589,7 @@ function renderPeopleSettingsPanel(peoplePayload = {}) {
           <div class="small core-inline-section-title">Identity Resolution</div>
           ${renderPeopleSummaryMetrics(Array.isArray(payload.summary_metrics) ? payload.summary_metrics : [])}
           <div class="small" style="margin-top:12px;">
-            Tater auto-discovers portal and voice identities, but only resolves a Person from identities you explicitly link here.
+            Tater auto-discovers portal and voice identities, but only resolves a Person from identities you explicitly link from the discovered list.
           </div>
         </section>
 
@@ -10602,31 +10602,6 @@ function renderPeopleSettingsPanel(peoplePayload = {}) {
           </div>
           <div class="inline-row" style="margin-top:12px;">
             <button type="button" id="people-create-person" class="action-btn">Create Person</button>
-            <span class="small core-manager-status"></span>
-          </div>
-        </section>
-
-        <section class="core-inline-section">
-          <div class="small core-inline-section-title">Manual Link</div>
-          <div class="form-grid two-col">
-            <label>Person
-              <select id="people_manual_person" ${people.length ? "" : "disabled"}>
-                <option value="">Choose person...</option>
-                ${personOptions}
-              </select>
-            </label>
-            <label>Platform
-              <input id="people_manual_platform" type="text" placeholder="discord" />
-            </label>
-            <label>External ID
-              <input id="people_manual_external_id" type="text" placeholder="123456789" />
-            </label>
-            <label>Label
-              <input id="people_manual_label" type="text" placeholder="Tater" />
-            </label>
-          </div>
-          <div class="inline-row" style="margin-top:12px;">
-            <button type="button" id="people-manual-link" class="action-btn" ${people.length ? "" : "disabled"}>Link Identity</button>
             <span class="small core-manager-status"></span>
           </div>
         </section>
@@ -10670,22 +10645,6 @@ function bindSettingsPeopleActions() {
     const host = event.currentTarget?.closest?.(".core-inline-section");
     const displayName = String(document.getElementById("people_create_display_name")?.value || "").trim();
     await runPeopleAction(host, "people_create", { values: { display_name: displayName } }, "Person created.");
-  });
-
-  document.getElementById("people-manual-link")?.addEventListener("click", async (event) => {
-    const host = event.currentTarget?.closest?.(".core-inline-section");
-    await runPeopleAction(
-      host,
-      "people_alias_attach",
-      {
-        person_id: String(document.getElementById("people_manual_person")?.value || "").trim(),
-        platform: String(document.getElementById("people_manual_platform")?.value || "").trim(),
-        external_id: String(document.getElementById("people_manual_external_id")?.value || "").trim(),
-        label: String(document.getElementById("people_manual_label")?.value || "").trim(),
-        kind: "user",
-      },
-      "Identity linked."
-    );
   });
 
   document.querySelectorAll(".people-person-save").forEach((button) => {
