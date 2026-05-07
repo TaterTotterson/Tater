@@ -1123,6 +1123,17 @@ def _core_system_prompt_fragments(
     redis_client: Any,
     memory_context_payload: Optional[Dict[str, Any]],
 ) -> List[str]:
+    out: List[str] = []
+    if str(role or "").strip().lower() in {"chat", "hermes", "memory_context", ""}:
+        try:
+            import people as people_identity
+
+            person_instruction = people_identity.person_instruction_prompt_from_origin(origin)
+        except Exception:
+            person_instruction = ""
+        if person_instruction:
+            out.append(person_instruction)
+
     fragments = collect_hydra_system_prompt_fragments(
         role=role,
         platform=platform,
@@ -1131,8 +1142,7 @@ def _core_system_prompt_fragments(
         redis_client=redis_client,
         memory_context=memory_context_payload,
     )
-    out: List[str] = []
-    seen: set[str] = set()
+    seen: set[str] = set(out)
     for item in fragments:
         text = _coerce_text(item).strip()
         if not text or text in seen:
