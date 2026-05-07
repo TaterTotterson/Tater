@@ -420,12 +420,14 @@ async def _build_hydra_llm_client_pool(
 
     base_client_host = str(getattr(base_llm_client, "host", "") or "").rstrip("/")
     base_client_model = str(getattr(base_llm_client, "model", "") or "").strip()
-    shared_clients: Dict[tuple[str, str], Any] = {}
+    base_client_api_key = str(getattr(base_llm_client, "api_key", "") or "").strip()
+    shared_clients: Dict[tuple[str, str, str], Any] = {}
 
     for role in HYDRA_BEAST_CONFIG_ROLE_IDS:
         raw_host = _safe_get_text(_hydra_role_llm_key(role, "host"))
         raw_port = _safe_get_text(_hydra_role_llm_key(role, "port"))
         raw_model = _safe_get_text(_hydra_role_llm_key(role, "model"))
+        raw_api_key = _safe_get_text(_hydra_role_llm_key(role, "api_key"))
         endpoint = _build_hydra_llm_endpoint(raw_host, raw_port)
         if not endpoint or not raw_model:
             missing_or_invalid_roles.append(role)
@@ -436,19 +438,20 @@ async def _build_hydra_llm_client_pool(
         if (
             base_client_model
             and raw_model == base_client_model
+            and (not raw_api_key or raw_api_key == base_client_api_key)
             and endpoint_key in {base_client_host, base_host_no_v1}
         ):
             role_clients[role] = base_llm_client
             continue
 
-        signature = (endpoint_key, str(raw_model).strip())
+        signature = (endpoint_key, str(raw_model).strip(), raw_api_key)
         existing = shared_clients.get(signature)
         if existing is not None:
             role_clients[role] = existing
             continue
 
         try:
-            client = get_llm_client_from_env(host=endpoint, model=raw_model)
+            client = get_llm_client_from_env(host=endpoint, model=raw_model, api_key=raw_api_key)
         except Exception:
             missing_or_invalid_roles.append(role)
             continue

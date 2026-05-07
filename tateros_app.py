@@ -750,7 +750,7 @@ def _normalize_hydra_base_server_rows(rows: Any) -> List[Dict[str, str]]:
         raise HTTPException(status_code=400, detail="hydra_base_servers must be a list")
 
     normalized: List[Dict[str, str]] = []
-    seen: set[Tuple[str, str]] = set()
+    seen: set[Tuple[str, str, str]] = set()
 
     for idx, row in enumerate(rows):
         if not isinstance(row, dict):
@@ -759,6 +759,7 @@ def _normalize_hydra_base_server_rows(rows: Any) -> List[Dict[str, str]]:
         host = str(row.get("host") or "").strip()
         port = str(row.get("port") or "").strip()
         model = str(row.get("model") or "").strip()
+        api_key = str(row.get("api_key") or "").strip()
 
         if not host and not port and not model:
             continue
@@ -779,7 +780,7 @@ def _normalize_hydra_base_server_rows(rows: Any) -> List[Dict[str, str]]:
         host_with_scheme = host.startswith(("http://", "https://"))
         canonical_host = f"{parsed.scheme}://{hostname}" if host_with_scheme else hostname
         canonical_port = str(parsed.port) if parsed.port is not None else ""
-        signature = (endpoint, model)
+        signature = (endpoint, model, api_key)
         if signature in seen:
             continue
         seen.add(signature)
@@ -788,6 +789,7 @@ def _normalize_hydra_base_server_rows(rows: Any) -> List[Dict[str, str]]:
                 "host": canonical_host,
                 "port": canonical_port,
                 "model": model,
+                "api_key": api_key,
             }
         )
 
@@ -2856,23 +2858,29 @@ class AppSettingsRequest(BaseModel):
     hydra_llm_host: Optional[str] = None
     hydra_llm_port: Optional[str] = None
     hydra_llm_model: Optional[str] = None
+    hydra_llm_api_key: Optional[str] = None
     hydra_base_servers: Optional[List[Dict[str, Any]]] = None
     hydra_beast_mode_enabled: Optional[bool] = None
     hydra_llm_chat_host: Optional[str] = None
     hydra_llm_chat_port: Optional[str] = None
     hydra_llm_chat_model: Optional[str] = None
+    hydra_llm_chat_api_key: Optional[str] = None
     hydra_llm_astraeus_host: Optional[str] = None
     hydra_llm_astraeus_port: Optional[str] = None
     hydra_llm_astraeus_model: Optional[str] = None
+    hydra_llm_astraeus_api_key: Optional[str] = None
     hydra_llm_thanatos_host: Optional[str] = None
     hydra_llm_thanatos_port: Optional[str] = None
     hydra_llm_thanatos_model: Optional[str] = None
+    hydra_llm_thanatos_api_key: Optional[str] = None
     hydra_llm_minos_host: Optional[str] = None
     hydra_llm_minos_port: Optional[str] = None
     hydra_llm_minos_model: Optional[str] = None
+    hydra_llm_minos_api_key: Optional[str] = None
     hydra_llm_hermes_host: Optional[str] = None
     hydra_llm_hermes_port: Optional[str] = None
     hydra_llm_hermes_model: Optional[str] = None
+    hydra_llm_hermes_api_key: Optional[str] = None
     hydra_max_ledger_items: Optional[int] = None
     hydra_step_retry_limit: Optional[int] = None
     hydra_astraeus_plan_review_enabled: Optional[bool] = None
@@ -5273,6 +5281,7 @@ def get_settings() -> Dict[str, Any]:
             "host": str(row.get("host") or "").strip(),
             "port": str(row.get("port") or "").strip(),
             "model": str(row.get("model") or "").strip(),
+            "api_key": str(row.get("api_key") or "").strip(),
         }
         for row in hydra_base_servers_raw
         if isinstance(row, dict)
@@ -5281,20 +5290,24 @@ def get_settings() -> Dict[str, Any]:
     hydra_llm_host = str(first_hydra_base.get("host") or redis_client.get(HYDRA_LLM_HOST_KEY) or "").strip()
     hydra_llm_port = str(first_hydra_base.get("port") or redis_client.get(HYDRA_LLM_PORT_KEY) or "").strip()
     hydra_llm_model = str(first_hydra_base.get("model") or redis_client.get(HYDRA_LLM_MODEL_KEY) or "").strip()
+    hydra_llm_api_key = str(first_hydra_base.get("api_key") or "").strip()
     hydra_beast_mode_enabled = _as_bool_flag(redis_client.get(HYDRA_BEAST_MODE_ENABLED_KEY), default=False)
     hydra_role_model_values: Dict[str, str] = {}
     for role in HYDRA_BEAST_CONFIG_ROLE_IDS:
         role_host = str(redis_client.get(_hydra_role_llm_key(role, "host")) or "").strip()
         role_port = str(redis_client.get(_hydra_role_llm_key(role, "port")) or "").strip()
         role_model = str(redis_client.get(_hydra_role_llm_key(role, "model")) or "").strip()
+        role_api_key = str(redis_client.get(_hydra_role_llm_key(role, "api_key")) or "").strip()
         hydra_role_model_values[f"hydra_llm_{role}_host"] = role_host
         hydra_role_model_values[f"hydra_llm_{role}_port"] = role_port
         hydra_role_model_values[f"hydra_llm_{role}_model"] = role_model
+        hydra_role_model_values[f"hydra_llm_{role}_api_key"] = role_api_key
 
     hydra_defaults = {
         "hydra_llm_host": "",
         "hydra_llm_port": "",
         "hydra_llm_model": "",
+        "hydra_llm_api_key": "",
         "hydra_beast_mode_enabled": False,
         "hydra_max_ledger_items": int(DEFAULT_MAX_LEDGER_ITEMS),
         "hydra_step_retry_limit": int(DEFAULT_STEP_RETRY_LIMIT),
@@ -5382,6 +5395,7 @@ def get_settings() -> Dict[str, Any]:
         "hydra_llm_host": hydra_llm_host,
         "hydra_llm_port": hydra_llm_port,
         "hydra_llm_model": hydra_llm_model,
+        "hydra_llm_api_key": hydra_llm_api_key,
         "hydra_base_servers": hydra_base_servers,
         "hydra_beast_mode_enabled": hydra_beast_mode_enabled,
         "hydra_max_ledger_items": _read_positive_int(HYDRA_MAX_LEDGER_ITEMS_KEY, DEFAULT_MAX_LEDGER_ITEMS),
@@ -5948,6 +5962,8 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
     current_llm_host = str(redis_client.get(HYDRA_LLM_HOST_KEY) or "").strip()
     current_llm_port = str(redis_client.get(HYDRA_LLM_PORT_KEY) or "").strip()
     current_llm_model = str(redis_client.get(HYDRA_LLM_MODEL_KEY) or "").strip()
+    current_base_rows = resolve_hydra_base_servers(redis_conn=redis_client, include_legacy=True)
+    current_llm_api_key = str((current_base_rows[0] if current_base_rows else {}).get("api_key") or "").strip()
 
     if "hydra_llm_host" in updates:
         current_llm_host = str(updates.get("hydra_llm_host") or "").strip()
@@ -5955,6 +5971,8 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         current_llm_port = str(updates.get("hydra_llm_port") or "").strip()
     if "hydra_llm_model" in updates:
         current_llm_model = str(updates.get("hydra_llm_model") or "").strip()
+    if "hydra_llm_api_key" in updates:
+        current_llm_api_key = str(updates.get("hydra_llm_api_key") or "").strip()
 
     if current_llm_port:
         if not str(current_llm_port).isdigit():
@@ -5968,6 +5986,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "hydra_llm_host",
         "hydra_llm_port",
         "hydra_llm_model",
+        "hydra_llm_api_key",
         "hydra_base_servers",
     }
     if any(key in updates for key in base_settings_keys):
@@ -5986,6 +6005,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
                             "host": f"{parsed.scheme}://{hostname}" if host_with_scheme else hostname,
                             "port": str(parsed.port) if parsed.port is not None else "",
                             "model": current_llm_model,
+                            "api_key": current_llm_api_key,
                         }
                     ]
 
@@ -6010,7 +6030,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         )
 
     for role in HYDRA_BEAST_CONFIG_ROLE_IDS:
-        for field in ("host", "port", "model"):
+        for field in ("host", "port", "model", "api_key"):
             payload_key = f"hydra_llm_{role}_{field}"
             if payload_key not in updates:
                 continue
