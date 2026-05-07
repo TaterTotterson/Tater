@@ -906,6 +906,7 @@ def _normalize_hydra_base_server_row(row: Any) -> Optional[Dict[str, str]]:
     raw_host = str(row.get("host") or "").strip()
     raw_port = str(row.get("port") or "").strip()
     raw_model = str(row.get("model") or "").strip()
+    raw_api_key = str(row.get("api_key") or "").strip()
     if not raw_host and not raw_port and not raw_model:
         return None
 
@@ -926,6 +927,7 @@ def _normalize_hydra_base_server_row(row: Any) -> Optional[Dict[str, str]]:
         "host": canonical_host,
         "port": canonical_port,
         "model": raw_model,
+        "api_key": raw_api_key,
         "endpoint": endpoint,
     }
 
@@ -933,7 +935,7 @@ def _normalize_hydra_base_server_row(row: Any) -> Optional[Dict[str, str]]:
 def resolve_hydra_base_servers(*, redis_conn: Any = None, include_legacy: bool = True) -> List[Dict[str, str]]:
     client = redis_conn or redis_client
     rows: List[Dict[str, str]] = []
-    seen: set[Tuple[str, str]] = set()
+    seen: set[Tuple[str, str, str]] = set()
 
     raw_payload = _safe_redis_text_get(HYDRA_LLM_BASE_SERVERS_KEY, redis_conn=client)
     parsed_payload: Any = []
@@ -948,7 +950,7 @@ def resolve_hydra_base_servers(*, redis_conn: Any = None, include_legacy: bool =
             normalized = _normalize_hydra_base_server_row(item)
             if not normalized:
                 continue
-            signature = (normalized["endpoint"], normalized["model"])
+            signature = (normalized["endpoint"], normalized["model"], normalized.get("api_key", ""))
             if signature in seen:
                 continue
             seen.add(signature)
@@ -964,7 +966,7 @@ def resolve_hydra_base_servers(*, redis_conn: Any = None, include_legacy: bool =
         {"host": legacy_host, "port": legacy_port, "model": legacy_model}
     )
     if legacy_row:
-        signature = (legacy_row["endpoint"], legacy_row["model"])
+        signature = (legacy_row["endpoint"], legacy_row["model"], legacy_row.get("api_key", ""))
         if signature not in seen:
             rows.append(legacy_row)
     return rows
@@ -1619,12 +1621,15 @@ def get_llm_client_from_env(host: Optional[str] = None, model: Optional[str] = N
     No .env host/model fallback is used.
     """
     redis_conn = kwargs.pop("redis_conn", None)
+    api_key_arg_provided = "api_key" in kwargs
+    explicit_api_key = str(kwargs.pop("api_key", "") or "").strip()
     explicit_host = str(host or "").strip()
     explicit_model = str(model or "").strip()
 
     base_servers = resolve_hydra_base_servers(redis_conn=redis_conn, include_legacy=True)
     default_host = str(base_servers[0]["endpoint"]).strip() if base_servers else ""
     default_model = str(base_servers[0]["model"]).strip() if base_servers else ""
+    default_api_key = str(base_servers[0].get("api_key") or "").strip() if base_servers else ""
     if not default_host or not default_model:
         fallback_host, fallback_model = _resolve_hydra_llm_defaults(redis_conn=redis_conn)
         if not default_host:
@@ -1643,20 +1648,26 @@ def get_llm_client_from_env(host: Optional[str] = None, model: Optional[str] = N
         for row in base_servers:
             endpoint = str(row.get("endpoint") or "").strip()
             row_model = str(row.get("model") or "").strip()
+            row_api_key = str(row.get("api_key") or "").strip()
             if not endpoint or not row_model:
                 continue
-            clients.append(LLMClientWrapper(host=endpoint, model=row_model, **kwargs))
-            signature_parts.append(f"{endpoint}|{row_model}")
+            clients.append(LLMClientWrapper(host=endpoint, model=row_model, api_key=row_api_key, **kwargs))
+            signature_parts.append(f"{endpoint}|{row_model}|{row_api_key}")
         if len(clients) > 1:
             pool_key = "||".join(signature_parts)
             return RoundRobinLLMClientWrapper(clients=clients, pool_key=pool_key)
         if len(clients) == 1:
             return clients[0]
 
-    return LLMClientWrapper(host=resolved_host, model=resolved_model, **kwargs)
+    resolved_api_key = explicit_api_key
+    if not resolved_api_key and not api_key_arg_provided and not explicit_host and not explicit_model:
+        resolved_api_key = default_api_key
+
+    return LLMClientWrapper(host=resolved_host, model=resolved_model, api_key=resolved_api_key, **kwargs)
 
 class LLMClientWrapper:
     def __init__(self, host, model=None, **kwargs):
+        explicit_api_key = str(kwargs.pop("api_key", "") or "").strip()
         resolved_host = str(host or "").strip()
         resolved_model = str(model or "").strip()
         if not resolved_host or not resolved_model:
@@ -1664,14 +1675,16 @@ class LLMClientWrapper:
 
         base_url = _normalize_base_url(resolved_host)
 
+        resolved_api_key = explicit_api_key or os.getenv("LLM_API_KEY") or "not-needed"
         self.client = AsyncOpenAI(
             base_url=base_url,
-            api_key=os.getenv("LLM_API_KEY", "not-needed"),
+            api_key=resolved_api_key,
             **kwargs
         )
 
         self.host = base_url.rstrip("/")
         self.model = resolved_model
+        self.api_key = resolved_api_key
 
         # Common generation defaults (caller can override per-call)
         self.max_tokens = int(os.getenv("LLM_MAX_TOKENS", "1024"))

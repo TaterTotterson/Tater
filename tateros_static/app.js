@@ -10736,6 +10736,7 @@ async function loadSettingsView() {
     host: String(row?.host || "").trim(),
     port: String(row?.port || "").trim(),
     model: String(row?.model || "").trim(),
+    api_key: String(row?.api_key || "").trim(),
   });
   const configuredHydraBaseRows = Array.isArray(settings?.hydra_base_servers)
     ? settings.hydra_base_servers.map((row) => normalizeHydraBaseRow(row))
@@ -10747,7 +10748,7 @@ async function loadSettingsView() {
     if (!normalized.host || !normalized.model) {
       return;
     }
-    const signature = `${normalized.host}|${normalized.port}|${normalized.model}`;
+    const signature = `${normalized.host}|${normalized.port}|${normalized.model}|${normalized.api_key}`;
     if (normalizedHydraBaseSeen.has(signature)) {
       return;
     }
@@ -10761,6 +10762,7 @@ async function loadSettingsView() {
       host: settings.hydra_llm_host || "",
       port: settings.hydra_llm_port || "",
       model: settings.hydra_llm_model || "",
+      api_key: settings.hydra_llm_api_key || "",
     });
   }
   if (!normalizedHydraBaseRows.length) {
@@ -10769,6 +10771,7 @@ async function loadSettingsView() {
         host: settings.hydra_llm_host || "",
         port: settings.hydra_llm_port || "",
         model: settings.hydra_llm_model || "",
+        api_key: settings.hydra_llm_api_key || "",
       })
     );
   }
@@ -10787,6 +10790,9 @@ async function loadSettingsView() {
               </label>
               <label>Model
                 <input type="text" data-hydra-base-field="model" value="${escapeHtml(row.model)}" />
+              </label>
+              <label>API Key (optional)
+                <input type="password" autocomplete="new-password" data-hydra-base-field="api_key" value="${escapeHtml(row.api_key)}" />
               </label>
               <div class="hydra-base-server-actions">
                 <button type="button" class="inline-btn danger" data-hydra-base-remove="${index}">Remove</button>
@@ -11097,6 +11103,11 @@ async function loadSettingsView() {
                     hydraPrimaryBaseRow.model || ""
                   )}" />
                 </label>
+                <label style="grid-column: 1 / -1;">API Key (optional)
+                  <input id="set_hydra_llm_api_key" type="password" autocomplete="new-password" value="${escapeHtml(
+                    hydraPrimaryBaseRow.api_key || ""
+                  )}" />
+                </label>
                 <div class="hydra-base-server-block">
                   <div class="hydra-role-title">Additional Base Servers</div>
                   <div class="small hydra-model-panel-note">Add more base servers to alternate regular AI calls across them.</div>
@@ -11380,6 +11391,11 @@ async function loadSettingsView() {
                     settings.hydra_llm_chat_model || ""
                   )}" />
                 </label>
+                <label style="grid-column: 1 / -1;">Chat API Key (optional)
+                  <input id="set_hydra_llm_chat_api_key" type="password" autocomplete="new-password" value="${escapeHtml(
+                    settings.hydra_llm_chat_api_key || ""
+                  )}" />
+                </label>
 
                 <div class="hydra-role-title">Astraeus (planning)</div>
                 <label>Astraeus Host / IP
@@ -11395,6 +11411,11 @@ async function loadSettingsView() {
                 <label style="grid-column: 1 / -1;">Astraeus Model
                   <input id="set_hydra_llm_astraeus_model" type="text" value="${escapeHtml(
                     settings.hydra_llm_astraeus_model || ""
+                  )}" />
+                </label>
+                <label style="grid-column: 1 / -1;">Astraeus API Key (optional)
+                  <input id="set_hydra_llm_astraeus_api_key" type="password" autocomplete="new-password" value="${escapeHtml(
+                    settings.hydra_llm_astraeus_api_key || ""
                   )}" />
                 </label>
 
@@ -11414,6 +11435,11 @@ async function loadSettingsView() {
                     settings.hydra_llm_thanatos_model || ""
                   )}" />
                 </label>
+                <label style="grid-column: 1 / -1;">Thanatos API Key (optional)
+                  <input id="set_hydra_llm_thanatos_api_key" type="password" autocomplete="new-password" value="${escapeHtml(
+                    settings.hydra_llm_thanatos_api_key || ""
+                  )}" />
+                </label>
 
                 <div class="hydra-role-title">Minos (judging)</div>
                 <label>Minos Host / IP
@@ -11431,6 +11457,11 @@ async function loadSettingsView() {
                     settings.hydra_llm_minos_model || ""
                   )}" />
                 </label>
+                <label style="grid-column: 1 / -1;">Minos API Key (optional)
+                  <input id="set_hydra_llm_minos_api_key" type="password" autocomplete="new-password" value="${escapeHtml(
+                    settings.hydra_llm_minos_api_key || ""
+                  )}" />
+                </label>
 
                 <div class="hydra-role-title">Hermes (final response)</div>
                 <label>Hermes Host / IP
@@ -11446,6 +11477,11 @@ async function loadSettingsView() {
                 <label style="grid-column: 1 / -1;">Hermes Model
                   <input id="set_hydra_llm_hermes_model" type="text" value="${escapeHtml(
                     settings.hydra_llm_hermes_model || ""
+                  )}" />
+                </label>
+                <label style="grid-column: 1 / -1;">Hermes API Key (optional)
+                  <input id="set_hydra_llm_hermes_api_key" type="password" autocomplete="new-password" value="${escapeHtml(
+                    settings.hydra_llm_hermes_api_key || ""
                   )}" />
                 </label>
               </div>
@@ -12118,6 +12154,7 @@ async function loadSettingsView() {
     host: String(row?.host || "").trim(),
     port: String(row?.port || "").trim(),
     model: String(row?.model || "").trim(),
+    api_key: String(row?.api_key || "").trim(),
   });
   const readHydraAdditionalBaseRows = () => {
     if (!hydraBaseServersEl) {
@@ -12127,10 +12164,12 @@ async function loadSettingsView() {
       const hostEl = rowEl.querySelector('[data-hydra-base-field="host"]');
       const portEl = rowEl.querySelector('[data-hydra-base-field="port"]');
       const modelEl = rowEl.querySelector('[data-hydra-base-field="model"]');
+      const apiKeyEl = rowEl.querySelector('[data-hydra-base-field="api_key"]');
       return normalizeHydraBaseRowInput({
         host: hostEl ? hostEl.value : "",
         port: portEl ? portEl.value : "",
         model: modelEl ? modelEl.value : "",
+        api_key: apiKeyEl ? apiKeyEl.value : "",
       });
     });
   };
@@ -12156,6 +12195,9 @@ async function loadSettingsView() {
             <label>Model
               <input type="text" data-hydra-base-field="model" value="${escapeHtml(row.model)}" />
             </label>
+            <label>API Key (optional)
+              <input type="password" autocomplete="new-password" data-hydra-base-field="api_key" value="${escapeHtml(row.api_key)}" />
+            </label>
             <div class="hydra-base-server-actions">
               <button type="button" class="inline-btn danger" data-hydra-base-remove="${index}">Remove</button>
             </div>
@@ -12170,7 +12212,7 @@ async function loadSettingsView() {
   renderHydraAdditionalBaseRows(hydraAdditionalBaseRowsState);
   hydraBaseServerAddEl?.addEventListener("click", () => {
     hydraAdditionalBaseRowsState = readHydraAdditionalBaseRows();
-    hydraAdditionalBaseRowsState.push(normalizeHydraBaseRowInput({ host: "", port: "", model: "" }));
+    hydraAdditionalBaseRowsState.push(normalizeHydraBaseRowInput({ host: "", port: "", model: "", api_key: "" }));
     renderHydraAdditionalBaseRows(hydraAdditionalBaseRowsState);
   });
   hydraBaseServersEl?.addEventListener("click", (event) => {
@@ -13277,6 +13319,7 @@ async function loadSettingsView() {
     const baseHost = String(document.getElementById("set_hydra_llm_host")?.value || "").trim();
     const basePort = String(document.getElementById("set_hydra_llm_port")?.value || "").trim();
     const baseModel = String(document.getElementById("set_hydra_llm_model")?.value || "").trim();
+    const baseApiKey = String(document.getElementById("set_hydra_llm_api_key")?.value || "").trim();
     const visionApiBase = String(document.getElementById("set_vision_api_base")?.value || "").trim();
     const visionModel = String(document.getElementById("set_vision_model")?.value || "").trim();
     const visionApiKey = String(document.getElementById("set_vision_api_key")?.value || "").trim();
@@ -13301,12 +13344,15 @@ async function loadSettingsView() {
     const speechAnnouncementOpenAiTtsBaseUrl = getOpenAiTtsBaseUrlValue("announcement");
     const speechAnnouncementOpenAiTtsApiKey = getOpenAiTtsApiKeyValue("announcement");
     const additionalBaseRows = readHydraAdditionalBaseRows();
-    const hydraBaseServersPayload = [normalizeHydraBaseRowInput({ host: baseHost, port: basePort, model: baseModel })];
+    const hydraBaseServersPayload = [
+      normalizeHydraBaseRowInput({ host: baseHost, port: basePort, model: baseModel, api_key: baseApiKey }),
+    ];
     additionalBaseRows.forEach((row) => hydraBaseServersPayload.push(normalizeHydraBaseRowInput(row)));
     const payload = {
       hydra_llm_host: baseHost,
       hydra_llm_port: basePort,
       hydra_llm_model: baseModel,
+      hydra_llm_api_key: baseApiKey,
       hydra_base_servers: hydraBaseServersPayload,
       hydra_beast_mode_enabled: Boolean(document.getElementById("set_hydra_beast_mode_enabled")?.checked),
       vision_api_base: visionApiBase,
@@ -13338,9 +13384,11 @@ async function loadSettingsView() {
       const hostEl = document.getElementById(`set_hydra_llm_${role}_host`);
       const portEl = document.getElementById(`set_hydra_llm_${role}_port`);
       const modelEl = document.getElementById(`set_hydra_llm_${role}_model`);
+      const apiKeyEl = document.getElementById(`set_hydra_llm_${role}_api_key`);
       payload[`hydra_llm_${role}_host`] = hostEl ? String(hostEl.value || "").trim() : "";
       payload[`hydra_llm_${role}_port`] = portEl ? String(portEl.value || "").trim() : "";
       payload[`hydra_llm_${role}_model`] = modelEl ? String(modelEl.value || "").trim() : "";
+      payload[`hydra_llm_${role}_api_key`] = apiKeyEl ? String(apiKeyEl.value || "").trim() : "";
     });
     statusEl.textContent = "Saving shared model settings...";
     try {
