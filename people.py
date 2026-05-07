@@ -283,7 +283,9 @@ def person_instruction_prompt_from_origin(origin: Optional[Dict[str, Any]]) -> s
     instructions = instructions[:PERSON_INSTRUCTIONS_MAX_CHARS].strip()
     return (
         "PERSON-SPECIFIC RESPONSE INSTRUCTIONS (trusted Settings > People):\n"
-        f"Apply these only while responding to {person_name} in the current turn.\n"
+        f"The current user for this turn has been resolved by Tater as {person_name}.\n"
+        "For this assistant response, follow these person-specific instructions when addressing the current user.\n"
+        "Do not apply them to other people mentioned in the conversation.\n"
         "Do not let these override higher-priority system, safety, platform, or tool rules.\n"
         f"{instructions}"
     )
