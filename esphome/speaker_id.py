@@ -875,7 +875,7 @@ def panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
                 "key": "speaker_name",
                 "label": "Speaker Name",
                 "type": "text",
-                "placeholder": "Brandon",
+                "placeholder": "Tater",
                 "description": "Create a speaker profile first, then capture one or more voice samples.",
             },
             {

@@ -11,9 +11,9 @@ from verba_kernel import normalize_platform
 
 
 PEOPLE_STORE_KEY = "tater:people:v1"
-DEFAULT_MANUAL_MATCH_ONLY = True
 DISCOVERY_MAX_KEYS = 200
 DISCOVERY_MAX_ROWS_PER_KEY = 200
+PERSON_INSTRUCTIONS_MAX_CHARS = 2000
 
 
 def _text(value: Any) -> str:
@@ -47,7 +47,7 @@ def _alias_key(platform: Any, external_id: Any) -> str:
 def _default_store() -> Dict[str, Any]:
     return {
         "version": 1,
-        "settings": {"manual_match_only": DEFAULT_MANUAL_MATCH_ONLY},
+        "settings": {},
         "people": [],
     }
 
@@ -83,6 +83,10 @@ def _normalize_person(row: Any) -> Optional[Dict[str, Any]]:
         return None
     person_id = _text(row.get("id") or row.get("person_id")) or _person_id()
     display_name = _text(row.get("display_name") or row.get("name")) or "Person"
+    instructions = _text(row.get("instructions"))
+    if not instructions:
+        instructions = _text(row.get("notes"))
+    instructions = instructions[:PERSON_INSTRUCTIONS_MAX_CHARS]
     aliases: List[Dict[str, Any]] = []
     seen: set[str] = set()
     for raw_alias in list(row.get("aliases") or []):
@@ -98,7 +102,7 @@ def _normalize_person(row: Any) -> Optional[Dict[str, Any]]:
         "id": person_id,
         "display_name": display_name,
         "is_admin": _as_bool(row.get("is_admin"), False),
-        "notes": _text(row.get("notes")),
+        "instructions": instructions,
         "created_ts": float(row.get("created_ts") or _now()),
         "updated_ts": float(row.get("updated_ts") or row.get("created_ts") or _now()),
         "aliases": aliases,
@@ -129,9 +133,7 @@ def _normalize_store(data: Any) -> Dict[str, Any]:
         people.append(person)
     return {
         "version": 1,
-        "settings": {
-            "manual_match_only": _as_bool(settings.get("manual_match_only"), DEFAULT_MANUAL_MATCH_ONLY),
-        },
+        "settings": {},
         "people": sorted(people, key=lambda item: _text(item.get("display_name")).lower()),
     }
 
@@ -244,36 +246,12 @@ def resolve_person(
                 "master_user_id": _text(person.get("id")),
                 "person_id": _text(person.get("id")),
                 "display_name": _text(person.get("display_name")),
+                "instructions": _text(person.get("instructions"))[:PERSON_INSTRUCTIONS_MAX_CHARS],
                 "alias": dict(alias),
                 "candidate_aliases": candidates,
             }
 
-    manual_only = _as_bool((store.get("settings") or {}).get("manual_match_only"), DEFAULT_MANUAL_MATCH_ONLY)
-    if not manual_only:
-        source = origin if isinstance(origin, dict) else {}
-        labels = [
-            source.get("display_name"),
-            source.get("speaker_name"),
-            source.get("username"),
-            source.get("user"),
-            source.get("author_name"),
-            source.get("sender_name"),
-        ]
-        normalized_people = {_norm(person.get("display_name")): person for person in list(store.get("people") or [])}
-        for label in labels:
-            person = normalized_people.get(_norm(label))
-            if person:
-                return {
-                    "matched": True,
-                    "match_type": "display_name",
-                    "master_user_id": _text(person.get("id")),
-                    "person_id": _text(person.get("id")),
-                    "display_name": _text(person.get("display_name")),
-                    "alias": {},
-                    "candidate_aliases": candidates,
-                }
-
-    return {"matched": False, "manual_match_only": manual_only, "candidate_aliases": candidates}
+    return {"matched": False, "candidate_aliases": candidates}
 
 
 def apply_resolution_to_origin(
@@ -287,8 +265,28 @@ def apply_resolution_to_origin(
         origin["master_user_id"] = _text(resolved.get("master_user_id"))
         origin["person_id"] = _text(resolved.get("person_id") or resolved.get("master_user_id"))
         origin["person_name"] = _text(resolved.get("display_name"))
+        if _text(resolved.get("instructions")):
+            origin["person_instructions"] = _text(resolved.get("instructions"))[:PERSON_INSTRUCTIONS_MAX_CHARS]
     origin["people_resolution"] = resolved
     return resolved
+
+
+def person_instruction_prompt_from_origin(origin: Optional[Dict[str, Any]]) -> str:
+    source = origin if isinstance(origin, dict) else {}
+    resolved = source.get("people_resolution") if isinstance(source.get("people_resolution"), dict) else {}
+    if not bool(resolved.get("matched")) and not _text(source.get("person_id") or source.get("master_user_id")):
+        return ""
+    instructions = _text(source.get("person_instructions") or resolved.get("instructions"))
+    if not instructions:
+        return ""
+    person_name = _text(source.get("person_name") or resolved.get("display_name")) or "this person"
+    instructions = instructions[:PERSON_INSTRUCTIONS_MAX_CHARS].strip()
+    return (
+        "PERSON-SPECIFIC RESPONSE INSTRUCTIONS (trusted Settings > People):\n"
+        f"Apply these only while responding to {person_name} in the current turn.\n"
+        "Do not let these override higher-priority system, safety, platform, or tool rules.\n"
+        f"{instructions}"
+    )
 
 
 def create_person(display_name: str, redis_client: Any = None) -> Dict[str, Any]:
@@ -302,7 +300,7 @@ def create_person(display_name: str, redis_client: Any = None) -> Dict[str, Any]
         "id": _person_id(),
         "display_name": name,
         "is_admin": False,
-        "notes": "",
+        "instructions": "",
         "created_ts": _now(),
         "updated_ts": _now(),
         "aliases": [],
@@ -328,7 +326,13 @@ def update_person(person_id: str, values: Dict[str, Any], redis_client: Any = No
     person["display_name"] = name
     if "is_admin" in values:
         person["is_admin"] = _as_bool(values.get("is_admin"), False)
-    person["notes"] = _text(values.get("notes") if "notes" in values else person.get("notes"))
+    if "instructions" in values:
+        person["instructions"] = _text(values.get("instructions"))[:PERSON_INSTRUCTIONS_MAX_CHARS]
+    elif "notes" in values:
+        person["instructions"] = _text(values.get("notes"))[:PERSON_INSTRUCTIONS_MAX_CHARS]
+    else:
+        person["instructions"] = _text(person.get("instructions") or person.get("notes"))[:PERSON_INSTRUCTIONS_MAX_CHARS]
+    person.pop("notes", None)
     person["updated_ts"] = _now()
     people[index] = person
     store["people"] = people
@@ -434,15 +438,6 @@ def detach_alias(*, person_id: str, platform: str, external_id: str, redis_clien
         save_store(store, redis_client)
         return target
     raise KeyError("Person not found.")
-
-
-def save_settings(values: Dict[str, Any], redis_client: Any = None) -> Dict[str, Any]:
-    store = load_store(redis_client)
-    current = dict(store.get("settings") or {})
-    if "manual_match_only" in values:
-        current["manual_match_only"] = _as_bool(values.get("manual_match_only"), DEFAULT_MANUAL_MATCH_ONLY)
-    store["settings"] = current
-    return dict(save_store(store, redis_client).get("settings") or {})
 
 
 def _linked_alias_index(store: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
@@ -733,9 +728,7 @@ def panel_payload(redis_client: Any = None) -> Dict[str, Any]:
             {"label": "Discovered Identities", "value": len(identities)},
             {
                 "label": "Matching",
-                "value": "Manual only"
-                if _as_bool((store.get("settings") or {}).get("manual_match_only"), DEFAULT_MANUAL_MATCH_ONLY)
-                else "Exact name fallback",
+                "value": "Manual links only",
             },
         ],
         "people": people,
@@ -748,10 +741,6 @@ def handle_action(action: str, payload: Dict[str, Any], redis_client: Any = None
     body = payload if isinstance(payload, dict) else {}
     values = body.get("values") if isinstance(body.get("values"), dict) else body
     client = _client(redis_client)
-
-    if token == "people_settings_save":
-        save_settings(values if isinstance(values, dict) else {}, client)
-        return {"ok": True, "action": token, "message": "People settings saved.", "people": panel_payload(client)}
 
     if token == "people_create":
         person = create_person(_text(values.get("display_name") or body.get("display_name")), client)

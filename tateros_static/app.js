@@ -10474,31 +10474,33 @@ function renderPeopleAliasList(person) {
 
 function renderPeopleSettingsPanel(peoplePayload = {}) {
   const payload = peoplePayload && typeof peoplePayload === "object" ? peoplePayload : {};
-  const settings = payload.settings && typeof payload.settings === "object" ? payload.settings : {};
   const people = Array.isArray(payload.people) ? payload.people : [];
   const identities = Array.isArray(payload.identities) ? payload.identities : [];
   const personOptions = renderPeoplePersonOptions(people);
-  const manualMatchOnly = boolFromAny(settings.manual_match_only, true);
   const peopleHtml = people.length
     ? people
         .map((person) => {
           const personId = String(person?.id || "").trim();
           const displayName = String(person?.display_name || "Person").trim() || "Person";
           const isAdmin = boolFromAny(person?.is_admin, false);
-          const notes = String(person?.notes || "").trim();
+          const instructions = String(person?.instructions || "").trim();
           return `
             <article class="card core-manager-item people-person-card" data-person-id="${escapeHtml(personId)}">
               <div class="card-head">
                 <h3 class="card-title">${escapeHtml(displayName)}</h3>
               </div>
-              <div class="form-grid two-col">
+              <div class="form-grid">
                 <label>Display Name
                   <input type="text" data-people-field="display_name" value="${escapeHtml(displayName)}" />
                 </label>
-                <label>Notes
-                  <input type="text" data-people-field="notes" value="${escapeHtml(notes)}" />
-                </label>
               </div>
+              <label style="margin-top:12px;">
+                Instructions
+                <textarea data-people-field="instructions" rows="4" placeholder="Always call this person sir.">${escapeHtml(
+                  instructions
+                )}</textarea>
+                <div class="small">Applied as response instructions only when this person is resolved from a linked identity.</div>
+              </label>
               <label style="margin-top:12px;">
                 Admin
                 ${renderToggleRow(
@@ -10584,20 +10586,10 @@ function renderPeopleSettingsPanel(peoplePayload = {}) {
       )}
       <div class="form-grid">
         <section class="core-inline-section">
-          <div class="small core-inline-section-title">Identity Matching</div>
+          <div class="small core-inline-section-title">Identity Resolution</div>
           ${renderPeopleSummaryMetrics(Array.isArray(payload.summary_metrics) ? payload.summary_metrics : [])}
-          <label style="margin-top:12px;">
-            Manual Matches Only
-            ${renderToggleRow(
-              `<input id="people_manual_match_only" class="toggle-input" type="checkbox" ${manualMatchOnly ? "checked" : ""} />`
-            )}
-            <div class="small">
-              When enabled, Tater only resolves a person from identities you explicitly link here. Disable it to allow exact display-name fallback.
-            </div>
-          </label>
-          <div class="inline-row" style="margin-top:12px;">
-            <button type="button" id="people-settings-save" class="action-btn">Save People Settings</button>
-            <span class="small core-manager-status"></span>
+          <div class="small" style="margin-top:12px;">
+            Tater auto-discovers portal and voice identities, but only resolves a Person from identities you explicitly link here.
           </div>
         </section>
 
@@ -10605,7 +10597,7 @@ function renderPeopleSettingsPanel(peoplePayload = {}) {
           <div class="small core-inline-section-title">Create Person</div>
           <div class="form-grid two-col">
             <label>Display Name
-              <input id="people_create_display_name" type="text" placeholder="Brandon" />
+              <input id="people_create_display_name" type="text" placeholder="Tater" />
             </label>
           </div>
           <div class="inline-row" style="margin-top:12px;">
@@ -10630,7 +10622,7 @@ function renderPeopleSettingsPanel(peoplePayload = {}) {
               <input id="people_manual_external_id" type="text" placeholder="123456789" />
             </label>
             <label>Label
-              <input id="people_manual_label" type="text" placeholder="Brandon" />
+              <input id="people_manual_label" type="text" placeholder="Tater" />
             </label>
           </div>
           <div class="inline-row" style="margin-top:12px;">
@@ -10673,16 +10665,6 @@ function bindSettingsPeopleActions() {
       throw error;
     }
   };
-
-  document.getElementById("people-settings-save")?.addEventListener("click", async (event) => {
-    const host = event.currentTarget?.closest?.(".core-inline-section");
-    await runPeopleAction(
-      host,
-      "people_settings_save",
-      { values: { manual_match_only: Boolean(document.getElementById("people_manual_match_only")?.checked) } },
-      "People settings saved."
-    );
-  });
 
   document.getElementById("people-create-person")?.addEventListener("click", async (event) => {
     const host = event.currentTarget?.closest?.(".core-inline-section");
