@@ -43,6 +43,9 @@ const state = {
     selector: "",
   },
   esphomeFirmwareDrafts: {},
+  esphomeBrowserUsbPorts: {},
+  esptoolJsModule: null,
+  esptoolJsLoadPromise: null,
   esphomeWakeSoundPreviewAudio: null,
   esphomeWakeSoundPreviewButton: null,
   sidebarCollapsed: String(safeStorageGet("tater_tateros_sidebar_collapsed", "false")).trim().toLowerCase() === "true",
@@ -6163,7 +6166,9 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
   const targetConnected = boolFromAny(variant?.connected ?? selectedDevice?.connected, false);
   const saveDisabledAttr = variantAvailable ? "" : " disabled";
   const otaFlashDisabledAttr = cliAvailable && variantAvailable && targetConnected ? "" : " disabled";
+  const otaLogsDisabledAttr = variantAvailable && targetConnected ? "" : " disabled";
   const browserFlashDisabledAttr = cliAvailable && variantAvailable ? "" : " disabled";
+  const browserLogsDisabledAttr = variantAvailable ? "" : " disabled";
   const itemId = escapeHtml(encodeCoreManagerId(selection.selector));
   const controlsHtml = `
     <section class="core-inline-section" style="margin-top:12px;">
@@ -6254,6 +6259,24 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
           data-firmware-success="Browser flash firmware ready."
           data-firmware-error="Browser flash build failed"${browserFlashDisabledAttr}
         >Browser USB Flash</button>
+        <button
+          type="button"
+          class="action-btn esphome-firmware-action"
+          data-firmware-action="voice_firmware_ota_logs"
+          data-firmware-title="Opening OTA Logs"
+          data-firmware-working="Opening OTA logs..."
+          data-firmware-success="OTA logs opened."
+          data-firmware-error="OTA logs failed"${otaLogsDisabledAttr}
+        >OTA Logs</button>
+        <button
+          type="button"
+          class="action-btn esphome-firmware-action"
+          data-firmware-action="voice_firmware_browser_logs"
+          data-firmware-title="Opening USB Logs"
+          data-firmware-working="Opening browser USB logs..."
+          data-firmware-success="USB logs opened."
+          data-firmware-error="USB logs failed"${browserLogsDisabledAttr}
+        >USB Logs</button>
         <button
           type="button"
           class="action-btn esphome-firmware-action"
@@ -8034,93 +8057,891 @@ function openEspHomeFirmwareFlashViewer(card, coreKey) {
   });
 }
 
-function ensureEspWebToolsLoaded() {
-  if (window.customElements?.get?.("esp-web-install-button")) {
-    return Promise.resolve(true);
+function esphomeFirmwareLogTone(entry) {
+  const explicitLevel = String(entry?.level || "").trim().toLowerCase();
+  if (["error", "err", "danger"].includes(explicitLevel)) {
+    return "error";
   }
-  if (state.espWebToolsLoadPromise instanceof Promise) {
-    return state.espWebToolsLoadPromise;
+  if (["warn", "warning"].includes(explicitLevel)) {
+    return "warn";
   }
-  state.espWebToolsLoadPromise = new Promise((resolve, reject) => {
-    const existing = document.querySelector('script[data-esp-web-tools="1"]');
-    if (existing instanceof HTMLScriptElement) {
-      existing.addEventListener("load", () => resolve(true), { once: true });
-      existing.addEventListener("error", () => reject(new Error("ESP Web Tools failed to load.")), { once: true });
-      return;
-    }
-    const script = document.createElement("script");
-    script.type = "module";
-    script.src = "https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module";
-    script.dataset.espWebTools = "1";
-    script.addEventListener("load", () => resolve(true), { once: true });
-    script.addEventListener("error", () => reject(new Error("ESP Web Tools failed to load.")), { once: true });
-    document.head.appendChild(script);
-  });
-  return state.espWebToolsLoadPromise;
+  if (["debug", "trace", "verbose", "very_verbose"].includes(explicitLevel)) {
+    return "debug";
+  }
+  return "info";
 }
 
-function openEspHomeBrowserFlashModal(result, { templateLabel = "Firmware", deviceLabel = "ESPHome Device" } = {}) {
-  const manifestUrl = withBasePath(String(result?.manifest_url || "").trim());
-  const binaryUrl = withBasePath(String(result?.binary_url || "").trim());
-  if (!manifestUrl) {
-    showToast("Browser flash build did not return a manifest URL.", "error", 3600);
+function appendEspHomeFirmwareLogLine(logConsole, entry) {
+  if (!(logConsole instanceof HTMLElement)) {
     return;
   }
-  const supported = Boolean(window.isSecureContext && navigator.serial);
-  const secureText = window.isSecureContext
-    ? "This browser context is secure."
-    : "Web Serial needs HTTPS or localhost. Open Tater from localhost/HTTPS for browser USB flashing.";
-  const serialText = navigator.serial
-    ? "Web Serial is available."
-    : "Use Chrome or Edge on desktop for Web Serial.";
+  const text = String(entry?.display || entry?.message || "").trim();
+  if (!text) {
+    return;
+  }
+  const lineEl = document.createElement("div");
+  const tone = esphomeFirmwareLogTone(entry);
+  lineEl.className = `voice-log-line tone-${tone}`;
+  const timeText = String(entry?.time || "").trim();
+  if (timeText) {
+    const timeEl = document.createElement("span");
+    timeEl.className = "voice-log-time";
+    timeEl.textContent = timeText;
+    lineEl.appendChild(timeEl);
+  }
+  const levelEl = document.createElement("span");
+  levelEl.className = `voice-log-level tone-${tone}`;
+  levelEl.textContent = String(entry?.level || tone).replace(/_/g, " ").toUpperCase();
+  lineEl.appendChild(levelEl);
+  const messageEl = document.createElement("span");
+  messageEl.className = "voice-log-message";
+  messageEl.textContent = text;
+  lineEl.appendChild(messageEl);
+  logConsole.appendChild(lineEl);
+}
+
+function appendEspHomeFirmwareLog(logConsole, message, level = "info") {
+  appendEspHomeFirmwareLogLine(logConsole, { display: message, level });
+  if (logConsole instanceof HTMLElement) {
+    logConsole.scrollTop = logConsole.scrollHeight;
+  }
+}
+
+function renderEspHomeFirmwareLogEntries(logConsole, entries, reset = false, emptyText = "Waiting for ESPHome output...") {
+  if (!(logConsole instanceof HTMLElement)) {
+    return;
+  }
+  const rows = Array.isArray(entries)
+    ? entries.filter((entry) => String(entry?.display || entry?.message || "").trim())
+    : [];
+  const shouldStick =
+    reset ||
+    logConsole.scrollHeight - logConsole.scrollTop - logConsole.clientHeight < 28;
+  if (reset) {
+    logConsole.innerHTML = "";
+  }
+  if (!rows.length && reset) {
+    const emptyEl = document.createElement("div");
+    emptyEl.className = "voice-log-empty";
+    emptyEl.textContent = emptyText;
+    logConsole.appendChild(emptyEl);
+  } else if (rows.length) {
+    rows.forEach((entry) => appendEspHomeFirmwareLogLine(logConsole, entry));
+  }
+  if (shouldStick) {
+    logConsole.scrollTop = logConsole.scrollHeight;
+  }
+}
+
+function browserUsbPortLabel(port) {
+  if (!port || typeof port.getInfo !== "function") {
+    return "USB serial device";
+  }
+  const info = port.getInfo() || {};
+  const vendor = Number(info.usbVendorId || 0);
+  const product = Number(info.usbProductId || 0);
+  if (!vendor && !product) {
+    return "USB serial device";
+  }
+  const hex = (value) => value.toString(16).padStart(4, "0");
+  return `USB ${hex(vendor)}:${hex(product)}`;
+}
+
+async function browserUsbSelectPort(selector = "") {
+  if (!window.isSecureContext || !navigator.serial) {
+    throw new Error("Browser USB needs Chrome or Edge on HTTPS or localhost.");
+  }
+  const port = await navigator.serial.requestPort();
+  const key = String(selector || "default").trim() || "default";
+  state.esphomeBrowserUsbPorts[key] = port;
+  return port;
+}
+
+async function browserUsbAuthorizedPorts() {
+  if (!window.isSecureContext || !navigator.serial || typeof navigator.serial.getPorts !== "function") {
+    return [];
+  }
+  return navigator.serial.getPorts();
+}
+
+function browserUsbStoredPort(selector = "") {
+  const key = String(selector || "default").trim() || "default";
+  return state.esphomeBrowserUsbPorts?.[key] || null;
+}
+
+async function ensureEsptoolJsLoaded() {
+  if (state.esptoolJsModule) {
+    return state.esptoolJsModule;
+  }
+  if (state.esptoolJsLoadPromise instanceof Promise) {
+    return state.esptoolJsLoadPromise;
+  }
+  state.esptoolJsLoadPromise = import("https://unpkg.com/esptool-js/lib/index.js?module").then((module) => {
+    state.esptoolJsModule = module;
+    return module;
+  });
+  return state.esptoolJsLoadPromise;
+}
+
+async function fetchFirmwareBinary(binaryUrl) {
+  const response = await fetch(withBasePath(binaryUrl), { credentials: "same-origin" });
+  if (!response.ok) {
+    throw new Error(`Firmware download failed: HTTP ${response.status}`);
+  }
+  return new Uint8Array(await response.arrayBuffer());
+}
+
+async function flashBrowserUsbPort(port, artifact, logConsole, statusNode) {
+  const module = await ensureEsptoolJsLoaded();
+  const { ESPLoader, Transport } = module;
+  if (!ESPLoader || !Transport) {
+    throw new Error("esptool-js did not expose ESPLoader/Transport.");
+  }
+  const binaryUrl = String(artifact?.binary_url || "").trim();
+  if (!binaryUrl) {
+    throw new Error("Browser flash binary URL is missing.");
+  }
+  const transport = new Transport(port, false);
+  const terminal = {
+    clean() {},
+    writeLine(data) {
+      appendEspHomeFirmwareLog(logConsole, String(data || "").trim(), "info");
+    },
+    write(data) {
+      const text = String(data || "").trim();
+      if (text) {
+        appendEspHomeFirmwareLog(logConsole, text, "info");
+      }
+    },
+  };
+  const loader = new ESPLoader({
+    transport,
+    baudrate: 115200,
+    terminal,
+    debugLogging: false,
+  });
+  let lastProgress = -1;
+  try {
+    if (statusNode instanceof HTMLElement) {
+      statusNode.textContent = "Connecting to selected USB device...";
+    }
+    appendEspHomeFirmwareLog(logConsole, `Connecting to ${browserUsbPortLabel(port)}...`, "info");
+    const chipName = await loader.main();
+    appendEspHomeFirmwareLog(logConsole, `Connected to ${chipName || "ESP device"}.`, "info");
+
+    if (statusNode instanceof HTMLElement) {
+      statusNode.textContent = "Downloading compiled firmware from Tater...";
+    }
+    const firmwareData = await fetchFirmwareBinary(binaryUrl);
+    appendEspHomeFirmwareLog(logConsole, `Firmware downloaded (${firmwareData.byteLength} bytes).`, "info");
+
+    if (statusNode instanceof HTMLElement) {
+      statusNode.textContent = "Flashing firmware over browser USB...";
+    }
+    await loader.writeFlash({
+      fileArray: [{ data: firmwareData, address: 0 }],
+      flashMode: String(artifact?.flash_mode || "dio"),
+      flashFreq: String(artifact?.flash_freq || "40m"),
+      flashSize: String(artifact?.flash_size || "4MB"),
+      eraseAll: false,
+      compress: true,
+      reportProgress: (_fileIndex, written, total) => {
+        const pct = total > 0 ? Math.floor((written / total) * 100) : 0;
+        if (pct >= lastProgress + 5 || pct === 100) {
+          lastProgress = pct;
+          appendEspHomeFirmwareLog(logConsole, `Flash progress: ${pct}% (${written}/${total} bytes)`, "info");
+          if (statusNode instanceof HTMLElement) {
+            statusNode.textContent = `Flashing firmware over browser USB... ${pct}%`;
+          }
+        }
+      },
+    });
+    appendEspHomeFirmwareLog(logConsole, "Flash complete. Resetting device.", "info");
+    await loader.after("hard_reset");
+    if (statusNode instanceof HTMLElement) {
+      statusNode.textContent = "Browser USB flash finished.";
+    }
+  } finally {
+    try {
+      await transport.disconnect();
+    } catch (_error) {
+      // Ignore disconnect cleanup failures.
+    }
+  }
+}
+
+function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
+  if (!(card instanceof HTMLElement)) {
+    return;
+  }
+  const selector = String(card.dataset?.firmwareSelector || decodeCoreManagerId(card.dataset?.coreItemId || "")).trim();
+  const templateKey = String(card.dataset?.firmwareTemplateKey || "").trim();
+  const templateSelect = card.querySelector('select[data-core-field-key="template_key"]');
+  const selectorSelect = card.querySelector('select[data-core-field-key="selector"]');
+  const templateLabel =
+    String(templateSelect?.selectedOptions?.[0]?.textContent || templateKey || "Firmware").trim() || "Firmware";
+  const deviceLabel =
+    String(selectorSelect?.selectedOptions?.[0]?.textContent || selector || "ESPHome Device").trim() || "ESPHome Device";
+  const values = collectCoreManagerValues(card);
+  if (!selector || !templateKey || !coreKey) {
+    showToast("Pick a firmware template and target before browser USB flashing.", "error", 3200);
+    return;
+  }
+
+  captureEspHomeFirmwareDraft(card);
+  setEspHomeFirmwareCardBusy(card, true);
+  setCoreManagerStatus(card, "Opening browser USB flash console...");
+
+  let stopped = false;
+  let sessionId = "";
+  let cursor = 0;
+  let pollTimer = 0;
+  let selectedPort = null;
+  let logConsole = null;
+  let statusNode = null;
+  let buildButton = null;
+  let selectButton = null;
+  let portListNode = null;
+  let selectedNode = null;
+  let modalDialog = null;
+
+  const updateSelectedPort = () => {
+    if (selectedNode instanceof HTMLElement) {
+      selectedNode.textContent = selectedPort
+        ? `Selected: ${browserUsbPortLabel(selectedPort)}`
+        : "No USB device selected.";
+    }
+    if (buildButton instanceof HTMLButtonElement) {
+      buildButton.disabled = !selectedPort;
+    }
+  };
+
+  const renderAuthorizedPorts = async () => {
+    if (!(portListNode instanceof HTMLElement)) {
+      return;
+    }
+    const ports = await browserUsbAuthorizedPorts();
+    if (!ports.length) {
+      portListNode.innerHTML = `<div class="small">No previously allowed USB serial devices. Use Select USB Device.</div>`;
+      return;
+    }
+    portListNode.innerHTML = ports
+      .map(
+        (_port, index) =>
+          `<button type="button" class="inline-btn esphome-browser-usb-authorized" data-port-index="${index}">${escapeHtml(
+            browserUsbPortLabel(_port)
+          )}</button>`
+      )
+      .join("");
+    portListNode.querySelectorAll(".esphome-browser-usb-authorized").forEach((button) => {
+      if (!(button instanceof HTMLButtonElement)) {
+        return;
+      }
+      button.addEventListener("click", () => {
+        const index = Number(button.dataset.portIndex || -1);
+        selectedPort = ports[index] || null;
+        if (selectedPort) {
+          state.esphomeBrowserUsbPorts[selector || "default"] = selectedPort;
+          appendEspHomeFirmwareLog(logConsole, `Selected ${browserUsbPortLabel(selectedPort)}.`, "info");
+        }
+        updateSelectedPort();
+      });
+    });
+  };
+
+  const stopViewer = async () => {
+    stopped = true;
+    if (pollTimer) {
+      window.clearTimeout(pollTimer);
+      pollTimer = 0;
+    }
+    if (sessionId) {
+      try {
+        await runCoreManagerAction(card, coreKey, "voice_firmware_flash_stop", {
+          session_id: sessionId,
+          id: sessionId,
+        });
+      } catch (_error) {
+        // Ignore cleanup failures while closing the browser flash console.
+      }
+    }
+    setEspHomeFirmwareCardBusy(card, false);
+    void reloadEspHomeRuntimePayloadOnly();
+  };
+
+  const runBrowserFlash = async (artifact) => {
+    if (!selectedPort) {
+      throw new Error("Select a USB device first.");
+    }
+    await flashBrowserUsbPort(selectedPort, artifact, logConsole, statusNode);
+    setCoreManagerStatus(card, "Browser USB flash finished.");
+    showToast("Browser USB flash finished.");
+  };
+
+  const schedulePoll = (delayMs = 1200) => {
+    if (stopped || !sessionId) {
+      return;
+    }
+    pollTimer = window.setTimeout(async () => {
+      if (stopped || !sessionId) {
+        return;
+      }
+      try {
+        const result = await runCoreManagerAction(card, coreKey, "voice_firmware_flash_poll", {
+          session_id: sessionId,
+          id: sessionId,
+          after_seq: cursor,
+        });
+        const entries = Array.isArray(result?.entries) ? result.entries : [];
+        if (entries.length) {
+          renderEspHomeFirmwareLogEntries(logConsole, entries, false);
+        }
+        cursor = Number(result?.cursor || cursor || 0);
+        if (statusNode instanceof HTMLElement) {
+          statusNode.textContent =
+            String(result?.status_text || result?.message || "").trim() || "Building browser flash firmware...";
+        }
+        if (boolFromAny(result?.active, true)) {
+          schedulePoll(1100);
+          return;
+        }
+        sessionId = "";
+        if (String(result?.phase || "").trim() === "failed") {
+          throw new Error(String(result?.error || result?.message || "Browser flash build failed."));
+        }
+        if (!String(result?.binary_url || "").trim()) {
+          throw new Error("Browser flash build finished without a firmware binary.");
+        }
+        await runBrowserFlash(result);
+      } catch (error) {
+        const message = String(error?.message || "unknown error");
+        appendEspHomeFirmwareLog(logConsole, `Browser USB flash failed: ${message}`, "error");
+        if (statusNode instanceof HTMLElement) {
+          statusNode.textContent = `Browser USB flash failed: ${message}`;
+        }
+        setCoreManagerStatus(card, `Failed: ${message}`);
+        showToast(`Failed: ${message}`, "error", 4200);
+        setEspHomeFirmwareCardBusy(card, false);
+      }
+    }, delayMs);
+  };
+
+  const startBuild = async () => {
+    if (!selectedPort) {
+      showToast("Select a USB device before building.", "error", 3000);
+      return;
+    }
+    if (buildButton instanceof HTMLButtonElement) {
+      buildButton.disabled = true;
+    }
+    if (selectButton instanceof HTMLButtonElement) {
+      selectButton.disabled = true;
+    }
+    setCoreManagerStatus(card, "Browser flash build in progress...");
+    appendEspHomeFirmwareLog(logConsole, `Selected ${browserUsbPortLabel(selectedPort)}.`, "info");
+    appendEspHomeFirmwareLog(logConsole, "Starting Tater firmware build...", "info");
+    try {
+      const result = await runCoreManagerAction(card, coreKey, "voice_firmware_browser_build", {
+        id: selector,
+        selector,
+        template_key: templateKey,
+        values,
+      });
+      sessionId = String(result?.session_id || "").trim();
+      cursor = Number(result?.cursor || 0);
+      delete state.esphomeFirmwareDrafts[templateKey];
+      renderEspHomeFirmwareLogEntries(logConsole, Array.isArray(result?.entries) ? result.entries : [], false);
+      if (!sessionId) {
+        throw new Error("Browser flash build did not create a log session.");
+      }
+      schedulePoll(900);
+    } catch (error) {
+      const message = String(error?.message || "unknown error");
+      appendEspHomeFirmwareLog(logConsole, `Failed to start browser flash build: ${message}`, "error");
+      if (statusNode instanceof HTMLElement) {
+        statusNode.textContent = `Browser flash build failed to start: ${message}`;
+      }
+      setEspHomeFirmwareCardBusy(card, false);
+      setCoreManagerStatus(card, `Failed: ${message}`);
+      showToast(`Failed: ${message}`, "error", 4200);
+      if (buildButton instanceof HTMLButtonElement) {
+        buildButton.disabled = false;
+      }
+      if (selectButton instanceof HTMLButtonElement) {
+        selectButton.disabled = false;
+      }
+    }
+  };
 
   openRuntimeSettingsModal({
     title: `${templateLabel} Browser USB Flash`,
-    meta: [deviceLabel, String(result?.artifact_id || "").trim()].filter(Boolean).join(" • "),
+    meta: [deviceLabel, selector].filter(Boolean).join(" • "),
     fields: [
       {
-        key: "browser_flash_status",
-        label: "Browser USB Flash",
+        key: "browser_flash_log",
+        label: "Firmware Log",
         type: "textarea",
-        read_only: true,
-        value: `${secureText}\n${serialText}`,
-        description: "Plug the ESP32-S3 into this computer, then connect and flash from the browser.",
+        value: "",
+        description: "Select the USB device first, then Tater builds and this browser flashes it.",
       },
     ],
-    onOpen: async ({ fieldsEl, statusEl }) => {
-      if (statusEl instanceof HTMLElement) {
-        statusEl.textContent = supported ? "Browser flash firmware is ready." : "Browser USB flash is not available in this browser/context.";
+    onOpen: async ({ modal, fieldsEl, statusEl }) => {
+      statusNode = statusEl instanceof HTMLElement ? statusEl : null;
+      modalDialog = modal?.querySelector(".runtime-settings-dialog") || null;
+      modal?.classList.add("voice-log-modal");
+      modalDialog?.classList.add("runtime-settings-dialog-log");
+      fieldsEl?.classList.add("runtime-settings-fields-log");
+      const logArea = fieldsEl?.querySelector('[data-setting-key="browser_flash_log"]') || null;
+      if (logArea instanceof HTMLTextAreaElement) {
+        logArea.readOnly = true;
+        logArea.spellcheck = false;
+        logArea.classList.add("voice-log-source-textarea");
+        const label = logArea.closest("label");
+        const controls = document.createElement("section");
+        controls.className = "core-inline-section";
+        controls.style.marginTop = "12px";
+        controls.innerHTML = `
+          <div class="small core-inline-section-title">USB Device</div>
+          <div class="small">Choose the ESP32-S3 from this browser before Tater starts building.</div>
+          <div class="inline-row" style="margin-top:10px;">
+            <button type="button" class="action-btn esphome-browser-usb-select">Select USB Device</button>
+            <button type="button" class="action-btn esphome-browser-usb-build" disabled>Build & Flash Selected Device</button>
+          </div>
+          <div class="small esphome-browser-usb-selected" style="margin-top:8px;"></div>
+          <div class="inline-row esphome-browser-usb-list" style="margin-top:8px;"></div>
+        `;
+        const consoleEl = document.createElement("div");
+        consoleEl.className = "voice-log-console";
+        consoleEl.setAttribute("role", "log");
+        consoleEl.setAttribute("aria-live", "polite");
+        consoleEl.setAttribute("aria-label", `${deviceLabel} browser USB flash log`);
+        logConsole = consoleEl;
+        if (label instanceof HTMLElement) {
+          label.classList.add("voice-log-field");
+          label.appendChild(controls);
+          label.appendChild(consoleEl);
+        }
+        selectButton = controls.querySelector(".esphome-browser-usb-select");
+        buildButton = controls.querySelector(".esphome-browser-usb-build");
+        portListNode = controls.querySelector(".esphome-browser-usb-list");
+        selectedNode = controls.querySelector(".esphome-browser-usb-selected");
       }
-      const host = document.createElement("section");
-      host.className = "core-inline-section";
-      host.style.marginTop = "12px";
-      host.innerHTML = `
-        <div class="small core-inline-section-title">Web Serial Installer</div>
-        <div class="small">ESP Web Tools will ask this browser for USB serial access and flash the firmware Tater just built.</div>
-        <div class="inline-row" style="margin-top:10px;">
-          <a class="action-btn" href="${escapeHtml(binaryUrl || manifestUrl)}" target="_blank" rel="noopener noreferrer">Download Firmware</a>
-          <a class="action-btn secondary" href="${escapeHtml(manifestUrl)}" target="_blank" rel="noopener noreferrer">Manifest</a>
-        </div>
-        <div class="esphome-browser-flash-host" style="margin-top:12px;"></div>
-      `;
-      fieldsEl?.appendChild(host);
-      const installHost = host.querySelector(".esphome-browser-flash-host");
+      if (statusNode instanceof HTMLElement) {
+        statusNode.textContent = "Select the USB device to continue.";
+        statusNode.classList.add("voice-log-status");
+      }
+      renderEspHomeFirmwareLogEntries(logConsole, [], true, "Select a USB device to start.");
+      updateSelectedPort();
       try {
-        await ensureEspWebToolsLoaded();
-        if (installHost instanceof HTMLElement) {
-          installHost.innerHTML = `
-            <esp-web-install-button manifest="${escapeHtml(manifestUrl)}">
-              <button class="action-btn" slot="activate" type="button">Connect & Flash</button>
-              <span slot="unsupported">Web Serial is not available in this browser.</span>
-              <span slot="not-allowed">Open Tater over HTTPS or localhost to use Web Serial.</span>
-            </esp-web-install-button>
-          `;
+        await renderAuthorizedPorts();
+      } catch (_error) {
+        // Ignore authorized-port listing failures; requestPort still works.
+      }
+      if (selectButton instanceof HTMLButtonElement) {
+        selectButton.addEventListener("click", async () => {
+          try {
+            selectedPort = await browserUsbSelectPort(selector);
+            appendEspHomeFirmwareLog(logConsole, `Selected ${browserUsbPortLabel(selectedPort)}.`, "info");
+            updateSelectedPort();
+            await renderAuthorizedPorts();
+          } catch (error) {
+            appendEspHomeFirmwareLog(logConsole, `USB selection failed: ${String(error?.message || "unknown error")}`, "error");
+          }
+        });
+      }
+      if (buildButton instanceof HTMLButtonElement) {
+        buildButton.addEventListener("click", () => {
+          void startBuild();
+        });
+      }
+    },
+    onClose: ({ modal, fieldsEl, statusEl }) => {
+      modal?.classList.remove("voice-log-modal");
+      modalDialog?.classList.remove("runtime-settings-dialog-log");
+      fieldsEl?.classList.remove("runtime-settings-fields-log");
+      if (statusEl instanceof HTMLElement) {
+        statusEl.classList.remove("voice-log-status");
+      }
+      void stopViewer();
+    },
+  });
+}
+
+function openEspHomeFirmwareOtaLogs(card, coreKey) {
+  if (!(card instanceof HTMLElement)) {
+    return;
+  }
+  const selector = String(card.dataset?.firmwareSelector || decodeCoreManagerId(card.dataset?.coreItemId || "")).trim();
+  const selectorSelect = card.querySelector('select[data-core-field-key="selector"]');
+  const deviceLabel =
+    String(selectorSelect?.selectedOptions?.[0]?.textContent || selector || "ESPHome Device").trim() || "ESPHome Device";
+  if (!selector || !coreKey) {
+    showToast("Pick a connected firmware target before opening OTA logs.", "error", 3200);
+    return;
+  }
+
+  let stopped = false;
+  let cursor = 0;
+  let pollTimer = 0;
+  let logConsole = null;
+  let statusNode = null;
+  let modalDialog = null;
+
+  const stopViewer = async () => {
+    stopped = true;
+    if (pollTimer) {
+      window.clearTimeout(pollTimer);
+      pollTimer = 0;
+    }
+    try {
+      await runCoreManagerAction(card, coreKey, "voice_logs_stop", { id: selector, selector });
+    } catch (_error) {
+      // Ignore cleanup failures while closing the OTA log viewer.
+    }
+  };
+
+  const schedulePoll = (delayMs = 1200) => {
+    if (stopped) {
+      return;
+    }
+    pollTimer = window.setTimeout(async () => {
+      if (stopped) {
+        return;
+      }
+      try {
+        const result = await runCoreManagerAction(card, coreKey, "voice_logs_poll", {
+          id: selector,
+          selector,
+          after_seq: cursor,
+        });
+        const entries = Array.isArray(result?.entries) ? result.entries : [];
+        if (entries.length) {
+          renderEspHomeFirmwareLogEntries(logConsole, entries, false);
         }
+        cursor = Number(result?.cursor || cursor || 0);
+        if (statusNode instanceof HTMLElement) {
+          const errorText = String(result?.error || "").trim();
+          statusNode.textContent = errorText ? `OTA log warning: ${errorText}` : `Streaming OTA logs from ${deviceLabel}.`;
+        }
+        schedulePoll(1200);
       } catch (error) {
-        if (installHost instanceof HTMLElement) {
-          installHost.innerHTML = `<div class="small">Could not load ESP Web Tools: ${escapeHtml(String(error?.message || error || "unknown error"))}</div>`;
+        if (statusNode instanceof HTMLElement) {
+          statusNode.textContent = `OTA log error: ${String(error?.message || "unknown error")}`;
+        }
+        schedulePoll(2500);
+      }
+    }, delayMs);
+  };
+
+  openRuntimeSettingsModal({
+    title: `${deviceLabel} OTA Logs`,
+    meta: selector,
+    fields: [
+      {
+        key: "ota_log_feed",
+        label: "Live Log",
+        type: "textarea",
+        value: "",
+        description: "Live ESPHome API logs stream in this window.",
+      },
+    ],
+    onOpen: async ({ modal, fieldsEl, statusEl }) => {
+      statusNode = statusEl instanceof HTMLElement ? statusEl : null;
+      modalDialog = modal?.querySelector(".runtime-settings-dialog") || null;
+      modal?.classList.add("voice-log-modal");
+      modalDialog?.classList.add("runtime-settings-dialog-log");
+      fieldsEl?.classList.add("runtime-settings-fields-log");
+      const logArea = fieldsEl?.querySelector('[data-setting-key="ota_log_feed"]') || null;
+      if (logArea instanceof HTMLTextAreaElement) {
+        logArea.readOnly = true;
+        logArea.spellcheck = false;
+        logArea.classList.add("voice-log-source-textarea");
+        const label = logArea.closest("label");
+        const consoleEl = document.createElement("div");
+        consoleEl.className = "voice-log-console";
+        consoleEl.setAttribute("role", "log");
+        consoleEl.setAttribute("aria-live", "polite");
+        consoleEl.setAttribute("aria-label", `${deviceLabel} OTA log`);
+        logConsole = consoleEl;
+        if (label instanceof HTMLElement) {
+          label.classList.add("voice-log-field");
+          label.appendChild(consoleEl);
         }
       }
+      if (statusNode instanceof HTMLElement) {
+        statusNode.textContent = "Opening OTA log feed...";
+        statusNode.classList.add("voice-log-status");
+      }
+      try {
+        const result = await runCoreManagerAction(card, coreKey, "voice_logs_start", { id: selector, selector });
+        cursor = Number(result?.cursor || 0);
+        renderEspHomeFirmwareLogEntries(logConsole, Array.isArray(result?.entries) ? result.entries : [], true, "Waiting for OTA logs...");
+        if (statusNode instanceof HTMLElement) {
+          statusNode.textContent = `Streaming OTA logs from ${deviceLabel}.`;
+        }
+        schedulePoll(1000);
+      } catch (error) {
+        renderEspHomeFirmwareLogEntries(
+          logConsole,
+          [{ display: `Failed to open OTA logs: ${String(error?.message || "unknown error")}`, level: "error" }],
+          true
+        );
+        if (statusNode instanceof HTMLElement) {
+          statusNode.textContent = `OTA logs failed: ${String(error?.message || "unknown error")}`;
+        }
+      }
+    },
+    onClose: ({ modal, fieldsEl, statusEl }) => {
+      modal?.classList.remove("voice-log-modal");
+      modalDialog?.classList.remove("runtime-settings-dialog-log");
+      fieldsEl?.classList.remove("runtime-settings-fields-log");
+      if (statusEl instanceof HTMLElement) {
+        statusEl.classList.remove("voice-log-status");
+      }
+      void stopViewer();
+    },
+  });
+}
+
+function openEspHomeBrowserUsbLogs(card) {
+  if (!(card instanceof HTMLElement)) {
+    return;
+  }
+  const selector = String(card.dataset?.firmwareSelector || decodeCoreManagerId(card.dataset?.coreItemId || "")).trim();
+  const selectorSelect = card.querySelector('select[data-core-field-key="selector"]');
+  const deviceLabel =
+    String(selectorSelect?.selectedOptions?.[0]?.textContent || selector || "ESPHome Device").trim() || "ESPHome Device";
+
+  let port = browserUsbStoredPort(selector);
+  let stopped = false;
+  let reader = null;
+  let logConsole = null;
+  let statusNode = null;
+  let modalDialog = null;
+  let reading = false;
+  let logSelectButton = null;
+  let logStartButton = null;
+  let logSelectedNode = null;
+  let logPortListNode = null;
+
+  const paintSelected = () => {
+    if (logSelectedNode instanceof HTMLElement) {
+      logSelectedNode.textContent = port ? `Selected: ${browserUsbPortLabel(port)}` : "No USB device selected.";
+    }
+  };
+
+  const updateLogControls = () => {
+    if (logSelectButton instanceof HTMLButtonElement) {
+      logSelectButton.disabled = reading || stopped;
+    }
+    if (logStartButton instanceof HTMLButtonElement) {
+      logStartButton.disabled = reading || stopped || !port;
+    }
+  };
+
+  const renderLogAuthorizedPorts = async () => {
+    if (!(logPortListNode instanceof HTMLElement)) {
+      return;
+    }
+    const ports = await browserUsbAuthorizedPorts();
+    if (!ports.length) {
+      logPortListNode.innerHTML = `<div class="small">No previously allowed USB serial devices.</div>`;
+      return;
+    }
+    logPortListNode.innerHTML = ports
+      .map(
+        (_port, index) =>
+          `<button type="button" class="inline-btn esphome-browser-usb-log-authorized" data-port-index="${index}">${escapeHtml(
+            browserUsbPortLabel(_port)
+          )}</button>`
+      )
+      .join("");
+    logPortListNode.querySelectorAll(".esphome-browser-usb-log-authorized").forEach((button) => {
+      if (!(button instanceof HTMLButtonElement)) {
+        return;
+      }
+      button.addEventListener("click", () => {
+        const index = Number(button.dataset.portIndex || -1);
+        port = ports[index] || null;
+        if (port) {
+          state.esphomeBrowserUsbPorts[selector || "default"] = port;
+          appendEspHomeFirmwareLog(logConsole, `Selected ${browserUsbPortLabel(port)}.`, "info");
+        }
+        paintSelected();
+        updateLogControls();
+      });
+    });
+  };
+
+  const closePort = async () => {
+    stopped = true;
+    updateLogControls();
+    try {
+      await reader?.cancel?.();
+    } catch (_error) {
+      // Ignore read cancellation failures.
+    }
+    try {
+      reader?.releaseLock?.();
+    } catch (_error) {
+      // Ignore reader cleanup failures.
+    }
+    try {
+      await port?.close?.();
+    } catch (_error) {
+      // Ignore close failures.
+    }
+  };
+
+  const readLoop = async () => {
+    if (!port) {
+      throw new Error("Select a USB device first.");
+    }
+    if (reading) {
+      return;
+    }
+    reading = true;
+    updateLogControls();
+    let activeReader = null;
+    try {
+      await port.open({ baudRate: 115200 });
+      if (statusNode instanceof HTMLElement) {
+        statusNode.textContent = `Streaming browser USB logs from ${browserUsbPortLabel(port)}.`;
+      }
+      appendEspHomeFirmwareLog(logConsole, `Streaming browser USB logs from ${browserUsbPortLabel(port)}.`, "info");
+      activeReader = port.readable?.getReader?.() || null;
+      if (!activeReader) {
+        throw new Error("Selected USB device did not expose a readable serial stream.");
+      }
+      reader = activeReader;
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (!stopped) {
+        const { value, done } = await activeReader.read();
+        if (done) {
+          break;
+        }
+        if (!value) {
+          continue;
+        }
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() || "";
+        lines.forEach((line) => {
+          const text = String(line || "").trim();
+          if (text) {
+            appendEspHomeFirmwareLog(logConsole, text, "info");
+          }
+        });
+      }
+    } finally {
+      try {
+        activeReader?.releaseLock?.();
+      } catch (_error) {
+        // Ignore reader cleanup failures.
+      }
+      if (reader === activeReader) {
+        reader = null;
+      }
+      reading = false;
+      updateLogControls();
+    }
+  };
+
+  openRuntimeSettingsModal({
+    title: `${deviceLabel} Browser USB Logs`,
+    meta: selector || "USB",
+    fields: [
+      {
+        key: "usb_log_feed",
+        label: "Live Log",
+        type: "textarea",
+        value: "",
+        description: "Select the USB device plugged into this computer and stream serial logs in the browser.",
+      },
+    ],
+    onOpen: async ({ modal, fieldsEl, statusEl }) => {
+      statusNode = statusEl instanceof HTMLElement ? statusEl : null;
+      modalDialog = modal?.querySelector(".runtime-settings-dialog") || null;
+      modal?.classList.add("voice-log-modal");
+      modalDialog?.classList.add("runtime-settings-dialog-log");
+      fieldsEl?.classList.add("runtime-settings-fields-log");
+      const logArea = fieldsEl?.querySelector('[data-setting-key="usb_log_feed"]') || null;
+      if (logArea instanceof HTMLTextAreaElement) {
+        logArea.readOnly = true;
+        logArea.spellcheck = false;
+        logArea.classList.add("voice-log-source-textarea");
+        const label = logArea.closest("label");
+        const controls = document.createElement("section");
+        controls.className = "core-inline-section";
+        controls.style.marginTop = "12px";
+        controls.innerHTML = `
+          <div class="small core-inline-section-title">USB Device</div>
+          <div class="inline-row" style="margin-top:10px;">
+            <button type="button" class="action-btn esphome-browser-usb-log-select">Select USB Device</button>
+            <button type="button" class="action-btn esphome-browser-usb-log-start" disabled>Start USB Logs</button>
+          </div>
+          <div class="small esphome-browser-usb-log-selected" style="margin-top:8px;"></div>
+          <div class="inline-row esphome-browser-usb-log-list" style="margin-top:8px;"></div>
+        `;
+        const consoleEl = document.createElement("div");
+        consoleEl.className = "voice-log-console";
+        consoleEl.setAttribute("role", "log");
+        consoleEl.setAttribute("aria-live", "polite");
+        consoleEl.setAttribute("aria-label", `${deviceLabel} browser USB log`);
+        logConsole = consoleEl;
+        if (label instanceof HTMLElement) {
+          label.classList.add("voice-log-field");
+          label.appendChild(controls);
+          label.appendChild(consoleEl);
+        }
+        logSelectButton = controls.querySelector(".esphome-browser-usb-log-select");
+        logStartButton = controls.querySelector(".esphome-browser-usb-log-start");
+        logSelectedNode = controls.querySelector(".esphome-browser-usb-log-selected");
+        logPortListNode = controls.querySelector(".esphome-browser-usb-log-list");
+        paintSelected();
+        updateLogControls();
+        try {
+          await renderLogAuthorizedPorts();
+        } catch (_error) {
+          // Ignore authorized-port listing failures; requestPort still works.
+        }
+        logSelectButton?.addEventListener("click", async () => {
+          try {
+            port = await browserUsbSelectPort(selector);
+            appendEspHomeFirmwareLog(logConsole, `Selected ${browserUsbPortLabel(port)}.`, "info");
+            paintSelected();
+            updateLogControls();
+            await renderLogAuthorizedPorts();
+          } catch (error) {
+            appendEspHomeFirmwareLog(logConsole, `USB selection failed: ${String(error?.message || "unknown error")}`, "error");
+          }
+        });
+        logStartButton?.addEventListener("click", async () => {
+          try {
+            await readLoop();
+          } catch (error) {
+            appendEspHomeFirmwareLog(logConsole, `USB logs failed: ${String(error?.message || "unknown error")}`, "error");
+            if (statusNode instanceof HTMLElement) {
+              statusNode.textContent = `USB logs failed: ${String(error?.message || "unknown error")}`;
+            }
+          }
+        });
+      }
+      if (statusNode instanceof HTMLElement) {
+        statusNode.textContent = "Select a USB device or start logs.";
+        statusNode.classList.add("voice-log-status");
+      }
+      renderEspHomeFirmwareLogEntries(logConsole, [], true, "Select a USB device to start logs.");
+    },
+    onClose: ({ modal, fieldsEl, statusEl }) => {
+      modal?.classList.remove("voice-log-modal");
+      modalDialog?.classList.remove("runtime-settings-dialog-log");
+      fieldsEl?.classList.remove("runtime-settings-fields-log");
+      if (statusEl instanceof HTMLElement) {
+        statusEl.classList.remove("voice-log-status");
+      }
+      void closePort();
     },
   });
 }
@@ -8150,6 +8971,18 @@ function bindEspHomeFirmwareActions(root = document) {
         openEspHomeFirmwareFlashViewer(card, coreKey);
         return;
       }
+      if (action === "voice_firmware_browser_build") {
+        openEspHomeBrowserUsbFlashFlow(card, coreKey);
+        return;
+      }
+      if (action === "voice_firmware_ota_logs") {
+        openEspHomeFirmwareOtaLogs(card, coreKey);
+        return;
+      }
+      if (action === "voice_firmware_browser_logs") {
+        openEspHomeBrowserUsbLogs(card);
+        return;
+      }
 
       const values = collectCoreManagerValues(card);
       captureEspHomeFirmwareDraft(card);
@@ -8172,12 +9005,6 @@ function bindEspHomeFirmwareActions(root = document) {
               values,
             })
         );
-        if (action === "voice_firmware_browser_build") {
-          openEspHomeBrowserFlashModal(result, {
-            templateLabel: String(card.querySelector('select[data-core-field-key="template_key"]')?.selectedOptions?.[0]?.textContent || templateKey || "Firmware").trim(),
-            deviceLabel: String(card.querySelector('select[data-core-field-key="selector"]')?.selectedOptions?.[0]?.textContent || selector || "ESPHome Device").trim(),
-          });
-        }
         if (action !== "voice_firmware_clean") {
           delete state.esphomeFirmwareDrafts[templateKey];
         }

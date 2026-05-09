@@ -1766,6 +1766,9 @@ def _create_browser_flash_artifact(context: Dict[str, Any], binary_path: Path) -
     manifest_path = artifact_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    template_ctx = context.get("template_ctx") if isinstance(context.get("template_ctx"), dict) else {}
+    template_doc = template_ctx.get("template_doc") if isinstance(template_ctx.get("template_doc"), dict) else {}
+    esp32_block = template_doc.get("esp32") if isinstance(template_doc.get("esp32"), dict) else {}
     base_url = f"/api/settings/esphome/firmware-web/{artifact_id}"
     return {
         "artifact_id": artifact_id,
@@ -1774,6 +1777,9 @@ def _create_browser_flash_artifact(context: Dict[str, Any], binary_path: Path) -
         "binary_name": target_binary_name,
         "source_binary": str(binary_path),
         "binary_size": int(target_binary_path.stat().st_size),
+        "flash_size": _text(esp32_block.get("flash_size")) or "4MB",
+        "flash_mode": "dio",
+        "flash_freq": "40m",
     }
 
 
@@ -2009,6 +2015,7 @@ def _session_payload_locked(session: Dict[str, Any], *, after_seq: int = 0) -> D
         "template_key": _text(session.get("template_key")),
         "display_name": _text(session.get("display_name")),
         "host": _text(session.get("host")),
+        "operation": _text(session.get("operation")),
         "phase": phase,
         "status_text": _text(session.get("status_text")) or _phase_status_text(phase, _text(session.get("display_name"))),
         "active": active,
@@ -2019,6 +2026,15 @@ def _session_payload_locked(session: Dict[str, Any], *, after_seq: int = 0) -> D
         "message": _text(session.get("message")),
         "command": list(session.get("command") or []),
         "config_path": _text(session.get("config_path")),
+        "artifact_id": _text(session.get("artifact_id")),
+        "manifest_url": _text(session.get("manifest_url")),
+        "binary_url": _text(session.get("binary_url")),
+        "binary_name": _text(session.get("binary_name")),
+        "binary_size": int(session.get("binary_size") or 0),
+        "source_binary": _text(session.get("source_binary")),
+        "flash_size": _text(session.get("flash_size")),
+        "flash_mode": _text(session.get("flash_mode")),
+        "flash_freq": _text(session.get("flash_freq")),
     }
 
 
@@ -2152,26 +2168,68 @@ def _firmware_session_worker(session_id: str) -> None:
         session["returncode"] = int(returncode)
         stop_requested = bool(session.get("stop_requested"))
         if stop_requested:
+            operation = _lower(session.get("operation"))
             session["active"] = False
-            session["message"] = "Firmware flash stopped."
+            session["message"] = (
+                "Browser flash build stopped."
+                if operation == "browser_build"
+                else "Firmware flash stopped."
+            )
             _set_session_phase_locked(session, "cancelled")
             _append_session_entry_locked(
                 session,
                 level="warn",
-                message="Firmware flash cancelled.",
+                message=(
+                    "Browser flash build cancelled."
+                    if operation == "browser_build"
+                    else "Firmware flash cancelled."
+                ),
                 source="cli",
             )
             return
         if returncode != 0:
             session["active"] = False
             session["error"] = f"ESPHome exited with code {int(returncode)}."
-            session["message"] = "Firmware flash failed."
+            session["message"] = (
+                "Browser flash build failed."
+                if _lower(session.get("operation")) == "browser_build"
+                else "Firmware flash failed."
+            )
             _set_session_phase_locked(session, "failed")
             _append_session_entry_locked(
                 session,
                 level="error",
                 message=f"ESPHome CLI exited with code {int(returncode)}.",
                 source="cli",
+            )
+            return
+        if _lower(session.get("operation")) == "browser_build":
+            try:
+                context = session.get("context") if isinstance(session.get("context"), dict) else {}
+                binary_path = _find_browser_flash_binary(context)
+                artifact = _create_browser_flash_artifact(context, binary_path)
+            except Exception as exc:
+                session["active"] = False
+                session["error"] = _text(exc) or exc.__class__.__name__
+                session["message"] = "Browser flash build failed."
+                _set_session_phase_locked(session, "failed")
+                _append_session_entry_locked(
+                    session,
+                    level="error",
+                    message=f"Browser flash artifact failed: {_text(exc) or exc.__class__.__name__}.",
+                    source="session",
+                )
+                return
+            session.update(artifact)
+            session["active"] = False
+            session["returncode"] = 0
+            session["message"] = "Browser flash firmware is ready."
+            _set_session_phase_locked(session, "completed")
+            _append_session_entry_locked(
+                session,
+                level="info",
+                message=f"Browser flash firmware ready: {artifact.get('binary_name')} ({artifact.get('binary_size')} bytes).",
+                source="session",
             )
             return
         session["returncode"] = 0
@@ -2365,6 +2423,91 @@ def _start_flash_session(
         return _session_payload_locked(live_session, after_seq=0)
 
 
+def _start_browser_build_session(
+    context: Dict[str, Any],
+    profile_values: Dict[str, str],
+    cli_status: Dict[str, Any],
+) -> Dict[str, Any]:
+    _prune_firmware_sessions()
+    selector = _text(context.get("selector"))
+    active_session = _active_flash_for_selector(selector)
+    if isinstance(active_session, dict):
+        raise RuntimeError(
+            f"A firmware session is already active for {_text(context.get('display_name')) or selector}."
+        )
+
+    config_path = _prepare_config_path(context, profile_values)
+    argv = list(cli_status.get("argv") or [])
+    if not argv:
+        raise RuntimeError("ESPHome CLI runner is not configured.")
+    command = [*argv, "compile", str(config_path)]
+    session_id = f"fw_{uuid.uuid4().hex}"
+    target_label = _text(context.get("display_name")) or selector
+    session = {
+        "id": session_id,
+        "selector": selector,
+        "template_key": _text(context.get("template_key")),
+        "display_name": target_label,
+        "host": _text(context.get("host")),
+        "operation": "browser_build",
+        "context": context,
+        "config_path": str(config_path),
+        "command": command,
+        "cwd": _text(cli_status.get("cwd")),
+        "env": _runner_env(cli_status),
+        "created_ts": time.time(),
+        "updated_ts": time.time(),
+        "cursor": 0,
+        "entries": [],
+        "phase": "starting",
+        "status_text": _phase_status_text("starting", target_label),
+        "active": True,
+        "error": "",
+        "message": f"Building browser flash firmware for {target_label}.",
+        "returncode": None,
+        "proc": None,
+        "stop_requested": False,
+        "device_logs_started": False,
+        "device_log_cursor": 0,
+        "device_log_next_retry_ts": 0.0,
+        "device_log_retry_count": 0,
+        "device_log_error": "",
+    }
+    with _FIRMWARE_SESSION_LOCK:
+        _FIRMWARE_SESSIONS[session_id] = session
+        _append_session_entry_locked(
+            session,
+            level="info",
+            message=f"Preparing browser flash firmware for {target_label}.",
+            source="session",
+        )
+        _append_session_entry_locked(
+            session,
+            level="debug",
+            message=f"Config written to {str(config_path)}",
+            source="session",
+        )
+        _append_session_entry_locked(
+            session,
+            level="debug",
+            message="Command: " + " ".join(command),
+            source="session",
+        )
+
+    worker = threading.Thread(target=_firmware_session_worker, args=(session_id,), daemon=True)
+    with _FIRMWARE_SESSION_LOCK:
+        live_session = _FIRMWARE_SESSIONS.get(session_id)
+        if isinstance(live_session, dict):
+            live_session["worker"] = worker
+    worker.start()
+
+    with _FIRMWARE_SESSION_LOCK:
+        live_session = _FIRMWARE_SESSIONS.get(session_id)
+        if not isinstance(live_session, dict):
+            raise RuntimeError("Firmware session was not created.")
+        return _session_payload_locked(live_session, after_seq=0)
+
+
 def _poll_flash_session(session_id: str, *, after_seq: int = 0) -> Dict[str, Any]:
     _prune_firmware_sessions()
     _pump_session_device_logs(session_id)
@@ -2415,12 +2558,21 @@ def _stop_flash_session(session_id: str) -> Dict[str, Any]:
         if not isinstance(session, dict):
             return {"ok": True, "session_id": session_token, "stopped": True}
         session["device_logs_started"] = False
+        operation = _lower(session.get("operation"))
         if _lower(session.get("phase")) not in {"failed", "cancelled"}:
             _set_session_phase_locked(session, _final_session_phase(session))
         if _lower(session.get("phase")) == "completed":
-            session["message"] = "Firmware flash completed."
+            session["message"] = (
+                "Browser flash firmware is ready."
+                if operation == "browser_build"
+                else "Firmware flash completed."
+            )
         elif _lower(session.get("phase")) == "cancelled":
-            session["message"] = "Firmware flash stopped."
+            session["message"] = (
+                "Browser flash build stopped."
+                if operation == "browser_build"
+                else "Firmware flash stopped."
+            )
         return {
             "ok": True,
             "session_id": session_token,
@@ -2529,7 +2681,7 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
         return result
 
     if action_name == "voice_firmware_browser_build":
-        result = _prepare_browser_flash_build(context, profile_values, cli_status)
+        result = _start_browser_build_session(context, profile_values, cli_status)
         result["action"] = action_name
         return result
 
