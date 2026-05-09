@@ -29,6 +29,7 @@ import core_registry as core_registry_module
 import people as people_module
 import verba_registry as verba_registry_module
 import portal_registry as portal_registry_module
+from esphome import firmware as esphome_firmware_module
 from esphome import home as esphome_home_module
 from admin_gate import DEFAULT_ADMIN_ONLY_PLUGINS, REDIS_KEY as ADMIN_GATE_KEY, get_admin_only_plugins
 from hydra import estimate_hydra_chat_context_window, get_active_chat_jobs_snapshot, run_hydra_turn
@@ -4229,6 +4230,18 @@ def run_esphome_runtime_action(payload: CoreTabActionRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"ESPHome action failed: {exc}")
+
+
+@app.get("/api/settings/esphome/firmware-web/{artifact_id}/{relative_path:path}")
+def get_esphome_firmware_web_artifact(artifact_id: str, relative_path: str) -> FileResponse:
+    try:
+        path = esphome_firmware_module.browser_flash_artifact_path(artifact_id, relative_path)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    media_type = "application/json" if path.suffix.lower() == ".json" else "application/octet-stream"
+    return FileResponse(path, media_type=media_type)
 
 
 @app.post("/api/cores/{core_key}/start")

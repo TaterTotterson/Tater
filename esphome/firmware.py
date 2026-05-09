@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import contextlib
 import copy
-import glob
 import json
 import os
 import re
@@ -27,6 +26,7 @@ FIRMWARE_PROFILE_HASH_KEY = "tater:esphome:firmware:profiles:v1"
 FIRMWARE_AGENT_LABS_ROOT = Path(__file__).resolve().parents[1] / "agent_lab" / "esphome"
 FIRMWARE_CONFIG_ROOT = FIRMWARE_AGENT_LABS_ROOT / "firmware_configs"
 FIRMWARE_BUILD_ROOT = FIRMWARE_AGENT_LABS_ROOT / "firmware_builds"
+FIRMWARE_WEB_FLASH_ROOT = FIRMWARE_AGENT_LABS_ROOT / "web_flash"
 FIRMWARE_RUNNER_ROOT = FIRMWARE_AGENT_LABS_ROOT / "runner"
 FIRMWARE_PLATFORMIO_ROOT = FIRMWARE_AGENT_LABS_ROOT / "platformio"
 FIRMWARE_HOME_ROOT = FIRMWARE_AGENT_LABS_ROOT / "home"
@@ -46,15 +46,6 @@ _FIRMWARE_SESSION_MAX_ENTRIES = 4000
 _FIRMWARE_SESSION_TTL_SECONDS = 45 * 60.0
 _FIRMWARE_DEVICE_LOG_RETRY_SECONDS = 2.5
 _FIRMWARE_USB_RECOVERY_SELECTOR = "__usb_recovery__"
-_FIRMWARE_SERIAL_PORT_PATTERNS: tuple[str, ...] = (
-    "/dev/serial/by-id/*",
-    "/dev/ttyUSB*",
-    "/dev/ttyACM*",
-    "/dev/cu.usb*",
-    "/dev/tty.usb*",
-    "/dev/cu.SLAB_USBtoUART*",
-    "/dev/tty.SLAB_USBtoUART*",
-)
 _FIRMWARE_SESSIONS: Dict[str, Dict[str, Any]] = {}
 _FIRMWARE_SESSION_LOCK = threading.Lock()
 _ANSI_ESCAPE_RE = re.compile(r"\x1B(?:\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])")
@@ -261,6 +252,7 @@ def _ensure_agent_labs_dirs() -> None:
         FIRMWARE_AGENT_LABS_ROOT,
         FIRMWARE_CONFIG_ROOT,
         FIRMWARE_BUILD_ROOT,
+        FIRMWARE_WEB_FLASH_ROOT,
         FIRMWARE_RUNNER_ROOT,
         FIRMWARE_PLATFORMIO_ROOT,
         FIRMWARE_HOME_ROOT,
@@ -941,7 +933,7 @@ def _usb_recovery_client_row(template_spec: Dict[str, Any]) -> Dict[str, Any]:
         "source": "usb_recovery",
         "device_info": {
             "name": _lower(template_spec.get("key")) or "usb_recovery",
-            "friendly_name": f"{template_label} USB Recovery",
+            "friendly_name": f"{template_label} Browser USB Recovery",
             "model": "USB Serial",
             "project_name": _text(template_spec.get("label")),
         },
@@ -1076,7 +1068,7 @@ def _build_device_context(
     wake_sound_catalog = _load_wake_sound_catalog()
 
     if usb_recovery:
-        display_name = f"{_text(template_spec.get('label')) or 'Firmware'} USB Recovery"
+        display_name = f"{_text(template_spec.get('label')) or 'Firmware'} Browser USB Recovery"
     else:
         display_name = (
             _text(device_info.get("friendly_name"))
@@ -1282,7 +1274,6 @@ def _build_device_context(
         ),
         "hero_image_alt": f"{display_name} firmware target",
         "connected": connected,
-        "default_transport": "ota" if connected else "usb",
         "sections": sections_ui,
         "links": [row for row in links if _text(row.get("href"))],
         "cli_available": bool(cli_status.get("available")),
@@ -1465,12 +1456,11 @@ def _firmware_device_option(selector: str, client_row: Dict[str, Any]) -> Option
     if usb_recovery:
         return {
             "value": _FIRMWARE_USB_RECOVERY_SELECTOR,
-            "label": "USB Recovery",
-            "title": "USB Recovery",
+            "label": "Browser USB Recovery",
+            "title": "Browser USB Recovery",
             "host": "",
-            "detail": "Flash or read logs through a local USB serial port.",
+            "detail": "Build firmware in Tater, then flash from this browser over Web Serial.",
             "connected": False,
-            "default_transport": "usb",
         }
 
     device_info = client_row.get("device_info") if isinstance(client_row.get("device_info"), dict) else {}
@@ -1493,98 +1483,12 @@ def _firmware_device_option(selector: str, client_row: Dict[str, Any]) -> Option
         "host": host,
         "detail": detail,
         "connected": connected,
-        "default_transport": "ota" if connected else "usb",
     }
-
-
-def _serial_port_label(path: str) -> str:
-    token = _text(path)
-    if not token:
-        return ""
-    suffix = ""
-    with contextlib.suppress(Exception):
-        if os.path.islink(token):
-            target = os.path.realpath(token)
-            if target and target != token:
-                suffix = f" -> {target}"
-    return f"{token}{suffix}"
-
-
-def _serial_port_options() -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
-    seen: set[str] = set()
-
-    with contextlib.suppress(Exception):
-        from serial.tools import list_ports  # type: ignore
-
-        for port in list_ports.comports():
-            device = _text(getattr(port, "device", ""))
-            if not device or device in seen:
-                continue
-            seen.add(device)
-            description = _text(getattr(port, "description", ""))
-            label = f"{device} • {description}" if description and description != device else device
-            rows.append({"value": device, "label": label, "detected": True})
-
-    for pattern in _FIRMWARE_SERIAL_PORT_PATTERNS:
-        for path in sorted(glob.glob(pattern)):
-            token = _text(path)
-            if not token or token in seen or not os.path.exists(token):
-                continue
-            seen.add(token)
-            rows.append(
-                {
-                    "value": token,
-                    "label": _serial_port_label(token),
-                    "detected": True,
-                }
-            )
-
-    rows.sort(key=lambda row: (_lower(row.get("label")), _text(row.get("value"))))
-    rows.append({"value": "__manual__", "label": "Manual USB path", "detected": False})
-    return rows
-
-
-def _serial_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-    body = payload if isinstance(payload, dict) else {}
-    values = esphome_runtime.payload_values(body)
-    port = (
-        _text(body.get("serial_port"))
-        or _text(body.get("usb_port"))
-        or _text(values.get("firmware_usb_port"))
-    )
-    if port == "__manual__":
-        port = _text(body.get("serial_port_manual")) or _text(values.get("firmware_usb_port_manual"))
-    return {"port": port, "values": values}
-
-
-def _validate_serial_port(port: str) -> str:
-    token = _text(port)
-    if not token:
-        raise RuntimeError("Choose a USB serial port before starting USB flash or logs.")
-    if token == "__manual__":
-        raise RuntimeError("Enter the manual USB serial path before starting USB flash or logs.")
-    if token.startswith("/dev/") or re.match(r"^COM\d+$", token, re.IGNORECASE):
-        return token
-    raise RuntimeError("USB serial port must be a /dev/... path or COM port.")
-
-
-def _firmware_transport(action_name: str, payload: Dict[str, Any]) -> str:
-    if action_name == "voice_firmware_usb_logs_start":
-        return "usb"
-    body = payload if isinstance(payload, dict) else {}
-    values = esphome_runtime.payload_values(body)
-    token = _lower(body.get("transport") or body.get("firmware_transport") or values.get("firmware_transport"))
-    if token in {"usb", "serial", "uart"}:
-        return "usb"
-    return "ota"
 
 
 def firmware_panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
     clients = status.get("clients") if isinstance(status.get("clients"), dict) else {}
     cli_status = esphome_cli_status()
-    serial_options = _serial_port_options()
-    detected_serial_options = [row for row in serial_options if bool(row.get("detected"))]
 
     template_options = [
         {"value": _text(spec.get("key")), "label": _text(spec.get("label")) or _text(spec.get("key"))}
@@ -1658,17 +1562,13 @@ def firmware_panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
         "active_selector": active_selector,
         "active_template_key": active_template_key,
         "empty_message": empty_message,
-        "serial": {
-            "ports": serial_options,
-            "detected_count": len(detected_serial_options),
-            "hint": (
-                "USB ports are shown when the Tater process or container can see the serial device. "
-                "If the list is empty, mount or pass the USB device through to Tater, then refresh this tab."
-            ),
-        },
         "wifi_note": (
             "Wi-Fi SSID is stored per device in Tater. "
             "Leave the Wi-Fi password blank to keep the saved password for that device."
+        ),
+        "browser_flash_note": (
+            "Browser USB flash builds firmware in Tater, then uses Web Serial from this browser. "
+            "Plug the device into the computer running the browser, and use Chrome or Edge on a secure context."
         ),
     }
     if warnings:
@@ -1790,6 +1690,144 @@ def _prepare_config_path(context: Dict[str, Any], values: Dict[str, str]) -> Pat
     config_path = selector_dir / f"{_sanitize_token(context.get('template_key'))}.yaml"
     config_path.write_text(_render_config_text(context, values), encoding="utf-8")
     return config_path
+
+
+def _build_path_for_context(context: Dict[str, Any]) -> Path:
+    return FIRMWARE_BUILD_ROOT / _sanitize_token(context.get("selector")) / _sanitize_token(context.get("template_key"))
+
+
+def _find_browser_flash_binary(context: Dict[str, Any]) -> Path:
+    build_path = _build_path_for_context(context)
+    if not build_path.exists():
+        raise RuntimeError(f"ESPHome build output was not found at {build_path}.")
+
+    bins = [path for path in build_path.rglob("*.bin") if path.is_file()]
+    if not bins:
+        raise RuntimeError(f"ESPHome did not produce a browser-flashable .bin under {build_path}.")
+
+    preferred_names = (
+        "firmware.factory.bin",
+        "firmware-factory.bin",
+        "factory.bin",
+        "merged-firmware.bin",
+        "merged.bin",
+    )
+    for wanted in preferred_names:
+        matches = [path for path in bins if path.name == wanted]
+        if matches:
+            return max(matches, key=lambda path: path.stat().st_size)
+
+    raise RuntimeError(
+        "ESPHome built firmware, but no factory/merged .bin was found for browser flashing. "
+        "ESP Web Tools needs a single factory image for ESP32-S3 browser installs."
+    )
+
+
+def _browser_flash_artifact_id(context: Dict[str, Any]) -> str:
+    base = "_".join(
+        part
+        for part in [
+            _sanitize_token(context.get("selector")),
+            _sanitize_token(context.get("template_key")),
+            str(int(time.time())),
+            uuid.uuid4().hex[:8],
+        ]
+        if part
+    )
+    return base or f"artifact_{uuid.uuid4().hex[:12]}"
+
+
+def _create_browser_flash_artifact(context: Dict[str, Any], binary_path: Path) -> Dict[str, Any]:
+    artifact_id = _browser_flash_artifact_id(context)
+    artifact_dir = FIRMWARE_WEB_FLASH_ROOT / artifact_id
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    target_binary_name = "firmware.bin"
+    target_binary_path = artifact_dir / target_binary_name
+    shutil.copy2(binary_path, target_binary_path)
+
+    display_name = _text(context.get("display_name")) or _text(context.get("template_label")) or "Tater Firmware"
+    manifest = {
+        "name": display_name,
+        "version": time.strftime("%Y.%m.%d.%H%M%S", time.localtime()),
+        "new_install_prompt_erase": True,
+        "builds": [
+            {
+                "chipFamily": "ESP32-S3",
+                "parts": [
+                    {
+                        "path": target_binary_name,
+                        "offset": 0,
+                    }
+                ],
+            }
+        ],
+    }
+    manifest_path = artifact_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    base_url = f"/api/settings/esphome/firmware-web/{artifact_id}"
+    return {
+        "artifact_id": artifact_id,
+        "manifest_url": f"{base_url}/manifest.json",
+        "binary_url": f"{base_url}/{target_binary_name}",
+        "binary_name": target_binary_name,
+        "source_binary": str(binary_path),
+        "binary_size": int(target_binary_path.stat().st_size),
+    }
+
+
+def _prepare_browser_flash_build(
+    context: Dict[str, Any],
+    profile_values: Dict[str, str],
+    cli_status: Dict[str, Any],
+) -> Dict[str, Any]:
+    config_path = _prepare_config_path(context, profile_values)
+    argv = list(cli_status.get("argv") or [])
+    if not argv:
+        raise RuntimeError("ESPHome CLI runner is not configured.")
+
+    command = [*argv, "compile", str(config_path)]
+    proc = _run_esphome_command(
+        command,
+        cwd=_text(cli_status.get("cwd")),
+        env=_runner_env(cli_status),
+    )
+    summary = _summarize_process_output(proc.stdout, proc.stderr)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"ESPHome browser flash build failed for {context.get('display_name') or context.get('selector')}.\n\n"
+            f"{summary or 'No CLI output was captured.'}"
+        )
+
+    binary_path = _find_browser_flash_binary(context)
+    artifact = _create_browser_flash_artifact(context, binary_path)
+    return {
+        "ok": True,
+        "selector": context.get("selector"),
+        "template_key": context.get("template_key"),
+        "config_path": str(config_path),
+        "command": command,
+        "message": f"Built browser flash firmware for {context.get('display_name') or context.get('selector')}.",
+        "output_tail": summary,
+        **artifact,
+    }
+
+
+def browser_flash_artifact_path(artifact_id: str, relative_path: str) -> Path:
+    artifact = _sanitize_token(artifact_id)
+    if not artifact:
+        raise KeyError("Browser flash artifact is missing.")
+    rel = Path(_text(relative_path))
+    if rel.is_absolute() or any(part in {"", ".", ".."} for part in rel.parts):
+        raise KeyError("Browser flash artifact path is invalid.")
+    root = (FIRMWARE_WEB_FLASH_ROOT / artifact).resolve()
+    target = (root / rel).resolve()
+    if root not in target.parents and target != root:
+        raise KeyError("Browser flash artifact path is invalid.")
+    if not target.is_file():
+        raise KeyError("Browser flash artifact file was not found.")
+    return target
 
 
 def _runner_env(status: Dict[str, Any]) -> Dict[str, str]:
@@ -2038,7 +2076,7 @@ def _firmware_session_worker(session_id: str) -> None:
         command = list(session.get("command") or [])
         cwd = _text(session.get("cwd"))
         env = session.get("env") if isinstance(session.get("env"), dict) else None
-        _set_session_phase_locked(session, "live_logs" if _lower(session.get("operation")) == "usb_logs" else "building")
+        _set_session_phase_locked(session, "building")
 
     proc: Optional[subprocess.Popen[str]] = None
     try:
@@ -2115,13 +2153,12 @@ def _firmware_session_worker(session_id: str) -> None:
         stop_requested = bool(session.get("stop_requested"))
         if stop_requested:
             session["active"] = False
-            is_usb_logs = _lower(session.get("operation")) == "usb_logs"
-            session["message"] = "USB log stream stopped." if is_usb_logs else "Firmware flash stopped."
+            session["message"] = "Firmware flash stopped."
             _set_session_phase_locked(session, "cancelled")
             _append_session_entry_locked(
                 session,
                 level="warn",
-                message="USB log stream cancelled." if is_usb_logs else "Firmware flash cancelled.",
+                message="Firmware flash cancelled.",
                 source="cli",
             )
             return
@@ -2135,22 +2172,6 @@ def _firmware_session_worker(session_id: str) -> None:
                 level="error",
                 message=f"ESPHome CLI exited with code {int(returncode)}.",
                 source="cli",
-            )
-            return
-        if _lower(session.get("transport")) == "usb":
-            session["active"] = False
-            session["returncode"] = 0
-            session["message"] = (
-                "USB log stream ended."
-                if _lower(session.get("operation")) == "usb_logs"
-                else "USB firmware session completed."
-            )
-            _set_session_phase_locked(session, "completed")
-            _append_session_entry_locked(
-                session,
-                level="info",
-                message=_text(session.get("message")),
-                source="session",
             )
             return
         session["returncode"] = 0
@@ -2175,8 +2196,6 @@ def _pump_session_device_logs(session_id: str) -> None:
     with _FIRMWARE_SESSION_LOCK:
         session = _FIRMWARE_SESSIONS.get(session_id)
         if not isinstance(session, dict):
-            return
-        if _lower(session.get("transport")) == "usb":
             return
         if not bool(session.get("active")):
             return
@@ -2263,10 +2282,6 @@ def _start_flash_session(
     context: Dict[str, Any],
     profile_values: Dict[str, str],
     cli_status: Dict[str, Any],
-    *,
-    transport: str = "ota",
-    serial_port: str = "",
-    operation: str = "flash",
 ) -> Dict[str, Any]:
     _prune_firmware_sessions()
     selector = _text(context.get("selector"))
@@ -2281,31 +2296,15 @@ def _start_flash_session(
     argv = list(cli_status.get("argv") or [])
     if not argv:
         raise RuntimeError("ESPHome CLI runner is not configured.")
-    transport_token = "usb" if _lower(transport) == "usb" else "ota"
-    operation_token = _lower(operation) or "flash"
-    usb_port = _validate_serial_port(serial_port) if transport_token == "usb" else ""
-    if operation_token == "usb_logs":
-        command = [*argv, "logs", str(config_path), "--device", usb_port]
-    elif transport_token == "usb":
-        command = [*argv, "run", str(config_path), "--device", usb_port]
-    else:
-        command = [*argv, "run", str(config_path), "--no-logs", "--device", host or "OTA"]
+    command = [*argv, "run", str(config_path), "--no-logs", "--device", host or "OTA"]
     session_id = f"fw_{uuid.uuid4().hex}"
     target_label = _text(context.get("display_name")) or selector
-    session_message = (
-        f"Streaming USB serial logs for {target_label}."
-        if operation_token == "usb_logs"
-        else f"Streaming build, upload, and live device logs for {target_label}."
-    )
     session = {
         "id": session_id,
         "selector": selector,
         "template_key": _text(context.get("template_key")),
         "display_name": target_label,
         "host": host,
-        "transport": transport_token,
-        "serial_port": usb_port,
-        "operation": operation_token,
         "config_path": str(config_path),
         "command": command,
         "cwd": _text(cli_status.get("cwd")),
@@ -2315,10 +2314,10 @@ def _start_flash_session(
         "cursor": 0,
         "entries": [],
         "phase": "starting",
-        "status_text": _phase_status_text("live_logs" if operation_token == "usb_logs" else "starting", target_label),
+        "status_text": _phase_status_text("starting", target_label),
         "active": True,
         "error": "",
-        "message": session_message,
+        "message": f"Streaming build, upload, and live device logs for {target_label}.",
         "returncode": None,
         "proc": None,
         "stop_requested": False,
@@ -2334,12 +2333,8 @@ def _start_flash_session(
             session,
             level="info",
             message=(
-                f"Opening USB logs for {target_label} on {usb_port}."
-                if operation_token == "usb_logs"
-                else (
-                    f"Preparing {_text(context.get('template_label')) or 'firmware'} for "
-                    f"{target_label} via {'USB' if transport_token == 'usb' else 'OTA'}."
-                )
+                f"Preparing {_text(context.get('template_label')) or 'firmware'} for "
+                f"{target_label} via OTA."
             ),
             source="session",
         )
@@ -2464,9 +2459,9 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
     if action_name not in {
         "voice_firmware_save",
         "voice_firmware_build",
+        "voice_firmware_browser_build",
         "voice_firmware_flash",
         "voice_firmware_flash_start",
-        "voice_firmware_usb_logs_start",
     }:
         return None
 
@@ -2482,15 +2477,6 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
     if not isinstance(template_spec, dict):
         raise RuntimeError(f"Firmware template {template_key} is not supported.")
 
-    transport = _firmware_transport(action_name, body)
-    serial_payload = _serial_payload(body)
-    needs_serial_port = action_name in {
-        "voice_firmware_flash",
-        "voice_firmware_flash_start",
-        "voice_firmware_usb_logs_start",
-    } and transport == "usb"
-    serial_port = _validate_serial_port(serial_payload.get("port", "")) if needs_serial_port else ""
-
     if _is_usb_recovery_selector(selector):
         client_row = _usb_recovery_client_row(template_spec)
     else:
@@ -2499,12 +2485,16 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
         raise RuntimeError(f"ESPHome device {selector} is not available for firmware actions.")
     if (
         action_name in {"voice_firmware_flash", "voice_firmware_flash_start"}
-        and transport != "usb"
         and not bool(client_row.get("connected"))
     ):
-        raise RuntimeError(f"ESPHome device {selector} is offline. Choose USB Serial to recover or debug it.")
+        raise RuntimeError(f"ESPHome device {selector} is offline. Use Browser USB Flash to recover it from this browser.")
 
-    force_remote_refresh = action_name in {"voice_firmware_build", "voice_firmware_flash", "voice_firmware_flash_start"}
+    force_remote_refresh = action_name in {
+        "voice_firmware_build",
+        "voice_firmware_browser_build",
+        "voice_firmware_flash",
+        "voice_firmware_flash_start",
+    }
     context = _build_device_context(
         selector,
         client_row,
@@ -2534,19 +2524,12 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
         raise RuntimeError(_text(cli_status.get("detail")) or "ESPHome CLI is unavailable.")
 
     if action_name == "voice_firmware_flash_start":
-        result = _start_flash_session(context, profile_values, cli_status, transport=transport, serial_port=serial_port)
+        result = _start_flash_session(context, profile_values, cli_status)
         result["action"] = action_name
         return result
 
-    if action_name == "voice_firmware_usb_logs_start":
-        result = _start_flash_session(
-            context,
-            profile_values,
-            cli_status,
-            transport="usb",
-            serial_port=serial_port,
-            operation="usb_logs",
-        )
+    if action_name == "voice_firmware_browser_build":
+        result = _prepare_browser_flash_build(context, profile_values, cli_status)
         result["action"] = action_name
         return result
 
@@ -2558,8 +2541,6 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
 
     if action_name == "voice_firmware_build":
         command = [*argv, "compile", str(config_path)]
-    elif transport == "usb":
-        command = [*argv, "run", str(config_path), "--no-logs", "--device", serial_port]
     else:
         command = [*argv, "run", str(config_path), "--no-logs", "--device", host or "OTA"]
 
