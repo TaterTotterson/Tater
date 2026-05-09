@@ -70,16 +70,33 @@ def _named_satellite_image_src(image_name: str) -> str:
     return _asset_data_url(path)
 
 
-def _satellite_image_src(*name_candidates: Any) -> str:
+def device_image_src(*name_candidates: Any) -> str:
     for raw_name in name_candidates:
         token = esphome_runtime.lower(raw_name)
         if not token:
             continue
+        if any(
+            part in token
+            for part in (
+                "taterd",
+                "taterdisplay",
+                "tater-display",
+                "tater display",
+                "s3box",
+                "s3 box",
+                "esp32-s3-box",
+            )
+        ):
+            return _named_satellite_image_src("taterD.png")
         if "tatervpe" in token:
             return _named_satellite_image_src("voicepe.png")
         if "tatersat1" in token:
             return _named_satellite_image_src("sat1.png")
     return _default_satellite_image_src()
+
+
+def _satellite_image_src(*name_candidates: Any) -> str:
+    return device_image_src(*name_candidates)
 
 
 def satellite_item_forms(status: Dict[str, Any]) -> List[Dict[str, Any]]:

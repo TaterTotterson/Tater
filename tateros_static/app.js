@@ -6136,6 +6136,8 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
     String(variant?.title || selectedDevice?.title || selection.selector || "Firmware Target").trim() || "Firmware Target";
   const subtitle = String(variant?.subtitle || "").trim();
   const detail = String(variant?.detail || selectedDevice?.detail || "").trim();
+  const heroImageSrc = String(variant?.hero_image_src || selectedDevice?.hero_image_src || "").trim();
+  const heroImageAlt = String(variant?.hero_image_alt || `${title} firmware target`).trim() || title;
   const templateLabel =
     String(variant?.template_label || selectedTemplate?.label || selection.templateKey || "Firmware").trim() || "Firmware";
   const cliAvailable = boolFromAny(variant?.cli_available ?? cli?.available, false);
@@ -6187,6 +6189,21 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
   const sectionsHtml = variant
     ? renderEspHomeFirmwareSections(Array.isArray(variant?.sections) ? variant.sections : [])
     : renderNotice("No firmware form is available for the current template/device selection.");
+  const targetSummaryHtml = heroImageSrc
+    ? `
+      <div class="core-satellite-summary">
+        <div class="core-satellite-image-wrap"><img class="core-satellite-image" src="${escapeHtml(heroImageSrc)}" alt="${escapeHtml(heroImageAlt)}" loading="lazy" /></div>
+        <div class="core-satellite-summary-main">
+          ${subtitle ? `<div class="small core-satellite-subtitle">${escapeHtml(subtitle)}</div>` : ""}
+          ${detail ? `<div class="small core-satellite-detail">${escapeHtml(detail)}</div>` : ""}
+          <div class="small">Template: ${escapeHtml(templateLabel)}</div>
+        </div>
+      </div>
+    `
+    : `
+      ${subtitle ? `<div class="small">${escapeHtml(subtitle)}</div>` : ""}
+      ${detail ? `<div class="small" style="margin-top:6px;">${escapeHtml(detail)}</div>` : ""}
+    `;
 
   return `
     <article class="card core-manager-item esphome-firmware-card"
@@ -6198,8 +6215,7 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
         <h3 class="card-title">${escapeHtml(title)}</h3>
         <span class="small">${escapeHtml(templateLabel)}</span>
       </div>
-      ${subtitle ? `<div class="small">${escapeHtml(subtitle)}</div>` : ""}
-      ${detail ? `<div class="small" style="margin-top:6px;">${escapeHtml(detail)}</div>` : ""}
+      ${targetSummaryHtml}
       ${
         !cliAvailable && cliReason
           ? `<div class="small" style="margin-top:8px;">ESPHome CLI unavailable: ${escapeHtml(cliReason)}</div>`
@@ -11641,7 +11657,7 @@ async function loadSettingsView() {
             <div class="settings-subpanel" data-esphome-panel="firmware">
               ${renderSettingsSectionIntro(
                 "Firmware",
-                "Build or flash Tater firmware for connected VoicePE and Satellite1 devices after reviewing template substitutions.",
+                "Build or flash Tater firmware for connected VoicePE, Satellite1, and S3Box display devices after reviewing template substitutions.",
                 "FW",
                 "subtle"
               )}

@@ -3,7 +3,7 @@ import uuid
 import re
 from typing import Any, Dict, Optional, Tuple
 
-ALLOWED_PLATFORMS = ("discord", "irc", "matrix", "homeassistant", "ntfy", "telegram", "macos", "webui")
+ALLOWED_PLATFORMS = ("discord", "irc", "matrix", "homeassistant", "ntfy", "telegram", "macos", "webui", "display")
 
 QUEUE_KEYS = {
     "discord": "notifyq:discord",
@@ -65,6 +65,11 @@ _PLATFORM_ALIASES = {
     "web ui": "webui",
     "web-ui": "webui",
     "web_ui": "webui",
+    "screen": "display",
+    "screens": "display",
+    "tater display": "display",
+    "tater-display": "display",
+    "tater_display": "display",
 }
 
 
@@ -283,6 +288,9 @@ def resolve_targets(
         pass
     elif platform == "webui":
         # No required target; writes directly to WebUI chat history.
+        pass
+    elif platform == "display":
+        # No required target; display events default to all subscribed displays.
         pass
 
     return resolved, None

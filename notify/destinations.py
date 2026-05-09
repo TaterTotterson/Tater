@@ -14,6 +14,7 @@ _PLATFORM_ORDER: Tuple[str, ...] = (
     "homeassistant",
     "ntfy",
     "webui",
+    "display",
     "wordpress",
 )
 
@@ -57,6 +58,11 @@ _PLATFORM_META: Dict[str, Dict[str, Any]] = {
         "label": "WebUI",
         "requires_target": False,
         "fields": (),
+    },
+    "display": {
+        "label": "Tater Display",
+        "requires_target": False,
+        "fields": ("target", "device", "selector"),
     },
     "wordpress": {
         "label": "WordPress",
@@ -242,6 +248,8 @@ def _platform_target_label(platform: str, targets: Dict[str, str]) -> str:
         return _to_text(targets.get("site_url")) or "WordPress site"
     if platform == "webui":
         return "WebUI chat"
+    if platform == "display":
+        return _to_text(targets.get("target") or targets.get("device") or targets.get("selector")) or "All Tater displays"
     return "Destination"
 
 
