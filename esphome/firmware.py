@@ -20,6 +20,7 @@ import yaml
 from helpers import redis_client
 
 from . import runtime as esphome_runtime
+from . import ui_helpers as esphome_ui_helpers
 
 FIRMWARE_PROFILE_HASH_KEY = "tater:esphome:firmware:profiles:v1"
 FIRMWARE_AGENT_LABS_ROOT = Path(__file__).resolve().parents[1] / "agent_lab" / "esphome"
@@ -113,6 +114,30 @@ _TEMPLATE_SPECS: tuple[Dict[str, Any], ...] = (
             "tater_sat1",
             "tater sat1",
             "core board",
+        },
+    },
+    {
+        "key": "s3box_display",
+        "label": "Tater S3Box Display",
+        "source_urls": [
+            "https://github.com/TaterTotterson/Tater-S3Box-Display/raw/refs/heads/main/s3box.yaml",
+        ],
+        "candidates": [
+            ("Tater-S3Box-Display", "s3box.yaml"),
+        ],
+        "fixed_keys": set(),
+        "auto_keys": {"device_ip"},
+        "match_tokens": {
+            "s3box",
+            "s3 box",
+            "s3-box",
+            "esp32-s3-box",
+            "esp32 s3 box",
+            "taterd",
+            "taterdisplay",
+            "tater-display",
+            "tater display",
+            "tater-s3box-display",
         },
     },
 )
@@ -1073,6 +1098,20 @@ def _build_device_context(
             description_parts.append("Pick a prebuilt wake word above or paste any custom JSON model URL.")
         elif key == "wake_word_triggered_sound_file":
             description_parts.append("Pick a prebuilt wake sound above or paste any custom audio URL.")
+        elif key == "tater_base_url":
+            placeholder = placeholder or "http://tater.local:8501"
+            description_parts.append("Base URL for the Tater display feed and event API.")
+        elif key == "tater_token":
+            field_type = "password"
+            description_parts.append("Use the same token as Tater's ESPHome voice/display API, if auth is enabled.")
+        elif key == "display_target":
+            description_parts.append("Display target name used for Tater events, for example livingroom or kitchen.")
+        elif key == "timezone":
+            placeholder = placeholder or "America/Chicago"
+            description_parts.append("IANA timezone used by the display clock.")
+        elif key == "device_ip":
+            placeholder = placeholder or host or "192.168.1.50"
+            description_parts.append("OTA target address for this ESPHome display.")
 
         if key in fixed_keys:
             description_parts.append("Locked to the firmware template for this device family.")
@@ -1190,6 +1229,16 @@ def _build_device_context(
         "detail": " • ".join(detail_parts),
         "template_label": _text(template_spec.get("label")),
         "template_url": _text((template_spec.get("source_urls") or [""])[0]),
+        "hero_image_src": esphome_ui_helpers.device_image_src(
+            display_name,
+            device_info.get("name"),
+            device_info.get("friendly_name"),
+            device_info.get("model"),
+            device_info.get("project_name"),
+            template_spec.get("key"),
+            template_spec.get("label"),
+        ),
+        "hero_image_alt": f"{display_name} firmware target",
         "connected": True,
         "sections": sections_ui,
         "links": [row for row in links if _text(row.get("href"))],

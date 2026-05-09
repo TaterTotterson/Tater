@@ -7,7 +7,7 @@ import sys
 import uuid
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Header, HTTPException, Response
+from fastapi import APIRouter, Header, HTTPException, Request, Response
 
 from .conversation import VoiceSessionRuntime
 
@@ -212,6 +212,44 @@ async def native_status(x_tater_token: Optional[str] = Header(None)) -> Dict[str
         "discovery": dict(vp._esphome_device_runtime.discovery_stats()),
         "esphome": vp._esphome_status(),
     }
+
+
+@router.get("/tater-ha/v1/display/feed")
+async def display_feed(request: Request, x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
+    vp = _vp()
+    vp._require_api_auth(x_tater_token)
+    from .. import display_feed as display_feed_module
+
+    return display_feed_module.build_display_feed(request.query_params, version=vp.__version__)
+
+
+@router.get("/tater-ha/v1/display/events")
+async def display_events(
+    after_seq: int = 0,
+    target: str = "",
+    device: str = "",
+    selector: str = "",
+    limit: int = 20,
+    x_tater_token: Optional[str] = Header(None),
+) -> Dict[str, Any]:
+    vp = _vp()
+    vp._require_api_auth(x_tater_token)
+    from .. import display_bus
+
+    return display_bus.list_display_events(
+        after_seq=after_seq,
+        target=target or device or selector,
+        limit=limit,
+    )
+
+
+@router.post("/tater-ha/v1/display/events")
+async def display_events_post(payload: Dict[str, Any], x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
+    vp = _vp()
+    vp._require_api_auth(x_tater_token)
+    from .. import display_bus
+
+    return display_bus.publish_display_event(payload if isinstance(payload, dict) else {})
 
 
 @router.get("/tater-ha/v1/voice/esphome/status")

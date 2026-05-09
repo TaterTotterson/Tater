@@ -271,6 +271,37 @@ Once the WebUI is up, continue to **Post-Install Setup** below.
 
 ---
 
+## ESPHome Display Feed
+
+ESPHome displays can poll Tater directly for a compact JSON feed instead of binding their screen widgets to Home Assistant. Use named query parameters to map display slots to Home Assistant entity IDs already known to Tater:
+
+```text
+http://<tater-host>:8501/tater-ha/v1/display/feed?temp_out=sensor.weather_outdoor_temperature&temp_in=sensor.living_room_temperature&humidity_out=sensor.humidity&humidity_in=sensor.up_sense_humidity_level&wind_speed=sensor.wind_speed&rain_rate=sensor.rain_rate&lightning_strikes=sensor.weather_lightning_strikes
+```
+
+If Voice API auth is enabled, send the same `X-Tater-Token` header used by Tater ESPHome voice routes. Display values live in `slots`, flat numeric/string `values`, and display-ready `text`; the feed also includes a local `clock`.
+
+Apps can also push transient display events for LVGL notification pages:
+
+```bash
+curl -X POST "http://<tater-host>:8501/tater-ha/v1/display/events" \
+  -H "Content-Type: application/json" \
+  -H "X-Tater-Token: <optional-token>" \
+  -d '{"kind":"doorbell","title":"Doorbell","message":"Someone is at the front door.","image_url":"http://camera/snapshot.jpg","ttl_seconds":90}'
+```
+
+Display event kinds include `notification`, `camera`, `doorbell`, `image`, `tool_call`, `voice`, `status`, and `alert`. During live voice tool-progress speech, Tater automatically queues a `tool_call` event targeted to the active ESPHome selector with `animation: "tool_call"`, the spoken progress line, and any available step metadata.
+
+Displays can poll events with:
+
+```text
+http://<tater-host>:8501/tater-ha/v1/display/events?target=livingroom&after_seq=0
+```
+
+The built-in notifier also accepts `display`, `screen`, or `tater display` as a destination, so awareness rules and other Tater send-message paths can queue display cards without knowing the ESPHome firmware details.
+
+---
+
 ## Post-Install Setup
 
 After Tater is running, open TaterOS and finish the first-run setup:

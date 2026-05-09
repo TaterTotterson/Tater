@@ -2661,6 +2661,47 @@ async def _send_voice_intent_end(
     session.intent_active = False
 
 
+def _publish_tool_progress_display_event(
+    *,
+    selector: str,
+    session_id: str,
+    spoken: str,
+    wait_payload: Optional[Dict[str, Any]],
+    timeout_s: float,
+) -> None:
+    progress = dict(wait_payload) if isinstance(wait_payload, dict) else {}
+    message = _sanitize_tool_progress_spoken_text(spoken)
+    if not message:
+        return
+    try:
+        from esphome import display_bus
+
+        display_bus.publish_display_event(
+            {
+                "kind": "tool_call",
+                "target": _text(selector) or "all",
+                "title": "Tool Call",
+                "message": message,
+                "description": _text(progress.get("instruction")),
+                "priority": "normal",
+                "ttl_seconds": max(6, min(30, int(round(float(timeout_s or 0.0) + 8.0)))),
+                "source": "voice_core",
+                "tool": _text(progress.get("tool")),
+                "phase": _text(progress.get("phase")) or "tool_start",
+                "status": "running",
+                "animation": "tool_call",
+                "step_index": progress.get("step_index"),
+                "step_total": progress.get("step_total"),
+                "meta": {
+                    "session_id": _text(session_id),
+                    "progress": progress,
+                },
+            }
+        )
+    except Exception as exc:
+        _native_debug(f"display tool progress event failed selector={selector}: {exc}")
+
+
 async def _play_live_tool_progress_for_session(
     client: Any,
     module: Any,
@@ -2670,6 +2711,7 @@ async def _play_live_tool_progress_for_session(
     session: "VoiceSessionRuntime",
     transcript: str,
     wait_text: str,
+    wait_payload: Optional[Dict[str, Any]] = None,
 ) -> None:
     if not _experimental_live_tool_progress_enabled():
         return
@@ -2695,6 +2737,14 @@ async def _play_live_tool_progress_for_session(
     timeout_s = _run_end_timeout_s(audio_bytes, audio_format)
     waiter: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
     lock = runtime.get("lock")
+
+    _publish_tool_progress_display_event(
+        selector=selector,
+        session_id=_text(session.session_id),
+        spoken=spoken,
+        wait_payload=wait_payload,
+        timeout_s=timeout_s,
+    )
 
     await _ensure_voice_stt_end_sent(client, module, session=session, transcript=transcript)
     await _ensure_voice_intent_active(client, module, session=session)
@@ -3841,6 +3891,7 @@ async def _finalize_session(
                 session=session,
                 transcript=_text(session.stt_transcript),
                 wait_text=wait_text,
+                wait_payload=wait_payload,
             )
 
         session.live_tool_progress_callback = _live_tool_progress
