@@ -125,7 +125,7 @@ _TEMPLATE_SPECS: tuple[Dict[str, Any], ...] = (
         "candidates": [
             ("Tater-S3Box-Display", "s3box.yaml"),
         ],
-        "fixed_keys": set(),
+        "fixed_keys": {"device_name"},
         "auto_keys": {"device_ip"},
         "match_tokens": {
             "s3box",
