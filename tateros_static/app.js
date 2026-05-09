@@ -6122,7 +6122,6 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
   const templates = Array.isArray(body?.templates) ? body.templates : [];
   const devices = Array.isArray(body?.devices) ? body.devices : [];
   const cli = body?.cli && typeof body.cli === "object" ? body.cli : {};
-  const serial = body?.serial && typeof body.serial === "object" ? body.serial : {};
   const selection = normalizeEspHomeFirmwareSelection(body);
   const selectedTemplate =
     templates.find((row) => String(row?.value || "").trim() === selection.templateKey) || {};
@@ -6133,10 +6132,6 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
     selection.templateKey
   );
   const variantAvailable = Boolean(variant && typeof variant === "object");
-  const firmwareDraft =
-    selection.templateKey && state.esphomeFirmwareDrafts && typeof state.esphomeFirmwareDrafts === "object"
-      ? state.esphomeFirmwareDrafts[selection.templateKey]
-      : null;
   const title =
     String(variant?.title || selectedDevice?.title || selection.selector || "Firmware Target").trim() || "Firmware Target";
   const subtitle = String(variant?.subtitle || "").trim();
@@ -6148,17 +6143,6 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
   const cliAvailable = boolFromAny(variant?.cli_available ?? cli?.available, false);
   const cliReason = String(variant?.cli_reason || cli?.detail || "").trim();
   const links = Array.isArray(variant?.links) ? variant.links : [];
-  const serialPorts = Array.isArray(serial?.ports) ? serial.ports : [];
-  const detectedSerialPort = serialPorts.find((row) => boolFromAny(row?.detected, false));
-  const targetDefaultTransport =
-    String(variant?.default_transport || selectedDevice?.default_transport || "ota").trim() || "ota";
-  const defaultTransport =
-    targetDefaultTransport === "usb"
-      ? "usb"
-      : String(firmwareDraft?.firmware_transport || targetDefaultTransport || "ota").trim() || "ota";
-  const selectedUsbPort =
-    String(firmwareDraft?.firmware_usb_port || detectedSerialPort?.value || "__manual__").trim() || "__manual__";
-  const selectedUsbManual = String(firmwareDraft?.firmware_usb_port_manual || "").trim();
   const linksHtml = links.length
     ? `
       <div class="small" style="margin-top:10px;">
@@ -6176,8 +6160,10 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
       </div>
     `
     : "";
+  const targetConnected = boolFromAny(variant?.connected ?? selectedDevice?.connected, false);
   const saveDisabledAttr = variantAvailable ? "" : " disabled";
-  const flashDisabledAttr = cliAvailable && variantAvailable ? "" : " disabled";
+  const otaFlashDisabledAttr = cliAvailable && variantAvailable && targetConnected ? "" : " disabled";
+  const browserFlashDisabledAttr = cliAvailable && variantAvailable ? "" : " disabled";
   const itemId = escapeHtml(encodeCoreManagerId(selection.selector));
   const controlsHtml = `
     <section class="core-inline-section" style="margin-top:12px;">
@@ -6197,39 +6183,7 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
           type: "select",
           value: selection.selector,
           options: devices,
-          description: "Choose a live/offline ESPHome target, or use USB Recovery when the device is blank.",
-        })}
-        ${renderCoreManagerField({
-          key: "firmware_transport",
-          label: "Flash Connection",
-          type: "select",
-          value: defaultTransport,
-          options: [
-            { value: "ota", label: "OTA / Network" },
-            { value: "usb", label: "USB Serial" },
-          ],
-          description: "Use USB Serial for recovery flashes or serial debugging when the ESPHome API is down.",
-        })}
-        ${renderCoreManagerField({
-          key: "firmware_usb_port",
-          label: "USB Port",
-          type: "select",
-          value: selectedUsbPort,
-          options: serialPorts,
-          description: String(serial?.hint || "Pick the USB serial device visible to Tater.").trim(),
-          show_when: { source_key: "firmware_transport", equals: "usb" },
-        })}
-        ${renderCoreManagerField({
-          key: "firmware_usb_port_manual",
-          label: "Manual USB Path",
-          type: "text",
-          value: selectedUsbManual,
-          placeholder: "/dev/ttyUSB0",
-          description: "Use this if the port is mounted into Tater but not detected in the list.",
-          show_when_all: [
-            { source_key: "firmware_transport", equals: "usb" },
-            { source_key: "firmware_usb_port", equals: "__manual__" },
-          ],
+          description: "Choose a live ESPHome device for OTA, or Browser USB Recovery when the device is blank.",
         })}
       </div>
     </section>
@@ -6289,17 +6243,17 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
           data-firmware-title="Flashing Firmware"
           data-firmware-working="Building and flashing firmware..."
           data-firmware-success="Firmware flash finished."
-          data-firmware-error="Firmware flash failed"${flashDisabledAttr}
+          data-firmware-error="Firmware flash failed"${otaFlashDisabledAttr}
         >Build + Flash</button>
         <button
           type="button"
           class="action-btn esphome-firmware-action"
-          data-firmware-action="voice_firmware_usb_logs_start"
-          data-firmware-title="Opening USB Logs"
-          data-firmware-working="Opening USB serial logs..."
-          data-firmware-success="USB logs opened."
-          data-firmware-error="USB log start failed"${flashDisabledAttr}
-        >USB Logs</button>
+          data-firmware-action="voice_firmware_browser_build"
+          data-firmware-title="Building Browser Flash"
+          data-firmware-working="Building browser flash firmware..."
+          data-firmware-success="Browser flash firmware ready."
+          data-firmware-error="Browser flash build failed"${browserFlashDisabledAttr}
+        >Browser USB Flash</button>
         <button
           type="button"
           class="action-btn esphome-firmware-action"
@@ -6324,6 +6278,7 @@ function renderEspHomeFirmwarePanel(firmware, coreKey = "esphome") {
   const cliLabel = String(cli?.label || "Unavailable").trim() || "Unavailable";
   const cliDetail = String(cli?.detail || "").trim();
   const wifiNote = String(body?.wifi_note || "").trim();
+  const browserFlashNote = String(body?.browser_flash_note || "").trim();
   const emptyMessage =
     String(body?.empty_message || "No connected ESPHome devices are available for firmware actions.").trim() ||
     "No connected ESPHome devices are available for firmware actions.";
@@ -6335,12 +6290,13 @@ function renderEspHomeFirmwarePanel(firmware, coreKey = "esphome") {
         <span class="small">${escapeHtml(coreKey)}</span>
       </div>
       <div class="small">
-        Pick a firmware template, choose an ESPHome target, then build and flash by OTA or USB directly from Tater.
+        Pick a firmware template, choose an ESPHome target, then flash OTA or build a browser USB installer.
       </div>
       <div class="small" style="margin-top:8px;">
         ESPHome CLI: ${escapeHtml(cliLabel)}${cliDetail ? ` • ${escapeHtml(cliDetail)}` : ""}
       </div>
       ${wifiNote ? `<div class="small" style="margin-top:8px;">${escapeHtml(wifiNote)}</div>` : ""}
+      ${browserFlashNote ? `<div class="small" style="margin-top:8px;">${escapeHtml(browserFlashNote)}</div>` : ""}
       ${
         !cliAvailable
           ? `<div class="small" style="margin-top:8px;">Build and flash actions stay disabled until ESPHome is runnable from this machine.</div>`
@@ -7731,7 +7687,7 @@ function bindEspHomeFirmwareSelectors(root = document) {
       return;
     }
     const key = String(input.dataset.coreFieldKey || "").trim();
-    if (!["template_key", "selector", "firmware_transport", "firmware_usb_port", "wake_word_catalog", "wake_sound_catalog"].includes(key)) {
+    if (!["template_key", "selector", "wake_word_catalog", "wake_sound_catalog"].includes(key)) {
       return;
     }
     if (input.dataset.esphomeFirmwareSelectBound === "1") {
@@ -7749,9 +7705,6 @@ function bindEspHomeFirmwareSelectors(root = document) {
         return;
       }
       captureEspHomeFirmwareDraft(card);
-      if (key === "firmware_transport" || key === "firmware_usb_port") {
-        return;
-      }
       const templateInput = card?.querySelector?.('select[data-core-field-key="template_key"]');
       const selectorInput = card?.querySelector?.('select[data-core-field-key="selector"]');
       state.esphomeFirmwareSelection = {
@@ -7790,15 +7743,6 @@ function bindEspHomeFirmwareSelectors(root = document) {
     sync();
   });
 
-  root.querySelectorAll('.esphome-firmware-card input[data-core-field-key="firmware_usb_port_manual"]').forEach((input) => {
-    if (!(input instanceof HTMLInputElement) || input.dataset.esphomeFirmwareUsbManualBound === "1") {
-      return;
-    }
-    input.dataset.esphomeFirmwareUsbManualBound = "1";
-    const sync = () => captureEspHomeFirmwareDraft(input.closest(".esphome-firmware-card"));
-    input.addEventListener("input", sync);
-    input.addEventListener("change", sync);
-  });
 }
 
 function setEspHomeFirmwareCardBusy(card, busy) {
@@ -7820,7 +7764,7 @@ function setEspHomeFirmwareCardBusy(card, busy) {
   });
 }
 
-function openEspHomeFirmwareFlashViewer(card, coreKey, action = "voice_firmware_flash_start") {
+function openEspHomeFirmwareFlashViewer(card, coreKey) {
   if (!(card instanceof HTMLElement)) {
     return;
   }
@@ -7833,14 +7777,8 @@ function openEspHomeFirmwareFlashViewer(card, coreKey, action = "voice_firmware_
   const deviceLabel =
     String(selectorSelect?.selectedOptions?.[0]?.textContent || selector || "ESPHome Device").trim() || "ESPHome Device";
   const values = collectCoreManagerValues(card);
-  const isUsbLogs = action === "voice_firmware_usb_logs_start";
-  const transport = String(values?.firmware_transport || "").trim();
   if (!selector || !templateKey || !coreKey) {
     showToast("Pick a firmware template and target before flashing.", "error", 3200);
-    return;
-  }
-  if (isUsbLogs && transport !== "usb") {
-    showToast("Choose USB Serial before opening USB logs.", "error", 3200);
     return;
   }
 
@@ -8018,7 +7956,7 @@ function openEspHomeFirmwareFlashViewer(card, coreKey, action = "voice_firmware_
   };
 
   openRuntimeSettingsModal({
-    title: `${templateLabel} ${isUsbLogs ? "USB Logs" : "Build + Flash"}`,
+    title: `${templateLabel} Build + Flash`,
     meta: [deviceLabel, selector].filter(Boolean).join(" • "),
     fields: [
       {
@@ -8026,9 +7964,7 @@ function openEspHomeFirmwareFlashViewer(card, coreKey, action = "voice_firmware_
         label: "Firmware Log",
         type: "textarea",
         value: "",
-        description: isUsbLogs
-          ? "USB serial logs stay in this window while the device is connected."
-          : "ESPHome build output, upload progress, and live device logs stay in this window.",
+        description: "ESPHome build output, upload progress, and live device logs stay in this window.",
       },
     ],
     onOpen: async ({ modal, fieldsEl, statusEl }) => {
@@ -8055,13 +7991,11 @@ function openEspHomeFirmwareFlashViewer(card, coreKey, action = "voice_firmware_
         }
       }
       if (statusNode instanceof HTMLElement) {
-        statusNode.textContent = isUsbLogs
-          ? `Opening USB logs for ${deviceLabel}...`
-          : `Starting firmware flash for ${deviceLabel}...`;
+        statusNode.textContent = `Starting firmware flash for ${deviceLabel}...`;
         statusNode.classList.add("voice-log-status");
       }
       try {
-        const result = await runCoreManagerAction(card, coreKey, action, {
+        const result = await runCoreManagerAction(card, coreKey, "voice_firmware_flash_start", {
           id: selector,
           selector,
           template_key: templateKey,
@@ -8075,13 +8009,13 @@ function openEspHomeFirmwareFlashViewer(card, coreKey, action = "voice_firmware_
           statusNode.textContent =
             String(result?.status_text || result?.message || "").trim() || `Streaming firmware logs for ${deviceLabel}.`;
         }
-        setCoreManagerStatus(card, isUsbLogs ? "USB logs streaming..." : "Firmware flash in progress...");
+        setCoreManagerStatus(card, "Firmware flash in progress...");
         schedulePoll(900);
       } catch (error) {
         const message = String(error?.message || "unknown error");
-        renderEntries([{ display: `Failed to start ${isUsbLogs ? "USB logs" : "firmware flash"}: ${message}`, level: "error" }], true);
+        renderEntries([{ display: `Failed to start firmware flash: ${message}`, level: "error" }], true);
         if (statusNode instanceof HTMLElement) {
-          statusNode.textContent = `${isUsbLogs ? "USB logs" : "Firmware flash"} failed to start: ${message}`;
+          statusNode.textContent = `Firmware flash failed to start: ${message}`;
         }
         setEspHomeFirmwareCardBusy(card, false);
         setCoreManagerStatus(card, `Failed: ${message}`);
@@ -8096,6 +8030,97 @@ function openEspHomeFirmwareFlashViewer(card, coreKey, action = "voice_firmware_
         statusEl.classList.remove("voice-log-status");
       }
       void stopViewer();
+    },
+  });
+}
+
+function ensureEspWebToolsLoaded() {
+  if (window.customElements?.get?.("esp-web-install-button")) {
+    return Promise.resolve(true);
+  }
+  if (state.espWebToolsLoadPromise instanceof Promise) {
+    return state.espWebToolsLoadPromise;
+  }
+  state.espWebToolsLoadPromise = new Promise((resolve, reject) => {
+    const existing = document.querySelector('script[data-esp-web-tools="1"]');
+    if (existing instanceof HTMLScriptElement) {
+      existing.addEventListener("load", () => resolve(true), { once: true });
+      existing.addEventListener("error", () => reject(new Error("ESP Web Tools failed to load.")), { once: true });
+      return;
+    }
+    const script = document.createElement("script");
+    script.type = "module";
+    script.src = "https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module";
+    script.dataset.espWebTools = "1";
+    script.addEventListener("load", () => resolve(true), { once: true });
+    script.addEventListener("error", () => reject(new Error("ESP Web Tools failed to load.")), { once: true });
+    document.head.appendChild(script);
+  });
+  return state.espWebToolsLoadPromise;
+}
+
+function openEspHomeBrowserFlashModal(result, { templateLabel = "Firmware", deviceLabel = "ESPHome Device" } = {}) {
+  const manifestUrl = withBasePath(String(result?.manifest_url || "").trim());
+  const binaryUrl = withBasePath(String(result?.binary_url || "").trim());
+  if (!manifestUrl) {
+    showToast("Browser flash build did not return a manifest URL.", "error", 3600);
+    return;
+  }
+  const supported = Boolean(window.isSecureContext && navigator.serial);
+  const secureText = window.isSecureContext
+    ? "This browser context is secure."
+    : "Web Serial needs HTTPS or localhost. Open Tater from localhost/HTTPS for browser USB flashing.";
+  const serialText = navigator.serial
+    ? "Web Serial is available."
+    : "Use Chrome or Edge on desktop for Web Serial.";
+
+  openRuntimeSettingsModal({
+    title: `${templateLabel} Browser USB Flash`,
+    meta: [deviceLabel, String(result?.artifact_id || "").trim()].filter(Boolean).join(" • "),
+    fields: [
+      {
+        key: "browser_flash_status",
+        label: "Browser USB Flash",
+        type: "textarea",
+        read_only: true,
+        value: `${secureText}\n${serialText}`,
+        description: "Plug the ESP32-S3 into this computer, then connect and flash from the browser.",
+      },
+    ],
+    onOpen: async ({ fieldsEl, statusEl }) => {
+      if (statusEl instanceof HTMLElement) {
+        statusEl.textContent = supported ? "Browser flash firmware is ready." : "Browser USB flash is not available in this browser/context.";
+      }
+      const host = document.createElement("section");
+      host.className = "core-inline-section";
+      host.style.marginTop = "12px";
+      host.innerHTML = `
+        <div class="small core-inline-section-title">Web Serial Installer</div>
+        <div class="small">ESP Web Tools will ask this browser for USB serial access and flash the firmware Tater just built.</div>
+        <div class="inline-row" style="margin-top:10px;">
+          <a class="action-btn" href="${escapeHtml(binaryUrl || manifestUrl)}" target="_blank" rel="noopener noreferrer">Download Firmware</a>
+          <a class="action-btn secondary" href="${escapeHtml(manifestUrl)}" target="_blank" rel="noopener noreferrer">Manifest</a>
+        </div>
+        <div class="esphome-browser-flash-host" style="margin-top:12px;"></div>
+      `;
+      fieldsEl?.appendChild(host);
+      const installHost = host.querySelector(".esphome-browser-flash-host");
+      try {
+        await ensureEspWebToolsLoaded();
+        if (installHost instanceof HTMLElement) {
+          installHost.innerHTML = `
+            <esp-web-install-button manifest="${escapeHtml(manifestUrl)}">
+              <button class="action-btn" slot="activate" type="button">Connect & Flash</button>
+              <span slot="unsupported">Web Serial is not available in this browser.</span>
+              <span slot="not-allowed">Open Tater over HTTPS or localhost to use Web Serial.</span>
+            </esp-web-install-button>
+          `;
+        }
+      } catch (error) {
+        if (installHost instanceof HTMLElement) {
+          installHost.innerHTML = `<div class="small">Could not load ESP Web Tools: ${escapeHtml(String(error?.message || error || "unknown error"))}</div>`;
+        }
+      }
     },
   });
 }
@@ -8121,8 +8146,8 @@ function bindEspHomeFirmwareActions(root = document) {
         return;
       }
 
-      if (action === "voice_firmware_flash_start" || action === "voice_firmware_usb_logs_start") {
-        openEspHomeFirmwareFlashViewer(card, coreKey, action);
+      if (action === "voice_firmware_flash_start") {
+        openEspHomeFirmwareFlashViewer(card, coreKey);
         return;
       }
 
@@ -8147,6 +8172,12 @@ function bindEspHomeFirmwareActions(root = document) {
               values,
             })
         );
+        if (action === "voice_firmware_browser_build") {
+          openEspHomeBrowserFlashModal(result, {
+            templateLabel: String(card.querySelector('select[data-core-field-key="template_key"]')?.selectedOptions?.[0]?.textContent || templateKey || "Firmware").trim(),
+            deviceLabel: String(card.querySelector('select[data-core-field-key="selector"]')?.selectedOptions?.[0]?.textContent || selector || "ESPHome Device").trim(),
+          });
+        }
         if (action !== "voice_firmware_clean") {
           delete state.esphomeFirmwareDrafts[templateKey];
         }
@@ -11737,7 +11768,7 @@ async function loadSettingsView() {
             <div class="settings-subpanel" data-esphome-panel="firmware">
               ${renderSettingsSectionIntro(
                 "Firmware",
-                "Build, flash, or USB-debug Tater firmware for VoicePE, Satellite1, and S3Box display devices after reviewing template substitutions.",
+                "Build OTA firmware or browser USB installers for VoicePE, Satellite1, and S3Box display devices after reviewing template substitutions.",
                 "FW",
                 "subtle"
               )}
