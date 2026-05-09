@@ -8235,15 +8235,21 @@ async function flashBrowserUsbPort(port, artifact, logConsole, statusNode) {
     const firmwareData = await fetchFirmwareBinary(binaryUrl);
     appendEspHomeFirmwareLog(logConsole, `Firmware downloaded (${firmwareData.byteLength} bytes).`, "info");
 
+    const eraseAll = boolFromAny(artifact?.erase_all, true);
     if (statusNode instanceof HTMLElement) {
-      statusNode.textContent = "Flashing firmware over browser USB...";
+      statusNode.textContent = eraseAll
+        ? "Erasing flash and flashing firmware over browser USB..."
+        : "Flashing firmware over browser USB...";
+    }
+    if (eraseAll) {
+      appendEspHomeFirmwareLog(logConsole, "Erasing flash first so ESPHome safe-mode state is cleared.", "info");
     }
     await loader.writeFlash({
       fileArray: [{ data: firmwareData, address: 0 }],
       flashMode: String(artifact?.flash_mode || "dio"),
       flashFreq: String(artifact?.flash_freq || "40m"),
       flashSize: String(artifact?.flash_size || "4MB"),
-      eraseAll: false,
+      eraseAll,
       compress: true,
       reportProgress: (_fileIndex, written, total) => {
         const pct = total > 0 ? Math.floor((written / total) * 100) : 0;
