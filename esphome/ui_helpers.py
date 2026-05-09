@@ -78,10 +78,10 @@ def device_image_src(*name_candidates: Any) -> str:
         if any(
             part in token
             for part in (
-                "taterd",
-                "taterdisplay",
-                "tater-display",
-                "tater display",
+                "taters3box",
+                "tater-s3box",
+                "tater s3box",
+                "tater-s3box-display",
                 "s3box",
                 "s3 box",
                 "esp32-s3-box",
