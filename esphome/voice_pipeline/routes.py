@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import json
+import re
 import sys
 import uuid
 from typing import Any, Dict, Optional
@@ -17,6 +19,75 @@ def _vp():
 
 
 router = APIRouter()
+
+_DISPLAY_SNAPSHOT_KEY_PREFIX = "awareness:event_snapshot:"
+_SNAPSHOT_ID_RE = re.compile(r"^[A-Fa-f0-9]{16,64}$")
+
+
+def _display_feed_payload_from_request(request: Request, payload: Any = None) -> Dict[str, Any]:
+    values: Dict[str, Any] = {}
+    try:
+        values.update({str(key): value for key, value in request.query_params.multi_items()})
+    except Exception:
+        values.update(dict(request.query_params))
+    if not isinstance(payload, dict):
+        return values
+    slots = payload.get("slots")
+    if isinstance(slots, dict):
+        for key, value in slots.items():
+            values[str(key)] = value
+    for key, value in payload.items():
+        if key == "slots":
+            continue
+        if isinstance(value, (dict, list, tuple)):
+            continue
+        values[str(key)] = value
+    return values
+
+
+def _display_snapshot_response(snapshot_id: str) -> Response:
+    vp = _vp()
+    token = vp._text(snapshot_id)
+    if not token or not _SNAPSHOT_ID_RE.match(token):
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+
+    try:
+        raw = vp.redis_client.get(f"{_DISPLAY_SNAPSHOT_KEY_PREFIX}{token}")
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Snapshot store unavailable: {exc}") from exc
+    if raw in (None, ""):
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="replace")
+
+    try:
+        payload = json.loads(str(raw))
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail="Snapshot payload invalid") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=404, detail="Snapshot payload invalid")
+
+    data_b64 = vp._text(payload.get("data_b64") or payload.get("data"))
+    if not data_b64:
+        raise HTTPException(status_code=404, detail="Snapshot payload empty")
+    try:
+        image_bytes = base64.b64decode(data_b64, validate=True)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail="Snapshot payload invalid") from exc
+    if not image_bytes:
+        raise HTTPException(status_code=404, detail="Snapshot payload empty")
+
+    media_type = vp._text(payload.get("content_type") or "image/jpeg").split(";", 1)[0].strip().lower()
+    if not media_type.startswith("image/"):
+        media_type = "image/jpeg"
+    return Response(
+        content=image_bytes,
+        media_type=media_type,
+        headers={
+            "Cache-Control": "no-store, max-age=0",
+            "X-Tater-Snapshot-Id": token,
+        },
+    )
 
 
 async def startup() -> None:
@@ -223,6 +294,22 @@ async def display_feed(request: Request, x_tater_token: Optional[str] = Header(N
     return display_feed_module.build_display_feed(request.query_params, version=vp.__version__)
 
 
+@router.post("/tater-ha/v1/display/feed")
+async def display_feed_post(request: Request, x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
+    vp = _vp()
+    vp._require_api_auth(x_tater_token)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    from .. import display_feed as display_feed_module
+
+    return display_feed_module.build_display_feed(
+        _display_feed_payload_from_request(request, payload),
+        version=vp.__version__,
+    )
+
+
 @router.get("/tater-ha/v1/display/events")
 async def display_events(
     after_seq: int = 0,
@@ -250,6 +337,13 @@ async def display_events_post(payload: Dict[str, Any], x_tater_token: Optional[s
     from .. import display_bus
 
     return display_bus.publish_display_event(payload if isinstance(payload, dict) else {})
+
+
+@router.get("/tater-ha/v1/display/snapshots/{snapshot_id}")
+async def display_snapshot(snapshot_id: str, x_tater_token: Optional[str] = Header(None)) -> Response:
+    vp = _vp()
+    vp._require_api_auth(x_tater_token)
+    return _display_snapshot_response(snapshot_id)
 
 
 @router.get("/tater-ha/v1/voice/esphome/status")

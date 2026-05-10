@@ -7,6 +7,7 @@ import os
 import time
 from typing import Any, Dict, List
 
+from . import reply_playback
 from . import runtime as esphome_runtime
 
 _asset_data_url_cache: Dict[str, str] = {}
@@ -85,6 +86,10 @@ def device_image_src(*name_candidates: Any) -> str:
                 "s3box",
                 "s3 box",
                 "esp32-s3-box",
+                "esp32-s3-box-3",
+                "esp32 s3 box 3",
+                "box-3",
+                "box 3",
             )
         ):
             return _named_satellite_image_src("taterD.png")
@@ -155,6 +160,16 @@ def satellite_item_forms(status: Dict[str, Any]) -> List[Dict[str, Any]]:
         name = esphome_runtime.text(row.get("name")) or host or selector
         source = esphome_runtime.text(row.get("source")) or "unknown"
         area_name = _satellite_area_name(row)
+        reply_playback_target = reply_playback.resolve_reply_playback_target(row, client_row=client_row)
+        reply_playback_options = reply_playback.build_reply_playback_options(reply_playback_target)
+        reply_playback_label = next(
+            (
+                esphome_runtime.text(option.get("label"))
+                for option in reply_playback_options
+                if esphome_runtime.text(option.get("value")) == reply_playback_target
+            ),
+            reply_playback_target or "This device speaker",
+        )
         last_seen = format_ts_label(row.get("last_seen_ts"))
         last_error = esphome_runtime.text(client_row.get("last_error"))
         device_info = client_row.get("device_info") if isinstance(client_row.get("device_info"), dict) else {}
@@ -196,6 +211,7 @@ def satellite_item_forms(status: Dict[str, Any]) -> List[Dict[str, Any]]:
         summary_rows: List[Dict[str, str]] = [
             {"label": "Host", "value": host or "-"},
             {"label": "Room / Area", "value": area_name or "-"},
+            {"label": "Reply Playback", "value": reply_playback_label or "-"},
             {"label": "Source", "value": source or "-"},
             {"label": "Last Seen", "value": last_seen},
             {"label": "Sensor Update", "value": state_updated},
@@ -261,6 +277,14 @@ def satellite_item_forms(status: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "value": area_name,
                 "placeholder": "Office",
                 "description": "Used as the default room context for voice turns from this satellite.",
+            },
+            {
+                "key": "reply_playback_target",
+                "label": "Reply Playback",
+                "type": "select",
+                "value": reply_playback_target,
+                "options": reply_playback_options,
+                "description": "Optional. Leave this on This device speaker to keep normal sat1 and VoicePE reply playback. Use Silent / display only when a device should act as a mic and screen.",
             },
         ]
 

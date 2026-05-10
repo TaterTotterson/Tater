@@ -36,6 +36,34 @@ def voice_ui_setting_specs() -> List[Dict[str, Any]]:
             "description": "If enabled, Tater uses a small AI check to decide whether to reopen the mic for a follow-up reply.",
         },
         {
+            "key": "VOICE_WAKE_ARBITRATION_ENABLED",
+            "label": "Wake Arbitration",
+            "type": "checkbox",
+            "default": vp.DEFAULT_WAKE_ARBITRATION_ENABLED,
+            "description": "If enabled, Tater resolves near-simultaneous wake triggers so only the best matching satellite handles the turn.",
+        },
+        {
+            "key": "VOICE_WAKE_ARBITRATION_WINDOW_MS",
+            "label": "Wake Arbitration Window (ms)",
+            "type": "number",
+            "default": vp.DEFAULT_WAKE_ARBITRATION_WINDOW_MS,
+            "min": 100,
+            "max": 2000,
+            "step": 50,
+            "description": "How long Tater waits for nearby wake candidates before stopping duplicate satellites.",
+        },
+        {
+            "key": "VOICE_WAKE_ARBITRATION_SCOPE",
+            "label": "Wake Arbitration Scope",
+            "type": "select",
+            "default": vp.DEFAULT_WAKE_ARBITRATION_SCOPE,
+            "options": [
+                {"value": "same_area", "label": "Same room / unknown room"},
+                {"value": "global", "label": "Whole home"},
+            ],
+            "description": "Same room is safer when multiple people may use Tater in different rooms at once. Whole home is useful when nearby satellites are assigned to different rooms.",
+        },
+        {
             "key": "VOICE_VAD_BACKEND",
             "label": "VAD Backend",
             "type": "select",
@@ -56,6 +84,18 @@ def voice_ui_setting_specs() -> List[Dict[str, Any]]:
             "max": 3,
             "step": 1,
             "description": "WebRTC only. 0 is least aggressive; 3 filters non-speech most aggressively.",
+        },
+        {
+            "key": "VOICE_SPEECHBRAIN_ACCELERATION",
+            "label": "SpeechBrain Acceleration",
+            "type": "select",
+            "default": vp.DEFAULT_SPEECHBRAIN_ACCELERATION,
+            "options": [
+                {"value": "auto", "label": "Auto"},
+                {"value": "cpu", "label": "CPU"},
+                {"value": "cuda", "label": "NVIDIA CUDA"},
+            ],
+            "description": "Controls SpeechBrain models used by Speaker ID and Emotion ID. Auto uses CUDA when available and falls back to CPU if CUDA load fails.",
         },
         {
             "key": "VOICE_EXPERIMENTAL_LIVE_TOOL_PROGRESS_ENABLED",
@@ -229,8 +269,23 @@ def settings_sections() -> List[Dict[str, Any]]:
     by_key = {vp._text(field.get("key")): field for field in ordered_fields if isinstance(field, dict)}
     groups = [
         ("Debugging", ["VOICE_NATIVE_DEBUG"]),
-        ("Conversation Flow", ["VOICE_CONTINUED_CHAT_ENABLED"]),
-        ("Voice Activity Detection", ["VOICE_VAD_BACKEND", "VOICE_WEBRTC_VAD_AGGRESSIVENESS"]),
+        (
+            "Conversation Flow",
+            [
+                "VOICE_CONTINUED_CHAT_ENABLED",
+                "VOICE_WAKE_ARBITRATION_ENABLED",
+                "VOICE_WAKE_ARBITRATION_WINDOW_MS",
+                "VOICE_WAKE_ARBITRATION_SCOPE",
+            ],
+        ),
+        (
+            "Voice Activity Detection",
+            ["VOICE_VAD_BACKEND", "VOICE_WEBRTC_VAD_AGGRESSIVENESS"],
+        ),
+        (
+            "SpeechBrain Models",
+            ["VOICE_SPEECHBRAIN_ACCELERATION"],
+        ),
         (
             "Experimental",
             [

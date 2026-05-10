@@ -7,12 +7,14 @@ import json
 import logging
 import os
 import queue
+import re
 import secrets
 import sys
 import threading
 import time
 import uuid
-from datetime import datetime
+from collections import Counter
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -175,7 +177,34 @@ WEBUI_AUTH_PASSWORD_MIN_LENGTH = 4
 WEBUI_AUTH_PBKDF2_ITERATIONS = 260_000
 WEBUI_AUTH_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 365 * 5
 RUNTIME_CONTEXT_ESTIMATE_TTL_SECONDS = 20
+DASHBOARD_BRIEFS_KEY = "tater:dashboard:briefs:v1"
+DASHBOARD_SNAPSHOT_KEY = "tater:dashboard:snapshot:v1"
+DASHBOARD_BRIEF_SCHEMA_VERSION = 7
+DASHBOARD_SNAPSHOT_SCHEMA_VERSION = 4
+DASHBOARD_SNAPSHOT_STALE_SECONDS = 60 * 5
+DASHBOARD_BRIEF_TTL_SECONDS = DASHBOARD_SNAPSHOT_STALE_SECONDS
+DASHBOARD_BRIEF_CHECK_INTERVAL_SECONDS = 60 * 5
+DASHBOARD_BRIEF_STARTUP_DELAY_SECONDS = 20
+DASHBOARD_BRIEF_RETRY_SECONDS = 60 * 5
+DASHBOARD_AWARENESS_EVENTS_PER_SOURCE = 1000
+DASHBOARD_AWARENESS_EVENT_DETAIL_LIMIT = 320
+DASHBOARD_AWARENESS_EVENT_HIGHLIGHT_LIMIT = 18
+DASHBOARD_AWARENESS_CAMERA_SUMMARY_REQUEST = (
+    "Summarize what the cameras saw across all awareness event sources in the last 12 hours. "
+    "Focus on camera image descriptions and notable visual activity for the homeowner. "
+    "Ignore simple sensor-only events unless they help explain the camera activity."
+)
 runtime_context_estimate_cache: Dict[str, Any] = {"updated_at": 0.0, "payload": {}}
+dashboard_brief_refresh_lock = threading.RLock()
+dashboard_brief_refresh_state: Dict[str, Any] = {
+    "running": False,
+    "started_at": 0.0,
+    "finished_at": 0.0,
+    "last_error": "",
+    "last_reason": "",
+    "last_ids": [],
+}
+dashboard_brief_scheduler_task: Optional[asyncio.Task] = None
 speech_model_warmup_lock = threading.RLock()
 speech_model_warmup_state: Dict[str, Any] = {
     "running": False,
@@ -628,6 +657,22 @@ def _warm_speech_model_item(item: Dict[str, str]) -> str:
             raise RuntimeError(f"unsupported TTS backend: {token}")
         return f"loaded TTS {token}"
 
+    if kind == "speaker_id":
+        from esphome import speaker_id as esphome_speaker_id
+
+        token = backend.lower()
+        if token != "speechbrain":
+            raise RuntimeError(f"unsupported Speaker ID backend: {token or 'unknown'}")
+        return esphome_speaker_id.warmup_model(enabled_only=True)
+
+    if kind == "emotion_id":
+        from esphome import emotion_id as esphome_emotion_id
+
+        token = backend.lower()
+        if token != "speechbrain":
+            raise RuntimeError(f"unsupported Emotion ID backend: {token or 'unknown'}")
+        return esphome_emotion_id.warmup_model(enabled_only=True)
+
     raise RuntimeError(f"unsupported warmup item: {kind or 'unknown'}")
 
 
@@ -635,6 +680,8 @@ def _run_speech_model_warmup(settings: Dict[str, Any], *, reason: str) -> None:
     items = [
         {"kind": "stt", "backend": str(settings.get("stt_backend") or "").strip()},
         *_speech_model_warmup_tts_items(settings),
+        {"kind": "speaker_id", "backend": "speechbrain"},
+        {"kind": "emotion_id", "backend": "speechbrain"},
     ]
     items = [item for item in items if str(item.get("backend") or "").strip()]
     with speech_model_warmup_lock:
@@ -2397,6 +2444,7 @@ def _replay_startup_after_redis_configure() -> Dict[str, Any]:
             )
         else:
             logger.info("[speech-warmup] startup warmup skipped (TATER_SPEECH_WARMUP_ON_STARTUP=false)")
+        _start_dashboard_brief_scheduler()
     except Exception as exc:
         err = str(exc)
         bootstrap_state["restore_error"] = err
@@ -2789,6 +2837,10 @@ class CoreTabActionRequest(BaseModel):
     payload: Dict[str, Any] = Field(default_factory=dict)
 
 
+class DashboardBriefRefreshRequest(BaseModel):
+    brief_id: Optional[str] = None
+
+
 class PeopleActionRequest(BaseModel):
     action: str = Field(min_length=1)
     payload: Dict[str, Any] = Field(default_factory=dict)
@@ -3022,6 +3074,7 @@ async def _startup_event() -> None:
                 logger.info("[speech-warmup] startup scheduled: %s", warmup)
             else:
                 logger.info("[speech-warmup] startup warmup skipped (TATER_SPEECH_WARMUP_ON_STARTUP=false)")
+            _start_dashboard_brief_scheduler()
     except RedisError as exc:
         bootstrap_state["restore_error"] = str(exc)
         logger.warning("Redis unavailable during startup autostart: %s", exc)
@@ -3033,6 +3086,7 @@ async def _startup_event() -> None:
 
 @app.on_event("shutdown")
 async def _shutdown_event() -> None:
+    await _stop_dashboard_brief_scheduler()
     core_runtime.stop_all()
     await esphome_home_module.shutdown()
     portal_runtime.stop_all()
@@ -3429,6 +3483,1562 @@ def _runtime_breakdown_payload() -> Dict[str, Any]:
     }
 
 
+def _dashboard_redis_text(value: Any) -> str:
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8", errors="ignore")
+        except Exception:
+            return ""
+    return str(value or "").strip()
+
+
+def _dashboard_safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(float(str(value).strip()))
+    except Exception:
+        return int(default)
+
+
+def _dashboard_stats(rows: Any, *, limit: int = 0) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for item in rows if isinstance(rows, list) else []:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or "").strip()
+        if not label:
+            continue
+        out.append({"label": label, "value": item.get("value")})
+        if limit > 0 and len(out) >= limit:
+            break
+    return out
+
+
+def _dashboard_stat_value(stats: List[Dict[str, Any]], label: str) -> str:
+    wanted = str(label or "").strip().lower()
+    for item in stats or []:
+        if str(item.get("label") or "").strip().lower() == wanted:
+            return str(item.get("value") if item.get("value") is not None else "").strip()
+    return ""
+
+
+def _dashboard_stats_have_signal(stats: List[Dict[str, Any]]) -> bool:
+    empty_values = {"", "-", "0", "0.0", "n/a", "none", "null", "waiting", "unknown"}
+    for item in stats or []:
+        value = item.get("value")
+        token = str(value if value is not None else "").strip().lower()
+        if token not in empty_values:
+            return True
+    return False
+
+
+def _dashboard_tab_payload(core_key: str) -> Optional[Dict[str, Any]]:
+    key = str(core_key or "").strip()
+    if not key:
+        return None
+    try:
+        tabs = _discover_core_webui_tabs(core_registry_module.refresh_core_registry())
+        tab = next((item for item in tabs if str(item.get("core_key") or "").strip() == key), None)
+        if not isinstance(tab, dict):
+            return None
+        payload = _load_surface_htmlui_tab_payload(tab)
+    except Exception:
+        logger.debug("[dashboard] failed loading core tab payload for %s", key, exc_info=True)
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _dashboard_esphome_payload() -> Optional[Dict[str, Any]]:
+    try:
+        payload = esphome_home_module.get_runtime_payload(
+            redis_client=redis_client,
+            core_key="esphome",
+            core_tab=_esphome_platform_tab_spec(),
+            panel="satellites",
+        )
+    except Exception:
+        logger.debug("[dashboard] failed loading ESPHome dashboard payload", exc_info=True)
+        return None
+    if not isinstance(payload, dict):
+        return None
+    for panel, key in (("speakerid", "speaker_id"), ("emotionid", "emotion_id")):
+        try:
+            extra = esphome_home_module.get_runtime_payload(
+                redis_client=redis_client,
+                core_key="esphome",
+                core_tab=_esphome_platform_tab_spec(),
+                panel=panel,
+            )
+            if isinstance(extra, dict) and isinstance(extra.get(key), dict):
+                payload[key] = extra[key]
+        except Exception:
+            logger.debug("[dashboard] failed loading ESPHome %s payload", panel, exc_info=True)
+    return payload
+
+
+def _dashboard_item_forms(payload: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    ui = payload.get("ui") if isinstance(payload.get("ui"), dict) else {}
+    rows = ui.get("item_forms") if isinstance(ui.get("item_forms"), list) else []
+    return [item for item in rows if isinstance(item, dict)]
+
+
+def _dashboard_item_fields(item: Dict[str, Any]) -> List[Dict[str, Any]]:
+    fields: List[Dict[str, Any]] = []
+    raw_fields = item.get("fields") if isinstance(item.get("fields"), list) else []
+    fields.extend([field for field in raw_fields if isinstance(field, dict)])
+    for section in item.get("sections") if isinstance(item.get("sections"), list) else []:
+        if not isinstance(section, dict):
+            continue
+        section_fields = section.get("fields") if isinstance(section.get("fields"), list) else []
+        fields.extend([field for field in section_fields if isinstance(field, dict)])
+    return fields
+
+
+def _dashboard_item_image_fields(item: Dict[str, Any]) -> List[Dict[str, str]]:
+    fields = _dashboard_item_fields(item)
+
+    images: List[Dict[str, str]] = []
+    for field in fields:
+        if str(field.get("type") or "").strip().lower() != "image":
+            continue
+        src = str(field.get("src") or field.get("url") or field.get("data_url") or field.get("image_url") or "").strip()
+        if not src:
+            continue
+        images.append(
+            {
+                "src": src,
+                "alt": str(field.get("alt") or field.get("label") or item.get("title") or "Dashboard image").strip(),
+                "caption": str(field.get("caption") or field.get("label") or "").strip(),
+                "display": str(field.get("display") or "").strip(),
+            }
+        )
+    return images
+
+
+def _dashboard_item_description(item: Dict[str, Any]) -> str:
+    fields = _dashboard_item_fields(item)
+    for field in fields:
+        key = str(field.get("key") or "").strip().lower()
+        label = str(field.get("label") or "").strip().lower()
+        field_type = str(field.get("type") or "").strip().lower()
+        if field_type not in {"text", "textarea"}:
+            continue
+        if "description" not in key and label not in {"", "description", "summary"}:
+            continue
+        text = _dashboard_short_text(field.get("value"), limit=420)
+        if text:
+            return text
+    subtitle = str(item.get("subtitle") or "").strip()
+    marker = "Summary:"
+    if marker in subtitle:
+        return _dashboard_short_text(subtitle.split(marker, 1)[1], limit=420)
+    return ""
+
+
+def _dashboard_compact_item(
+    item: Dict[str, Any],
+    *,
+    include_image: bool = True,
+) -> Dict[str, Any]:
+    images = _dashboard_item_image_fields(item)
+    hero_src = str(item.get("hero_image_src") or "").strip()
+    image = {"src": hero_src, "alt": str(item.get("hero_image_alt") or item.get("title") or "Dashboard image").strip()} if hero_src else (images[0] if images else {})
+    badges = item.get("hero_badges") if isinstance(item.get("hero_badges"), list) else []
+    summary_rows = item.get("summary_rows") if isinstance(item.get("summary_rows"), list) else []
+    sensor_rows = item.get("sensor_rows") if isinstance(item.get("sensor_rows"), list) else []
+    description = _dashboard_item_description(item)
+    row = {
+        "id": str(item.get("id") or "").strip(),
+        "group": str(item.get("group") or "").strip(),
+        "title": str(item.get("title") or item.get("id") or "").strip(),
+        "subtitle": str(item.get("subtitle") or "").strip(),
+        "detail": str(item.get("detail") or "").strip(),
+        "description": description,
+        "connected": bool(item.get("connected")),
+        "badges": [badge for badge in badges if isinstance(badge, dict)][:4],
+        "summary_rows": [entry for entry in summary_rows if isinstance(entry, dict)][:6],
+        "sensor_title": str(item.get("sensor_title") or "").strip(),
+        "sensor_rows": [entry for entry in sensor_rows if isinstance(entry, dict)][:18],
+    }
+    if include_image and image.get("src"):
+        row["image_src"] = str(image.get("src") or "").strip()
+        row["image_alt"] = str(image.get("alt") or row.get("title") or "Dashboard image").strip()
+        row["image_caption"] = str(image.get("caption") or "").strip()
+        row["image_display"] = str(image.get("display") or "").strip()
+    return row
+
+
+def _dashboard_core_items(
+    payload: Optional[Dict[str, Any]],
+    *,
+    groups: Tuple[str, ...],
+    limit: int = 4,
+    require_image: bool = False,
+    include_image: bool = True,
+) -> List[Dict[str, Any]]:
+    wanted = {str(group or "").strip().lower() for group in groups if str(group or "").strip()}
+    items: List[Dict[str, Any]] = []
+    for item in _dashboard_item_forms(payload):
+        group = str(item.get("group") or "").strip().lower()
+        if wanted and group not in wanted:
+            continue
+        compact = _dashboard_compact_item(item, include_image=include_image)
+        if require_image and not compact.get("image_src"):
+            continue
+        if not compact.get("title") and not compact.get("image_src"):
+            continue
+        items.append(compact)
+        if limit > 0 and len(items) >= limit:
+            break
+    return items
+
+
+def _dashboard_environment_table_rows(item: Dict[str, Any], *, tokens: Tuple[str, ...], limit: int = 6) -> List[Dict[str, Any]]:
+    wanted = tuple(str(token or "").strip().lower() for token in tokens if str(token or "").strip())
+    out: List[Dict[str, Any]] = []
+    for field in _dashboard_item_fields(item):
+        if not isinstance(field, dict) or str(field.get("type") or "").strip().lower() != "table":
+            continue
+        haystack = " ".join(
+            str(field.get(key) or "").strip().lower()
+            for key in ("key", "label")
+        )
+        if wanted and not any(token in haystack for token in wanted):
+            continue
+        rows = field.get("rows") if isinstance(field.get("rows"), list) else []
+        for row in rows:
+            if isinstance(row, dict):
+                out.append(row)
+            if len(out) >= max(1, int(limit)):
+                return out
+    return out
+
+
+def _dashboard_environment_context(payload: Optional[Dict[str, Any]], section: Dict[str, Any]) -> Dict[str, Any]:
+    stats = _dashboard_stats((payload or {}).get("header_stats") or (payload or {}).get("stats"), limit=0)
+    if not stats:
+        stats = _dashboard_stats(section.get("stats"), limit=0)
+    context: Dict[str, Any] = {
+        "summary": section.get("summary"),
+        "stats": stats,
+        "overview_cards": [],
+        "forecast_cards": [],
+        "selected_sources": [],
+    }
+    reserved_source_ids = {"source:runtime", "source:ecowitt", "source:discovery"}
+    for item in _dashboard_item_forms(payload):
+        group = str(item.get("group") or "").strip().lower()
+        compact = _dashboard_compact_item(item, include_image=False)
+        if group == "overview":
+            context["overview_cards"].append(compact)
+        elif group == "forecast":
+            card = dict(compact)
+            daily = _dashboard_environment_table_rows(item, tokens=("daily", "forecast"), limit=5)
+            hourly = _dashboard_environment_table_rows(item, tokens=("hourly", "next hours"), limit=6)
+            alerts = _dashboard_environment_table_rows(item, tokens=("alert",), limit=3)
+            if daily:
+                card["daily_forecast"] = daily
+            if hourly:
+                card["next_hours"] = hourly
+            if alerts:
+                card["alerts"] = alerts
+            context["forecast_cards"].append(card)
+        elif group == "source":
+            item_id = str(item.get("id") or "").strip()
+            if item_id in reserved_source_ids or not item_id.startswith("source:"):
+                continue
+            context["selected_sources"].append(
+                {
+                    "title": compact.get("title"),
+                    "subtitle": compact.get("subtitle"),
+                    "detail": compact.get("detail"),
+                    "summary_rows": compact.get("summary_rows") or [],
+                }
+            )
+    context["overview_cards"] = context["overview_cards"][:8]
+    context["forecast_cards"] = context["forecast_cards"][:4]
+    context["selected_sources"] = context["selected_sources"][:16]
+    return context
+
+
+def _dashboard_section(
+    *,
+    section_id: str,
+    title: str,
+    subtitle: str,
+    payload: Optional[Dict[str, Any]],
+    stats_limit: int = 8,
+    require_signal: bool = True,
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("error"):
+        return {
+            "id": section_id,
+            "title": title,
+            "subtitle": subtitle,
+            "summary": "",
+            "stats": [{"label": "Status", "value": "Needs attention"}],
+            "tone": "warning",
+            "error": str(payload.get("error") or "").strip(),
+        }
+
+    stats = _dashboard_stats(payload.get("header_stats") or payload.get("stats"), limit=stats_limit)
+    summary = str(payload.get("summary") or "").strip()
+    if require_signal and not _dashboard_stats_have_signal(stats):
+        return None
+    return {
+        "id": section_id,
+        "title": title,
+        "subtitle": subtitle,
+        "summary": summary,
+        "stats": stats,
+        "tone": "normal",
+    }
+
+
+def _dashboard_short_text(value: Any, *, limit: int = 220) -> str:
+    text = " ".join(_dashboard_redis_text(value).split())
+    if limit <= 0 or len(text) <= limit:
+        return text
+    return text[: max(1, limit - 1)].rstrip() + "..."
+
+
+def _dashboard_awareness_area_label(source: Any, data: Dict[str, Any]) -> str:
+    for value in (data.get("area"), data.get("area_name"), data.get("location"), source):
+        text = _dashboard_redis_text(value)
+        if text:
+            return " ".join(text.replace("_", " ").split()).title()
+    return ""
+
+
+def _dashboard_awareness_event_row(
+    event: Dict[str, Any],
+    *,
+    bucket_fn: Optional[Callable[[Dict[str, Any]], str]] = None,
+) -> Dict[str, Any]:
+    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    source = _dashboard_redis_text(event.get("source"))
+    bucket = ""
+    if callable(bucket_fn):
+        try:
+            bucket = _dashboard_redis_text(bucket_fn(event)).lower()
+        except Exception:
+            bucket = ""
+    if not bucket:
+        event_type = _dashboard_redis_text(event.get("type")).lower()
+        entity_id = _dashboard_redis_text(event.get("entity_id")).lower()
+        if event_type == "doorbell":
+            bucket = "doorbell"
+        elif event_type.startswith("camera") or entity_id.startswith("camera."):
+            bucket = "camera"
+        elif "_sensor_" in event_type or entity_id.startswith(("sensor.", "binary_sensor.", "cover.")):
+            bucket = "sensor"
+        else:
+            bucket = "other"
+    title = _dashboard_short_text(event.get("title"), limit=100)
+    message = _dashboard_short_text(event.get("message") or title, limit=260)
+    return {
+        "time": _dashboard_redis_text(event.get("ha_time") or event.get("time") or event.get("timestamp")),
+        "source": source,
+        "area": _dashboard_awareness_area_label(source, data),
+        "type": _dashboard_redis_text(event.get("type")),
+        "bucket": bucket,
+        "entity_id": _dashboard_redis_text(event.get("entity_id")),
+        "level": _dashboard_redis_text(event.get("level")),
+        "title": title,
+        "message": message,
+    }
+
+
+def _dashboard_awareness_event_is_camera(event: Dict[str, Any]) -> bool:
+    bucket = str((event or {}).get("bucket") or "").strip().lower()
+    event_type = str((event or {}).get("type") or "").strip().lower()
+    entity_id = str((event or {}).get("entity_id") or "").strip().lower()
+    return bool(bucket == "camera" or event_type.startswith("camera") or entity_id.startswith("camera."))
+
+
+def _dashboard_awareness_camera_events(event_summary: Dict[str, Any], *, limit: int = 180) -> List[Dict[str, Any]]:
+    events = event_summary.get("events") if isinstance(event_summary.get("events"), list) else []
+    camera_events = [event for event in events if isinstance(event, dict) and _dashboard_awareness_event_is_camera(event)]
+    if limit > 0 and len(camera_events) > limit:
+        return camera_events[-limit:]
+    return camera_events
+
+
+def _dashboard_awareness_events_summary(
+    *,
+    hours: int = 12,
+    event_limit: int = DASHBOARD_AWARENESS_EVENT_DETAIL_LIMIT,
+) -> Dict[str, Any]:
+    try:
+        module = core_runtime._import_module("awareness_core", reload_module=False)
+    except Exception:
+        logger.debug("[dashboard] failed importing awareness_core for event summary", exc_info=True)
+        return {}
+
+    discover_fn = getattr(module, "_discover_event_sources", None)
+    load_fn = getattr(module, "_load_events_for_sources", None)
+    if not callable(discover_fn) or not callable(load_fn):
+        return {}
+
+    end = datetime.now()
+    start = end - timedelta(hours=max(1, int(hours or 12)))
+    try:
+        sources = discover_fn(redis_client) or []
+    except Exception:
+        logger.debug("[dashboard] failed discovering awareness event sources", exc_info=True)
+        return {}
+    sources = [_dashboard_redis_text(source) for source in sources if _dashboard_redis_text(source)]
+    if not sources:
+        return {
+            "window": f"last {max(1, int(hours or 12))} hours",
+            "event_count": 0,
+            "sources": [],
+            "events": [],
+            "top_areas": [],
+            "top_types": [],
+        }
+
+    try:
+        events = load_fn(redis_client, sources, start, end, limit_per_source=DASHBOARD_AWARENESS_EVENTS_PER_SOURCE) or []
+    except Exception:
+        logger.debug("[dashboard] failed loading awareness events for dashboard summary", exc_info=True)
+        return {}
+
+    bucket_fn = getattr(module, "_event_type_bucket", None)
+    rows_latest = [
+        _dashboard_awareness_event_row(event, bucket_fn=bucket_fn if callable(bucket_fn) else None)
+        for event in events
+        if isinstance(event, dict)
+    ]
+    rows = list(reversed(rows_latest))
+    bucket_counts = Counter(row.get("bucket") or "other" for row in rows)
+    area_counts = Counter(row.get("area") or row.get("source") or "Unknown" for row in rows)
+    type_counts = Counter(row.get("type") or row.get("bucket") or "event" for row in rows)
+    source_counts = Counter(row.get("source") or "unknown" for row in rows)
+    highlights = [
+        {
+            "time": row.get("time"),
+            "area": row.get("area"),
+            "type": row.get("type") or row.get("bucket"),
+            "title": row.get("title"),
+            "message": row.get("message"),
+        }
+        for row in rows_latest[: min(len(rows_latest), DASHBOARD_AWARENESS_EVENT_HIGHLIGHT_LIMIT)]
+        if row.get("message") or row.get("title")
+    ]
+    detail_limit = max(0, int(event_limit or 0))
+    event_details = rows[-detail_limit:] if detail_limit else []
+    return {
+        "window": f"last {max(1, int(hours or 12))} hours",
+        "start": start.isoformat(timespec="seconds"),
+        "end": end.isoformat(timespec="seconds"),
+        "event_count": len(rows),
+        "included_event_count": len(event_details),
+        "truncated": len(rows) > len(event_details),
+        "sources": [{"source": source, "count": count} for source, count in source_counts.most_common(8)],
+        "buckets": [{"type": bucket, "count": count} for bucket, count in bucket_counts.most_common()],
+        "top_areas": [{"area": area, "count": count} for area, count in area_counts.most_common(8)],
+        "top_types": [{"type": event_type, "count": count} for event_type, count in type_counts.most_common(8)],
+        "highlights": highlights,
+        "events": event_details,
+    }
+
+
+def _dashboard_cache_rows() -> Dict[str, Dict[str, Any]]:
+    try:
+        raw_rows = redis_client.hgetall(DASHBOARD_BRIEFS_KEY) or {}
+    except Exception:
+        return {}
+    rows: Dict[str, Dict[str, Any]] = {}
+    for raw_key, raw_value in raw_rows.items():
+        key = _dashboard_redis_text(raw_key)
+        text = _dashboard_redis_text(raw_value)
+        if not key or not text:
+            continue
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            continue
+        if isinstance(parsed, dict) and _dashboard_safe_int(parsed.get("schema_version")) == DASHBOARD_BRIEF_SCHEMA_VERSION:
+            rows[key] = parsed
+    return rows
+
+
+def _dashboard_save_brief(row: Dict[str, Any]) -> None:
+    brief_id = str(row.get("id") or "").strip()
+    if not brief_id:
+        return
+    try:
+        row["schema_version"] = DASHBOARD_BRIEF_SCHEMA_VERSION
+        redis_client.hset(DASHBOARD_BRIEFS_KEY, brief_id, json.dumps(row, separators=(",", ":")))
+    except Exception:
+        logger.debug("[dashboard] failed saving brief %s", brief_id, exc_info=True)
+
+
+def _dashboard_snapshot_meta(*, cached_at: float = 0.0, source: str = "live") -> Dict[str, Any]:
+    now = time.time()
+    age = max(0.0, now - float(cached_at or now))
+    return {
+        "source": str(source or "live").strip() or "live",
+        "cached_at": float(cached_at or now),
+        "age_seconds": age,
+        "stale": bool(age > DASHBOARD_SNAPSHOT_STALE_SECONDS),
+        "stale_after_seconds": DASHBOARD_SNAPSHOT_STALE_SECONDS,
+    }
+
+
+def _dashboard_load_snapshot_cache() -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    try:
+        raw = redis_client.get(DASHBOARD_SNAPSHOT_KEY)
+    except Exception:
+        return None, _dashboard_snapshot_meta(source="miss")
+    text = _dashboard_redis_text(raw)
+    if not text:
+        return None, _dashboard_snapshot_meta(source="miss")
+    try:
+        row = json.loads(text)
+    except Exception:
+        return None, _dashboard_snapshot_meta(source="invalid")
+    if not isinstance(row, dict):
+        return None, _dashboard_snapshot_meta(source="invalid")
+    if _dashboard_safe_int(row.get("schema_version")) != DASHBOARD_SNAPSHOT_SCHEMA_VERSION:
+        return None, _dashboard_snapshot_meta(source="invalid")
+    snapshot = row.get("snapshot") if isinstance(row.get("snapshot"), dict) else None
+    if not isinstance(snapshot, dict):
+        return None, _dashboard_snapshot_meta(source="invalid")
+    cached_at = float(row.get("cached_at") or 0.0)
+    return snapshot, _dashboard_snapshot_meta(cached_at=cached_at, source="cache")
+
+
+def _dashboard_save_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    cached_at = time.time()
+    if not isinstance(snapshot, dict):
+        return _dashboard_snapshot_meta(cached_at=cached_at, source="live")
+    try:
+        row = {
+            "schema_version": DASHBOARD_SNAPSHOT_SCHEMA_VERSION,
+            "cached_at": cached_at,
+            "snapshot": snapshot,
+        }
+        redis_client.set(DASHBOARD_SNAPSHOT_KEY, json.dumps(row, default=str, separators=(",", ":")))
+    except Exception:
+        logger.debug("[dashboard] failed saving snapshot cache", exc_info=True)
+    return _dashboard_snapshot_meta(cached_at=cached_at, source="live")
+
+
+def _dashboard_time_greeting(now: Optional[datetime] = None) -> Dict[str, Any]:
+    local_now = now or datetime.now()
+    hour = int(local_now.hour)
+    if 5 <= hour < 12:
+        greeting = "Good morning"
+    elif 12 <= hour < 17:
+        greeting = "Good afternoon"
+    elif 17 <= hour < 22:
+        greeting = "Good evening"
+    else:
+        greeting = "Good night"
+    return {
+        "greeting": greeting,
+        "date": f"{local_now.strftime('%A, %B')} {local_now.day}",
+        "time": local_now.strftime("%-I:%M %p") if os.name != "nt" else local_now.strftime("%I:%M %p").lstrip("0"),
+        "hour": hour,
+    }
+
+
+def _dashboard_overview_context_data(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    health_payload = snapshot.get("health") if isinstance(snapshot.get("health"), dict) else {}
+    runtime = snapshot.get("runtime") if isinstance(snapshot.get("runtime"), dict) else {}
+    sections = snapshot.get("sections") if isinstance(snapshot.get("sections"), list) else []
+    cards = snapshot.get("cards") if isinstance(snapshot.get("cards"), list) else []
+
+    compact_sections: List[Dict[str, Any]] = []
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        section_id = str(section.get("id") or "").strip()
+        stats = _dashboard_stats(section.get("stats"), limit=8)
+        row: Dict[str, Any] = {
+            "id": section_id,
+            "title": section.get("title"),
+            "summary": section.get("summary"),
+            "stats": stats,
+        }
+        if section_id == "voice":
+            row["devices"] = [
+                {
+                    "title": item.get("title"),
+                    "subtitle": item.get("subtitle"),
+                    "connected": item.get("connected"),
+                }
+                for item in section.get("devices") or []
+                if isinstance(item, dict)
+            ][:6]
+        elif section_id == "awareness":
+            event_summary = section.get("event_summary") if isinstance(section.get("event_summary"), dict) else {}
+            camera_events = _dashboard_awareness_camera_events(event_summary, limit=8)
+            row["event_summary"] = {
+                "window": event_summary.get("window"),
+                "event_count": event_summary.get("event_count"),
+                "camera_event_count": len(camera_events),
+                "top_areas": event_summary.get("top_areas") or [],
+                "camera_highlights": [
+                    {
+                        "time": item.get("time"),
+                        "area": item.get("area"),
+                        "message": item.get("message") or item.get("title"),
+                    }
+                    for item in camera_events[-5:]
+                    if item.get("message") or item.get("title")
+                ],
+            }
+        compact_sections.append(row)
+
+    return {
+        "local_time": _dashboard_time_greeting(),
+        "health": health_payload,
+        "runtime": runtime,
+        "cards": [
+            {
+                "id": item.get("id"),
+                "label": item.get("label"),
+                "value": item.get("value"),
+                "detail": item.get("detail"),
+                "tone": item.get("tone"),
+            }
+            for item in cards
+            if isinstance(item, dict)
+        ],
+        "sections": compact_sections,
+    }
+
+
+def _dashboard_brief_contexts(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
+    contexts: List[Dict[str, Any]] = []
+    health_payload = snapshot.get("health") if isinstance(snapshot.get("health"), dict) else {}
+    runtime = snapshot.get("runtime") if isinstance(snapshot.get("runtime"), dict) else {}
+    contexts.append(
+        {
+            "id": "overview",
+            "title": "Home Brief",
+            "source": "tater",
+            "instructions": (
+                "Write the top dashboard greeting for the user. Start with local_time.greeting exactly, and include the date naturally. "
+                "Use the available cards and sections to summarize the whole home and Tater state in one friendly paragraph. "
+                "Prefer concrete useful details: Tater health, weather, connected voice devices, and what cameras recently saw. "
+                "Mention only data that is present; do not imply a missing core is installed. "
+                "Keep it concise, warm, and practical: one to three sentences, no markdown."
+            ),
+            "data": _dashboard_overview_context_data(snapshot),
+        }
+    )
+    contexts.append(
+        {
+            "id": "system",
+            "title": "Tater Status",
+            "source": "tater",
+            "data": {
+                "health": health_payload,
+                "runtime": runtime,
+            },
+        }
+    )
+
+    voice_section = snapshot.get("voice_section")
+    if isinstance(voice_section, dict):
+        contexts.append(
+            {
+                "id": "voice",
+                "title": "Voice Summary",
+                "source": "esphome",
+                "data": {
+                    "summary": voice_section.get("summary"),
+                    "stats": voice_section.get("stats"),
+                    "devices": [
+                        {
+                            "title": item.get("title"),
+                            "subtitle": item.get("subtitle"),
+                            "connected": item.get("connected"),
+                        }
+                        for item in voice_section.get("devices") or []
+                        if isinstance(item, dict)
+                    ],
+                },
+            }
+        )
+
+    environment_section = snapshot.get("environment_section")
+    if isinstance(environment_section, dict):
+        environment_context = environment_section.get("brief_context") if isinstance(environment_section.get("brief_context"), dict) else {}
+        contexts.append(
+            {
+                "id": "environment",
+                "title": "Weather Summary",
+                "source": "environment_core",
+                "instructions": (
+                    "Write a natural dashboard Environment brief, like a helpful weather and home sensor check-in. "
+                    "Lead with the current outdoor feel using temperature and condition when present, then mention rain or forecast risk, "
+                    "wind/humidity if useful, and any notable indoor/room/selected sensor readings. "
+                    "Use all available Environment Core context: stats, overview_cards sensor_rows, forecast_cards, and selected_sources. "
+                    "Do not recite every value as a list, do not start with 'Environment is live', and do not invent missing sensor readings. "
+                    "One or two polished sentences, no markdown."
+                ),
+                "data": {
+                    "summary": environment_context.get("summary") or environment_section.get("summary"),
+                    "stats": environment_context.get("stats") or environment_section.get("stats"),
+                    "overview_cards": environment_context.get("overview_cards") or [],
+                    "forecast_cards": environment_context.get("forecast_cards") or [],
+                    "selected_sources": environment_context.get("selected_sources") or [],
+                },
+            }
+        )
+
+    awareness_section = snapshot.get("awareness_section")
+    if isinstance(awareness_section, dict):
+        contexts.append(
+            {
+                "id": "awareness",
+                "title": "Awareness Summary",
+                "source": "awareness_core",
+                "instructions": (
+                    "Write a dashboard awareness brief for the last 12 hours using event_summary. "
+                    "Treat event_summary.events as chronological evidence from all Awareness event cards and event_summary.highlights as the newest notable items. "
+                    "Summarize the story of the home: patterns by area, repeated camera/sensor/doorbell activity, quiet periods if evident, and notable recent messages. "
+                    "Use counts only to support the narrative; do not make lifetime Total Events the main point. "
+                    "If event_summary.truncated is true, summarize the included latest events plus the aggregate counts without pretending unseen event details were read. "
+                    "Keep it useful for a homeowner checking the dashboard."
+                ),
+                "data": {
+                    "summary": awareness_section.get("summary"),
+                    "stats": awareness_section.get("stats"),
+                    "event_summary": awareness_section.get("event_summary") or {},
+                    "recent_events": awareness_section.get("recent_events") or [],
+                },
+            }
+        )
+
+    return contexts
+
+
+def _dashboard_environment_lookup(data: Dict[str, Any], labels: Tuple[str, ...]) -> str:
+    wanted = {str(label or "").strip().lower() for label in labels if str(label or "").strip()}
+    if not wanted:
+        return ""
+    for stat in _dashboard_stats(data.get("stats"), limit=0):
+        if str(stat.get("label") or "").strip().lower() in wanted:
+            return str(stat.get("value") if stat.get("value") is not None else "").strip()
+    for card in data.get("overview_cards") if isinstance(data.get("overview_cards"), list) else []:
+        if not isinstance(card, dict):
+            continue
+        for row_key in ("summary_rows", "sensor_rows"):
+            for row in card.get(row_key) if isinstance(card.get(row_key), list) else []:
+                if not isinstance(row, dict):
+                    continue
+                if str(row.get("label") or "").strip().lower() in wanted:
+                    return str(row.get("value") if row.get("value") is not None else "").strip()
+    return ""
+
+
+def _dashboard_numeric_value(value: Any) -> Optional[float]:
+    match = re.search(r"-?\d+(?:\.\d+)?", str(value if value is not None else ""))
+    if not match:
+        return None
+    try:
+        return float(match.group(0))
+    except Exception:
+        return None
+
+
+def _dashboard_zeroish_value(value: Any) -> bool:
+    numeric = _dashboard_numeric_value(value)
+    return numeric is not None and abs(numeric) < 0.0001
+
+
+def _dashboard_temperature_phrase(value: Any) -> str:
+    token = str(value if value is not None else "").strip()
+    numeric = _dashboard_numeric_value(token)
+    if numeric is None:
+        return token
+    rounded = int(round(numeric))
+    if re.search(r"\b[cf]\b|degrees?", token, flags=re.IGNORECASE):
+        return f"{rounded} degrees"
+    return token
+
+
+def _dashboard_condition_phrase(value: Any) -> str:
+    token = str(value if value is not None else "").strip()
+    if not token or token in {"-", "n/a"}:
+        return ""
+    return token[:1].lower() + token[1:]
+
+
+def _dashboard_sentence_case(value: str) -> str:
+    token = str(value or "").strip()
+    if not token:
+        return ""
+    return token[:1].upper() + token[1:]
+
+
+def _dashboard_environment_forecast_rain_phrase(data: Dict[str, Any]) -> str:
+    saw_precip_value = False
+    wet_values: List[str] = []
+    for card in data.get("forecast_cards") if isinstance(data.get("forecast_cards"), list) else []:
+        if not isinstance(card, dict):
+            continue
+        for row_key in ("next_hours", "daily_forecast"):
+            for row in card.get(row_key) if isinstance(card.get(row_key), list) else []:
+                if not isinstance(row, dict):
+                    continue
+                condition = str(row.get("condition") or "").strip().lower()
+                if any(token in condition for token in ("rain", "shower", "storm", "drizzle")):
+                    wet_values.append(str(row.get("condition") or "").strip())
+                    continue
+                for key in ("rain", "precip", "chance_of_rain", "chance_rain"):
+                    token = str(row.get(key) if row.get(key) is not None else "").strip()
+                    if not token or token in {"-", "n/a", "None"}:
+                        continue
+                    saw_precip_value = True
+                    if not _dashboard_zeroish_value(token):
+                        wet_values.append(token)
+    if wet_values:
+        first = wet_values[0]
+        return f"the forecast has rain to watch for ({first})" if first else "the forecast has rain to watch for"
+    if saw_precip_value:
+        return "no rain is showing in the near forecast"
+    return ""
+
+
+def _dashboard_environment_fallback_text(data: Dict[str, Any]) -> str:
+    temp = _dashboard_environment_lookup(data, ("Outdoor Temp", "Outdoor", "Temp", "Current"))
+    condition = _dashboard_environment_lookup(data, ("Forecast", "Current Conditions", "Condition"))
+    humidity = _dashboard_environment_lookup(data, ("Humidity", "Outdoor Humidity"))
+    wind = _dashboard_environment_lookup(data, ("Wind", "Wind Speed"))
+    rain = _dashboard_environment_lookup(data, ("Rain Today", "Daily Rain", "Piezo Rain Today"))
+    indoor = _dashboard_environment_lookup(data, ("Indoor", "Indoor Temp", "Indoor Temperature"))
+    indoor_humidity = _dashboard_environment_lookup(data, ("Indoor Humidity",))
+    uv = _dashboard_environment_lookup(data, ("UV", "UV Index"))
+    aqi = _dashboard_environment_lookup(data, ("AQI", "Air Quality"))
+
+    temp_phrase = _dashboard_temperature_phrase(temp)
+    condition_phrase = _dashboard_condition_phrase(condition)
+    if temp_phrase and condition_phrase:
+        text = f"Outside, it is currently {temp_phrase} and {condition_phrase}."
+    elif temp_phrase:
+        text = f"Outside, it is currently {temp_phrase}."
+    elif condition_phrase:
+        text = f"Outside, conditions are {condition_phrase}."
+    else:
+        text = str(data.get("summary") or "Environment readings are available.").strip()
+
+    detail_parts: List[str] = []
+    forecast_rain = _dashboard_environment_forecast_rain_phrase(data)
+    if forecast_rain:
+        detail_parts.append(forecast_rain)
+    elif rain:
+        if _dashboard_zeroish_value(rain):
+            detail_parts.append("no rain has been recorded today")
+        else:
+            detail_parts.append(f"rain today is {rain}")
+    if wind and not _dashboard_zeroish_value(wind):
+        detail_parts.append(f"wind is {wind}")
+    if humidity:
+        detail_parts.append(f"humidity is {humidity}")
+    if indoor:
+        indoor_phrase = f"inside is {indoor}"
+        if indoor_humidity:
+            indoor_phrase = f"{indoor_phrase} with {indoor_humidity} humidity"
+        detail_parts.append(indoor_phrase)
+    if uv and not _dashboard_zeroish_value(uv):
+        detail_parts.append(f"UV is {uv}")
+    if aqi and not _dashboard_zeroish_value(aqi):
+        detail_parts.append(f"air quality is {aqi}")
+    if detail_parts:
+        text = f"{text} " + _dashboard_sentence_case(", ".join(detail_parts[:4])) + "."
+    return _dashboard_short_text(text, limit=420)
+
+
+def _dashboard_fallback_brief(context: Dict[str, Any]) -> Dict[str, Any]:
+    brief_id = str(context.get("id") or "").strip()
+    title = str(context.get("title") or brief_id.title()).strip()
+    data = context.get("data") if isinstance(context.get("data"), dict) else {}
+    now = time.time()
+
+    if brief_id == "overview":
+        local_time = data.get("local_time") if isinstance(data.get("local_time"), dict) else _dashboard_time_greeting()
+        greeting = str(local_time.get("greeting") or "Hello").strip()
+        date_label = str(local_time.get("date") or "").strip()
+        cards = [item for item in data.get("cards") or [] if isinstance(item, dict)]
+        sections = [item for item in data.get("sections") or [] if isinstance(item, dict)]
+        health_payload = data.get("health") if isinstance(data.get("health"), dict) else {}
+        status = "running smoothly" if bool(health_payload.get("ok")) else "needs a little attention"
+        parts = [f"Tater is {status}"]
+        for section in sections:
+            section_id = str(section.get("id") or "").strip()
+            stats = _dashboard_stats(section.get("stats"))
+            if section_id == "environment":
+                temp = _dashboard_stat_value(stats, "Outdoor Temp")
+                condition = str(section.get("summary") or "").strip()
+                if temp:
+                    parts.append(f"outside is {temp}")
+                elif condition:
+                    parts.append(_dashboard_short_text(condition, limit=110))
+            elif section_id == "voice":
+                connected = _dashboard_stat_value(stats, "Connected")
+                if connected:
+                    parts.append(f"{connected} voice satellite{'s are' if connected != '1' else ' is'} connected")
+            elif section_id == "awareness":
+                event_summary = section.get("event_summary") if isinstance(section.get("event_summary"), dict) else {}
+                highlights = [item for item in event_summary.get("camera_highlights") or [] if isinstance(item, dict)]
+                if highlights:
+                    messages = [
+                        _dashboard_short_text(item.get("message"), limit=90)
+                        for item in highlights[-2:]
+                        if _dashboard_short_text(item.get("message"), limit=90)
+                    ]
+                    if messages:
+                        parts.append("cameras recently saw " + "; ".join(messages))
+        if len(parts) == 1 and cards:
+            parts.extend(
+                _dashboard_short_text(f"{item.get('label')}: {item.get('value')}", limit=60)
+                for item in cards[:3]
+                if item.get("label") or item.get("value")
+            )
+        text = f"{greeting}{', ' + date_label if date_label else ''}. " + ", ".join(parts) + "."
+    elif brief_id == "system":
+        health_payload = data.get("health") if isinstance(data.get("health"), dict) else {}
+        runtime = data.get("runtime") if isinstance(data.get("runtime"), dict) else {}
+        status = "online" if bool(health_payload.get("ok")) else "degraded"
+        jobs = _dashboard_safe_int(health_payload.get("hydra_jobs_active") or health_payload.get("chat_jobs_active"))
+        llm = _dashboard_safe_int(health_payload.get("llm_calls_active"))
+        cores = _dashboard_safe_int(health_payload.get("cores_running"))
+        portals = _dashboard_safe_int(health_payload.get("portals_running"))
+        text = (
+            f"Tater is {status}. Runtime is calm with {jobs} Hydra job{'s' if jobs != 1 else ''}, "
+            f"{llm} active LLM call{'s' if llm != 1 else ''}, {cores} running core{'s' if cores != 1 else ''}, "
+            f"and {portals} running portal{'s' if portals != 1 else ''}."
+        )
+        if runtime.get("context_summary"):
+            text = f"{text} {str(runtime.get('context_summary')).strip()}"
+    elif brief_id == "voice":
+        stats = _dashboard_stats(data.get("stats"))
+        connected = _dashboard_stat_value(stats, "Connected") or "0"
+        known = _dashboard_stat_value(stats, "Known Satellites") or _dashboard_stat_value(stats, "Known") or "0"
+        stt = _dashboard_stat_value(stats, "STT Backend")
+        tts = _dashboard_stat_value(stats, "TTS Backend")
+        text = f"Voice has {connected} connected satellite{'s' if connected != '1' else ''} out of {known} known."
+        if stt or tts:
+            text = f"{text} STT is {stt or 'unknown'} and TTS is {tts or 'unknown'}."
+    elif brief_id == "environment":
+        text = _dashboard_environment_fallback_text(data)
+    elif brief_id == "awareness":
+        event_summary = data.get("event_summary") if isinstance(data.get("event_summary"), dict) else {}
+        has_event_summary = "event_count" in event_summary
+        event_count = _dashboard_safe_int(event_summary.get("event_count"))
+        window = str(event_summary.get("window") or "last 12 hours").strip()
+        if not has_event_summary:
+            recent_events = [item for item in data.get("recent_events") or [] if isinstance(item, dict)]
+            event_titles = [
+                _dashboard_short_text(item.get("title") or item.get("detail") or item.get("subtitle"), limit=120)
+                for item in recent_events[:4]
+                if _dashboard_short_text(item.get("title") or item.get("detail") or item.get("subtitle"), limit=120)
+            ]
+            if event_titles:
+                text = f"Awareness is live. Recent signals include {'; '.join(event_titles)}."
+            else:
+                text = "Awareness is live, but no 12-hour event summary is available yet."
+        elif event_count <= 0:
+            text = f"No awareness activity was recorded in the {window}."
+        else:
+            camera_events = _dashboard_awareness_camera_events(event_summary, limit=12)
+            if not camera_events:
+                text = f"Awareness had events in the {window}, but no camera image descriptions were available in the dashboard sample."
+            else:
+                area_counts = Counter(str(item.get("area") or item.get("source") or "Unknown").strip() for item in camera_events)
+                areas = [area for area, _count in area_counts.most_common(3) if area]
+                text = f"Cameras recorded {len(camera_events)} image event{'s' if len(camera_events) != 1 else ''} in the {window}"
+                if areas:
+                    text = f"{text}, mostly around {', '.join(areas)}"
+            highlights = camera_events[-4:] if camera_events else []
+            messages = [
+                _dashboard_short_text(item.get("message") or item.get("title"), limit=140)
+                for item in highlights[:4]
+                if _dashboard_short_text(item.get("message") or item.get("title"), limit=140)
+            ]
+            if messages:
+                text = f"{text}. Recent highlights: {'; '.join(messages)}."
+            else:
+                text = f"{text}."
+    else:
+        text = str(data.get("summary") or "").strip() or "No summary is available yet."
+
+    return {
+        "id": brief_id,
+        "title": title,
+        "text": text.strip(),
+        "source": str(context.get("source") or "").strip(),
+        "updated_at": now,
+        "mode": "live",
+        "stale": False,
+    }
+
+
+def _dashboard_extract_json_object(text: str) -> Dict[str, Any]:
+    raw = str(text or "").strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`").strip()
+        if raw.lower().startswith("json"):
+            raw = raw[4:].strip()
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start >= 0 and end > start:
+        raw = raw[start : end + 1]
+    parsed = json.loads(raw)
+    return parsed if isinstance(parsed, dict) else {}
+
+
+async def _dashboard_awareness_camera_brief(llm_client: Any, context: Dict[str, Any]) -> str:
+    data = context.get("data") if isinstance(context.get("data"), dict) else {}
+    event_summary = data.get("event_summary") if isinstance(data.get("event_summary"), dict) else {}
+    camera_events = _dashboard_awareness_camera_events(event_summary, limit=180)
+    if not event_summary:
+        return ""
+    if not camera_events:
+        return f"No camera image events were available in the {event_summary.get('window') or 'last 12 hours'}."
+
+    payload = {
+        "request": DASHBOARD_AWARENESS_CAMERA_SUMMARY_REQUEST,
+        "time_window": {
+            "label": event_summary.get("window") or "last 12 hours",
+            "start": event_summary.get("start"),
+            "end": event_summary.get("end"),
+        },
+        "candidate_event_count": int(event_summary.get("included_event_count") or len(camera_events)),
+        "camera_event_count": len(camera_events),
+        "all_event_count": int(event_summary.get("event_count") or 0),
+        "truncated": bool(event_summary.get("truncated")),
+        "top_areas": event_summary.get("top_areas") or [],
+        "sources": event_summary.get("sources") or [],
+        "camera_events": camera_events,
+    }
+    system_prompt = (
+        "You write Tater dashboard summaries from Redis-backed Awareness camera events.\n"
+        "Rules:\n"
+        "- Use only camera_events and the aggregate metadata provided.\n"
+        "- Summarize what the cameras saw in the last 12 hours, focusing on image descriptions and notable visual activity.\n"
+        "- Group repeated observations naturally by area, subject, and time when the evidence supports it.\n"
+        "- Ignore sensor-only events unless the aggregate metadata helps explain camera activity.\n"
+        "- If the supplied events are truncated, say the summary is based on the included latest camera events; do not imply unseen details were read.\n"
+        "- Do not mention internal tools, prompts, Redis, kernels, or implementation details.\n"
+        "- Return two to four conversational sentences, no markdown and no bullet lists."
+    )
+    try:
+        response = await llm_client.chat(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps(payload, default=str, ensure_ascii=False)},
+            ],
+            temperature=0.18,
+            max_tokens=560,
+            timeout=25,
+            activity="dashboard_awareness_camera_brief",
+        )
+    except Exception:
+        logger.debug("[dashboard] awareness camera brief generation failed", exc_info=True)
+        return ""
+    content = ""
+    if isinstance(response, dict):
+        message = response.get("message") if isinstance(response.get("message"), dict) else {}
+        content = str(message.get("content") or "").strip()
+    return _dashboard_short_text(content, limit=1800)
+
+
+async def _dashboard_generate_briefs(
+    contexts: List[Dict[str, Any]],
+    *,
+    brief_id: str = "",
+) -> List[Dict[str, Any]]:
+    target = str(brief_id or "").strip()
+    selected_contexts = [
+        context for context in contexts if isinstance(context, dict) and (not target or str(context.get("id") or "").strip() == target)
+    ]
+    if target and not selected_contexts:
+        raise HTTPException(status_code=404, detail=f"Unknown dashboard brief: {target}")
+    fallbacks = {str(context.get("id") or "").strip(): _dashboard_fallback_brief(context) for context in selected_contexts}
+    if not selected_contexts:
+        return []
+
+    generated: Dict[str, str] = {}
+    error_text = ""
+    try:
+        async with get_llm_client_from_env(redis_conn=redis_client) as llm_client:
+            for context in selected_contexts:
+                row_id = str(context.get("id") or "").strip()
+                if row_id != "awareness":
+                    continue
+                text = await _dashboard_awareness_camera_brief(llm_client, context)
+                if text:
+                    generated[row_id] = text
+
+            generic_contexts = [
+                context
+                for context in selected_contexts
+                if str(context.get("id") or "").strip() not in generated
+                and str(context.get("id") or "").strip() != "awareness"
+            ]
+            if generic_contexts:
+                prompt_payload = {
+                    "briefs": [
+                        {
+                            "id": context.get("id"),
+                            "title": context.get("title"),
+                            "source": context.get("source"),
+                            "instructions": context.get("instructions"),
+                            "data": context.get("data"),
+                        }
+                        for context in generic_contexts
+                    ]
+                }
+                messages = [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You write short operational dashboard briefs for Tater. "
+                            "Use only the provided data and follow each brief's instructions. Return strict JSON as "
+                            "{\"briefs\":[{\"id\":\"...\",\"text\":\"...\"}]}. "
+                            "Most texts should be one or two natural sentences. Awareness may be a richer two to four sentence activity digest "
+                            "that names what happened, where it happened, and what seems notable or quiet. "
+                            "Use no markdown, no bullet lists, and no invented sensor values."
+                        ),
+                    },
+                    {"role": "user", "content": json.dumps(prompt_payload, default=str, ensure_ascii=False)},
+                ]
+                response = await llm_client.chat(
+                    messages,
+                    temperature=0.35,
+                    max_tokens=700,
+                    timeout=20,
+                    activity="dashboard_briefs",
+                )
+                content = ""
+                if isinstance(response, dict):
+                    message = response.get("message") if isinstance(response.get("message"), dict) else {}
+                    content = str(message.get("content") or "").strip()
+                parsed = _dashboard_extract_json_object(content)
+                for row in parsed.get("briefs") if isinstance(parsed.get("briefs"), list) else []:
+                    if not isinstance(row, dict):
+                        continue
+                    row_id = str(row.get("id") or "").strip()
+                    text = str(row.get("text") or "").strip()
+                    if row_id in fallbacks and text:
+                        generated[row_id] = text
+    except Exception as exc:
+        error_text = str(exc)
+        logger.info("[dashboard] brief generation fell back: %s", exc)
+
+    now = time.time()
+    rows: List[Dict[str, Any]] = []
+    for context in selected_contexts:
+        row_id = str(context.get("id") or "").strip()
+        fallback = dict(fallbacks.get(row_id) or _dashboard_fallback_brief(context))
+        text = generated.get(row_id) or str(fallback.get("text") or "").strip()
+        row = {
+            **fallback,
+            "text": text,
+            "updated_at": now,
+            "mode": "generated" if row_id in generated else "fallback",
+            "stale": False,
+        }
+        if error_text and row_id not in generated:
+            row["error"] = error_text
+        _dashboard_save_brief(row)
+        rows.append(row)
+    return rows
+
+
+def _dashboard_stale_brief_ids(
+    contexts: List[Dict[str, Any]],
+    cached: Dict[str, Dict[str, Any]],
+    *,
+    now: Optional[float] = None,
+) -> List[str]:
+    current = time.time() if now is None else float(now)
+    stale: List[str] = []
+    for context in contexts or []:
+        row_id = str((context or {}).get("id") or "").strip()
+        if not row_id:
+            continue
+        row = cached.get(row_id)
+        updated_at = float(row.get("updated_at") or 0.0) if isinstance(row, dict) else 0.0
+        if not isinstance(row, dict) or not row.get("text") or not updated_at or (current - updated_at) > DASHBOARD_BRIEF_TTL_SECONDS:
+            stale.append(row_id)
+    return stale
+
+
+def _dashboard_brief_refresh_snapshot(stale_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+    with dashboard_brief_refresh_lock:
+        state = dict(dashboard_brief_refresh_state)
+        state["last_ids"] = list(state.get("last_ids") or [])
+    state["stale_ids"] = [str(item).strip() for item in (stale_ids or []) if str(item).strip()]
+    state["check_interval_seconds"] = DASHBOARD_BRIEF_CHECK_INTERVAL_SECONDS
+    state["ttl_seconds"] = DASHBOARD_BRIEF_TTL_SECONDS
+    return state
+
+
+def _dashboard_mark_brief_refresh_started(*, reason: str, brief_ids: List[str], force: bool = False) -> bool:
+    now = time.time()
+    cleaned_ids = [str(item).strip() for item in (brief_ids or []) if str(item).strip()]
+    with dashboard_brief_refresh_lock:
+        if bool(dashboard_brief_refresh_state.get("running")):
+            return False
+        last_error = str(dashboard_brief_refresh_state.get("last_error") or "").strip()
+        finished_at = float(dashboard_brief_refresh_state.get("finished_at") or 0.0)
+        if not force and last_error and finished_at and (now - finished_at) < DASHBOARD_BRIEF_RETRY_SECONDS:
+            return False
+        dashboard_brief_refresh_state.update(
+            {
+                "running": True,
+                "started_at": now,
+                "finished_at": 0.0,
+                "last_error": "",
+                "last_reason": str(reason or "").strip() or "refresh",
+                "last_ids": cleaned_ids,
+            }
+        )
+    return True
+
+
+def _dashboard_mark_brief_refresh_finished(*, error: str = "") -> None:
+    with dashboard_brief_refresh_lock:
+        dashboard_brief_refresh_state.update(
+            {
+                "running": False,
+                "finished_at": time.time(),
+                "last_error": str(error or "").strip(),
+            }
+        )
+
+
+async def _dashboard_refresh_briefs_job(
+    contexts: List[Dict[str, Any]],
+    *,
+    brief_id: str = "",
+    reason: str = "scheduler",
+    force: bool = False,
+) -> bool:
+    target = str(brief_id or "").strip()
+    ids = [target] if target else [str((context or {}).get("id") or "").strip() for context in contexts or []]
+    ids = [item for item in ids if item]
+    if not ids:
+        return False
+    if not _dashboard_mark_brief_refresh_started(reason=reason, brief_ids=ids, force=force):
+        return False
+    error = ""
+    try:
+        await _dashboard_generate_briefs(contexts, brief_id=target)
+    except Exception as exc:
+        error = str(exc)
+        logger.info("[dashboard] background brief refresh failed reason=%s: %s", reason, exc)
+    finally:
+        _dashboard_mark_brief_refresh_finished(error=error)
+    return not bool(error)
+
+
+def _dashboard_schedule_brief_refresh(
+    contexts: List[Dict[str, Any]],
+    *,
+    brief_id: str = "",
+    stale_ids: Optional[List[str]] = None,
+    reason: str = "dashboard",
+    force: bool = False,
+) -> bool:
+    target = str(brief_id or "").strip()
+    wanted = {target} if target else {str(item).strip() for item in (stale_ids or []) if str(item).strip()}
+    selected = [
+        context
+        for context in contexts or []
+        if isinstance(context, dict)
+        and (not wanted or str(context.get("id") or "").strip() in wanted)
+    ]
+    ids = [str(context.get("id") or "").strip() for context in selected if str(context.get("id") or "").strip()]
+    if not ids:
+        return False
+    if not _dashboard_mark_brief_refresh_started(reason=reason, brief_ids=ids, force=force):
+        return False
+
+    async def runner() -> None:
+        error = ""
+        try:
+            await _dashboard_generate_briefs(selected, brief_id=target)
+        except Exception as exc:
+            error = str(exc)
+            logger.info("[dashboard] queued brief refresh failed reason=%s: %s", reason, exc)
+        finally:
+            _dashboard_mark_brief_refresh_finished(error=error)
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        _dashboard_mark_brief_refresh_finished(error="dashboard event loop unavailable")
+        return False
+    loop.create_task(runner())
+    return True
+
+
+async def _dashboard_brief_scheduler_loop() -> None:
+    await asyncio.sleep(float(DASHBOARD_BRIEF_STARTUP_DELAY_SECONDS))
+    while True:
+        try:
+            snapshot = _dashboard_build_snapshot()
+            _dashboard_save_snapshot(snapshot)
+            contexts = _dashboard_brief_contexts(snapshot)
+            stale_ids = _dashboard_stale_brief_ids(contexts, _dashboard_cache_rows())
+            if stale_ids:
+                await _dashboard_refresh_briefs_job(
+                    [context for context in contexts if str(context.get("id") or "").strip() in set(stale_ids)],
+                    reason="scheduler",
+                )
+                _dashboard_save_snapshot(snapshot)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug("[dashboard] brief scheduler tick failed: %s", exc, exc_info=True)
+        await asyncio.sleep(float(DASHBOARD_BRIEF_CHECK_INTERVAL_SECONDS))
+
+
+def _start_dashboard_brief_scheduler() -> None:
+    global dashboard_brief_scheduler_task
+    if dashboard_brief_scheduler_task and not dashboard_brief_scheduler_task.done():
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    dashboard_brief_scheduler_task = loop.create_task(_dashboard_brief_scheduler_loop())
+
+
+async def _stop_dashboard_brief_scheduler() -> None:
+    global dashboard_brief_scheduler_task
+    task = dashboard_brief_scheduler_task
+    dashboard_brief_scheduler_task = None
+    if not task:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+def _dashboard_build_snapshot() -> Dict[str, Any]:
+    health_payload = health()
+    hydra_jobs = _chat_job_counts_with_breakdown(include_history=False)
+    llm_calls = get_llm_call_runtime_summary(include_history=False)
+    vision_calls = get_vision_call_runtime_summary(include_history=False)
+
+    voice_payload = _dashboard_esphome_payload()
+    voice_section = _dashboard_section(
+        section_id="voice",
+        title="Voice",
+        subtitle="Satellites, wake detection, and speech pipeline",
+        payload=voice_payload,
+        stats_limit=8,
+        require_signal=False,
+    )
+    if isinstance(voice_section, dict):
+        voice_devices = _dashboard_core_items(
+            voice_payload,
+            groups=("satellite",),
+            limit=0,
+            require_image=False,
+        )
+        voice_section["devices"] = [device for device in voice_devices if bool(device.get("connected"))][:6]
+        if isinstance(voice_payload, dict):
+            if isinstance(voice_payload.get("speaker_id"), dict):
+                voice_section["speaker_id"] = voice_payload.get("speaker_id")
+            if isinstance(voice_payload.get("emotion_id"), dict):
+                voice_section["emotion_id"] = voice_payload.get("emotion_id")
+
+    environment_payload = _dashboard_tab_payload("environment_core")
+    environment_section = _dashboard_section(
+        section_id="environment",
+        title="Environment",
+        subtitle="Weather and live home readings",
+        payload=environment_payload,
+        stats_limit=8,
+        require_signal=True,
+    )
+    if isinstance(environment_section, dict):
+        environment_section["visuals"] = _dashboard_core_items(
+            environment_payload,
+            groups=("overview", "forecast"),
+            limit=4,
+            require_image=True,
+        )
+        environment_section["brief_context"] = _dashboard_environment_context(environment_payload, environment_section)
+
+    awareness_payload = _dashboard_tab_payload("awareness_core")
+    awareness_section = _dashboard_section(
+        section_id="awareness",
+        title="Awareness",
+        subtitle="Recent home activity and event signals",
+        payload=awareness_payload,
+        stats_limit=8,
+        require_signal=True,
+    )
+    if isinstance(awareness_section, dict):
+        awareness_section["event_summary"] = _dashboard_awareness_events_summary(hours=12)
+        awareness_section["snapshots"] = _dashboard_core_items(
+            awareness_payload,
+            groups=("event",),
+            limit=6,
+            require_image=True,
+        )
+        awareness_section["recent_events"] = _dashboard_core_items(
+            awareness_payload,
+            groups=("event",),
+            limit=8,
+            require_image=False,
+            include_image=False,
+        )
+
+    cards: List[Dict[str, Any]] = [
+        {
+            "id": "tater",
+            "label": _dashboard_redis_text(redis_client.get("tater:first_name")) or "Tater",
+            "value": "Online" if bool(health_payload.get("ok")) else "Degraded",
+            "detail": "Redis connected" if bool(health_payload.get("redis")) else "Redis needs attention",
+            "tone": "good" if bool(health_payload.get("ok")) else "warning",
+        },
+        {
+            "id": "hydra",
+            "label": "Hydra",
+            "value": f"{int(hydra_jobs.get('total') or 0)} active",
+            "detail": f"{int(llm_calls.get('active_total') or 0)} LLM calls, {int(vision_calls.get('active_total') or 0)} vision calls",
+            "tone": "normal",
+        },
+        {
+            "id": "surfaces",
+            "label": "Surfaces",
+            "value": f"{int(health_payload.get('cores_running') or 0)} cores",
+            "detail": f"{int(health_payload.get('portals_running') or 0)} portals running",
+            "tone": "normal",
+        },
+    ]
+    if isinstance(voice_section, dict):
+        connected = _dashboard_stat_value(_dashboard_stats(voice_section.get("stats")), "Connected")
+        known = _dashboard_stat_value(_dashboard_stats(voice_section.get("stats")), "Known Satellites")
+        cards.append(
+            {
+                "id": "voice",
+                "label": "Voice",
+                "value": f"{connected or '0'} connected",
+                "detail": f"{known or '0'} known satellites",
+                "tone": "good" if _dashboard_safe_int(connected) > 0 else "normal",
+            }
+        )
+    if isinstance(environment_section, dict):
+        temp = _dashboard_stat_value(_dashboard_stats(environment_section.get("stats")), "Outdoor Temp")
+        cards.append(
+            {
+                "id": "environment",
+                "label": "Outside",
+                "value": temp or "Live",
+                "detail": "Environment core",
+                "tone": "normal",
+            }
+        )
+    if isinstance(awareness_section, dict):
+        total = _dashboard_stat_value(_dashboard_stats(awareness_section.get("stats")), "Total Events")
+        cards.append(
+            {
+                "id": "awareness",
+                "label": "Awareness",
+                "value": f"{total or '0'} events",
+                "detail": "Activity history",
+                "tone": "normal",
+            }
+        )
+
+    sections = [section for section in (voice_section, environment_section, awareness_section) if isinstance(section, dict)]
+    return {
+        "health": health_payload,
+        "runtime": {
+            "hydra_jobs": hydra_jobs,
+            "llm_calls": llm_calls,
+            "vision_calls": vision_calls,
+        },
+        "cards": cards,
+        "sections": sections,
+        "voice_section": voice_section,
+        "environment_section": environment_section,
+        "awareness_section": awareness_section,
+    }
+
+
+async def _dashboard_payload(
+    *,
+    refresh_briefs: bool = False,
+    brief_id: str = "",
+    refresh_snapshot: bool = False,
+) -> Dict[str, Any]:
+    snapshot_meta: Dict[str, Any]
+    rebuilt_snapshot = False
+    if refresh_briefs or refresh_snapshot:
+        snapshot = _dashboard_build_snapshot()
+        rebuilt_snapshot = True
+        snapshot_meta = _dashboard_snapshot_meta(source="live")
+    else:
+        cached_snapshot, snapshot_meta = _dashboard_load_snapshot_cache()
+        if isinstance(cached_snapshot, dict) and not bool(snapshot_meta.get("stale")):
+            snapshot = cached_snapshot
+        else:
+            snapshot = _dashboard_build_snapshot()
+            rebuilt_snapshot = True
+            snapshot_meta = _dashboard_snapshot_meta(source="live")
+    contexts = _dashboard_brief_contexts(snapshot)
+    context_ids = {str(context.get("id") or "").strip() for context in contexts}
+    cached = _dashboard_cache_rows()
+    now = time.time()
+
+    stale_ids = _dashboard_stale_brief_ids(contexts, cached, now=now)
+    target_id = str(brief_id or "").strip()
+    if target_id and target_id not in context_ids:
+        raise HTTPException(status_code=404, detail=f"Unknown dashboard brief: {target_id}")
+    if refresh_briefs:
+        _dashboard_schedule_brief_refresh(contexts, brief_id=target_id, reason="manual", force=True)
+    elif stale_ids:
+        _dashboard_schedule_brief_refresh(contexts, stale_ids=stale_ids, reason="dashboard", force=False)
+
+    if rebuilt_snapshot:
+        snapshot_meta = _dashboard_save_snapshot(snapshot)
+
+    now = time.time()
+    briefs: List[Dict[str, Any]] = []
+    for context in contexts:
+        row_id = str(context.get("id") or "").strip()
+        row = cached.get(row_id)
+        if isinstance(row, dict) and row.get("text"):
+            out = dict(row)
+            updated_at = float(out.get("updated_at") or 0.0)
+            out["stale"] = bool(updated_at and (now - updated_at) > DASHBOARD_BRIEF_TTL_SECONDS)
+            briefs.append(out)
+        else:
+            briefs.append(_dashboard_fallback_brief(context))
+
+    return {
+        "ok": True,
+        "generated_at": float(snapshot_meta.get("cached_at") or time.time()),
+        "snapshot": snapshot_meta,
+        "brief_ttl_seconds": DASHBOARD_BRIEF_TTL_SECONDS,
+        "brief_refresh": _dashboard_brief_refresh_snapshot(stale_ids),
+        "cards": snapshot.get("cards") or [],
+        "sections": snapshot.get("sections") or [],
+        "briefs": [row for row in briefs if str(row.get("id") or "").strip() in context_ids],
+    }
+
+
 def _redis_setup_payload(payload: RedisSetupRequest) -> Dict[str, Any]:
     raw_password = payload.password
     password = "" if raw_password is None else str(raw_password)
@@ -3593,6 +5203,16 @@ def health() -> Dict[str, Any]:
             "restore_summary": dict(bootstrap_state.get("restore_summary") or {}),
         },
     }
+
+
+@app.get("/api/dashboard")
+async def dashboard(refresh_briefs: bool = False, refresh_snapshot: bool = False) -> Dict[str, Any]:
+    return await _dashboard_payload(refresh_briefs=bool(refresh_briefs), refresh_snapshot=bool(refresh_snapshot))
+
+
+@app.post("/api/dashboard/briefs/refresh")
+async def dashboard_briefs_refresh(payload: DashboardBriefRefreshRequest) -> Dict[str, Any]:
+    return await _dashboard_payload(refresh_briefs=True, brief_id=str(payload.brief_id or "").strip())
 
 
 @app.get("/api/runtime/breakdown")

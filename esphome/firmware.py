@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import importlib.util
 import json
 import os
 import re
@@ -23,6 +24,7 @@ from . import runtime as esphome_runtime
 from . import ui_helpers as esphome_ui_helpers
 
 FIRMWARE_PROFILE_HASH_KEY = "tater:esphome:firmware:profiles:v1"
+DISPLAY_PROFILE_HASH_KEY = "tater:display:profiles:v1"
 FIRMWARE_AGENT_LABS_ROOT = Path(__file__).resolve().parents[1] / "agent_lab" / "esphome"
 FIRMWARE_CONFIG_ROOT = FIRMWARE_AGENT_LABS_ROOT / "firmware_configs"
 FIRMWARE_BUILD_ROOT = FIRMWARE_AGENT_LABS_ROOT / "firmware_builds"
@@ -42,6 +44,9 @@ _REMOTE_TEMPLATE_LOCK = threading.Lock()
 _REMOTE_JSON_CACHE_TTL_SECONDS = 15 * 60.0
 _REMOTE_JSON_CACHE: Dict[str, Dict[str, Any]] = {}
 _REMOTE_JSON_LOCK = threading.Lock()
+_TATER_SENSOR_OPTIONS_CACHE_TTL_SECONDS = 60.0
+_TATER_SENSOR_OPTIONS_CACHE: Dict[str, Any] = {"ts": 0.0, "options": []}
+_TATER_SENSOR_OPTIONS_LOCK = threading.Lock()
 _FIRMWARE_SESSION_MAX_ENTRIES = 4000
 _FIRMWARE_SESSION_TTL_SECONDS = 45 * 60.0
 _FIRMWARE_DEVICE_LOG_RETRY_SECONDS = 2.5
@@ -68,10 +73,62 @@ _WAKE_WORD_SOURCE_SPECS: tuple[Dict[str, str], ...] = (
 _WAKE_SOUND_SOURCE_SPECS: tuple[Dict[str, str], ...] = (
     {"key": "wakeSounds", "label": "wakeSounds"},
 )
+
+_S3BOX_SENSOR_FIELD_LABELS: Dict[str, str] = {
+    "sensor_temp_out": "Outdoor Temperature",
+    "sensor_temp_in": "Indoor Temperature",
+    "sensor_humidity_out": "Outdoor Humidity",
+    "sensor_humidity_in": "Indoor Humidity",
+    "sensor_wind_speed": "Wind Speed",
+    "sensor_rain_rate": "Rain Rate",
+    "sensor_lightning_strikes": "Lightning Strikes",
+}
+_S3BOX_DISPLAY_SLOT_KEYS: Dict[str, str] = {
+    "temp_out": "sensor_temp_out",
+    "temp_in": "sensor_temp_in",
+    "humidity_out": "sensor_humidity_out",
+    "humidity_in": "sensor_humidity_in",
+    "wind_speed": "sensor_wind_speed",
+    "rain_rate": "sensor_rain_rate",
+    "lightning_strikes": "sensor_lightning_strikes",
+}
+_INTEGRATION_SOURCE_LABELS: Dict[str, str] = {
+    "environment": "Environment Core",
+    "homeassistant": "Home Assistant",
+    "unifi_protect": "UniFi Protect",
+    "unifi_network": "UniFi Network",
+    "hue": "Philips Hue",
+    "ecobee_homekit": "Ecobee HomeKit",
+    "weather_api": "WeatherAPI.com",
+}
+_ENVIRONMENT_PROVIDER_LATEST_KEYS: Dict[str, str] = {
+    "ecowitt": "environment:latest:ecowitt",
+    "unifi_protect": "environment:latest:unifi_protect",
+    "ecobee_homekit": "environment:latest:ecobee_homekit",
+    "hue": "environment:latest:hue",
+    "homeassistant": "environment:latest:homeassistant",
+    "weather_api": "environment:latest:weather_api",
+}
+_ENVIRONMENT_SELECTED_SENSORS_KEY = "environment:selected_sensors"
+_ENVIRONMENT_DISPLAY_SENSOR_CATEGORIES = {
+    "air",
+    "condition",
+    "forecast",
+    "humidity",
+    "lightning",
+    "pressure",
+    "rain",
+    "solar",
+    "temperature",
+    "wind",
+}
 _WAKE_SOUND_AUDIO_EXTS = {".flac", ".mp3", ".ogg", ".wav"}
 _WAKE_WORD_CATALOG_CACHE_TTL_SECONDS = 10 * 60.0
 _WAKE_WORD_CATALOG_CACHE: Dict[str, Any] = {"ts": 0.0, "payload": {}}
 _WAKE_WORD_CATALOG_LOCK = threading.Lock()
+_TRAINER_WAKE_WORD_CATALOG_CACHE_TTL_SECONDS = 30.0
+_TRAINER_WAKE_WORD_CATALOG_CACHE: Dict[str, Dict[str, Any]] = {}
+_TRAINER_WAKE_WORD_CATALOG_LOCK = threading.Lock()
 _WAKE_SOUND_CATALOG_CACHE_TTL_SECONDS = 10 * 60.0
 _WAKE_SOUND_CATALOG_CACHE: Dict[str, Any] = {"ts": 0.0, "payload": {}}
 _WAKE_SOUND_CATALOG_LOCK = threading.Lock()
@@ -120,12 +177,12 @@ _TEMPLATE_SPECS: tuple[Dict[str, Any], ...] = (
     },
     {
         "key": "s3box_display",
-        "label": "Tater S3Box Display",
+        "label": "Tater ESP32-S3-BOX-3 Display",
         "source_urls": [
-            "https://github.com/TaterTotterson/Tater-S3Box-Display/raw/refs/heads/main/s3box.yaml",
+            "https://github.com/TaterTotterson/Tater-S3Box-Display/raw/refs/heads/main/esp32-s3-box-3.yaml",
         ],
         "candidates": [
-            ("Tater-S3Box-Display", "s3box.yaml"),
+            ("Tater-S3Box-Display", "esp32-s3-box-3.yaml"),
         ],
         "fixed_keys": {"device_name"},
         "auto_keys": {"device_ip"},
@@ -134,7 +191,11 @@ _TEMPLATE_SPECS: tuple[Dict[str, Any], ...] = (
             "s3 box",
             "s3-box",
             "esp32-s3-box",
+            "esp32-s3-box-3",
             "esp32 s3 box",
+            "esp32 s3 box 3",
+            "box-3",
+            "box 3",
             "taters3box",
             "tater-s3box",
             "tater s3box",
@@ -236,6 +297,240 @@ def _humanize_key(key: str) -> str:
         lower = raw.lower()
         parts.append(special.get(lower, raw.capitalize()))
     return " ".join(parts) or token
+
+
+def _current_tater_first_name() -> str:
+    try:
+        return _text(redis_client.get("tater:first_name")) or "Tater"
+    except Exception:
+        return "Tater"
+
+
+def _normalize_http_base_url(value: Any, *, default_scheme: str = "http") -> str:
+    token = _text(value)
+    if not token:
+        return ""
+    token = re.sub(r"\s+", "", token)
+    lower = token.lower()
+    if lower.startswith("http:") and not lower.startswith("http://"):
+        token = f"http://{token[5:].lstrip('/')}"
+    elif lower.startswith("https:") and not lower.startswith("https://"):
+        token = f"https://{token[6:].lstrip('/')}"
+    elif "://" not in token:
+        scheme = _lower(default_scheme) or "http"
+        token = f"{scheme}://{token.lstrip('/')}"
+    return token.rstrip("/")
+
+
+def _integration_source_label(provider: Any) -> str:
+    token = _text(provider).strip()
+    if not token:
+        return "Tater"
+    return _INTEGRATION_SOURCE_LABELS.get(token, _humanize_key(token))
+
+
+def _json_from_redis_key(key: str, default: Any) -> Any:
+    try:
+        raw = redis_client.get(key)
+    except Exception:
+        return copy.deepcopy(default)
+    if raw in (None, ""):
+        return copy.deepcopy(default)
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="replace")
+    try:
+        return json.loads(str(raw))
+    except Exception:
+        return copy.deepcopy(default)
+
+
+def _environment_provider_label(provider: Any) -> str:
+    return _INTEGRATION_SOURCE_LABELS.get(_lower(provider), _integration_source_label(provider))
+
+
+def _environment_core_installed() -> bool:
+    try:
+        import core_registry
+
+        core_dir = getattr(core_registry, "CORE_DIR", None)
+        if core_dir is not None and (Path(core_dir) / "environment_core.py").exists():
+            return True
+    except Exception:
+        pass
+    try:
+        return importlib.util.find_spec("cores.environment_core") is not None
+    except Exception:
+        return False
+
+
+def _environment_provider_snapshots() -> Dict[str, Dict[str, Any]]:
+    snapshots: Dict[str, Dict[str, Any]] = {}
+    for provider, key in _ENVIRONMENT_PROVIDER_LATEST_KEYS.items():
+        snapshot = _json_from_redis_key(key, {})
+        if isinstance(snapshot, dict) and snapshot:
+            snapshots[provider] = snapshot
+    latest = _json_from_redis_key("environment:latest", {})
+    if isinstance(latest, dict) and latest:
+        provider = _lower(latest.get("provider")) or "environment"
+        snapshots.setdefault(provider, latest)
+    return snapshots
+
+
+def _environment_combined_readings(provider_snapshots: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    readings: List[Dict[str, Any]] = []
+    for provider, snapshot in provider_snapshots.items():
+        if not isinstance(snapshot, dict):
+            continue
+        provider_token = _lower(snapshot.get("provider")) or _lower(provider)
+        source_id = _text(snapshot.get("source_id")) or provider_token
+        source_name = _text(snapshot.get("model") or snapshot.get("stationtype")) or _environment_provider_label(provider_token)
+        for row in snapshot.get("readings") or []:
+            if not isinstance(row, dict):
+                continue
+            key = _text(row.get("key"))
+            if not key:
+                continue
+            next_row = dict(row)
+            next_row.setdefault("provider", provider_token)
+            next_row.setdefault("provider_label", _environment_provider_label(provider_token))
+            next_row.setdefault("source_id", source_id)
+            next_row.setdefault("source_name", source_name)
+            readings.append(next_row)
+    return readings
+
+
+def _environment_selected_sensor_labels() -> Dict[str, Dict[str, str]]:
+    raw = _json_from_redis_key(_ENVIRONMENT_SELECTED_SENSORS_KEY, [])
+    rows = raw if isinstance(raw, list) else []
+    selected: Dict[str, Dict[str, str]] = {}
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        key = _text(item.get("key"))
+        if not key:
+            continue
+        selected[key] = {
+            "label": _text(item.get("label")),
+            "area": _text(item.get("area")),
+            "provider": _lower(item.get("provider")),
+            "category": _lower(item.get("category")),
+        }
+    return selected
+
+
+def _environment_reading_state_id(row: Dict[str, Any]) -> str:
+    provider = _lower(row.get("provider")) or "environment"
+    source_id = _text(row.get("source_id")) or provider
+    key = _text(row.get("key"))
+    return f"{provider}:{source_id}:{key}" if key else ""
+
+
+def _environment_sensor_options_from_core() -> Dict[str, Dict[str, str]]:
+    options: Dict[str, Dict[str, str]] = {}
+    provider_snapshots = _environment_provider_snapshots()
+    selected = _environment_selected_sensor_labels()
+    for row in _environment_combined_readings(provider_snapshots):
+        category = _lower(row.get("category")) or "other"
+        if category not in _ENVIRONMENT_DISPLAY_SENSOR_CATEGORIES:
+            continue
+        state_id = _environment_reading_state_id(row)
+        if not state_id:
+            continue
+        value = f"environment:{state_id}"
+        source_key = _text(row.get("source_id"))
+        selection = selected.get(source_key) or selected.get(_text(row.get("key"))) or {}
+        label = _text(selection.get("label")) or _text(row.get("label")) or _text(row.get("key")) or state_id
+        area = _text(selection.get("area")) or _text(row.get("area"))
+        provider_label = _text(row.get("provider_label")) or _environment_provider_label(row.get("provider"))
+        display = _text(row.get("display"))
+        label_parts = []
+        if area:
+            label_parts.append(area)
+        label_parts.append(label)
+        if display:
+            label_parts.append(display)
+        label_text = " - ".join(part for part in label_parts if part)
+        if provider_label:
+            label_text = f"{label_text} ({provider_label})"
+        options[value] = {
+            "value": value,
+            "label": label_text,
+            "source": "environment",
+            "source_label": "Environment Core",
+            "category": category,
+            "area": area,
+        }
+    return options
+
+
+def _environment_sensor_picker_state() -> Dict[str, Any]:
+    if not _environment_core_installed():
+        return {
+            "ready": False,
+            "options": [],
+            "message": "Install Environment Core to choose display sensors.",
+        }
+    options = _environment_sensor_options_from_core()
+    if not options:
+        return {
+            "ready": False,
+            "options": [],
+            "message": "Environment Core is installed, but no readings are available yet. Open Environment Core, run discovery or add a source, then refresh this firmware tab.",
+        }
+    return {"ready": True, "options": options, "message": ""}
+
+
+def _tater_sensor_options() -> List[Dict[str, str]]:
+    now = time.time()
+    with _TATER_SENSOR_OPTIONS_LOCK:
+        cached_ts = float(_TATER_SENSOR_OPTIONS_CACHE.get("ts") or 0.0)
+        cached_options = _TATER_SENSOR_OPTIONS_CACHE.get("options")
+        if isinstance(cached_options, list) and (now - cached_ts) < _TATER_SENSOR_OPTIONS_CACHE_TTL_SECONDS:
+            return copy.deepcopy(cached_options)
+
+    picker = _environment_sensor_picker_state()
+    options_by_value = picker.get("options") if isinstance(picker.get("options"), dict) else {}
+
+    options = sorted(
+        options_by_value.values(),
+        key=lambda row: (
+            _lower(row.get("source_label")),
+            _lower(row.get("area")),
+            _lower(row.get("category")),
+            _lower(row.get("label")),
+            _lower(row.get("value")),
+        ),
+    )
+    with _TATER_SENSOR_OPTIONS_LOCK:
+        _TATER_SENSOR_OPTIONS_CACHE["ts"] = now
+        _TATER_SENSOR_OPTIONS_CACHE["options"] = copy.deepcopy(options)
+    return options
+
+
+def _tater_sensor_select_state(current_value: Any) -> Dict[str, Any]:
+    current = _text(current_value)
+    sensor_options = _tater_sensor_options()
+    known_values = {_text(row.get("value")) for row in sensor_options if isinstance(row, dict)}
+    options: List[Dict[str, Any]] = [{"value": "", "label": "None"}]
+    if current and current not in known_values:
+        options.append({"value": current, "label": f"{current} (current)"})
+    if sensor_options:
+        grouped: Dict[str, List[Dict[str, str]]] = {}
+        source_labels: Dict[str, str] = {}
+        for row in sensor_options:
+            if not isinstance(row, dict):
+                continue
+            source = _text(row.get("source")) or "tater"
+            grouped.setdefault(source, []).append(row)
+            source_labels[source] = _text(row.get("source_label")) or _integration_source_label(source)
+        for source in sorted(grouped, key=lambda item: _lower(source_labels.get(item) or item)):
+            options.append({"label": source_labels.get(source) or _integration_source_label(source), "options": grouped[source]})
+    picker = _environment_sensor_picker_state()
+    return {
+        "ready": bool(sensor_options) and bool(picker.get("ready")),
+        "options": options,
+        "message": _text(picker.get("message")),
+    }
 
 
 def _clean_terminal_text(value: Any) -> str:
@@ -411,6 +706,75 @@ def _wake_word_slug_from_url(url: str) -> str:
     if name.lower().endswith(".json"):
         name = name[:-5]
     return _sanitize_token(name).lower()
+
+
+def _wake_word_source_value(value: Any) -> str:
+    token = _lower(value)
+    if token in {"prebuilt", "trainer", "custom"}:
+        return token
+    return ""
+
+
+def _wake_word_source_from_profile(profile: Dict[str, Any], wake_word_catalog: Dict[str, Any]) -> str:
+    explicit = _wake_word_source_value(profile.get("wake_word_source"))
+    if explicit:
+        return explicit
+
+    current_url = _text(profile.get("wake_word_model_url"))
+    if not current_url:
+        return "prebuilt"
+    if "/api/trained_wake_words/" in current_url:
+        return "trainer"
+
+    entries = wake_word_catalog.get("entries") if isinstance(wake_word_catalog.get("entries"), list) else []
+    prebuilt_urls = {_text(row.get("url")) for row in entries if isinstance(row, dict)}
+    if current_url in prebuilt_urls or f"/{_WAKE_WORD_GITHUB_OWNER}/{_WAKE_WORD_GITHUB_REPO}/" in current_url:
+        return "prebuilt"
+    return "custom"
+
+
+def _trainer_base_url_from_model_url(value: Any) -> str:
+    token = _text(value)
+    if not token or "/api/trained_wake_words/" not in token:
+        return ""
+    try:
+        parsed = urllib_parse.urlparse(token)
+    except Exception:
+        return ""
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+
+
+def _wake_word_trainer_url_from_profile(profile: Dict[str, Any]) -> str:
+    explicit = _normalize_http_base_url(profile.get("wake_word_trainer_url"))
+    if explicit:
+        return explicit
+    return _trainer_base_url_from_model_url(profile.get("wake_word_model_url"))
+
+
+def _trainer_catalog_url(trainer_base_url: Any) -> str:
+    base = _normalize_http_base_url(trainer_base_url)
+    if not base:
+        return ""
+    if base.lower().endswith("/api/trained_wake_words/catalog"):
+        return base
+    return f"{base}/api/trained_wake_words/catalog"
+
+
+def _trainer_absolute_url(trainer_base_url: str, value: Any) -> str:
+    token = _text(value)
+    if not token:
+        return ""
+    parsed = urllib_parse.urlparse(token)
+    if parsed.scheme and parsed.netloc:
+        return token
+    base = _normalize_http_base_url(trainer_base_url)
+    if not base:
+        return token
+    if token.startswith("/"):
+        return f"{base}{token}"
+    return f"{base}/{token}"
 
 
 def _wake_sound_slug_from_url(url: str) -> str:
@@ -771,6 +1135,94 @@ def _load_wake_word_catalog(*, force_refresh: bool = False) -> Dict[str, Any]:
     return payload
 
 
+def _trainer_wake_word_entries_from_payload(payload: Any, trainer_base_url: str) -> List[Dict[str, str]]:
+    rows: List[Any] = []
+    if isinstance(payload, list):
+        rows = list(payload)
+    elif isinstance(payload, dict):
+        for key in ("wake_words", "entries", "models", "items", "words"):
+            candidate = payload.get(key)
+            if isinstance(candidate, list):
+                rows = list(candidate)
+                break
+
+    entries: List[Dict[str, str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        url = (
+            _text(row.get("json_url"))
+            or _text(row.get("url"))
+            or _text(row.get("wake_word_model_url"))
+            or _text(row.get("download_url"))
+            or _text(row.get("model_json_url"))
+            or _text(row.get("model_url"))
+        )
+        url = _trainer_absolute_url(trainer_base_url, url)
+        slug = (
+            _text(row.get("wake_word_name"))
+            or _text(row.get("slug"))
+            or _text(row.get("key"))
+            or _wake_word_slug_from_url(url)
+        )
+        label = _text(row.get("label") or row.get("wake_word") or row.get("title"))
+        entry = _wake_word_entry(
+            source_key="trainer",
+            source_label="Trainer",
+            slug=slug,
+            url=url,
+            label=label,
+            path=_text(row.get("json_file") or row.get("path")),
+        )
+        if isinstance(entry, dict):
+            entries.append(entry)
+    return sorted(entries, key=lambda row: (_lower(row.get("label")), _text(row.get("url"))))
+
+
+def _load_trainer_wake_word_catalog(
+    trainer_base_url: Any,
+    *,
+    force_refresh: bool = False,
+    strict: bool = False,
+) -> Dict[str, Any]:
+    base = _normalize_http_base_url(trainer_base_url)
+    catalog_url = _trainer_catalog_url(base)
+    if not catalog_url:
+        if strict:
+            raise RuntimeError("Trainer URL is required.")
+        return {"entries": [], "source_kind": "trainer", "source_label": "", "warning": "Enter a trainer URL."}
+
+    now = time.time()
+    if not force_refresh:
+        with _TRAINER_WAKE_WORD_CATALOG_LOCK:
+            cached = _TRAINER_WAKE_WORD_CATALOG_CACHE.get(catalog_url)
+            cached_ts = float(cached.get("ts") or 0.0) if isinstance(cached, dict) else 0.0
+            if isinstance(cached, dict) and (now - cached_ts) < _TRAINER_WAKE_WORD_CATALOG_CACHE_TTL_SECONDS:
+                return copy.deepcopy(cached.get("payload") or {})
+
+    try:
+        payload = _remote_json(catalog_url, force_refresh=True)
+        catalog = {
+            "entries": _trainer_wake_word_entries_from_payload(payload, base),
+            "source_kind": "trainer",
+            "source_label": base,
+            "warning": "",
+        }
+    except RuntimeError as exc:
+        if strict:
+            raise
+        catalog = {
+            "entries": [],
+            "source_kind": "trainer",
+            "source_label": base,
+            "warning": _text(exc),
+        }
+
+    with _TRAINER_WAKE_WORD_CATALOG_LOCK:
+        _TRAINER_WAKE_WORD_CATALOG_CACHE[catalog_url] = {"ts": now, "payload": copy.deepcopy(catalog)}
+    return catalog
+
+
 def _load_wake_sound_catalog(*, force_refresh: bool = False) -> Dict[str, Any]:
     now = time.time()
     if not force_refresh:
@@ -820,7 +1272,12 @@ def _load_wake_sound_catalog(*, force_refresh: bool = False) -> Dict[str, Any]:
     return payload
 
 
-def _wake_word_picker_options(catalog: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _wake_word_picker_options(
+    catalog: Dict[str, Any],
+    *,
+    include_custom: bool = True,
+    blank_label: str = "Custom URL",
+) -> List[Dict[str, Any]]:
     entries = catalog.get("entries") if isinstance(catalog.get("entries"), list) else []
     rows: List[Dict[str, str]] = []
     for row in entries:
@@ -837,7 +1294,19 @@ def _wake_word_picker_options(catalog: Dict[str, Any]) -> List[Dict[str, Any]]:
             }
         )
     rows.sort(key=lambda option: (_lower(option.get("label")), _text(option.get("value"))))
-    return [{"value": "__custom__", "label": "Custom URL"}, *rows]
+    if include_custom:
+        return [{"value": "__custom__", "label": blank_label or "Custom URL"}, *rows]
+    return [{"value": "", "label": blank_label or "Choose wake word"}, *rows]
+
+
+def _trainer_wake_word_picker_options(catalog: Dict[str, Any]) -> List[Dict[str, Any]]:
+    entries = catalog.get("entries") if isinstance(catalog.get("entries"), list) else []
+    options = _wake_word_picker_options(catalog, include_custom=False, blank_label="Choose trained wake word")
+    if len(options) > 1:
+        return options
+    warning = _text(catalog.get("warning"))
+    label = "Trainer unavailable" if warning else "No trained wake words found"
+    return [{"value": "", "label": label}]
 
 
 def _wake_sound_picker_options(catalog: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -997,6 +1466,27 @@ def _profile_save(template_key: str, values: Dict[str, Any]) -> None:
         return
     clean = {str(key): _text(value) for key, value in (values or {}).items() if _text(key)}
     redis_client.hset(FIRMWARE_PROFILE_HASH_KEY, token, json.dumps(clean, ensure_ascii=False))
+    _display_profile_save(token, clean)
+
+
+def _display_profile_save(profile_token: str, values: Dict[str, str]) -> None:
+    if _lower(profile_token) != "template:s3box_display":
+        return
+    target = _text(values.get("display_target")) or _text(values.get("selector")) or _text(values.get("device_name"))
+    if not target:
+        return
+    slots = {
+        alias: _text(values.get(key))
+        for alias, key in _S3BOX_DISPLAY_SLOT_KEYS.items()
+        if _text(values.get(key))
+    }
+    payload = {
+        "target": target,
+        "template": "s3box_display",
+        "updated_at": time.time(),
+        "slots": slots,
+    }
+    redis_client.hset(DISPLAY_PROFILE_HASH_KEY, target, json.dumps(payload, ensure_ascii=False))
 
 
 def _match_template_spec(selector: str, client_row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -1065,6 +1555,13 @@ def _build_device_context(
     fixed_keys = set(template_spec.get("fixed_keys") or set())
     auto_keys = set(template_spec.get("auto_keys") or set())
     wake_word_catalog = _load_wake_word_catalog()
+    wake_word_source = _wake_word_source_from_profile(profile, wake_word_catalog)
+    wake_word_trainer_url = _wake_word_trainer_url_from_profile(profile)
+    trainer_wake_word_catalog = (
+        _load_trainer_wake_word_catalog(wake_word_trainer_url)
+        if wake_word_source == "trainer" and wake_word_trainer_url
+        else {"entries": [], "source_kind": "trainer", "source_label": wake_word_trainer_url, "warning": ""}
+    )
     wake_sound_catalog = _load_wake_sound_catalog()
 
     if usb_recovery:
@@ -1100,6 +1597,10 @@ def _build_device_context(
         resolved_value = saved_value or template_default
         if key == "friendly_name":
             resolved_value = saved_value or _text(device_info.get("friendly_name")) or display_name or template_default
+        if key == "tater_first_name":
+            resolved_value = saved_value or _current_tater_first_name() or template_default
+        if key == "tater_base_url":
+            resolved_value = _normalize_http_base_url(resolved_value)
         if key in auto_keys and host:
             resolved_value = host
         if key in fixed_keys:
@@ -1107,6 +1608,8 @@ def _build_device_context(
 
         field_type = "checkbox" if _checkbox_like_key(key, raw_value) else "text"
         field_value: Any = resolved_value
+        field_options: Optional[List[Dict[str, Any]]] = None
+        field_disabled = False
         description_parts: List[str] = []
         placeholder = ""
         read_only = key in fixed_keys or key in auto_keys
@@ -1127,9 +1630,9 @@ def _build_device_context(
                 description_parts.append("Required before build or flash.")
         elif key == "wake_word_name":
             placeholder = placeholder or "hey_tater"
-            description_parts.append("Auto-filled when you choose a prebuilt wake word, but you can still edit it.")
+            description_parts.append("Auto-filled when you choose a prebuilt or trainer wake word, but you can still edit it.")
         elif key == "wake_word_model_url":
-            description_parts.append("Pick a prebuilt wake word above or paste any custom JSON model URL.")
+            description_parts.append("Used when Wake Word Source is Custom URL.")
         elif key == "wake_word_triggered_sound_file":
             description_parts.append("Pick a prebuilt wake sound above or paste any custom audio URL.")
         elif key == "tater_base_url":
@@ -1138,6 +1641,9 @@ def _build_device_context(
         elif key == "tater_token":
             field_type = "password"
             description_parts.append("Use the same token as Tater's ESPHome voice/display API, if auth is enabled.")
+        elif key == "tater_first_name":
+            placeholder = placeholder or _current_tater_first_name()
+            description_parts.append("Defaults to Tater First Name from Settings and controls the display header label.")
         elif key == "display_target":
             description_parts.append("Display target name used for Tater events, for example livingroom or kitchen.")
         elif key == "timezone":
@@ -1146,6 +1652,16 @@ def _build_device_context(
         elif key == "device_ip":
             placeholder = placeholder or host or "192.168.1.50"
             description_parts.append("OTA target address for this ESPHome display.")
+        elif key in _S3BOX_SENSOR_FIELD_LABELS:
+            field_type = "select"
+            sensor_select = _tater_sensor_select_state(resolved_value)
+            field_options = sensor_select.get("options") if isinstance(sensor_select.get("options"), list) else []
+            sensor_ready = bool(sensor_select.get("ready"))
+            field_disabled = not sensor_ready
+            if sensor_ready:
+                description_parts.append("Choose an Environment Core reading to show in this display slot.")
+            else:
+                description_parts.append(_text(sensor_select.get("message")) or "Install Environment Core to choose display sensors.")
 
         if key in fixed_keys:
             description_parts.append("Locked to the firmware template for this device family.")
@@ -1154,14 +1670,21 @@ def _build_device_context(
         elif secret_hint and key not in {"wifi_password", "wifi_ssid"}:
             placeholder = placeholder or secret_hint
 
+        effective_read_only = read_only or field_disabled
         field_row = {
             "key": key,
-            "label": _humanize_key(key),
+            "label": _S3BOX_SENSOR_FIELD_LABELS.get(key, _humanize_key(key)),
             "type": field_type,
             "value": field_value,
-            "read_only": read_only,
+            "read_only": effective_read_only,
         }
-        if placeholder and not read_only:
+        if isinstance(field_options, list):
+            field_row["options"] = field_options
+        if key == "wake_word_model_url":
+            field_row["show_when"] = {"source_key": "wake_word_source", "equals": "custom"}
+        if field_disabled:
+            field_row["disabled"] = True
+        if placeholder and not effective_read_only:
             field_row["placeholder"] = placeholder
         if description_parts:
             field_row["description"] = " ".join(part for part in description_parts if part)
@@ -1171,7 +1694,7 @@ def _build_device_context(
             "type": field_type,
             "template_default": template_default,
             "secret_hint": secret_hint,
-            "read_only": read_only,
+            "read_only": effective_read_only,
             "resolved_value": resolved_value,
             "required": key in {"wifi_ssid", "wifi_password"},
         }
@@ -1179,6 +1702,11 @@ def _build_device_context(
     wake_word_section = section_lookup.get("Micro Wake Word") if isinstance(section_lookup.get("Micro Wake Word"), list) else None
     if isinstance(wake_word_section, list) and "wake_word_model_url" in fields_meta:
         wake_word_entries = wake_word_catalog.get("entries") if isinstance(wake_word_catalog.get("entries"), list) else []
+        trainer_wake_word_entries = (
+            trainer_wake_word_catalog.get("entries")
+            if isinstance(trainer_wake_word_catalog.get("entries"), list)
+            else []
+        )
         current_wake_word_url = _text(
             (
                 fields_meta.get("wake_word_model_url", {}).get("resolved_value")
@@ -1187,29 +1715,72 @@ def _build_device_context(
             )
         )
         available_urls = {_text(row.get("url")) for row in wake_word_entries if isinstance(row, dict)}
-        picker_value = current_wake_word_url if current_wake_word_url in available_urls else "__custom__"
+        trainer_available_urls = {_text(row.get("url")) for row in trainer_wake_word_entries if isinstance(row, dict)}
+        picker_value = current_wake_word_url if current_wake_word_url in available_urls else ""
+        trainer_picker_value = current_wake_word_url if current_wake_word_url in trainer_available_urls else ""
         catalog_description = (
-            f"Choose from {len(wake_word_entries)} prebuilt wake words, "
-            "or leave this on Custom URL and paste your own model URL below. If you need a new wake word, request it from the "
+            f"Choose from {len(wake_word_entries)} prebuilt wake words. If you need a new shared wake word, request it from the "
             "microWakeWords repo link below and this list will update after it is added."
             if wake_word_entries
-            else "Prebuilt wake-word catalog is unavailable right now. You can still paste any custom model URL below. "
+            else "Prebuilt wake-word catalog is unavailable right now. "
             "If you need a new wake word, request it from the microWakeWords repo link below and this list will update after it is added."
         )
         catalog_warning = _text(wake_word_catalog.get("warning"))
         if catalog_warning and not wake_word_entries:
             catalog_description = f"{catalog_description} {_text(catalog_warning)}".strip()
-        wake_word_section.insert(
-            0,
+        trainer_description = (
+            f"Loaded {len(trainer_wake_word_entries)} trained wake words from the trainer app."
+            if trainer_wake_word_entries
+            else "Enter a trainer URL; Tater loads this list when the URL changes or when the tab refreshes."
+        )
+        trainer_warning = _text(trainer_wake_word_catalog.get("warning"))
+        if trainer_warning and not trainer_wake_word_entries:
+            trainer_description = f"{trainer_description} {trainer_warning}".strip()
+        wake_word_section[0:0] = [
+            {
+                "key": "wake_word_source",
+                "label": "Wake Word Source",
+                "type": "select",
+                "value": wake_word_source,
+                "options": [
+                    {"value": "prebuilt", "label": "Prebuilt"},
+                    {"value": "trainer", "label": "Trainer App"},
+                    {"value": "custom", "label": "Custom URL"},
+                ],
+                "description": "Choose a shared prebuilt model, a model from a microWakeWord trainer app, or a direct JSON URL.",
+            },
             {
                 "key": "wake_word_catalog",
                 "label": "Prebuilt Wake Word",
                 "type": "select",
                 "value": picker_value,
-                "options": _wake_word_picker_options(wake_word_catalog),
+                "options": _wake_word_picker_options(
+                    wake_word_catalog,
+                    include_custom=False,
+                    blank_label="Choose prebuilt wake word",
+                ),
                 "description": catalog_description,
+                "show_when": {"source_key": "wake_word_source", "equals": "prebuilt"},
             },
-        )
+            {
+                "key": "wake_word_trainer_url",
+                "label": "Trainer App URL",
+                "type": "text",
+                "value": wake_word_trainer_url,
+                "placeholder": "http://trainer.local:8789",
+                "description": "Tater will read /api/trained_wake_words/catalog from this trainer app.",
+                "show_when": {"source_key": "wake_word_source", "equals": "trainer"},
+            },
+            {
+                "key": "wake_word_trainer_catalog",
+                "label": "Trainer Wake Word",
+                "type": "select",
+                "value": trainer_picker_value,
+                "options": _trainer_wake_word_picker_options(trainer_wake_word_catalog),
+                "description": trainer_description,
+                "show_when": {"source_key": "wake_word_source", "equals": "trainer"},
+            },
+        ]
 
     wake_sound_section = section_lookup.get("Wake Sound") if isinstance(section_lookup.get("Wake Sound"), list) else None
     if isinstance(wake_sound_section, list) and "wake_word_triggered_sound_file" in fields_meta:
@@ -1580,6 +2151,21 @@ def _normalize_profile_values(context: Dict[str, Any], values: Dict[str, Any]) -
     incoming = values if isinstance(values, dict) else {}
     existing = context.get("profile") if isinstance(context.get("profile"), dict) else {}
     normalized: Dict[str, str] = dict(existing)
+    wake_word_source = (
+        _wake_word_source_value(incoming.get("wake_word_source"))
+        or _wake_word_source_value(existing.get("wake_word_source"))
+        or "prebuilt"
+    )
+    normalized["wake_word_source"] = wake_word_source
+
+    if "wake_word_trainer_url" in incoming:
+        trainer_url = _normalize_http_base_url(incoming.get("wake_word_trainer_url"))
+    else:
+        trainer_url = _normalize_http_base_url(existing.get("wake_word_trainer_url"))
+    if trainer_url:
+        normalized["wake_word_trainer_url"] = trainer_url
+    else:
+        normalized.pop("wake_word_trainer_url", None)
 
     for key in list(context.get("field_order") or []):
         meta = context.get("fields_meta", {}).get(key) if isinstance(context.get("fields_meta"), dict) else {}
@@ -1599,13 +2185,27 @@ def _normalize_profile_values(context: Dict[str, Any], values: Dict[str, Any]) -
             normalized[key] = token or _text(existing.get(key))
             continue
 
+        if key == "tater_base_url":
+            normalized[key] = _normalize_http_base_url(raw_value)
+            continue
+
+        if key == "wake_word_model_url" and key not in incoming:
+            normalized[key] = _text(existing.get(key)) or current_value
+            continue
+
         normalized[key] = _text(raw_value)
 
     wake_word_catalog_value = _text(incoming.get("wake_word_catalog"))
-    if wake_word_catalog_value and wake_word_catalog_value != "__custom__" and "wake_word_model_url" in normalized:
+    if wake_word_source == "prebuilt" and wake_word_catalog_value and "wake_word_model_url" in normalized:
         normalized["wake_word_model_url"] = wake_word_catalog_value
-        if "wake_word_name" in normalized and not _text(normalized.get("wake_word_name")):
-            normalized["wake_word_name"] = _wake_word_slug_from_url(wake_word_catalog_value)
+        if "wake_word_name" in normalized:
+            normalized["wake_word_name"] = _wake_word_slug_from_url(wake_word_catalog_value) or _text(normalized.get("wake_word_name"))
+
+    trainer_wake_word_value = _text(incoming.get("wake_word_trainer_catalog"))
+    if wake_word_source == "trainer" and trainer_wake_word_value and "wake_word_model_url" in normalized:
+        normalized["wake_word_model_url"] = trainer_wake_word_value
+        if "wake_word_name" in normalized:
+            normalized["wake_word_name"] = _wake_word_slug_from_url(trainer_wake_word_value) or _text(normalized.get("wake_word_name"))
 
     wake_sound_catalog_value = _text(incoming.get("wake_sound_catalog"))
     if wake_sound_catalog_value and wake_sound_catalog_value != "__custom__" and "wake_word_triggered_sound_file" in normalized:
@@ -2586,6 +3186,21 @@ def _stop_flash_session(session_id: str) -> Dict[str, Any]:
 
 
 def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if action_name == "voice_firmware_trainer_wake_words":
+        body = payload if isinstance(payload, dict) else {}
+        trainer_url = _normalize_http_base_url(body.get("trainer_url"))
+        catalog = _load_trainer_wake_word_catalog(trainer_url, force_refresh=True, strict=True)
+        entries = catalog.get("entries") if isinstance(catalog.get("entries"), list) else []
+        return {
+            "ok": True,
+            "action": action_name,
+            "trainer_url": trainer_url,
+            "entries": entries,
+            "options": _trainer_wake_word_picker_options(catalog),
+            "count": len(entries),
+            "message": f"Loaded {len(entries)} trained wake word(s) from {trainer_url}.",
+        }
+
     if action_name == "voice_firmware_flash_poll":
         body = payload if isinstance(payload, dict) else {}
         session_id = _text(body.get("session_id") or body.get("id"))

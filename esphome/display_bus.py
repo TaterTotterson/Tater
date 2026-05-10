@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
+import threading
 import time
 import uuid
 from typing import Any, Dict, Iterable, List, Optional
@@ -9,6 +11,8 @@ from urllib.parse import urlparse
 
 from helpers import redis_client
 
+
+logger = logging.getLogger("tater_display")
 
 DISPLAY_EVENTS_KEY = "tater:display:events:v1"
 DISPLAY_EVENT_SEQ_KEY = "tater:display:events:seq:v1"
@@ -26,6 +30,10 @@ _ALLOWED_KINDS = {
     "alert",
 }
 _ALLOWED_PRIORITIES = {"low", "normal", "high", "critical"}
+_REFRESH_BUTTON_SLUGS = {
+    "refresh_display_events",
+    "tater_refresh_display_events",
+}
 
 
 def _text(value: Any) -> str:
@@ -41,6 +49,10 @@ def _text(value: Any) -> str:
 
 def _lower(value: Any) -> str:
     return _text(value).lower()
+
+
+def _slug(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", _lower(value)).strip("_")
 
 
 def _as_int(value: Any, default: int, *, minimum: Optional[int] = None, maximum: Optional[int] = None) -> int:
@@ -178,6 +190,61 @@ def _matches_target(event: Dict[str, Any], target: str = "") -> bool:
     return "all" in targets or token in targets
 
 
+def _display_refresh_button_key(entity_infos: Any) -> str:
+    infos = entity_infos if isinstance(entity_infos, dict) else {}
+    for key, info in infos.items():
+        if not isinstance(info, dict):
+            continue
+        if "button" not in _lower(info.get("kind")):
+            continue
+        candidates = {
+            _slug(key),
+            _slug(info.get("name")),
+            _slug(info.get("object_id")),
+        }
+        if candidates & _REFRESH_BUTTON_SLUGS:
+            return _text(info.get("key") or key)
+    return ""
+
+
+def _nudge_display_refresh_clients(event: Dict[str, Any]) -> None:
+    try:
+        from . import device_runtime, runtime as esphome_runtime
+
+        clients = device_runtime.clients_snapshot_sync()
+    except Exception as exc:
+        logger.debug("[display] refresh nudge unavailable: %s", exc)
+        return
+
+    nudged = 0
+    for selector, row in clients.items():
+        if not isinstance(row, dict) or not row.get("connected"):
+            continue
+        button_key = _display_refresh_button_key(row.get("entity_infos"))
+        if not button_key:
+            continue
+        try:
+            esphome_runtime.command_entity(
+                selector,
+                entity_key=button_key,
+                command="press",
+                timeout=2.0,
+            )
+            nudged += 1
+        except Exception as exc:
+            logger.debug("[display] refresh nudge failed selector=%s event=%s detail=%s", selector, event.get("id"), exc)
+    if nudged:
+        logger.debug("[display] refresh nudged %s display(s) for event %s", nudged, event.get("id"))
+
+
+def _schedule_display_refresh_nudge(event: Dict[str, Any]) -> None:
+    try:
+        thread = threading.Thread(target=_nudge_display_refresh_clients, args=(dict(event),), daemon=True)
+        thread.start()
+    except Exception as exc:
+        logger.debug("[display] failed to schedule refresh nudge: %s", exc)
+
+
 def _event_from_payload(payload: Dict[str, Any], *, seq: int) -> Dict[str, Any]:
     body = payload if isinstance(payload, dict) else {}
     now = time.time()
@@ -270,6 +337,7 @@ def publish_display_event(payload: Dict[str, Any], *, client: Any = None) -> Dic
     event = _event_from_payload(payload if isinstance(payload, dict) else {}, seq=seq)
     store.rpush(DISPLAY_EVENTS_KEY, json.dumps(event, sort_keys=True, separators=(",", ":"), default=str))
     store.ltrim(DISPLAY_EVENTS_KEY, -_MAX_EVENTS, -1)
+    _schedule_display_refresh_nudge(event)
     return {"ok": True, "event": event}
 
 

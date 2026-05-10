@@ -27,6 +27,7 @@ from integrations.homeassistant import (
     remove_local_media_source_sync as ha_remove_local_media_source_sync,
     upload_local_media_source_file_sync as ha_upload_local_media_source_file_sync,
 )
+from integrations.huggingface import huggingface_environment
 from integrations.sonos import SONOS_DEFAULT_PLAY_TIMEOUT_SECONDS, sonos_play_media_sync
 from integrations.unifi_protect import DEFAULT_UNIFI_PROTECT_AUDIO_TIMEOUT_SECONDS, play_unifi_protect_audio_sync
 from speech_settings import (
@@ -1480,7 +1481,8 @@ def _load_kokoro_pipeline(model_id: str, acceleration: Any = None) -> Any:
                 ),
             )
             logger.info("[speech_tts] kokoro model source=%s model=%s provider=%s", root, model_token, provider)
-            pipeline = build_kokoro_pipeline(config=cfg, eager=True)
+            with _temporary_env(huggingface_environment()):
+                pipeline = build_kokoro_pipeline(config=cfg, eager=True)
             _kokoro_pipeline_cache[key] = pipeline
         return pipeline
 
@@ -1496,11 +1498,13 @@ def _load_pocket_tts_model(model_id: str) -> Any:
             hf_root = os.path.join(root, "hf")
             os.makedirs(hf_root, exist_ok=True)
             with _temporary_env(
-                {
-                    "HF_HOME": hf_root,
-                    "HF_HUB_CACHE": os.path.join(hf_root, "hub"),
-                    "HUGGINGFACE_HUB_CACHE": os.path.join(hf_root, "hub"),
-                }
+                huggingface_environment(
+                    {
+                        "HF_HOME": hf_root,
+                        "HF_HUB_CACHE": os.path.join(hf_root, "hub"),
+                        "HUGGINGFACE_HUB_CACHE": os.path.join(hf_root, "hub"),
+                    }
+                )
             ):
                 model = PocketTTSModel.load_model(config=token)
             _pocket_tts_model_cache[token] = model
@@ -1519,12 +1523,14 @@ def _load_piper_voice_model(model_id: str) -> Any:
     model_path, config_path = _piper_model_paths(model_id)
     backend_root = _ensure_tts_backend_model_root("piper")
     if not (os.path.isfile(model_path) and os.path.isfile(config_path)):
-        piper_download_voice(_text(model_id) or DEFAULT_PIPER_MODEL, download_dir=Path(backend_root))
+        with _temporary_env(huggingface_environment()):
+            piper_download_voice(_text(model_id) or DEFAULT_PIPER_MODEL, download_dir=Path(backend_root))
     cache_key = _text(model_path)
     with _piper_voice_lock:
         voice = _piper_voice_cache.get(cache_key)
         if voice is None:
-            voice = PiperVoice.load(model_path=model_path, config_path=config_path, download_dir=backend_root)
+            with _temporary_env(huggingface_environment()):
+                voice = PiperVoice.load(model_path=model_path, config_path=config_path, download_dir=backend_root)
             _piper_voice_cache[cache_key] = voice
         return voice
 
@@ -1546,11 +1552,13 @@ def _synthesize_pocket_tts_sync(text: str, model_id: str, voice: str) -> Tuple[b
     hf_root = os.path.join(root, "hf")
     os.makedirs(hf_root, exist_ok=True)
     with _temporary_env(
-        {
-            "HF_HOME": hf_root,
-            "HF_HUB_CACHE": os.path.join(hf_root, "hub"),
-            "HUGGINGFACE_HUB_CACHE": os.path.join(hf_root, "hub"),
-        }
+        huggingface_environment(
+            {
+                "HF_HOME": hf_root,
+                "HF_HUB_CACHE": os.path.join(hf_root, "hub"),
+                "HUGGINGFACE_HUB_CACHE": os.path.join(hf_root, "hub"),
+            }
+        )
     ):
         model_state = model.get_state_for_audio_prompt(_text(voice) or DEFAULT_POCKET_TTS_VOICE)
         audio_tensor = model.generate_audio(model_state, prompt)
@@ -1995,6 +2003,156 @@ async def speak_announcement_targets(
     if sent_count > 0:
         result["ok"] = True
         result["sent_count"] = sent_count
+        if warnings:
+            result["warnings"] = warnings
+        return result
+
+    result["ok"] = False
+    result["error"] = "; ".join(warnings) or "Announcement playback failed."
+    return result
+
+
+async def play_announcement_audio_targets(
+    *,
+    text: str,
+    wav_bytes: bytes,
+    ha_base: str,
+    token: str,
+    targets: list[str],
+    public_base_url: str = "",
+    backend: str = "",
+    default_backend: str = DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
+) -> Dict[str, Any]:
+    prompt = _text(text)
+    audio = bytes(wav_bytes or b"")
+    raw_targets = list(targets or [])
+    grouped = split_announcement_targets(targets)
+    homeassistant_players = list(grouped.get("homeassistant_media_players") or [])
+    voice_core_selectors = list(grouped.get("voice_core_selectors") or [])
+    unifi_protect_cameras = list(grouped.get("unifi_protect_cameras") or [])
+    sonos_speakers = list(grouped.get("sonos_speakers") or [])
+    target_count = len(homeassistant_players) + len(voice_core_selectors) + len(unifi_protect_cameras) + len(sonos_speakers)
+    selected_backend = normalize_announcement_tts_backend(backend, default=default_backend)
+    logger.info(
+        "[speech_tts] play_announcement_audio_targets backend=%s raw_targets=%s bytes=%s ha_players=%s voice_core_selectors=%s unifi_cameras=%s sonos_speakers=%s",
+        selected_backend,
+        raw_targets,
+        len(audio),
+        homeassistant_players,
+        voice_core_selectors,
+        unifi_protect_cameras,
+        sonos_speakers,
+    )
+    if target_count <= 0:
+        return {"ok": False, "sent_count": 0, "error": "No announcement targets selected."}
+    if not audio:
+        return {"ok": False, "sent_count": 0, "error": "Announcement audio is empty."}
+
+    warnings: list[str] = []
+    sent_count = 0
+    result: Dict[str, Any] = {
+        "backend": selected_backend,
+        "bytes": len(audio),
+        "target_count": target_count,
+        "homeassistant_target_count": len(homeassistant_players),
+        "voice_core_target_count": len(voice_core_selectors),
+        "unifi_protect_target_count": len(unifi_protect_cameras),
+        "sonos_target_count": len(sonos_speakers),
+    }
+
+    if homeassistant_players:
+        if not _text(ha_base) or not _text(token):
+            warnings.append("Home Assistant announcement targets are selected but Home Assistant is not configured.")
+        else:
+            try:
+                media_content_id = await asyncio.to_thread(
+                    ha_upload_local_media_source_file_sync,
+                    _text(ha_base),
+                    _text(token),
+                    target_media_content_id=HOMEASSISTANT_MEDIA_SOURCE_TARGET,
+                    filename=f"tater-reply-{uuid.uuid4().hex}.wav",
+                    content=audio,
+                    content_type="audio/wav",
+                    timeout_s=60.0,
+                )
+                result["homeassistant_media_content_id"] = media_content_id
+                ha_result = await asyncio.to_thread(
+                    _homeassistant_play_media_sync,
+                    base_url=_text(ha_base),
+                    token=_text(token),
+                    players=homeassistant_players,
+                    media_content_id=media_content_id,
+                )
+                result["homeassistant_sent_count"] = int(ha_result.get("sent_count") or 0)
+                sent_count += int(ha_result.get("sent_count") or 0)
+                warnings.extend([_text(item) for item in list(ha_result.get("warnings") or []) if _text(item)])
+                if not ha_result.get("ok") and _text(ha_result.get("error")):
+                    warnings.append(_text(ha_result.get("error")))
+                _schedule_homeassistant_media_cleanup(
+                    base_url=_text(ha_base),
+                    token=_text(token),
+                    media_content_id=media_content_id,
+                )
+            except Exception as exc:
+                warnings.append(f"Home Assistant media upload failed: {exc}")
+
+    if voice_core_selectors:
+        voice_result = await asyncio.to_thread(
+            _voice_core_play_media_sync,
+            selectors=voice_core_selectors,
+            source_url="",
+            audio_bytes=audio,
+            text=prompt,
+            media_type="audio/wav",
+            filename=f"tts-{selected_backend}.wav",
+            timeout_s=DEFAULT_VOICE_CORE_PLAY_TIMEOUT_SECONDS,
+        )
+        result["voice_core_sent_count"] = int(voice_result.get("sent_count") or 0)
+        sent_count += int(voice_result.get("sent_count") or 0)
+        warnings.extend([_text(item) for item in list(voice_result.get("warnings") or []) if _text(item)])
+        if not voice_result.get("ok") and _text(voice_result.get("error")):
+            warnings.append(_text(voice_result.get("error")))
+
+    if sonos_speakers:
+        try:
+            asset_id = store_runtime_tts_wav(audio)
+            if not asset_id:
+                raise RuntimeError("failed to store Sonos reply audio")
+            if _text(public_base_url):
+                sonos_source_url = f"{_text(public_base_url).rstrip('/')}/api/speech/tts/runtime/{asset_id}.wav"
+            else:
+                sonos_source_url = build_runtime_tts_asset_url(asset_id)
+            result["sonos_source_url"] = sonos_source_url
+            sonos_result = await asyncio.to_thread(
+                sonos_play_media_sync,
+                speakers=sonos_speakers,
+                source_url=sonos_source_url,
+                timeout_s=SONOS_DEFAULT_PLAY_TIMEOUT_SECONDS,
+            )
+            result["sonos_sent_count"] = int(sonos_result.get("sent_count") or 0)
+            sent_count += int(sonos_result.get("sent_count") or 0)
+            warnings.extend([_text(item) for item in list(sonos_result.get("warnings") or []) if _text(item)])
+            if not sonos_result.get("ok") and _text(sonos_result.get("error")):
+                warnings.append(_text(sonos_result.get("error")))
+        except Exception as exc:
+            warnings.append(f"Sonos playback failed: {exc}")
+
+    if unifi_protect_cameras:
+        unifi_result = await asyncio.to_thread(
+            play_unifi_protect_audio_sync,
+            cameras=unifi_protect_cameras,
+            audio_bytes=audio,
+            timeout_s=DEFAULT_UNIFI_PROTECT_AUDIO_TIMEOUT_SECONDS,
+        )
+        result["unifi_protect_sent_count"] = int(unifi_result.get("sent_count") or 0)
+        sent_count += int(unifi_result.get("sent_count") or 0)
+        warnings.extend([_text(item) for item in list(unifi_result.get("warnings") or []) if _text(item)])
+        if not unifi_result.get("ok") and _text(unifi_result.get("error")):
+            warnings.append(_text(unifi_result.get("error")))
+
+    result["sent_count"] = sent_count
+    if sent_count > 0:
+        result["ok"] = True
         if warnings:
             result["warnings"] = warnings
         return result

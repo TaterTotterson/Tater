@@ -33,7 +33,7 @@ RUN python -m pip install --upgrade pip \
  && python -m pip install -r requirements.txt \
  && python -m pip uninstall -y onnxruntime \
  && python -m pip install onnxruntime-gpu \
- && python -c "from google.protobuf import runtime_version; import aioesphomeapi, esphome, torch, torchaudio, webrtcvad; assert getattr(aioesphomeapi, 'APIClient', None); print('protobuf_runtime', runtime_version.__name__, 'aioesphomeapi', getattr(aioesphomeapi, '__version__', 'unknown'), 'esphome', getattr(esphome, '__version__', 'unknown'), 'torch', torch.__version__, 'cuda', torch.version.cuda, 'torchaudio', torchaudio.__version__, 'webrtcvad', webrtcvad.__name__)"
+ && python -c "from google.protobuf import runtime_version; import aioesphomeapi, esphome, torch, torchaudio, transformers, webrtcvad; assert getattr(aioesphomeapi, 'APIClient', None); print('protobuf_runtime', runtime_version.__name__, 'aioesphomeapi', getattr(aioesphomeapi, '__version__', 'unknown'), 'esphome', getattr(esphome, '__version__', 'unknown'), 'torch', torch.__version__, 'cuda', torch.version.cuda, 'torchaudio', torchaudio.__version__, 'transformers', transformers.__version__, 'webrtcvad', webrtcvad.__name__)"
 
 COPY . .
 

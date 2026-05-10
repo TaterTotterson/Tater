@@ -248,7 +248,7 @@ docker buildx build \
 
 The NVIDIA image is amd64-only. Use the default `latest` image for CPU-first installs and ARM hosts.
 
-The NVIDIA build uses CUDA 12.8 PyTorch wheels plus CUDA/cuDNN runtime packages for RTX 30, 40, and 50 series cards. Piper and Pocket TTS remain CPU-backed. In TaterOS, use **Settings → Models → Voice Acceleration** to select Auto, CPU, or NVIDIA CUDA. Tater starts a background warmup for the selected local STT and TTS models during app startup and after saving voice model settings so the first real voice turn is less likely to pause on model loading. Set `TATER_SPEECH_WARMUP_ON_STARTUP=false` to disable startup warmup.
+The NVIDIA build uses CUDA 12.8 PyTorch wheels plus CUDA/cuDNN runtime packages for RTX 30, 40, and 50 series cards. Piper and Pocket TTS remain CPU-backed. In TaterOS, use **Settings → Models → Voice Acceleration** to select Auto, CPU, or NVIDIA CUDA for STT/TTS models. Tater starts a background warmup for the selected local STT and TTS models during app startup and after saving voice model settings so the first real voice turn is less likely to pause on model loading. If Speaker ID or Emotion ID is enabled, the warmup also loads the matching SpeechBrain model; use **Settings → ESPHome → Voice Pipeline → SpeechBrain Models** to let those models use CUDA in the NVIDIA image, with CPU fallback if CUDA load fails. Emotion ID uses a SpeechBrain wav2vec2 model and requires Hugging Face `transformers`, which is included in current Tater images. Set `TATER_SPEECH_WARMUP_ON_STARTUP=false` to disable startup warmup.
 
 Kokoro output is boosted slightly by default for clearer satellite playback. Tune it with `TATER_KOKORO_OUTPUT_GAIN` if needed; the default is `1.5`.
 
@@ -290,7 +290,7 @@ curl -X POST "http://<tater-host>:8501/tater-ha/v1/display/events" \
   -d '{"kind":"doorbell","title":"Doorbell","message":"Someone is at the front door.","image_url":"http://camera/snapshot.jpg","ttl_seconds":90}'
 ```
 
-Display event kinds include `notification`, `camera`, `doorbell`, `image`, `tool_call`, `voice`, `status`, and `alert`. During live voice tool-progress speech, Tater automatically queues a `tool_call` event targeted to the active ESPHome selector with `animation: "tool_call"`, the spoken progress line, and any available step metadata.
+Display event kinds include `notification`, `camera`, `doorbell`, `image`, `tool_call`, `voice`, `status`, and `alert`. Apps can publish `tool_call` with `animation: "tool_call"` plus optional `tool`, `phase`, `status`, `step_index`, and `step_total` metadata for displays that render a tool-progress state. Awareness camera snapshots stored in Redis can be served back to displays from `/tater-ha/v1/display/snapshots/<snapshot_id>` using the same display API token.
 
 Displays can poll events with:
 

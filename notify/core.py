@@ -229,6 +229,7 @@ def _dispatch_display(
                 "priority": meta_map.get("priority") or "normal",
                 "ttl_seconds": meta_map.get("ttl_sec") or meta_map.get("ttl_seconds") or 90,
                 "image_url": meta_map.get("image_url") or meta_map.get("snapshot_url") or "",
+                "image_format": meta_map.get("image_format") or "",
                 "media_url": meta_map.get("media_url") or meta_map.get("clip_url") or "",
                 "source": origin_map.get("platform") or origin_map.get("source") or "notify",
                 "attachments": payload_attachments,

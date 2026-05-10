@@ -18,6 +18,12 @@ ECOBEE_HOMEKIT_DEFAULT_TIMEOUT_SECONDS = 10
 
 SERVICE_THERMOSTAT = "0000004A-0000-1000-8000-0026BB765291"
 SERVICE_ACCESSORY_INFORMATION = "0000003E-0000-1000-8000-0026BB765291"
+SERVICE_TEMPERATURE_SENSOR = "0000008A-0000-1000-8000-0026BB765291"
+SERVICE_HUMIDITY_SENSOR = "00000082-0000-1000-8000-0026BB765291"
+SERVICE_OCCUPANCY_SENSOR = "00000086-0000-1000-8000-0026BB765291"
+SERVICE_MOTION_SENSOR = "00000085-0000-1000-8000-0026BB765291"
+SERVICE_CONTACT_SENSOR = "00000080-0000-1000-8000-0026BB765291"
+SERVICE_BATTERY_SERVICE = "00000096-0000-1000-8000-0026BB765291"
 
 CHAR_NAME = "00000023-0000-1000-8000-0026BB765291"
 CHAR_MANUFACTURER = "00000020-0000-1000-8000-0026BB765291"
@@ -32,6 +38,11 @@ CHAR_CURRENT_RELATIVE_HUMIDITY = "00000010-0000-1000-8000-0026BB765291"
 CHAR_TARGET_RELATIVE_HUMIDITY = "00000034-0000-1000-8000-0026BB765291"
 CHAR_COOLING_THRESHOLD_TEMPERATURE = "0000000D-0000-1000-8000-0026BB765291"
 CHAR_HEATING_THRESHOLD_TEMPERATURE = "00000012-0000-1000-8000-0026BB765291"
+CHAR_OCCUPANCY_DETECTED = "00000071-0000-1000-8000-0026BB765291"
+CHAR_MOTION_DETECTED = "00000022-0000-1000-8000-0026BB765291"
+CHAR_CONTACT_SENSOR_STATE = "0000006A-0000-1000-8000-0026BB765291"
+CHAR_BATTERY_LEVEL = "00000068-0000-1000-8000-0026BB765291"
+CHAR_STATUS_LOW_BATTERY = "00000079-0000-1000-8000-0026BB765291"
 
 HOMEKIT_MODE_VALUES = {
     "off": 0,
@@ -530,6 +541,22 @@ def _coerce_float(value: Any) -> Optional[float]:
         return None
 
 
+def _coerce_bool(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    text = _text(value).strip().lower()
+    if text in {"true", "yes", "on", "open", "occupied", "detected"}:
+        return True
+    if text in {"false", "no", "off", "closed", "clear", "none"}:
+        return False
+    try:
+        return bool(int(float(value)))
+    except Exception:
+        return None
+
+
 def _temperature_payload(value_c: Any, unit: str) -> Tuple[Optional[float], Optional[float], str]:
     value = _coerce_float(value_c)
     c = _round_temperature(value) if value is not None else None
@@ -548,6 +575,78 @@ def _mode_name(value: Any, names: Dict[int, str]) -> str:
     except Exception:
         return ""
     return names.get(index, str(index))
+
+
+def _service_name(accessory: Dict[str, Any], service: Dict[str, Any], fallback: str) -> str:
+    info = _accessory_info(accessory)
+    return _text(_char_value(service, CHAR_NAME)) or _text(info.get("name")) or fallback
+
+
+def _sensor_base_row(alias: str, accessory: Dict[str, Any], service: Dict[str, Any], sensor_type: str, fallback: str) -> Dict[str, Any]:
+    aid = int(accessory.get("aid") or 0)
+    service_iid = int(service.get("iid") or 0)
+    info = _accessory_info(accessory)
+    return {
+        "id": f"{alias}:{aid}:{service_iid}",
+        "accessory_id": f"{alias}:{aid}",
+        "alias": alias,
+        "aid": aid,
+        "service_iid": service_iid,
+        "name": _service_name(accessory, service, fallback),
+        "type": sensor_type,
+        "service_type": _normalize_uuid(service.get("type")),
+        "manufacturer": info.get("manufacturer", ""),
+        "model": info.get("model", ""),
+        "serial_number": info.get("serial_number", ""),
+    }
+
+
+def _environment_sensor_row(alias: str, accessory: Dict[str, Any], service: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    aid = int(accessory.get("aid") or 0)
+    service_type = _normalize_uuid(service.get("type"))
+    if _uuid_matches(service_type, SERVICE_TEMPERATURE_SENSOR):
+        row = _sensor_base_row(alias, accessory, service, "temperature", f"Temperature Sensor {aid}")
+        current_c, current_f, _ = _temperature_payload(_char_value(service, CHAR_CURRENT_TEMPERATURE), "F")
+        row.update(
+            {
+                "temperature_unit": "F",
+                "current_temperature_c": current_c,
+                "current_temperature_f": current_f,
+            }
+        )
+        return row
+    if _uuid_matches(service_type, SERVICE_HUMIDITY_SENSOR):
+        row = _sensor_base_row(alias, accessory, service, "humidity", f"Humidity Sensor {aid}")
+        row["current_humidity"] = _char_value(service, CHAR_CURRENT_RELATIVE_HUMIDITY)
+        return row
+    if _uuid_matches(service_type, SERVICE_OCCUPANCY_SENSOR):
+        row = _sensor_base_row(alias, accessory, service, "occupancy", f"Occupancy Sensor {aid}")
+        occupied = _coerce_bool(_char_value(service, CHAR_OCCUPANCY_DETECTED))
+        row["occupancy_detected"] = occupied
+        row["display"] = "Occupied" if occupied is True else "Clear" if occupied is False else ""
+        return row
+    if _uuid_matches(service_type, SERVICE_MOTION_SENSOR):
+        row = _sensor_base_row(alias, accessory, service, "motion", f"Motion Sensor {aid}")
+        motion = _coerce_bool(_char_value(service, CHAR_MOTION_DETECTED))
+        row["motion_detected"] = motion
+        row["display"] = "Motion" if motion is True else "Clear" if motion is False else ""
+        return row
+    if _uuid_matches(service_type, SERVICE_CONTACT_SENSOR):
+        row = _sensor_base_row(alias, accessory, service, "contact", f"Contact Sensor {aid}")
+        state = _char_value(service, CHAR_CONTACT_SENSOR_STATE)
+        state_number = _coerce_float(state)
+        row["contact_state"] = state
+        row["display"] = "Closed" if state_number == 0 else "Open" if state_number == 1 else _text(state)
+        return row
+    if _uuid_matches(service_type, SERVICE_BATTERY_SERVICE):
+        row = _sensor_base_row(alias, accessory, service, "battery", f"Battery {aid}")
+        level = _char_value(service, CHAR_BATTERY_LEVEL)
+        low = _coerce_bool(_char_value(service, CHAR_STATUS_LOW_BATTERY))
+        row["battery_level"] = level
+        row["status_low_battery"] = low
+        row["display"] = f"{level}%" if _coerce_float(level) is not None else "Low" if low is True else "OK" if low is False else ""
+        return row
+    return None
 
 
 def _thermostat_row(alias: str, accessory: Dict[str, Any], service: Dict[str, Any]) -> Dict[str, Any]:
@@ -619,6 +718,21 @@ def _extract_thermostats(alias: str, accessories: Iterable[Dict[str, Any]]) -> L
     return rows
 
 
+def _extract_environment_sensors(alias: str, accessories: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for accessory in accessories or []:
+        if not isinstance(accessory, dict):
+            continue
+        for service in accessory.get("services") or []:
+            if not isinstance(service, dict):
+                continue
+            row = _environment_sensor_row(alias, accessory, service)
+            if row:
+                rows.append(row)
+    rows.sort(key=lambda item: (_text(item.get("name")).casefold(), _text(item.get("type")), int(item.get("aid") or 0), int(item.get("service_iid") or 0)))
+    return rows
+
+
 async def _with_pairing(alias: str, callback: Callable[[Any], Any]) -> Any:
     pairing_data = _load_pairing(alias, required=True)
 
@@ -644,6 +758,19 @@ async def _list_homekit_thermostats_async(alias: str) -> List[Dict[str, Any]]:
 def list_homekit_thermostats(alias: Any = None) -> List[Dict[str, Any]]:
     name = _normalize_alias(alias or read_ecobee_homekit_settings().get("ECOBEE_HOMEKIT_ALIAS"))
     return _run_sync(_list_homekit_thermostats_async(name))
+
+
+async def _list_homekit_environment_sensors_async(alias: str) -> List[Dict[str, Any]]:
+    async def work(pairing: Any) -> List[Dict[str, Any]]:
+        accessories = await pairing.list_accessories_and_characteristics()
+        return _extract_environment_sensors(alias, accessories if isinstance(accessories, list) else [])
+
+    return await _with_pairing(alias, work)
+
+
+def list_homekit_environment_sensors(alias: Any = None) -> List[Dict[str, Any]]:
+    name = _normalize_alias(alias or read_ecobee_homekit_settings().get("ECOBEE_HOMEKIT_ALIAS"))
+    return _run_sync(_list_homekit_environment_sensors_async(name))
 
 
 def ecobee_homekit_paired(alias: Any = None, client: Any = None) -> bool:
@@ -1011,6 +1138,7 @@ def integration_devices() -> Dict[str, Any]:
     if alias not in _load_pairings():
         return {"devices": [], "message": "Ecobee HomeKit is not paired yet."}
     rows = list_homekit_thermostats(alias)
+    sensor_rows = list_homekit_environment_sensors(alias)
     devices: List[Dict[str, Any]] = []
     for row in rows:
         if not isinstance(row, dict):
@@ -1037,7 +1165,45 @@ def integration_devices() -> Dict[str, Any]:
                 },
             }
         )
-    return {"devices": devices, "message": f"Ecobee HomeKit returned {len(devices)} thermostats."}
+    for row in sensor_rows:
+        if not isinstance(row, dict):
+            continue
+        sensor_type = _text(row.get("type")) or "sensor"
+        if sensor_type == "temperature":
+            state = f"{row.get('current_temperature_f')} F" if row.get("current_temperature_f") not in (None, "") else ""
+        elif sensor_type == "humidity":
+            state = f"{row.get('current_humidity')}%" if row.get("current_humidity") not in (None, "") else ""
+        elif sensor_type == "battery":
+            state = _text(row.get("display"))
+            if not state and row.get("battery_level") not in (None, ""):
+                state = f"{row.get('battery_level')}%"
+        else:
+            state = _text(row.get("display"))
+        devices.append(
+            {
+                "id": _text(row.get("id")) or _text(row.get("name")),
+                "name": _text(row.get("name")) or "Ecobee Sensor",
+                "type": sensor_type,
+                "status": state,
+                "state": state,
+                "details": {
+                    "sensor_type": sensor_type,
+                    "current_temperature_f": row.get("current_temperature_f"),
+                    "current_humidity": row.get("current_humidity"),
+                    "occupancy_detected": row.get("occupancy_detected"),
+                    "motion_detected": row.get("motion_detected"),
+                    "contact_state": row.get("contact_state"),
+                    "battery_level": row.get("battery_level"),
+                    "status_low_battery": row.get("status_low_battery"),
+                    "model": row.get("model"),
+                    "manufacturer": row.get("manufacturer"),
+                },
+            }
+        )
+    return {
+        "devices": devices,
+        "message": f"Ecobee HomeKit returned {len(rows)} thermostat{'s' if len(rows) != 1 else ''} and {len(sensor_rows)} sensor service{'s' if len(sensor_rows) != 1 else ''}.",
+    }
 
 
 def save_integration_settings(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1114,12 +1280,21 @@ def run_integration_action(action_id: str, payload: Dict[str, Any]) -> Dict[str,
 
     if action == "list_thermostats":
         rows = list_homekit_thermostats(alias)
+        sensors = list_homekit_environment_sensors(alias)
         names = ", ".join(row.get("name") or row.get("id") for row in rows) or "none"
+        sensor_names = ", ".join(row.get("name") or row.get("id") for row in sensors[:8]) or "none"
+        if len(sensors) > 8:
+            sensor_names = f"{sensor_names}, and {len(sensors) - 8} more"
         return {
             "ok": True,
             "thermostat_count": len(rows),
             "thermostats": rows,
-            "message": f"Found {len(rows)} HomeKit thermostat{'s' if len(rows) != 1 else ''}: {names}.",
+            "sensor_count": len(sensors),
+            "sensors": sensors,
+            "message": (
+                f"Found {len(rows)} HomeKit thermostat{'s' if len(rows) != 1 else ''}: {names}. "
+                f"Found {len(sensors)} sensor service{'s' if len(sensors) != 1 else ''}: {sensor_names}."
+            ),
         }
 
     if action == "forget_pairing":

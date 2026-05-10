@@ -7,8 +7,10 @@ from fastapi import HTTPException
 
 from . import runtime as esphome_runtime
 from . import firmware as esphome_firmware
+from . import reply_playback as esphome_reply_playback
 from . import settings as esphome_settings
 from . import speaker_id as esphome_speaker_id
+from . import emotion_id as esphome_emotion_id
 
 
 def settings_hash_key() -> str:
@@ -56,7 +58,7 @@ async def shutdown() -> None:
 
 def _runtime_panel_token(panel: Any = "") -> str:
     token = esphome_runtime.lower(panel)
-    return token if token in {"satellites", "firmware", "platform", "speakerid", "stats"} else ""
+    return token if token in {"satellites", "firmware", "platform", "speakerid", "emotionid", "stats"} else ""
 
 
 def get_runtime_payload(
@@ -70,6 +72,7 @@ def get_runtime_payload(
     include_satellites = panel_token in {"", "satellites"}
     include_firmware = panel_token in {"", "firmware"}
     include_speaker_id = panel_token in {"", "speakerid"}
+    include_emotion_id = panel_token in {"", "emotionid"}
     include_stats = panel_token in {"", "stats"}
     status = esphome_runtime.status()
     clients = status.get("clients") if isinstance(status.get("clients"), dict) else {}
@@ -154,6 +157,9 @@ def get_runtime_payload(
 
     if include_speaker_id:
         payload["speaker_id"] = esphome_speaker_id.panel_payload(status)
+
+    if include_emotion_id:
+        payload["emotion_id"] = esphome_emotion_id.panel_payload(status)
 
     if include_stats:
         voice_rows, voices_meta = esphome_runtime.load_wyoming_tts_voice_catalog()
@@ -324,6 +330,10 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
     if isinstance(speaker_id_result, dict):
         return speaker_id_result
 
+    emotion_id_result = esphome_emotion_id.handle_runtime_action(action_name, body, esphome_runtime.status())
+    if isinstance(emotion_id_result, dict):
+        return emotion_id_result
+
     if action_name == "voice_settings_save":
         values = esphome_runtime.payload_values(body)
         result = esphome_settings.save_settings_values(values)
@@ -369,6 +379,10 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
         metadata = dict(existing.get("metadata") or {})
         if "area_name" in values:
             metadata["area_name"] = esphome_runtime.text(values.get("area_name"))
+        if "reply_playback_target" in values:
+            metadata["reply_playback_target"] = esphome_reply_playback.normalize_reply_playback_target(
+                values.get("reply_playback_target")
+            )
         name = esphome_runtime.text(values.get("name")) or esphome_runtime.text(existing.get("name")) or host or selector
         source = esphome_runtime.text(existing.get("source")) or "manual"
         esphome_runtime.upsert_satellite({"selector": selector, "host": host, "name": name, "source": source, "metadata": metadata})
