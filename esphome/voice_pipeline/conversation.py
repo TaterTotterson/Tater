@@ -66,6 +66,14 @@ class VoiceSessionRuntime:
     speaker_id: str = ""
     speaker_name: str = ""
     speaker_score: float = 0.0
+    voice_emotion: str = ""
+    voice_emotion_score: float = 0.0
+    voice_emotion_prompt_hint: str = ""
+    wake_arbitration_group_id: str = ""
+    wake_arbitration_candidate: bool = False
+    wake_arbitration_winner: bool = False
+    wake_arbitration_peak_dbfs: float = -120.0
+    wake_arbitration_audio_chunks: int = 0
 
 
 def _history_key(conv_id: str) -> str:
@@ -172,10 +180,14 @@ async def _run_hydra_turn_for_voice(*, transcript: str, conv_id: str, session: V
         context = {}
     session_context = session.context if isinstance(session.context, dict) else {}
     session_has_speaker = bool(vp._text(session_context.get("speaker_id")) or vp._text(session_context.get("speaker_name")))
+    session_has_emotion = bool(vp._text(session_context.get("voice_emotion")))
     if session_context:
         context.update(session_context)
     if not session_has_speaker:
         for key in ("speaker_id", "speaker_name", "speaker_score"):
+            context.pop(key, None)
+    if not session_has_emotion:
+        for key in ("voice_emotion", "voice_emotion_score", "voice_emotion_prompt_hint"):
             context.pop(key, None)
 
     registry = dict(vp.verba_registry.get_verba_registry() or {})
@@ -191,6 +203,7 @@ async def _run_hydra_turn_for_voice(*, transcript: str, conv_id: str, session: V
     area_name = vp._text(context.get("area_name")) or vp._text(context.get("room_name"))
     speaker_id = vp._text(context.get("speaker_id"))
     speaker_name = vp._text(context.get("speaker_name"))
+    voice_emotion_hint = vp._text(context.get("voice_emotion_prompt_hint"))
     if device_name:
         origin["device_name"] = device_name
     if area_name:
@@ -210,19 +223,22 @@ async def _run_hydra_turn_for_voice(*, transcript: str, conv_id: str, session: V
 
     platform_preamble = ""
     person_name = vp._text(origin.get("person_name"))
-    if device_name or area_name or speaker_name or person_name:
+    if device_name or area_name or speaker_name or person_name or voice_emotion_hint:
         speaker_line = f"- Speaker: {speaker_name}\n" if speaker_name else ""
         person_line = f"- Person: {person_name}\n" if person_name else ""
+        emotion_line = f"- Voice tone hint: {voice_emotion_hint}\n" if voice_emotion_hint else ""
         platform_preamble = (
             "VOICE CONTEXT:\n"
             f"- Device: {device_name or '(unknown)'}\n"
             f"- Area/Room: {area_name or '(unknown)'}\n"
             f"{speaker_line}"
             f"{person_line}\n"
+            f"{emotion_line}"
             "DEFAULT ROOM RULE:\n"
             "If the user asks to control lights, switches, fans, speakers, or similar devices and does not specify a room, "
             "assume they mean the Area/Room shown above.\n\n"
-            "Use this as voice context only. Do not claim the user explicitly said the room unless they actually did.\n"
+            "Use this as voice context only. Do not claim the user explicitly said the room. "
+            "Emotion ID is an acoustic guess; if you mention it, phrase it as how the user's voice seems, not as certainty.\n"
         )
 
     async with vp.get_llm_client_from_env(redis_conn=vp.redis_client) as llm_client:

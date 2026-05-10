@@ -54,6 +54,7 @@ from dotenv import load_dotenv
 from fastapi import HTTPException
 
 from helpers import extract_json, get_llm_client_from_env, redis_client
+from integrations.homeassistant import load_homeassistant_config
 import verba_registry
 from verba_settings import get_verba_enabled
 from hydra import run_hydra_turn, resolve_agent_limits
@@ -61,6 +62,7 @@ from speech_settings import (
     get_speech_settings as get_shared_speech_settings,
     normalize_speech_acceleration,
 )
+from .. import reply_playback
 # Compatibility re-exports for package-level callers while the implementation
 # lives in smaller modules.
 from .conversation import (
@@ -316,6 +318,10 @@ DEFAULT_EXPERIMENTAL_PARTIAL_STT_MIN_AUDIO_S = 0.55
 DEFAULT_EXPERIMENTAL_PARTIAL_STT_MIN_NEW_AUDIO_S = 0.28
 DEFAULT_EXPERIMENTAL_TTS_EARLY_START_MIN_CHARS = 90
 DEFAULT_EXPERIMENTAL_TTS_EARLY_START_MIN_FIRST_CHARS = 28
+DEFAULT_WAKE_ARBITRATION_ENABLED = True
+DEFAULT_WAKE_ARBITRATION_WINDOW_MS = 500
+DEFAULT_WAKE_ARBITRATION_SCOPE = "same_area"
+DEFAULT_SPEECHBRAIN_ACCELERATION = "auto"
 DEFAULT_STARTUP_GATE_S = 0.0
 DEFAULT_WAKE_STARTUP_GATE_S = 0.40
 DEFAULT_WAKE_MIN_SPEECH_FRAMES = 3
@@ -375,6 +381,8 @@ PLATFORM_WEBUI_TAB = CORE_WEBUI_TAB
 # -------------------- Global Runtime State --------------------
 _voice_runtime_lock = asyncio.Lock()
 _voice_selector_runtime: Dict[str, Dict[str, Any]] = {}
+_wake_arbitration_lock = asyncio.Lock()
+_wake_arbitration_groups: Dict[str, Dict[str, Any]] = {}
 
 _background_tasks: Dict[str, asyncio.Task] = {}
 
@@ -583,6 +591,43 @@ def _continued_chat_enabled() -> bool:
     return _get_bool_setting("VOICE_CONTINUED_CHAT_ENABLED", DEFAULT_CONTINUED_CHAT_ENABLED)
 
 
+def _wake_arbitration_enabled() -> bool:
+    return _get_bool_setting("VOICE_WAKE_ARBITRATION_ENABLED", DEFAULT_WAKE_ARBITRATION_ENABLED)
+
+
+def _wake_arbitration_window_s() -> float:
+    ms = _get_int_setting(
+        "VOICE_WAKE_ARBITRATION_WINDOW_MS",
+        DEFAULT_WAKE_ARBITRATION_WINDOW_MS,
+        minimum=100,
+        maximum=2000,
+    )
+    return float(ms) / 1000.0
+
+
+def _wake_arbitration_scope() -> str:
+    token = _lower(_voice_settings().get("VOICE_WAKE_ARBITRATION_SCOPE") or DEFAULT_WAKE_ARBITRATION_SCOPE)
+    token = token.replace("-", "_").replace(" ", "_")
+    return token if token in {"same_area", "global"} else DEFAULT_WAKE_ARBITRATION_SCOPE
+
+
+def _speechbrain_acceleration_setting() -> str:
+    token = normalize_speech_acceleration(
+        _voice_settings().get("VOICE_SPEECHBRAIN_ACCELERATION"),
+        default=DEFAULT_SPEECHBRAIN_ACCELERATION,
+    )
+    return token if token in {"auto", "cpu", "cuda"} else DEFAULT_SPEECHBRAIN_ACCELERATION
+
+
+def _speechbrain_device() -> str:
+    selected = _speechbrain_acceleration_setting()
+    if selected == "cuda":
+        return "cuda" if _cuda_runtime_available() else "cpu"
+    if selected == "cpu":
+        return "cpu"
+    return "cuda" if _cuda_runtime_available() else "cpu"
+
+
 def _experimental_live_tool_progress_enabled() -> bool:
     return _get_bool_setting(
         "VOICE_EXPERIMENTAL_LIVE_TOOL_PROGRESS_ENABLED",
@@ -757,6 +802,262 @@ def _continued_chat_spoken_reply_text(
     if reply[-1:] in ".!?":
         return f"{reply} {cue}".strip()
     return f"{reply}. {cue}".strip()
+
+
+def _session_reply_playback_target(selector: str, session: "VoiceSessionRuntime") -> str:
+    context = session.context if isinstance(session.context, dict) else {}
+    configured = reply_playback.normalize_reply_playback_target(context.get("reply_playback_target"))
+    if configured:
+        return configured
+    row = _satellite_lookup(selector)
+    client_row: Dict[str, Any] = {}
+    with contextlib.suppress(Exception):
+        client_row = _esphome_client_row_snapshot_sync(selector)
+    return reply_playback.resolve_reply_playback_target(row, client_row=client_row)
+
+
+async def _play_reply_on_external_target(
+    *,
+    selector: str,
+    session: "VoiceSessionRuntime",
+    spoken_text: str,
+    target: str,
+    audio_bytes: bytes,
+    audio_format: Dict[str, Any],
+    backend_used: str,
+) -> Dict[str, Any]:
+    wav_bytes, _normalized_format = _pcm_to_wav(audio_bytes, audio_format)
+    if not wav_bytes:
+        return {"ok": False, "sent_count": 0, "error": "Reply audio is empty."}
+
+    try:
+        ha_config = load_homeassistant_config(required=False)
+    except Exception:
+        ha_config = {"base": "", "token": ""}
+
+    from speech_tts import play_announcement_audio_targets
+
+    result = await play_announcement_audio_targets(
+        text=spoken_text,
+        wav_bytes=wav_bytes,
+        ha_base=_text(ha_config.get("base")),
+        token=_text(ha_config.get("token")),
+        targets=[target],
+        public_base_url=_text(os.getenv("VOICE_CORE_PUBLIC_BASE_URL")),
+        backend=backend_used or session.tts_backend_effective or session.tts_backend,
+    )
+    return result if isinstance(result, dict) else {"ok": False, "sent_count": 0, "error": "External playback failed."}
+
+
+def _wake_arbitration_phrase_key(wake_phrase: Any) -> str:
+    phrase = _lower(wake_phrase)
+    phrase = re.sub(r"[^a-z0-9]+", "_", phrase).strip("_")
+    return phrase or "wake"
+
+
+def _wake_arbitration_area_key(area_name: Any) -> str:
+    area = _lower(area_name)
+    area = re.sub(r"[^a-z0-9]+", "_", area).strip("_")
+    return area or "unknown"
+
+
+def _wake_arbitration_group_key(*, wake_phrase: Any, area_name: Any) -> str:
+    phrase = _wake_arbitration_phrase_key(wake_phrase)
+    if _wake_arbitration_scope() == "global":
+        return f"global:{phrase}"
+    return f"area:{phrase}:{_wake_arbitration_area_key(area_name)}"
+
+
+def _wake_arbitration_candidate_score(candidate: Dict[str, Any]) -> float:
+    selector = _text(candidate.get("selector"))
+    session_id = _text(candidate.get("session_id"))
+    runtime = _selector_runtime(selector)
+    session = runtime.get("session")
+    if not isinstance(session, VoiceSessionRuntime) or _text(session.session_id) != session_id:
+        return -100000.0
+    if bool(session.processing):
+        return -100000.0
+
+    peak_dbfs = float(session.wake_arbitration_peak_dbfs or -120.0)
+    audio_chunks = int(session.wake_arbitration_audio_chunks or 0)
+    max_prob = float(session.max_probability or 0.0)
+    started_delta_ms = max(0.0, (float(candidate.get("started_ts") or _now()) - float(candidate.get("group_started_ts") or _now())) * 1000.0)
+
+    audio_score = max(0.0, min(60.0, peak_dbfs + 60.0))
+    chunk_score = min(12.0, float(audio_chunks) * 2.0)
+    vad_score = max(0.0, min(20.0, max_prob * 20.0))
+    first_bias = max(0.0, 8.0 - (started_delta_ms / 100.0))
+    return audio_score + chunk_score + vad_score + first_bias
+
+
+async def _resolve_wake_arbitration_group(group_id: str, *, delay_s: float) -> None:
+    try:
+        await asyncio.sleep(max(0.05, float(delay_s)))
+        losers: List[Dict[str, Any]] = []
+        winner_selector = ""
+        winner_session_id = ""
+        winner_score = 0.0
+        candidate_count = 0
+
+        async with _wake_arbitration_lock:
+            group = _wake_arbitration_groups.get(group_id)
+            if not isinstance(group, dict):
+                return
+            candidates = group.get("candidates") if isinstance(group.get("candidates"), dict) else {}
+            candidate_rows = [dict(row) for row in candidates.values() if isinstance(row, dict)]
+            candidate_count = len(candidate_rows)
+            if not candidate_rows:
+                _wake_arbitration_groups.pop(group_id, None)
+                return
+
+            scored = []
+            for row in candidate_rows:
+                row["group_started_ts"] = group.get("started_ts")
+                score = _wake_arbitration_candidate_score(row)
+                scored.append((score, float(row.get("started_ts") or 0.0), row))
+            scored.sort(key=lambda item: (-item[0], item[1]))
+            winner_score, _winner_started, winner = scored[0]
+            winner_selector = _text(winner.get("selector"))
+            winner_session_id = _text(winner.get("session_id"))
+            losers = [row for _score, _started, row in scored[1:]]
+            _wake_arbitration_groups.pop(group_id, None)
+
+        if winner_selector and winner_session_id:
+            winner_runtime = _selector_runtime(winner_selector)
+            winner_lock = winner_runtime.get("lock")
+            if winner_lock is not None:
+                async with winner_lock:
+                    session = winner_runtime.get("session")
+                    if isinstance(session, VoiceSessionRuntime) and _text(session.session_id) == winner_session_id:
+                        session.wake_arbitration_winner = True
+                        if isinstance(session.context, dict):
+                            session.context["wake_arbitration_winner"] = True
+                            session.context["wake_arbitration_candidate_count"] = candidate_count
+                            session.context["wake_arbitration_score"] = round(float(winner_score), 2)
+
+        for row in losers:
+            selector = _text(row.get("selector"))
+            session_id = _text(row.get("session_id"))
+            client = row.get("client")
+            module = row.get("module")
+            if not selector or not session_id or client is None or module is None:
+                continue
+            with contextlib.suppress(Exception):
+                await _esphome_send_event(
+                    client,
+                    module,
+                    ("VOICE_ASSISTANT_ERROR", "ERROR"),
+                    {
+                        "code": "duplicate_wake_up_detected",
+                        "message": "Another nearby satellite is handling this wake.",
+                    },
+                )
+            with contextlib.suppress(Exception):
+                await _finalize_session(
+                    selector,
+                    client,
+                    module,
+                    session_id=session_id,
+                    abort=True,
+                    reason="wake_arbitration_lost",
+                )
+
+        if candidate_count > 1:
+            logger.info(
+                "[native-voice] wake arbitration winner selector=%s session_id=%s candidates=%s losers=%s score=%.2f",
+                winner_selector,
+                winner_session_id,
+                candidate_count,
+                len(losers),
+                float(winner_score),
+            )
+    except asyncio.CancelledError:
+        return
+    except Exception as exc:
+        logger.warning("[native-voice] wake arbitration failed group=%s error=%s", group_id, exc)
+
+
+async def _register_wake_arbitration_candidate(
+    *,
+    selector: str,
+    session: VoiceSessionRuntime,
+    client: Any,
+    module: Any,
+    wake_phrase: str,
+    area_name: str,
+) -> None:
+    if not _wake_arbitration_enabled() or not _text(wake_phrase):
+        return
+
+    now_ts = _now()
+    window_s = _wake_arbitration_window_s()
+    key = _wake_arbitration_group_key(wake_phrase=wake_phrase, area_name=area_name)
+    group_id = ""
+    created = False
+
+    async with _wake_arbitration_lock:
+        for existing_id, group in list(_wake_arbitration_groups.items()):
+            if not isinstance(group, dict):
+                _wake_arbitration_groups.pop(existing_id, None)
+                continue
+            if float(group.get("resolve_at") or 0.0) + 2.0 < now_ts:
+                _wake_arbitration_groups.pop(existing_id, None)
+
+        for existing_id, group in _wake_arbitration_groups.items():
+            if _text(group.get("key")) == key and now_ts <= float(group.get("resolve_at") or 0.0):
+                group_id = existing_id
+                break
+
+        if not group_id:
+            group_id = uuid.uuid4().hex
+            created = True
+            _wake_arbitration_groups[group_id] = {
+                "id": group_id,
+                "key": key,
+                "started_ts": now_ts,
+                "resolve_at": now_ts + window_s,
+                "candidates": {},
+            }
+
+        group = _wake_arbitration_groups.get(group_id)
+        candidates = group.get("candidates") if isinstance(group, dict) and isinstance(group.get("candidates"), dict) else {}
+        if isinstance(group, dict):
+            group["candidates"] = candidates
+            candidates[_text(selector)] = {
+                "selector": _text(selector),
+                "session_id": _text(session.session_id),
+                "wake_phrase": _text(wake_phrase),
+                "area_name": _text(area_name),
+                "started_ts": now_ts,
+                "client": client,
+                "module": module,
+            }
+
+    session.wake_arbitration_group_id = group_id
+    session.wake_arbitration_candidate = True
+    if isinstance(session.context, dict):
+        session.context["wake_arbitration_group_id"] = group_id
+        session.context["wake_arbitration_scope"] = _wake_arbitration_scope()
+
+    if created:
+        asyncio.create_task(_resolve_wake_arbitration_group(group_id, delay_s=window_s))
+    _native_debug(
+        f"wake arbitration candidate selector={selector} session_id={session.session_id} group={group_id} key={key} window_s={window_s:.2f}"
+    )
+
+
+def _record_wake_arbitration_audio(session: VoiceSessionRuntime, audio_bytes: bytes, audio_format: Dict[str, Any]) -> None:
+    if not isinstance(session, VoiceSessionRuntime) or not session.wake_arbitration_candidate:
+        return
+    if not _text(session.wake_arbitration_group_id):
+        return
+    width = int((audio_format or {}).get("width") or DEFAULT_VOICE_SAMPLE_WIDTH)
+    dbfs = _pcm_dbfs(audio_bytes, sample_width=width)
+    if dbfs is None:
+        return
+    session.wake_arbitration_audio_chunks += 1
+    if float(dbfs) > float(session.wake_arbitration_peak_dbfs or -120.0):
+        session.wake_arbitration_peak_dbfs = float(dbfs)
 
 
 def _merge_text_notes(*parts: str) -> str:
@@ -2661,47 +2962,6 @@ async def _send_voice_intent_end(
     session.intent_active = False
 
 
-def _publish_tool_progress_display_event(
-    *,
-    selector: str,
-    session_id: str,
-    spoken: str,
-    wait_payload: Optional[Dict[str, Any]],
-    timeout_s: float,
-) -> None:
-    progress = dict(wait_payload) if isinstance(wait_payload, dict) else {}
-    message = _sanitize_tool_progress_spoken_text(spoken)
-    if not message:
-        return
-    try:
-        from esphome import display_bus
-
-        display_bus.publish_display_event(
-            {
-                "kind": "tool_call",
-                "target": _text(selector) or "all",
-                "title": "Tool Call",
-                "message": message,
-                "description": _text(progress.get("instruction")),
-                "priority": "normal",
-                "ttl_seconds": max(6, min(30, int(round(float(timeout_s or 0.0) + 8.0)))),
-                "source": "voice_core",
-                "tool": _text(progress.get("tool")),
-                "phase": _text(progress.get("phase")) or "tool_start",
-                "status": "running",
-                "animation": "tool_call",
-                "step_index": progress.get("step_index"),
-                "step_total": progress.get("step_total"),
-                "meta": {
-                    "session_id": _text(session_id),
-                    "progress": progress,
-                },
-            }
-        )
-    except Exception as exc:
-        _native_debug(f"display tool progress event failed selector={selector}: {exc}")
-
-
 async def _play_live_tool_progress_for_session(
     client: Any,
     module: Any,
@@ -2711,7 +2971,6 @@ async def _play_live_tool_progress_for_session(
     session: "VoiceSessionRuntime",
     transcript: str,
     wait_text: str,
-    wait_payload: Optional[Dict[str, Any]] = None,
 ) -> None:
     if not _experimental_live_tool_progress_enabled():
         return
@@ -2737,14 +2996,6 @@ async def _play_live_tool_progress_for_session(
     timeout_s = _run_end_timeout_s(audio_bytes, audio_format)
     waiter: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
     lock = runtime.get("lock")
-
-    _publish_tool_progress_display_event(
-        selector=selector,
-        session_id=_text(session.session_id),
-        spoken=spoken,
-        wait_payload=wait_payload,
-        timeout_s=timeout_s,
-    )
 
     await _ensure_voice_stt_end_sent(client, module, session=session, transcript=transcript)
     await _ensure_voice_intent_active(client, module, session=session)
@@ -3099,6 +3350,42 @@ def _run_end_timeout_s(audio_bytes: bytes, audio_format: Dict[str, Any]) -> floa
             _estimate_pcm_duration_s(audio_bytes, audio_format) + 1.75,
         ),
     )
+
+
+async def _send_followup_reopen_marker(
+    selector: str,
+    client: Any,
+    module: Any,
+    *,
+    runtime: Dict[str, Any],
+    session: "VoiceSessionRuntime",
+    audio_format: Dict[str, Any],
+    reason: str,
+) -> str:
+    marker_audio = _append_pcm_silence(b"", audio_format, seconds=0.16)
+    marker_url = _store_tts_url(selector, session.session_id, marker_audio, audio_format)
+    if not marker_url:
+        return ""
+
+    timeout_s = max(1.0, min(3.0, _run_end_timeout_s(marker_audio, audio_format)))
+    lock = runtime.get("lock")
+    async with lock:
+        _set_awaiting_announcement_state(
+            runtime,
+            session_id=_text(session.session_id),
+            kind="response",
+            future=None,
+            timeout_s=timeout_s,
+        )
+        _cancel_announcement_wait(runtime)
+        _schedule_announcement_timeout(selector, client, module, timeout_s)
+
+    await _esphome_send_event(client, module, ("VOICE_ASSISTANT_TTS_END", "TTS_END"), {"url": marker_url})
+    _native_debug(
+        f"continued chat reopen marker queued selector={selector} session_id={session.session_id} "
+        f"reason={_text(reason) or '-'} timeout_s={timeout_s:.2f}"
+    )
+    return marker_url
 
 
 def _set_awaiting_announcement_state(
@@ -3737,6 +4024,40 @@ async def _process_voice_turn(session: VoiceSessionRuntime) -> Dict[str, Any]:
             f"reason={_text(speaker_match.get('reason'))} score={float(speaker_match.get('score') or 0.0):.3f}"
         )
 
+    try:
+        from .. import emotion_id as esphome_emotion_id
+
+        emotion_result = await asyncio.to_thread(
+            esphome_emotion_id.classify_emotion_for_audio,
+            audio_bytes=bytes(session.audio_buffer),
+            audio_format=dict(session.audio_format or {}),
+            speech_s=float(session.speech_duration_s or 0.0),
+        )
+    except Exception as exc:
+        emotion_result = {"detected": False, "reason": "error"}
+        _native_debug(
+            f"emotion id error selector={session.selector} session_id={session.session_id} error={exc}"
+        )
+
+    if bool(emotion_result.get("detected")):
+        session.voice_emotion = _text(emotion_result.get("emotion"))
+        session.voice_emotion_score = float(emotion_result.get("score") or 0.0)
+        session.voice_emotion_prompt_hint = _text(emotion_result.get("prompt_hint"))
+        if isinstance(session.context, dict):
+            session.context["voice_emotion"] = session.voice_emotion
+            session.context["voice_emotion_score"] = session.voice_emotion_score
+            session.context["voice_emotion_prompt_hint"] = session.voice_emotion_prompt_hint
+        _native_debug(
+            f"emotion id detected selector={session.selector} session_id={session.session_id} "
+            f"emotion={session.voice_emotion!r} score={session.voice_emotion_score:.3f} "
+            f"prompt_hint={bool(session.voice_emotion_prompt_hint)}"
+        )
+    elif _text(emotion_result.get("reason")) not in {"", "disabled", "too_short"}:
+        _native_debug(
+            f"emotion id no-hit selector={session.selector} session_id={session.session_id} "
+            f"reason={_text(emotion_result.get('reason'))}"
+        )
+
     _native_debug(
         f"hydra turn start selector={session.selector} session_id={session.session_id} transcript_len={len(transcript)}"
     )
@@ -3882,7 +4203,7 @@ async def _finalize_session(
         with contextlib.suppress(Exception):
             await _esphome_send_event(client, module, ("VOICE_ASSISTANT_STT_VAD_END", "STT_VAD_END"), None)
 
-        async def _live_tool_progress(wait_text: str, wait_payload: Optional[Dict[str, Any]] = None) -> None:
+        async def _live_tool_progress(wait_text: str, _wait_payload: Optional[Dict[str, Any]] = None) -> None:
             await _play_live_tool_progress_for_session(
                 client,
                 module,
@@ -3891,7 +4212,6 @@ async def _finalize_session(
                 session=session,
                 transcript=_text(session.stt_transcript),
                 wait_text=wait_text,
-                wait_payload=wait_payload,
             )
 
         session.live_tool_progress_callback = _live_tool_progress
@@ -3948,6 +4268,8 @@ async def _finalize_session(
         tts_mode = "stream"
         run_end_mode = "immediate"
         wait_for_announcement = False
+        reply_playback_target = _session_reply_playback_target(token, session)
+        reply_playback_on_device = reply_playback_target == reply_playback.REPLY_PLAYBACK_DEVICE
 
         async with lock:
             if continue_conversation:
@@ -3956,7 +4278,7 @@ async def _finalize_session(
                 _clear_pending_followup(runtime)
 
         streamed_tts = None
-        if not continue_conversation and not bool(session.live_tool_progress_played):
+        if reply_playback_on_device and not continue_conversation and not bool(session.live_tool_progress_played):
             streamed_tts = await _start_experimental_streamed_tts_response(
                 token,
                 client,
@@ -3995,54 +4317,140 @@ async def _finalize_session(
                 session=session,
                 continue_conversation=continue_conversation,
             )
+            spoken_tts_text = _continued_chat_spoken_reply_text(
+                spoken_response_text,
+                continue_conversation=continue_conversation,
+                followup_cue=followup_cue,
+            )
             await _esphome_send_event(
                 client,
                 module,
                 ("VOICE_ASSISTANT_TTS_START", "TTS_START"),
-                {
-                    "text": _continued_chat_spoken_reply_text(
-                        spoken_response_text,
-                        continue_conversation=continue_conversation,
-                        followup_cue=followup_cue,
-                    )
-                },
+                {"text": spoken_tts_text},
             )
 
-            tts_url = _store_tts_url(token, session.session_id, tts_audio, tts_format)
-            if not tts_url:
-                tts_url = "voice-assistant://stream"
-
-            wait_for_announcement = tts_url.startswith(("http://", "https://"))
-            if wait_for_announcement:
-                timeout_s = _run_end_timeout_s(tts_audio, tts_format)
-                async with lock:
-                    _set_awaiting_announcement_state(
-                        runtime,
-                        session_id=_text(session.session_id),
-                        kind="response",
-                        future=None,
-                        timeout_s=timeout_s,
-                    )
-                    _cancel_announcement_wait(runtime)
-                    _schedule_announcement_timeout(token, client, module, timeout_s)
-                _native_debug(
-                    f"esphome awaiting announcement_finished selector={token} session_id={session.session_id} timeout_s={timeout_s:.2f}"
-                )
-                tts_mode = "url"
-                run_end_mode = "announcement"
-
-            await _esphome_send_event(client, module, ("VOICE_ASSISTANT_TTS_END", "TTS_END"), {"url": tts_url})
-
-            if not wait_for_announcement:
-                await _send_voice_run_end(
-                    client,
-                    module,
-                    selector=token,
-                    session_id=session.session_id,
-                    reason="tts_immediate",
-                )
-                tts_mode = "stream"
+            if reply_playback_target == reply_playback.REPLY_PLAYBACK_SILENT:
+                tts_mode = "silent"
                 run_end_mode = "immediate"
+                await asyncio.sleep(0.2)
+                if continue_conversation:
+                    marker_url = await _send_followup_reopen_marker(
+                        token,
+                        client,
+                        module,
+                        runtime=runtime,
+                        session=session,
+                        audio_format=tts_format,
+                        reason="tts_silent",
+                    )
+                    if marker_url:
+                        tts_url = "silent:followup"
+                        wait_for_announcement = True
+                        run_end_mode = "silent_followup_marker"
+                    else:
+                        await _send_voice_run_end(
+                            client,
+                            module,
+                            selector=token,
+                            session_id=session.session_id,
+                            reason="tts_silent_marker_failed",
+                        )
+                else:
+                    await _send_voice_run_end(
+                        client,
+                        module,
+                        selector=token,
+                        session_id=session.session_id,
+                        reason="tts_silent",
+                    )
+            elif not reply_playback_on_device:
+                external_result = await _play_reply_on_external_target(
+                    selector=token,
+                    session=session,
+                    spoken_text=spoken_tts_text,
+                    target=reply_playback_target,
+                    audio_bytes=tts_audio,
+                    audio_format=tts_format,
+                    backend_used=tts_backend_used,
+                )
+                external_ok = bool(external_result.get("ok")) if isinstance(external_result, dict) else False
+                if not external_ok:
+                    logger.warning(
+                        "[native-voice] external reply playback failed selector=%s target=%s error=%s",
+                        token,
+                        reply_playback_target,
+                        _text((external_result or {}).get("error") if isinstance(external_result, dict) else ""),
+                    )
+                tts_url = f"external:{reply_playback_target}"
+                tts_mode = "external"
+                run_end_mode = "external_player"
+                playback_delay_s = max(0.5, min(45.0, _estimate_pcm_duration_s(tts_audio, tts_format) + 0.35))
+                await asyncio.sleep(playback_delay_s if external_ok else 0.25)
+                if continue_conversation:
+                    marker_url = await _send_followup_reopen_marker(
+                        token,
+                        client,
+                        module,
+                        runtime=runtime,
+                        session=session,
+                        audio_format=tts_format,
+                        reason="tts_external" if external_ok else "tts_external_failed",
+                    )
+                    if marker_url:
+                        wait_for_announcement = True
+                        run_end_mode = "external_followup_marker"
+                    else:
+                        await _send_voice_run_end(
+                            client,
+                            module,
+                            selector=token,
+                            session_id=session.session_id,
+                            reason="tts_external_marker_failed" if external_ok else "tts_external_failed",
+                        )
+                else:
+                    await _send_voice_run_end(
+                        client,
+                        module,
+                        selector=token,
+                        session_id=session.session_id,
+                        reason="tts_external" if external_ok else "tts_external_failed",
+                    )
+            else:
+                tts_url = _store_tts_url(token, session.session_id, tts_audio, tts_format)
+                if not tts_url:
+                    tts_url = "voice-assistant://stream"
+
+                wait_for_announcement = tts_url.startswith(("http://", "https://"))
+                if wait_for_announcement:
+                    timeout_s = _run_end_timeout_s(tts_audio, tts_format)
+                    async with lock:
+                        _set_awaiting_announcement_state(
+                            runtime,
+                            session_id=_text(session.session_id),
+                            kind="response",
+                            future=None,
+                            timeout_s=timeout_s,
+                        )
+                        _cancel_announcement_wait(runtime)
+                        _schedule_announcement_timeout(token, client, module, timeout_s)
+                    _native_debug(
+                        f"esphome awaiting announcement_finished selector={token} session_id={session.session_id} timeout_s={timeout_s:.2f}"
+                    )
+                    tts_mode = "url"
+                    run_end_mode = "announcement"
+
+                await _esphome_send_event(client, module, ("VOICE_ASSISTANT_TTS_END", "TTS_END"), {"url": tts_url})
+
+                if not wait_for_announcement:
+                    await _send_voice_run_end(
+                        client,
+                        module,
+                        selector=token,
+                        session_id=session.session_id,
+                        reason="tts_immediate",
+                    )
+                    tts_mode = "stream"
+                    run_end_mode = "immediate"
             tts_bytes = len(tts_audio)
 
         session.turn_outcome = _VOICE_OUTCOME_VALID
@@ -4231,6 +4639,10 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
         if area_name:
             session_context["area_name"] = area_name
             session_context["room_name"] = area_name
+        session_context["reply_playback_target"] = reply_playback.resolve_reply_playback_target(
+            satellite_row,
+            client_row=client_row,
+        )
 
         session = VoiceSessionRuntime(
             selector=token,
@@ -4253,6 +4665,15 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             _clear_streamed_tts_state(runtime)
             _clear_awaiting_announcement_state(runtime)
             runtime["session"] = session
+
+        await _register_wake_arbitration_candidate(
+            selector=token,
+            session=session,
+            client=client,
+            module=module,
+            wake_phrase=wake_phrase,
+            area_name=area_name,
+        )
 
         _voice_metrics_record_session_start(
             selector=token,
@@ -4335,6 +4756,11 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             return
 
         now_ts = _now()
+        async with lock:
+            session_for_arbitration = runtime.get("session")
+            if isinstance(session_for_arbitration, VoiceSessionRuntime) and session_for_arbitration.session_id == sid:
+                _record_wake_arbitration_audio(session_for_arbitration, audio_bytes, audio_format)
+
         if now_ts < gate_ts:
             async with lock:
                 s = runtime.get("session")

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from helpers import redis_client
+from integrations.huggingface import huggingface_environment
 
 from . import runtime as esphome_runtime
 
@@ -44,7 +45,25 @@ def _log_exception(message: str, *args: Any) -> None:
     logger.exception("[native-voice] speaker-id " + message, *args)
 
 
+@contextlib.contextmanager
+def _temporary_huggingface_env():
+    overrides = huggingface_environment()
+    previous: Dict[str, Optional[str]] = {}
+    try:
+        for key, value in overrides.items():
+            previous[key] = os.environ.get(key)
+            os.environ[key] = str(value or "").strip()
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 SPEAKER_ID_SETTINGS_HASH_KEY = "voice_speaker_id_settings"
+SPEAKER_ID_LAST_HASH_KEY = "voice_speaker_id_last"
 SPEAKER_ID_PENDING_TTL_S = 15 * 60
 SPEAKER_ID_AGENT_LABS_ROOT = Path(__file__).resolve().parents[1] / "agent_lab" / "speaker_id"
 SPEAKER_ID_MODEL_ROOT = Path(__file__).resolve().parents[1] / "agent_lab" / "models" / "speaker_id"
@@ -65,6 +84,8 @@ with contextlib.suppress(Exception):
 _ENGINE_LOCK = threading.Lock()
 _ENGINE: Any = None
 _ENGINE_SOURCE = ""
+_ENGINE_DEVICE = ""
+_ENGINE_REQUESTED_DEVICE = ""
 _ENGINE_ERROR = ""
 _PENDING_LOCK = threading.Lock()
 _PENDING_ENROLLMENT: Dict[str, Any] = {}
@@ -204,6 +225,21 @@ def _match_margin() -> float:
 
 def _min_speech_seconds() -> float:
     return _get_float_setting("VOICE_SPEAKER_ID_MIN_SPEECH_S", DEFAULT_SPEAKER_ID_MIN_SPEECH_S, minimum=0.4, maximum=15.0)
+
+
+def _save_last_result(result: Dict[str, Any]) -> None:
+    with contextlib.suppress(Exception):
+        redis_client.hset(SPEAKER_ID_LAST_HASH_KEY, "last_result", json.dumps(result, ensure_ascii=False))
+
+
+def last_result() -> Dict[str, Any]:
+    with contextlib.suppress(Exception):
+        raw = redis_client.hget(SPEAKER_ID_LAST_HASH_KEY, "last_result")
+        if raw:
+            parsed = json.loads(_vp()._text(raw))
+            if isinstance(parsed, dict):
+                return parsed
+    return {}
 
 
 def _enroll_min_speech_seconds() -> float:
@@ -507,6 +543,10 @@ def _speechbrain_import_state() -> Tuple[bool, str]:
     return False, "Speaker ID dependencies are unavailable."
 
 
+def _speechbrain_run_device(device: str) -> str:
+    return "cuda:0" if device == "cuda" else device
+
+
 def _apply_speechbrain_yaml_compat_shim() -> None:
     # SpeechBrain/HyperPyYAML still assumes a max_depth attribute exists on the
     # ruamel loader object, but ESPHome 2026.4.0 brings in ruamel.yaml 0.19.1.
@@ -537,47 +577,71 @@ def _apply_speechbrain_yaml_compat_shim() -> None:
 
 
 def _speechbrain_state() -> Tuple[bool, str]:
-    global _ENGINE, _ENGINE_SOURCE, _ENGINE_ERROR
+    global _ENGINE, _ENGINE_SOURCE, _ENGINE_DEVICE, _ENGINE_REQUESTED_DEVICE, _ENGINE_ERROR
     source = _model_source()
+    requested_device = _vp()._speechbrain_device()
+    source_key = f"{source}|{requested_device}"
     with _ENGINE_LOCK:
-        if _ENGINE is not None and _ENGINE_SOURCE == source:
+        if _ENGINE is not None and _ENGINE_SOURCE == source and _ENGINE_REQUESTED_DEVICE == requested_device:
             return True, ""
-        if _ENGINE_ERROR and _ENGINE_SOURCE == source:
+        if _ENGINE_ERROR and _ENGINE_SOURCE == source_key:
             return False, _ENGINE_ERROR
         imports_ok, import_detail = _speechbrain_import_state()
         if not imports_ok:
             _ENGINE = None
-            _ENGINE_SOURCE = source
+            _ENGINE_SOURCE = source_key
+            _ENGINE_DEVICE = requested_device
+            _ENGINE_REQUESTED_DEVICE = requested_device
             _ENGINE_ERROR = import_detail
             _log_warning("dependencies unavailable source=%s detail=%s", source, import_detail or "unknown")
             _debug(f"dependencies unavailable source={source!r} detail={import_detail!r}")
             return False, _ENGINE_ERROR
         _apply_speechbrain_yaml_compat_shim()
         from speechbrain.inference.speaker import SpeakerRecognition  # type: ignore
+        load_errors: List[str] = []
         try:
             _ensure_dirs()
             savedir = SPEAKER_ID_MODEL_ROOT / _slugify_token(source)
             savedir.mkdir(parents=True, exist_ok=True)
-            _log_info("loading model source=%s savedir=%s", source, str(savedir))
-            _debug(f"loading model source={source!r} savedir={str(savedir)!r}")
-            _ENGINE = SpeakerRecognition.from_hparams(
-                source=source,
-                savedir=str(savedir),
-                run_opts={"device": "cpu"},
-            )
-            _ENGINE_SOURCE = source
-            _ENGINE_ERROR = ""
-            with contextlib.suppress(Exception):
-                if hasattr(_ENGINE, "eval"):
-                    _ENGINE.eval()
-            _log_info("model loaded source=%s savedir=%s", source, str(savedir))
-            _debug(f"model loaded source={source!r}")
-            return True, ""
+            devices = [requested_device]
+            if requested_device == "cuda":
+                devices.append("cpu")
+            for device in devices:
+                run_device = _speechbrain_run_device(device)
+                try:
+                    _log_info("loading model source=%s savedir=%s device=%s", source, str(savedir), run_device)
+                    _debug(f"loading model source={source!r} savedir={str(savedir)!r} device={run_device!r}")
+                    with _temporary_huggingface_env():
+                        _ENGINE = SpeakerRecognition.from_hparams(
+                            source=source,
+                            savedir=str(savedir),
+                            run_opts={"device": run_device},
+                        )
+                    _ENGINE_SOURCE = source
+                    _ENGINE_DEVICE = run_device
+                    _ENGINE_REQUESTED_DEVICE = requested_device
+                    _ENGINE_ERROR = ""
+                    with contextlib.suppress(Exception):
+                        if hasattr(_ENGINE, "eval"):
+                            _ENGINE.eval()
+                    if device != requested_device:
+                        _log_warning("model loaded with CPU fallback source=%s requested_device=%s", source, requested_device)
+                    _log_info("model loaded source=%s savedir=%s device=%s", source, str(savedir), run_device)
+                    _debug(f"model loaded source={source!r} device={run_device!r}")
+                    return True, ""
+                except Exception as exc:
+                    load_errors.append(f"{run_device}: {exc.__class__.__name__}: {str(exc) or 'unknown error'}")
+                    if device == "cuda":
+                        _log_warning("CUDA model load failed source=%s detail=%s; retrying on CPU", source, load_errors[-1])
+                        continue
+                    raise
         except Exception as exc:
             _ENGINE = None
-            _ENGINE_SOURCE = source
+            _ENGINE_SOURCE = source_key
+            _ENGINE_DEVICE = requested_device
+            _ENGINE_REQUESTED_DEVICE = requested_device
             detail = str(exc) or "unknown SpeechBrain error"
-            _ENGINE_ERROR = f"{exc.__class__.__name__}: {detail}"
+            _ENGINE_ERROR = "; ".join(load_errors) or f"{exc.__class__.__name__}: {detail}"
             _log_exception("model load failed source=%s detail=%s", source, _ENGINE_ERROR)
             _debug(f"model load failed source={source!r} detail={_ENGINE_ERROR!r}")
             return False, _ENGINE_ERROR
@@ -585,12 +649,19 @@ def _speechbrain_state() -> Tuple[bool, str]:
 
 def runtime_availability() -> Dict[str, Any]:
     available, detail = _speechbrain_import_state()
+    source = _model_source()
+    requested_device = _vp()._speechbrain_device()
+    actual_device = requested_device
     if available:
-        source = _model_source()
         with _ENGINE_LOCK:
+            actual_device = _ENGINE_DEVICE or requested_device
             if _ENGINE is not None and _ENGINE_SOURCE == source:
                 detail = ""
-            elif _ENGINE_ERROR and _ENGINE_SOURCE == source:
+                if _ENGINE_REQUESTED_DEVICE == "cuda" and _ENGINE_DEVICE == "cpu":
+                    detail = "CUDA load failed; running on CPU fallback."
+                elif _ENGINE_REQUESTED_DEVICE and _ENGINE_REQUESTED_DEVICE != requested_device:
+                    detail = "Loaded with the previous acceleration setting; it will reload on next use."
+            elif _ENGINE_ERROR and _ENGINE_SOURCE == f"{source}|{requested_device}":
                 available = False
                 detail = _ENGINE_ERROR
     return {
@@ -598,7 +669,19 @@ def runtime_availability() -> Dict[str, Any]:
         "label": "available" if available else "unavailable",
         "detail": detail,
         "model_source": _model_source(),
+        "device": actual_device,
+        "acceleration": _vp()._speechbrain_acceleration_setting(),
     }
+
+
+def warmup_model(*, enabled_only: bool = True) -> str:
+    if enabled_only and not speaker_id_enabled():
+        return "skipped Speaker ID disabled"
+    source = _model_source()
+    available, detail = _speechbrain_state()
+    if not available:
+        raise RuntimeError(detail or "SpeechBrain model is unavailable.")
+    return f"loaded Speaker ID SpeechBrain model {source} on {_ENGINE_DEVICE or _vp()._speechbrain_device()}"
 
 
 def _pcm_to_waveform(audio_bytes: bytes, audio_format: Dict[str, Any]) -> Any:
@@ -653,8 +736,12 @@ def _compute_embedding(audio_bytes: bytes, audio_format: Dict[str, Any]) -> List
     lengths = torch.tensor([1.0], dtype=torch.float32)
     with _ENGINE_LOCK:
         encoder = _ENGINE
+        device = _ENGINE_DEVICE or "cpu"
     if encoder is None:
         raise RuntimeError("Speaker ID model is not loaded.")
+    if device != "cpu":
+        waveform = waveform.to(device)
+        lengths = lengths.to(device)
     with torch.no_grad():
         try:
             embedding = encoder.encode_batch(waveform, lengths=lengths)
@@ -713,7 +800,15 @@ def match_speaker_for_audio(
         )
     if not scored:
         _debug("match skipped reason=no_embeddings")
-        return {"matched": False, "reason": "no_embeddings"}
+        result = {
+            "matched": False,
+            "reason": "no_embeddings",
+            "speech_s": float(speech_s or 0.0),
+            "model_source": _model_source(),
+            "updated_ts": time.time(),
+        }
+        _save_last_result(result)
+        return result
     scored.sort(key=lambda item: float(item.get("score") or 0.0), reverse=True)
     best = scored[0]
     second_score = float(scored[1].get("score") or 0.0) if len(scored) > 1 else -1.0
@@ -750,7 +845,7 @@ def match_speaker_for_audio(
             f"match no-hit top_speaker={top_name!r} score={top_score:.3f} margin={float(margin):.3f} "
             f"threshold={_match_threshold():.3f} required_margin={_match_margin():.3f}"
         )
-    return {
+    result = {
         "matched": matched,
         "reason": "best_match" if matched and best_match else ("matched" if matched else "below_threshold"),
         "speaker_id": _vp()._text(best.get("speaker_id")),
@@ -762,7 +857,12 @@ def match_speaker_for_audio(
         "best_match": bool(best_match),
         "sample_count": int(best.get("sample_count") or 0),
         "candidates": scored[:3],
+        "speech_s": float(speech_s or 0.0),
+        "model_source": _model_source(),
+        "updated_ts": time.time(),
     }
+    _save_last_result(result)
+    return result
 
 
 def add_enrollment_sample(
@@ -853,12 +953,15 @@ def panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
     selector_options = _selector_options(status)
     pending = current_pending_enrollment()
     availability = runtime_availability()
+    last = last_result()
     return {
         "availability": availability,
         "summary_metrics": [
             {"label": "Enabled", "value": "Yes" if speaker_id_enabled() else "No"},
             {"label": "Mode", "value": "Best match" if _best_match_enabled() else "Threshold"},
             {"label": "Enrolled Speakers", "value": len(speakers)},
+            {"label": "Last Speaker", "value": vp._text(last.get("speaker_name")) or "-"},
+            {"label": "Last Score", "value": f"{float(last.get('score') or 0.0):.2f}" if last else "-"},
             {"label": "Pending Capture", "value": pending.get("speaker_name") or "-"},
             {"label": "Model", "value": _model_source()},
         ],
@@ -870,6 +973,10 @@ def panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
         ],
         "selector_options": selector_options,
         "pending": pending,
+        "last_result": {
+            **last,
+            "updated_at": _pretty_timestamp(last.get("updated_ts")) if last else "-",
+        },
         "create_fields": [
             {
                 "key": "speaker_name",

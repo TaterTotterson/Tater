@@ -26,10 +26,33 @@ function createSessionId() {
   return `sess_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }
 
+const DASHBOARD_REFRESH_INTERVAL_OPTIONS = [
+  { value: 0, label: "Off" },
+  { value: 30, label: "30 seconds" },
+  { value: 60, label: "1 minute" },
+  { value: 300, label: "5 minutes" },
+  { value: 900, label: "15 minutes" },
+  { value: 1800, label: "30 minutes" },
+];
+
+function normalizeDashboardRefreshIntervalSeconds(value) {
+  const parsed = Number(value);
+  const allowed = DASHBOARD_REFRESH_INTERVAL_OPTIONS.map((item) => Number(item.value));
+  return allowed.includes(parsed) ? parsed : 300;
+}
+
 const state = {
-  view: "chat",
+  view: "dashboard",
   sessionId: safeStorageGet("tater_tateros_session_id", "") || createSessionId(),
   settingsTab: safeStorageGet("tater_tateros_settings_tab", "") || "general",
+  dashboardPayload: null,
+  dashboardShowStatusTiles: String(safeStorageGet("tater_dashboard_show_status_tiles", "true")).trim().toLowerCase() !== "false",
+  dashboardShowMetrics: String(safeStorageGet("tater_dashboard_show_metrics", "true")).trim().toLowerCase() !== "false",
+  dashboardShowMedia: String(safeStorageGet("tater_dashboard_show_media", "true")).trim().toLowerCase() !== "false",
+  dashboardRefreshIntervalSeconds: normalizeDashboardRefreshIntervalSeconds(
+    safeStorageGet("tater_dashboard_refresh_interval_seconds", "300")
+  ),
+  dashboardRefreshTimer: 0,
   coreTopTab: safeStorageGet("tater_tateros_core_tab", "") || "manage",
   coreTabSpecs: {},
   coreTabPayloadCache: {},
@@ -38,6 +61,7 @@ const state = {
   esphomeRuntimeRequestSeq: 0,
   esphomeFirmwarePayload: null,
   esphomeSpeakerIdPayload: null,
+  esphomeEmotionIdPayload: null,
   esphomeFirmwareSelection: {
     templateKey: "",
     selector: "",
@@ -131,6 +155,7 @@ function withBasePath(path) {
 }
 
 const VIEW_META = {
+  dashboard: { title: "Dashboard", subtitle: "Tater status, live signals, and generated briefs." },
   chat: { title: "Chat", subtitle: "Talk to Tater Totterson" },
   verbas: { title: "Verba", subtitle: "Enable tools and manage Verba settings + shop updates." },
   portals: { title: "Portals", subtitle: "Portal runtime controls and full Portal Shop manager." },
@@ -2330,7 +2355,7 @@ function syncChatCopy() {
 }
 
 function updateHeader() {
-  const meta = VIEW_META[state.view];
+  const meta = VIEW_META[state.view] || { title: String(state.view || "Tater"), subtitle: "" };
   const subtitle = state.view === "chat" ? `Talk to ${getTaterFullName()}` : meta.subtitle;
   document.getElementById("view-title").textContent = meta.title;
   document.getElementById("view-subtitle").textContent = subtitle;
@@ -2630,7 +2655,7 @@ function _renderRuntimeContextWindowCard(estimate) {
   const error = String(payload?.error || "").trim();
   if (error) {
     return `
-      <section class="runtime-breakdown-card runtime-breakdown-card-wide">
+      <section class="runtime-breakdown-card runtime-breakdown-card-wide runtime-card-context">
         <div class="runtime-breakdown-head">
           <h4 class="runtime-breakdown-title">Estimated Chat Context Window</h4>
           <div class="small muted">Estimator unavailable</div>
@@ -2668,7 +2693,7 @@ function _renderRuntimeContextWindowCard(estimate) {
 
   if (promptTokens <= 0 && minimumWindow <= 0 && recommendedWindow <= 0) {
     return `
-      <section class="runtime-breakdown-card runtime-breakdown-card-wide">
+      <section class="runtime-breakdown-card runtime-breakdown-card-wide runtime-card-context">
         <div class="runtime-breakdown-head">
           <h4 class="runtime-breakdown-title">Estimated Chat Context Window</h4>
           <div class="small muted">No estimate available yet</div>
@@ -2715,7 +2740,7 @@ function _renderRuntimeContextWindowCard(estimate) {
     .join("");
 
   return `
-    <section class="runtime-breakdown-card runtime-breakdown-card-wide">
+    <section class="runtime-breakdown-card runtime-breakdown-card-wide runtime-card-context">
       <div class="runtime-breakdown-head">
         <h4 class="runtime-breakdown-title">Estimated Chat Context Window</h4>
         <div class="small muted">${escapeHtml(summaryParts.join(" • "))}</div>
@@ -2774,21 +2799,21 @@ function renderRuntimeBreakdown(payload) {
   )} • Completed ${Number(visionCalls?.totals?.completed ?? 0)} • Failed ${Number(visionCalls?.totals?.failed ?? 0)}`;
   return `
     <div class="runtime-breakdown-grid">
-      <section class="runtime-breakdown-card runtime-breakdown-card-wide">
+      <section class="runtime-breakdown-card runtime-breakdown-card-wide runtime-card-hydra">
         <div class="runtime-breakdown-head">
           <h4 class="runtime-breakdown-title">Hydra Jobs</h4>
           <div class="small muted">${escapeHtml(hydraSummary)}</div>
         </div>
         ${_renderRuntimeHydraJobRows(hydraJobs)}
       </section>
-      <section class="runtime-breakdown-card">
+      <section class="runtime-breakdown-card runtime-card-llm">
         <div class="runtime-breakdown-head">
           <h4 class="runtime-breakdown-title">LLM Calls</h4>
           <div class="small muted">${escapeHtml(llmSummary)}</div>
         </div>
         ${_renderRuntimeLlmCallRows(llmCalls)}
       </section>
-      <section class="runtime-breakdown-card">
+      <section class="runtime-breakdown-card runtime-card-vision">
         <div class="runtime-breakdown-head">
           <h4 class="runtime-breakdown-title">Vision Calls</h4>
           <div class="small muted">${escapeHtml(visionSummary)}</div>
@@ -2811,9 +2836,14 @@ function ensureRuntimeBreakdownModal() {
     `
       <div id="runtime-breakdown-modal" class="cerb-modal" aria-hidden="true">
         <div class="cerb-modal-dialog card runtime-breakdown-dialog" role="dialog" aria-modal="true" aria-label="Hydra Jobs, LLM Calls, and Vision Calls">
-          <div class="card-head">
-            <h3 class="card-title">Live Hydra Jobs + LLM Calls + Vision Calls</h3>
-            <div class="inline-row">
+          <div class="card-head runtime-breakdown-modal-head">
+            <span class="runtime-breakdown-modal-badge" aria-hidden="true">RT</span>
+            <div>
+              <div class="runtime-breakdown-kicker">Runtime Stats</div>
+              <h3 class="card-title">Live Activity</h3>
+              <div class="small muted">Hydra turns, model calls, vision work, and context budget.</div>
+            </div>
+            <div class="inline-row runtime-breakdown-actions">
               <span id="runtime-breakdown-updated" class="small"></span>
               <button type="button" class="inline-btn" id="runtime-breakdown-refresh">Refresh</button>
               <button type="button" class="inline-btn" id="runtime-breakdown-close">Close</button>
@@ -4116,8 +4146,10 @@ function renderCoreManagerField(field) {
   const placeholder = String(field?.placeholder || "").trim();
   const placeholderAttr = placeholder ? `placeholder="${escapeHtml(placeholder)}"` : "";
   const readOnly = boolFromAny(field?.read_only, false);
+  const disabled = boolFromAny(field?.disabled, false);
   const hideLabel = boolFromAny(field?.hide_label, false);
   const readOnlyAttr = readOnly ? " readonly" : "";
+  const disabledAttr = disabled ? " disabled" : "";
   const showWhen = field?.show_when && typeof field.show_when === "object" ? field.show_when : {};
   const showWhenAll = Array.isArray(field?.show_when_all)
     ? field.show_when_all.filter((item) => item && typeof item === "object")
@@ -4316,7 +4348,7 @@ function renderCoreManagerField(field) {
         ${renderToggleRow(
           `<input class="toggle-input" type="checkbox" data-core-field-key="${escapeHtml(
             key
-          )}" data-core-field-type="checkbox" ${checked} />`
+          )}" data-core-field-type="checkbox" ${checked}${disabledAttr} />`
         )}
         ${descHtml}
       </label>
@@ -4375,7 +4407,7 @@ function renderCoreManagerField(field) {
       .join("");
     return wrapField(`
       <label>${escapeHtml(label)}
-        <select multiple size="${size}" data-core-field-key="${escapeHtml(key)}" data-core-field-type="multiselect"${dependentAttrs}>${optionsHtml}</select>
+        <select multiple size="${size}" data-core-field-key="${escapeHtml(key)}" data-core-field-type="multiselect"${dependentAttrs}${disabledAttr}>${optionsHtml}</select>
         ${descHtml}
       </label>
     `);
@@ -4429,7 +4461,7 @@ function renderCoreManagerField(field) {
     const optionsHtml = renderSelectOptionRows(options);
     return wrapField(`
       <label>${escapeHtml(label)}
-        <select data-core-field-key="${escapeHtml(key)}" data-core-field-type="select"${dependentAttrs}>${optionsHtml}</select>
+        <select data-core-field-key="${escapeHtml(key)}" data-core-field-type="select"${dependentAttrs}${disabledAttr}>${optionsHtml}</select>
         ${descHtml}
       </label>
     `);
@@ -4453,7 +4485,7 @@ function renderCoreManagerField(field) {
     }
     return wrapField(`
       <label>${escapeHtml(label)}
-        <textarea data-core-field-key="${escapeHtml(key)}" data-core-field-type="textarea"${readOnlyAttr} ${placeholderAttr}>${escapeHtml(
+        <textarea data-core-field-key="${escapeHtml(key)}" data-core-field-type="textarea"${readOnlyAttr}${disabledAttr} ${placeholderAttr}>${escapeHtml(
           field?.value ?? ""
         )}</textarea>
         ${descHtml}
@@ -4470,7 +4502,7 @@ function renderCoreManagerField(field) {
       : "";
   return wrapField(`
     <label>${escapeHtml(label)}
-      <input type="${htmlType}"${numberAttrs}${readOnlyAttr} value="${escapeHtml(field?.value ?? "")}" ${placeholderAttr} data-core-field-key="${escapeHtml(
+      <input type="${htmlType}"${numberAttrs}${readOnlyAttr}${disabledAttr} value="${escapeHtml(field?.value ?? "")}" ${placeholderAttr} data-core-field-key="${escapeHtml(
     key
   )}" data-core-field-type="${escapeHtml(type)}" />
       ${descHtml}
@@ -5981,6 +6013,77 @@ function syncEspHomeFirmwareWakeWordCatalog(card, { fromPicker = false } = {}) {
   captureEspHomeFirmwareDraft(card);
 }
 
+function syncEspHomeFirmwareTrainerWakeWordCatalog(card, { fromPicker = false } = {}) {
+  if (!(card instanceof HTMLElement)) {
+    return;
+  }
+  const picker = card.querySelector('select[data-core-field-key="wake_word_trainer_catalog"]');
+  const urlInput = card.querySelector('input[data-core-field-key="wake_word_model_url"]');
+  const nameInput = card.querySelector('input[data-core-field-key="wake_word_name"]');
+  if (!(picker instanceof HTMLSelectElement) || !(urlInput instanceof HTMLInputElement)) {
+    return;
+  }
+
+  if (fromPicker) {
+    const selectedUrl = String(picker.value || "").trim();
+    if (selectedUrl) {
+      urlInput.value = selectedUrl;
+      if (nameInput instanceof HTMLInputElement && !nameInput.readOnly) {
+        const slug = deriveWakeWordSlugFromUrl(selectedUrl);
+        if (slug) {
+          nameInput.value = slug;
+        }
+      }
+    }
+    captureEspHomeFirmwareDraft(card);
+    return;
+  }
+
+  const currentUrl = String(urlInput.value || "").trim();
+  const optionValues = Array.from(picker.options).map((option) => String(option.value || "").trim());
+  if (currentUrl && optionValues.includes(currentUrl)) {
+    picker.value = currentUrl;
+  }
+  captureEspHomeFirmwareDraft(card);
+}
+
+async function loadEspHomeFirmwareTrainerWakeWords(card) {
+  if (!(card instanceof HTMLElement)) {
+    return;
+  }
+  const sourceInput = card.querySelector('select[data-core-field-key="wake_word_source"]');
+  const trainerUrlInput = card.querySelector('input[data-core-field-key="wake_word_trainer_url"]');
+  const picker = card.querySelector('select[data-core-field-key="wake_word_trainer_catalog"]');
+  const modelUrlInput = card.querySelector('input[data-core-field-key="wake_word_model_url"]');
+  const coreKey = String(card.dataset?.coreKey || "esphome").trim() || "esphome";
+  const source = String(sourceInput instanceof HTMLSelectElement ? sourceInput.value || "" : "").trim();
+  const trainerUrl = String(trainerUrlInput instanceof HTMLInputElement ? trainerUrlInput.value || "" : "").trim();
+  if (source !== "trainer" || !trainerUrl || !(picker instanceof HTMLSelectElement)) {
+    return;
+  }
+
+  const previousValue = String(picker.value || modelUrlInput?.value || "").trim();
+  picker.disabled = true;
+  picker.innerHTML = `<option value="">Loading trainer wake words...</option>`;
+  setCoreManagerStatus(card, "Loading trainer wake words...");
+  try {
+    const result = await runCoreManagerAction(card, coreKey, "voice_firmware_trainer_wake_words", {
+      trainer_url: trainerUrl,
+    });
+    const options = Array.isArray(result?.options) ? result.options : [];
+    _coreRenderSelectOptions(picker, options, previousValue);
+    picker.disabled = false;
+    syncEspHomeFirmwareTrainerWakeWordCatalog(card, { fromPicker: false });
+    setCoreManagerStatus(card, String(result?.message || "Trainer wake words loaded.").trim());
+  } catch (error) {
+    const message = String(error?.message || "Could not load trainer wake words.");
+    picker.innerHTML = `<option value="">Trainer unavailable</option>`;
+    picker.disabled = false;
+    setCoreManagerStatus(card, `Trainer wake words failed: ${message}`);
+    showToast(`Trainer wake words failed: ${message}`, "error", 4200);
+  }
+}
+
 function syncEspHomeFirmwareWakeSoundCatalog(card, { fromPicker = false } = {}) {
   if (!(card instanceof HTMLElement)) {
     return;
@@ -6372,6 +6475,17 @@ function renderEspHomeSpeakerIdPanel(payload, coreKey = "esphome") {
   const availabilityLabel = String(availability?.label || (available ? "available" : "unavailable")).trim() || "unavailable";
   const availabilityDetail = String(availability?.detail || "").trim();
   const modelSource = String(availability?.model_source || "").trim();
+  const availabilityDevice = String(availability?.device || "").trim();
+  const availabilityAcceleration = String(availability?.acceleration || "").trim();
+  const availabilityRuntime = [
+    availabilityLabel,
+    modelSource ? `Model: ${modelSource}` : "",
+    availabilityDevice ? `Device: ${availabilityDevice.toUpperCase()}` : "",
+    availabilityAcceleration ? `Accel: ${availabilityAcceleration}` : "",
+    availabilityDetail,
+  ]
+    .filter(Boolean)
+    .join(" • ");
 
   const settingsHtml = settingsSections.length
     ? settingsSections
@@ -6453,7 +6567,7 @@ function renderEspHomeSpeakerIdPanel(payload, coreKey = "esphome") {
         Enroll local voiceprints for people who use your satellites, then let Tater attach the matched speaker to the voice turn before Hydra runs.
       </div>
       <div class="small" style="margin-top:8px;">
-        Status: ${escapeHtml(availabilityLabel)}${modelSource ? ` • Model: ${escapeHtml(modelSource)}` : ""}${availabilityDetail ? ` • ${escapeHtml(availabilityDetail)}` : ""}
+        Status: ${escapeHtml(availabilityRuntime)}
       </div>
       <div class="small" style="margin-top:8px;">
         Capture flow: click <strong>Capture Sample</strong>, say the wake word, then speak one clear sentence for a few seconds on the selected satellite.
@@ -6492,6 +6606,102 @@ function renderEspHomeSpeakerIdPanel(payload, coreKey = "esphome") {
     </div>
 
     ${pendingHtml}
+  `;
+}
+
+function renderEspHomeEmotionIdPanel(payload, coreKey = "esphome") {
+  const body = payload && typeof payload === "object" ? payload : {};
+  const availability = body?.availability && typeof body.availability === "object" ? body.availability : {};
+  const settingsSections = Array.isArray(body?.settings_sections) ? body.settings_sections : [];
+  const last = body?.last_result && typeof body.last_result === "object" ? body.last_result : {};
+  const available = boolFromAny(availability?.available, false);
+  const availabilityLabel = String(availability?.label || (available ? "available" : "unavailable")).trim() || "unavailable";
+  const availabilityDetail = String(availability?.detail || "").trim();
+  const modelSource = String(availability?.model_source || "").trim();
+  const availabilityDevice = String(availability?.device || "").trim();
+  const availabilityAcceleration = String(availability?.acceleration || "").trim();
+  const availabilityRuntime = [
+    availabilityLabel,
+    modelSource ? `Model: ${modelSource}` : "",
+    availabilityDevice ? `Device: ${availabilityDevice.toUpperCase()}` : "",
+    availabilityAcceleration ? `Accel: ${availabilityAcceleration}` : "",
+    availabilityDetail,
+  ]
+    .filter(Boolean)
+    .join(" • ");
+  const lastEmotion = String(last?.emotion || "").trim();
+  const lastScore = Number(last?.score || 0);
+  const lastUpdated = String(last?.updated_at || "-").trim() || "-";
+  const promptHint = String(last?.prompt_hint || "").trim();
+
+  const settingsHtml = settingsSections.length
+    ? settingsSections
+        .map((section) => {
+          const label = String(section?.label || "Settings").trim() || "Settings";
+          const fields = Array.isArray(section?.fields) ? section.fields : [];
+          if (!fields.length) {
+            return "";
+          }
+          return `
+            <section class="core-inline-section">
+              <div class="small core-inline-section-title">${escapeHtml(label)}</div>
+              <div class="form-grid two-col">
+                ${fields.map((field) => renderCoreManagerField(field)).join("")}
+              </div>
+            </section>
+          `;
+        })
+        .join("")
+    : renderNotice("Emotion ID settings are unavailable right now.");
+
+  const lastHtml = lastEmotion
+    ? `
+      <article class="card core-manager-item">
+        <div class="card-head">
+          <h3 class="card-title">Last Detection</h3>
+          <span class="small">${escapeHtml(lastUpdated)}</span>
+        </div>
+        ${renderEspHomeSpeakerIdSummaryMetrics([
+          { label: "Tone", value: lastEmotion },
+          { label: "Score", value: lastScore ? lastScore.toFixed(2) : "-" },
+          { label: "Prompted", value: promptHint ? "Yes" : "No" },
+        ])}
+        ${promptHint ? `<div class="small" style="margin-top:10px;">${escapeHtml(promptHint)}</div>` : ""}
+      </article>
+    `
+    : renderNotice("No Emotion ID detection has run yet.");
+
+  return `
+    <section class="core-inline-section">
+      <div class="small core-inline-section-title">Emotion ID</div>
+      <div class="small">
+        Classify the user's voice tone after speech recognition, then add a soft prompt hint before Hydra responds.
+      </div>
+      <div class="small" style="margin-top:8px;">
+        Status: ${escapeHtml(availabilityRuntime)}
+      </div>
+      <div class="small" style="margin-top:8px;">
+        Emotion ID is a tone hint, not a certainty. Tater treats it as fallible context and should not claim to know how someone truly feels.
+      </div>
+      <div style="margin-top:12px;">
+        ${renderEspHomeSpeakerIdSummaryMetrics(Array.isArray(body?.summary_metrics) ? body.summary_metrics : [])}
+      </div>
+    </section>
+
+    <article class="card core-manager-item esphome-emotion-id-settings-card" data-core-key="${escapeHtml(coreKey)}">
+      <div class="card-head">
+        <h3 class="card-title">Runtime Settings</h3>
+      </div>
+      ${settingsHtml}
+      <div class="inline-row" style="margin-top:12px;">
+        <button type="button" class="action-btn esphome-emotion-id-settings-save">Save Settings</button>
+        <span class="small core-manager-status"></span>
+      </div>
+    </article>
+
+    <div class="core-tab-items">
+      ${lastHtml}
+    </div>
   `;
 }
 
@@ -7163,7 +7373,9 @@ function resolveCoreRefreshScope(node) {
 
 function normalizeEspHomeRuntimePanel(panel = "") {
   const token = String(panel || "").trim().toLowerCase();
-  return ["satellites", "firmware", "platform", "speakerid", "stats"].includes(token) ? token : "satellites";
+  return ["satellites", "firmware", "platform", "speakerid", "emotionid", "stats"].includes(token)
+    ? token
+    : "satellites";
 }
 
 function getActiveEspHomeRuntimePanel(defaultPanel = "satellites") {
@@ -7186,6 +7398,7 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
   const addHost = document.getElementById("settings-esphome-runtime-add");
   const firmwareHost = document.getElementById("settings-esphome-runtime-firmware");
   const speakerIdHost = document.getElementById("settings-esphome-runtime-speakerid");
+  const emotionIdHost = document.getElementById("settings-esphome-runtime-emotionid");
   const statsHost = document.getElementById("settings-esphome-runtime-stats");
   if (
     !(shell instanceof HTMLElement) ||
@@ -7193,7 +7406,8 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
     !(satellitesHost instanceof HTMLElement) ||
     !(addHost instanceof HTMLElement) ||
     !(firmwareHost instanceof HTMLElement) ||
-    !(speakerIdHost instanceof HTMLElement)
+    !(speakerIdHost instanceof HTMLElement) ||
+    !(emotionIdHost instanceof HTMLElement)
   ) {
       return;
   }
@@ -7221,6 +7435,8 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
     firmwareHost.innerHTML = renderNotice("Loading firmware builder...");
   } else if (targetPanel === "speakerid") {
     speakerIdHost.innerHTML = renderNotice("Loading Speaker ID...");
+  } else if (targetPanel === "emotionid") {
+    emotionIdHost.innerHTML = renderNotice("Loading Emotion ID...");
   } else if (targetPanel === "stats" && statsHost instanceof HTMLElement) {
     statsHost.innerHTML = renderNotice("Loading stats...");
   }
@@ -7247,6 +7463,7 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
       const statsTables = Array.isArray(body.stats_tables) ? body.stats_tables : [];
       const firmware = body?.firmware && typeof body.firmware === "object" ? body.firmware : {};
       const speakerId = body?.speaker_id && typeof body.speaker_id === "object" ? body.speaker_id : {};
+      const emotionId = body?.emotion_id && typeof body.emotion_id === "object" ? body.emotion_id : {};
       const emptyMessage = String(body.empty_message || "No satellites discovered yet.").trim();
       const coreKey = String(tabSpec?.core_key || "esphome").trim() || "esphome";
 
@@ -7273,6 +7490,10 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
         state.esphomeSpeakerIdPayload = speakerId;
         speakerIdHost.innerHTML = renderEspHomeSpeakerIdPanel(speakerId, coreKey);
       }
+      if (targetPanel === "emotionid" && emotionIdHost instanceof HTMLElement) {
+        state.esphomeEmotionIdPayload = emotionId;
+        emotionIdHost.innerHTML = renderEspHomeEmotionIdPanel(emotionId, coreKey);
+      }
       if (targetPanel === "stats" && statsHost instanceof HTMLElement) {
         statsHost.innerHTML = renderEspHomeStatsPanel(statsSections, statsTables);
       }
@@ -7292,6 +7513,8 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
         firmwareHost.innerHTML = renderNotice(message);
       } else if (targetPanel === "speakerid" && speakerIdHost instanceof HTMLElement) {
         speakerIdHost.innerHTML = renderNotice(message);
+      } else if (targetPanel === "emotionid" && emotionIdHost instanceof HTMLElement) {
+        emotionIdHost.innerHTML = renderNotice(message);
       } else if (targetPanel === "stats" && statsHost instanceof HTMLElement) {
         statsHost.innerHTML = renderNotice(message);
       }
@@ -7299,6 +7522,8 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
         state.esphomeFirmwarePayload = null;
       } else if (targetPanel === "speakerid") {
         state.esphomeSpeakerIdPayload = null;
+      } else if (targetPanel === "emotionid") {
+        state.esphomeEmotionIdPayload = null;
       }
       shell.dataset.runtimeLoaded = "error";
     })
@@ -7710,7 +7935,14 @@ function bindEspHomeFirmwareSelectors(root = document) {
       return;
     }
     const key = String(input.dataset.coreFieldKey || "").trim();
-    if (!["template_key", "selector", "wake_word_catalog", "wake_sound_catalog"].includes(key)) {
+    if (![
+      "template_key",
+      "selector",
+      "wake_word_source",
+      "wake_word_catalog",
+      "wake_word_trainer_catalog",
+      "wake_sound_catalog",
+    ].includes(key)) {
       return;
     }
     if (input.dataset.esphomeFirmwareSelectBound === "1") {
@@ -7719,8 +7951,17 @@ function bindEspHomeFirmwareSelectors(root = document) {
     input.dataset.esphomeFirmwareSelectBound = "1";
     input.addEventListener("change", () => {
       const card = input.closest(".esphome-firmware-card");
+      if (key === "wake_word_source") {
+        captureEspHomeFirmwareDraft(card);
+        void loadEspHomeFirmwareTrainerWakeWords(card);
+        return;
+      }
       if (key === "wake_word_catalog") {
         syncEspHomeFirmwareWakeWordCatalog(card, { fromPicker: true });
+        return;
+      }
+      if (key === "wake_word_trainer_catalog") {
+        syncEspHomeFirmwareTrainerWakeWordCatalog(card, { fromPicker: true });
         return;
       }
       if (key === "wake_sound_catalog") {
@@ -7750,6 +7991,29 @@ function bindEspHomeFirmwareSelectors(root = document) {
     input.addEventListener("input", sync);
     input.addEventListener("change", sync);
     sync();
+  });
+
+  root.querySelectorAll('.esphome-firmware-card input[data-core-field-key="wake_word_trainer_url"]').forEach((input) => {
+    if (!(input instanceof HTMLInputElement) || input.dataset.esphomeFirmwareTrainerUrlBound === "1") {
+      return;
+    }
+    input.dataset.esphomeFirmwareTrainerUrlBound = "1";
+    input.addEventListener("change", () => {
+      const card = input.closest(".esphome-firmware-card");
+      captureEspHomeFirmwareDraft(card);
+      void loadEspHomeFirmwareTrainerWakeWords(card);
+    });
+  });
+
+  root.querySelectorAll('.esphome-firmware-card select[data-core-field-key="wake_word_source"]').forEach((input) => {
+    if (!(input instanceof HTMLSelectElement) || input.dataset.esphomeFirmwareWakeSourceLoaded === "1") {
+      return;
+    }
+    input.dataset.esphomeFirmwareWakeSourceLoaded = "1";
+    const card = input.closest(".esphome-firmware-card");
+    if (String(input.value || "").trim() === "trainer") {
+      void loadEspHomeFirmwareTrainerWakeWords(card);
+    }
   });
 
   root.querySelectorAll('.esphome-firmware-card input[data-core-field-key="wake_word_triggered_sound_file"]').forEach((input) => {
@@ -8169,6 +8433,16 @@ function browserUsbStoredPort(selector = "") {
   return state.esphomeBrowserUsbPorts?.[key] || null;
 }
 
+function normalizeEsptoolJsModule(module) {
+  if (module?.ESPLoader && module?.Transport) {
+    return module;
+  }
+  if (module?.default?.ESPLoader && module?.default?.Transport) {
+    return module.default;
+  }
+  return null;
+}
+
 async function ensureEsptoolJsLoaded() {
   if (state.esptoolJsModule) {
     return state.esptoolJsModule;
@@ -8176,10 +8450,27 @@ async function ensureEsptoolJsLoaded() {
   if (state.esptoolJsLoadPromise instanceof Promise) {
     return state.esptoolJsLoadPromise;
   }
-  state.esptoolJsLoadPromise = import("https://unpkg.com/esptool-js/lib/index.js?module").then((module) => {
-    state.esptoolJsModule = module;
-    return module;
-  });
+  const moduleUrls = [
+    "https://esm.sh/esptool-js@0.5.7?bundle",
+    "https://unpkg.com/esptool-js@0.5.7/bundle.js",
+    "https://cdn.jsdelivr.net/npm/esptool-js@0.5.7/bundle.js",
+  ];
+  state.esptoolJsLoadPromise = (async () => {
+    const errors = [];
+    for (const moduleUrl of moduleUrls) {
+      try {
+        const module = normalizeEsptoolJsModule(await import(moduleUrl));
+        if (module) {
+          state.esptoolJsModule = module;
+          return module;
+        }
+        errors.push(`${moduleUrl}: missing ESPLoader/Transport exports`);
+      } catch (error) {
+        errors.push(`${moduleUrl}: ${String(error?.message || error || "load failed")}`);
+      }
+    }
+    throw new Error(`Could not load bundled esptool-js. ${errors.join(" | ")}`);
+  })();
   return state.esptoolJsLoadPromise;
 }
 
@@ -8189,6 +8480,18 @@ async function fetchFirmwareBinary(binaryUrl) {
     throw new Error(`Firmware download failed: HTTP ${response.status}`);
   }
   return new Uint8Array(await response.arrayBuffer());
+}
+
+function uint8ArrayToBinaryString(bytes) {
+  if (!(bytes instanceof Uint8Array)) {
+    return "";
+  }
+  const chunks = [];
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    chunks.push(String.fromCharCode(...bytes.subarray(offset, offset + chunkSize)));
+  }
+  return chunks.join("");
 }
 
 async function flashBrowserUsbPort(port, artifact, logConsole, statusNode) {
@@ -8244,7 +8547,7 @@ async function flashBrowserUsbPort(port, artifact, logConsole, statusNode) {
     if (eraseAll) {
       appendEspHomeFirmwareLog(logConsole, "Erasing flash first so ESPHome safe-mode state is cleared.", "info");
     }
-    await loader.writeFlash({
+    const flashOptions = {
       fileArray: [{ data: firmwareData, address: 0 }],
       flashMode: String(artifact?.flash_mode || "dio"),
       flashFreq: String(artifact?.flash_freq || "40m"),
@@ -8261,7 +8564,25 @@ async function flashBrowserUsbPort(port, artifact, logConsole, statusNode) {
           }
         }
       },
-    });
+    };
+    try {
+      await loader.writeFlash(flashOptions);
+    } catch (error) {
+      const message = String(error?.message || error || "");
+      if (!message.includes("charCodeAt")) {
+        throw error;
+      }
+      appendEspHomeFirmwareLog(
+        logConsole,
+        "Retrying flash with binary-string firmware format for this esptool-js bundle.",
+        "warn"
+      );
+      await loader.writeFlash({
+        ...flashOptions,
+        eraseAll: false,
+        fileArray: [{ data: uint8ArrayToBinaryString(firmwareData), address: 0 }],
+      });
+    }
     appendEspHomeFirmwareLog(logConsole, "Flash complete. Resetting device.", "info");
     await loader.after("hard_reset");
     if (statusNode instanceof HTMLElement) {
@@ -9160,6 +9481,60 @@ function bindEspHomeSpeakerIdActions(root = document) {
   });
 }
 
+function rerenderEspHomeEmotionIdPanel(root = document) {
+  const host =
+    root instanceof HTMLElement
+      ? root.querySelector("#settings-esphome-runtime-emotionid")
+      : document.getElementById("settings-esphome-runtime-emotionid");
+  if (!(host instanceof HTMLElement)) {
+    return;
+  }
+  const shell = document.getElementById("settings-esphome-shell");
+  const coreKey = String(host.dataset.coreKey || shell?.dataset?.coreKey || "esphome").trim() || "esphome";
+  const payload =
+    state.esphomeEmotionIdPayload && typeof state.esphomeEmotionIdPayload === "object" ? state.esphomeEmotionIdPayload : {};
+  host.dataset.coreKey = coreKey;
+  host.innerHTML = renderEspHomeEmotionIdPanel(payload, coreKey);
+  bindEspHomeEmotionIdActions(document);
+}
+
+function bindEspHomeEmotionIdActions(root = document) {
+  const runAction = async (host, action, payload, successText) => {
+    const statusHost = host instanceof HTMLElement ? host : null;
+    setCoreManagerStatus(statusHost, "Working...");
+    try {
+      const result = await api("/api/settings/esphome/runtime/action", {
+        method: "POST",
+        body: JSON.stringify({ action, payload }),
+      });
+      if (result?.emotion_id && typeof result.emotion_id === "object") {
+        state.esphomeEmotionIdPayload = result.emotion_id;
+      }
+      rerenderEspHomeEmotionIdPanel(document);
+      const message = String(result?.message || successText).trim() || successText;
+      showToast(message);
+      return result;
+    } catch (error) {
+      const message = String(error?.message || "Emotion ID action failed.");
+      setCoreManagerStatus(statusHost, `Failed: ${message}`);
+      showToast(`Failed: ${message}`, "error", 3600);
+      throw error;
+    }
+  };
+
+  root.querySelectorAll(".esphome-emotion-id-settings-save").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement) || button.dataset.esphomeEmotionIdBound === "1") {
+      return;
+    }
+    button.dataset.esphomeEmotionIdBound = "1";
+    button.addEventListener("click", async (event) => {
+      const card = event.currentTarget?.closest?.(".esphome-emotion-id-settings-card");
+      const values = collectCoreManagerValues(card);
+      await runAction(card, "emotion_id_settings_save", { values }, "Emotion ID settings saved.");
+    });
+  });
+}
+
 function bindCoreTabManagers() {
   bindCoreManagerTabs();
   bindCoreManagerSubtabs();
@@ -9172,6 +9547,7 @@ function bindCoreTabManagers() {
   bindEspHomeWakeSoundPreview();
   bindEspHomeFirmwareActions();
   bindEspHomeSpeakerIdActions();
+  bindEspHomeEmotionIdActions();
   document.querySelectorAll(".core-tab-refresh-btn[data-core-tab-refresh]").forEach((button) => {
     if (!(button instanceof HTMLButtonElement)) {
       return;
@@ -10030,6 +10406,1046 @@ function bindSurfaceRuntimeActions(kind, endpoint, root = document) {
       });
     });
   });
+}
+
+function dashboardTimeLabel(rawTs) {
+  const ts = Number(rawTs || 0);
+  if (!Number.isFinite(ts) || ts <= 0) {
+    return "";
+  }
+  const ms = ts > 100000000000 ? ts : ts * 1000;
+  try {
+    return new Date(ms).toLocaleString([], {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  } catch {
+    return "";
+  }
+}
+
+function dashboardToneClass(toneRaw) {
+  const tone = String(toneRaw || "").trim().toLowerCase();
+  if (tone === "good" || tone === "warning" || tone === "error") {
+    return tone;
+  }
+  return "normal";
+}
+
+function renderDashboardCards(cards) {
+  if (!state.dashboardShowStatusTiles) {
+    return "";
+  }
+  const rows = Array.isArray(cards) ? cards.filter((row) => row && typeof row === "object") : [];
+  if (!rows.length) {
+    return "";
+  }
+  return `
+    <div class="dashboard-status-rail" aria-label="Status">
+      ${rows
+        .map((card) => {
+          const tone = dashboardToneClass(card.tone);
+          return `
+            <article class="dashboard-status-tile ${escapeHtml(tone)}">
+              <div class="small">${escapeHtml(card.label || "")}</div>
+              <strong>${escapeHtml(card.value ?? "-")}</strong>
+              ${card.detail ? `<div class="small muted">${escapeHtml(card.detail)}</div>` : ""}
+            </article>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
+function dashboardBriefRefreshButton(id) {
+  return "";
+}
+
+function dashboardBriefMap(briefs) {
+  const rows = Array.isArray(briefs) ? briefs : [];
+  const byId = {};
+  rows.forEach((brief) => {
+    if (!brief || typeof brief !== "object") {
+      return;
+    }
+    const id = String(brief.id || "").trim();
+    if (id) {
+      byId[id] = brief;
+    }
+  });
+  return byId;
+}
+
+function dashboardBriefMeta(brief) {
+  if (!brief || typeof brief !== "object") {
+    return "";
+  }
+  const updated = dashboardTimeLabel(brief.updated_at);
+  const mode = String(brief.mode || "live").trim();
+  const stale = Boolean(brief.stale);
+  return [updated ? `Updated ${updated}` : "", mode, stale ? "stale" : ""].filter(Boolean).join(" • ");
+}
+
+function renderDashboardSignalStats(stats) {
+  if (!state.dashboardShowMetrics) {
+    return "";
+  }
+  const rows = Array.isArray(stats) ? stats.filter((row) => row && typeof row === "object") : [];
+  if (!rows.length) {
+    return "";
+  }
+  return `
+    <div class="core-metric-row dashboard-metric-row">
+      ${rows
+        .map(
+          (stat) => `
+            <div class="core-metric-pill">
+              <div class="small">${escapeHtml(stat.label || "")}</div>
+              <strong>${escapeHtml(stat.value ?? "-")}</strong>
+            </div>
+          `
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function dashboardSectionById(sections, id) {
+  const wanted = String(id || "").trim();
+  return (Array.isArray(sections) ? sections : []).find((section) => String(section?.id || "").trim() === wanted) || null;
+}
+
+function dashboardSectionItems(section, key) {
+  const rows = Array.isArray(section?.[key]) ? section[key] : [];
+  return rows.filter((row) => row && typeof row === "object");
+}
+
+function dashboardStatMatch(stats, labels) {
+  const wanted = new Set((Array.isArray(labels) ? labels : []).map((label) => String(label || "").trim().toLowerCase()).filter(Boolean));
+  if (!wanted.size) {
+    return null;
+  }
+  return (
+    (Array.isArray(stats) ? stats : []).find((stat) => wanted.has(String(stat?.label || "").trim().toLowerCase())) ||
+    null
+  );
+}
+
+function dashboardSummaryMetric(payload, labels) {
+  const body = payload && typeof payload === "object" ? payload : {};
+  const row = dashboardStatMatch(Array.isArray(body.summary_metrics) ? body.summary_metrics : [], Array.isArray(labels) ? labels : [labels]);
+  return String(row?.value ?? "").trim();
+}
+
+function dashboardScoreLabel(value) {
+  const score = Number(value || 0);
+  return Number.isFinite(score) && score > 0 ? score.toFixed(2) : "-";
+}
+
+function dashboardSpeakerReasonLabel(reason) {
+  const token = String(reason || "").trim().toLowerCase();
+  const labels = {
+    best_match: "best match",
+    matched: "matched",
+    below_threshold: "below threshold",
+    no_embeddings: "no voiceprints",
+    error: "error",
+  };
+  return labels[token] || token.replace(/_/g, " ") || "not matched";
+}
+
+function dashboardWeatherFeaturedStats(stats) {
+  const groups = [
+    ["Outdoor Temp", "Outside Temp", "Temperature", "Temp"],
+    ["Humidity", "Outdoor Humidity"],
+    ["Wind", "Wind Speed"],
+    ["Rain Today", "Rain", "Rain Rate"],
+  ];
+  const featured = [];
+  const used = new Set();
+  groups.forEach((labels) => {
+    const stat = dashboardStatMatch(stats, labels);
+    const key = String(stat?.label || "").trim().toLowerCase();
+    if (stat && key && !used.has(key)) {
+      featured.push(stat);
+      used.add(key);
+    }
+  });
+  (Array.isArray(stats) ? stats : []).forEach((stat) => {
+    const key = String(stat?.label || "").trim().toLowerCase();
+    if (featured.length >= 6 || !key || used.has(key)) {
+      return;
+    }
+    featured.push(stat);
+    used.add(key);
+  });
+  return featured;
+}
+
+function dashboardWeatherCondition(stats, visuals, fallbackText = "") {
+  const currentVisual = (Array.isArray(visuals) ? visuals : []).find((item) => {
+    const title = String(item?.title || "").trim().toLowerCase();
+    return title.includes("current") || title.includes("condition");
+  });
+  const forecast = dashboardStatMatch(stats, ["Forecast", "Condition", "Weather"]);
+  const candidates = [
+    currentVisual?.subtitle,
+    currentVisual?.title,
+    forecast?.value,
+    fallbackText,
+  ];
+  for (const raw of candidates) {
+    const token = String(raw || "").trim();
+    if (token && !["live weather", "current conditions", "weather"].includes(token.toLowerCase())) {
+      return token;
+    }
+  }
+  return "Live weather";
+}
+
+function dashboardWeatherSceneKind(condition, stats) {
+  const text = String(condition || "").toLowerCase();
+  const rainStat = dashboardStatMatch(stats, ["Rain Today", "Rain", "Rain Rate"]);
+  const rainValue = String(rainStat?.value ?? "").trim().toLowerCase();
+  const hasRainAmount = Boolean(rainValue && !/^(-|n\/a|none|null|0(?:\.0+)?(?:\s*(mm|in|inch|inches))?)$/.test(rainValue));
+  if (/(thunder|lightning|storm)/.test(text)) {
+    return "storm";
+  }
+  if (/(rain|drizzle|shower|sleet)/.test(text) || hasRainAmount) {
+    return "rain";
+  }
+  if (/(snow|flurr)/.test(text)) {
+    return "snow";
+  }
+  if (/(fog|mist|haze|smoke)/.test(text)) {
+    return "fog";
+  }
+  if (/(cloud|overcast)/.test(text)) {
+    return "cloudy";
+  }
+  if (/(clear|sun|fair)/.test(text)) {
+    return "clear";
+  }
+  if (/(wind|gust)/.test(text)) {
+    return "wind";
+  }
+  return "mixed";
+}
+
+function renderDashboardWeatherScene(kind) {
+  const safeKind = String(kind || "mixed").replace(/[^a-z0-9_-]/g, "") || "mixed";
+  return `
+    <div class="dashboard-weather-scene scene-${escapeHtml(safeKind)}" aria-hidden="true">
+      <span class="weather-sun"></span>
+      <span class="weather-cloud weather-cloud-one"></span>
+      <span class="weather-cloud weather-cloud-two"></span>
+      <span class="weather-rain weather-rain-one"></span>
+      <span class="weather-rain weather-rain-two"></span>
+      <span class="weather-wind weather-wind-one"></span>
+      <span class="weather-wind weather-wind-two"></span>
+      <span class="weather-bolt"></span>
+      <span class="weather-snow weather-snow-one"></span>
+      <span class="weather-snow weather-snow-two"></span>
+    </div>
+  `;
+}
+
+function dashboardWeatherStatKind(label) {
+  const token = String(label || "").trim().toLowerCase();
+  if (/(temp|outdoor|inside|indoor|feels)/.test(token)) {
+    return "temp";
+  }
+  if (/(humid|dew|moisture)/.test(token)) {
+    return "humidity";
+  }
+  if (/(wind|gust)/.test(token)) {
+    return "wind";
+  }
+  if (/(rain|precip)/.test(token)) {
+    return "rain";
+  }
+  if (/(source|provider)/.test(token)) {
+    return "sources";
+  }
+  if (/(sample|seen|updated|last)/.test(token)) {
+    return "sample";
+  }
+  return "default";
+}
+
+function renderDashboardBriefTile(card, options = {}) {
+  if (!card || typeof card !== "object") {
+    return "";
+  }
+  const brief = card.brief && typeof card.brief === "object" ? card.brief : {};
+  const text = String(brief.text || card.summary || "").trim();
+  const meta = dashboardBriefMeta(brief);
+  const tone = dashboardToneClass(card.tone);
+  const briefId = String(brief.id || card.id || "").trim();
+  const compact = options.compact ? " compact" : "";
+  return `
+    <article class="dashboard-brief-tile ${escapeHtml(tone)}${compact}">
+      <div class="dashboard-brief-tile-head">
+        <div>
+          <h3 class="card-title">${escapeHtml(card.title || "Signal")}</h3>
+          ${card.subtitle ? `<div class="small muted">${escapeHtml(card.subtitle)}</div>` : ""}
+          ${meta ? `<div class="small muted">${escapeHtml(meta)}</div>` : ""}
+        </div>
+        ${dashboardBriefRefreshButton(briefId)}
+      </div>
+      ${text ? `<p class="dashboard-brief-text">${escapeHtml(text)}</p>` : ""}
+      ${renderDashboardSignalStats(card.stats)}
+      ${card.error ? `<div class="notice error">${escapeHtml(card.error)}</div>` : ""}
+    </article>
+  `;
+}
+
+function renderDashboardImageFigure(item, options = {}) {
+  if (!item || typeof item !== "object") {
+    return "";
+  }
+  const src = String(item.image_src || "").trim();
+  if (!src) {
+    return "";
+  }
+  const title = String(item.title || item.image_caption || "").trim();
+  const subtitle = String(item.subtitle || item.detail || "").trim();
+  const alt = String(item.image_alt || title || "Dashboard image").trim() || "Dashboard image";
+  const className = String(options.className || "").trim();
+  return `
+    <figure class="dashboard-media-figure${className ? ` ${escapeHtml(className)}` : ""}">
+      <img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}" loading="lazy" />
+      ${
+        title || subtitle
+          ? `<figcaption>
+              ${title ? `<strong>${escapeHtml(title)}</strong>` : ""}
+              ${subtitle ? `<span>${escapeHtml(subtitle)}</span>` : ""}
+            </figcaption>`
+          : ""
+      }
+    </figure>
+  `;
+}
+
+function renderDashboardOverviewPanel(brief) {
+  const text = String(brief?.text || "").trim();
+  if (!text) {
+    return "";
+  }
+  const meta = dashboardBriefMeta(brief);
+  return `
+    <article class="dashboard-global-brief">
+      <div class="dashboard-global-brief-head">
+        <div>
+          <div class="dashboard-panel-kicker">Today</div>
+          <h3 class="card-title">${escapeHtml(brief?.title || "Home Brief")}</h3>
+          ${meta ? `<div class="small muted">${escapeHtml(meta)}</div>` : ""}
+        </div>
+        ${dashboardBriefRefreshButton(brief?.id || "overview")}
+      </div>
+      <p>${escapeHtml(text)}</p>
+    </article>
+  `;
+}
+
+function renderDashboardSystemPanel(cards, brief) {
+  const rows = Array.isArray(cards) ? cards : [];
+  const text = String(brief?.text || "").trim();
+  const meta = dashboardBriefMeta(brief);
+  if (!rows.length && !text) {
+    return "";
+  }
+  return `
+    <article class="dashboard-core-panel dashboard-system-panel">
+      <div class="dashboard-panel-head">
+        <div>
+          <div class="dashboard-panel-kicker">Tater</div>
+          <h3 class="card-title">${escapeHtml(brief?.title || "Tater Status")}</h3>
+          ${meta ? `<div class="small muted">${escapeHtml(meta)}</div>` : ""}
+        </div>
+        ${dashboardBriefRefreshButton(brief?.id || "system")}
+      </div>
+      ${text ? `<p class="dashboard-panel-brief">${escapeHtml(text)}</p>` : ""}
+      ${renderDashboardCards(rows)}
+    </article>
+  `;
+}
+
+function renderDashboardWeatherPanel(section, brief) {
+  const hasSection = section && typeof section === "object";
+  const hasBrief = brief && typeof brief === "object" && String(brief.text || "").trim();
+  if (!hasSection && !hasBrief) {
+    return "";
+  }
+  const stats = Array.isArray(section?.stats) ? section.stats : [];
+  const featured = dashboardWeatherFeaturedStats(stats);
+  const title = String(section?.title || brief?.title || "Weather").trim() || "Weather";
+  const subtitle = String(section?.subtitle || brief?.source || "Environment").trim();
+  const text = String(brief?.text || section?.summary || "").trim();
+  const meta = dashboardBriefMeta(brief);
+  const briefId = String(brief?.id || section?.id || "").trim();
+  const tone = dashboardToneClass(section?.tone);
+  const visuals = dashboardSectionItems(section, "visuals").filter((item) => String(item.image_src || "").trim());
+  const condition = dashboardWeatherCondition(stats, visuals, text);
+  const sceneKind = dashboardWeatherSceneKind(condition, stats);
+  const primaryStat = featured[0] || null;
+  return `
+    <article class="dashboard-core-panel dashboard-weather-panel ${escapeHtml(tone)}">
+      <div class="dashboard-panel-head dashboard-weather-head">
+        <div>
+          <div class="dashboard-panel-kicker">Environment</div>
+          <h3 class="card-title">${escapeHtml(title)}</h3>
+          ${subtitle ? `<div class="small muted">${escapeHtml(subtitle)}</div>` : ""}
+          ${meta ? `<div class="small muted">${escapeHtml(meta)}</div>` : ""}
+        </div>
+        ${dashboardBriefRefreshButton(briefId)}
+      </div>
+      <div class="dashboard-weather-hero">
+        ${renderDashboardWeatherScene(sceneKind)}
+        <div class="dashboard-weather-hero-content">
+          <div>
+            <div class="small muted">Current Conditions</div>
+            <strong>${escapeHtml(condition)}</strong>
+          </div>
+          ${primaryStat ? `<div class="dashboard-weather-hero-value">${escapeHtml(primaryStat.value ?? "-")}</div>` : ""}
+        </div>
+        ${text ? `<p class="dashboard-panel-brief dashboard-weather-brief">${escapeHtml(text)}</p>` : ""}
+      </div>
+      ${
+        featured.length
+          ? `<div class="dashboard-weather-metrics">
+              ${featured
+                .map(
+                  (stat, index) => `
+                    <div class="dashboard-weather-tile weather-stat-${escapeHtml(dashboardWeatherStatKind(stat.label))}${index === 0 ? " primary" : ""}">
+                      <span class="dashboard-weather-tile-art" aria-hidden="true"></span>
+                      <div class="small">${escapeHtml(stat.label || "")}</div>
+                      <strong>${escapeHtml(stat.value ?? "-")}</strong>
+                    </div>
+                  `
+                )
+                .join("")}
+            </div>`
+          : ""
+      }
+      ${section?.error ? `<div class="notice error">${escapeHtml(section.error)}</div>` : ""}
+    </article>
+  `;
+}
+
+function renderDashboardAwarenessPanel(section, brief) {
+  const hasSection = section && typeof section === "object";
+  const hasBrief = brief && typeof brief === "object" && String(brief.text || "").trim();
+  if (!hasSection && !hasBrief) {
+    return "";
+  }
+  const snapshots = dashboardSectionItems(section, "snapshots").filter((item) => String(item.image_src || "").trim());
+  const recentEvents = dashboardSectionItems(section, "recent_events");
+  const stats = Array.isArray(section?.stats) ? section.stats : [];
+  const title = String(section?.title || brief?.title || "Awareness").trim() || "Awareness";
+  const subtitle = String(section?.subtitle || brief?.source || "Activity history").trim();
+  const text = String(brief?.text || section?.summary || "").trim();
+  const meta = dashboardBriefMeta(brief);
+  const briefId = String(brief?.id || section?.id || "").trim();
+  const imageEvents = snapshots.slice(0, 6);
+  const eventRows = recentEvents.slice(0, 3);
+  const showMedia = Boolean(state.dashboardShowMedia);
+  return `
+    <article class="dashboard-core-panel dashboard-awareness-panel">
+      <div class="dashboard-panel-head">
+        <div>
+          <div class="dashboard-panel-kicker">Awareness</div>
+          <h3 class="card-title">${escapeHtml(title)}</h3>
+          ${subtitle ? `<div class="small muted">${escapeHtml(subtitle)}</div>` : ""}
+          ${meta ? `<div class="small muted">${escapeHtml(meta)}</div>` : ""}
+        </div>
+        ${dashboardBriefRefreshButton(briefId)}
+      </div>
+      ${text ? `<p class="dashboard-panel-brief">${escapeHtml(text)}</p>` : ""}
+      ${
+        showMedia && imageEvents.length
+          ? `<div class="dashboard-awareness-events">
+              ${imageEvents
+                .map((item) => {
+                  const src = String(item.image_src || "").trim();
+                  const description = String(item.description || item.detail || "").trim();
+                  return `
+                    <article class="dashboard-awareness-event-card">
+                      ${src ? `<img src="${escapeHtml(src)}" alt="${escapeHtml(item.image_alt || item.title || "Awareness event")}" loading="lazy" />` : ""}
+                      <div class="dashboard-awareness-event-copy">
+                        <strong>${escapeHtml(item.title || "Awareness Event")}</strong>
+                        ${item.subtitle ? `<span>${escapeHtml(item.subtitle)}</span>` : ""}
+                        ${description ? `<p>${escapeHtml(description)}</p>` : ""}
+                      </div>
+                    </article>
+                  `;
+                })
+                .join("")}
+            </div>`
+          : eventRows.length
+            ? `<div class="dashboard-event-list">${eventRows
+                .map(
+                  (item) => `
+                    <div class="dashboard-event-row">
+                      <strong>${escapeHtml(item.title || "Event")}</strong>
+                      ${item.subtitle ? `<span>${escapeHtml(item.subtitle)}</span>` : ""}
+                    </div>
+                  `
+                )
+                .join("")}</div>`
+            : ""
+      }
+      ${renderDashboardSignalStats(stats)}
+      ${section?.error ? `<div class="notice error">${escapeHtml(section.error)}</div>` : ""}
+    </article>
+  `;
+}
+
+function renderDashboardVoiceIdentityPanel(speakerId, emotionId) {
+  const speaker = speakerId && typeof speakerId === "object" ? speakerId : null;
+  const emotion = emotionId && typeof emotionId === "object" ? emotionId : null;
+  if (!speaker && !emotion) {
+    return "";
+  }
+
+  const cards = [];
+  if (speaker) {
+    const last = speaker.last_result && typeof speaker.last_result === "object" ? speaker.last_result : {};
+    const enabled = dashboardSummaryMetric(speaker, "Enabled") || "No";
+    const model = dashboardSummaryMetric(speaker, "Model");
+    const matched = boolFromAny(last.matched, false);
+    const speakerName = String(last.speaker_name || "").trim();
+    const reason = dashboardSpeakerReasonLabel(last.reason);
+    const hasLast = Boolean(String(last.updated_at || "").trim() && String(last.updated_at || "").trim() !== "-");
+    const title = hasLast
+      ? matched
+        ? speakerName || "Matched speaker"
+        : "No speaker match"
+      : "No detection yet";
+    const detail = hasLast
+      ? matched
+        ? `Matched${speakerName ? ` ${speakerName}` : ""}`
+        : `Last attempt ${reason}`
+      : "Waiting for a voice turn";
+    cards.push(`
+      <article class="dashboard-voice-intel-card">
+        <div>
+          <div class="dashboard-voice-intel-kicker">Speaker ID</div>
+          <strong>${escapeHtml(title)}</strong>
+          <span>${escapeHtml(detail)}</span>
+        </div>
+        <div class="dashboard-voice-intel-meta">
+          <span>Enabled ${escapeHtml(enabled)}</span>
+          <span>Score ${escapeHtml(dashboardScoreLabel(last.score))}</span>
+          ${hasLast ? `<span>${escapeHtml(last.updated_at)}</span>` : ""}
+          ${model ? `<span>${escapeHtml(model)}</span>` : ""}
+        </div>
+      </article>
+    `);
+  }
+
+  if (emotion) {
+    const last = emotion.last_result && typeof emotion.last_result === "object" ? emotion.last_result : {};
+    const enabled = dashboardSummaryMetric(emotion, "Enabled") || "No";
+    const promptHint = dashboardSummaryMetric(emotion, "Prompt Hint") || "No";
+    const model = dashboardSummaryMetric(emotion, "Model");
+    const tone = String(last.emotion || "").trim();
+    const hasLast = Boolean(tone && String(last.updated_at || "").trim() && String(last.updated_at || "").trim() !== "-");
+    cards.push(`
+      <article class="dashboard-voice-intel-card">
+        <div>
+          <div class="dashboard-voice-intel-kicker">Emotion ID</div>
+          <strong>${escapeHtml(hasLast ? tone : "No detection yet")}</strong>
+          <span>${escapeHtml(hasLast ? (last.prompt_hint || "Tone hint captured") : "Waiting for a voice turn")}</span>
+        </div>
+        <div class="dashboard-voice-intel-meta">
+          <span>Enabled ${escapeHtml(enabled)}</span>
+          <span>Score ${escapeHtml(dashboardScoreLabel(last.score))}</span>
+          <span>Prompt ${escapeHtml(promptHint)}</span>
+          ${hasLast ? `<span>${escapeHtml(last.updated_at)}</span>` : ""}
+          ${model ? `<span>${escapeHtml(model)}</span>` : ""}
+        </div>
+      </article>
+    `);
+  }
+
+  return `<div class="dashboard-voice-intel-grid">${cards.join("")}</div>`;
+}
+
+function renderDashboardVoicePanel(section, brief) {
+  const hasSection = section && typeof section === "object";
+  const hasBrief = brief && typeof brief === "object" && String(brief.text || "").trim();
+  if (!hasSection && !hasBrief) {
+    return "";
+  }
+  const devices = dashboardSectionItems(section, "devices");
+  const stats = Array.isArray(section?.stats) ? section.stats : [];
+  const title = String(section?.title || brief?.title || "Voice").trim() || "Voice";
+  const subtitle = String(section?.subtitle || brief?.source || "Satellites").trim();
+  const text = String(brief?.text || section?.summary || "").trim();
+  const meta = dashboardBriefMeta(brief);
+  const briefId = String(brief?.id || section?.id || "").trim();
+  const showMedia = Boolean(state.dashboardShowMedia);
+  const voiceIdentity = renderDashboardVoiceIdentityPanel(section?.speaker_id, section?.emotion_id);
+  return `
+    <article class="dashboard-core-panel dashboard-voice-panel">
+      <div class="dashboard-panel-head">
+        <div>
+          <div class="dashboard-panel-kicker">Voice</div>
+          <h3 class="card-title">${escapeHtml(title)}</h3>
+          ${subtitle ? `<div class="small muted">${escapeHtml(subtitle)}</div>` : ""}
+          ${meta ? `<div class="small muted">${escapeHtml(meta)}</div>` : ""}
+        </div>
+        ${dashboardBriefRefreshButton(briefId)}
+      </div>
+      ${text ? `<p class="dashboard-panel-brief">${escapeHtml(text)}</p>` : ""}
+      ${voiceIdentity}
+      ${
+        showMedia && devices.length
+          ? `<div class="dashboard-device-grid">
+              ${devices
+                .map((device) => {
+                  const connected = boolFromAny(device.connected, false);
+                  const src = String(device.image_src || "").trim();
+                  return `
+                    <div class="dashboard-device-card${connected ? " connected" : ""}">
+                      ${
+                        src
+                          ? `<img src="${escapeHtml(src)}" alt="${escapeHtml(device.image_alt || device.title || "Satellite")}" loading="lazy" />`
+                          : `<div class="dashboard-device-placeholder">${escapeHtml(String(device.title || "Sat").slice(0, 2).toUpperCase())}</div>`
+                      }
+                      <div>
+                        <strong>${escapeHtml(device.title || "Satellite")}</strong>
+                        ${device.subtitle ? `<span>${escapeHtml(device.subtitle)}</span>` : ""}
+                      </div>
+                    </div>
+                  `;
+                })
+                .join("")}
+            </div>`
+          : ""
+      }
+      ${renderDashboardSignalStats(stats)}
+      ${section?.error ? `<div class="notice error">${escapeHtml(section.error)}</div>` : ""}
+    </article>
+  `;
+}
+
+function renderDashboardSignalBriefs(payload) {
+  const sections = Array.isArray(payload?.sections) ? payload.sections.filter((row) => row && typeof row === "object") : [];
+  const briefs = dashboardBriefMap(payload?.briefs);
+  const environmentSection = dashboardSectionById(sections, "environment");
+  const awarenessSection = dashboardSectionById(sections, "awareness");
+  const voiceSection = dashboardSectionById(sections, "voice");
+  const extraCards = [];
+
+  sections.forEach((section) => {
+    const id = String(section.id || "").trim();
+    if (id === "environment" || id === "awareness" || id === "voice") {
+      return;
+    }
+    const brief = briefs[id];
+    extraCards.push({
+      id,
+      title: section.title || brief?.title || "Signal",
+      subtitle: section.subtitle || "",
+      brief,
+      summary: section.summary || "",
+      stats: section.stats || [],
+      tone: section.tone || "normal",
+      error: section.error || "",
+    });
+  });
+
+  Object.values(briefs).forEach((brief) => {
+    const id = String(brief?.id || "").trim();
+    if (!id || id === "overview" || id === "system" || sections.some((section) => String(section.id || "").trim() === id)) {
+      return;
+    }
+    if (String(brief.text || "").trim()) {
+      extraCards.push({ id, title: brief.title || id, subtitle: brief.source || "", brief, stats: [] });
+    }
+  });
+
+  const overviewHtml = renderDashboardOverviewPanel(briefs.overview);
+  const systemHtml = renderDashboardSystemPanel(payload?.cards, briefs.system);
+  const weatherHtml = renderDashboardWeatherPanel(environmentSection, briefs.environment);
+  const awarenessHtml = renderDashboardAwarenessPanel(awarenessSection, briefs.awareness);
+  const voiceHtml = renderDashboardVoicePanel(voiceSection, briefs.voice);
+  const extraHtml = extraCards.map((card) => renderDashboardBriefTile(card)).join("");
+
+  if (!overviewHtml && !systemHtml && !weatherHtml && !awarenessHtml && !voiceHtml && !extraHtml) {
+    return "";
+  }
+
+  return `
+    <section class="dashboard-unified-panel">
+      ${overviewHtml}
+      ${systemHtml}
+      <div class="dashboard-core-grid">
+        ${weatherHtml}
+        ${awarenessHtml}
+        ${voiceHtml}
+      </div>
+      ${extraHtml ? `<div class="dashboard-secondary-grid">${extraHtml}</div>` : ""}
+    </section>
+  `;
+}
+
+function dashboardBriefRefreshLabel(payload) {
+  const refresh = payload?.brief_refresh && typeof payload.brief_refresh === "object" ? payload.brief_refresh : {};
+  const staleIds = Array.isArray(refresh.stale_ids) ? refresh.stale_ids.filter(Boolean) : [];
+  if (refresh.running) {
+    return "Briefs are refreshing in the background.";
+  }
+  const lastError = String(refresh.last_error || "").trim();
+  if (lastError) {
+    return `Last brief refresh failed. Tater will retry later.`;
+  }
+  if (staleIds.length) {
+    return `${staleIds.length} brief${staleIds.length === 1 ? "" : "s"} need refresh.`;
+  }
+  return "Briefs are current.";
+}
+
+function dashboardSnapshotLabel(payload) {
+  const snapshot = payload?.snapshot && typeof payload.snapshot === "object" ? payload.snapshot : {};
+  const source = String(snapshot.source || "").trim().toLowerCase();
+  const age = Number(snapshot.age_seconds || 0);
+  if (source === "cache") {
+    return `${snapshot.stale ? "Stale cached snapshot" : "Cached snapshot"} • ${_runtimeAgeLabel(age)} old`;
+  }
+  if (source) {
+    return "Live snapshot";
+  }
+  return "Live dashboard";
+}
+
+function dashboardRefreshIntervalLabel(value = state.dashboardRefreshIntervalSeconds) {
+  const seconds = normalizeDashboardRefreshIntervalSeconds(value);
+  const found = DASHBOARD_REFRESH_INTERVAL_OPTIONS.find((item) => Number(item.value) === seconds);
+  return found ? found.label : "5 minutes";
+}
+
+function dashboardRefreshIntervalOptionsHtml() {
+  const current = normalizeDashboardRefreshIntervalSeconds(state.dashboardRefreshIntervalSeconds);
+  return DASHBOARD_REFRESH_INTERVAL_OPTIONS.map((item) => {
+    const value = Number(item.value);
+    return `<option value="${escapeHtml(String(value))}"${value === current ? " selected" : ""}>${escapeHtml(item.label)}</option>`;
+  }).join("");
+}
+
+function dashboardSettingsToggleHtml({ key, label, description, checked }) {
+  return `
+    <label class="dashboard-setting-toggle">
+      <input type="checkbox" data-dashboard-setting="${escapeHtml(key)}"${checked ? " checked" : ""} />
+      <span>
+        <strong>${escapeHtml(label)}</strong>
+        ${description ? `<small>${escapeHtml(description)}</small>` : ""}
+      </span>
+    </label>
+  `;
+}
+
+function dashboardSettingsStatusHtml(payload) {
+  const generated = dashboardTimeLabel(payload?.generated_at);
+  const briefRefreshLabel = dashboardBriefRefreshLabel(payload);
+  const snapshotLabel = dashboardSnapshotLabel(payload);
+  const ttl = Number(payload?.brief_ttl_seconds || 0);
+  const ttlLabel = ttl > 0 ? `${Math.round(ttl / 60)} min brief TTL` : "scheduled brief refresh";
+  return `
+    <div class="dashboard-settings-status">
+      <div>
+        <div class="small muted">Dashboard State</div>
+        <strong>${generated ? `Updated ${generated}` : "Live dashboard"}</strong>
+        <span>${escapeHtml(snapshotLabel)}</span>
+      </div>
+      <div>
+        <div class="small muted">Briefs</div>
+        <strong>${escapeHtml(briefRefreshLabel || "Scheduled")}</strong>
+        <span>${escapeHtml(ttlLabel)}</span>
+      </div>
+    </div>
+  `;
+}
+
+function ensureDashboardSettingsModal() {
+  let modal = document.getElementById("dashboard-settings-modal");
+  if (modal) {
+    return modal;
+  }
+
+  document.body.insertAdjacentHTML(
+    "beforeend",
+    `
+      <div id="dashboard-settings-modal" class="cerb-modal" aria-hidden="true">
+        <div class="cerb-modal-dialog card dashboard-settings-dialog" role="dialog" aria-modal="true" aria-label="Dashboard Controls">
+          <div class="card-head">
+            <h3 class="card-title">Dashboard Controls</h3>
+            <button type="button" class="inline-btn" id="dashboard-settings-close">Close</button>
+          </div>
+          <div id="dashboard-settings-content" class="dashboard-settings-body"></div>
+          <div id="dashboard-settings-action-status" class="small muted"></div>
+        </div>
+      </div>
+    `
+  );
+
+  modal = document.getElementById("dashboard-settings-modal");
+  const closeBtn = document.getElementById("dashboard-settings-close");
+  const closeModal = () => closePopupModal(modal);
+  closeBtn?.addEventListener("click", closeModal);
+  modal.addEventListener("click", (event) => {
+    if (event.target === modal) {
+      closeModal();
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && modal.classList.contains("active")) {
+      closeModal();
+    }
+  });
+  return modal;
+}
+
+function renderDashboardSettingsContent() {
+  return `
+    ${dashboardSettingsStatusHtml(state.dashboardPayload)}
+    <div class="dashboard-settings-options">
+      ${dashboardSettingsToggleHtml({
+        key: "status",
+        label: "Show Status Tiles",
+        description: "Display Tater, Hydra, surface, voice, environment, and awareness state tiles.",
+        checked: state.dashboardShowStatusTiles,
+      })}
+      ${dashboardSettingsToggleHtml({
+        key: "metrics",
+        label: "Show Metric Pills",
+        description: "Display compact stat rows inside Environment, Awareness, and Voice sections.",
+        checked: state.dashboardShowMetrics,
+      })}
+      ${dashboardSettingsToggleHtml({
+        key: "media",
+        label: "Show Media",
+        description: "Display camera snapshots and connected satellite image cards when available.",
+        checked: state.dashboardShowMedia,
+      })}
+      <label class="dashboard-setting-select" for="dashboard-refresh-interval">
+        <span>
+          <strong>Auto Refresh</strong>
+          <small>How often the open dashboard updates the full dashboard package.</small>
+        </span>
+        <select id="dashboard-refresh-interval" data-dashboard-refresh-interval>
+          ${dashboardRefreshIntervalOptionsHtml()}
+        </select>
+      </label>
+    </div>
+    <div class="dashboard-settings-actions">
+      <button type="button" id="dashboard-settings-refresh-now" class="inline-btn">Refresh Live Snapshot</button>
+      <button type="button" id="dashboard-settings-generate-now" class="inline-btn primary">Generate Briefs Now</button>
+    </div>
+  `;
+}
+
+function rerenderDashboardFromState() {
+  const root = document.getElementById("view-root");
+  if (!root || !state.dashboardPayload) {
+    return;
+  }
+  root.innerHTML = renderDashboardView(state.dashboardPayload);
+  bindDashboardControls();
+}
+
+function clearDashboardRefreshTimer() {
+  if (state.dashboardRefreshTimer) {
+    window.clearTimeout(state.dashboardRefreshTimer);
+    state.dashboardRefreshTimer = 0;
+  }
+}
+
+function scheduleDashboardRefresh() {
+  clearDashboardRefreshTimer();
+  if (state.view !== "dashboard") {
+    return;
+  }
+  const seconds = normalizeDashboardRefreshIntervalSeconds(state.dashboardRefreshIntervalSeconds);
+  if (seconds <= 0) {
+    return;
+  }
+  state.dashboardRefreshTimer = window.setTimeout(async () => {
+    state.dashboardRefreshTimer = 0;
+    if (state.view !== "dashboard") {
+      return;
+    }
+    try {
+      await loadDashboardView({ silent: true });
+    } catch {
+      scheduleDashboardRefresh();
+    }
+  }, seconds * 1000);
+}
+
+function bindDashboardSettingsModal() {
+  const content = document.getElementById("dashboard-settings-content");
+  const statusEl = document.getElementById("dashboard-settings-action-status");
+  if (!content) {
+    return;
+  }
+  content.querySelectorAll("[data-dashboard-setting]").forEach((input) => {
+    input.addEventListener("change", () => {
+      const key = String(input.getAttribute("data-dashboard-setting") || "").trim();
+      const checked = Boolean(input.checked);
+      if (key === "status") {
+        state.dashboardShowStatusTiles = checked;
+        safeStorageSet("tater_dashboard_show_status_tiles", checked ? "true" : "false");
+      } else if (key === "metrics") {
+        state.dashboardShowMetrics = checked;
+        safeStorageSet("tater_dashboard_show_metrics", checked ? "true" : "false");
+      } else if (key === "media") {
+        state.dashboardShowMedia = checked;
+        safeStorageSet("tater_dashboard_show_media", checked ? "true" : "false");
+      }
+      rerenderDashboardFromState();
+      if (statusEl) {
+        statusEl.textContent = "Dashboard display updated.";
+      }
+    });
+  });
+  content.querySelector("[data-dashboard-refresh-interval]")?.addEventListener("change", (event) => {
+    const next = normalizeDashboardRefreshIntervalSeconds(event.currentTarget?.value);
+    state.dashboardRefreshIntervalSeconds = next;
+    safeStorageSet("tater_dashboard_refresh_interval_seconds", String(next));
+    scheduleDashboardRefresh();
+    if (statusEl) {
+      statusEl.textContent =
+        next > 0 ? `Dashboard will refresh every ${dashboardRefreshIntervalLabel(next)}.` : "Dashboard auto refresh is off.";
+    }
+  });
+  document.getElementById("dashboard-settings-refresh-now")?.addEventListener("click", async () => {
+    if (statusEl) {
+      statusEl.textContent = "Refreshing live dashboard snapshot...";
+    }
+    try {
+      await loadDashboardView({ refreshSnapshot: true });
+      openDashboardSettingsModal();
+      if (statusEl) {
+        statusEl.textContent = "Dashboard snapshot refreshed.";
+      }
+    } catch (error) {
+      if (statusEl) {
+        statusEl.textContent = `Refresh failed: ${error.message}`;
+      }
+    }
+  });
+  document.getElementById("dashboard-settings-generate-now")?.addEventListener("click", async () => {
+    if (statusEl) {
+      statusEl.textContent = "Queueing brief refresh...";
+    }
+    try {
+      await refreshDashboardBriefs("", { silent: true });
+      openDashboardSettingsModal();
+      if (statusEl) {
+        statusEl.textContent = "Brief refresh queued.";
+      }
+    } catch (error) {
+      if (statusEl) {
+        statusEl.textContent = `Brief generation failed: ${error.message}`;
+      }
+    }
+  });
+}
+
+function openDashboardSettingsModal() {
+  const modal = ensureDashboardSettingsModal();
+  const content = document.getElementById("dashboard-settings-content");
+  const statusEl = document.getElementById("dashboard-settings-action-status");
+  if (content) {
+    content.innerHTML = renderDashboardSettingsContent();
+  }
+  if (statusEl) {
+    statusEl.textContent = "Briefs normally update on schedule; use manual actions only when you want to force it.";
+  }
+  bindDashboardSettingsModal();
+  openPopupModal(modal);
+}
+
+function renderDashboardView(payload) {
+  const generated = dashboardTimeLabel(payload?.generated_at);
+  const briefRefreshLabel = dashboardBriefRefreshLabel(payload);
+  return `${consumeNoticeHtml()}
+    ${renderSettingsSectionIntro("Dashboard", "Live status, signals, and Tater-owned summaries.", "DASH")}
+    <div class="dashboard-actions">
+      <div>
+        <div class="small muted">${generated ? `Updated ${escapeHtml(generated)}` : "Live dashboard"}</div>
+        ${briefRefreshLabel ? `<div class="small muted">${escapeHtml(briefRefreshLabel)}</div>` : ""}
+      </div>
+      <div class="dashboard-action-buttons">
+        <button type="button" id="dashboard-settings" class="inline-btn">Dashboard Controls</button>
+      </div>
+    </div>
+    ${renderDashboardSignalBriefs(payload)}
+  `;
+}
+
+async function refreshDashboardBriefs(briefId = "", options = {}) {
+  const root = document.getElementById("view-root");
+  if (!root) {
+    return;
+  }
+  const silent = Boolean(options?.silent);
+  const previousPayload = state.dashboardPayload;
+  if (!silent) {
+    root.innerHTML = renderNotice("Queueing dashboard brief refresh...");
+  }
+  try {
+    const payload = await api("/api/dashboard/briefs/refresh", {
+      method: "POST",
+      body: JSON.stringify({ brief_id: String(briefId || "").trim() || null }),
+      _timeoutMs: 30000,
+    });
+    state.dashboardPayload = payload;
+    root.innerHTML = renderDashboardView(payload);
+    bindDashboardControls();
+    scheduleDashboardRefresh();
+    if (!silent) {
+      showToast("Dashboard brief refresh queued.");
+    }
+    return payload;
+  } catch (error) {
+    if (!silent) {
+      root.innerHTML = previousPayload ? renderDashboardView(previousPayload) : renderNotice(`Brief generation failed: ${error.message}`);
+    }
+    bindDashboardControls();
+    if (!silent) {
+      showToast(`Brief generation failed: ${error.message}`, "error", 3600);
+    }
+    throw error;
+  }
+}
+
+function bindDashboardControls() {
+  document.getElementById("dashboard-settings")?.addEventListener("click", () => {
+    openDashboardSettingsModal();
+  });
+  document.querySelectorAll(".dashboard-brief-refresh").forEach((button) => {
+    button.addEventListener("click", () => {
+      void refreshDashboardBriefs(button.getAttribute("data-dashboard-brief-id") || "");
+    });
+  });
+}
+
+async function loadDashboardView(options = {}) {
+  const root = document.getElementById("view-root");
+  const refreshSnapshot = Boolean(options?.refreshSnapshot);
+  const endpoint = refreshSnapshot ? "/api/dashboard?refresh_snapshot=true" : "/api/dashboard";
+  const payload = await api(endpoint, { _timeoutMs: refreshSnapshot ? 20000 : 12000 });
+  state.dashboardPayload = payload;
+  root.innerHTML = renderDashboardView(payload);
+  bindDashboardControls();
+  scheduleDashboardRefresh();
 }
 
 async function loadChatView() {
@@ -12515,6 +13931,7 @@ async function loadSettingsView() {
               <button type="button" class="settings-subtab-btn active" data-esphome-tab="satellites">Satellites</button>
               <button type="button" class="settings-subtab-btn" data-esphome-tab="firmware">Firmware</button>
               <button type="button" class="settings-subtab-btn" data-esphome-tab="speakerid">Speaker ID</button>
+              <button type="button" class="settings-subtab-btn" data-esphome-tab="emotionid">Emotion ID</button>
               <button type="button" class="settings-subtab-btn" data-esphome-tab="stats">Stats</button>
               <button type="button" class="settings-subtab-btn" data-esphome-tab="platform">Settings</button>
             </div>
@@ -12601,7 +14018,7 @@ async function loadSettingsView() {
             <div class="settings-subpanel" data-esphome-panel="firmware">
               ${renderSettingsSectionIntro(
                 "Firmware",
-                "Build OTA firmware or browser USB installers for VoicePE, Satellite1, and S3Box display devices after reviewing template substitutions.",
+                "Build OTA firmware or browser USB installers for VoicePE, Satellite1, and ESP32-S3-BOX-3 display devices after reviewing template substitutions.",
                 "FW",
                 "subtle"
               )}
@@ -12619,6 +14036,18 @@ async function loadSettingsView() {
               )}
               <div id="settings-esphome-runtime-speakerid">
                 ${renderNotice("Open the ESPHome tab to load Speaker ID.")}
+              </div>
+            </div>
+
+            <div class="settings-subpanel" data-esphome-panel="emotionid">
+              ${renderSettingsSectionIntro(
+                "Emotion ID",
+                "Detect a soft voice-tone hint from each voice turn, then let Tater respond with a little more emotional awareness.",
+                "MOOD",
+                "subtle"
+              )}
+              <div id="settings-esphome-runtime-emotionid">
+                ${renderNotice("Open the ESPHome tab to load Emotion ID.")}
               </div>
             </div>
 
@@ -15016,6 +16445,9 @@ async function loadSettingsView() {
 async function loadView(viewName) {
   setRedisBootstrapMode(false);
   state.view = viewName;
+  if (state.view !== "dashboard") {
+    clearDashboardRefreshTimer();
+  }
   document.body.dataset.view = String(viewName || "").trim().toLowerCase();
   setActiveNav(viewName);
   updateHeader();
@@ -15025,6 +16457,10 @@ async function loadView(viewName) {
   root.innerHTML = renderNotice("Loading...");
 
   try {
+    if (viewName === "dashboard") {
+      await loadDashboardView();
+      return;
+    }
     if (viewName === "chat") {
       await loadChatView();
       return;
@@ -15100,6 +16536,7 @@ window.addEventListener("beforeunload", () => {
     window.clearTimeout(healthRefreshTimer);
     healthRefreshTimer = 0;
   }
+  clearDashboardRefreshTimer();
   closeChatEventSource();
   stopAllChatJobPolling();
   stopRuntimeBreakdownPolling();

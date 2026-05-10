@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from .conversation import VoiceSessionRuntime
+from integrations.huggingface import huggingface_environment
 
 
 def _vp():
@@ -174,7 +175,8 @@ def _load_faster_whisper_model() -> Any:
                 compute_type,
                 ctranslate2_cuda_devices,
             )
-            model = vp.WhisperModel(model_source, **kwargs)
+            with _temporary_env(huggingface_environment()):
+                model = vp.WhisperModel(model_source, **kwargs)
             vp._faster_whisper_model_cache[key] = model
         return model
 
@@ -893,7 +895,8 @@ def _load_kokoro_pipeline(model_id: str) -> Any:
                 tokenizer_config=(vp.KokoroTokenizerConfig(use_spacy=False) if vp.KokoroTokenizerConfig is not None else None),
             )
             vp.logger.info("[native-voice] kokoro model source=%s model=%s provider=%s", root, model_id, provider)
-            pipeline = vp.build_kokoro_pipeline(config=cfg, eager=True)
+            with _temporary_env(huggingface_environment()):
+                pipeline = vp.build_kokoro_pipeline(config=cfg, eager=True)
             vp._kokoro_pipeline_cache[key] = pipeline
         return pipeline
 
@@ -911,7 +914,15 @@ def _load_pocket_tts_model(model_id: str) -> Any:
             hf_root = os.path.join(root, "hf")
             os.makedirs(hf_root, exist_ok=True)
             vp.logger.info("[native-voice] pocket-tts model source=%s model=%s", hf_root, token)
-            with _temporary_env({"HF_HOME": hf_root, "HF_HUB_CACHE": os.path.join(hf_root, "hub"), "HUGGINGFACE_HUB_CACHE": os.path.join(hf_root, "hub")}):
+            with _temporary_env(
+                huggingface_environment(
+                    {
+                        "HF_HOME": hf_root,
+                        "HF_HUB_CACHE": os.path.join(hf_root, "hub"),
+                        "HUGGINGFACE_HUB_CACHE": os.path.join(hf_root, "hub"),
+                    }
+                )
+            ):
                 model = vp.PocketTTSModel.load_model(config=token)
             vp._pocket_tts_model_cache[token] = model
         return model
@@ -933,14 +944,19 @@ def _load_piper_voice_model(model_id: str) -> Any:
     backend_root = vp._ensure_tts_backend_model_root("piper")
     if not (os.path.isfile(model_path) and os.path.isfile(config_path)):
         vp.logger.info("[native-voice] piper model missing; downloading model=%s target_root=%s", model_id, backend_root)
-        vp.piper_download_voice(vp._text(model_id) or vp.DEFAULT_PIPER_MODEL, download_dir=importlib.import_module("pathlib").Path(backend_root))
+        with _temporary_env(huggingface_environment()):
+            vp.piper_download_voice(
+                vp._text(model_id) or vp.DEFAULT_PIPER_MODEL,
+                download_dir=importlib.import_module("pathlib").Path(backend_root),
+            )
 
     cache_key = vp._text(model_path)
     with vp._piper_voice_lock:
         voice = vp._piper_voice_cache.get(cache_key)
         if voice is None:
             vp.logger.info("[native-voice] piper model source=%s", model_path)
-            voice = vp.PiperVoice.load(model_path=model_path, config_path=config_path, download_dir=backend_root)
+            with _temporary_env(huggingface_environment()):
+                voice = vp.PiperVoice.load(model_path=model_path, config_path=config_path, download_dir=backend_root)
             vp._piper_voice_cache[cache_key] = voice
         return voice
 
@@ -963,7 +979,15 @@ def _synthesize_pocket_tts_sync(text: str, model_id: str, voice: str) -> Tuple[b
     root = vp._ensure_tts_backend_model_root("pocket_tts")
     hf_root = os.path.join(root, "hf")
     os.makedirs(hf_root, exist_ok=True)
-    with _temporary_env({"HF_HOME": hf_root, "HF_HUB_CACHE": os.path.join(hf_root, "hub"), "HUGGINGFACE_HUB_CACHE": os.path.join(hf_root, "hub")}):
+    with _temporary_env(
+        huggingface_environment(
+            {
+                "HF_HOME": hf_root,
+                "HF_HUB_CACHE": os.path.join(hf_root, "hub"),
+                "HUGGINGFACE_HUB_CACHE": os.path.join(hf_root, "hub"),
+            }
+        )
+    ):
         model_state = model.get_state_for_audio_prompt(vp._text(voice) or vp.DEFAULT_POCKET_TTS_VOICE)
         audio_tensor = model.generate_audio(model_state, prompt)
     tensor = audio_tensor.detach().cpu().squeeze()

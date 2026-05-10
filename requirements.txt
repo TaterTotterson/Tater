@@ -38,6 +38,7 @@ silero-vad
 webrtcvad-wheels
 torch
 speechbrain==1.1.0
+transformers
 faster-whisper
 vosk
 pykokoro
