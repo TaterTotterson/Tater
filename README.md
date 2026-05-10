@@ -30,7 +30,6 @@ Some Portals are paired with companion repos/apps that complete the end-user int
 | Companion Repo/App | Used With | Purpose |
 |---|---|---|
 | https://github.com/TaterTotterson/hassio-addons-tater | Home Assistant | Home Assistant add-on repository for running Tater + Redis Stack directly inside HAOS/Supervised setups. |
-| https://github.com/TaterTotterson/Tater-HomeAssistant | Home Assistant Portal | Conversation Agent integration that routes Home Assistant Assist requests to Tater. |
 | https://github.com/TaterTotterson/Tater-MacOS | macOS Portal | Menu bar companion app and bridge client for desktop chat, quick actions, and uploads. |
 | https://github.com/TaterTotterson/tater_meshtastic_bridge | Meshtastic Portal | Host-side BLE bridge service for connecting Tater to Meshtastic radios over a simple local API. |
 | https://github.com/TaterTotterson/skin.cortana.tater-xbmc | XBMC Portal | OG Xbox/XBMC4Xbox skin and script integration for on-console Tater access. |
@@ -268,37 +267,6 @@ Once the container is running with host networking, open your browser and naviga
 If you changed `HTMLUI_PORT`, use that port in the URL.
 
 Once the WebUI is up, continue to **Post-Install Setup** below.
-
----
-
-## ESPHome Display Feed
-
-ESPHome displays can poll Tater directly for a compact JSON feed instead of binding their screen widgets to Home Assistant. Use named query parameters to map display slots to Home Assistant entity IDs already known to Tater:
-
-```text
-http://<tater-host>:8501/tater-ha/v1/display/feed?temp_out=sensor.weather_outdoor_temperature&temp_in=sensor.living_room_temperature&humidity_out=sensor.humidity&humidity_in=sensor.up_sense_humidity_level&wind_speed=sensor.wind_speed&rain_rate=sensor.rain_rate&lightning_strikes=sensor.weather_lightning_strikes
-```
-
-If Voice API auth is enabled, send the same `X-Tater-Token` header used by Tater ESPHome voice routes. Display values live in `slots`, flat numeric/string `values`, and display-ready `text`; the feed also includes a local `clock`.
-
-Apps can also push transient display events for LVGL notification pages:
-
-```bash
-curl -X POST "http://<tater-host>:8501/tater-ha/v1/display/events" \
-  -H "Content-Type: application/json" \
-  -H "X-Tater-Token: <optional-token>" \
-  -d '{"kind":"doorbell","title":"Doorbell","message":"Someone is at the front door.","image_url":"http://camera/snapshot.jpg","ttl_seconds":90}'
-```
-
-Display event kinds include `notification`, `camera`, `doorbell`, `image`, `tool_call`, `voice`, `status`, and `alert`. Apps can publish `tool_call` with `animation: "tool_call"` plus optional `tool`, `phase`, `status`, `step_index`, and `step_total` metadata for displays that render a tool-progress state. Awareness camera snapshots stored in Redis can be served back to displays from `/tater-ha/v1/display/snapshots/<snapshot_id>` using the same display API token.
-
-Displays can poll events with:
-
-```text
-http://<tater-host>:8501/tater-ha/v1/display/events?target=livingroom&after_seq=0
-```
-
-The built-in notifier also accepts `display`, `screen`, or `tater display` as a destination, so awareness rules and other Tater send-message paths can queue display cards without knowing the ESPHome firmware details.
 
 ---
 
