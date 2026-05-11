@@ -2982,19 +2982,17 @@ async def _play_live_tool_progress_for_session(
     if last and current and last == current:
         return
 
-    audio_bytes, audio_format, _backend_used, _backend_note = await _native_synthesize_text(
+    audio_bytes, audio_format, backend_used, _backend_note = await _native_synthesize_text(
         spoken,
         session=session,
     )
     if not audio_bytes:
         return
 
-    url = _store_tts_url(selector, session.session_id, audio_bytes, audio_format)
-    if not url:
-        return
-
+    reply_playback_target = _session_reply_playback_target(selector, session)
+    reply_playback_on_device = reply_playback_target == reply_playback.REPLY_PLAYBACK_DEVICE
     timeout_s = _run_end_timeout_s(audio_bytes, audio_format)
-    waiter: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+    waiter: Optional[asyncio.Future[Any]] = None
     lock = runtime.get("lock")
 
     await _ensure_voice_stt_end_sent(client, module, session=session, transcript=transcript)
@@ -3010,23 +3008,59 @@ async def _play_live_tool_progress_for_session(
         },
     )
 
-    async with lock:
-        _set_awaiting_announcement_state(
-            runtime,
-            session_id=_text(session.session_id),
-            kind="tool_progress",
-            future=waiter,
-            timeout_s=timeout_s,
+    if reply_playback_target == reply_playback.REPLY_PLAYBACK_SILENT:
+        await asyncio.sleep(min(max(_estimate_pcm_duration_s(audio_bytes, audio_format), 0.2), 2.0))
+        _native_debug(
+            f"live tool progress suppressed by silent playback selector={selector} session_id={session.session_id} text={spoken!r}"
         )
-        _cancel_announcement_wait(runtime)
-        _schedule_announcement_timeout(selector, client, module, timeout_s)
+    elif not reply_playback_on_device:
+        external_result = await _play_reply_on_external_target(
+            selector=selector,
+            session=session,
+            spoken_text=spoken,
+            target=reply_playback_target,
+            audio_bytes=audio_bytes,
+            audio_format=audio_format,
+            backend_used=backend_used,
+        )
+        external_ok = bool(external_result.get("ok")) if isinstance(external_result, dict) else False
+        if not external_ok:
+            logger.warning(
+                "[native-voice] external tool-progress playback failed selector=%s target=%s error=%s",
+                selector,
+                reply_playback_target,
+                _text((external_result or {}).get("error") if isinstance(external_result, dict) else ""),
+            )
+        playback_delay_s = max(0.25, min(8.0, _estimate_pcm_duration_s(audio_bytes, audio_format) + 0.2))
+        await asyncio.sleep(playback_delay_s if external_ok else 0.25)
+        _native_debug(
+            f"live tool progress external playback selector={selector} target={reply_playback_target} "
+            f"ok={external_ok} session_id={session.session_id} text={spoken!r}"
+        )
+    else:
+        url = _store_tts_url(selector, session.session_id, audio_bytes, audio_format)
+        if not url:
+            return
+        waiter = asyncio.get_running_loop().create_future()
 
-    await _esphome_send_event(client, module, ("VOICE_ASSISTANT_TTS_END", "TTS_END"), {"url": url})
-    _native_debug(
-        f"live tool progress queued selector={selector} session_id={session.session_id} timeout_s={timeout_s:.2f} text={spoken!r}"
-    )
-    with contextlib.suppress(Exception):
-        await waiter
+        async with lock:
+            _set_awaiting_announcement_state(
+                runtime,
+                session_id=_text(session.session_id),
+                kind="tool_progress",
+                future=waiter,
+                timeout_s=timeout_s,
+            )
+            _cancel_announcement_wait(runtime)
+            _schedule_announcement_timeout(selector, client, module, timeout_s)
+
+        await _esphome_send_event(client, module, ("VOICE_ASSISTANT_TTS_END", "TTS_END"), {"url": url})
+        _native_debug(
+            f"live tool progress queued selector={selector} session_id={session.session_id} timeout_s={timeout_s:.2f} text={spoken!r}"
+        )
+        with contextlib.suppress(Exception):
+            await waiter
+
     await _ensure_voice_intent_active(client, module, session=session)
     session.live_tool_progress_played = True
     session.last_tool_progress_text = spoken
