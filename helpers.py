@@ -820,7 +820,16 @@ def _sanitize_chat_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, An
 
         cleaned.append({"role": role, "content": content_text})
 
-    return cleaned
+    system_parts = [str(m.get("content") or "").strip() for m in cleaned if m.get("role") == "system"]
+    if not system_parts:
+        return cleaned
+
+    # Some OpenAI-compatible local servers use strict Jinja chat templates that
+    # only allow system content at message index 0. Keep all Tater context, but
+    # coalesce it into one leading system message for maximum backend compatibility.
+    merged_system = "\n\n".join(part for part in system_parts if part)
+    non_system = [m for m in cleaned if m.get("role") != "system"]
+    return ([{"role": "system", "content": merged_system}] if merged_system else []) + non_system
 
 def _coerce_content_to_text(content) -> str:
     if isinstance(content, str):
