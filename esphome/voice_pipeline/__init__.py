@@ -4224,6 +4224,10 @@ async def _finalize_session(
                     turn_latency_ms=max(0.0, (_now() - float(session.started_ts or _now())) * 1000.0),
                 )
                 with contextlib.suppress(Exception):
+                    await _esphome_send_event(client, module, ("VOICE_ASSISTANT_STT_VAD_END", "STT_VAD_END"), None)
+                with contextlib.suppress(Exception):
+                    await _esphome_send_event(client, module, ("VOICE_ASSISTANT_STT_END", "STT_END"), {"text": ""})
+                with contextlib.suppress(Exception):
                     await _send_voice_run_end(
                         client,
                         module,
