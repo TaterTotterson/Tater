@@ -425,7 +425,7 @@ def voice_ui_setting_specs() -> List[Dict[str, Any]]:
             "label": "Enable Tater openWakeWord",
             "type": "checkbox",
             "default": True,
-            "description": "Enables Tater's openWakeWord detector for satellites that post wake-audio chunks to /api/openwakeword/detect. Turn off only when every satellite is using device-local microWakeWord.",
+            "description": "Enables Tater's openWakeWord detector for satellites that stream wake audio to /api/openwakeword/stream. Turn off only when every satellite is using device-local microWakeWord.",
         },
         {
             "key": "VOICE_OPENWAKEWORD_MODEL_SOURCE",
