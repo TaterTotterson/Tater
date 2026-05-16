@@ -133,6 +133,8 @@ _TRAINER_WAKE_WORD_CATALOG_LOCK = threading.Lock()
 _WAKE_SOUND_CATALOG_CACHE_TTL_SECONDS = 10 * 60.0
 _WAKE_SOUND_CATALOG_CACHE: Dict[str, Any] = {"ts": 0.0, "payload": {}}
 _WAKE_SOUND_CATALOG_LOCK = threading.Lock()
+_WAKE_SOUND_DISABLED_PICKER_VALUE = "__none__"
+_WAKE_SOUND_ENABLED_PROFILE_KEY = "wake_sound_enabled"
 
 _TEMPLATE_SPECS: tuple[Dict[str, Any], ...] = (
     {
@@ -1456,7 +1458,11 @@ def _wake_sound_picker_options(catalog: Dict[str, Any]) -> List[Dict[str, Any]]:
             }
         )
     rows.sort(key=lambda option: (_lower(option.get("label")), _text(option.get("value"))))
-    return [{"value": "__custom__", "label": "Custom URL"}, *rows]
+    return [
+        {"value": _WAKE_SOUND_DISABLED_PICKER_VALUE, "label": "No wake sound"},
+        {"value": "__custom__", "label": "Custom URL"},
+        *rows,
+    ]
 
 
 def _extract_substitution_sections(raw_text: str) -> Dict[str, str]:
@@ -1842,7 +1848,7 @@ def _build_device_context(
             field_step = 1
             description_parts.append("Consecutive remote openWakeWord request failures before the device falls back to microWakeWord.")
         elif key == "wake_word_model_url":
-            description_parts.append("Used when Wake Word Source is Custom URL.")
+            description_parts.append("Used when microWakeWord Model Source is Custom URL.")
         elif key == "wake_word_triggered_sound_file":
             description_parts.append("Pick a prebuilt wake sound above or paste any custom audio URL.")
         elif key == "tater_base_url":
@@ -1900,6 +1906,9 @@ def _build_device_context(
             field_row["step"] = field_step
         if key == "wake_word_model_url":
             field_row["show_when"] = {"source_key": "wake_word_source", "equals": "custom"}
+        if key == "wake_word_triggered_sound_file":
+            field_row["disable_when"] = {"source_key": "wake_sound_catalog", "equals": _WAKE_SOUND_DISABLED_PICKER_VALUE}
+            field_row["disabled_note"] = "Wake sound is disabled for this build."
         if field_disabled:
             field_row["disabled"] = True
         if placeholder and not effective_read_only:
@@ -1937,17 +1946,17 @@ def _build_device_context(
         picker_value = current_wake_word_url if current_wake_word_url in available_urls else ""
         trainer_picker_value = current_wake_word_url if current_wake_word_url in trainer_available_urls else ""
         catalog_description = (
-            f"Choose from {len(wake_word_entries)} prebuilt wake words. If you need a new shared wake word, request it from the "
+            f"Choose from {len(wake_word_entries)} prebuilt microWakeWord models. If you need a new shared wake word, request it from the "
             "microWakeWords repo link below and this list will update after it is added."
             if wake_word_entries
-            else "Prebuilt wake-word catalog is unavailable right now. "
+            else "Prebuilt microWakeWord catalog is unavailable right now. "
             "If you need a new wake word, request it from the microWakeWords repo link below and this list will update after it is added."
         )
         catalog_warning = _text(wake_word_catalog.get("warning"))
         if catalog_warning and not wake_word_entries:
             catalog_description = f"{catalog_description} {_text(catalog_warning)}".strip()
         trainer_description = (
-            f"Loaded {len(trainer_wake_word_entries)} trained wake words from the trainer app."
+            f"Loaded {len(trainer_wake_word_entries)} trained microWakeWord models from the trainer app."
             if trainer_wake_word_entries
             else "Enter a trainer URL; Tater loads this list when the URL changes or when the tab refreshes."
         )
@@ -1957,7 +1966,7 @@ def _build_device_context(
         micro_wakeword_picker_fields = [
             {
                 "key": "wake_word_source",
-                "label": "Wake Word Source",
+                "label": "microWakeWord Model Source",
                 "type": "select",
                 "value": wake_word_source,
                 "options": [
@@ -1965,33 +1974,33 @@ def _build_device_context(
                     {"value": "trainer", "label": "Trainer App"},
                     {"value": "custom", "label": "Custom URL"},
                 ],
-                "description": "Choose a shared prebuilt model, a model from a microWakeWord trainer app, or a direct JSON URL.",
+                "description": "Choose the local microWakeWord model flashed onto the device. openWakeWord uses the separate Wake Engine and openWakeWord URL settings.",
             },
             {
                 "key": "wake_word_catalog",
-                "label": "Prebuilt Wake Word",
+                "label": "Prebuilt microWakeWord",
                 "type": "select",
                 "value": picker_value,
                 "options": _wake_word_picker_options(
                     wake_word_catalog,
                     include_custom=False,
-                    blank_label="Choose prebuilt wake word",
+                    blank_label="Choose prebuilt microWakeWord",
                 ),
                 "description": catalog_description,
                 "show_when": {"source_key": "wake_word_source", "equals": "prebuilt"},
             },
             {
                 "key": "wake_word_trainer_url",
-                "label": "Trainer App URL",
+                "label": "microWakeWord Trainer URL",
                 "type": "text",
                 "value": wake_word_trainer_url,
                 "placeholder": "http://trainer.local:8789",
-                "description": "Tater will read /api/trained_wake_words/catalog from this trainer app.",
+                "description": "Tater will read /api/trained_wake_words/catalog from this microWakeWord trainer app.",
                 "show_when": {"source_key": "wake_word_source", "equals": "trainer"},
             },
             {
                 "key": "wake_word_trainer_catalog",
-                "label": "Trainer Wake Word",
+                "label": "Trainer microWakeWord",
                 "type": "select",
                 "value": trainer_picker_value,
                 "options": _trainer_wake_word_picker_options(trainer_wake_word_catalog),
@@ -2013,6 +2022,7 @@ def _build_device_context(
     wake_sound_section = section_lookup.get("Wake Sound") if isinstance(section_lookup.get("Wake Sound"), list) else None
     if isinstance(wake_sound_section, list) and "wake_word_triggered_sound_file" in fields_meta:
         wake_sound_entries = wake_sound_catalog.get("entries") if isinstance(wake_sound_catalog.get("entries"), list) else []
+        wake_sound_enabled = _as_bool(profile.get(_WAKE_SOUND_ENABLED_PROFILE_KEY), True)
         current_wake_sound_url = _text(
             (
                 fields_meta.get("wake_word_triggered_sound_file", {}).get("resolved_value")
@@ -2021,12 +2031,18 @@ def _build_device_context(
             )
         )
         available_urls = {_text(row.get("url")) for row in wake_sound_entries if isinstance(row, dict)}
-        picker_value = current_wake_sound_url if current_wake_sound_url in available_urls else "__custom__"
+        picker_value = (
+            _WAKE_SOUND_DISABLED_PICKER_VALUE
+            if not wake_sound_enabled
+            else current_wake_sound_url
+            if current_wake_sound_url in available_urls
+            else "__custom__"
+        )
         catalog_description = (
             f"Choose from {len(wake_sound_entries)} prebuilt wake sounds, "
-            "or leave this on Custom URL and paste your own audio URL below."
+            "select No wake sound, or leave this on Custom URL and paste your own audio URL below."
             if wake_sound_entries
-            else "Prebuilt wake-sound catalog is unavailable right now. You can still paste any custom audio URL below."
+            else "Prebuilt wake-sound catalog is unavailable right now. You can still select No wake sound or paste any custom audio URL below."
         )
         catalog_warning = _text(wake_sound_catalog.get("warning"))
         if catalog_warning and not wake_sound_entries:
@@ -2382,6 +2398,9 @@ def firmware_panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
                     warnings.append(message)
                 continue
             if isinstance(context, dict):
+                context_item = context["item"]
+                if isinstance(context_item, dict):
+                    context_item["unmatched_template"] = not bool(matched_template_key)
                 append_device_option(
                     {
                         **device_option,
@@ -2449,23 +2468,29 @@ def firmware_panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
         empty_message = "No ESPHome firmware targets are available."
 
     firmware_updates: List[Dict[str, Any]] = []
+    firmware_flash_targets: List[Dict[str, Any]] = []
     for template_key, rows in variants.items():
         if not isinstance(rows, dict):
             continue
         for selector_token, item in rows.items():
-            if not isinstance(item, dict) or not bool(item.get("firmware_update_available")):
+            if not isinstance(item, dict):
                 continue
             if _is_usb_recovery_selector(selector_token):
                 continue
+            row_payload = {
+                "selector": selector_token,
+                "template_key": template_key,
+                "title": _text(item.get("title")) or selector_token,
+                "template_label": _text(item.get("template_label")),
+                "installed": _text(item.get("installed_firmware_version")) or "unknown",
+                "latest": _text(item.get("firmware_version")),
+            }
+            if bool(item.get("connected")) and not bool(item.get("unmatched_template")):
+                firmware_flash_targets.append(dict(row_payload))
+            if not bool(item.get("firmware_update_available")):
+                continue
             firmware_updates.append(
-                {
-                    "selector": selector_token,
-                    "template_key": template_key,
-                    "title": _text(item.get("title")) or selector_token,
-                    "template_label": _text(item.get("template_label")),
-                    "installed": _text(item.get("installed_firmware_version")) or "unknown",
-                    "latest": _text(item.get("firmware_version")),
-                }
+                row_payload
             )
 
     payload = {
@@ -2476,6 +2501,8 @@ def firmware_panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
         "variants": variants,
         "firmware_updates": firmware_updates,
         "firmware_update_count": len(firmware_updates),
+        "firmware_flash_targets": firmware_flash_targets,
+        "firmware_flash_target_count": len(firmware_flash_targets),
         "active_selector": active_selector,
         "active_template_key": active_template_key,
         "empty_message": empty_message,
@@ -2572,7 +2599,15 @@ def _normalize_profile_values(context: Dict[str, Any], values: Dict[str, Any]) -
             normalized["wake_word_name"] = _wake_word_slug_from_url(trainer_wake_word_value) or _text(normalized.get("wake_word_name"))
 
     wake_sound_catalog_value = _text(incoming.get("wake_sound_catalog"))
-    if wake_sound_catalog_value and wake_sound_catalog_value != "__custom__" and "wake_word_triggered_sound_file" in normalized:
+    if wake_sound_catalog_value == _WAKE_SOUND_DISABLED_PICKER_VALUE:
+        normalized[_WAKE_SOUND_ENABLED_PROFILE_KEY] = "false"
+    elif wake_sound_catalog_value:
+        normalized[_WAKE_SOUND_ENABLED_PROFILE_KEY] = "true"
+    if (
+        wake_sound_catalog_value
+        and wake_sound_catalog_value not in {"__custom__", _WAKE_SOUND_DISABLED_PICKER_VALUE}
+        and "wake_word_triggered_sound_file" in normalized
+    ):
         normalized["wake_word_triggered_sound_file"] = wake_sound_catalog_value
 
     if _text(context.get("host")) and "ha_voice_ip" in normalized:
@@ -2632,6 +2667,38 @@ def _rewrite_local_packages(config: Dict[str, Any], repo_root: Optional[Path]) -
         config["packages"] = new_packages
 
 
+def _append_esphome_on_boot(config: Dict[str, Any], automation: Dict[str, Any]) -> None:
+    if not isinstance(config, dict) or not isinstance(automation, dict):
+        return
+    esphome_block = config.get("esphome") if isinstance(config.get("esphome"), dict) else {}
+    existing = esphome_block.get("on_boot")
+    if isinstance(existing, list):
+        existing.append(automation)
+    elif existing:
+        esphome_block["on_boot"] = [existing, automation]
+    else:
+        esphome_block["on_boot"] = [automation]
+    config["esphome"] = esphome_block
+
+
+def _apply_wake_sound_profile(config: Dict[str, Any], values: Dict[str, str]) -> None:
+    if _as_bool((values or {}).get(_WAKE_SOUND_ENABLED_PROFILE_KEY), True):
+        return
+    substitutions = config.get("substitutions") if isinstance(config.get("substitutions"), dict) else {}
+    if "wake_sound_restore_mode" in substitutions:
+        substitutions["wake_sound_restore_mode"] = "ALWAYS_OFF"
+        config["substitutions"] = substitutions
+    _append_esphome_on_boot(
+        config,
+        {
+            "priority": -100,
+            "then": [
+                {"switch.turn_off": "wake_sound"},
+            ],
+        },
+    )
+
+
 def _render_config_text(context: Dict[str, Any], values: Dict[str, str]) -> str:
     config = copy.deepcopy(context["template_ctx"]["template_doc"])
     substitutions = config.get("substitutions") if isinstance(config.get("substitutions"), dict) else {}
@@ -2643,6 +2710,7 @@ def _render_config_text(context: Dict[str, Any], values: Dict[str, str]) -> str:
         FIRMWARE_BUILD_ROOT / _sanitize_token(context.get("selector")) / _sanitize_token(context.get("template_key"))
     )
     config["esphome"] = esphome_block
+    _apply_wake_sound_profile(config, values)
     _rewrite_local_packages(config, context["template_ctx"].get("repo_root"))
     return yaml.dump(config, Dumper=_FirmwareYamlDumper, sort_keys=False, allow_unicode=True)
 

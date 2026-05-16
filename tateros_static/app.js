@@ -6163,8 +6163,11 @@ function syncEspHomeFirmwareWakeSoundCatalog(card, { fromPicker = false } = {}) 
 
   if (fromPicker) {
     const selectedUrl = String(picker.value || "").trim();
-    if (selectedUrl && selectedUrl !== "__custom__") {
+    if (selectedUrl && selectedUrl !== "__custom__" && selectedUrl !== "__none__") {
       urlInput.value = selectedUrl;
+    }
+    if (selectedUrl === "__none__") {
+      resetEspHomeWakeSoundPreview("Wake sound disabled.");
     }
     captureEspHomeFirmwareDraft(card);
     return;
@@ -6172,7 +6175,9 @@ function syncEspHomeFirmwareWakeSoundCatalog(card, { fromPicker = false } = {}) 
 
   const currentUrl = String(urlInput.value || "").trim();
   const optionValues = Array.from(picker.options).map((option) => String(option.value || "").trim());
-  if (currentUrl && optionValues.includes(currentUrl)) {
+  if (String(picker.value || "").trim() === "__none__") {
+    // Keep the user's saved URL around while the build is configured for no wake sound.
+  } else if (currentUrl && optionValues.includes(currentUrl)) {
     picker.value = currentUrl;
   } else if (optionValues.includes("__custom__")) {
     picker.value = "__custom__";
@@ -6186,11 +6191,14 @@ function getEspHomeWakeSoundPreviewUrl(card) {
   }
   const urlInput = card.querySelector('input[data-core-field-key="wake_word_triggered_sound_file"]');
   const picker = card.querySelector('select[data-core-field-key="wake_sound_catalog"]');
+  const pickerValue = String(picker instanceof HTMLSelectElement ? picker.value || "" : "").trim();
+  if (pickerValue === "__none__") {
+    return "";
+  }
   const urlValue = String(urlInput instanceof HTMLInputElement ? urlInput.value || "" : "").trim();
   if (urlValue) {
     return urlValue;
   }
-  const pickerValue = String(picker instanceof HTMLSelectElement ? picker.value || "" : "").trim();
   return pickerValue && pickerValue !== "__custom__" ? pickerValue : "";
 }
 
@@ -6237,6 +6245,14 @@ function bindEspHomeWakeSoundPreview(root = document) {
 
       const url = getEspHomeWakeSoundPreviewUrl(card);
       if (!url) {
+        const picker = card?.querySelector?.('select[data-core-field-key="wake_sound_catalog"]');
+        const pickerValue = String(picker instanceof HTMLSelectElement ? picker.value || "" : "").trim();
+        if (pickerValue === "__none__") {
+          if (status instanceof HTMLElement) {
+            status.textContent = "Wake sound disabled for this build.";
+          }
+          return;
+        }
         if (status instanceof HTMLElement) {
           status.textContent = "Choose a wake sound or enter a URL first.";
         }
@@ -6557,11 +6573,50 @@ function renderEspHomeFirmwareUpdatePanel(firmwareUpdates, coreKey = "esphome", 
   `;
 }
 
+function renderEspHomeFirmwareFlashAllPanel(firmwareTargets, coreKey = "esphome", cliAvailable = false) {
+  const rows = (Array.isArray(firmwareTargets) ? firmwareTargets : [])
+    .map((row) => {
+      const selector = String(row?.selector || "").trim();
+      const templateKey = String(row?.template_key || row?.templateKey || "").trim();
+      if (!selector || !templateKey) {
+        return null;
+      }
+      return {
+        selector,
+        templateKey,
+        title: String(row?.title || selector || "ESPHome device").trim() || "ESPHome device",
+        templateLabel: String(row?.template_label || row?.templateLabel || templateKey || "Firmware").trim() || "Firmware",
+      };
+    })
+    .filter(Boolean);
+  if (!rows.length) {
+    return "";
+  }
+  const count = rows.length;
+  return `
+    <section class="firmware-update-panel" aria-label="Flash all firmware devices">
+      <div class="firmware-update-head">
+        <div>
+          <div class="firmware-update-kicker">Saved Firmware Flash</div>
+          <h4>${escapeHtml(count)} connected device${count === 1 ? "" : "s"}</h4>
+          <p>Builds fresh firmware from the latest template and flashes each connected target with its saved settings.</p>
+        </div>
+        <button
+          type="button"
+          class="action-btn esphome-firmware-flash-all"
+          data-core-key="${escapeHtml(coreKey)}"${cliAvailable ? "" : " disabled"}
+        >Flash All Devices (${escapeHtml(count)})</button>
+      </div>
+    </section>
+  `;
+}
+
 function renderEspHomeFirmwarePanel(firmware, coreKey = "esphome") {
   const body = firmware && typeof firmware === "object" ? firmware : {};
   const devices = Array.isArray(body?.devices) ? body.devices : [];
   const warnings = Array.isArray(body?.warnings) ? body.warnings : [];
   const firmwareUpdates = Array.isArray(body?.firmware_updates) ? body.firmware_updates : [];
+  const firmwareFlashTargets = Array.isArray(body?.firmware_flash_targets) ? body.firmware_flash_targets : [];
   const cli = body?.cli && typeof body.cli === "object" ? body.cli : {};
   const cliAvailable = boolFromAny(cli?.available, false);
   const cliLabel = String(cli?.label || "Unavailable").trim() || "Unavailable";
@@ -6597,6 +6652,7 @@ function renderEspHomeFirmwarePanel(firmware, coreKey = "esphome") {
           : ""
       }
       ${renderEspHomeFirmwareUpdatePanel(firmwareUpdates, coreKey, cliAvailable)}
+      ${renderEspHomeFirmwareFlashAllPanel(firmwareFlashTargets, coreKey, cliAvailable)}
     </div>
     ${devices.length ? renderEspHomeFirmwareCard(body, coreKey) : renderNotice(emptyMessage)}
   `;
@@ -9605,7 +9661,36 @@ function espHomeFirmwareUpdateRows() {
     .filter(Boolean);
 }
 
-function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "esphome", updateRows = null) {
+function espHomeFirmwareFlashTargetRows() {
+  const firmware =
+    state.esphomeFirmwarePayload && typeof state.esphomeFirmwarePayload === "object"
+      ? state.esphomeFirmwarePayload
+      : {};
+  return (Array.isArray(firmware?.firmware_flash_targets) ? firmware.firmware_flash_targets : [])
+    .map((row) => {
+      const selector = String(row?.selector || "").trim();
+      const templateKey = String(row?.template_key || row?.templateKey || "").trim();
+      if (!selector || !templateKey) {
+        return null;
+      }
+      return {
+        ...row,
+        selector,
+        template_key: templateKey,
+        title: String(row?.title || selector).trim() || selector,
+      };
+    })
+    .filter(Boolean);
+}
+
+function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "esphome", updateRows = null, options = {}) {
+  const batchMode = String(options?.mode || "updates").trim();
+  const flashAllMode = batchMode === "flash_all";
+  const actionPast = flashAllMode ? "flashed" : "updated";
+  const actionProgress = flashAllMode ? "Flashing" : "Updating";
+  const emptyMessage = String(
+    options?.emptyMessage || (flashAllMode ? "No connected firmware devices are available to flash." : "No firmware updates are currently showing.")
+  ).trim();
   const updates = (Array.isArray(updateRows) ? updateRows : espHomeFirmwareUpdateRows())
     .map((row) => {
       const selector = String(row?.selector || "").trim();
@@ -9622,7 +9707,7 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "esphome", updateRo
     })
     .filter(Boolean);
   if (!updates.length) {
-    showToast("No firmware updates are currently showing.", "error", 2800);
+    showToast(emptyMessage, "error", 2800);
     return;
   }
   const singleUpdate = updates.length === 1;
@@ -9685,8 +9770,8 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "esphome", updateRo
     currentSessionId = "";
     setBusy(false);
     const summary = failed
-      ? `${singleUpdate ? "Firmware update" : "Firmware batch"} finished: ${completed} updated, ${failed} failed.`
-      : `${singleUpdate ? "Firmware update" : "Firmware batch"} finished: ${completed} updated.`;
+      ? `${singleUpdate ? "Firmware task" : "Firmware batch"} finished: ${completed} ${actionPast}, ${failed} failed.`
+      : `${singleUpdate ? "Firmware task" : "Firmware batch"} finished: ${completed} ${actionPast}.`;
     if (statusNode instanceof HTMLElement) {
       statusNode.classList.add("voice-log-status");
       statusNode.textContent = summary;
@@ -9715,7 +9800,7 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "esphome", updateRo
         if (statusNode instanceof HTMLElement) {
           statusNode.textContent =
             String(result?.status_text || result?.message || "").trim() ||
-            `Updating ${row.title} (${index}/${updates.length})...`;
+            `${actionProgress} ${row.title} (${index}/${updates.length})...`;
         }
         if (!boolFromAny(result?.active, true)) {
           const phase = String(result?.phase || "").trim().toLowerCase();
@@ -9725,7 +9810,7 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "esphome", updateRo
             appendBatchLine(`${row.title} failed${error ? `: ${error}` : "."}`, "error");
           } else {
             completed += 1;
-            appendBatchLine(`${row.title} updated.`, "info");
+            appendBatchLine(`${row.title} ${actionPast}.`, "info");
           }
           currentSessionId = "";
           window.setTimeout(startNext, 900);
@@ -9796,7 +9881,7 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "esphome", updateRo
 
   setBusy(true);
   openRuntimeSettingsModal({
-    title: singleUpdate ? "Update Firmware" : "Update All Firmware",
+    title: singleUpdate ? (flashAllMode ? "Flash Firmware" : "Update Firmware") : flashAllMode ? "Flash All Devices" : "Update All Firmware",
     meta: singleUpdate ? updates[0].title : `${updates.length} targets queued`,
     fields: [
       {
@@ -9805,7 +9890,9 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "esphome", updateRo
         type: "textarea",
         value: "",
         description: singleUpdate
-          ? "Tater builds and uploads this firmware update over OTA."
+          ? "Tater builds fresh firmware and uploads it over OTA."
+          : flashAllMode
+          ? "Tater flashes one device at a time with its saved settings and moves to the next after the upload completes."
           : "Tater updates one satellite at a time and moves to the next after the upload completes.",
       },
     ],
@@ -9835,8 +9922,11 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "esphome", updateRo
           label.appendChild(consoleEl);
         }
       }
-      renderEspHomeFirmwareLogEntries(logConsole, [], true, "Waiting to start firmware updates...");
-      appendBatchLine(`Queued ${updates.length} firmware update${updates.length === 1 ? "" : "s"}.`, "info");
+      renderEspHomeFirmwareLogEntries(logConsole, [], true, flashAllMode ? "Waiting to start firmware flash..." : "Waiting to start firmware updates...");
+      appendBatchLine(
+        `Queued ${updates.length} firmware ${flashAllMode ? "flash target" : "update"}${updates.length === 1 ? "" : "s"}.`,
+        "info"
+      );
       await startNext();
     },
     onClose: ({ modal, fieldsEl, statusEl }) => {
@@ -9852,6 +9942,20 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "esphome", updateRo
 }
 
 function bindEspHomeFirmwareActions(root = document) {
+  root.querySelectorAll(".esphome-firmware-flash-all").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement) || button.dataset.esphomeFirmwareFlashAllBound === "1") {
+      return;
+    }
+    button.dataset.esphomeFirmwareFlashAllBound = "1";
+    button.addEventListener("click", () => {
+      const coreKey = String(button.dataset?.coreKey || "esphome").trim() || "esphome";
+      openEspHomeFirmwareUpdateAllFlow(button, coreKey, espHomeFirmwareFlashTargetRows(), {
+        mode: "flash_all",
+        emptyMessage: "No connected firmware devices are available to flash.",
+      });
+    });
+  });
+
   root.querySelectorAll(".esphome-firmware-update-all").forEach((button) => {
     if (!(button instanceof HTMLButtonElement) || button.dataset.esphomeFirmwareUpdateAllBound === "1") {
       return;
