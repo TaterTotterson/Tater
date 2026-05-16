@@ -25,13 +25,27 @@ def _vp():
 _LOCAL_STT_TRANSCRIBE_LOCK = asyncio.Lock()
 
 
+def _drain_background_task(task: asyncio.Task[Any]) -> None:
+    with contextlib.suppress(BaseException):
+        task.result()
+
+
 async def _run_local_stt_thread(func: Any, *args: Any) -> str:
+    vp = _vp()
     task = asyncio.create_task(asyncio.to_thread(func, *args))
     try:
-        return await asyncio.shield(task)
+        timeout_s = vp._get_float_setting(
+            "VOICE_NATIVE_LOCAL_STT_TIMEOUT_S",
+            vp.DEFAULT_LOCAL_STT_TIMEOUT_SECONDS,
+            minimum=5.0,
+            maximum=180.0,
+        )
+        return await asyncio.wait_for(asyncio.shield(task), timeout=max(5.0, float(timeout_s)))
+    except asyncio.TimeoutError:
+        task.add_done_callback(_drain_background_task)
+        raise TimeoutError(f"Local STT timed out after {float(timeout_s):.1f}s")
     except asyncio.CancelledError:
-        with contextlib.suppress(Exception):
-            await task
+        task.add_done_callback(_drain_background_task)
         raise
 
 
@@ -438,6 +452,8 @@ async def _native_wyoming_stream_stt_task(
         or vp.WyomingAudioStop is None
         or vp.WyomingError is None
     ):
+        if isinstance(session_ref, VoiceSessionRuntime):
+            vp._mark_stt_stream_unhealthy(session_ref, "wyoming_dependency_unavailable")
         return
 
     host, port = _wyoming_stt_endpoint()
@@ -500,11 +516,15 @@ async def _native_wyoming_stream_stt_task(
                         if vp.WyomingError.is_type(event.type):
                             err = vp.WyomingError.from_event(event)
                             vp._native_debug(f"Wyoming STT error: {err.text}")
+                            if isinstance(session_ref, VoiceSessionRuntime):
+                                vp._mark_stt_stream_unhealthy(session_ref, vp._text(err.text) or "wyoming_stt_error")
                             if not result_future.done():
                                 result_future.set_result("")
                             return
                 except Exception as exc:
                     vp._native_debug(f"STT stream reader failed: {exc}")
+                    if isinstance(session_ref, VoiceSessionRuntime):
+                        vp._mark_stt_stream_unhealthy(session_ref, f"wyoming_reader_failed:{exc}")
                     if not result_future.done():
                         result_future.set_result("")
 
@@ -535,6 +555,61 @@ async def _native_wyoming_stream_stt_task(
                     await reader_task
     except Exception as exc:
         vp._native_debug(f"STT stream task failed: {exc}")
+        if isinstance(session_ref, VoiceSessionRuntime):
+            vp._mark_stt_stream_unhealthy(session_ref, f"wyoming_stream_failed:{exc}")
+
+
+def _buffered_stt_fallback_backend() -> str:
+    vp = _vp()
+    candidates = []
+    default_backend = vp._normalize_stt_backend(vp.DEFAULT_STT_BACKEND)
+    if default_backend != "wyoming":
+        candidates.append(default_backend)
+    candidates.extend(["faster_whisper", "vosk"])
+
+    seen = set()
+    for candidate in candidates:
+        token = vp._normalize_stt_backend(candidate)
+        if token in seen or token == "wyoming":
+            continue
+        seen.add(token)
+        ok, _reason = vp._stt_backend_available(token)
+        if ok:
+            return token
+    return ""
+
+
+async def _transcribe_buffered_stt_fallback(session: VoiceSessionRuntime, reason: str) -> str:
+    vp = _vp()
+    audio_bytes = bytes(session.audio_buffer or b"")
+    if not audio_bytes:
+        return ""
+    backend = _buffered_stt_fallback_backend()
+    if not backend:
+        vp._native_debug(
+            f"STT stream fallback unavailable selector={session.selector} session_id={session.session_id} "
+            f"reason={vp._text(reason) or '-'}"
+        )
+        return ""
+    if not bool(session.stt_stream_fallback_used):
+        vp._voice_metrics_record_stt_fallback(session.selector, vp._text(reason) or "wyoming_stream_unhealthy")
+        session.stt_stream_fallback_used = True
+    vp._native_debug(
+        f"STT stream fallback selector={session.selector} session_id={session.session_id} "
+        f"backend={backend} reason={vp._text(reason) or '-'} bytes={len(audio_bytes)}"
+    )
+    transcript = await _native_transcribe_local_audio_bytes(
+        backend=backend,
+        audio_bytes=audio_bytes,
+        audio_format=session.audio_format,
+        language=session.language,
+        selector=session.selector,
+        session_id=session.session_id,
+        partial=False,
+    )
+    session.stt_backend_effective = backend
+    session.stt_transcript = vp._text(transcript)
+    return session.stt_transcript
 
 
 async def _native_transcribe_session_audio(session: VoiceSessionRuntime) -> str:
@@ -542,12 +617,27 @@ async def _native_transcribe_session_audio(session: VoiceSessionRuntime) -> str:
     backend = vp._normalize_stt_backend(vp._text(session.stt_backend_effective) or vp._text(session.stt_backend))
     if backend == "wyoming":
         if session.stt_task is not None:
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(session.stt_task, timeout=15.0)
+            wait_timeout = 2.0 if bool(session.stt_stream_unhealthy) else 15.0
+            try:
+                await asyncio.wait_for(session.stt_task, timeout=wait_timeout)
+            except asyncio.TimeoutError:
+                vp._mark_stt_stream_unhealthy(session, "wyoming_stream_result_timeout")
+                session.stt_task.cancel()
+                with contextlib.suppress(BaseException):
+                    await session.stt_task
         final_text = vp._text(session.stt_transcript)
-        if final_text:
+        if final_text and not bool(session.stt_stream_unhealthy):
             return final_text
         fallback = vp._text(session.partial_transcript)
+        if bool(session.stt_stream_unhealthy):
+            buffered = await _transcribe_buffered_stt_fallback(
+                session,
+                vp._text(session.stt_stream_fallback_reason) or "wyoming_stream_unhealthy",
+            )
+            if buffered:
+                return buffered
+        if final_text:
+            return final_text
         session.stt_transcript = fallback
         return fallback
 
@@ -901,6 +991,28 @@ def _load_kokoro_pipeline(model_id: str) -> Any:
         return pipeline
 
 
+def _pocket_tts_load_model_for_token(token: str) -> Any:
+    vp = _vp()
+    model_token = vp._text(token)
+    if not model_token or model_token.lower() in {"default", vp.DEFAULT_POCKET_TTS_MODEL.lower()}:
+        return vp.PocketTTSModel.load_model()
+
+    expanded = os.path.expanduser(model_token)
+    if expanded.lower().endswith((".yaml", ".yml")):
+        return vp.PocketTTSModel.load_model(config=expanded)
+
+    try:
+        return vp.PocketTTSModel.load_model(model_token)
+    except Exception as exc:
+        message = str(exc)
+        if "Config should be a path" in message:
+            raise RuntimeError(
+                "PocketTTS model config must be a local .yaml file. "
+                "Use the built-in PocketTTS model option unless you are providing a custom YAML config path."
+            ) from exc
+        raise
+
+
 def _load_pocket_tts_model(model_id: str) -> Any:
     vp = _vp()
     if vp.PocketTTSModel is None:
@@ -923,7 +1035,7 @@ def _load_pocket_tts_model(model_id: str) -> Any:
                     }
                 )
             ):
-                model = vp.PocketTTSModel.load_model(config=token)
+                model = _pocket_tts_load_model_for_token(token)
             vp._pocket_tts_model_cache[token] = model
         return model
 

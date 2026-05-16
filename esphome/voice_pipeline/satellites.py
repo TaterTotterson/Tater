@@ -309,6 +309,25 @@ def _schedule_audio_stall_watch(
 
                     now_ts = vp._now()
                     wake_started = bool(vp._text(session.wake_word))
+                    active_listen_started = wake_started or bool(getattr(session, "continued_chat_reopen", False))
+                    after_speech_timeout_s = vp._as_float(
+                        getattr(session, "audio_stall_timeout_s", vp.DEFAULT_AUDIO_STALL_TIMEOUT_S),
+                        vp.DEFAULT_AUDIO_STALL_TIMEOUT_S,
+                        minimum=0.4,
+                        maximum=20.0,
+                    )
+                    no_speech_timeout_s = vp._as_float(
+                        getattr(session, "audio_stall_no_speech_timeout_s", vp.DEFAULT_AUDIO_STALL_NO_SPEECH_TIMEOUT_S),
+                        vp.DEFAULT_AUDIO_STALL_NO_SPEECH_TIMEOUT_S,
+                        minimum=1.0,
+                        maximum=30.0,
+                    )
+                    blank_timeout_s = vp._as_float(
+                        getattr(session, "blank_wake_timeout_s", vp.DEFAULT_BLANK_WAKE_TIMEOUT_S),
+                        vp.DEFAULT_BLANK_WAKE_TIMEOUT_S,
+                        minimum=1.0,
+                        maximum=20.0,
+                    )
                     if now_ts < float(session.startup_gate_until_ts):
                         continue
 
@@ -316,12 +335,10 @@ def _schedule_audio_stall_watch(
                     last_ts = float(session.last_audio_ts or 0.0)
                     if last_ts <= 0.0:
                         elapsed = now_ts - float(session.started_ts or now_ts)
-                        timeout_s = float(
-                            vp.DEFAULT_AUDIO_STALL_NO_SPEECH_TIMEOUT_S if wake_started else vp.DEFAULT_BLANK_WAKE_TIMEOUT_S
-                        )
+                        timeout_s = float(no_speech_timeout_s if active_listen_started else blank_timeout_s)
                         if elapsed >= timeout_s:
                             should_finalize = True
-                            finalize_reason = "audio_stall_no_audio" if wake_started else "blank_wake_timeout"
+                            finalize_reason = "audio_stall_no_audio" if active_listen_started else "blank_wake_timeout"
                         else:
                             continue
 
@@ -333,16 +350,14 @@ def _schedule_audio_stall_watch(
                     voice_seen = bool(seg.voice_seen) if isinstance(seg, vp.SegmenterState) else bool(chunks > 0)
 
                     if voice_seen:
-                        if gap_s >= float(vp.DEFAULT_AUDIO_STALL_TIMEOUT_S):
+                        if gap_s >= float(after_speech_timeout_s):
                             should_finalize = True
                             finalize_reason = "audio_stall_after_speech"
                     else:
-                        timeout_s = float(
-                            vp.DEFAULT_AUDIO_STALL_NO_SPEECH_TIMEOUT_S if wake_started else vp.DEFAULT_BLANK_WAKE_TIMEOUT_S
-                        )
+                        timeout_s = float(no_speech_timeout_s if active_listen_started else blank_timeout_s)
                         if gap_s >= timeout_s:
                             should_finalize = True
-                            finalize_reason = "audio_stall_no_speech" if wake_started else "blank_wake_timeout"
+                            finalize_reason = "audio_stall_no_speech" if active_listen_started else "blank_wake_timeout"
 
                 if should_finalize:
                     vp._native_debug(

@@ -5,7 +5,6 @@ import hashlib
 import json
 import logging
 import os
-import random
 import tempfile
 import threading
 import time
@@ -81,8 +80,10 @@ EMOTION_ID_MODEL_ROOT = Path(__file__).resolve().parents[1] / "agent_lab" / "mod
 
 DEFAULT_EMOTION_ID_ENABLED = False
 DEFAULT_EMOTION_ID_PROMPT_HINT_ENABLED = True
-DEFAULT_EMOTION_ID_INCLUDE_NEUTRAL = False
+DEFAULT_EMOTION_ID_INCLUDE_NEUTRAL = True
 DEFAULT_EMOTION_ID_MODEL_SOURCE = "speechbrain/emotion-recognition-wav2vec2-IEMOCAP"
+_DEPRECATED_SPEECHBRAIN_HF_PATH = "speechbrain.lobes.models.huggingface_transformers."
+_CURRENT_SPEECHBRAIN_HF_PATH = "speechbrain.integrations.huggingface."
 DEFAULT_EMOTION_ID_MIN_SPEECH_S = 1.0
 DEFAULT_EMOTION_ID_CONFIDENCE_THRESHOLD = 0.45
 _SPEECHBRAIN_REPO_FILES = (
@@ -150,10 +151,10 @@ def _setting_specs() -> List[Dict[str, Any]]:
         },
         {
             "key": "VOICE_EMOTION_ID_INCLUDE_NEUTRAL",
-            "label": "Prompt Neutral Tone",
+            "label": "Use Neutral Context",
             "type": "checkbox",
             "default": DEFAULT_EMOTION_ID_INCLUDE_NEUTRAL,
-            "description": "Include neutral detections in the prompt. Leave off to avoid extra prompt noise.",
+            "description": "Let neutral detections steady the reply without asking Tater to mention the tone.",
         },
         {
             "key": "VOICE_EMOTION_ID_CONFIDENCE_THRESHOLD",
@@ -255,8 +256,30 @@ def _snapshot_complete(savedir: Path) -> bool:
     return all((savedir / filename).exists() for filename in _SPEECHBRAIN_REPO_FILES)
 
 
+def _speechbrain_huggingface_integration_available() -> bool:
+    with contextlib.suppress(Exception):
+        import importlib.util
+
+        return importlib.util.find_spec("speechbrain.integrations.huggingface.wav2vec2") is not None
+    return False
+
+
+def _patch_speechbrain_hyperparams(savedir: Path) -> None:
+    if not _speechbrain_huggingface_integration_available():
+        return
+    hyperparams_path = savedir / "hyperparams.yaml"
+    with contextlib.suppress(Exception):
+        raw = hyperparams_path.read_text(encoding="utf-8")
+        if _DEPRECATED_SPEECHBRAIN_HF_PATH not in raw:
+            return
+        patched = raw.replace(_DEPRECATED_SPEECHBRAIN_HF_PATH, _CURRENT_SPEECHBRAIN_HF_PATH)
+        hyperparams_path.write_text(patched, encoding="utf-8")
+        _log_info("patched SpeechBrain deprecated Hugging Face path in %s", str(hyperparams_path))
+
+
 def _ensure_speechbrain_snapshot(source: str, savedir: Path, hf_cache_dir: Path) -> str:
     if _snapshot_complete(savedir):
+        _patch_speechbrain_hyperparams(savedir)
         return str(savedir)
     try:
         from huggingface_hub import snapshot_download  # type: ignore
@@ -276,6 +299,8 @@ def _ensure_speechbrain_snapshot(source: str, savedir: Path, hf_cache_dir: Path)
         token=token,
         allow_patterns=list(_SPEECHBRAIN_REPO_FILES),
     )
+    if _snapshot_complete(savedir):
+        _patch_speechbrain_hyperparams(savedir)
     return str(savedir) if _snapshot_complete(savedir) else source
 
 
@@ -602,23 +627,10 @@ def _normalize_label(value: Any) -> str:
 
 def _prompt_phrase(label: str, score: float) -> str:
     tone = _vp()._text(label) or "unknown"
-    response_style = random.choice(
-        (
-            "briefly acknowledge the perceived tone before answering",
-            "ask a gentle check-in while still answering the request",
-            "adapt your warmth and pace, naming the tone only if it helps",
-            "mirror the user's energy lightly before moving into the answer",
-            "make the emotional awareness visible in a short, natural aside",
-        )
-    )
-    return (
-        f"The user's voice tone seems {tone} (confidence {float(score or 0.0):.2f}). "
-        "This is a soft, fallible acoustic cue, not a fact. "
-        f"Let it visibly influence the response using this approach: {response_style}. "
-        "For non-neutral tones, usually include one brief acknowledgement, check-in, or tone-aware aside before or while answering, "
-        "unless that would interrupt an urgent or purely mechanical command. Use your own natural phrasing, vary the wording, "
-        "do not reuse a fixed template, and do not make the tone the whole reply."
-    )
+    confidence = float(score or 0.0)
+    if tone == "neutral":
+        return f"Voice tone cue: neutral ({confidence:.2f}, uncertain). Keep the reply steady and natural; do not mention the tone."
+    return f"Voice tone cue: {tone} ({confidence:.2f}, uncertain). Briefly acknowledge the tone in natural, varied wording, then answer normally."
 
 
 def _save_last_result(result: Dict[str, Any]) -> None:

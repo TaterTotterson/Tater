@@ -24,6 +24,7 @@ from . import runtime as esphome_runtime
 from . import ui_helpers as esphome_ui_helpers
 
 FIRMWARE_PROFILE_HASH_KEY = "tater:esphome:firmware:profiles:v1"
+FIRMWARE_INSTALLED_VERSION_HASH_KEY = "tater:esphome:firmware:installed_versions:v1"
 DISPLAY_PROFILE_HASH_KEY = "tater:display:profiles:v1"
 FIRMWARE_AGENT_LABS_ROOT = Path(__file__).resolve().parents[1] / "agent_lab" / "esphome"
 FIRMWARE_CONFIG_ROOT = FIRMWARE_AGENT_LABS_ROOT / "firmware_configs"
@@ -264,6 +265,10 @@ def _lower(value: Any) -> str:
 
 def _as_bool(value: Any, default: bool = False) -> bool:
     return esphome_runtime.as_bool(value, default)
+
+
+def _as_int(value: Any, default: int = 0, *, minimum: Optional[int] = None, maximum: Optional[int] = None) -> int:
+    return esphome_runtime.as_int(value, default, minimum=minimum, maximum=maximum)
 
 
 def _repo_siblings_root() -> Path:
@@ -615,6 +620,132 @@ def _secret_name(raw_value: Any) -> str:
     if isinstance(raw_value, dict):
         return _text(raw_value.get("__secret__"))
     return ""
+
+
+def _semver_tuple(value: Any) -> tuple[int, int, int]:
+    token = _lower(value)
+    if not token:
+        return (0, 0, 0)
+    if token.startswith("v"):
+        token = token[1:].strip()
+    match = re.match(r"^([0-9]+(\.[0-9]+){0,2})", token)
+    core = match.group(1) if match else "0.0.0"
+    parts = (core.split(".") + ["0", "0", "0"])[:3]
+    try:
+        return (int(parts[0]), int(parts[1]), int(parts[2]))
+    except Exception:
+        return (0, 0, 0)
+
+
+def _resolve_template_refs(value: Any, substitutions: Dict[str, Any]) -> str:
+    token = _template_default_string(value)
+    if not token:
+        return ""
+    for _idx in range(4):
+        previous = token
+        for key, raw_value in (substitutions or {}).items():
+            key_token = _text(key)
+            if key_token:
+                token = token.replace("${" + key_token + "}", _template_default_string(raw_value))
+        if token == previous:
+            break
+    return _text(token)
+
+
+def _template_firmware_metadata(template_doc: Dict[str, Any], substitutions: Dict[str, Any]) -> Dict[str, str]:
+    esphome_block = template_doc.get("esphome") if isinstance(template_doc.get("esphome"), dict) else {}
+    project_block = esphome_block.get("project") if isinstance(esphome_block.get("project"), dict) else {}
+    version = ""
+    for candidate in (
+        substitutions.get("firmware_version"),
+        project_block.get("version"),
+        substitutions.get("esp32_fw_version"),
+        substitutions.get("version"),
+    ):
+        resolved = _resolve_template_refs(candidate, substitutions)
+        if resolved:
+            version = resolved
+            break
+    project_name = _resolve_template_refs(project_block.get("name"), substitutions)
+    return {
+        "version": version,
+        "project_name": project_name,
+    }
+
+
+def _installed_version_key(selector: Any, template_key: Any) -> str:
+    selector_token = _text(selector)
+    template_token = _text(template_key)
+    if not selector_token or not template_token:
+        return ""
+    return f"{selector_token}|{template_token}"
+
+
+def _load_recorded_firmware_version(selector: Any, template_key: Any) -> Dict[str, str]:
+    key = _installed_version_key(selector, template_key)
+    if not key:
+        return {}
+    with contextlib.suppress(Exception):
+        raw = redis_client.hget(FIRMWARE_INSTALLED_VERSION_HASH_KEY, key)
+        if raw:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return {str(k): _text(v) for k, v in parsed.items() if _text(k)}
+    return {}
+
+
+def _save_recorded_firmware_version(
+    selector: Any,
+    template_key: Any,
+    version: Any,
+    *,
+    display_name: Any = "",
+    source: str = "",
+) -> None:
+    key = _installed_version_key(selector, template_key)
+    version_token = _text(version)
+    if not key or not version_token:
+        return
+    payload = {
+        "selector": _text(selector),
+        "template_key": _text(template_key),
+        "version": version_token,
+        "display_name": _text(display_name),
+        "source": _text(source),
+        "updated_at": str(time.time()),
+    }
+    redis_client.hset(FIRMWARE_INSTALLED_VERSION_HASH_KEY, key, json.dumps(payload, ensure_ascii=False))
+
+
+def _firmware_version_snapshot(
+    selector: str,
+    template_key: str,
+    device_info: Dict[str, Any],
+    latest_version: str,
+    *,
+    update_if_missing_installed: bool = False,
+) -> Dict[str, Any]:
+    device_version = _text(device_info.get("project_version"))
+    recorded = _load_recorded_firmware_version(selector, template_key)
+    recorded_version = _text(recorded.get("version"))
+    installed_version = device_version or recorded_version
+    source = "device" if device_version else ("recorded" if recorded_version else "")
+    missing_installed_update = bool(latest_version and not installed_version and update_if_missing_installed)
+    versioned_update = bool(
+        latest_version
+        and installed_version
+        and _semver_tuple(latest_version) > _semver_tuple(installed_version)
+    )
+    update_available = missing_installed_update or versioned_update
+    return {
+        "latest": latest_version,
+        "installed": installed_version,
+        "source": source,
+        "recorded": recorded_version,
+        "device": device_version,
+        "update_available": update_available,
+        "missing_installed_update": missing_installed_update,
+    }
 
 
 def _remote_json(url: str, *, force_refresh: bool = False) -> Any:
@@ -1427,30 +1558,42 @@ def _load_template_context(spec: Dict[str, Any], *, force_remote_refresh: bool =
 
     substitutions = parsed.get("substitutions") if isinstance(parsed.get("substitutions"), dict) else {}
     sections = _extract_substitution_sections(raw_text)
+    firmware_meta = _template_firmware_metadata(parsed, substitutions)
     return {
         "spec": dict(spec),
         "repo_root": Path(resolved["repo_root"]) if resolved.get("repo_root") else None,
         "template_path": template_path,
         "template_doc": parsed,
         "substitutions": dict(substitutions),
+        "firmware_version": _text(firmware_meta.get("version")),
+        "firmware_project": _text(firmware_meta.get("project_name")),
         "sections": sections,
         "source_kind": _text(resolved.get("source_kind")),
         "source_label": _text(resolved.get("source_label")),
     }
 
 
-def _profile_storage_key(template_key: str) -> str:
+def _profile_storage_key(template_key: str, selector: str = "") -> str:
     token = _lower(template_key)
-    return f"template:{token}" if token else ""
+    if not token:
+        return ""
+    selector_token = _lower(selector)
+    if selector_token:
+        return f"template:{token}:target:{selector_token}"
+    return f"template:{token}"
 
 
 def _profile_load(template_key: str, selector: str = "") -> Dict[str, str]:
-    tokens = [_profile_storage_key(template_key)]
+    tokens = [_profile_storage_key(template_key, selector), _profile_storage_key(template_key)]
     legacy_selector = _text(selector)
     if legacy_selector:
         tokens.append(legacy_selector)
 
+    seen_tokens: set[str] = set()
     for token in [item for item in tokens if _text(item)]:
+        if token in seen_tokens:
+            continue
+        seen_tokens.add(token)
         with contextlib.suppress(Exception):
             raw = redis_client.hget(FIRMWARE_PROFILE_HASH_KEY, token)
             if raw:
@@ -1460,17 +1603,17 @@ def _profile_load(template_key: str, selector: str = "") -> Dict[str, str]:
     return {}
 
 
-def _profile_save(template_key: str, values: Dict[str, Any]) -> None:
-    token = _profile_storage_key(template_key)
+def _profile_save(template_key: str, selector: str, values: Dict[str, Any]) -> None:
+    token = _profile_storage_key(template_key, selector)
     if not token:
         return
     clean = {str(key): _text(value) for key, value in (values or {}).items() if _text(key)}
     redis_client.hset(FIRMWARE_PROFILE_HASH_KEY, token, json.dumps(clean, ensure_ascii=False))
-    _display_profile_save(token, clean)
+    _display_profile_save(template_key, selector, clean)
 
 
-def _display_profile_save(profile_token: str, values: Dict[str, str]) -> None:
-    if _lower(profile_token) != "template:s3box_display":
+def _display_profile_save(template_key: str, selector: str, values: Dict[str, str]) -> None:
+    if _lower(template_key) != "s3box_display":
         return
     target = _text(values.get("display_target")) or _text(values.get("selector")) or _text(values.get("device_name"))
     if not target:
@@ -1483,6 +1626,8 @@ def _display_profile_save(profile_token: str, values: Dict[str, str]) -> None:
     payload = {
         "target": target,
         "template": "s3box_display",
+        "selector": _text(selector),
+        "profile_key": _profile_storage_key(template_key, selector),
         "updated_at": time.time(),
         "slots": slots,
     }
@@ -1512,6 +1657,11 @@ def _match_template_spec(selector: str, client_row: Dict[str, Any]) -> Optional[
         if any(token and token in haystack for token in tokens):
             return dict(spec)
     return None
+
+
+def _matched_template_key(selector: str, client_row: Dict[str, Any]) -> str:
+    matched = _match_template_spec(selector, client_row)
+    return _text(matched.get("key")) if isinstance(matched, dict) else ""
 
 
 def _checkbox_like_key(key: str, raw_value: Any) -> bool:
@@ -1551,6 +1701,22 @@ def _build_device_context(
     host = _text(client_row.get("host")) or esphome_runtime.satellite_host_from_selector(selector_token)
     device_info = client_row.get("device_info") if isinstance(client_row.get("device_info"), dict) else {}
     template_key = _text(template_spec.get("key"))
+    latest_firmware_version = _text(template_ctx.get("firmware_version"))
+    firmware_project = _text(template_ctx.get("firmware_project"))
+    matched_template_key = _matched_template_key(selector_token, client_row)
+    update_if_missing_installed = bool(
+        connected
+        and not usb_recovery
+        and matched_template_key
+        and _lower(matched_template_key) == _lower(template_key)
+    )
+    version_snapshot = _firmware_version_snapshot(
+        selector_token,
+        template_key,
+        device_info,
+        latest_firmware_version,
+        update_if_missing_installed=update_if_missing_installed,
+    )
     profile = _profile_load(template_key, selector_token)
     fixed_keys = set(template_spec.get("fixed_keys") or set())
     auto_keys = set(template_spec.get("auto_keys") or set())
@@ -1583,9 +1749,18 @@ def _build_device_context(
         template_default = _template_default_string(raw_value)
         secret_hint = _secret_name(raw_value)
         saved_value = _text(profile.get(key))
+        version_key = key in {"firmware_version", "esp32_fw_version"}
         section_title = _text(template_ctx["sections"].get(key)) or "Firmware"
-        if key in {"wake_word_name", "wake_word_model_url"}:
-            section_title = "Micro Wake Word"
+        if key in {
+            "wake_engine",
+            "wake_word_name",
+            "wake_word_model_url",
+            "wake_model_stop_url",
+            "openwakeword_server_url",
+            "openwakeword_http_timeout_ms",
+            "openwakeword_max_failures",
+        } or key.startswith("wake_cutoff_"):
+            section_title = "Wake Word"
         if key == "wake_word_triggered_sound_file":
             section_title = "Wake Sound"
         if section_title not in section_lookup:
@@ -1595,11 +1770,15 @@ def _build_device_context(
         fields = section_lookup[section_title]
 
         resolved_value = saved_value or template_default
+        if version_key:
+            resolved_value = template_default
         if key == "friendly_name":
             resolved_value = saved_value or _text(device_info.get("friendly_name")) or display_name or template_default
         if key == "tater_first_name":
             resolved_value = saved_value or _current_tater_first_name() or template_default
         if key == "tater_base_url":
+            resolved_value = _normalize_http_base_url(resolved_value)
+        if key == "openwakeword_server_url":
             resolved_value = _normalize_http_base_url(resolved_value)
         if key in auto_keys and host:
             resolved_value = host
@@ -1610,9 +1789,12 @@ def _build_device_context(
         field_value: Any = resolved_value
         field_options: Optional[List[Dict[str, Any]]] = None
         field_disabled = False
+        field_min: Optional[Any] = None
+        field_max: Optional[Any] = None
+        field_step: Optional[Any] = None
         description_parts: List[str] = []
         placeholder = ""
-        read_only = key in fixed_keys or key in auto_keys
+        read_only = key in fixed_keys or key in auto_keys or version_key
 
         if field_type == "checkbox":
             field_value = _as_bool(resolved_value, _as_bool(template_default, False))
@@ -1631,6 +1813,34 @@ def _build_device_context(
         elif key == "wake_word_name":
             placeholder = placeholder or "hey_tater"
             description_parts.append("Auto-filled when you choose a prebuilt or trainer wake word, but you can still edit it.")
+        elif key == "wake_engine":
+            field_type = "select"
+            engine_value = _lower(resolved_value) or "microwakeword"
+            if engine_value not in {"microwakeword", "openwakeword"}:
+                engine_value = "microwakeword"
+            field_value = engine_value
+            field_options = [
+                {"value": "microwakeword", "label": "microWakeWord (device)"},
+                {"value": "openwakeword", "label": "openWakeWord (remote URL)"},
+            ]
+            description_parts.append("Choose whether the satellite listens locally or posts wake-word audio chunks to the configured openWakeWord URL.")
+        elif key == "openwakeword_server_url":
+            placeholder = placeholder or "http://tater.local:8501"
+            description_parts.append("Base HTTP URL for remote openWakeWord detection. Tater uses /api/openwakeword/detect automatically; a compatible external HTTP endpoint can also be used. If this endpoint fails, the device falls back to microWakeWord.")
+        elif key == "openwakeword_http_timeout_ms":
+            field_type = "number"
+            field_value = _as_int(resolved_value, 1400, minimum=250, maximum=10000)
+            field_min = 250
+            field_max = 10000
+            field_step = 50
+            description_parts.append("Per-chunk HTTP timeout for remote openWakeWord detection before the device counts a failed request.")
+        elif key == "openwakeword_max_failures":
+            field_type = "number"
+            field_value = _as_int(resolved_value, 3, minimum=1, maximum=20)
+            field_min = 1
+            field_max = 20
+            field_step = 1
+            description_parts.append("Consecutive remote openWakeWord request failures before the device falls back to microWakeWord.")
         elif key == "wake_word_model_url":
             description_parts.append("Used when Wake Word Source is Custom URL.")
         elif key == "wake_word_triggered_sound_file":
@@ -1652,6 +1862,8 @@ def _build_device_context(
         elif key == "device_ip":
             placeholder = placeholder or host or "192.168.1.50"
             description_parts.append("OTA target address for this ESPHome display.")
+        elif version_key:
+            description_parts.append("Managed by the firmware template and used for update checks.")
         elif key in _S3BOX_SENSOR_FIELD_LABELS:
             field_type = "select"
             sensor_select = _tater_sensor_select_state(resolved_value)
@@ -1680,6 +1892,12 @@ def _build_device_context(
         }
         if isinstance(field_options, list):
             field_row["options"] = field_options
+        if field_min is not None:
+            field_row["min"] = field_min
+        if field_max is not None:
+            field_row["max"] = field_max
+        if field_step is not None:
+            field_row["step"] = field_step
         if key == "wake_word_model_url":
             field_row["show_when"] = {"source_key": "wake_word_source", "equals": "custom"}
         if field_disabled:
@@ -1699,7 +1917,7 @@ def _build_device_context(
             "required": key in {"wifi_ssid", "wifi_password"},
         }
 
-    wake_word_section = section_lookup.get("Micro Wake Word") if isinstance(section_lookup.get("Micro Wake Word"), list) else None
+    wake_word_section = section_lookup.get("Wake Word") if isinstance(section_lookup.get("Wake Word"), list) else None
     if isinstance(wake_word_section, list) and "wake_word_model_url" in fields_meta:
         wake_word_entries = wake_word_catalog.get("entries") if isinstance(wake_word_catalog.get("entries"), list) else []
         trainer_wake_word_entries = (
@@ -1736,7 +1954,7 @@ def _build_device_context(
         trainer_warning = _text(trainer_wake_word_catalog.get("warning"))
         if trainer_warning and not trainer_wake_word_entries:
             trainer_description = f"{trainer_description} {trainer_warning}".strip()
-        wake_word_section[0:0] = [
+        micro_wakeword_picker_fields = [
             {
                 "key": "wake_word_source",
                 "label": "Wake Word Source",
@@ -1781,6 +1999,16 @@ def _build_device_context(
                 "show_when": {"source_key": "wake_word_source", "equals": "trainer"},
             },
         ]
+        wake_engine_index = next(
+            (
+                idx
+                for idx, field in enumerate(wake_word_section)
+                if isinstance(field, dict) and _text(field.get("key")) == "wake_engine"
+            ),
+            -1,
+        )
+        insert_at = wake_engine_index + 1 if wake_engine_index >= 0 else 0
+        wake_word_section[insert_at:insert_at] = micro_wakeword_picker_fields
 
     wake_sound_section = section_lookup.get("Wake Sound") if isinstance(section_lookup.get("Wake Sound"), list) else None
     if isinstance(wake_sound_section, list) and "wake_word_triggered_sound_file" in fields_meta:
@@ -1824,6 +2052,14 @@ def _build_device_context(
     model = _text(device_info.get("model"))
     project_name = _text(device_info.get("project_name"))
     detail_parts = [part for part in [host, model or project_name] if part]
+    installed_firmware_version = _text(version_snapshot.get("installed"))
+    firmware_badges: List[Dict[str, str]] = []
+    if bool(version_snapshot.get("update_available")):
+        firmware_badges.append({"label": "Firmware update available", "tone": "accent"})
+    elif latest_firmware_version and installed_firmware_version:
+        firmware_badges.append({"label": "Firmware current", "tone": "success"})
+    elif latest_firmware_version:
+        firmware_badges.append({"label": "Firmware version unknown", "tone": "muted"})
 
     item = {
         "id": selector_token,
@@ -1834,6 +2070,21 @@ def _build_device_context(
         "detail": " • ".join(detail_parts),
         "template_label": _text(template_spec.get("label")),
         "template_url": _text((template_spec.get("source_urls") or [""])[0]),
+        "firmware_version": latest_firmware_version,
+        "firmware_project": firmware_project,
+        "installed_firmware_version": installed_firmware_version,
+        "installed_firmware_version_source": _text(version_snapshot.get("source")),
+        "firmware_update_available": bool(version_snapshot.get("update_available")),
+        "firmware_update_status": (
+            f"Installed {installed_firmware_version} • latest {latest_firmware_version}"
+            if installed_firmware_version and latest_firmware_version
+            else (
+                f"Latest {latest_firmware_version} • flash once to enable version checks"
+                if latest_firmware_version
+                else "Firmware version metadata unavailable"
+            )
+        ),
+        "hero_badges": firmware_badges,
         "hero_image_src": esphome_ui_helpers.device_image_src(
             display_name,
             device_info.get("name"),
@@ -1858,6 +2109,8 @@ def _build_device_context(
         "display_name": display_name,
         "template_key": template_key,
         "template_label": _text(template_spec.get("label")),
+        "firmware_version": latest_firmware_version,
+        "firmware_project": firmware_project,
         "template_spec": template_spec,
         "template_ctx": template_ctx,
         "profile": profile,
@@ -1898,6 +2151,8 @@ def _remote_template_text(url: str, *, force_refresh: bool = False) -> str:
         headers={
             "User-Agent": "Tater/1.0",
             "Accept": "text/plain, text/yaml, application/yaml, */*",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
         },
     )
     try:
@@ -2066,20 +2321,55 @@ def firmware_panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
         for spec in _TEMPLATE_SPECS
         if _text(spec.get("key"))
     ]
-    devices: List[Dict[str, str]] = []
+    devices: List[Dict[str, Any]] = []
+    devices_by_template: Dict[str, List[Dict[str, Any]]] = {
+        row["value"]: [] for row in template_options if _text(row.get("value"))
+    }
+    seen_devices: set[str] = set()
+    seen_devices_by_template: Dict[str, set[str]] = {
+        row["value"]: set() for row in template_options if _text(row.get("value"))
+    }
     variants: Dict[str, Dict[str, Dict[str, Any]]] = {row["value"]: {} for row in template_options if _text(row.get("value"))}
     warnings: List[str] = []
     seen_warnings: set[str] = set()
 
+    def append_device_option(device_option: Dict[str, Any], *, template_key: str = "") -> None:
+        value = _text(device_option.get("value"))
+        if not value:
+            return
+        if value not in seen_devices:
+            seen_devices.add(value)
+            devices.append(device_option)
+        template_token = _text(template_key)
+        if not template_token:
+            return
+        seen_for_template = seen_devices_by_template.setdefault(template_token, set())
+        if value in seen_for_template:
+            return
+        seen_for_template.add(value)
+        devices_by_template.setdefault(template_token, []).append(
+            {
+                **device_option,
+                "template_key": template_token,
+            }
+        )
+
     for selector, client_row in sorted(clients.items(), key=lambda item: _lower(item[0])):
         selector_token = _text(selector)
         row = client_row if isinstance(client_row, dict) else {}
+        matched_template_key = _matched_template_key(selector_token, row)
         device_option = _firmware_device_option(selector_token, row)
         if not isinstance(device_option, dict):
             continue
-        devices.append(device_option)
+        candidate_specs: List[Dict[str, Any]] = []
+        if matched_template_key:
+            spec = _template_spec_by_key(matched_template_key)
+            if isinstance(spec, dict):
+                candidate_specs.append(spec)
+        else:
+            candidate_specs = [dict(spec) for spec in _TEMPLATE_SPECS]
 
-        for spec in _TEMPLATE_SPECS:
+        for spec in candidate_specs:
             template_key = _text(spec.get("key"))
             if not template_key:
                 continue
@@ -2092,11 +2382,17 @@ def firmware_panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
                     warnings.append(message)
                 continue
             if isinstance(context, dict):
+                append_device_option(
+                    {
+                        **device_option,
+                        "unmatched_template": not bool(matched_template_key),
+                    },
+                    template_key=template_key,
+                )
                 variants.setdefault(template_key, {})[selector_token] = context["item"]
 
     usb_recovery_option = _firmware_device_option(_FIRMWARE_USB_RECOVERY_SELECTOR, {"firmware_usb_recovery": True})
     if isinstance(usb_recovery_option, dict):
-        devices.append(usb_recovery_option)
         for spec in _TEMPLATE_SPECS:
             template_key = _text(spec.get("key"))
             if not template_key:
@@ -2114,22 +2410,72 @@ def firmware_panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
                     warnings.append(message)
                 continue
             if isinstance(context, dict):
+                append_device_option(usb_recovery_option, template_key=template_key)
                 variants.setdefault(template_key, {})[_FIRMWARE_USB_RECOVERY_SELECTOR] = context["item"]
 
-    active_selector = _text((devices[0] or {}).get("value")) if devices else ""
-    active_template_key = _text((template_options[0] or {}).get("value")) if template_options else ""
+    active_template_key = ""
+    active_selector = ""
+    for template_option in template_options:
+        candidate_key = _text(template_option.get("value"))
+        candidate_devices = devices_by_template.get(candidate_key) if candidate_key else []
+        first_real_device = next(
+            (
+                row
+                for row in (candidate_devices or [])
+                if isinstance(row, dict) and not _is_usb_recovery_selector(row.get("value"))
+            ),
+            None,
+        )
+        if candidate_key and isinstance(first_real_device, dict):
+            active_template_key = candidate_key
+            active_selector = _text(first_real_device.get("value"))
+            break
+    if not active_template_key:
+        for template_option in template_options:
+            candidate_key = _text(template_option.get("value"))
+            if candidate_key and devices_by_template.get(candidate_key):
+                active_template_key = candidate_key
+                active_selector = _text((devices_by_template[candidate_key][0] or {}).get("value"))
+                break
+    if not active_template_key:
+        active_template_key = _text((template_options[0] or {}).get("value")) if template_options else ""
+    if not active_selector:
+        active_selector = _text((devices[0] or {}).get("value")) if devices else ""
 
     empty_message = "No ESPHome firmware targets are available."
-    if not devices:
-        empty_message = "No ESPHome firmware targets are available."
-    elif warnings and not any(bool(rows) for rows in variants.values()):
+    if warnings and not any(bool(rows) for rows in variants.values()):
         empty_message = warnings[0]
+    elif not devices:
+        empty_message = "No ESPHome firmware targets are available."
+
+    firmware_updates: List[Dict[str, Any]] = []
+    for template_key, rows in variants.items():
+        if not isinstance(rows, dict):
+            continue
+        for selector_token, item in rows.items():
+            if not isinstance(item, dict) or not bool(item.get("firmware_update_available")):
+                continue
+            if _is_usb_recovery_selector(selector_token):
+                continue
+            firmware_updates.append(
+                {
+                    "selector": selector_token,
+                    "template_key": template_key,
+                    "title": _text(item.get("title")) or selector_token,
+                    "template_label": _text(item.get("template_label")),
+                    "installed": _text(item.get("installed_firmware_version")) or "unknown",
+                    "latest": _text(item.get("firmware_version")),
+                }
+            )
 
     payload = {
         "cli": cli_status,
         "devices": devices,
+        "devices_by_template": devices_by_template,
         "templates": template_options,
         "variants": variants,
+        "firmware_updates": firmware_updates,
+        "firmware_update_count": len(firmware_updates),
         "active_selector": active_selector,
         "active_template_key": active_template_key,
         "empty_message": empty_message,
@@ -2175,9 +2521,19 @@ def _normalize_profile_values(context: Dict[str, Any], values: Dict[str, Any]) -
             normalized[key] = current_value
             continue
 
+        has_incoming_value = key in incoming
         raw_value = incoming.get(key)
+        if not has_incoming_value:
+            normalized[key] = _text(existing.get(key)) or current_value
+            continue
+
         if field_type == "checkbox":
             normalized[key] = "true" if _as_bool(raw_value, False) else "false"
+            continue
+
+        if key == "wake_engine":
+            engine_value = _lower(raw_value)
+            normalized[key] = "openwakeword" if engine_value in {"openwakeword", "open_wake_word", "open wakeword"} else "microwakeword"
             continue
 
         if key == "wifi_password":
@@ -2189,8 +2545,16 @@ def _normalize_profile_values(context: Dict[str, Any], values: Dict[str, Any]) -
             normalized[key] = _normalize_http_base_url(raw_value)
             continue
 
-        if key == "wake_word_model_url" and key not in incoming:
-            normalized[key] = _text(existing.get(key)) or current_value
+        if key == "openwakeword_server_url":
+            normalized[key] = _normalize_http_base_url(raw_value)
+            continue
+
+        if key == "openwakeword_http_timeout_ms":
+            normalized[key] = str(_as_int(raw_value, 1400, minimum=250, maximum=10000))
+            continue
+
+        if key == "openwakeword_max_failures":
+            normalized[key] = str(_as_int(raw_value, 3, minimum=1, maximum=20))
             continue
 
         normalized[key] = _text(raw_value)
@@ -2285,6 +2649,7 @@ def _render_config_text(context: Dict[str, Any], values: Dict[str, str]) -> str:
 
 def _prepare_config_path(context: Dict[str, Any], values: Dict[str, str]) -> Path:
     _ensure_agent_labs_dirs()
+    _reset_build_path_for_context(context)
     selector_dir = FIRMWARE_CONFIG_ROOT / _sanitize_token(context.get("selector"))
     selector_dir.mkdir(parents=True, exist_ok=True)
     config_path = selector_dir / f"{_sanitize_token(context.get('template_key'))}.yaml"
@@ -2294,6 +2659,16 @@ def _prepare_config_path(context: Dict[str, Any], values: Dict[str, str]) -> Pat
 
 def _build_path_for_context(context: Dict[str, Any]) -> Path:
     return FIRMWARE_BUILD_ROOT / _sanitize_token(context.get("selector")) / _sanitize_token(context.get("template_key"))
+
+
+def _reset_build_path_for_context(context: Dict[str, Any]) -> Optional[Path]:
+    build_path = _build_path_for_context(context)
+    if not build_path.exists():
+        return None
+    shutil.rmtree(build_path, ignore_errors=True)
+    if build_path.exists():
+        raise RuntimeError(f"Could not clear stale ESPHome build output at {build_path}.")
+    return build_path
 
 
 def _find_browser_flash_binary(context: Dict[str, Any]) -> Path:
@@ -2375,6 +2750,9 @@ def _create_browser_flash_artifact(context: Dict[str, Any], binary_path: Path) -
         "manifest_url": f"{base_url}/manifest.json",
         "binary_url": f"{base_url}/{target_binary_name}",
         "binary_name": target_binary_name,
+        "selector": _text(context.get("selector")),
+        "template_key": _text(context.get("template_key")),
+        "firmware_version": _text(context.get("firmware_version")),
         "source_binary": str(binary_path),
         "binary_size": int(target_binary_path.stat().st_size),
         "erase_all": True,
@@ -2614,6 +2992,7 @@ def _session_payload_locked(session: Dict[str, Any], *, after_seq: int = 0) -> D
         "session_id": _text(session.get("id")),
         "selector": _text(session.get("selector")),
         "template_key": _text(session.get("template_key")),
+        "firmware_version": _text(session.get("firmware_version")),
         "display_name": _text(session.get("display_name")),
         "host": _text(session.get("host")),
         "operation": _text(session.get("operation")),
@@ -2834,6 +3213,25 @@ def _firmware_session_worker(session_id: str) -> None:
                 source="session",
             )
             return
+        _save_recorded_firmware_version(
+            session.get("selector"),
+            session.get("template_key"),
+            session.get("firmware_version"),
+            display_name=session.get("display_name"),
+            source="ota_flash",
+        )
+        if not bool(session.get("follow_logs", True)):
+            session["active"] = False
+            session["returncode"] = 0
+            session["message"] = "Firmware uploaded successfully."
+            _set_session_phase_locked(session, "completed")
+            _append_session_entry_locked(
+                session,
+                level="info",
+                message="Build and upload finished.",
+                source="session",
+            )
+            return
         session["returncode"] = 0
         session["message"] = "Firmware uploaded successfully. Waiting for live device logs."
         session["device_log_next_retry_ts"] = time.time()
@@ -2942,6 +3340,8 @@ def _start_flash_session(
     context: Dict[str, Any],
     profile_values: Dict[str, str],
     cli_status: Dict[str, Any],
+    *,
+    follow_logs: bool = True,
 ) -> Dict[str, Any]:
     _prune_firmware_sessions()
     selector = _text(context.get("selector"))
@@ -2963,8 +3363,10 @@ def _start_flash_session(
         "id": session_id,
         "selector": selector,
         "template_key": _text(context.get("template_key")),
+        "firmware_version": _text(context.get("firmware_version")),
         "display_name": target_label,
         "host": host,
+        "context": context,
         "config_path": str(config_path),
         "command": command,
         "cwd": _text(cli_status.get("cwd")),
@@ -2977,10 +3379,15 @@ def _start_flash_session(
         "status_text": _phase_status_text("starting", target_label),
         "active": True,
         "error": "",
-        "message": f"Streaming build, upload, and live device logs for {target_label}.",
+        "message": (
+            f"Streaming build, upload, and live device logs for {target_label}."
+            if follow_logs
+            else f"Streaming build and upload logs for {target_label}."
+        ),
         "returncode": None,
         "proc": None,
         "stop_requested": False,
+        "follow_logs": bool(follow_logs),
         "device_logs_started": False,
         "device_log_cursor": 0,
         "device_log_next_retry_ts": 0.0,
@@ -3049,6 +3456,7 @@ def _start_browser_build_session(
         "id": session_id,
         "selector": selector,
         "template_key": _text(context.get("template_key")),
+        "firmware_version": _text(context.get("firmware_version")),
         "display_name": target_label,
         "host": _text(context.get("host")),
         "operation": "browser_build",
@@ -3225,6 +3633,33 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
         result["action"] = action_name
         return result
 
+    if action_name == "voice_firmware_mark_installed":
+        body = payload if isinstance(payload, dict) else {}
+        selector = esphome_runtime.payload_selector(body)
+        template_key = _text(body.get("template_key"))
+        firmware_version = _text(body.get("firmware_version") or body.get("version"))
+        if not selector:
+            raise ValueError("selector is required")
+        if not template_key:
+            raise ValueError("template_key is required")
+        if not firmware_version:
+            raise ValueError("firmware_version is required")
+        _save_recorded_firmware_version(
+            selector,
+            template_key,
+            firmware_version,
+            display_name=body.get("display_name"),
+            source=_text(body.get("source")) or "browser_usb_flash",
+        )
+        return {
+            "ok": True,
+            "action": action_name,
+            "selector": selector,
+            "template_key": template_key,
+            "firmware_version": firmware_version,
+            "message": f"Recorded firmware {firmware_version} for {_text(body.get('display_name')) or selector}.",
+        }
+
     if action_name not in {
         "voice_firmware_save",
         "voice_firmware_build",
@@ -3252,6 +3687,16 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
         client_row = esphome_runtime.client_row_snapshot_sync(selector)
     if not isinstance(client_row, dict):
         raise RuntimeError(f"ESPHome device {selector} is not available for firmware actions.")
+    if not _is_usb_recovery_selector(selector):
+        matched_template_key = _matched_template_key(selector, client_row)
+        if matched_template_key and _lower(matched_template_key) != _lower(template_key):
+            matched_spec = _template_spec_by_key(matched_template_key) or {}
+            matched_label = _text(matched_spec.get("label")) or matched_template_key
+            selected_label = _text(template_spec.get("label")) or template_key
+            raise RuntimeError(
+                f"{selector} looks like a {matched_label} target, not {selected_label}. "
+                f"Select the {matched_label} firmware template before building or flashing."
+            )
     if (
         action_name in {"voice_firmware_flash", "voice_firmware_flash_start"}
         and not bool(client_row.get("connected"))
@@ -3277,7 +3722,7 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
     profile_values = _normalize_profile_values(context, values)
 
     if action_name == "voice_firmware_save":
-        _profile_save(_text(context.get("template_key")), profile_values)
+        _profile_save(_text(context.get("template_key")), _text(context.get("selector")) or selector, profile_values)
         return {
             "ok": True,
             "action": action_name,
@@ -3287,13 +3732,18 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
         }
 
     _validate_profile_values(context, profile_values)
-    _profile_save(_text(context.get("template_key")), profile_values)
+    _profile_save(_text(context.get("template_key")), _text(context.get("selector")) or selector, profile_values)
     cli_status = esphome_cli_status(force=True)
     if not bool(cli_status.get("available")):
         raise RuntimeError(_text(cli_status.get("detail")) or "ESPHome CLI is unavailable.")
 
     if action_name == "voice_firmware_flash_start":
-        result = _start_flash_session(context, profile_values, cli_status)
+        result = _start_flash_session(
+            context,
+            profile_values,
+            cli_status,
+            follow_logs=_as_bool(body.get("follow_logs"), True),
+        )
         result["action"] = action_name
         return result
 
@@ -3326,6 +3776,13 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
         )
 
     if action_name == "voice_firmware_flash":
+        _save_recorded_firmware_version(
+            selector,
+            context.get("template_key"),
+            context.get("firmware_version"),
+            display_name=context.get("display_name"),
+            source="ota_flash",
+        )
         message = f"Built and flashed {context.get('display_name') or selector}."
     else:
         message = f"Built firmware for {context.get('display_name') or selector}."

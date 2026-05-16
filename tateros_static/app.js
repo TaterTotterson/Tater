@@ -4154,7 +4154,12 @@ function renderCoreManagerField(field) {
   const showWhenAll = Array.isArray(field?.show_when_all)
     ? field.show_when_all.filter((item) => item && typeof item === "object")
     : [];
-  const normalizeShowWhen = (condition) => {
+  const disableWhen = field?.disable_when && typeof field.disable_when === "object" ? field.disable_when : {};
+  const disableWhenAll = Array.isArray(field?.disable_when_all)
+    ? field.disable_when_all.filter((item) => item && typeof item === "object")
+    : [];
+  const disabledNote = String(field?.disabled_note || "").trim();
+  const normalizeCondition = (condition) => {
     const sourceKey = String(condition?.source_key ?? condition?.key ?? "").trim();
     const values = [];
     const appendShowValue = (raw) => {
@@ -4180,24 +4185,41 @@ function renderCoreManagerField(field) {
     }
     return { sourceKey, values };
   };
+  const encodeConditionValues = (values) => {
+    try {
+      return encodeURIComponent(JSON.stringify(values));
+    } catch (_error) {
+      return "";
+    }
+  };
   const wrapWithCondition = (innerHtml, condition) => {
-    const { sourceKey, values } = normalizeShowWhen(condition || {});
+    const { sourceKey, values } = normalizeCondition(condition || {});
     if (!sourceKey || !values.length) {
       return innerHtml;
     }
-    let encodedValues = "";
-    try {
-      encodedValues = encodeURIComponent(JSON.stringify(values));
-    } catch (_error) {
-      encodedValues = "";
-    }
+    const encodedValues = encodeConditionValues(values);
     return `<div data-core-show-source-key="${escapeHtml(sourceKey)}" data-core-show-values="${escapeHtml(encodedValues)}">${innerHtml}</div>`;
   };
-  const wrapField = (innerHtml) => {
-    if (showWhenAll.length) {
-      return showWhenAll.reduce((html, condition) => wrapWithCondition(html, condition), innerHtml);
+  const wrapWithDisableCondition = (innerHtml, condition) => {
+    const { sourceKey, values } = normalizeCondition(condition || {});
+    if (!sourceKey || !values.length) {
+      return innerHtml;
     }
-    return wrapWithCondition(innerHtml, showWhen);
+    const encodedValues = encodeConditionValues(values);
+    const noteAttr = disabledNote ? ` data-core-disable-note="${escapeHtml(disabledNote)}"` : "";
+    return `<div class="core-conditional-field" data-core-disable-source-key="${escapeHtml(
+      sourceKey
+    )}" data-core-disable-values="${escapeHtml(encodedValues)}"${noteAttr}>${innerHtml}</div>`;
+  };
+  const wrapField = (innerHtml) => {
+    let html = innerHtml;
+    html = disableWhenAll.length
+      ? disableWhenAll.reduce((currentHtml, condition) => wrapWithDisableCondition(currentHtml, condition), html)
+      : wrapWithDisableCondition(html, disableWhen);
+    html = showWhenAll.length
+      ? showWhenAll.reduce((currentHtml, condition) => wrapWithCondition(currentHtml, condition), html)
+      : wrapWithCondition(html, showWhen);
+    return html;
   };
 
   if (type === "table") {
@@ -4451,7 +4473,8 @@ function renderCoreManagerField(field) {
             const optionValue = String(raw.value ?? raw.id ?? raw.key ?? raw.label ?? "");
             const optionLabel = String(raw.label ?? optionValue);
             const isSelected = optionValue === selected ? "selected" : "";
-            return `<option value="${escapeHtml(optionValue)}" ${isSelected}>${escapeHtml(optionLabel)}</option>`;
+            const frameworkAttr = raw.framework ? ` data-framework="${escapeHtml(raw.framework)}"` : "";
+            return `<option value="${escapeHtml(optionValue)}" ${isSelected}${frameworkAttr}>${escapeHtml(optionLabel)}</option>`;
           }
           const optionValue = String(raw ?? "");
           const isSelected = optionValue === selected ? "selected" : "";
@@ -5725,6 +5748,7 @@ function renderEspHomeSatelliteCard(item, coreKey = "esphome") {
       ${fields.length ? `<div class="form-grid">${fields.map((field) => renderCoreManagerField(field)).join("")}</div>` : ""}
       <div class="inline-row" style="margin-top:10px;">
         ${saveAction ? `<button type="button" class="action-btn core-manager-save">Save</button>` : ""}
+        <button type="button" class="inline-btn esphome-entities-refresh">Refresh Entities</button>
         ${popupFields.length ? `<button type="button" class="action-btn core-manager-settings">${escapeHtml(settingsLabel)}</button>` : ""}
         ${removeAction ? `<button type="button" class="inline-btn danger core-manager-remove">Forget</button>` : ""}
         ${runAction ? `<button type="button" class="action-btn core-manager-run" style="margin-left:auto;">${escapeHtml(String(item?.run_label || "Run"))}</button>` : ""}
@@ -5882,20 +5906,43 @@ function renderEspHomeFirmwareSections(sections) {
     .join("");
 }
 
+function espHomeFirmwareDevicesForTemplate(firmware, templateKey = "") {
+  const body = firmware && typeof firmware === "object" ? firmware : {};
+  const templateToken = String(templateKey || "").trim();
+  const byTemplate =
+    body?.devices_by_template && typeof body.devices_by_template === "object" ? body.devices_by_template : {};
+  const templateDevices =
+    templateToken && Array.isArray(byTemplate?.[templateToken]) ? byTemplate[templateToken] : null;
+  if (templateDevices) {
+    return templateDevices;
+  }
+
+  const devices = Array.isArray(body?.devices) ? body.devices : [];
+  const variants = body?.variants && typeof body.variants === "object" ? body.variants : {};
+  const templateMap =
+    templateToken && variants?.[templateToken] && typeof variants[templateToken] === "object" ? variants[templateToken] : {};
+  const allowedSelectors = new Set(Object.keys(templateMap || {}).map((value) => String(value || "").trim()).filter(Boolean));
+  if (!allowedSelectors.size) {
+    return devices;
+  }
+  return devices.filter((row) => allowedSelectors.has(String(row?.value || "").trim()));
+}
+
 function normalizeEspHomeFirmwareSelection(firmware) {
   const body = firmware && typeof firmware === "object" ? firmware : {};
   const templates = Array.isArray(body?.templates) ? body.templates : [];
-  const devices = Array.isArray(body?.devices) ? body.devices : [];
   const templateValues = templates.map((row) => String(row?.value || "").trim()).filter(Boolean);
-  const deviceValues = devices.map((row) => String(row?.value || "").trim()).filter(Boolean);
   const requestedTemplate = String(
     state.esphomeFirmwareSelection?.templateKey || body?.active_template_key || templateValues[0] || ""
   ).trim();
+  const templateKey = templateValues.includes(requestedTemplate) ? requestedTemplate : templateValues[0] || "";
+  const devices = espHomeFirmwareDevicesForTemplate(body, templateKey);
+  const deviceValues = devices.map((row) => String(row?.value || "").trim()).filter(Boolean);
   const requestedSelector = String(
     state.esphomeFirmwareSelection?.selector || body?.active_selector || deviceValues[0] || ""
   ).trim();
   return {
-    templateKey: templateValues.includes(requestedTemplate) ? requestedTemplate : templateValues[0] || "",
+    templateKey,
     selector: deviceValues.includes(requestedSelector) ? requestedSelector : deviceValues[0] || "",
   };
 }
@@ -5908,12 +5955,28 @@ function resolveEspHomeFirmwareVariant(firmware, templateKey = "", selector = ""
   return selector && templateMap[selector] && typeof templateMap[selector] === "object" ? templateMap[selector] : null;
 }
 
-function applyEspHomeFirmwareDraftToVariant(variant, templateKey = "") {
+function espHomeFirmwareDraftKey(templateKey = "", selector = "") {
+  const templateToken = String(templateKey || "").trim();
+  const selectorToken = String(selector || "").trim();
+  if (!templateToken) {
+    return "";
+  }
+  return selectorToken ? `${templateToken}::${selectorToken}` : templateToken;
+}
+
+function clearEspHomeFirmwareDraft(templateKey = "", selector = "") {
+  const key = espHomeFirmwareDraftKey(templateKey, selector);
+  if (key && state.esphomeFirmwareDrafts && typeof state.esphomeFirmwareDrafts === "object") {
+    delete state.esphomeFirmwareDrafts[key];
+  }
+}
+
+function applyEspHomeFirmwareDraftToVariant(variant, templateKey = "", selector = "") {
   const base = variant && typeof variant === "object" ? variant : null;
   if (!base) {
     return null;
   }
-  const token = String(templateKey || "").trim();
+  const token = espHomeFirmwareDraftKey(templateKey, selector);
   const draft =
     token && state.esphomeFirmwareDrafts && typeof state.esphomeFirmwareDrafts === "object"
       ? state.esphomeFirmwareDrafts[token]
@@ -5943,12 +6006,13 @@ function applyEspHomeFirmwareDraftToVariant(variant, templateKey = "") {
   };
 }
 
-function captureEspHomeFirmwareDraft(card) {
+function captureEspHomeFirmwareDraft(card, scope = {}) {
   if (!(card instanceof HTMLElement)) {
     return;
   }
   const values = collectCoreManagerValues(card);
-  const templateKey = String(card.dataset?.firmwareTemplateKey || values?.template_key || "").trim();
+  const templateKey = String(scope?.templateKey || card.dataset?.firmwareTemplateKey || values?.template_key || "").trim();
+  const selector = String(scope?.selector || card.dataset?.firmwareSelector || values?.selector || "").trim();
   if (!templateKey) {
     return;
   }
@@ -5960,7 +6024,10 @@ function captureEspHomeFirmwareDraft(card) {
     }
     draft[token] = value;
   });
-  state.esphomeFirmwareDrafts[templateKey] = draft;
+  const draftKey = espHomeFirmwareDraftKey(templateKey, selector);
+  if (draftKey) {
+    state.esphomeFirmwareDrafts[draftKey] = draft;
+  }
 }
 
 function deriveWakeWordSlugFromUrl(value) {
@@ -6226,16 +6293,17 @@ function bindEspHomeWakeSoundPreview(root = document) {
 function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
   const body = firmware && typeof firmware === "object" ? firmware : {};
   const templates = Array.isArray(body?.templates) ? body.templates : [];
-  const devices = Array.isArray(body?.devices) ? body.devices : [];
   const cli = body?.cli && typeof body.cli === "object" ? body.cli : {};
   const selection = normalizeEspHomeFirmwareSelection(body);
+  const devices = espHomeFirmwareDevicesForTemplate(body, selection.templateKey);
   const selectedTemplate =
     templates.find((row) => String(row?.value || "").trim() === selection.templateKey) || {};
   const selectedDevice =
     devices.find((row) => String(row?.value || "").trim() === selection.selector) || {};
   const variant = applyEspHomeFirmwareDraftToVariant(
     resolveEspHomeFirmwareVariant(body, selection.templateKey, selection.selector),
-    selection.templateKey
+    selection.templateKey,
+    selection.selector
   );
   const variantAvailable = Boolean(variant && typeof variant === "object");
   const title =
@@ -6249,6 +6317,8 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
   const cliAvailable = boolFromAny(variant?.cli_available ?? cli?.available, false);
   const cliReason = String(variant?.cli_reason || cli?.detail || "").trim();
   const links = Array.isArray(variant?.links) ? variant.links : [];
+  const heroBadges = Array.isArray(variant?.hero_badges) ? variant.hero_badges : [];
+  const firmwareStatus = String(variant?.firmware_update_status || "").trim();
   const linksHtml = links.length
     ? `
       <div class="small" style="margin-top:10px;">
@@ -6304,15 +6374,36 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
       <div class="core-satellite-summary">
         <div class="core-satellite-image-wrap"><img class="core-satellite-image" src="${escapeHtml(heroImageSrc)}" alt="${escapeHtml(heroImageAlt)}" loading="lazy" /></div>
         <div class="core-satellite-summary-main">
+          ${
+            heroBadges.length
+              ? `
+                <div class="core-satellite-badges">
+                  ${heroBadges
+                    .map((badge) => {
+                      const label = String(badge?.label || "").trim();
+                      if (!label) {
+                        return "";
+                      }
+                      const tone = String(badge?.tone || "muted").trim().toLowerCase().replace(/[^a-z0-9_-]/g, "");
+                      return `<span class="core-satellite-badge tone-${escapeHtml(tone || "muted")}">${escapeHtml(label)}</span>`;
+                    })
+                    .filter(Boolean)
+                    .join("")}
+                </div>
+              `
+              : ""
+          }
           ${subtitle ? `<div class="small core-satellite-subtitle">${escapeHtml(subtitle)}</div>` : ""}
           ${detail ? `<div class="small core-satellite-detail">${escapeHtml(detail)}</div>` : ""}
           <div class="small">Template: ${escapeHtml(templateLabel)}</div>
+          ${firmwareStatus ? `<div class="small" style="margin-top:6px;">Firmware: ${escapeHtml(firmwareStatus)}</div>` : ""}
         </div>
       </div>
     `
     : `
       ${subtitle ? `<div class="small">${escapeHtml(subtitle)}</div>` : ""}
       ${detail ? `<div class="small" style="margin-top:6px;">${escapeHtml(detail)}</div>` : ""}
+      ${firmwareStatus ? `<div class="small" style="margin-top:6px;">Firmware: ${escapeHtml(firmwareStatus)}</div>` : ""}
     `;
 
   return `
@@ -6395,10 +6486,82 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
   `;
 }
 
+function renderEspHomeFirmwareUpdatePanel(firmwareUpdates, coreKey = "esphome", cliAvailable = false) {
+  const rows = (Array.isArray(firmwareUpdates) ? firmwareUpdates : [])
+    .map((row) => {
+      const selector = String(row?.selector || "").trim();
+      const templateKey = String(row?.template_key || "").trim();
+      if (!selector || !templateKey) {
+        return null;
+      }
+      return {
+        selector,
+        templateKey,
+        title: String(row?.title || selector || "ESPHome device").trim() || "ESPHome device",
+        templateLabel: String(row?.template_label || templateKey || "Firmware").trim() || "Firmware",
+        installed: String(row?.installed || "unknown").trim() || "unknown",
+        latest: String(row?.latest || "").trim(),
+      };
+    })
+    .filter(Boolean);
+  if (!rows.length) {
+    return "";
+  }
+  const count = rows.length;
+  return `
+    <section class="firmware-update-panel" aria-label="Firmware updates">
+      <div class="firmware-update-head">
+        <div>
+          <div class="firmware-update-kicker">Firmware Updates</div>
+          <h4>${escapeHtml(count)} update${count === 1 ? "" : "s"} available</h4>
+          <p>OTA updates run one device at a time and keep streaming logs until each upload finishes.</p>
+        </div>
+        <button
+          type="button"
+          class="action-btn esphome-firmware-update-all"
+          data-core-key="${escapeHtml(coreKey)}"${cliAvailable ? "" : " disabled"}
+        >Update All (${escapeHtml(count)})</button>
+      </div>
+      <div class="firmware-update-list">
+        ${rows
+          .map(
+            (row) => `
+              <article class="firmware-update-row">
+                <div class="firmware-update-device">
+                  <strong>${escapeHtml(row.title)}</strong>
+                  <span>${escapeHtml(row.templateLabel)}</span>
+                </div>
+                <div class="firmware-update-version-grid">
+                  <div>
+                    <span>Current</span>
+                    <strong>${escapeHtml(row.installed)}</strong>
+                  </div>
+                  <div>
+                    <span>Available</span>
+                    <strong>${escapeHtml(row.latest || "unknown")}</strong>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  class="inline-btn primary firmware-update-device-action esphome-firmware-update-one"
+                  data-core-key="${escapeHtml(coreKey)}"
+                  data-selector="${escapeHtml(row.selector)}"
+                  data-template-key="${escapeHtml(row.templateKey)}"${cliAvailable ? "" : " disabled"}
+                >Update</button>
+              </article>
+            `
+          )
+          .join("")}
+      </div>
+    </section>
+  `;
+}
+
 function renderEspHomeFirmwarePanel(firmware, coreKey = "esphome") {
   const body = firmware && typeof firmware === "object" ? firmware : {};
   const devices = Array.isArray(body?.devices) ? body.devices : [];
   const warnings = Array.isArray(body?.warnings) ? body.warnings : [];
+  const firmwareUpdates = Array.isArray(body?.firmware_updates) ? body.firmware_updates : [];
   const cli = body?.cli && typeof body.cli === "object" ? body.cli : {};
   const cliAvailable = boolFromAny(cli?.available, false);
   const cliLabel = String(cli?.label || "Unavailable").trim() || "Unavailable";
@@ -6433,6 +6596,7 @@ function renderEspHomeFirmwarePanel(firmware, coreKey = "esphome") {
           ? `<div class="small" style="margin-top:8px;">${warnings.map((warning) => escapeHtml(String(warning || "").trim())).filter(Boolean).join("<br>")}</div>`
           : ""
       }
+      ${renderEspHomeFirmwareUpdatePanel(firmwareUpdates, coreKey, cliAvailable)}
     </div>
     ${devices.length ? renderEspHomeFirmwareCard(body, coreKey) : renderNotice(emptyMessage)}
   `;
@@ -6751,6 +6915,43 @@ function bindEspHomeSettingsTabs(root = document) {
     button.addEventListener("click", () => activate(String(button.dataset.esphomeTab || "").trim(), { load: true }));
   });
   const initial = String(host.dataset.esphomeActiveTab || "satellites").trim() || "satellites";
+  activate(initial);
+}
+
+function bindModelSettingsTabs(root = document) {
+  const host =
+    root instanceof HTMLElement
+      ? root.querySelector("#settings-models-shell")
+      : document.getElementById("settings-models-shell");
+  if (!(host instanceof HTMLElement)) {
+    return;
+  }
+  const buttons = Array.from(host.querySelectorAll(".settings-subtab-btn[data-models-tab]"));
+  const panels = Array.from(host.querySelectorAll(".settings-subpanel[data-models-panel]"));
+  if (!buttons.length || !panels.length) {
+    return;
+  }
+  const activate = (tabKey, { load = false } = {}) => {
+    const normalized = String(tabKey || "routing").trim() || "routing";
+    host.dataset.modelsActiveTab = normalized;
+    buttons.forEach((button) => {
+      button.classList.toggle("active", button.dataset.modelsTab === normalized);
+    });
+    panels.forEach((panel) => {
+      panel.classList.toggle("active", panel.dataset.modelsPanel === normalized);
+    });
+    if (load && ["speakerid", "emotionid"].includes(normalized)) {
+      void ensureEspHomeRuntimeLoaded({ force: true, panel: normalized });
+    }
+  };
+  buttons.forEach((button) => {
+    if (button.dataset.modelsTabBound === "1") {
+      return;
+    }
+    button.dataset.modelsTabBound = "1";
+    button.addEventListener("click", () => activate(String(button.dataset.modelsTab || "").trim(), { load: true }));
+  });
+  const initial = String(host.dataset.modelsActiveTab || "routing").trim() || "routing";
   activate(initial);
 }
 
@@ -7235,6 +7436,56 @@ function bindCoreManagerConditionalFields() {
   });
 }
 
+function bindCoreManagerConditionalDisabledFields() {
+  document.querySelectorAll("[data-core-disable-source-key]").forEach((container) => {
+    if (!(container instanceof HTMLElement)) {
+      return;
+    }
+    if (container.dataset.coreDisableBound === "1") {
+      return;
+    }
+    const sourceKey = String(container.dataset.coreDisableSourceKey || "").trim();
+    if (!sourceKey) {
+      return;
+    }
+    const host =
+      container.closest(".core-manager-add-form, .core-manager-item, .core-manager-tab-panel, .card") || document;
+    const sourceInput = _coreFieldByKey(host, sourceKey);
+    if (!(sourceInput instanceof HTMLInputElement || sourceInput instanceof HTMLSelectElement || sourceInput instanceof HTMLTextAreaElement)) {
+      return;
+    }
+    const mutedRaw = _coreDecodeDependentJson(container.dataset.coreDisableValues, []);
+    const mutedValues = Array.isArray(mutedRaw)
+      ? mutedRaw.map((item) => String(item ?? "").trim()).filter(Boolean)
+      : [];
+    if (!mutedValues.length) {
+      return;
+    }
+    const refresh = () => {
+      const sourceValue = String(sourceInput.value || "").trim();
+      const muted = mutedValues.includes(sourceValue);
+      container.classList.toggle("core-conditionally-muted", muted);
+      container.setAttribute("aria-disabled", muted ? "true" : "false");
+      container.querySelectorAll("[data-core-field-key]").forEach((input) => {
+        if (!(input instanceof HTMLElement)) {
+          return;
+        }
+        input.setAttribute("aria-disabled", muted ? "true" : "false");
+        if (muted) {
+          input.setAttribute("tabindex", "-1");
+        } else {
+          input.removeAttribute("tabindex");
+        }
+      });
+    };
+
+    sourceInput.addEventListener("change", refresh);
+    sourceInput.addEventListener("input", refresh);
+    container.dataset.coreDisableBound = "1";
+    refresh();
+  });
+}
+
 function bindCoreManagerDependentSelects() {
   document.querySelectorAll("select[data-core-filter-source-key]").forEach((targetSelect) => {
     if (!(targetSelect instanceof HTMLSelectElement)) {
@@ -7378,7 +7629,23 @@ function normalizeEspHomeRuntimePanel(panel = "") {
     : "satellites";
 }
 
+function getActiveModelsRuntimePanel() {
+  const shell = document.getElementById("settings-models-shell");
+  const activeButton = shell?.querySelector?.(".settings-subtab-btn.active[data-models-tab]");
+  const panel = String(activeButton?.dataset?.modelsTab || shell?.dataset?.modelsActiveTab || "").trim().toLowerCase();
+  return ["speakerid", "emotionid"].includes(panel) ? panel : "";
+}
+
 function getActiveEspHomeRuntimePanel(defaultPanel = "satellites") {
+  const activeSettingsTab = String(
+    document.querySelector(".settings-tab-btn.active[data-settings-tab]")?.dataset?.settingsTab || ""
+  ).trim();
+  if (activeSettingsTab === "models") {
+    const modelsRuntimePanel = getActiveModelsRuntimePanel();
+    if (modelsRuntimePanel) {
+      return modelsRuntimePanel;
+    }
+  }
   const shell = document.getElementById("settings-esphome-shell");
   const activeButton = shell?.querySelector?.(".settings-subtab-btn.active[data-esphome-tab]");
   return normalizeEspHomeRuntimePanel(
@@ -7719,6 +7986,35 @@ function bindEspHomeEntityControls(root = document) {
     });
   });
 
+  root.querySelectorAll(".esphome-entities-refresh").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement) || button.dataset.esphomeBound === "1") {
+      return;
+    }
+    button.dataset.esphomeBound = "1";
+    button.addEventListener("click", async () => {
+      const card = button.closest(".esphome-satellite-card");
+      const coreKey = String(card?.dataset?.coreKey || "esphome").trim();
+      const selector = decodeCoreManagerId(card?.dataset?.coreItemId || "");
+      if (!(card instanceof HTMLElement) || !coreKey || !selector) {
+        return;
+      }
+      button.disabled = true;
+      setCoreManagerStatus(card, "Refreshing live entities...");
+      try {
+        const result = await runCoreManagerAction(card, coreKey, "voice_entity_refresh", {
+          id: selector,
+          selector,
+        });
+        updateEspHomeSatelliteSensorRows(card, result?.entity_rows);
+        setCoreManagerStatus(card, String(result?.message || "Live entities refreshed."));
+      } catch (error) {
+        setCoreManagerStatus(card, error instanceof Error ? error.message : String(error || "Failed to refresh entities."));
+      } finally {
+        button.disabled = false;
+      }
+    });
+  });
+
   root.querySelectorAll(".esphome-entity-color").forEach((input) => {
     if (!(input instanceof HTMLInputElement) || input.dataset.esphomeBound === "1") {
       return;
@@ -7968,7 +8264,10 @@ function bindEspHomeFirmwareSelectors(root = document) {
         syncEspHomeFirmwareWakeSoundCatalog(card, { fromPicker: true });
         return;
       }
-      captureEspHomeFirmwareDraft(card);
+      captureEspHomeFirmwareDraft(card, {
+        templateKey: String(card?.dataset?.firmwareTemplateKey || "").trim(),
+        selector: String(card?.dataset?.firmwareSelector || "").trim(),
+      });
       const templateInput = card?.querySelector?.('select[data-core-field-key="template_key"]');
       const selectorInput = card?.querySelector?.('select[data-core-field-key="selector"]');
       state.esphomeFirmwareSelection = {
@@ -8290,7 +8589,7 @@ function openEspHomeFirmwareFlashViewer(card, coreKey) {
         });
         sessionId = String(result?.session_id || "").trim();
         cursor = Number(result?.cursor || 0);
-        delete state.esphomeFirmwareDrafts[templateKey];
+        clearEspHomeFirmwareDraft(templateKey, selector);
         renderEntries(Array.isArray(result?.entries) ? result.entries : [], true);
         if (statusNode instanceof HTMLElement) {
           statusNode.textContent =
@@ -8701,6 +9000,17 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
       throw new Error("Select a USB device first.");
     }
     await flashBrowserUsbPort(selectedPort, artifact, logConsole, statusNode);
+    try {
+      await runCoreManagerAction(card, coreKey, "voice_firmware_mark_installed", {
+        selector: String(artifact?.selector || selector || "").trim(),
+        template_key: String(artifact?.template_key || templateKey || "").trim(),
+        firmware_version: String(artifact?.firmware_version || "").trim(),
+        display_name: deviceLabel,
+        source: "browser_usb_flash",
+      });
+    } catch (_error) {
+      // The flash succeeded; failing to record the local version should not make recovery look failed.
+    }
     setCoreManagerStatus(card, "Browser USB flash finished.");
     showToast("Browser USB flash finished.");
   };
@@ -8776,7 +9086,7 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
       });
       sessionId = String(result?.session_id || "").trim();
       cursor = Number(result?.cursor || 0);
-      delete state.esphomeFirmwareDrafts[templateKey];
+      clearEspHomeFirmwareDraft(templateKey, selector);
       renderEspHomeFirmwareLogEntries(logConsole, Array.isArray(result?.entries) ? result.entries : [], false);
       if (!sessionId) {
         throw new Error("Browser flash build did not create a log session.");
@@ -9273,7 +9583,307 @@ function openEspHomeBrowserUsbLogs(card) {
   });
 }
 
+function espHomeFirmwareUpdateRows() {
+  const firmware =
+    state.esphomeFirmwarePayload && typeof state.esphomeFirmwarePayload === "object"
+      ? state.esphomeFirmwarePayload
+      : {};
+  return (Array.isArray(firmware?.firmware_updates) ? firmware.firmware_updates : [])
+    .map((row) => {
+      const selector = String(row?.selector || "").trim();
+      const templateKey = String(row?.template_key || "").trim();
+      if (!selector || !templateKey) {
+        return null;
+      }
+      return {
+        ...row,
+        selector,
+        template_key: templateKey,
+        title: String(row?.title || selector).trim() || selector,
+      };
+    })
+    .filter(Boolean);
+}
+
+function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "esphome", updateRows = null) {
+  const updates = (Array.isArray(updateRows) ? updateRows : espHomeFirmwareUpdateRows())
+    .map((row) => {
+      const selector = String(row?.selector || "").trim();
+      const templateKey = String(row?.template_key || row?.templateKey || "").trim();
+      if (!selector || !templateKey) {
+        return null;
+      }
+      return {
+        ...row,
+        selector,
+        template_key: templateKey,
+        title: String(row?.title || selector).trim() || selector,
+      };
+    })
+    .filter(Boolean);
+  if (!updates.length) {
+    showToast("No firmware updates are currently showing.", "error", 2800);
+    return;
+  }
+  const singleUpdate = updates.length === 1;
+
+  const currentCard = document.querySelector(".esphome-firmware-card");
+  const currentTemplateKey = String(currentCard?.dataset?.firmwareTemplateKey || "").trim();
+  const currentSelector = String(currentCard?.dataset?.firmwareSelector || "").trim();
+  const currentValues = currentCard instanceof HTMLElement ? collectCoreManagerValues(currentCard) : {};
+  const currentMatches = (row) => row.selector === currentSelector && row.template_key === currentTemplateKey;
+
+  let stopped = false;
+  let currentSessionId = "";
+  let cursor = 0;
+  let pollTimer = 0;
+  let index = 0;
+  let completed = 0;
+  let failed = 0;
+  let logConsole = null;
+  let statusNode = null;
+  let modalDialog = null;
+
+  const setBusy = (busy) => {
+    if (trigger instanceof HTMLButtonElement && document.body.contains(trigger)) {
+      trigger.disabled = Boolean(busy);
+    }
+  };
+
+  const appendBatchLine = (message, level = "info") => {
+    appendEspHomeFirmwareLog(logConsole, message, level);
+  };
+
+  const refreshBehindModal = async () => {
+    try {
+      await reloadEspHomeRuntimePayloadOnly();
+    } catch (_error) {
+      // Ignore background refresh failures while the batch window is closing.
+    }
+  };
+
+  const stopCurrentSession = async () => {
+    if (!currentSessionId) {
+      return;
+    }
+    try {
+      await runCoreManagerAction(trigger, coreKey, "voice_firmware_flash_stop", {
+        session_id: currentSessionId,
+        id: currentSessionId,
+      });
+    } catch (_error) {
+      // Ignore cleanup failures while stopping the active batch session.
+    }
+    currentSessionId = "";
+  };
+
+  const finishBatch = async () => {
+    if (pollTimer) {
+      window.clearTimeout(pollTimer);
+      pollTimer = 0;
+    }
+    currentSessionId = "";
+    setBusy(false);
+    const summary = failed
+      ? `${singleUpdate ? "Firmware update" : "Firmware batch"} finished: ${completed} updated, ${failed} failed.`
+      : `${singleUpdate ? "Firmware update" : "Firmware batch"} finished: ${completed} updated.`;
+    if (statusNode instanceof HTMLElement) {
+      statusNode.classList.add("voice-log-status");
+      statusNode.textContent = summary;
+    }
+    appendBatchLine(summary, failed ? "warn" : "info");
+    showToast(summary, failed ? "error" : "info", failed ? 4800 : 3200);
+    await refreshBehindModal();
+  };
+
+  const pollCurrent = (row) => {
+    if (stopped || !currentSessionId) {
+      return;
+    }
+    pollTimer = window.setTimeout(async () => {
+      if (stopped || !currentSessionId) {
+        return;
+      }
+      try {
+        const result = await runCoreManagerAction(trigger, coreKey, "voice_firmware_flash_poll", {
+          session_id: currentSessionId,
+          id: currentSessionId,
+          after_seq: cursor,
+        });
+        renderEspHomeFirmwareLogEntries(logConsole, Array.isArray(result?.entries) ? result.entries : [], false);
+        cursor = Number(result?.cursor || cursor || 0);
+        if (statusNode instanceof HTMLElement) {
+          statusNode.textContent =
+            String(result?.status_text || result?.message || "").trim() ||
+            `Updating ${row.title} (${index}/${updates.length})...`;
+        }
+        if (!boolFromAny(result?.active, true)) {
+          const phase = String(result?.phase || "").trim().toLowerCase();
+          const error = String(result?.error || "").trim();
+          if (phase === "failed" || phase === "cancelled" || error) {
+            failed += 1;
+            appendBatchLine(`${row.title} failed${error ? `: ${error}` : "."}`, "error");
+          } else {
+            completed += 1;
+            appendBatchLine(`${row.title} updated.`, "info");
+          }
+          currentSessionId = "";
+          window.setTimeout(startNext, 900);
+          return;
+        }
+        pollCurrent(row);
+      } catch (error) {
+        failed += 1;
+        appendBatchLine(`${row.title} log polling failed: ${String(error?.message || "unknown error")}`, "error");
+        await stopCurrentSession();
+        window.setTimeout(startNext, 900);
+      }
+    }, 1000);
+  };
+
+  const startNext = async () => {
+    if (stopped) {
+      return;
+    }
+    if (index >= updates.length) {
+      await finishBatch();
+      return;
+    }
+    const row = updates[index];
+    index += 1;
+    cursor = 0;
+    currentSessionId = "";
+    const values = currentMatches(row) ? currentValues : {};
+    appendBatchLine(`Starting ${row.title} (${index}/${updates.length})...`, "info");
+    if (statusNode instanceof HTMLElement) {
+      statusNode.textContent = `Starting ${row.title} (${index}/${updates.length})...`;
+    }
+    try {
+      const result = await runCoreManagerAction(trigger, coreKey, "voice_firmware_flash_start", {
+        id: row.selector,
+        selector: row.selector,
+        template_key: row.template_key,
+        values,
+        follow_logs: false,
+      });
+      currentSessionId = String(result?.session_id || "").trim();
+      cursor = Number(result?.cursor || 0);
+      renderEspHomeFirmwareLogEntries(logConsole, Array.isArray(result?.entries) ? result.entries : [], false);
+      if (!currentSessionId) {
+        throw new Error("Firmware session did not start.");
+      }
+      pollCurrent(row);
+    } catch (error) {
+      failed += 1;
+      appendBatchLine(`${row.title} failed to start: ${String(error?.message || "unknown error")}`, "error");
+      window.setTimeout(startNext, 900);
+    }
+  };
+
+  const stopBatch = async () => {
+    if (stopped) {
+      return;
+    }
+    stopped = true;
+    if (pollTimer) {
+      window.clearTimeout(pollTimer);
+      pollTimer = 0;
+    }
+    await stopCurrentSession();
+    setBusy(false);
+    await refreshBehindModal();
+  };
+
+  setBusy(true);
+  openRuntimeSettingsModal({
+    title: singleUpdate ? "Update Firmware" : "Update All Firmware",
+    meta: singleUpdate ? updates[0].title : `${updates.length} targets queued`,
+    fields: [
+      {
+        key: "firmware_update_all_log",
+        label: singleUpdate ? "Firmware Update Log" : "Batch Firmware Log",
+        type: "textarea",
+        value: "",
+        description: singleUpdate
+          ? "Tater builds and uploads this firmware update over OTA."
+          : "Tater updates one satellite at a time and moves to the next after the upload completes.",
+      },
+    ],
+    onOpen: async ({ modal, fieldsEl, statusEl }) => {
+      statusNode = statusEl instanceof HTMLElement ? statusEl : null;
+      if (statusNode instanceof HTMLElement) {
+        statusNode.classList.add("voice-log-status");
+      }
+      modalDialog = modal?.querySelector(".runtime-settings-dialog") || null;
+      modal?.classList.add("voice-log-modal");
+      modalDialog?.classList.add("runtime-settings-dialog-log");
+      fieldsEl?.classList.add("runtime-settings-fields-log");
+      const logArea = fieldsEl?.querySelector('[data-setting-key="firmware_update_all_log"]') || null;
+      if (logArea instanceof HTMLTextAreaElement) {
+        logArea.readOnly = true;
+        logArea.spellcheck = false;
+        logArea.classList.add("voice-log-source-textarea");
+        const label = logArea.closest("label");
+        const consoleEl = document.createElement("div");
+        consoleEl.className = "voice-log-console";
+        consoleEl.setAttribute("role", "log");
+        consoleEl.setAttribute("aria-live", "polite");
+        consoleEl.setAttribute("aria-label", singleUpdate ? "Firmware update log" : "Batch firmware update log");
+        logConsole = consoleEl;
+        if (label instanceof HTMLElement) {
+          label.classList.add("voice-log-field");
+          label.appendChild(consoleEl);
+        }
+      }
+      renderEspHomeFirmwareLogEntries(logConsole, [], true, "Waiting to start firmware updates...");
+      appendBatchLine(`Queued ${updates.length} firmware update${updates.length === 1 ? "" : "s"}.`, "info");
+      await startNext();
+    },
+    onClose: ({ modal, fieldsEl, statusEl }) => {
+      modal?.classList.remove("voice-log-modal");
+      modalDialog?.classList.remove("runtime-settings-dialog-log");
+      fieldsEl?.classList.remove("runtime-settings-fields-log");
+      if (statusEl instanceof HTMLElement) {
+        statusEl.classList.remove("voice-log-status");
+      }
+      void stopBatch();
+    },
+  });
+}
+
 function bindEspHomeFirmwareActions(root = document) {
+  root.querySelectorAll(".esphome-firmware-update-all").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement) || button.dataset.esphomeFirmwareUpdateAllBound === "1") {
+      return;
+    }
+    button.dataset.esphomeFirmwareUpdateAllBound = "1";
+    button.addEventListener("click", () => {
+      const coreKey = String(button.dataset?.coreKey || "esphome").trim() || "esphome";
+      openEspHomeFirmwareUpdateAllFlow(button, coreKey);
+    });
+  });
+
+  root.querySelectorAll(".esphome-firmware-update-one").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement) || button.dataset.esphomeFirmwareUpdateOneBound === "1") {
+      return;
+    }
+    button.dataset.esphomeFirmwareUpdateOneBound = "1";
+    button.addEventListener("click", () => {
+      const coreKey = String(button.dataset?.coreKey || "esphome").trim() || "esphome";
+      const selector = String(button.dataset?.selector || "").trim();
+      const templateKey = String(button.dataset?.templateKey || "").trim();
+      const row = espHomeFirmwareUpdateRows().find(
+        (candidate) => candidate.selector === selector && candidate.template_key === templateKey
+      );
+      if (!row) {
+        showToast("That firmware update is no longer available. Refreshing the firmware list.", "error", 3200);
+        void reloadEspHomeRuntimePayloadOnly();
+        return;
+      }
+      openEspHomeFirmwareUpdateAllFlow(button, coreKey, [row]);
+    });
+  });
+
   root.querySelectorAll(".esphome-firmware-action").forEach((button) => {
     if (!(button instanceof HTMLButtonElement) || button.dataset.esphomeFirmwareBound === "1") {
       return;
@@ -9333,7 +9943,7 @@ function bindEspHomeFirmwareActions(root = document) {
             })
         );
         if (action !== "voice_firmware_clean") {
-          delete state.esphomeFirmwareDrafts[templateKey];
+          clearEspHomeFirmwareDraft(templateKey, selector);
         }
         await reloadEspHomeRuntimePayloadOnly();
         const message = String(result?.message || successText).trim() || successText;
@@ -9541,6 +10151,7 @@ function bindCoreTabManagers() {
   bindCoreManagerSelectors();
   bindCoreManagerPagination();
   bindCoreManagerConditionalFields();
+  bindCoreManagerConditionalDisabledFields();
   bindCoreManagerDependentSelects();
   bindEspHomeEntityControls();
   bindEspHomeFirmwareSelectors();
@@ -10447,11 +11058,17 @@ function renderDashboardCards(cards) {
       ${rows
         .map((card) => {
           const tone = dashboardToneClass(card.tone);
+          const actionTarget = String(card.action_target || "").trim().toLowerCase();
+          const actionLabel = String(card.action_label || (actionTarget === "firmware" ? "Open Firmware" : "Open")).trim();
+          const actionAttrs = actionTarget
+            ? ` data-dashboard-update-target="${escapeHtml(actionTarget)}" role="button" tabindex="0"`
+            : "";
           return `
-            <article class="dashboard-status-tile ${escapeHtml(tone)}">
+            <article class="dashboard-status-tile ${escapeHtml(tone)}${actionTarget ? " actionable" : ""}"${actionAttrs}>
               <div class="small">${escapeHtml(card.label || "")}</div>
               <strong>${escapeHtml(card.value ?? "-")}</strong>
               ${card.detail ? `<div class="small muted">${escapeHtml(card.detail)}</div>` : ""}
+              ${actionTarget ? `<span class="dashboard-status-action">${escapeHtml(actionLabel)}</span>` : ""}
             </article>
           `;
         })
@@ -10751,11 +11368,83 @@ function renderDashboardOverviewPanel(brief) {
   `;
 }
 
-function renderDashboardSystemPanel(cards, brief) {
+function dashboardUpdateGroups(updates) {
+  const body = updates && typeof updates === "object" ? updates : {};
+  return Array.isArray(body.groups) ? body.groups.filter((group) => group && typeof group === "object") : [];
+}
+
+function renderDashboardUpdatesPanel(updates) {
+  const body = updates && typeof updates === "object" ? updates : {};
+  const total = Number(body.total || 0);
+  const groups = dashboardUpdateGroups(body).filter((group) => Number(group.count || 0) > 0 || String(group.error || "").trim());
+  if (!groups.length && total <= 0) {
+    return "";
+  }
+  return `
+    <div class="dashboard-updates-panel">
+      <div class="dashboard-updates-head">
+        <div>
+          <div class="small muted">Update Watch</div>
+          <strong>${escapeHtml(total > 0 ? `${total} update${total === 1 ? "" : "s"} available` : "Update scan")}</strong>
+        </div>
+        <span>${escapeHtml(String(body.summary || "").trim() || "Firmware and shop surfaces checked.")}</span>
+      </div>
+      <div class="dashboard-updates-grid">
+        ${groups
+          .map((group) => {
+            const kind = String(group.kind || "").trim();
+            const label = String(group.label || kind || "Updates").trim();
+            const count = Number(group.count || 0);
+            const error = String(group.error || "").trim();
+            const items = Array.isArray(group.items) ? group.items : [];
+            const openLabel = kind === "firmware" ? "Open Firmware" : "Open Updates";
+            const openAttrs = kind
+              ? ` data-dashboard-update-target="${escapeHtml(kind)}" role="button" tabindex="0"`
+              : "";
+            return `
+              <article class="dashboard-update-card${count > 0 ? " has-updates" : ""}${kind ? " actionable" : ""}"${openAttrs}>
+                <div class="dashboard-update-card-head">
+                  <div>
+                    <span>${escapeHtml(label)}</span>
+                    <strong>${escapeHtml(error ? "Needs check" : count > 0 ? `${count} available` : "Current")}</strong>
+                  </div>
+                  <button type="button" class="inline-btn dashboard-update-link" data-dashboard-update-target="${escapeHtml(kind)}">
+                    ${escapeHtml(openLabel)}
+                  </button>
+                </div>
+                ${
+                  error
+                    ? `<div class="small muted">${escapeHtml(error)}</div>`
+                    : items.length
+                      ? `<div class="dashboard-update-items">
+                          ${items
+                            .slice(0, 4)
+                            .map((item) => {
+                              const name = String(item.name || item.id || "Update").trim();
+                              const installed = String(item.installed || "unknown").trim();
+                              const latest = String(item.latest || "").trim();
+                              return `<div><span>${escapeHtml(name)}</span><small>${escapeHtml(installed)}${latest ? ` -> ${escapeHtml(latest)}` : ""}</small></div>`;
+                            })
+                            .join("")}
+                          ${items.length > 4 ? `<div><span>More</span><small>+${items.length - 4} more</small></div>` : ""}
+                        </div>`
+                      : `<div class="small muted">No pending updates.</div>`
+                }
+              </article>
+            `;
+          })
+          .join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderDashboardSystemPanel(cards, brief, updates) {
   const rows = Array.isArray(cards) ? cards : [];
   const text = String(brief?.text || "").trim();
   const meta = dashboardBriefMeta(brief);
-  if (!rows.length && !text) {
+  const updatesHtml = renderDashboardUpdatesPanel(updates);
+  if (!rows.length && !text && !updatesHtml) {
     return "";
   }
   return `
@@ -10769,6 +11458,7 @@ function renderDashboardSystemPanel(cards, brief) {
         ${dashboardBriefRefreshButton(brief?.id || "system")}
       </div>
       ${text ? `<p class="dashboard-panel-brief">${escapeHtml(text)}</p>` : ""}
+      ${updatesHtml}
       ${renderDashboardCards(rows)}
     </article>
   `;
@@ -11071,7 +11761,7 @@ function renderDashboardSignalBriefs(payload) {
   });
 
   const overviewHtml = renderDashboardOverviewPanel(briefs.overview);
-  const systemHtml = renderDashboardSystemPanel(payload?.cards, briefs.system);
+  const systemHtml = renderDashboardSystemPanel(payload?.cards, briefs.system, payload?.updates);
   const weatherHtml = renderDashboardWeatherPanel(environmentSection, briefs.environment);
   const awarenessHtml = renderDashboardAwarenessPanel(awarenessSection, briefs.awareness);
   const voiceHtml = renderDashboardVoicePanel(voiceSection, briefs.voice);
@@ -11430,11 +12120,61 @@ function bindDashboardControls() {
   document.getElementById("dashboard-settings")?.addEventListener("click", () => {
     openDashboardSettingsModal();
   });
+  document.querySelectorAll(".dashboard-status-tile[data-dashboard-update-target], .dashboard-update-card[data-dashboard-update-target]").forEach((card) => {
+    if (!(card instanceof HTMLElement) || card.dataset.dashboardUpdateCardBound === "1") {
+      return;
+    }
+    card.dataset.dashboardUpdateCardBound = "1";
+    const openTarget = () => {
+      void openDashboardUpdateTarget(card.getAttribute("data-dashboard-update-target") || "");
+    };
+    card.addEventListener("click", (event) => {
+      if (event.target instanceof HTMLElement && event.target.closest("button, a, input, select, textarea")) {
+        return;
+      }
+      openTarget();
+    });
+    card.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") {
+        return;
+      }
+      event.preventDefault();
+      openTarget();
+    });
+  });
+  document.querySelectorAll(".dashboard-update-link[data-dashboard-update-target]").forEach((button) => {
+    button.addEventListener("click", () => {
+      void openDashboardUpdateTarget(button.getAttribute("data-dashboard-update-target") || "");
+    });
+  });
   document.querySelectorAll(".dashboard-brief-refresh").forEach((button) => {
     button.addEventListener("click", () => {
       void refreshDashboardBriefs(button.getAttribute("data-dashboard-brief-id") || "");
     });
   });
+}
+
+async function openDashboardUpdateTarget(rawTarget) {
+  const target = String(rawTarget || "").trim().toLowerCase();
+  if (target === "firmware") {
+    setPreferredSettingsTab("esphome");
+    await loadView("settings");
+    const firmwareButton = document.querySelector("#settings-esphome-shell .settings-subtab-btn[data-esphome-tab='firmware']");
+    if (firmwareButton instanceof HTMLElement) {
+      firmwareButton.click();
+    } else {
+      await ensureEspHomeRuntimeLoaded({ force: true, panel: "firmware" });
+    }
+    document.getElementById("settings-esphome-runtime-firmware")?.scrollIntoView({ block: "start", behavior: "smooth" });
+    return;
+  }
+  if (["cores", "portals", "verbas"].includes(target)) {
+    await loadView(target);
+    const manageButton = document.querySelector(`.shop-tab-btn[data-kind='${target}'][data-tab='manage']`);
+    if (manageButton instanceof HTMLElement) {
+      manageButton.click();
+    }
+  }
 }
 
 async function loadDashboardView(options = {}) {
@@ -13275,15 +14015,15 @@ async function loadSettingsView() {
     ? esphomeFields.map((field) => renderCoreManagerField(field)).join("")
     : renderNotice("ESPHome settings are unavailable right now.");
   const esphomeSections = Array.isArray(esphomeUi.sections) ? esphomeUi.sections : [];
-  const esphomeExperimentalSection = esphomeSections.find(
-    (section) => String(section?.label || "").trim().toLowerCase() === "experimental"
+  const esphomeTaterVoiceSection = esphomeSections.find(
+    (section) => String(section?.label || "").trim().toLowerCase() === "tater voice extras"
   ) || null;
-  const esphomeExperimentalFields = Array.isArray(esphomeExperimentalSection?.fields) ? esphomeExperimentalSection.fields : [];
-  const esphomeExperimentalFieldsHtml = esphomeExperimentalFields.length
-    ? esphomeExperimentalFields.map((field) => renderCoreManagerField(field)).join("")
+  const esphomeTaterVoiceFields = Array.isArray(esphomeTaterVoiceSection?.fields) ? esphomeTaterVoiceSection.fields : [];
+  const esphomeTaterVoiceFieldsHtml = esphomeTaterVoiceFields.length
+    ? esphomeTaterVoiceFields.map((field) => renderCoreManagerField(field)).join("")
     : "";
   const esphomePipelineSections = esphomeSections.filter(
-    (section) => String(section?.label || "").trim().toLowerCase() !== "experimental"
+    (section) => String(section?.label || "").trim().toLowerCase() !== "tater voice extras"
   );
   const esphomePipelineFields = esphomePipelineSections.flatMap((section) =>
     Array.isArray(section?.fields) ? section.fields : []
@@ -13309,6 +14049,80 @@ async function loadSettingsView() {
   const esphomePipelineFieldsHtml = esphomePipelineFields.length
     ? esphomePipelineFields.map((field) => renderCoreManagerField(field)).join("")
     : esphomeFieldsHtml;
+  const voiceModelUi = settings?.voice_model_ui && typeof settings.voice_model_ui === "object" ? settings.voice_model_ui : {};
+  const voiceModelSections = Array.isArray(voiceModelUi.sections) ? voiceModelUi.sections : [];
+  const openWakeWordTrainer =
+    voiceModelUi.openwakeword_trainer && typeof voiceModelUi.openwakeword_trainer === "object"
+      ? voiceModelUi.openwakeword_trainer
+      : {};
+  const voiceModelSettingKeys = new Set(
+    voiceModelSections
+      .flatMap((section) => (Array.isArray(section?.fields) ? section.fields : []))
+      .map((field) => String(field?.key || "").trim())
+      .filter(Boolean)
+  );
+  const openWakeWordTrainerUrl = String(openWakeWordTrainer.trainer_url || "http://127.0.0.1:8791").trim();
+  const renderVoiceModelSection = (section) => {
+    const label = String(section?.label || "").trim();
+    const fields = Array.isArray(section?.fields) ? section.fields : [];
+    if (!fields.length) {
+      return "";
+    }
+    return `
+      <div class="hydra-model-panel is-active voice-model-settings-panel">
+        <div class="hydra-model-panel-title">${escapeHtml(label || "Voice Model Settings")}</div>
+        <div class="small hydra-model-panel-note" style="grid-column: 1 / -1;">
+          ${escapeHtml(
+            label === "openWakeWord"
+              ? "Server-side wake model settings used by updated Tater satellite firmware."
+              : label === "Voice Activity Detection"
+                ? "Server-side speech endpoint detection used after wake."
+                : "Local model acceleration used by voice identity and emotion models."
+          )}
+        </div>
+        ${fields.map((field) => renderCoreManagerField(field)).join("")}
+      </div>
+    `;
+  };
+  const voiceModelSectionHtmlByLabel = (wantedLabel) =>
+    voiceModelSections.length
+      ? voiceModelSections
+          .filter((section) => String(section?.label || "").trim().toLowerCase() === String(wantedLabel || "").trim().toLowerCase())
+          .map((section) => renderVoiceModelSection(section))
+          .join("")
+      : "";
+  const voiceVadSettingsHtml = voiceModelSectionHtmlByLabel("Voice Activity Detection");
+  const speechBrainSettingsHtml = voiceModelSectionHtmlByLabel("SpeechBrain Models");
+  const openWakeWordSettingsHtml = voiceModelSections.length
+    ? voiceModelSections
+        .filter((section) => String(section?.label || "").trim().toLowerCase() === "openwakeword")
+        .map((section) => renderVoiceModelSection(section))
+        .join("")
+    : "";
+  const openWakeWordTrainerHtml = `
+    <div class="hydra-model-panel is-active voice-model-settings-panel">
+      <div class="hydra-model-panel-title">openWakeWord Trainer</div>
+      <div class="small hydra-model-panel-note" style="grid-column: 1 / -1;">
+        Load trained ONNX/TFLite artifacts from the openWakeWord trainer, download one into Tater, and use it as the active remote wake model.
+      </div>
+      <label style="grid-column: 1 / -1;">Trainer URL
+        <input id="set_openwakeword_trainer_url" type="text" value="${escapeHtml(openWakeWordTrainerUrl)}" placeholder="http://127.0.0.1:8791" />
+      </label>
+      <div class="inline-row" style="grid-column: 1 / -1;">
+        <button type="button" id="settings-openwakeword-load-trainer-models" class="inline-btn">Load Trainer Models</button>
+        <span id="settings-openwakeword-trainer-status" class="small"></span>
+      </div>
+      <label style="grid-column: 1 / -1;">Trained Model
+        <select id="settings-openwakeword-trainer-model">
+          <option value="">Load trainer models</option>
+        </select>
+      </label>
+      <div class="inline-row" style="grid-column: 1 / -1;">
+        <button type="button" id="settings-openwakeword-download-trainer-model" class="inline-btn">Download and Use Model</button>
+        <span class="small">The saved path is written into the openWakeWord Model field above.</span>
+      </div>
+    </div>
+  `;
   const esphomeRunning = boolFromAny(esphomeUi.running, false);
 
   root.innerHTML = `${consumeNoticeHtml()}
@@ -13447,20 +14261,26 @@ async function loadSettingsView() {
         <section class="settings-tab-panel" data-settings-panel="models">
           ${renderSettingsSectionIntro(
             "Models",
-            "Shared model routing for base LLM calls, vision, local voice acceleration, STT, and TTS.",
+            "Shared model routing for LLM, vision, wake words, speech, speaker identity, and emotion hints.",
             "AI"
           )}
-          <div class="form-grid two-col">
-            <div class="hydra-model-mode" style="grid-column: 1 / -1;">
-              <div class="small hydra-model-mode-label">Beast Mode Routing</div>
-              ${renderToggleRow(
-                `<input id="set_hydra_beast_mode_enabled" class="toggle-input" type="checkbox" ${
-                  settings.hydra_beast_mode_enabled ? "checked" : ""
-                } />`
-              )}
-              <div class="small">Off: regular calls use Base model servers. On: dedicated models per head, while AI Calls still uses Base model servers.</div>
-            </div>
+          <div
+            id="settings-models-shell"
+            class="form-grid two-col"
+            data-core-action-endpoint="/api/settings/esphome/runtime/action"
+            data-core-refresh-scope="esphome-runtime"
+            data-core-key="esphome"
+          >
             <div id="settings-hydra-model-stack" class="hydra-model-stack">
+              <div class="settings-subtabs" style="grid-column: 1 / -1;">
+                <button type="button" class="settings-subtab-btn active" data-models-tab="routing">LLM / Vision</button>
+                <button type="button" class="settings-subtab-btn" data-models-tab="speech">Speech</button>
+                <button type="button" class="settings-subtab-btn" data-models-tab="wake">Wake Word</button>
+                <button type="button" class="settings-subtab-btn" data-models-tab="speakerid">Speaker ID</button>
+                <button type="button" class="settings-subtab-btn" data-models-tab="emotionid">Emotion ID</button>
+              </div>
+
+              <div class="settings-subpanel active" data-models-panel="routing">
               <div id="settings-hydra-base-fields" class="hydra-model-panel is-active">
                 <div class="hydra-model-panel-title">Base Model</div>
                 <div class="small hydra-model-panel-note">Used for regular AI calls. Multiple base servers rotate in round-robin order.</div>
@@ -13511,7 +14331,15 @@ async function loadSettingsView() {
                   <input id="set_vision_api_key" type="password" value="${escapeHtml(settings.vision_api_key || "")}" />
                 </label>
               </div>
+              </div>
 
+              <div class="settings-subpanel" data-models-panel="wake">
+              ${voiceVadSettingsHtml}
+              ${openWakeWordTrainerHtml}
+              ${openWakeWordSettingsHtml}
+              </div>
+
+              <div class="settings-subpanel" data-models-panel="speech">
               <div class="hydra-model-panel is-active">
                 <div class="hydra-model-panel-title">Voice Acceleration</div>
                 <div class="small hydra-model-panel-note">
@@ -13745,6 +14573,18 @@ async function loadSettingsView() {
                   <span id="settings-speech-tts-preview-status" class="small"></span>
                 </div>
               </div>
+              </div>
+
+              <div class="settings-subpanel active" data-models-panel="routing">
+              <div class="hydra-model-mode" style="grid-column: 1 / -1;">
+                <div class="small hydra-model-mode-label">Beast Mode Routing</div>
+                ${renderToggleRow(
+                  `<input id="set_hydra_beast_mode_enabled" class="toggle-input" type="checkbox" ${
+                    settings.hydra_beast_mode_enabled ? "checked" : ""
+                  } />`
+                )}
+                <div class="small">Off: regular calls use Base model servers. On: dedicated models per head, while AI Calls still uses Base model servers.</div>
+              </div>
               <div id="settings-hydra-beast-fields" class="hydra-model-panel ${
                 settings.hydra_beast_mode_enabled ? "is-active" : ""
               }">
@@ -13861,10 +14701,36 @@ async function loadSettingsView() {
                   )}" />
                 </label>
               </div>
+              </div>
+
+              <div class="settings-subpanel" data-models-panel="speakerid">
+                ${speechBrainSettingsHtml}
+                ${renderSettingsSectionIntro(
+                  "Speaker ID",
+                  "Enroll voiceprints for people who use your satellites, then let Tater tag the speaker before Hydra runs.",
+                  "ID",
+                  "subtle"
+                )}
+                <div id="settings-esphome-runtime-speakerid">
+                  ${renderNotice("Open Speaker ID to load voice identity controls.")}
+                </div>
+              </div>
+
+              <div class="settings-subpanel" data-models-panel="emotionid">
+                ${renderSettingsSectionIntro(
+                  "Emotion ID",
+                  "Detect a soft voice-tone hint from each voice turn, then let Tater respond with a little more emotional awareness.",
+                  "MOOD",
+                  "subtle"
+                )}
+                <div id="settings-esphome-runtime-emotionid">
+                  ${renderNotice("Open Emotion ID to load voice emotion controls.")}
+                </div>
+              </div>
             </div>
             <div class="inline-row" style="grid-column: 1 / -1;">
               <button type="button" id="settings-hydra-model-save" class="action-btn">Save Models</button>
-              <span class="small">Saves shared LLM, vision, STT, and TTS routing settings.</span>
+              <span class="small">Saves shared LLM, vision, speech, wake word, Speaker ID, Emotion ID, STT, and TTS settings.</span>
             </div>
           </div>
         </section>
@@ -13918,7 +14784,7 @@ async function loadSettingsView() {
         <section class="settings-tab-panel" data-settings-panel="esphome">
           ${renderSettingsSectionIntro(
             "ESPHome",
-            "Manage satellites, firmware, speaker ID, stats, and native voice runtime settings from one place.",
+            "Manage satellites, firmware, stats, and native voice runtime settings from one place.",
             "ESP"
           )}
           <div
@@ -13930,8 +14796,6 @@ async function loadSettingsView() {
             <div class="settings-subtabs">
               <button type="button" class="settings-subtab-btn active" data-esphome-tab="satellites">Satellites</button>
               <button type="button" class="settings-subtab-btn" data-esphome-tab="firmware">Firmware</button>
-              <button type="button" class="settings-subtab-btn" data-esphome-tab="speakerid">Speaker ID</button>
-              <button type="button" class="settings-subtab-btn" data-esphome-tab="emotionid">Emotion ID</button>
               <button type="button" class="settings-subtab-btn" data-esphome-tab="stats">Stats</button>
               <button type="button" class="settings-subtab-btn" data-esphome-tab="platform">Settings</button>
             </div>
@@ -13991,11 +14855,11 @@ async function loadSettingsView() {
                 </section>
 
                 ${
-                  esphomeExperimentalFieldsHtml
+                  esphomeTaterVoiceFieldsHtml
                     ? `<section class="core-inline-section">
-                        <div class="small core-inline-section-title">Experimental</div>
+                        <div class="small core-inline-section-title">Tater Voice Extras</div>
                         <div class="form-grid two-col">
-                          ${esphomeExperimentalFieldsHtml}
+                          ${esphomeTaterVoiceFieldsHtml}
                         </div>
                       </section>`
                     : ""
@@ -14024,30 +14888,6 @@ async function loadSettingsView() {
               )}
               <div id="settings-esphome-runtime-firmware">
                 ${renderNotice("Open the ESPHome tab to load the firmware builder.")}
-              </div>
-            </div>
-
-            <div class="settings-subpanel" data-esphome-panel="speakerid">
-              ${renderSettingsSectionIntro(
-                "Speaker ID",
-                "Enroll voiceprints for people who use your satellites, then let Tater tag the speaker before Hydra runs.",
-                "ID",
-                "subtle"
-              )}
-              <div id="settings-esphome-runtime-speakerid">
-                ${renderNotice("Open the ESPHome tab to load Speaker ID.")}
-              </div>
-            </div>
-
-            <div class="settings-subpanel" data-esphome-panel="emotionid">
-              ${renderSettingsSectionIntro(
-                "Emotion ID",
-                "Detect a soft voice-tone hint from each voice turn, then let Tater respond with a little more emotional awareness.",
-                "MOOD",
-                "subtle"
-              )}
-              <div id="settings-esphome-runtime-emotionid">
-                ${renderNotice("Open the ESPHome tab to load Emotion ID.")}
               </div>
             </div>
 
@@ -14386,6 +15226,12 @@ async function loadSettingsView() {
     setPreferredSettingsTab(normalizedTab);
     if (normalizedTab === "esphome") {
       void ensureEspHomeRuntimeLoaded({ force: true, panel: getActiveEspHomeRuntimePanel() });
+    } else if (normalizedTab === "models") {
+      const modelsShell = document.getElementById("settings-models-shell");
+      const activeModelsPanel = String(modelsShell?.dataset?.modelsActiveTab || "").trim();
+      if (["speakerid", "emotionid"].includes(activeModelsPanel)) {
+        void ensureEspHomeRuntimeLoaded({ force: true, panel: activeModelsPanel });
+      }
     }
   };
 
@@ -15704,6 +16550,154 @@ async function loadSettingsView() {
   setSpeechTtsDownloadEnabled(false);
   applySpeechSettingsVisibility();
 
+  const openWakeWordTrainerUrlEl = document.getElementById("set_openwakeword_trainer_url");
+  const openWakeWordTrainerModelEl = document.getElementById("settings-openwakeword-trainer-model");
+  const openWakeWordTrainerStatusEl = document.getElementById("settings-openwakeword-trainer-status");
+  const openWakeWordLoadTrainerBtnEl = document.getElementById("settings-openwakeword-load-trainer-models");
+  const openWakeWordDownloadTrainerBtnEl = document.getElementById("settings-openwakeword-download-trainer-model");
+  const getOpenWakeWordCoreField = (key) => document.querySelector(`[data-core-field-key="${key}"]`);
+  const collectVoiceModelSettings = () => {
+    const values = collectCoreManagerValues(document.getElementById("settings-hydra-model-stack"));
+    return Object.fromEntries(
+      Object.entries(values).filter(([key]) => voiceModelSettingKeys.has(String(key || "").trim()))
+    );
+  };
+  const getOpenWakeWordRuntimeValue = () =>
+    String(getOpenWakeWordCoreField("VOICE_OPENWAKEWORD_INFERENCE_FRAMEWORK")?.value || "onnx").trim() || "onnx";
+  const upsertOpenWakeWordModelOption = (rawOption) => {
+    const select = getOpenWakeWordCoreField("VOICE_OPENWAKEWORD_MODEL_SOURCE");
+    if (!(select instanceof HTMLSelectElement)) {
+      return false;
+    }
+    const option = rawOption && typeof rawOption === "object" ? rawOption : {};
+    const value = String(option.value || option.model_source || option.path || "").trim();
+    if (!value) {
+      return false;
+    }
+    const label = String(option.label || option.name || value).trim() || value;
+    const framework = String(option.framework || "").trim();
+    let row = Array.from(select.options || []).find((item) => String(item.value || "") === value);
+    if (!row) {
+      row = new Option(label, value);
+      select.appendChild(row);
+    } else {
+      row.textContent = label;
+    }
+    if (framework) {
+      row.dataset.framework = framework;
+    }
+    select.value = value;
+    return true;
+  };
+  const syncOpenWakeWordFrameworkFromModel = () => {
+    const modelSelect = getOpenWakeWordCoreField("VOICE_OPENWAKEWORD_MODEL_SOURCE");
+    const frameworkEl = getOpenWakeWordCoreField("VOICE_OPENWAKEWORD_INFERENCE_FRAMEWORK");
+    if (!(modelSelect instanceof HTMLSelectElement) || !(frameworkEl instanceof HTMLSelectElement)) {
+      return;
+    }
+    const selected = modelSelect.selectedOptions?.[0] || null;
+    const framework = String(selected?.dataset?.framework || "").trim();
+    if (["onnx", "tflite"].includes(framework)) {
+      frameworkEl.value = framework;
+    }
+  };
+  const setOpenWakeWordTrainerStatus = (message) => {
+    if (openWakeWordTrainerStatusEl) {
+      openWakeWordTrainerStatusEl.textContent = String(message || "");
+    }
+  };
+  const renderOpenWakeWordTrainerOptions = (items) => {
+    if (!openWakeWordTrainerModelEl) {
+      return;
+    }
+    const rows = Array.isArray(items) ? items : [];
+    if (!rows.length) {
+      openWakeWordTrainerModelEl.innerHTML = `<option value="">No ONNX/TFLite models found</option>`;
+      return;
+    }
+    openWakeWordTrainerModelEl.innerHTML = rows
+      .map((item) => {
+        const value = String(item?.value || item?.url || "").trim();
+        const label = String(item?.label || item?.name || value).trim() || value;
+        const framework = String(item?.framework || "").trim();
+        return `<option value="${escapeHtml(value)}" data-framework="${escapeHtml(framework)}">${escapeHtml(label)}</option>`;
+      })
+      .join("");
+  };
+  const loadOpenWakeWordTrainerModels = async () => {
+    if (!openWakeWordTrainerUrlEl || !openWakeWordLoadTrainerBtnEl) {
+      return;
+    }
+    openWakeWordLoadTrainerBtnEl.disabled = true;
+    setOpenWakeWordTrainerStatus("Loading trainer models...");
+    try {
+      const result = await api("/api/settings/openwakeword/trainer-models", {
+        method: "POST",
+        body: JSON.stringify({
+          trainer_url: String(openWakeWordTrainerUrlEl.value || "").trim(),
+          framework: getOpenWakeWordRuntimeValue(),
+        }),
+      });
+      renderOpenWakeWordTrainerOptions(result?.items || []);
+      const count = Number(result?.count || 0);
+      setOpenWakeWordTrainerStatus(count ? `Loaded ${count} trained model${count === 1 ? "" : "s"}.` : "No matching trained models found.");
+    } catch (error) {
+      setOpenWakeWordTrainerStatus(`Trainer load failed: ${error.message}`);
+      showToast(`openWakeWord trainer load failed: ${error.message}`, "error", 3600);
+    } finally {
+      openWakeWordLoadTrainerBtnEl.disabled = false;
+    }
+  };
+  const downloadOpenWakeWordTrainerModel = async () => {
+    if (!openWakeWordTrainerUrlEl || !openWakeWordTrainerModelEl || !openWakeWordDownloadTrainerBtnEl) {
+      return;
+    }
+    const artifactUrl = String(openWakeWordTrainerModelEl.value || "").trim();
+    if (!artifactUrl) {
+      setOpenWakeWordTrainerStatus("Choose a trained model first.");
+      return;
+    }
+    const selected = openWakeWordTrainerModelEl.selectedOptions?.[0] || null;
+    const selectedFramework = String(selected?.dataset?.framework || getOpenWakeWordRuntimeValue()).trim();
+    openWakeWordDownloadTrainerBtnEl.disabled = true;
+    setOpenWakeWordTrainerStatus("Downloading trained model into Tater...");
+    try {
+      const result = await api("/api/settings/openwakeword/download-trainer-model", {
+        method: "POST",
+        body: JSON.stringify({
+          trainer_url: String(openWakeWordTrainerUrlEl.value || "").trim(),
+          artifact_url: artifactUrl,
+          framework: selectedFramework,
+        }),
+      });
+      const modelSourceEl = getOpenWakeWordCoreField("VOICE_OPENWAKEWORD_MODEL_SOURCE");
+      const frameworkEl = getOpenWakeWordCoreField("VOICE_OPENWAKEWORD_INFERENCE_FRAMEWORK");
+      const modelOption = result?.option && typeof result.option === "object"
+        ? result.option
+        : {
+            value: result?.model_source || result?.path || "",
+            label: result?.name || result?.model_source || result?.path || "",
+            framework: result?.framework || "",
+          };
+      if (!upsertOpenWakeWordModelOption(modelOption) && modelSourceEl) {
+        modelSourceEl.value = result?.model_source || result?.path || "";
+      }
+      if (frameworkEl && result?.framework) {
+        frameworkEl.value = result.framework;
+      }
+      setOpenWakeWordTrainerStatus(`Saved ${result?.name || "trained model"} for openWakeWord.`);
+      showToast("openWakeWord trainer model downloaded and selected.");
+    } catch (error) {
+      setOpenWakeWordTrainerStatus(`Download failed: ${error.message}`);
+      showToast(`openWakeWord model download failed: ${error.message}`, "error", 3600);
+    } finally {
+      openWakeWordDownloadTrainerBtnEl.disabled = false;
+    }
+  };
+  openWakeWordLoadTrainerBtnEl?.addEventListener("click", loadOpenWakeWordTrainerModels);
+  openWakeWordDownloadTrainerBtnEl?.addEventListener("click", downloadOpenWakeWordTrainerModel);
+  getOpenWakeWordCoreField("VOICE_OPENWAKEWORD_MODEL_SOURCE")?.addEventListener("change", syncOpenWakeWordFrameworkFromModel);
+
   document.getElementById("settings-hydra-model-save").addEventListener("click", async () => {
     const baseHost = String(document.getElementById("set_hydra_llm_host")?.value || "").trim();
     const basePort = String(document.getElementById("set_hydra_llm_port")?.value || "").trim();
@@ -15733,6 +16727,7 @@ async function loadSettingsView() {
     const speechAnnouncementOpenAiTtsBaseUrl = getOpenAiTtsBaseUrlValue("announcement");
     const speechAnnouncementOpenAiTtsApiKey = getOpenAiTtsApiKeyValue("announcement");
     const additionalBaseRows = readHydraAdditionalBaseRows();
+    const voiceModelSettings = collectVoiceModelSettings();
     const hydraBaseServersPayload = [
       normalizeHydraBaseRowInput({ host: baseHost, port: basePort, model: baseModel, api_key: baseApiKey }),
     ];
@@ -15767,6 +16762,7 @@ async function loadSettingsView() {
       speech_announcement_wyoming_tts_voice: speechAnnouncementWyomingTtsVoice,
       speech_announcement_openai_tts_base_url: speechAnnouncementOpenAiTtsBaseUrl,
       speech_announcement_openai_tts_api_key: speechAnnouncementOpenAiTtsApiKey,
+      esphome_settings: voiceModelSettings,
     };
     const hydraRoleIds = ["chat", "astraeus", "thanatos", "minos", "hermes"];
     hydraRoleIds.forEach((role) => {
@@ -15813,6 +16809,7 @@ async function loadSettingsView() {
     button.addEventListener("click", () => activateHydraSubtab(button.dataset.hydraTab));
   });
   activateHydraSubtab("settings");
+  bindModelSettingsTabs(root);
   bindEspHomeSettingsTabs(root);
 
   const metricsStatusEl = document.getElementById("settings-cerb-metrics-status");
@@ -16312,6 +17309,10 @@ async function loadSettingsView() {
     }
 
     const esphomeFormEl = document.getElementById("settings-esphome-form");
+    const esphomeSettingsValues = {
+      ...(esphomeFormEl ? collectCoreManagerValues(esphomeFormEl) : {}),
+      ...collectVoiceModelSettings(),
+    };
     const integrationPayloads = (Array.isArray(settings.integrations) ? settings.integrations : [])
       .map((integration) => ({
         id: String(integration?.id || "").trim(),
@@ -16354,7 +17355,7 @@ async function loadSettingsView() {
       ).checked,
       popup_effect_style: normalizePopupEffectStyle(document.getElementById("set_popup_effect_style")?.value || "flame"),
       admin_only_plugins: adminOnlyPlugins,
-      esphome_settings: esphomeFormEl ? collectCoreManagerValues(esphomeFormEl) : {},
+      esphome_settings: esphomeSettingsValues,
     };
     if (clearWebuiPasswordRequested) {
       payload.clear_webui_password = true;

@@ -114,17 +114,22 @@ def status() -> Dict[str, Any]:
 
 
 def discover_once() -> List[Dict[str, Any]]:
-    rows = run_async_blocking(device_runtime.discover_mdns_once(), timeout=30.0)
+    rows = device_runtime.run_on_native_loop(device_runtime.discover_mdns_once(), timeout=30.0)
     return rows if isinstance(rows, list) else []
 
 
 def reconcile_once(*, force: bool = True, timeout: float = 45.0) -> Dict[str, Any]:
-    result = run_async_blocking(device_runtime.reconcile_once(force=force), timeout=timeout)
+    result = device_runtime.run_on_native_loop(device_runtime.reconcile_once(force=force), timeout=timeout)
+    return result if isinstance(result, dict) else {}
+
+
+def refresh_entity_catalog(selector: str, *, timeout: float = 20.0) -> Dict[str, Any]:
+    result = device_runtime.run_on_native_loop(device_runtime.refresh_entity_catalog(selector), timeout=timeout)
     return result if isinstance(result, dict) else {}
 
 
 def disconnect_selector(selector: str, *, reason: str, timeout: float = 20.0) -> None:
-    run_async_blocking(device_runtime.disconnect_selector(selector, reason=reason), timeout=timeout)
+    device_runtime.run_on_native_loop(device_runtime.disconnect_selector(selector, reason=reason), timeout=timeout)
 
 
 def command_entity(
@@ -136,7 +141,7 @@ def command_entity(
     options: Dict[str, Any] | None = None,
     timeout: float = 20.0,
 ) -> Dict[str, Any]:
-    result = run_async_blocking(
+    result = device_runtime.run_on_native_loop(
         device_runtime.command_entity(
             selector,
             entity_key=entity_key,
@@ -150,17 +155,17 @@ def command_entity(
 
 
 def logs_start(selector: str, *, timeout: float = 20.0) -> Dict[str, Any]:
-    result = run_async_blocking(device_runtime.logs_start(selector), timeout=timeout)
+    result = device_runtime.run_on_native_loop(device_runtime.logs_start(selector), timeout=timeout)
     return result if isinstance(result, dict) else {}
 
 
 def logs_poll(selector: str, *, after_seq: int = 0, timeout: float = 20.0) -> Dict[str, Any]:
-    result = run_async_blocking(device_runtime.logs_poll(selector, after_seq=after_seq), timeout=timeout)
+    result = device_runtime.run_on_native_loop(device_runtime.logs_poll(selector, after_seq=after_seq), timeout=timeout)
     return result if isinstance(result, dict) else {}
 
 
 def logs_stop(selector: str, *, force: bool = False, timeout: float = 20.0) -> Dict[str, Any]:
-    result = run_async_blocking(device_runtime.logs_stop(selector, force=force), timeout=timeout)
+    result = device_runtime.run_on_native_loop(device_runtime.logs_stop(selector, force=force), timeout=timeout)
     return result if isinstance(result, dict) else {}
 
 

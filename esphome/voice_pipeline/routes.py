@@ -124,8 +124,8 @@ async def startup() -> None:
     vp.logger.info(
         "[native-voice] vad backend selected=%s threshold=%.2f neg_threshold=%.2f webrtc_aggressiveness=%s",
         selected_vad_backend,
-        float(eou_cfg.get("silero_threshold") or vp.DEFAULT_SILERO_THRESHOLD),
-        float(eou_cfg.get("silero_neg_threshold") or vp.DEFAULT_SILERO_NEG_THRESHOLD),
+        vp._as_float(eou_cfg.get("silero_threshold"), vp.DEFAULT_SILERO_THRESHOLD, minimum=0.01, maximum=0.99),
+        vp._as_float(eou_cfg.get("silero_neg_threshold"), vp.DEFAULT_SILERO_NEG_THRESHOLD, minimum=0.0, maximum=0.99),
         int(eou_cfg.get("webrtc_aggressiveness") or vp.DEFAULT_WEBRTC_VAD_AGGRESSIVENESS),
     )
     vp.logger.info(
@@ -243,7 +243,7 @@ async def native_status(x_tater_token: Optional[str] = Header(None)) -> Dict[str
             {
                 "selector": key,
                 "active_session_id": session.session_id if isinstance(session, VoiceSessionRuntime) else "",
-                "state": session.state if isinstance(session, VoiceSessionRuntime) else vp.VOICE_STATE_IDLE,
+                "state": session.state if isinstance(session, VoiceSessionRuntime) else "idle",
                 "awaiting_announcement": bool(row.get("awaiting_announcement")),
             }
         )
@@ -456,6 +456,9 @@ async def esphome_play(payload: Dict[str, Any], x_tater_token: Optional[str] = H
     source_url = vp._text(payload.get("source_url"))
     audio_b64 = vp._text(payload.get("audio_b64"))
     announce_text = vp._text(payload.get("text"))
+    tts_kind = vp._text(payload.get("tts_kind"))
+    continue_conversation = vp._as_bool(payload.get("continue_conversation"), False)
+    conversation_id = vp._text(payload.get("conversation_id"))
     filename = vp._text(payload.get("filename")) or "audio.bin"
     requested_media_type = vp._text(payload.get("media_type")).split(";", 1)[0].strip().lower()
     timeout_s = vp._as_float(payload.get("timeout_s"), 180.0)
@@ -498,6 +501,9 @@ async def esphome_play(payload: Dict[str, Any], x_tater_token: Optional[str] = H
             playback_url,
             text=announce_text,
             timeout_s=timeout_s,
+            tts_kind=tts_kind,
+            continue_conversation=continue_conversation,
+            conversation_id=conversation_id,
         )
     except Exception as exc:
         raise HTTPException(status_code=409, detail=f"Failed to queue selector playback: {exc}") from exc
@@ -510,6 +516,54 @@ async def esphome_play(payload: Dict[str, Any], x_tater_token: Optional[str] = H
         "media_type": media_type,
         **result,
     }
+
+
+@router.get("/tater-ha/v1/voice/intercom/targets")
+async def intercom_targets(x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
+    vp = _vp()
+    vp._require_api_auth(x_tater_token)
+    from .. import intercom
+
+    rows = intercom.target_options()
+    return {"ok": True, "targets": rows, "count": len(rows)}
+
+
+@router.get("/tater-ha/v1/voice/intercom/status")
+async def intercom_status(x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
+    vp = _vp()
+    vp._require_api_auth(x_tater_token)
+    from .. import intercom
+
+    return await intercom.status()
+
+
+@router.post("/tater-ha/v1/voice/intercom/start")
+async def intercom_start(payload: Dict[str, Any], x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
+    vp = _vp()
+    vp._require_api_auth(x_tater_token)
+    from .. import intercom
+
+    result = await intercom.start_intercom(
+        source_selector=vp._text((payload or {}).get("source_selector") or (payload or {}).get("selector")),
+        target_query=vp._text((payload or {}).get("target") or (payload or {}).get("target_query")),
+        timeout_s=vp._as_float((payload or {}).get("timeout_s"), intercom.DEFAULT_INTERCOM_CAPTURE_TIMEOUT_S),
+    )
+    if not bool(result.get("ok")):
+        detail = vp._text(result.get("message")) or vp._text(result.get("error")) or "Intercom failed"
+        raise HTTPException(status_code=400, detail=detail)
+    return result
+
+
+@router.post("/tater-ha/v1/voice/intercom/cancel")
+async def intercom_cancel(payload: Dict[str, Any], x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
+    vp = _vp()
+    vp._require_api_auth(x_tater_token)
+    from .. import intercom
+
+    selector = vp._text((payload or {}).get("source_selector") or (payload or {}).get("selector"))
+    if not selector:
+        raise HTTPException(status_code=400, detail="selector is required")
+    return await intercom.cancel_for_selector(selector)
 
 
 @router.get("/tater-ha/v1/voice/esphome/tts/{stream_id}.wav")

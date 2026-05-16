@@ -268,6 +268,13 @@ def satellite_item_forms(status: Dict[str, Any]) -> List[Dict[str, Any]]:
             for sensor in entity_rows
             if isinstance(sensor, dict)
         ]
+        wake_engine_value = ""
+        for sensor in sensor_rows:
+            if esphome_runtime.lower(sensor.get("label")) == "wake engine":
+                wake_engine_value = esphome_runtime.text(sensor.get("value"))
+                break
+        if wake_engine_value:
+            summary_rows.insert(3, {"label": "Wake Engine", "value": wake_engine_value})
 
         fields: List[Dict[str, Any]] = [
             {

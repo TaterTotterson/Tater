@@ -36,6 +36,8 @@ pandas
 wyoming
 silero-vad
 webrtcvad-wheels
+openwakeword
+onnxruntime
 torch
 speechbrain==1.1.0
 transformers

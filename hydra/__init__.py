@@ -1117,6 +1117,37 @@ def _memory_context_payload(
     )
 
 
+def _tool_memory_context_payload(memory_context_payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(memory_context_payload, dict) or not memory_context_payload:
+        return {}
+
+    out: Dict[str, Any] = {}
+    user_ctx = memory_context_payload.get("user") if isinstance(memory_context_payload.get("user"), dict) else {}
+    if isinstance(user_ctx, dict) and user_ctx:
+        user_out: Dict[str, Any] = {}
+        for key in ("person_name", "display_name", "user_id", "person_id", "source_user_id"):
+            value = _coerce_text(user_ctx.get(key)).strip()
+            if value:
+                user_out[key] = value
+        if user_out:
+            out["user"] = user_out
+
+    room_ctx = memory_context_payload.get("room") if isinstance(memory_context_payload.get("room"), dict) else {}
+    if isinstance(room_ctx, dict) and room_ctx:
+        room_out: Dict[str, Any] = {}
+        for key in ("room_name", "area_name", "room_id", "area_id"):
+            value = _coerce_text(room_ctx.get(key)).strip()
+            if value:
+                room_out[key] = value
+        summary = _coerce_text(room_ctx.get("summary")).strip()
+        if summary:
+            room_out["summary"] = summary
+        if room_out:
+            out["room"] = room_out
+
+    return out
+
+
 def _core_system_prompt_fragments(
     *,
     role: str,
@@ -2448,16 +2479,24 @@ async def _run_astraeus_plan(
     if isinstance(memory_context, dict) and memory_context:
         user_ctx = memory_context.get("user") if isinstance(memory_context.get("user"), dict) else {}
         room_ctx = memory_context.get("room") if isinstance(memory_context.get("room"), dict) else {}
-        payload["memory_context"] = {
-            "user_memory": _short_text(user_ctx.get("summary"), limit=1200),
-            "user_name": _short_text(
-                user_ctx.get("person_name") or user_ctx.get("display_name") or user_ctx.get("user_id"),
-                limit=120,
-            ),
-            "person_id": _short_text(user_ctx.get("person_id"), limit=120),
-            "source_user_id": _short_text(user_ctx.get("source_user_id") or user_ctx.get("user_id"), limit=120),
-            "room_memory": _short_text(room_ctx.get("summary"), limit=1200),
-        }
+        memory_payload: Dict[str, str] = {}
+        user_name = _short_text(
+            user_ctx.get("person_name") or user_ctx.get("display_name") or user_ctx.get("user_id"),
+            limit=120,
+        )
+        person_id = _short_text(user_ctx.get("person_id"), limit=120)
+        source_user_id = _short_text(user_ctx.get("source_user_id") or user_ctx.get("user_id"), limit=120)
+        room_memory = _short_text(room_ctx.get("summary"), limit=1200)
+        if user_name:
+            memory_payload["user_name"] = user_name
+        if person_id:
+            memory_payload["person_id"] = person_id
+        if source_user_id:
+            memory_payload["source_user_id"] = source_user_id
+        if room_memory:
+            memory_payload["room_memory"] = room_memory
+        if memory_payload:
+            payload["memory_context"] = memory_payload
     if capability_catalog:
         payload["available_capabilities"] = capability_catalog
     if available_tool_ids:
@@ -4464,6 +4503,7 @@ async def _run_hydra_turn_impl(
     max_rounds: Optional[int] = None,
     max_tool_calls: Optional[int] = None,
     platform_preamble: str = "",
+    tool_platform_preamble: Optional[str] = None,
 ) -> Dict[str, Any]:
     r = redis_client or default_redis
     platform = normalize_platform(platform)
@@ -4506,6 +4546,10 @@ async def _run_hydra_turn_impl(
     if turn_available_artifacts:
         origin_payload["available_artifacts"] = [dict(item) for item in turn_available_artifacts]
     platform_preamble = _sanitize_platform_preamble(platform, platform_preamble)
+    if tool_platform_preamble is None:
+        tool_platform_preamble = platform_preamble
+    else:
+        tool_platform_preamble = _sanitize_platform_preamble(platform, tool_platform_preamble)
     origin_preview = _origin_preview_for_ledger(origin_payload)
     user_text = str(user_text or "")
     effective_max_rounds, effective_max_tool_calls = resolve_agent_limits(
@@ -4593,6 +4637,7 @@ async def _run_hydra_turn_impl(
         scope=scope,
         origin=origin_payload,
     )
+    tool_memory_context_payload = _tool_memory_context_payload(memory_context_payload)
     chat_context_message = _core_system_prompt_message(
         role="chat",
         platform=platform,
@@ -4629,10 +4674,10 @@ async def _run_hydra_turn_impl(
             topic_shift_seed=astraeus_topic_shift,
             history=history,
             prior_state=prior_state,
-            memory_context=memory_context_payload,
+            memory_context=tool_memory_context_payload,
             capability_catalog=astraeus_capability_catalog,
             available_tool_ids=available_execution_tool_ids,
-            platform_preamble=platform_preamble,
+            platform_preamble=tool_platform_preamble,
             max_tokens=None,
         )
         astraeus_ms_total += (time.perf_counter() - astraeus_started) * 1000.0
@@ -4663,7 +4708,7 @@ async def _run_hydra_turn_impl(
             steps=structured_plan_queue,
             capability_catalog=astraeus_capability_catalog,
             available_tool_ids=available_execution_tool_ids,
-            platform_preamble=platform_preamble,
+            platform_preamble=tool_platform_preamble,
             max_tokens=None,
         )
         astraeus_ms_total += (time.perf_counter() - plan_review_started) * 1000.0
@@ -5020,7 +5065,7 @@ async def _run_hydra_turn_impl(
                 thanatos_messages.append({"role": "system", "content": tool_contract_prompt})
         thanatos_messages = _with_platform_preamble(
             thanatos_messages,
-            platform_preamble=platform_preamble,
+            platform_preamble=tool_platform_preamble,
         )
         thanatos_messages.extend(history)
         thanatos_messages.append({"role": "user", "content": round_request_text})
@@ -5047,7 +5092,7 @@ async def _run_hydra_turn_impl(
                 current_user_text=current_user_turn_text,
                 turn_request_text=turn_request_text,
                 agent_state=agent_state,
-                memory_context=memory_context_payload,
+                memory_context=tool_memory_context_payload,
                 available_artifacts=_available_artifacts_payload(turn_available_artifacts),
                 current_step=(current_plan_step if isinstance(current_plan_step, dict) else None),
                 goal=astraeus_goal or turn_request_text or current_user_turn_text,
@@ -5056,7 +5101,7 @@ async def _run_hydra_turn_impl(
                 draft_response=draft_response,
                 retry_count=current_step_retry_count,
                 retry_allowed=_retry_allowed_for_step(current_step_id, current_step_retry_count),
-                platform_preamble=platform_preamble,
+                platform_preamble=tool_platform_preamble,
                 max_tokens=None,
             )
             minos_ms_total += (time.perf_counter() - checker_started) * 1000.0
@@ -5177,7 +5222,7 @@ async def _run_hydra_turn_impl(
             scope=scope,
             history_messages=history,
             context=context if isinstance(context, dict) else {},
-            platform_preamble=platform_preamble,
+            platform_preamble=tool_platform_preamble,
         )
         validation_status = (
             tool_eval.get("validation_status")
@@ -5308,7 +5353,7 @@ async def _run_hydra_turn_impl(
             current_plan_step=(current_plan_step if isinstance(current_plan_step, dict) else None),
             completed_steps_count=len(completed_tool_steps),
             total_plan_steps=structured_plan_total_steps,
-            platform_preamble=platform_preamble,
+            platform_preamble=tool_platform_preamble,
             max_tokens=None,
         )
         tool_started = time.perf_counter()
@@ -5447,7 +5492,7 @@ async def _run_hydra_turn_impl(
             current_user_text=current_user_turn_text,
             turn_request_text=turn_request_text,
             agent_state=agent_state,
-            memory_context=memory_context_payload,
+            memory_context=tool_memory_context_payload,
             available_artifacts=_available_artifacts_payload(turn_available_artifacts),
             current_step=(current_plan_step if isinstance(current_plan_step, dict) else None),
             goal=astraeus_goal or turn_request_text or current_user_turn_text,
@@ -5456,7 +5501,7 @@ async def _run_hydra_turn_impl(
             draft_response=turn_draft_response,
             retry_count=current_step_retry_count,
             retry_allowed=_retry_allowed_for_step(current_step_id, current_step_retry_count),
-            platform_preamble=platform_preamble,
+            platform_preamble=tool_platform_preamble,
             max_tokens=None,
         )
         minos_ms_total += (time.perf_counter() - checker_started) * 1000.0
@@ -5649,7 +5694,7 @@ async def _run_hydra_turn_impl(
         current_user_text=current_user_turn_text,
         turn_request_text=turn_request_text,
         agent_state=agent_state,
-        memory_context=memory_context_payload,
+        memory_context=tool_memory_context_payload,
         available_artifacts=_available_artifacts_payload(turn_available_artifacts),
         current_step=(fallback_step if isinstance(fallback_step, dict) else None),
         goal=astraeus_goal or turn_request_text or current_user_turn_text,
@@ -5658,7 +5703,7 @@ async def _run_hydra_turn_impl(
         draft_response=best_effort,
         retry_count=fallback_step_retry_count,
         retry_allowed=_retry_allowed_for_step(fallback_step_id, fallback_step_retry_count),
-        platform_preamble=platform_preamble,
+        platform_preamble=tool_platform_preamble,
         max_tokens=None,
     )
     minos_ms_total += (time.perf_counter() - checker_started) * 1000.0
@@ -5736,6 +5781,7 @@ async def run_hydra_turn(
     max_rounds: Optional[int] = None,
     max_tool_calls: Optional[int] = None,
     platform_preamble: str = "",
+    tool_platform_preamble: Optional[str] = None,
 ) -> Dict[str, Any]:
     active_job_id = _register_active_chat_job(
         platform=platform,
@@ -5769,6 +5815,7 @@ async def run_hydra_turn(
                 max_rounds=max_rounds,
                 max_tool_calls=max_tool_calls,
                 platform_preamble=platform_preamble,
+                tool_platform_preamble=tool_platform_preamble,
             )
         finally:
             await llm_pool.aclose()

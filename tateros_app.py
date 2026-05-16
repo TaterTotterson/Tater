@@ -33,6 +33,7 @@ import verba_registry as verba_registry_module
 import portal_registry as portal_registry_module
 from esphome import firmware as esphome_firmware_module
 from esphome import home as esphome_home_module
+from esphome import openwakeword_engine as esphome_openwakeword_module
 from admin_gate import DEFAULT_ADMIN_ONLY_PLUGINS, REDIS_KEY as ADMIN_GATE_KEY, get_admin_only_plugins
 from hydra import estimate_hydra_chat_context_window, get_active_chat_jobs_snapshot, run_hydra_turn
 from hydra import (
@@ -179,8 +180,8 @@ WEBUI_AUTH_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 365 * 5
 RUNTIME_CONTEXT_ESTIMATE_TTL_SECONDS = 20
 DASHBOARD_BRIEFS_KEY = "tater:dashboard:briefs:v1"
 DASHBOARD_SNAPSHOT_KEY = "tater:dashboard:snapshot:v1"
-DASHBOARD_BRIEF_SCHEMA_VERSION = 7
-DASHBOARD_SNAPSHOT_SCHEMA_VERSION = 4
+DASHBOARD_BRIEF_SCHEMA_VERSION = 8
+DASHBOARD_SNAPSHOT_SCHEMA_VERSION = 5
 DASHBOARD_SNAPSHOT_STALE_SECONDS = 60 * 5
 DASHBOARD_BRIEF_TTL_SECONDS = DASHBOARD_SNAPSHOT_STALE_SECONDS
 DASHBOARD_BRIEF_CHECK_INTERVAL_SECONDS = 60 * 5
@@ -673,6 +674,14 @@ def _warm_speech_model_item(item: Dict[str, str]) -> str:
             raise RuntimeError(f"unsupported Emotion ID backend: {token or 'unknown'}")
         return esphome_emotion_id.warmup_model(enabled_only=True)
 
+    if kind == "wake_word":
+        from esphome import openwakeword_engine
+
+        token = backend.lower()
+        if token != "openwakeword":
+            raise RuntimeError(f"unsupported wake-word backend: {token or 'unknown'}")
+        return openwakeword_engine.warmup_model(enabled_only=True)
+
     raise RuntimeError(f"unsupported warmup item: {kind or 'unknown'}")
 
 
@@ -680,6 +689,7 @@ def _run_speech_model_warmup(settings: Dict[str, Any], *, reason: str) -> None:
     items = [
         {"kind": "stt", "backend": str(settings.get("stt_backend") or "").strip()},
         *_speech_model_warmup_tts_items(settings),
+        {"kind": "wake_word", "backend": "openwakeword"},
         {"kind": "speaker_id", "backend": "speechbrain"},
         {"kind": "emotion_id", "backend": "speechbrain"},
     ]
@@ -2243,6 +2253,118 @@ def _portal_shop_raw() -> Dict[str, Any]:
     }
 
 
+def _dashboard_shop_update_group(kind: str, label: str, loader: Callable[[], Dict[str, Any]]) -> Dict[str, Any]:
+    try:
+        snapshot = loader()
+    except Exception as exc:
+        logger.debug("[dashboard] failed loading %s update snapshot", kind, exc_info=True)
+        return {
+            "kind": kind,
+            "label": label,
+            "count": 0,
+            "items": [],
+            "error": str(exc),
+        }
+
+    installed = snapshot.get("installed") if isinstance(snapshot, dict) and isinstance(snapshot.get("installed"), list) else []
+    rows: List[Dict[str, Any]] = []
+    for entry in installed:
+        if not isinstance(entry, dict) or not bool(entry.get("update_available")):
+            continue
+        item_id = str(entry.get("id") or entry.get("module_key") or "").strip()
+        name = str(entry.get("name") or entry.get("display_name") or item_id or label).strip()
+        rows.append(
+            {
+                "id": item_id,
+                "name": name,
+                "installed": str(entry.get("installed_ver") or "0.0.0").strip(),
+                "latest": str(entry.get("store_ver") or "").strip(),
+                "source": str(entry.get("source_label") or "").strip(),
+            }
+        )
+    rows.sort(key=_shop_payload_sort_key)
+    return {
+        "kind": kind,
+        "label": label,
+        "count": len(rows),
+        "items": rows[:8],
+        "installed_count": len(installed),
+        "errors": list(snapshot.get("errors") or []) if isinstance(snapshot, dict) else [],
+    }
+
+
+def _dashboard_firmware_update_group() -> Dict[str, Any]:
+    try:
+        payload = esphome_home_module.get_runtime_payload(
+            redis_client=redis_client,
+            core_key="esphome",
+            core_tab=_esphome_platform_tab_spec(),
+            panel="firmware",
+        )
+    except Exception as exc:
+        logger.debug("[dashboard] failed loading firmware update snapshot", exc_info=True)
+        return {
+            "kind": "firmware",
+            "label": "Firmware",
+            "count": 0,
+            "items": [],
+            "error": str(exc),
+        }
+    firmware = payload.get("firmware") if isinstance(payload, dict) and isinstance(payload.get("firmware"), dict) else {}
+    update_rows = firmware.get("firmware_updates") if isinstance(firmware.get("firmware_updates"), list) else []
+    rows: List[Dict[str, Any]] = []
+    for row in update_rows:
+        if not isinstance(row, dict):
+            continue
+        selector = str(row.get("selector") or "").strip()
+        title = str(row.get("title") or selector or "ESPHome device").strip()
+        rows.append(
+            {
+                "id": selector,
+                "name": title,
+                "installed": str(row.get("installed") or "unknown").strip(),
+                "latest": str(row.get("latest") or "").strip(),
+                "template": str(row.get("template_label") or "").strip(),
+            }
+        )
+    return {
+        "kind": "firmware",
+        "label": "Firmware",
+        "count": len(rows),
+        "items": rows[:8],
+    }
+
+
+def _dashboard_updates_snapshot() -> Dict[str, Any]:
+    groups = [
+        _dashboard_firmware_update_group(),
+        _dashboard_shop_update_group("cores", "Cores", _core_shop_raw),
+        _dashboard_shop_update_group("portals", "Portals", _portal_shop_raw),
+        _dashboard_shop_update_group("verbas", "Verba", _verba_shop_raw),
+    ]
+    total = sum(_dashboard_safe_int(group.get("count")) for group in groups if isinstance(group, dict))
+    parts = [
+        f"{_dashboard_safe_int(group.get('count'))} {str(group.get('label') or '').strip()}"
+        for group in groups
+        if isinstance(group, dict) and _dashboard_safe_int(group.get("count")) > 0
+    ]
+    errors = [
+        {
+            "kind": str(group.get("kind") or "").strip(),
+            "label": str(group.get("label") or "").strip(),
+            "error": str(group.get("error") or "").strip(),
+        }
+        for group in groups
+        if isinstance(group, dict) and str(group.get("error") or "").strip()
+    ]
+    return {
+        "total": total,
+        "groups": groups,
+        "errors": errors,
+        "summary": ", ".join(parts) if parts else "No updates currently available.",
+    }
+
+
 def _autostart_enabled_surfaces() -> None:
     core_entries = core_registry_module.refresh_core_registry()
     portal_entries = portal_registry_module.refresh_portal_registry()
@@ -2846,6 +2968,17 @@ class PeopleActionRequest(BaseModel):
     payload: Dict[str, Any] = Field(default_factory=dict)
 
 
+class OpenWakeWordTrainerModelsRequest(BaseModel):
+    trainer_url: Optional[str] = None
+    framework: Optional[str] = None
+
+
+class OpenWakeWordTrainerDownloadRequest(BaseModel):
+    trainer_url: Optional[str] = None
+    artifact_url: Optional[str] = None
+    framework: Optional[str] = None
+
+
 class AppSettingsRequest(BaseModel):
     username: Optional[str] = None
     user_avatar: Optional[str] = None
@@ -3111,6 +3244,8 @@ def index() -> FileResponse:
 async def _webui_auth_middleware(request: Request, call_next):
     path = str(request.url.path or "")
     if path.startswith("/api/speech/tts/runtime/"):
+        return await call_next(request)
+    if path == "/api/openwakeword/detect":
         return await call_next(request)
     path_parts = [part for part in path.strip("/").split("/") if part]
     if len(path_parts) == 5 and path_parts[0] == "api" and path_parts[1] == "cores" and path_parts[3] == "webhook":
@@ -4051,6 +4186,7 @@ def _dashboard_time_greeting(now: Optional[datetime] = None) -> Dict[str, Any]:
 def _dashboard_overview_context_data(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     health_payload = snapshot.get("health") if isinstance(snapshot.get("health"), dict) else {}
     runtime = snapshot.get("runtime") if isinstance(snapshot.get("runtime"), dict) else {}
+    updates = snapshot.get("updates") if isinstance(snapshot.get("updates"), dict) else {}
     sections = snapshot.get("sections") if isinstance(snapshot.get("sections"), list) else []
     cards = snapshot.get("cards") if isinstance(snapshot.get("cards"), list) else []
 
@@ -4100,6 +4236,7 @@ def _dashboard_overview_context_data(snapshot: Dict[str, Any]) -> Dict[str, Any]
         "local_time": _dashboard_time_greeting(),
         "health": health_payload,
         "runtime": runtime,
+        "updates": updates,
         "cards": [
             {
                 "id": item.get("id"),
@@ -4125,9 +4262,11 @@ def _dashboard_brief_contexts(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
             "title": "Home Brief",
             "source": "tater",
             "instructions": (
-                "Write the top dashboard greeting for the user. Start with local_time.greeting exactly, and include the date naturally. "
+                "Write the top dashboard greeting for the user. Start with local_time.greeting as the first words, but do not attach local_time.date directly after it as a comma phrase or standalone date label. "
+                "If local_time.date is useful, weave it into a natural dashboard sentence such as 'Good morning. For Friday, May 15, ...' or omit it when it sounds forced. "
                 "Use the available cards and sections to summarize the whole home and Tater state in one friendly paragraph. "
                 "Prefer concrete useful details: Tater health, weather, connected voice devices, and what cameras recently saw. "
+                "If updates.total is greater than zero, mention that updates are waiting and summarize the affected groups from updates.summary. "
                 "Mention only data that is present; do not imply a missing core is installed. "
                 "Keep it concise, warm, and practical: one to three sentences, no markdown."
             ),
@@ -4139,9 +4278,15 @@ def _dashboard_brief_contexts(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
             "id": "system",
             "title": "Tater Status",
             "source": "tater",
+            "instructions": (
+                "Write a concise Tater runtime status. Include update availability from updates when updates.total is greater than zero, "
+                "otherwise say the installed surfaces and firmware look current only if the data supports that. "
+                "Use one or two natural sentences, no markdown."
+            ),
             "data": {
                 "health": health_payload,
                 "runtime": runtime,
+                "updates": snapshot.get("updates") if isinstance(snapshot.get("updates"), dict) else {},
             },
         }
     )
@@ -4369,6 +4514,7 @@ def _dashboard_fallback_brief(context: Dict[str, Any]) -> Dict[str, Any]:
         local_time = data.get("local_time") if isinstance(data.get("local_time"), dict) else _dashboard_time_greeting()
         greeting = str(local_time.get("greeting") or "Hello").strip()
         date_label = str(local_time.get("date") or "").strip()
+        updates = data.get("updates") if isinstance(data.get("updates"), dict) else {}
         cards = [item for item in data.get("cards") or [] if isinstance(item, dict)]
         sections = [item for item in data.get("sections") or [] if isinstance(item, dict)]
         health_payload = data.get("health") if isinstance(data.get("health"), dict) else {}
@@ -4399,25 +4545,44 @@ def _dashboard_fallback_brief(context: Dict[str, Any]) -> Dict[str, Any]:
                     ]
                     if messages:
                         parts.append("cameras recently saw " + "; ".join(messages))
+        update_total = _dashboard_safe_int(updates.get("total")) if isinstance(updates, dict) else 0
+        update_summary = str(updates.get("summary") or "").strip() if isinstance(updates, dict) else ""
+        if update_total > 0:
+            parts.append(f"{update_total} update{'s are' if update_total != 1 else ' is'} waiting ({update_summary})")
         if len(parts) == 1 and cards:
             parts.extend(
                 _dashboard_short_text(f"{item.get('label')}: {item.get('value')}", limit=60)
                 for item in cards[:3]
                 if item.get("label") or item.get("value")
             )
-        text = f"{greeting}{', ' + date_label if date_label else ''}. " + ", ".join(parts) + "."
+        if date_label:
+            text = f"{greeting}. For {date_label}, " + ", ".join(parts) + "."
+        else:
+            text = f"{greeting}. " + ", ".join(parts) + "."
     elif brief_id == "system":
         health_payload = data.get("health") if isinstance(data.get("health"), dict) else {}
         runtime = data.get("runtime") if isinstance(data.get("runtime"), dict) else {}
+        updates = data.get("updates") if isinstance(data.get("updates"), dict) else {}
         status = "online" if bool(health_payload.get("ok")) else "degraded"
         jobs = _dashboard_safe_int(health_payload.get("hydra_jobs_active") or health_payload.get("chat_jobs_active"))
         llm = _dashboard_safe_int(health_payload.get("llm_calls_active"))
         cores = _dashboard_safe_int(health_payload.get("cores_running"))
         portals = _dashboard_safe_int(health_payload.get("portals_running"))
+        update_total = _dashboard_safe_int(updates.get("total")) if isinstance(updates, dict) else 0
+        update_errors = updates.get("errors") if isinstance(updates.get("errors"), list) else []
+        update_sentence = (
+            f" There {'are' if update_total != 1 else 'is'} {update_total} update{'s' if update_total != 1 else ''} available: {str(updates.get('summary') or '').strip()}."
+            if update_total > 0
+            else (
+                " Update checks need attention for one or more sources."
+                if update_errors
+                else " Firmware, cores, portals, and Verba report no pending updates."
+            )
+        )
         text = (
             f"Tater is {status}. Runtime is calm with {jobs} Hydra job{'s' if jobs != 1 else ''}, "
             f"{llm} active LLM call{'s' if llm != 1 else ''}, {cores} running core{'s' if cores != 1 else ''}, "
-            f"and {portals} running portal{'s' if portals != 1 else ''}."
+            f"and {portals} running portal{'s' if portals != 1 else ''}.{update_sentence}"
         )
         if runtime.get("context_summary"):
             text = f"{text} {str(runtime.get('context_summary')).strip()}"
@@ -4836,6 +5001,7 @@ def _dashboard_build_snapshot() -> Dict[str, Any]:
     hydra_jobs = _chat_job_counts_with_breakdown(include_history=False)
     llm_calls = get_llm_call_runtime_summary(include_history=False)
     vision_calls = get_vision_call_runtime_summary(include_history=False)
+    updates = _dashboard_updates_snapshot()
 
     voice_payload = _dashboard_esphome_payload()
     voice_section = _dashboard_section(
@@ -4903,6 +5069,19 @@ def _dashboard_build_snapshot() -> Dict[str, Any]:
             include_image=False,
         )
 
+    update_total = _dashboard_safe_int(updates.get("total"))
+    update_errors = updates.get("errors") if isinstance(updates.get("errors"), list) else []
+    update_groups = updates.get("groups") if isinstance(updates.get("groups"), list) else []
+    update_target = ""
+    for wanted_kind in ("firmware", "cores", "portals", "verbas"):
+        if any(
+            isinstance(group, dict)
+            and str(group.get("kind") or "").strip() == wanted_kind
+            and _dashboard_safe_int(group.get("count")) > 0
+            for group in update_groups
+        ):
+            update_target = wanted_kind
+            break
     cards: List[Dict[str, Any]] = [
         {
             "id": "tater",
@@ -4910,6 +5089,19 @@ def _dashboard_build_snapshot() -> Dict[str, Any]:
             "value": "Online" if bool(health_payload.get("ok")) else "Degraded",
             "detail": "Redis connected" if bool(health_payload.get("redis")) else "Redis needs attention",
             "tone": "good" if bool(health_payload.get("ok")) else "warning",
+        },
+        {
+            "id": "updates",
+            "label": "Updates",
+            "value": (
+                f"{update_total} available"
+                if update_total > 0
+                else ("Check needed" if update_errors else "Current")
+            ),
+            "detail": str(updates.get("summary") or ("Update scan needs attention." if update_errors else "")).strip(),
+            "tone": "warning" if update_total > 0 or update_errors else "good",
+            "action_target": update_target,
+            "action_label": "Open Firmware" if update_target == "firmware" else ("Open Updates" if update_target else ""),
         },
         {
             "id": "hydra",
@@ -4969,6 +5161,7 @@ def _dashboard_build_snapshot() -> Dict[str, Any]:
             "llm_calls": llm_calls,
             "vision_calls": vision_calls,
         },
+        "updates": updates,
         "cards": cards,
         "sections": sections,
         "voice_section": voice_section,
@@ -6886,6 +7079,17 @@ def get_settings() -> Dict[str, Any]:
         if isinstance(esphome_settings_item, dict) and isinstance(esphome_settings_item.get("sections"), list)
         else []
     )
+    try:
+        voice_model_sections = (
+            esphome_home_module.model_settings_sections()
+            if hasattr(esphome_home_module, "model_settings_sections")
+            else []
+        )
+        if not isinstance(voice_model_sections, list):
+            voice_model_sections = []
+    except Exception:
+        logger.exception("[settings] failed building voice model settings sections")
+        voice_model_sections = []
     esphome_ui = {
         "label": "ESPHome",
         "description": "Built-in ESPHome device services for Tater. Voice satellites, sensors, and future ESPHome-native devices live here.",
@@ -6894,6 +7098,15 @@ def get_settings() -> Dict[str, Any]:
         "running": bool(esphome_home_module.is_running()),
         "runtime_tab_label": "ESPHome",
         "runtime_tab_hint": "Tater Voice satellites, live entities, rooms, and logs are managed directly in this ESPHome settings area.",
+    }
+    voice_model_ui = {
+        "label": "Voice Models",
+        "description": "Remote openWakeWord, VAD, and voice model runtime settings.",
+        "sections": voice_model_sections,
+        "openwakeword_trainer": {
+            "trainer_url": esphome_openwakeword_module.trainer_url(),
+            "model_root": str(esphome_openwakeword_module.OPENWAKEWORD_MODEL_ROOT),
+        },
     }
     announcement_speech_ui = get_announcement_tts_ui_payload(
         backend=speech_settings.get("announcement_tts_backend"),
@@ -7018,6 +7231,7 @@ def get_settings() -> Dict[str, Any]:
         "speech_ui": speech_ui,
         "announcement_speech_ui": announcement_speech_ui,
         "esphome_ui": esphome_ui,
+        "voice_model_ui": voice_model_ui,
         "emoji_enable_on_reaction_add": bool(emoji_settings.get("enable_on_reaction_add", True)),
         "emoji_enable_auto_reaction_on_reply": bool(emoji_settings.get("enable_auto_reaction_on_reply", True)),
         "emoji_reaction_chain_chance_percent": int(emoji_settings.get("reaction_chain_chance_percent", 100)),
@@ -7079,6 +7293,107 @@ async def preview_speech_tts(payload: SpeechTtsPreviewRequest) -> Response:
     if not wav_bytes:
         raise HTTPException(status_code=400, detail="TTS preview produced no audio.")
     return Response(content=wav_bytes, media_type="audio/wav")
+
+
+@app.post("/api/settings/openwakeword/trainer-models")
+def list_openwakeword_trainer_models(payload: OpenWakeWordTrainerModelsRequest) -> Dict[str, Any]:
+    try:
+        return esphome_openwakeword_module.trainer_model_catalog(
+            trainer_url_value=payload.trainer_url or "",
+            framework=payload.framework or "",
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc) or "Failed to load openWakeWord trainer models.",
+        ) from exc
+
+
+@app.post("/api/settings/openwakeword/download-trainer-model")
+def download_openwakeword_trainer_model(payload: OpenWakeWordTrainerDownloadRequest) -> Dict[str, Any]:
+    try:
+        return esphome_openwakeword_module.download_trainer_model(
+            trainer_url_value=payload.trainer_url or "",
+            artifact_url=payload.artifact_url or "",
+            framework=payload.framework or "",
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc) or "Failed to download openWakeWord trainer model.",
+        ) from exc
+
+
+def _openwakeword_header_int(
+    request: Request,
+    header_name: str,
+    default: int,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    raw = str(request.headers.get(header_name) or "").strip()
+    try:
+        parsed = int(raw) if raw else int(default)
+    except Exception:
+        parsed = int(default)
+    return max(int(minimum), min(int(maximum), parsed))
+
+
+@app.post("/api/openwakeword/detect")
+async def detect_openwakeword(request: Request) -> Dict[str, Any]:
+    if not esphome_openwakeword_module.openwakeword_enabled():
+        raise HTTPException(status_code=503, detail="openWakeWord is disabled.")
+
+    audio_bytes = await request.body()
+    if not audio_bytes:
+        return {"ok": True, "detected": False}
+    if len(audio_bytes) > 512 * 1024:
+        raise HTTPException(status_code=413, detail="openWakeWord audio chunk is too large.")
+
+    audio_bits = _openwakeword_header_int(request, "X-Audio-Bits", 16, minimum=8, maximum=32)
+    audio_format = {
+        "rate": _openwakeword_header_int(request, "X-Audio-Rate", 16000, minimum=8000, maximum=48000),
+        "width": max(1, audio_bits // 8),
+        "channels": _openwakeword_header_int(request, "X-Audio-Channels", 1, minimum=1, maximum=2),
+    }
+    client_host = getattr(request.client, "host", "") if request.client is not None else ""
+    selector = str(
+        request.headers.get("X-Source-Device")
+        or request.query_params.get("selector")
+        or client_host
+        or "remote"
+    ).strip()
+    wake_word_hint = str(request.headers.get("X-Wake-Word") or "").strip()
+
+    try:
+        detection = await asyncio.to_thread(
+            esphome_openwakeword_module.process_audio,
+            selector,
+            audio_bytes,
+            audio_format,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=str(exc) or "openWakeWord detection is unavailable.",
+        ) from exc
+
+    if not isinstance(detection, dict) or not detection.get("detected"):
+        return {"ok": True, "detected": False}
+
+    try:
+        score = float(detection.get("score") or 0.0)
+    except Exception:
+        score = 0.0
+    return {
+        "ok": True,
+        "detected": True,
+        "wake_word": str(detection.get("wake_word") or wake_word_hint or "openwakeword"),
+        "score": score,
+        "engine": "openwakeword",
+        "model_source": str(detection.get("model_source") or ""),
+    }
 
 
 @app.get("/api/speech/tts/runtime/{asset_id}.wav")
@@ -7524,6 +7839,16 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         if raw_esphome_settings is not None and not isinstance(raw_esphome_settings, dict):
             raise HTTPException(status_code=400, detail="esphome_settings must be an object.")
         esphome_result = _save_esphome_settings_values(dict(raw_esphome_settings or {}))
+        changed_esphome_keys = [
+            str(key or "")
+            for key in (esphome_result.get("changed_keys") or [])
+            if str(key or "")
+        ]
+        if any(key.startswith("VOICE_OPENWAKEWORD_") for key in changed_esphome_keys):
+            speech_warmup_result = _start_speech_model_warmup(
+                get_shared_speech_settings(),
+                reason="openwakeword-settings-save",
+            )
 
     emoji_keys = {
         "emoji_enable_on_reaction_add",
