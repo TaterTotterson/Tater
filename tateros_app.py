@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import contextlib
 import hashlib
 import hmac
 import importlib
@@ -21,7 +22,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
 import dotenv
-from fastapi import Cookie, FastAPI, HTTPException, Request
+from fastapi import Cookie, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -148,6 +149,10 @@ from tateros import portal_store as portal_store_module
 dotenv.load_dotenv()
 
 logger = logging.getLogger("tateros")
+OPENWAKEWORD_DETECT_LOG_EVERY = 120
+OPENWAKEWORD_DETECT_SLOW_LOG_S = 1.0
+openwakeword_detect_stats_lock = threading.Lock()
+openwakeword_detect_stats: Dict[str, Dict[str, Any]] = {}
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)-8s %(name)-20s %(message)s",
@@ -3244,8 +3249,6 @@ def index() -> FileResponse:
 async def _webui_auth_middleware(request: Request, call_next):
     path = str(request.url.path or "")
     if path.startswith("/api/speech/tts/runtime/"):
-        return await call_next(request)
-    if path == "/api/openwakeword/detect":
         return await call_next(request)
     path_parts = [part for part in path.strip("/").split("/") if part]
     if len(path_parts) == 5 and path_parts[0] == "api" and path_parts[1] == "cores" and path_parts[3] == "webhook":
@@ -7324,15 +7327,15 @@ def download_openwakeword_trainer_model(payload: OpenWakeWordTrainerDownloadRequ
         ) from exc
 
 
-def _openwakeword_header_int(
-    request: Request,
-    header_name: str,
+def _openwakeword_query_int(
+    websocket: WebSocket,
+    param_name: str,
     default: int,
     *,
     minimum: int,
     maximum: int,
 ) -> int:
-    raw = str(request.headers.get(header_name) or "").strip()
+    raw = str(websocket.query_params.get(param_name) or "").strip()
     try:
         parsed = int(raw) if raw else int(default)
     except Exception:
@@ -7340,60 +7343,174 @@ def _openwakeword_header_int(
     return max(int(minimum), min(int(maximum), parsed))
 
 
-@app.post("/api/openwakeword/detect")
-async def detect_openwakeword(request: Request) -> Dict[str, Any]:
-    if not esphome_openwakeword_module.openwakeword_enabled():
-        raise HTTPException(status_code=503, detail="openWakeWord is disabled.")
+def _record_openwakeword_detect_request(
+    *,
+    selector: str,
+    status: str,
+    elapsed_s: float,
+    audio_bytes_len: int,
+    detected: bool = False,
+    detail: str = "",
+) -> None:
+    selector_key = str(selector or "remote").strip() or "remote"
+    now_ts = time.time()
+    with openwakeword_detect_stats_lock:
+        row = openwakeword_detect_stats.setdefault(
+            selector_key,
+            {
+                "count": 0,
+                "errors": 0,
+                "detected": 0,
+                "slow": 0,
+                "last_log_ts": 0.0,
+            },
+        )
+        row["count"] = int(row.get("count") or 0) + 1
+        if status != "ok":
+            row["errors"] = int(row.get("errors") or 0) + 1
+        if detected:
+            row["detected"] = int(row.get("detected") or 0) + 1
+        if elapsed_s >= OPENWAKEWORD_DETECT_SLOW_LOG_S:
+            row["slow"] = int(row.get("slow") or 0) + 1
+        count = int(row.get("count") or 0)
+        errors = int(row.get("errors") or 0)
+        detections = int(row.get("detected") or 0)
+        slow = int(row.get("slow") or 0)
+        last_log_ts = float(row.get("last_log_ts") or 0.0)
+        should_log = (
+            status != "ok"
+            or detected
+            or elapsed_s >= OPENWAKEWORD_DETECT_SLOW_LOG_S
+            or count == 1
+            or count % OPENWAKEWORD_DETECT_LOG_EVERY == 0
+            or (now_ts - last_log_ts) >= 300.0
+        )
+        if should_log:
+            row["last_log_ts"] = now_ts
 
-    audio_bytes = await request.body()
-    if not audio_bytes:
-        return {"ok": True, "detected": False}
-    if len(audio_bytes) > 512 * 1024:
-        raise HTTPException(status_code=413, detail="openWakeWord audio chunk is too large.")
+    if not should_log:
+        return
+    logger.info(
+        "[openwakeword] detect selector=%s status=%s detected=%s elapsed_ms=%.1f bytes=%s count=%s errors=%s slow=%s detections=%s%s",
+        selector_key,
+        status,
+        bool(detected),
+        elapsed_s * 1000.0,
+        int(audio_bytes_len or 0),
+        count,
+        errors,
+        slow,
+        detections,
+        f" detail={detail}" if detail else "",
+    )
 
-    audio_bits = _openwakeword_header_int(request, "X-Audio-Bits", 16, minimum=8, maximum=32)
-    audio_format = {
-        "rate": _openwakeword_header_int(request, "X-Audio-Rate", 16000, minimum=8000, maximum=48000),
-        "width": max(1, audio_bits // 8),
-        "channels": _openwakeword_header_int(request, "X-Audio-Channels", 1, minimum=1, maximum=2),
-    }
-    client_host = getattr(request.client, "host", "") if request.client is not None else ""
+
+@app.websocket("/api/openwakeword/stream")
+async def stream_openwakeword(websocket: WebSocket) -> None:
+    client_host = getattr(websocket.client, "host", "") if websocket.client is not None else ""
     selector = str(
-        request.headers.get("X-Source-Device")
-        or request.query_params.get("selector")
+        websocket.query_params.get("selector")
+        or websocket.query_params.get("source_device")
         or client_host
         or "remote"
     ).strip()
-    wake_word_hint = str(request.headers.get("X-Wake-Word") or "").strip()
-
-    try:
-        detection = await asyncio.to_thread(
-            esphome_openwakeword_module.process_audio,
-            selector,
-            audio_bytes,
-            audio_format,
-        )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=str(exc) or "openWakeWord detection is unavailable.",
-        ) from exc
-
-    if not isinstance(detection, dict) or not detection.get("detected"):
-        return {"ok": True, "detected": False}
-
-    try:
-        score = float(detection.get("score") or 0.0)
-    except Exception:
-        score = 0.0
-    return {
-        "ok": True,
-        "detected": True,
-        "wake_word": str(detection.get("wake_word") or wake_word_hint or "openwakeword"),
-        "score": score,
-        "engine": "openwakeword",
-        "model_source": str(detection.get("model_source") or ""),
+    wake_word_hint = str(websocket.query_params.get("wake_word") or "").strip()
+    audio_bits = _openwakeword_query_int(websocket, "bits", 16, minimum=8, maximum=32)
+    audio_format = {
+        "rate": _openwakeword_query_int(websocket, "rate", 16000, minimum=8000, maximum=48000),
+        "width": max(1, audio_bits // 8),
+        "channels": _openwakeword_query_int(websocket, "channels", 1, minimum=1, maximum=2),
     }
+    await websocket.accept()
+    logger.info("[openwakeword] stream-start selector=%s client=%s", selector, client_host or "-")
+    frame_count = 0
+    try:
+        if not esphome_openwakeword_module.openwakeword_enabled():
+            await websocket.send_json({"ok": False, "error": "openWakeWord is disabled."})
+            await websocket.close(code=1013)
+            return
+
+        while True:
+            started_ts = time.time()
+            message = await websocket.receive()
+            message_type = str(message.get("type") or "")
+            if message_type == "websocket.disconnect":
+                break
+            audio_bytes = message.get("bytes")
+            if audio_bytes is None:
+                continue
+            frame_count += 1
+            audio_bytes_len = len(audio_bytes or b"")
+            if not audio_bytes:
+                await websocket.send_json({"ok": True, "detected": False})
+                continue
+            if audio_bytes_len > 512 * 1024:
+                await websocket.send_json({"ok": False, "error": "openWakeWord audio chunk is too large."})
+                await websocket.close(code=1009)
+                return
+
+            try:
+                detection = await asyncio.to_thread(
+                    esphome_openwakeword_module.process_audio,
+                    selector,
+                    bytes(audio_bytes),
+                    audio_format,
+                )
+            except Exception as exc:
+                detail = str(exc) or type(exc).__name__
+                _record_openwakeword_detect_request(
+                    selector=selector,
+                    status="error",
+                    elapsed_s=time.time() - started_ts,
+                    audio_bytes_len=audio_bytes_len,
+                    detail=f"transport=ws error={detail}",
+                )
+                await websocket.send_json({"ok": False, "error": detail})
+                continue
+
+            if not isinstance(detection, dict) or not detection.get("detected"):
+                _record_openwakeword_detect_request(
+                    selector=selector,
+                    status="ok",
+                    elapsed_s=time.time() - started_ts,
+                    audio_bytes_len=audio_bytes_len,
+                    detail="transport=ws",
+                )
+                await websocket.send_json({"ok": True, "detected": False})
+                continue
+
+            try:
+                score = float(detection.get("score") or 0.0)
+            except Exception:
+                score = 0.0
+            wake_word = str(detection.get("wake_word") or wake_word_hint or "openwakeword")
+            _record_openwakeword_detect_request(
+                selector=selector,
+                status="ok",
+                detected=True,
+                elapsed_s=time.time() - started_ts,
+                audio_bytes_len=audio_bytes_len,
+                detail=f"transport=ws wake_word={wake_word} score={score:.3f}",
+            )
+            await websocket.send_json(
+                {
+                    "ok": True,
+                    "detected": True,
+                    "wake_word": wake_word,
+                    "score": score,
+                    "engine": "openwakeword",
+                    "model_source": str(detection.get("model_source") or ""),
+                }
+            )
+    except WebSocketDisconnect:
+        pass
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        with contextlib.suppress(Exception):
+            await websocket.send_json({"ok": False, "error": str(exc) or type(exc).__name__})
+    finally:
+        logger.info("[openwakeword] stream-stop selector=%s frames=%s", selector, frame_count)
 
 
 @app.get("/api/speech/tts/runtime/{asset_id}.wav")

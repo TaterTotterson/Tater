@@ -1779,7 +1779,7 @@ def _build_device_context(
         if key == "tater_base_url":
             resolved_value = _normalize_http_base_url(resolved_value)
         if key == "openwakeword_server_url":
-            resolved_value = _normalize_http_base_url(resolved_value)
+            resolved_value = _normalize_http_base_url(resolved_value, default_scheme="ws")
         if key in auto_keys and host:
             resolved_value = host
         if key in fixed_keys:
@@ -1823,17 +1823,17 @@ def _build_device_context(
                 {"value": "microwakeword", "label": "microWakeWord (device)"},
                 {"value": "openwakeword", "label": "openWakeWord (remote URL)"},
             ]
-            description_parts.append("Choose whether the satellite listens locally or posts wake-word audio chunks to the configured openWakeWord URL.")
+            description_parts.append("Choose whether the satellite listens locally or streams wake-word audio to the configured openWakeWord URL.")
         elif key == "openwakeword_server_url":
-            placeholder = placeholder or "http://tater.local:8501"
-            description_parts.append("Base HTTP URL for remote openWakeWord detection. Tater uses /api/openwakeword/detect automatically; a compatible external HTTP endpoint can also be used. If this endpoint fails, the device falls back to microWakeWord.")
+            placeholder = placeholder or "ws://tater.local:8501"
+            description_parts.append("Base openWakeWord URL for the streaming detector. http:// and https:// values are accepted, but firmware converts them to ws:// or wss:// and streams audio only. If this endpoint fails, the device falls back to microWakeWord.")
         elif key == "openwakeword_http_timeout_ms":
             field_type = "number"
-            field_value = _as_int(resolved_value, 1400, minimum=250, maximum=10000)
+            field_value = _as_int(resolved_value, 3000, minimum=250, maximum=10000)
             field_min = 250
             field_max = 10000
             field_step = 50
-            description_parts.append("Per-chunk HTTP timeout for remote openWakeWord detection before the device counts a failed request.")
+            description_parts.append("Remote openWakeWord transport timeout before the device counts a failed request.")
         elif key == "openwakeword_max_failures":
             field_type = "number"
             field_value = _as_int(resolved_value, 3, minimum=1, maximum=20)
@@ -2546,11 +2546,11 @@ def _normalize_profile_values(context: Dict[str, Any], values: Dict[str, Any]) -
             continue
 
         if key == "openwakeword_server_url":
-            normalized[key] = _normalize_http_base_url(raw_value)
+            normalized[key] = _normalize_http_base_url(raw_value, default_scheme="ws")
             continue
 
         if key == "openwakeword_http_timeout_ms":
-            normalized[key] = str(_as_int(raw_value, 1400, minimum=250, maximum=10000))
+            normalized[key] = str(_as_int(raw_value, 3000, minimum=250, maximum=10000))
             continue
 
         if key == "openwakeword_max_failures":
