@@ -36,12 +36,28 @@ class VoiceSessionRuntime:
     last_audio_ts: float = 0.0
     state: str = field(default_factory=lambda: _vp().VOICE_STATE_LISTENING)
     processing: bool = False
+    continued_chat_reopen: bool = False
+    max_audio_bytes: int = field(default_factory=lambda: _vp().DEFAULT_MAX_AUDIO_BYTES)
+    startup_gate_s: float = 0.0
+    startup_preroll_s: float = 0.0
+    startup_preroll_max_bytes: int = 0
+    startup_preroll_buffer: bytearray = field(default_factory=bytearray)
+    startup_preroll_applied: bool = False
+    audio_stall_timeout_s: float = field(default_factory=lambda: _vp().DEFAULT_AUDIO_STALL_TIMEOUT_S)
+    audio_stall_no_speech_timeout_s: float = field(default_factory=lambda: _vp().DEFAULT_AUDIO_STALL_NO_SPEECH_TIMEOUT_S)
+    blank_wake_timeout_s: float = field(default_factory=lambda: _vp().DEFAULT_BLANK_WAKE_TIMEOUT_S)
 
     audio_buffer: bytearray = field(default_factory=bytearray)
     eou_engine: Any = None
 
     stt_task: Optional[asyncio.Task] = None
     stt_queue: Optional[asyncio.Queue] = None
+    stt_queue_max_chunks: int = 0
+    stt_queue_dropped_chunks: int = 0
+    stt_stream_unhealthy: bool = False
+    stt_stream_stop_requested: bool = False
+    stt_stream_fallback_reason: str = ""
+    stt_stream_fallback_used: bool = False
     partial_stt_task: Optional[asyncio.Task] = None
     stt_transcript: str = ""
     partial_transcript: str = ""
@@ -72,6 +88,8 @@ class VoiceSessionRuntime:
     wake_arbitration_group_id: str = ""
     wake_arbitration_candidate: bool = False
     wake_arbitration_winner: bool = False
+    wake_arbitration_room_key: str = ""
+    wake_arbitration_room_claimed: bool = False
     wake_arbitration_peak_dbfs: float = -120.0
     wake_arbitration_audio_chunks: int = 0
 
@@ -222,8 +240,10 @@ async def _run_hydra_turn_for_voice(*, transcript: str, conv_id: str, session: V
         )
 
     platform_preamble = ""
+    tool_platform_preamble = ""
     person_name = vp._text(origin.get("person_name"))
-    if device_name or area_name or speaker_name or person_name or voice_emotion_hint:
+    has_voice_context = bool(device_name or area_name or speaker_name or person_name)
+    if has_voice_context or voice_emotion_hint:
         speaker_line = f"- Speaker: {speaker_name}\n" if speaker_name else ""
         person_line = f"- Person: {person_name}\n" if person_name else ""
         emotion_line = f"- Voice tone hint: {voice_emotion_hint}\n" if voice_emotion_hint else ""
@@ -240,6 +260,18 @@ async def _run_hydra_turn_for_voice(*, transcript: str, conv_id: str, session: V
             "Use this as voice context only. Do not claim the user explicitly said the room. "
             "Emotion ID is an acoustic guess; if you mention it, phrase it as how the user's voice seems, not as certainty.\n"
         )
+        if has_voice_context:
+            tool_platform_preamble = (
+                "VOICE CONTEXT:\n"
+                f"- Device: {device_name or '(unknown)'}\n"
+                f"- Area/Room: {area_name or '(unknown)'}\n"
+                f"{speaker_line}"
+                f"{person_line}\n"
+                "DEFAULT ROOM RULE:\n"
+                "If the user asks to control lights, switches, fans, speakers, or similar devices and does not specify a room, "
+                "assume they mean the Area/Room shown above.\n\n"
+                "Use this as voice context only. Do not claim the user explicitly said the room.\n"
+            )
 
     async with vp.get_llm_client_from_env(redis_conn=vp.redis_client) as llm_client:
         async def _wait(
@@ -276,6 +308,7 @@ async def _run_hydra_turn_for_voice(*, transcript: str, conv_id: str, session: V
             max_rounds=max_rounds,
             max_tool_calls=max_tool_calls,
             platform_preamble=platform_preamble,
+            tool_platform_preamble=tool_platform_preamble,
             wait_callback=_wait,
         )
 

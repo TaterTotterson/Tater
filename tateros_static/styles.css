@@ -1714,6 +1714,10 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   gap: 10px;
 }
 
+.hydra-model-stack > .settings-subpanel {
+  grid-column: 1 / -1;
+}
+
 .hydra-model-panel {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2217,6 +2221,130 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 .dashboard-brief-tile.warning,
 .dashboard-core-panel.warning {
   border-color: rgba(240, 180, 80, 0.32);
+}
+
+.dashboard-status-tile.actionable,
+.dashboard-update-card.actionable {
+  cursor: pointer;
+  transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
+}
+
+.dashboard-status-tile.actionable:hover,
+.dashboard-status-tile.actionable:focus-visible,
+.dashboard-update-card.actionable:hover,
+.dashboard-update-card.actionable:focus-visible {
+  transform: translateY(-1px);
+  border-color: rgba(240, 131, 69, 0.5);
+  box-shadow:
+    inset 3px 0 0 rgba(240, 131, 69, 0.78),
+    0 14px 28px rgba(0, 0, 0, 0.22);
+  outline: none;
+}
+
+.dashboard-status-action {
+  display: inline-flex;
+  width: fit-content;
+  margin-top: 4px;
+  padding: 4px 8px;
+  border: 1px solid rgba(240, 131, 69, 0.42);
+  border-radius: 8px;
+  color: var(--accent-soft);
+  background: rgba(240, 131, 69, 0.12);
+  font-size: 0.74rem;
+  font-weight: 800;
+}
+
+.dashboard-updates-panel {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid rgba(240, 131, 69, 0.2);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, rgba(240, 131, 69, 0.13), rgba(166, 158, 148, 0.055)),
+    rgba(0, 0, 0, 0.16);
+}
+
+.dashboard-updates-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.dashboard-updates-head strong {
+  display: block;
+  margin-top: 2px;
+  font-size: 1.05rem;
+}
+
+.dashboard-updates-head > span {
+  max-width: 48ch;
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.35;
+  text-align: right;
+}
+
+.dashboard-updates-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 10px;
+}
+
+.dashboard-update-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(166, 158, 148, 0.16);
+  border-radius: 8px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(0, 0, 0, 0.12));
+}
+
+.dashboard-update-card.has-updates {
+  border-color: rgba(240, 131, 69, 0.34);
+  box-shadow: inset 3px 0 0 rgba(240, 131, 69, 0.7);
+}
+
+.dashboard-update-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.dashboard-update-card-head span,
+.dashboard-update-items span {
+  display: block;
+  color: var(--text);
+  font-size: 0.86rem;
+  font-weight: 700;
+}
+
+.dashboard-update-card-head strong {
+  display: block;
+  margin-top: 2px;
+  color: var(--accent);
+  font-size: 0.92rem;
+}
+
+.dashboard-update-items {
+  display: grid;
+  gap: 7px;
+}
+
+.dashboard-update-items div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 7px;
+  border-top: 1px solid rgba(255, 255, 255, 0.055);
+}
+
+.dashboard-update-items small {
+  color: var(--muted);
+  white-space: nowrap;
 }
 
 .dashboard-core-grid {
@@ -3385,6 +3513,27 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   color: #ffd0d0;
 }
 
+.core-conditionally-muted {
+  opacity: 0.52;
+  filter: grayscale(0.35);
+}
+
+.core-conditionally-muted label,
+.core-conditionally-muted input,
+.core-conditionally-muted select,
+.core-conditionally-muted textarea,
+.core-conditionally-muted button {
+  pointer-events: none;
+}
+
+.core-conditionally-muted::after {
+  content: attr(data-core-disable-note);
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
 .esphome-wake-sound-preview-row {
   grid-column: 1 / -1;
   display: flex;
@@ -4366,6 +4515,133 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 .core-manager-item .small {
   white-space: normal;
   overflow-wrap: anywhere;
+}
+
+.firmware-update-panel {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid rgba(240, 131, 69, 0.28);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, rgba(240, 131, 69, 0.14), rgba(255, 255, 255, 0.035)),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.18), rgba(0, 0, 0, 0.08));
+  box-shadow:
+    inset 3px 0 0 rgba(240, 131, 69, 0.78),
+    0 12px 28px rgba(0, 0, 0, 0.18);
+}
+
+.firmware-update-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.firmware-update-head h4 {
+  margin: 3px 0 4px;
+  color: #f7f0e7;
+  font-size: 1.05rem;
+  line-height: 1.18;
+}
+
+.firmware-update-head p {
+  margin: 0;
+  max-width: 64ch;
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.4;
+}
+
+.firmware-update-kicker {
+  display: inline-flex;
+  width: fit-content;
+  padding: 4px 8px;
+  border: 1px solid rgba(240, 131, 69, 0.54);
+  border-radius: 8px;
+  color: var(--accent-soft);
+  background: rgba(240, 131, 69, 0.12);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.firmware-update-list {
+  display: grid;
+  gap: 8px;
+}
+
+.firmware-update-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(210px, 0.9fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 11px;
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(0, 0, 0, 0.1)),
+    rgba(0, 0, 0, 0.12);
+}
+
+.firmware-update-device {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.firmware-update-device strong {
+  color: var(--text);
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.firmware-update-device span {
+  color: var(--muted);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+.firmware-update-version-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.firmware-update-version-grid div {
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.16);
+}
+
+.firmware-update-version-grid span {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.firmware-update-version-grid strong {
+  display: block;
+  color: #f4eadf;
+  font-size: 0.92rem;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.firmware-update-version-grid div:last-child strong {
+  color: var(--accent-soft);
+}
+
+.firmware-update-device-action {
+  justify-self: end;
+  white-space: nowrap;
 }
 
 .core-manager-item-event {
@@ -6218,9 +6494,17 @@ body[data-popup-effect="melt"] .toast-item.flame-out::after {
   .dashboard-global-brief-head,
   .dashboard-weather-head,
   .dashboard-brief-tile-head,
-  .dashboard-panel-head {
+  .dashboard-panel-head,
+  .firmware-update-head,
+  .dashboard-updates-head,
+  .dashboard-update-card-head {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .dashboard-updates-head > span {
+    max-width: none;
+    text-align: left;
   }
 
   .dashboard-action-buttons {
@@ -6233,6 +6517,8 @@ body[data-popup-effect="melt"] .toast-item.flame-out::after {
   .dashboard-settings-status,
   .dashboard-secondary-grid,
   .dashboard-core-grid,
+  .dashboard-updates-grid,
+  .firmware-update-row,
   .dashboard-weather-visuals,
   .dashboard-snapshot-layout,
   .dashboard-weather-metrics {
@@ -6254,6 +6540,10 @@ body[data-popup-effect="melt"] .toast-item.flame-out::after {
   .dashboard-weather-tile.primary {
     grid-column: auto;
     min-height: 104px;
+  }
+
+  .firmware-update-device-action {
+    justify-self: stretch;
   }
 
   .bubble {

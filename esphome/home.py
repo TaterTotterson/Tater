@@ -27,6 +27,11 @@ def settings_item_form() -> Dict[str, Any]:
     return form if isinstance(form, dict) else {}
 
 
+def model_settings_sections() -> List[Dict[str, Any]]:
+    rows = esphome_settings.model_settings_sections()
+    return rows if isinstance(rows, list) else []
+
+
 def save_settings_values(values: Dict[str, Any]) -> Dict[str, Any]:
     result = esphome_settings.save_settings_values(values or {})
     return result if isinstance(result, dict) else {"ok": True}
@@ -418,6 +423,21 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
             "count": len(rows or []),
             "status": status,
             "message": f"Refresh completed: discovered {len(rows or [])} satellite(s) and reconciled selected devices.",
+        }
+
+    if action_name == "voice_entity_refresh":
+        selector = esphome_runtime.payload_selector(body)
+        if not selector:
+            raise ValueError("selector is required")
+        result = esphome_runtime.refresh_entity_catalog(selector, timeout=20.0)
+        entity_rows = list(result.get("entity_rows") or []) if isinstance(result, dict) else []
+        wake_engine_found = any(esphome_runtime.lower(row.get("label")) == "wake engine" for row in entity_rows if isinstance(row, dict))
+        return {
+            "ok": True,
+            "action": action_name,
+            "selector": selector,
+            "entity_rows": entity_rows,
+            "message": "Live entities refreshed." if wake_engine_found else "Live entities refreshed, but Wake Engine was not exposed by this firmware.",
         }
 
     if action_name == "voice_connect":

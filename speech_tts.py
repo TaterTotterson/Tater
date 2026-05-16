@@ -491,6 +491,18 @@ def _voice_core_base_url() -> str:
     return f"http://127.0.0.1:{_main_app_port()}"
 
 
+def _voice_core_auth_headers() -> Dict[str, str]:
+    with contextlib.suppress(Exception):
+        settings = redis_client.hgetall("voice_core_settings") or {}
+        if isinstance(settings, dict):
+            enabled = str(settings.get("API_AUTH_ENABLED") or "").strip().lower()
+            token = _text(settings.get("API_AUTH_KEY"))
+            auth_enabled = enabled in {"1", "true", "yes", "on"} or (bool(token) and enabled == "")
+            if auth_enabled and token:
+                return {"X-Tater-Token": token}
+    return {}
+
+
 def _patch_kokoro_ssmd_parser() -> None:
     global _kokoro_ssmd_patch_applied
     if _kokoro_ssmd_patch_applied:
@@ -1487,6 +1499,27 @@ def _load_kokoro_pipeline(model_id: str, acceleration: Any = None) -> Any:
         return pipeline
 
 
+def _pocket_tts_load_model_for_token(token: str) -> Any:
+    model_token = _text(token)
+    if not model_token or model_token.lower() in {"default", DEFAULT_POCKET_TTS_MODEL.lower()}:
+        return PocketTTSModel.load_model()
+
+    expanded = os.path.expanduser(model_token)
+    if expanded.lower().endswith((".yaml", ".yml")):
+        return PocketTTSModel.load_model(config=expanded)
+
+    try:
+        return PocketTTSModel.load_model(model_token)
+    except Exception as exc:
+        message = str(exc)
+        if "Config should be a path" in message:
+            raise RuntimeError(
+                "PocketTTS model config must be a local .yaml file. "
+                "Use the built-in PocketTTS model option unless you are providing a custom YAML config path."
+            ) from exc
+        raise
+
+
 def _load_pocket_tts_model(model_id: str) -> Any:
     if PocketTTSModel is None:
         raise RuntimeError(f"pocket-tts dependency unavailable: {POCKET_TTS_IMPORT_ERROR or 'unknown import error'}")
@@ -1506,7 +1539,7 @@ def _load_pocket_tts_model(model_id: str) -> Any:
                     }
                 )
             ):
-                model = PocketTTSModel.load_model(config=token)
+                model = _pocket_tts_load_model_for_token(token)
             _pocket_tts_model_cache[token] = model
         return model
 
@@ -1710,6 +1743,9 @@ def _voice_core_play_media_sync(
     media_type: str = "audio/wav",
     filename: str = "tts.wav",
     timeout_s: float = DEFAULT_VOICE_CORE_PLAY_TIMEOUT_SECONDS,
+    tts_kind: str = "",
+    continue_conversation: bool = False,
+    conversation_id: str = "",
 ) -> Dict[str, Any]:
     clean_selectors = [_text(item) for item in list(selectors or []) if _text(item)]
     if not clean_selectors:
@@ -1731,6 +1767,12 @@ def _voice_core_play_media_sync(
         "filename": _text(filename) or "tts.wav",
         "timeout_s": _as_float(timeout_s, DEFAULT_VOICE_CORE_PLAY_TIMEOUT_SECONDS, minimum=30.0),
     }
+    if _text(tts_kind):
+        payload_template["tts_kind"] = _text(tts_kind)
+    if continue_conversation:
+        payload_template["continue_conversation"] = True
+        if _text(conversation_id):
+            payload_template["conversation_id"] = _text(conversation_id)
     if isinstance(audio_bytes, (bytes, bytearray)) and audio_bytes:
         payload_template["audio_b64"] = base64.b64encode(bytes(audio_bytes)).decode("ascii")
     failures = []
@@ -1743,6 +1785,7 @@ def _voice_core_play_media_sync(
             response = requests.post(
                 f"{base_url}/tater-ha/v1/voice/esphome/play",
                 json=payload,
+                headers=_voice_core_auth_headers(),
                 timeout=90,
             )
             logger.info(
@@ -1846,6 +1889,7 @@ async def speak_announcement_targets(
     voice_core_wyoming_port: Any = DEFAULT_WYOMING_TTS_PORT,
     voice_core_wyoming_voice: str = DEFAULT_WYOMING_TTS_VOICE,
     default_backend: str = DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
+    tts_kind: str = "",
 ) -> Dict[str, Any]:
     prompt = _text(text)
     if not prompt:
@@ -1955,6 +1999,7 @@ async def speak_announcement_targets(
             media_type="audio/wav",
             filename=f"tts-{selected_backend}.wav",
             timeout_s=DEFAULT_VOICE_CORE_PLAY_TIMEOUT_SECONDS,
+            tts_kind=tts_kind,
         )
         result["voice_core_sent_count"] = int(voice_result.get("sent_count") or 0)
         sent_count += int(voice_result.get("sent_count") or 0)
@@ -2022,6 +2067,9 @@ async def play_announcement_audio_targets(
     public_base_url: str = "",
     backend: str = "",
     default_backend: str = DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
+    tts_kind: str = "",
+    continue_conversation: bool = False,
+    conversation_id: str = "",
 ) -> Dict[str, Any]:
     prompt = _text(text)
     audio = bytes(wav_bytes or b"")
@@ -2106,6 +2154,9 @@ async def play_announcement_audio_targets(
             media_type="audio/wav",
             filename=f"tts-{selected_backend}.wav",
             timeout_s=DEFAULT_VOICE_CORE_PLAY_TIMEOUT_SECONDS,
+            tts_kind=tts_kind,
+            continue_conversation=continue_conversation,
+            conversation_id=conversation_id,
         )
         result["voice_core_sent_count"] = int(voice_result.get("sent_count") or 0)
         sent_count += int(voice_result.get("sent_count") or 0)

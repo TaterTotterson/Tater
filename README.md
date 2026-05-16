@@ -1,5 +1,7 @@
 <div align="center">
-  <img src="images/tater_hydra_logo.png" alt="Tater AI Assistant" width="300"/>
+  <a href="https://taterassistant.com">
+    <img src="images/tater-logo-primary.png" alt="Tater AI Assistant" width="440"/>
+  </a>
 </div>
 <h3 align="center">
   <a href="https://taterassistant.com">taterassistant.com</a>
@@ -29,11 +31,17 @@ Some Portals are paired with companion repos/apps that complete the end-user int
 
 | Companion Repo/App | Used With | Purpose |
 |---|---|---|
-| https://github.com/TaterTotterson/hassio-addons-tater | Home Assistant | Home Assistant add-on repository for running Tater + Redis Stack directly inside HAOS/Supervised setups. |
-| https://github.com/TaterTotterson/Tater-MacOS | macOS Portal | Menu bar companion app and bridge client for desktop chat, quick actions, and uploads. |
-| https://github.com/TaterTotterson/tater_meshtastic_bridge | Meshtastic Portal | Host-side BLE bridge service for connecting Tater to Meshtastic radios over a simple local API. |
-| https://github.com/TaterTotterson/skin.cortana.tater-xbmc | XBMC Portal | OG Xbox/XBMC4Xbox skin and script integration for on-console Tater access. |
-| https://taterassistant.com/portals/homekit.html | HomeKit Portal | Shortcut guide for Siri -> HomeKit bridge -> Tater workflows. |
+| <a href="https://github.com/TaterTotterson/hassio-addons-tater"><img src="images/companion-cards/hassio-addons-tater.png" alt="HA Add-ons" width="300"></a> | Home Assistant | Home Assistant add-on repository for running Tater + Redis Stack directly inside HAOS/Supervised setups. |
+| <a href="https://github.com/TaterTotterson/Tater-MacOS"><img src="images/companion-cards/tater-macos.png" alt="Tater MacOS" width="300"></a> | macOS Portal | Menu bar companion app and bridge client for desktop chat, quick actions, and uploads. |
+| <a href="https://github.com/TaterTotterson/tater_meshtastic_bridge"><img src="images/companion-cards/tater-meshtastic-bridge.png" alt="Meshtastic Bridge" width="300"></a> | Meshtastic Portal | Host-side BLE bridge service for connecting Tater to Meshtastic radios over a simple local API. |
+| <a href="https://github.com/TaterTotterson/skin.cortana.tater-xbmc"><img src="images/companion-cards/skin-cortana-tater-xbmc.png" alt="XBMC4Xbox Skin" width="300"></a> | XBMC Portal | OG Xbox/XBMC4Xbox skin and script integration for on-console Tater access. |
+| <a href="https://taterassistant.com/portals/homekit.html"><img src="images/companion-cards/homekit-shortcuts.png" alt="HomeKit Shortcuts" width="300"></a> | HomeKit Portal | Shortcut guide for Siri -> HomeKit bridge -> Tater workflows. |
+| <a href="https://github.com/TaterTotterson/Tater-OWW-Server"><img src="images/companion-cards/tater-oww-server.png" alt="Tater OWW Server" width="300"></a> | ESPHome Voice / openWakeWord | Standalone openWakeWord HTTP server for Tater satellites that need remote wake detection outside the main Tater app. |
+| <a href="https://github.com/TaterTotterson/microWakeWords"><img src="images/companion-cards/microwakewords.png" alt="microWakeWords" width="300"></a> | ESPHome Voice / firmware | Tater VoicePE, Satellite1, and related ESPHome firmware plus microWakeWord model assets. |
+| <a href="https://github.com/TaterTotterson/Tater-S3Box-Display"><img src="images/companion-cards/tater-s3box-display.png" alt="S3Box Display" width="300"></a> | ESPHome Voice / firmware | ESP32-S3-BOX display firmware for Tater voice and dashboard-style device experiences. |
+| <a href="https://github.com/TaterTotterson/microWakeWord-Trainer-AppleSilicon"><img src="images/companion-cards/mww-trainer-apple-silicon.png" alt="mWW Trainer Apple Silicon" width="300"></a> | Wake word training | Apple Silicon trainer for creating custom microWakeWord models. |
+| <a href="https://github.com/TaterTotterson/microWakeWord-Trainer-Nvidia-Docker"><img src="images/companion-cards/mww-trainer-nvidia-docker.png" alt="mWW Trainer NVIDIA Docker" width="300"></a> | Wake word training | NVIDIA Docker trainer for creating custom microWakeWord models with GPU acceleration. |
+| <a href="https://github.com/TaterTotterson/openWakeWord-Trainer"><img src="images/companion-cards/openwakeword-trainer.png" alt="OWW Trainer" width="300"></a> | Wake word training | Trainer for custom openWakeWord models used by Tater's local or standalone openWakeWord server. |
 
 ---
 

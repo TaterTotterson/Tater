@@ -57,6 +57,7 @@ META_TOOLS = {
     "image_describe",
     "attach_file",
     "send_message",
+    "intercom",
 }
 
 _KERNEL_TOOL_PURPOSE_HINTS = {
@@ -78,6 +79,7 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
     "image_describe": "describe an explicit image using an artifact_id, URL, blob, or local path",
     "attach_file": "attach an available artifact/local file and optionally send it to a destination platform/target",
     "send_message": "queue a cross-portal notification/message only when the user explicitly asks to notify or message a destination (never for normal chat replies)",
+    "intercom": "open or manage a short room-to-room intercom handoff between connected Voice Core satellites; only starts from a Voice Core satellite context",
 }
 
 _KERNEL_TOOL_USAGE_HINTS = {
@@ -99,6 +101,7 @@ _KERNEL_TOOL_USAGE_HINTS = {
     "image_describe": '{"function":"image_describe","arguments":{"artifact_id":"<artifact_id>","query":"Describe this image."}}',
     "attach_file": '{"function":"attach_file","arguments":{"artifact_id":"<artifact_id>","message":"Attachment"}}',
     "send_message": '{"function":"send_message","arguments":{"message":"<message>"}}',
+    "intercom": '{"function":"intercom","arguments":{"target":"<room or satellite>","action":"start"}}',
 }
 
 
@@ -648,6 +651,12 @@ async def run_meta_tool(
             api_notification=args.get("api_notification"),
             chat_id=args.get("chat_id"),
         )
+    if func == "intercom":
+        return await _run_intercom_tool(
+            args=args,
+            platform=platform,
+            origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
+        )
 
     core_scope = str(
         args.get("scope")
@@ -755,6 +764,102 @@ def _needs_request_arg(needs: Any) -> bool:
         if "request" in norm and "request" == norm.split("(", 1)[0].strip():
             return True
     return False
+
+
+def _origin_text(origin: Optional[Dict[str, Any]], *keys: str) -> str:
+    payload = origin if isinstance(origin, dict) else {}
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _voice_core_selector_from_origin(origin: Optional[Dict[str, Any]]) -> str:
+    payload = origin if isinstance(origin, dict) else {}
+    selector = _origin_text(payload, "satellite_selector")
+    if selector:
+        return selector
+    device_id = _origin_text(payload, "device_id")
+    if device_id.startswith("host:") or device_id.startswith("manual:"):
+        return device_id
+    return ""
+
+
+def _arg_text(args: Dict[str, Any], *keys: str) -> str:
+    payload = args if isinstance(args, dict) else {}
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+async def _run_intercom_tool(
+    *,
+    args: Dict[str, Any],
+    platform: str,
+    origin: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    del platform
+    from esphome import intercom as voice_intercom
+
+    action = _arg_text(args, "action", "mode").lower()
+    if action == "status":
+        result = await voice_intercom.status()
+        count = int(result.get("count") or 0)
+        return action_success(
+            facts={"pending_count": count, "pending": list(result.get("pending") or [])[:8]},
+            summary_for_user=f"{count} intercom handoff(s) are pending.",
+            say_hint="Give a brief intercom status.",
+        )
+
+    selector = _voice_core_selector_from_origin(origin)
+    if not selector:
+        return action_failure(
+            code="voice_core_required",
+            message="Intercom must be started from a Voice Core satellite so Tater knows which microphone is speaking.",
+            say_hint="Explain that intercom starts from a voice satellite.",
+        )
+
+    if action in {"cancel", "close", "end", "stop"}:
+        result = await voice_intercom.cancel_for_selector(selector)
+        return action_success(
+            facts={"selector": selector, "removed": int(result.get("removed") or 0)},
+            summary_for_user="Intercom closed.",
+            say_hint="Confirm that the intercom is closed.",
+        )
+
+    target = _arg_text(args, "target", "room", "area", "satellite", "device", "name")
+    if not target:
+        return action_failure(
+            code="missing_intercom_target",
+            message="No intercom target was provided.",
+            needs=["Ask which room or satellite to intercom with."],
+            say_hint="Ask which room or satellite they want to intercom with.",
+        )
+
+    result = await voice_intercom.start_intercom(source_selector=selector, target_query=target)
+    if not bool(result.get("ok")):
+        return action_failure(
+            code=str(result.get("error") or "intercom_start_failed"),
+            message=str(result.get("message") or "Could not open the intercom."),
+            needs=["Choose a connected Voice Core satellite."],
+            say_hint="Explain that the target satellite could not be found or is not available.",
+        )
+
+    target_label = str(result.get("target_label") or target).strip()
+    return action_success(
+        facts={
+            "session_id": result.get("session_id"),
+            "source_selector": result.get("source_selector"),
+            "target_selector": result.get("target_selector"),
+            "target_label": target_label,
+            "expires_ts": result.get("expires_ts"),
+        },
+        summary_for_user=f"Intercom to {target_label} is open.",
+        say_hint=f"Tell the user the intercom to {target_label} is open and ask them to say the message they want to send.",
+    )
 
 
 def _autofill_request_arg(plugin: Any, args: Dict[str, Any], context: Optional[Dict[str, Any]]) -> Dict[str, Any]:

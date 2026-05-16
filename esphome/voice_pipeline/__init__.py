@@ -250,6 +250,7 @@ REDIS_WYOMING_TTS_VOICES_KEY = "tater:voice:wyoming:tts_voices:v1"
 REDIS_WYOMING_TTS_VOICES_META_KEY = "tater:voice:wyoming:tts_voices:meta:v1"
 REDIS_PIPER_TTS_MODELS_KEY = "tater:voice:piper:tts_models:v1"
 REDIS_PIPER_TTS_MODELS_META_KEY = "tater:voice:piper:tts_models:meta:v1"
+REDIS_VOICE_METRICS_KEY = "tater:voice:metrics:v1"
 
 DEFAULT_WYOMING_STT_HOST = "127.0.0.1"
 DEFAULT_WYOMING_STT_PORT = 10300
@@ -257,6 +258,10 @@ DEFAULT_WYOMING_TTS_HOST = "127.0.0.1"
 DEFAULT_WYOMING_TTS_PORT = 10200
 DEFAULT_WYOMING_TTS_VOICE = ""
 DEFAULT_WYOMING_TIMEOUT_SECONDS = 45.0
+DEFAULT_WYOMING_STT_QUEUE_CHUNKS = 64
+DEFAULT_WYOMING_STT_QUEUE_DROP_LIMIT = 3
+DEFAULT_LOCAL_STT_TIMEOUT_SECONDS = 35.0
+DEFAULT_VOICE_TURN_PROCESS_TIMEOUT_S = 90.0
 DEFAULT_OPENAI_COMPATIBLE_TTS_TIMEOUT_SECONDS = 90.0
 DEFAULT_STT_BACKEND = "faster_whisper"
 DEFAULT_TTS_BACKEND = "wyoming"
@@ -310,6 +315,7 @@ DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_FRAMES = 4
 DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_SHORT_S = 0.66
 DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_LONG_S = 0.82
 DEFAULT_CONTINUED_CHAT_REOPEN_STARTUP_GATE_S = 0.40
+DEFAULT_CONTINUED_CHAT_REOPEN_PREROLL_S = 0.30
 DEFAULT_EXPERIMENTAL_LIVE_TOOL_PROGRESS_ENABLED = False
 DEFAULT_EXPERIMENTAL_PARTIAL_STT_ENABLED = False
 DEFAULT_EXPERIMENTAL_TTS_EARLY_START_ENABLED = False
@@ -319,13 +325,18 @@ DEFAULT_EXPERIMENTAL_PARTIAL_STT_MIN_NEW_AUDIO_S = 0.28
 DEFAULT_EXPERIMENTAL_TTS_EARLY_START_MIN_CHARS = 90
 DEFAULT_EXPERIMENTAL_TTS_EARLY_START_MIN_FIRST_CHARS = 28
 DEFAULT_WAKE_ARBITRATION_ENABLED = True
-DEFAULT_WAKE_ARBITRATION_WINDOW_MS = 500
+DEFAULT_WAKE_ARBITRATION_WINDOW_MS = 900
 DEFAULT_WAKE_ARBITRATION_SCOPE = "same_area"
+DEFAULT_WAKE_ARBITRATION_BUSY_TIMEOUT_S = 120.0
+DEFAULT_WAKE_ARBITRATION_RELEASE_GRACE_S = 1.5
 DEFAULT_SPEECHBRAIN_ACCELERATION = "auto"
 DEFAULT_STARTUP_GATE_S = 0.0
-DEFAULT_WAKE_STARTUP_GATE_S = 0.40
+DEFAULT_WAKE_STARTUP_GATE_S = 0.15
+DEFAULT_WAKE_SILENCE_SECONDS = 0.96
+DEFAULT_WAKE_NO_SPEECH_TIMEOUT_S = 5.75
 DEFAULT_WAKE_MIN_SPEECH_FRAMES = 3
-DEFAULT_WAKE_MIN_SILENCE_LONG_S = 0.74
+DEFAULT_WAKE_MIN_SILENCE_SHORT_S = 0.70
+DEFAULT_WAKE_MIN_SILENCE_LONG_S = 0.86
 DEFAULT_TTS_URL_TTL_S = 180
 DEFAULT_TTS_ANNOUNCEMENT_TIMEOUT_MAX_S = 170.0
 
@@ -354,7 +365,6 @@ DEFAULT_SESSION_TTL_SECONDS = 2 * 60 * 60
 DEFAULT_HISTORY_MAX_STORE = 20
 DEFAULT_HISTORY_MAX_LLM = 8
 
-VOICE_STATE_IDLE = "idle"
 VOICE_STATE_LISTENING = "listening"
 VOICE_STATE_THINKING = "thinking"
 VOICE_STATE_SPEAKING = "speaking"
@@ -383,6 +393,7 @@ _voice_runtime_lock = asyncio.Lock()
 _voice_selector_runtime: Dict[str, Dict[str, Any]] = {}
 _wake_arbitration_lock = asyncio.Lock()
 _wake_arbitration_groups: Dict[str, Dict[str, Any]] = {}
+_wake_arbitration_room_claims: Dict[str, Dict[str, Any]] = {}
 
 _background_tasks: Dict[str, asyncio.Task] = {}
 
@@ -479,7 +490,7 @@ _VOICE_OUTCOME_FALSE_WAKE = "false_wake"
 _VOICE_OUTCOME_WAKE_NO_SPEECH = "wake_no_speech"
 _VOICE_OUTCOME_LOW_SIGNAL = "low_signal_speech"
 _VOICE_OUTCOME_CLIPPED = "clipped_ambiguous_speech"
-_VOICE_METRICS: Dict[str, Any] = {
+_VOICE_METRICS_TEMPLATE: Dict[str, Any] = {
     "sessions_started": 0,
     "valid_turns": 0,
     "no_op_turns": 0,
@@ -499,7 +510,9 @@ _VOICE_METRICS: Dict[str, Any] = {
     "tts_latency_ms": {"count": 0, "total": 0.0, "by_backend": {}},
     "devices": {},
 }
+_VOICE_METRICS: Dict[str, Any] = json.loads(json.dumps(_VOICE_METRICS_TEMPLATE))
 _VOICE_METRICS_LOCK = threading.Lock()
+_VOICE_METRICS_LOADED = False
 
 # -------------------- Shared Utility Helpers --------------------
 def _now() -> float:
@@ -600,9 +613,18 @@ def _wake_arbitration_window_s() -> float:
         "VOICE_WAKE_ARBITRATION_WINDOW_MS",
         DEFAULT_WAKE_ARBITRATION_WINDOW_MS,
         minimum=100,
-        maximum=2000,
+        maximum=3000,
     )
     return float(ms) / 1000.0
+
+
+def _wake_arbitration_busy_timeout_s() -> float:
+    return _get_float_setting(
+        "VOICE_WAKE_ARBITRATION_BUSY_TIMEOUT_S",
+        DEFAULT_WAKE_ARBITRATION_BUSY_TIMEOUT_S,
+        minimum=5.0,
+        maximum=300.0,
+    )
 
 
 def _wake_arbitration_scope() -> str:
@@ -626,6 +648,24 @@ def _speechbrain_device() -> str:
     if selected == "cpu":
         return "cpu"
     return "cuda" if _cuda_runtime_available() else "cpu"
+
+
+def _wyoming_stt_queue_max_chunks() -> int:
+    return _get_int_setting(
+        "VOICE_WYOMING_STT_QUEUE_CHUNKS",
+        DEFAULT_WYOMING_STT_QUEUE_CHUNKS,
+        minimum=8,
+        maximum=512,
+    )
+
+
+def _wyoming_stt_queue_drop_limit() -> int:
+    return _get_int_setting(
+        "VOICE_WYOMING_STT_QUEUE_DROP_LIMIT",
+        DEFAULT_WYOMING_STT_QUEUE_DROP_LIMIT,
+        minimum=1,
+        maximum=64,
+    )
 
 
 def _experimental_live_tool_progress_enabled() -> bool:
@@ -868,6 +908,153 @@ def _wake_arbitration_group_key(*, wake_phrase: Any, area_name: Any) -> str:
     return f"area:{phrase}:{_wake_arbitration_area_key(area_name)}"
 
 
+def _wake_arbitration_room_key(area_name: Any) -> str:
+    if _wake_arbitration_scope() == "global":
+        return "global"
+    return f"area:{_wake_arbitration_area_key(area_name)}"
+
+
+def _wake_arbitration_cleanup_room_claims_locked(now_ts: float) -> None:
+    for key, row in list(_wake_arbitration_room_claims.items()):
+        if not isinstance(row, dict):
+            _wake_arbitration_room_claims.pop(key, None)
+            continue
+        if float(row.get("expires_at") or 0.0) <= now_ts:
+            _wake_arbitration_room_claims.pop(key, None)
+
+
+async def _wake_arbitration_active_room_claim(*, selector: str, area_name: str) -> Optional[Dict[str, Any]]:
+    if not _wake_arbitration_enabled():
+        return None
+    token = _text(selector)
+    room_key = _wake_arbitration_room_key(area_name)
+    now_ts = _now()
+    async with _wake_arbitration_lock:
+        _wake_arbitration_cleanup_room_claims_locked(now_ts)
+        claim = _wake_arbitration_room_claims.get(room_key)
+        if not isinstance(claim, dict):
+            return None
+        if _text(claim.get("selector")) == token:
+            return None
+        return dict(claim)
+
+
+async def _wake_arbitration_claim_room(
+    *,
+    selector: str,
+    session: VoiceSessionRuntime,
+    area_name: str,
+    reason: str,
+    expires_at: float = 0.0,
+) -> None:
+    if not _wake_arbitration_enabled() or not isinstance(session, VoiceSessionRuntime):
+        return
+    token = _text(selector)
+    if not token:
+        return
+    now_ts = _now()
+    room_key = _wake_arbitration_room_key(area_name)
+    expiry = float(expires_at or 0.0)
+    if expiry <= now_ts:
+        expiry = now_ts + _wake_arbitration_busy_timeout_s()
+    row = {
+        "key": room_key,
+        "selector": token,
+        "session_id": _text(session.session_id),
+        "conversation_id": _text(session.conversation_id),
+        "area_name": _text(area_name) or "unknown",
+        "claimed_ts": now_ts,
+        "updated_ts": now_ts,
+        "expires_at": expiry,
+        "reason": _text(reason) or "active_session",
+    }
+    async with _wake_arbitration_lock:
+        _wake_arbitration_cleanup_room_claims_locked(now_ts)
+        _wake_arbitration_room_claims[room_key] = row
+    session.wake_arbitration_room_key = room_key
+    session.wake_arbitration_room_claimed = True
+    if isinstance(session.context, dict):
+        session.context["wake_arbitration_room_key"] = room_key
+        session.context["wake_arbitration_room_claimed"] = True
+    _native_debug(
+        f"wake arbitration room claim selector={token} session_id={session.session_id} "
+        f"room={room_key} reason={_text(reason) or 'active_session'} expires_in_s={max(0.0, expiry - now_ts):.1f}"
+    )
+
+
+async def _wake_arbitration_extend_room_claim_for_session(
+    *,
+    selector: str,
+    session_id: str,
+    until_ts: float,
+    reason: str,
+    replace: bool = False,
+) -> None:
+    if not _wake_arbitration_enabled():
+        return
+    token = _text(selector)
+    sid = _text(session_id)
+    expiry = float(until_ts or 0.0)
+    now_ts = _now()
+    if not token or not sid or expiry <= now_ts:
+        return
+    touched = False
+    async with _wake_arbitration_lock:
+        _wake_arbitration_cleanup_room_claims_locked(now_ts)
+        for row in _wake_arbitration_room_claims.values():
+            if not isinstance(row, dict):
+                continue
+            if _text(row.get("selector")) != token or _text(row.get("session_id")) != sid:
+                continue
+            row["expires_at"] = expiry if replace else max(float(row.get("expires_at") or 0.0), expiry)
+            row["updated_ts"] = now_ts
+            row["reason"] = _text(reason) or "extended"
+            touched = True
+    if touched:
+        _native_debug(
+            f"wake arbitration room claim extended selector={token} session_id={sid} "
+            f"reason={_text(reason) or 'extended'} expires_in_s={max(0.0, expiry - now_ts):.1f}"
+        )
+
+
+async def _wake_arbitration_release_room_claim_for_session(
+    *,
+    selector: str,
+    session_id: str,
+    reason: str,
+    delay_s: float = 0.0,
+) -> None:
+    if not _wake_arbitration_enabled():
+        return
+    token = _text(selector)
+    sid = _text(session_id)
+    if not token or not sid:
+        return
+    now_ts = _now()
+    delay = max(0.0, float(delay_s or 0.0))
+    release_at = now_ts + delay
+    released: List[str] = []
+    async with _wake_arbitration_lock:
+        _wake_arbitration_cleanup_room_claims_locked(now_ts)
+        for key, row in list(_wake_arbitration_room_claims.items()):
+            if not isinstance(row, dict):
+                continue
+            if _text(row.get("selector")) != token or _text(row.get("session_id")) != sid:
+                continue
+            if delay > 0.0:
+                row["expires_at"] = min(float(row.get("expires_at") or release_at), release_at)
+                row["updated_ts"] = now_ts
+                row["reason"] = _text(reason) or "release_grace"
+            else:
+                _wake_arbitration_room_claims.pop(key, None)
+            released.append(key)
+    if released:
+        _native_debug(
+            f"wake arbitration room claim release selector={token} session_id={sid} "
+            f"rooms={','.join(released)} reason={_text(reason) or 'release'} delay_s={delay:.1f}"
+        )
+
+
 def _wake_arbitration_candidate_score(candidate: Dict[str, Any]) -> float:
     selector = _text(candidate.get("selector"))
     session_id = _text(candidate.get("session_id"))
@@ -915,6 +1102,10 @@ async def _resolve_wake_arbitration_group(group_id: str, *, delay_s: float) -> N
                 row["group_started_ts"] = group.get("started_ts")
                 score = _wake_arbitration_candidate_score(row)
                 scored.append((score, float(row.get("started_ts") or 0.0), row))
+            scored = [item for item in scored if item[0] > -99999.0]
+            if not scored:
+                _wake_arbitration_groups.pop(group_id, None)
+                return
             scored.sort(key=lambda item: (-item[0], item[1]))
             winner_score, _winner_started, winner = scored[0]
             winner_selector = _text(winner.get("selector"))
@@ -925,15 +1116,29 @@ async def _resolve_wake_arbitration_group(group_id: str, *, delay_s: float) -> N
         if winner_selector and winner_session_id:
             winner_runtime = _selector_runtime(winner_selector)
             winner_lock = winner_runtime.get("lock")
+            winner_session: Optional[VoiceSessionRuntime] = None
+            winner_area = _text(winner.get("area_name"))
             if winner_lock is not None:
                 async with winner_lock:
                     session = winner_runtime.get("session")
                     if isinstance(session, VoiceSessionRuntime) and _text(session.session_id) == winner_session_id:
                         session.wake_arbitration_winner = True
+                        winner_session = session
                         if isinstance(session.context, dict):
                             session.context["wake_arbitration_winner"] = True
                             session.context["wake_arbitration_candidate_count"] = candidate_count
                             session.context["wake_arbitration_score"] = round(float(winner_score), 2)
+                            winner_area = (
+                                _text(session.context.get("area_name") or session.context.get("room_name"))
+                                or winner_area
+                            )
+            if winner_session is not None:
+                await _wake_arbitration_claim_room(
+                    selector=winner_selector,
+                    session=winner_session,
+                    area_name=winner_area,
+                    reason="wake_arbitration_winner",
+                )
 
         for row in losers:
             selector = _text(row.get("selector"))
@@ -1101,6 +1306,113 @@ def _voice_metric_add(bucket: Dict[str, Any], value: Any) -> None:
     bucket["total"] = float(bucket.get("total") or 0.0) + max(0.0, float(value or 0.0))
 
 
+def _voice_metric_merge_counter(target: Dict[str, Any], source: Dict[str, Any], key: str) -> None:
+    if not isinstance(target, dict) or not isinstance(source, dict):
+        return
+    try:
+        target[key] = max(int(target.get(key) or 0), int(source.get(key) or 0))
+    except Exception:
+        return
+
+
+def _voice_metric_merge_bucket(target: Dict[str, Any], source: Any) -> None:
+    if not isinstance(target, dict) or not isinstance(source, dict):
+        return
+    _voice_metric_merge_counter(target, source, "count")
+    try:
+        target["total"] = max(float(target.get("total") or 0.0), float(source.get("total") or 0.0))
+    except Exception:
+        pass
+    source_by_backend = source.get("by_backend") if isinstance(source.get("by_backend"), dict) else {}
+    if not source_by_backend:
+        return
+    target_by_backend = target.get("by_backend")
+    if not isinstance(target_by_backend, dict):
+        target_by_backend = {}
+        target["by_backend"] = target_by_backend
+    for backend, saved_bucket in source_by_backend.items():
+        if not isinstance(saved_bucket, dict):
+            continue
+        token = _text(backend) or "unknown"
+        bucket = target_by_backend.get(token)
+        if not isinstance(bucket, dict):
+            bucket = {"count": 0, "total": 0.0}
+            target_by_backend[token] = bucket
+        _voice_metric_merge_bucket(bucket, saved_bucket)
+
+
+def _voice_metrics_merge_row(target: Dict[str, Any], source: Any) -> None:
+    if not isinstance(target, dict) or not isinstance(source, dict):
+        return
+    for key in (
+        "sessions_started",
+        "valid_turns",
+        "no_op_turns",
+        "false_wake_count",
+        "wake_no_speech_count",
+        "low_signal_count",
+        "clipped_ambiguous_count",
+        "blank_wake_count",
+        "continued_chat_attempts",
+        "continued_chat_reopens",
+        "stt_fallback_count",
+        "tts_fallback_count",
+        "error_count",
+        "disconnect_count",
+        "reconnect_count",
+    ):
+        if key in source:
+            _voice_metric_merge_counter(target, source, key)
+    for key in ("speech_duration", "silence_duration", "turn_latency_ms", "stt_latency_ms", "tts_latency_ms"):
+        if isinstance(target.get(key), dict):
+            _voice_metric_merge_bucket(target[key], source.get(key))
+    source_seen = _as_float(source.get("last_seen_ts"), 0.0)
+    target_seen = _as_float(target.get("last_seen_ts"), 0.0)
+    if source_seen >= target_seen:
+        for key in ("last_outcome", "last_reason"):
+            if key in source:
+                target[key] = _text(source.get(key))
+        if source_seen > 0.0:
+            target["last_seen_ts"] = source_seen
+
+
+def _voice_metrics_load_persisted_locked() -> None:
+    global _VOICE_METRICS_LOADED
+    if _VOICE_METRICS_LOADED:
+        return
+    try:
+        raw = redis_client.get(REDIS_VOICE_METRICS_KEY)
+    except Exception as exc:
+        logger.debug("[native-voice] voice metrics load skipped: %s", exc)
+        return
+    _VOICE_METRICS_LOADED = True
+    if raw in (None, ""):
+        return
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="replace")
+    try:
+        saved = json.loads(str(raw))
+    except Exception as exc:
+        logger.debug("[native-voice] voice metrics payload invalid: %s", exc)
+        return
+    if not isinstance(saved, dict):
+        return
+    _voice_metrics_merge_row(_VOICE_METRICS, saved)
+    saved_devices = saved.get("devices") if isinstance(saved.get("devices"), dict) else {}
+    for selector, saved_row in saved_devices.items():
+        if not isinstance(saved_row, dict):
+            continue
+        row = _voice_device_metrics(_text(selector) or "unknown")
+        _voice_metrics_merge_row(row, saved_row)
+
+
+def _voice_metrics_persist_locked() -> None:
+    try:
+        redis_client.set(REDIS_VOICE_METRICS_KEY, json.dumps(_VOICE_METRICS, ensure_ascii=False))
+    except Exception as exc:
+        logger.debug("[native-voice] voice metrics persist skipped: %s", exc)
+
+
 def _voice_backend_bucket(group_name: str, backend: str) -> Dict[str, Any]:
     metrics = _VOICE_METRICS.get(group_name)
     if not isinstance(metrics, dict):
@@ -1159,6 +1471,7 @@ def _voice_metrics_record_session_start(
     tts_fallback_used: bool,
 ) -> None:
     with _VOICE_METRICS_LOCK:
+        _voice_metrics_load_persisted_locked()
         _VOICE_METRICS["sessions_started"] = int(_VOICE_METRICS.get("sessions_started") or 0) + 1
         if continued_chat_reopen:
             _VOICE_METRICS["continued_chat_reopens"] = int(_VOICE_METRICS.get("continued_chat_reopens") or 0) + 1
@@ -1171,6 +1484,7 @@ def _voice_metrics_record_session_start(
         if continued_chat_reopen:
             device["continued_chat_reopens"] = int(device.get("continued_chat_reopens") or 0) + 1
         device["last_seen_ts"] = _now()
+        _voice_metrics_persist_locked()
 
 
 def _voice_metrics_record_connection_event(selector: str, *, event: str) -> None:
@@ -1178,6 +1492,7 @@ def _voice_metrics_record_connection_event(selector: str, *, event: str) -> None
     if token not in {"disconnect", "reconnect", "error"}:
         return
     with _VOICE_METRICS_LOCK:
+        _voice_metrics_load_persisted_locked()
         device = _voice_device_metrics(selector)
         if token == "disconnect":
             device["disconnect_count"] = int(device.get("disconnect_count") or 0) + 1
@@ -1186,24 +1501,39 @@ def _voice_metrics_record_connection_event(selector: str, *, event: str) -> None
         else:
             device["error_count"] = int(device.get("error_count") or 0) + 1
         device["last_seen_ts"] = _now()
+        _voice_metrics_persist_locked()
 
 
 def _voice_metrics_record_stt(selector: str, backend: str, latency_ms: float) -> None:
     with _VOICE_METRICS_LOCK:
+        _voice_metrics_load_persisted_locked()
         _voice_metric_add(_VOICE_METRICS.setdefault("stt_latency_ms", {"count": 0, "total": 0.0, "by_backend": {}}), latency_ms)
         _voice_metric_add(_voice_backend_bucket("stt_latency_ms", backend), latency_ms)
         device = _voice_device_metrics(selector)
         _voice_metric_add(device.setdefault("stt_latency_ms", {"count": 0, "total": 0.0}), latency_ms)
         device["last_seen_ts"] = _now()
+        _voice_metrics_persist_locked()
+
+
+def _voice_metrics_record_stt_fallback(selector: str, reason: str = "") -> None:
+    with _VOICE_METRICS_LOCK:
+        _voice_metrics_load_persisted_locked()
+        _VOICE_METRICS["stt_fallback_count"] = int(_VOICE_METRICS.get("stt_fallback_count") or 0) + 1
+        device = _voice_device_metrics(selector)
+        device["last_reason"] = _text(reason) or "stt_fallback"
+        device["last_seen_ts"] = _now()
+        _voice_metrics_persist_locked()
 
 
 def _voice_metrics_record_tts(selector: str, backend: str, latency_ms: float) -> None:
     with _VOICE_METRICS_LOCK:
+        _voice_metrics_load_persisted_locked()
         _voice_metric_add(_VOICE_METRICS.setdefault("tts_latency_ms", {"count": 0, "total": 0.0, "by_backend": {}}), latency_ms)
         _voice_metric_add(_voice_backend_bucket("tts_latency_ms", backend), latency_ms)
         device = _voice_device_metrics(selector)
         _voice_metric_add(device.setdefault("tts_latency_ms", {"count": 0, "total": 0.0}), latency_ms)
         device["last_seen_ts"] = _now()
+        _voice_metrics_persist_locked()
 
 
 def _voice_metrics_record_turn(
@@ -1216,6 +1546,7 @@ def _voice_metrics_record_turn(
     turn_latency_ms: float,
 ) -> None:
     with _VOICE_METRICS_LOCK:
+        _voice_metrics_load_persisted_locked()
         valid = outcome == _VOICE_OUTCOME_VALID
         if valid:
             _VOICE_METRICS["valid_turns"] = int(_VOICE_METRICS.get("valid_turns") or 0) + 1
@@ -1254,17 +1585,21 @@ def _voice_metrics_record_turn(
         device["last_outcome"] = _text(outcome)
         device["last_reason"] = _text(reason)
         device["last_seen_ts"] = _now()
+        _voice_metrics_persist_locked()
 
 
 def _voice_metrics_record_continued_chat_attempt(selector: str) -> None:
     with _VOICE_METRICS_LOCK:
+        _voice_metrics_load_persisted_locked()
         _VOICE_METRICS["continued_chat_attempts"] = int(_VOICE_METRICS.get("continued_chat_attempts") or 0) + 1
         device = _voice_device_metrics(selector)
         device["last_seen_ts"] = _now()
+        _voice_metrics_persist_locked()
 
 
 def _voice_metrics_snapshot() -> Dict[str, Any]:
     with _VOICE_METRICS_LOCK:
+        _voice_metrics_load_persisted_locked()
         metrics = json.loads(json.dumps(_VOICE_METRICS))
     devices = metrics.get("devices") if isinstance(metrics.get("devices"), dict) else {}
     for row in devices.values():
@@ -1923,6 +2258,8 @@ def _voice_config_snapshot() -> Dict[str, Any]:
     return {
         "native_debug": _native_debug_enabled(),
         "wyoming_timeout_s": _get_float_setting("VOICE_NATIVE_WYOMING_TIMEOUT_S", DEFAULT_WYOMING_TIMEOUT_SECONDS, minimum=5.0, maximum=180.0),
+        "wyoming_stt_queue_chunks": _wyoming_stt_queue_max_chunks(),
+        "wyoming_stt_queue_drop_limit": _wyoming_stt_queue_drop_limit(),
         "acceleration": {
             "selected": selected_acceleration,
             "effective": effective_acceleration,
@@ -2016,14 +2353,33 @@ def _voice_config_snapshot() -> Dict[str, Any]:
         "eou": {
             "mode": DEFAULT_EOU_MODE,
             "backend": vad_backend,
-            "silence_s": float(DEFAULT_VAD_SILENCE_SECONDS),
-            "timeout_s": float(DEFAULT_VAD_TIMEOUT_SECONDS),
-            "startup_gate_s": float(DEFAULT_STARTUP_GATE_S),
-            "no_speech_timeout_s": float(DEFAULT_VAD_NO_SPEECH_TIMEOUT_S),
-            "silero_threshold": float(DEFAULT_SILERO_THRESHOLD),
-            "silero_neg_threshold": float(DEFAULT_SILERO_NEG_THRESHOLD),
-            "min_speech_frames": int(DEFAULT_SILERO_MIN_SPEECH_FRAMES),
-            "min_silence_frames": int(DEFAULT_SILERO_MIN_SILENCE_FRAMES),
+            "silence_s": _get_float_setting("VOICE_VAD_SILENCE_SECONDS", DEFAULT_VAD_SILENCE_SECONDS, minimum=0.2, maximum=5.0),
+            "timeout_s": _get_float_setting("VOICE_VAD_TIMEOUT_SECONDS", DEFAULT_VAD_TIMEOUT_SECONDS, minimum=2.0, maximum=60.0),
+            "startup_gate_s": _get_float_setting("VOICE_STARTUP_GATE_S", DEFAULT_STARTUP_GATE_S, minimum=0.0, maximum=2.0),
+            "no_speech_timeout_s": _get_float_setting("VOICE_VAD_NO_SPEECH_TIMEOUT_S", DEFAULT_VAD_NO_SPEECH_TIMEOUT_S, minimum=1.0, maximum=20.0),
+            "silero_threshold": _get_float_setting("VOICE_SILERO_THRESHOLD", DEFAULT_SILERO_THRESHOLD, minimum=0.01, maximum=0.99),
+            "silero_neg_threshold": _get_float_setting("VOICE_SILERO_NEG_THRESHOLD", DEFAULT_SILERO_NEG_THRESHOLD, minimum=0.0, maximum=0.99),
+            "min_speech_frames": _get_int_setting("VOICE_SILERO_MIN_SPEECH_FRAMES", DEFAULT_SILERO_MIN_SPEECH_FRAMES, minimum=1, maximum=30),
+            "min_silence_frames": _get_int_setting("VOICE_SILERO_MIN_SILENCE_FRAMES", DEFAULT_SILERO_MIN_SILENCE_FRAMES, minimum=3, maximum=60),
+            "min_silence_short_s": _get_float_setting("VOICE_VAD_MIN_SILENCE_SHORT_S", DEFAULT_VAD_MIN_SILENCE_SHORT_S, minimum=0.1, maximum=5.0),
+            "min_silence_long_s": _get_float_setting("VOICE_VAD_MIN_SILENCE_LONG_S", DEFAULT_VAD_MIN_SILENCE_LONG_S, minimum=0.1, maximum=5.0),
+            "wake_startup_gate_s": _get_float_setting("VOICE_WAKE_STARTUP_GATE_S", DEFAULT_WAKE_STARTUP_GATE_S, minimum=0.0, maximum=2.0),
+            "wake_silence_s": _get_float_setting("VOICE_WAKE_SILENCE_SECONDS", DEFAULT_WAKE_SILENCE_SECONDS, minimum=0.2, maximum=5.0),
+            "wake_no_speech_timeout_s": _get_float_setting("VOICE_WAKE_NO_SPEECH_TIMEOUT_S", DEFAULT_WAKE_NO_SPEECH_TIMEOUT_S, minimum=1.0, maximum=20.0),
+            "wake_min_speech_frames": _get_int_setting("VOICE_WAKE_MIN_SPEECH_FRAMES", DEFAULT_WAKE_MIN_SPEECH_FRAMES, minimum=1, maximum=30),
+            "wake_min_silence_short_s": _get_float_setting("VOICE_WAKE_MIN_SILENCE_SHORT_S", DEFAULT_WAKE_MIN_SILENCE_SHORT_S, minimum=0.1, maximum=5.0),
+            "wake_min_silence_long_s": _get_float_setting("VOICE_WAKE_MIN_SILENCE_LONG_S", DEFAULT_WAKE_MIN_SILENCE_LONG_S, minimum=0.1, maximum=5.0),
+            "continued_chat_reopen_startup_gate_s": _get_float_setting("VOICE_CONTINUED_CHAT_REOPEN_STARTUP_GATE_S", DEFAULT_CONTINUED_CHAT_REOPEN_STARTUP_GATE_S, minimum=0.0, maximum=2.0),
+            "continued_chat_reopen_preroll_s": _get_float_setting("VOICE_CONTINUED_CHAT_REOPEN_PREROLL_S", DEFAULT_CONTINUED_CHAT_REOPEN_PREROLL_S, minimum=0.0, maximum=1.0),
+            "continued_chat_reopen_silence_s": _get_float_setting("VOICE_CONTINUED_CHAT_REOPEN_SILENCE_SECONDS", DEFAULT_CONTINUED_CHAT_REOPEN_SILENCE_SECONDS, minimum=0.2, maximum=5.0),
+            "continued_chat_reopen_timeout_s": _get_float_setting("VOICE_CONTINUED_CHAT_REOPEN_TIMEOUT_SECONDS", DEFAULT_CONTINUED_CHAT_REOPEN_TIMEOUT_SECONDS, minimum=2.0, maximum=60.0),
+            "continued_chat_reopen_no_speech_timeout_s": _get_float_setting("VOICE_CONTINUED_CHAT_REOPEN_NO_SPEECH_TIMEOUT_S", DEFAULT_CONTINUED_CHAT_REOPEN_NO_SPEECH_TIMEOUT_S, minimum=1.0, maximum=20.0),
+            "continued_chat_reopen_min_silence_frames": _get_int_setting("VOICE_CONTINUED_CHAT_REOPEN_MIN_SILENCE_FRAMES", DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_FRAMES, minimum=3, maximum=60),
+            "continued_chat_reopen_min_silence_short_s": _get_float_setting("VOICE_CONTINUED_CHAT_REOPEN_MIN_SILENCE_SHORT_S", DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_SHORT_S, minimum=0.1, maximum=5.0),
+            "continued_chat_reopen_min_silence_long_s": _get_float_setting("VOICE_CONTINUED_CHAT_REOPEN_MIN_SILENCE_LONG_S", DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_LONG_S, minimum=0.1, maximum=5.0),
+            "audio_stall_timeout_s": _get_float_setting("VOICE_AUDIO_STALL_TIMEOUT_S", DEFAULT_AUDIO_STALL_TIMEOUT_S, minimum=0.4, maximum=20.0),
+            "audio_stall_no_speech_timeout_s": _get_float_setting("VOICE_AUDIO_STALL_NO_SPEECH_TIMEOUT_S", DEFAULT_AUDIO_STALL_NO_SPEECH_TIMEOUT_S, minimum=1.0, maximum=30.0),
+            "blank_wake_timeout_s": _get_float_setting("VOICE_BLANK_WAKE_TIMEOUT_S", DEFAULT_BLANK_WAKE_TIMEOUT_S, minimum=1.0, maximum=20.0),
             "webrtc_aggressiveness": _get_int_setting(
                 "VOICE_WEBRTC_VAD_AGGRESSIVENESS",
                 DEFAULT_WEBRTC_VAD_AGGRESSIVENESS,
@@ -2276,6 +2632,15 @@ def _audio_format_from_settings(audio_settings: Any) -> Dict[str, int]:
         "width": _read_int(["width", "sample_width", "sample_width_bytes"], DEFAULT_VOICE_SAMPLE_WIDTH),
         "channels": _read_int(["channels", "num_channels"], DEFAULT_VOICE_CHANNELS),
     }
+
+
+def _audio_bytes_for_seconds(audio_format: Dict[str, Any], seconds: float) -> int:
+    rate = _as_int((audio_format or {}).get("rate"), DEFAULT_VOICE_SAMPLE_RATE_HZ, minimum=1)
+    width = _as_int((audio_format or {}).get("width"), DEFAULT_VOICE_SAMPLE_WIDTH, minimum=1, maximum=4)
+    channels = _as_int((audio_format or {}).get("channels"), DEFAULT_VOICE_CHANNELS, minimum=1, maximum=8)
+    frame_bytes = max(1, width * channels)
+    frames = max(0, int(round(float(seconds or 0.0) * float(rate))))
+    return int(frames * frame_bytes)
 
 
 def _pcm_to_pcm16_mono_16k(
@@ -2779,20 +3144,30 @@ class EouEngine:
             self.backend.reset_state()
 
 
+@dataclass
+class AwaitingAnnouncementState:
+    session_id: str
+    kind: str
+    future: Optional[asyncio.Future[Any]]
+    started_ts: float
+    timeout_s: float
+
+
 def _build_eou_engine(
     audio_format: Dict[str, int],
     *,
     continued_chat_reopen: bool = False,
     wake_word_session: bool = False,
+    cfg: Optional[Dict[str, Any]] = None,
 ) -> EouEngine:
-    cfg = _voice_config_snapshot()
-    eou = cfg.get("eou") if isinstance(cfg.get("eou"), dict) else {}
+    cfg_row = cfg if isinstance(cfg, dict) else _voice_config_snapshot()
+    eou = cfg_row.get("eou") if isinstance(cfg_row.get("eou"), dict) else {}
     selected_backend = _normalize_vad_backend(eou.get("backend"))
     backend_name = selected_backend if selected_backend != "auto" else DEFAULT_VAD_BACKEND
     mode = DEFAULT_EOU_MODE
 
-    threshold = float(eou.get("silero_threshold") or DEFAULT_SILERO_THRESHOLD)
-    neg_threshold = float(eou.get("silero_neg_threshold") or DEFAULT_SILERO_NEG_THRESHOLD)
+    threshold = _as_float(eou.get("silero_threshold"), DEFAULT_SILERO_THRESHOLD, minimum=0.01, maximum=0.99)
+    neg_threshold = _as_float(eou.get("silero_neg_threshold"), DEFAULT_SILERO_NEG_THRESHOLD, minimum=0.0, maximum=0.99)
 
     backend: VadBackendBase
     backend_note = ""
@@ -2829,47 +3204,65 @@ def _build_eou_engine(
                 backend_name = "webrtc"
 
     segmenter = SegmenterState(
-        silence_s=float(eou.get("silence_s") or DEFAULT_VAD_SILENCE_SECONDS),
-        timeout_s=float(eou.get("timeout_s") or DEFAULT_VAD_TIMEOUT_SECONDS),
-        no_speech_timeout_s=float(eou.get("no_speech_timeout_s") or DEFAULT_VAD_NO_SPEECH_TIMEOUT_S),
+        silence_s=_as_float(eou.get("silence_s"), DEFAULT_VAD_SILENCE_SECONDS, minimum=0.2, maximum=5.0),
+        timeout_s=_as_float(eou.get("timeout_s"), DEFAULT_VAD_TIMEOUT_SECONDS, minimum=2.0, maximum=60.0),
+        no_speech_timeout_s=_as_float(eou.get("no_speech_timeout_s"), DEFAULT_VAD_NO_SPEECH_TIMEOUT_S, minimum=1.0, maximum=20.0),
         threshold=threshold,
         neg_threshold=neg_threshold,
         min_speech_frames=_as_int(eou.get("min_speech_frames"), DEFAULT_SILERO_MIN_SPEECH_FRAMES, minimum=1, maximum=30),
         min_silence_frames=_as_int(eou.get("min_silence_frames"), DEFAULT_SILERO_MIN_SILENCE_FRAMES, minimum=3, maximum=60),
-        min_silence_short_s=float(DEFAULT_VAD_MIN_SILENCE_SHORT_S),
-        min_silence_long_s=float(DEFAULT_VAD_MIN_SILENCE_LONG_S),
+        min_silence_short_s=_as_float(eou.get("min_silence_short_s"), DEFAULT_VAD_MIN_SILENCE_SHORT_S, minimum=0.1, maximum=5.0),
+        min_silence_long_s=_as_float(eou.get("min_silence_long_s"), DEFAULT_VAD_MIN_SILENCE_LONG_S, minimum=0.1, maximum=5.0),
     )
     if wake_word_session:
         # Wake-triggered turns are the most likely to catch wake tail or room
         # noise at the front, so require a slightly more confident speech
         # start and allow a touch more pause tolerance once the user is in a
         # real utterance.
-        segmenter.min_speech_frames = max(
-            int(segmenter.min_speech_frames),
-            int(DEFAULT_WAKE_MIN_SPEECH_FRAMES),
+        segmenter.silence_s = max(
+            float(segmenter.silence_s),
+            _as_float(eou.get("wake_silence_s"), DEFAULT_WAKE_SILENCE_SECONDS, minimum=0.2, maximum=5.0),
         )
-        segmenter.min_silence_long_s = max(
-            float(segmenter.min_silence_long_s),
-            float(DEFAULT_WAKE_MIN_SILENCE_LONG_S),
-        )
-    if continued_chat_reopen:
-        segmenter.silence_s = max(float(segmenter.silence_s), float(DEFAULT_CONTINUED_CHAT_REOPEN_SILENCE_SECONDS))
-        segmenter.timeout_s = max(float(segmenter.timeout_s), float(DEFAULT_CONTINUED_CHAT_REOPEN_TIMEOUT_SECONDS))
         segmenter.no_speech_timeout_s = max(
             float(segmenter.no_speech_timeout_s),
-            float(DEFAULT_CONTINUED_CHAT_REOPEN_NO_SPEECH_TIMEOUT_S),
+            _as_float(eou.get("wake_no_speech_timeout_s"), DEFAULT_WAKE_NO_SPEECH_TIMEOUT_S, minimum=1.0, maximum=20.0),
         )
-        segmenter.min_silence_frames = max(
-            int(segmenter.min_silence_frames),
-            int(DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_FRAMES),
+        segmenter.min_speech_frames = max(
+            int(segmenter.min_speech_frames),
+            _as_int(eou.get("wake_min_speech_frames"), DEFAULT_WAKE_MIN_SPEECH_FRAMES, minimum=1, maximum=30),
         )
         segmenter.min_silence_short_s = max(
             float(segmenter.min_silence_short_s),
-            float(DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_SHORT_S),
+            _as_float(eou.get("wake_min_silence_short_s"), DEFAULT_WAKE_MIN_SILENCE_SHORT_S, minimum=0.1, maximum=5.0),
         )
         segmenter.min_silence_long_s = max(
             float(segmenter.min_silence_long_s),
-            float(DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_LONG_S),
+            _as_float(eou.get("wake_min_silence_long_s"), DEFAULT_WAKE_MIN_SILENCE_LONG_S, minimum=0.1, maximum=5.0),
+        )
+    if continued_chat_reopen:
+        segmenter.silence_s = max(
+            float(segmenter.silence_s),
+            _as_float(eou.get("continued_chat_reopen_silence_s"), DEFAULT_CONTINUED_CHAT_REOPEN_SILENCE_SECONDS, minimum=0.2, maximum=5.0),
+        )
+        segmenter.timeout_s = max(
+            float(segmenter.timeout_s),
+            _as_float(eou.get("continued_chat_reopen_timeout_s"), DEFAULT_CONTINUED_CHAT_REOPEN_TIMEOUT_SECONDS, minimum=2.0, maximum=60.0),
+        )
+        segmenter.no_speech_timeout_s = max(
+            float(segmenter.no_speech_timeout_s),
+            _as_float(eou.get("continued_chat_reopen_no_speech_timeout_s"), DEFAULT_CONTINUED_CHAT_REOPEN_NO_SPEECH_TIMEOUT_S, minimum=1.0, maximum=20.0),
+        )
+        segmenter.min_silence_frames = max(
+            int(segmenter.min_silence_frames),
+            _as_int(eou.get("continued_chat_reopen_min_silence_frames"), DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_FRAMES, minimum=3, maximum=60),
+        )
+        segmenter.min_silence_short_s = max(
+            float(segmenter.min_silence_short_s),
+            _as_float(eou.get("continued_chat_reopen_min_silence_short_s"), DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_SHORT_S, minimum=0.1, maximum=5.0),
+        )
+        segmenter.min_silence_long_s = max(
+            float(segmenter.min_silence_long_s),
+            _as_float(eou.get("continued_chat_reopen_min_silence_long_s"), DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_LONG_S, minimum=0.1, maximum=5.0),
         )
 
     if backend_note:
@@ -2960,6 +3353,23 @@ async def _send_voice_intent_end(
         },
     )
     session.intent_active = False
+
+
+async def _send_voice_no_text_recognized(
+    client: Any,
+    module: Any,
+    *,
+    message: str = "No speech was recognized.",
+) -> None:
+    await _esphome_send_event(
+        client,
+        module,
+        ("VOICE_ASSISTANT_ERROR", "ERROR"),
+        {
+            "code": "stt-no-text-recognized",
+            "message": _text(message) or "No speech was recognized.",
+        },
+    )
 
 
 async def _play_live_tool_progress_for_session(
@@ -3430,21 +3840,46 @@ def _set_awaiting_announcement_state(
     future: Optional[asyncio.Future[Any]],
     timeout_s: float,
 ) -> None:
+    state = AwaitingAnnouncementState(
+        session_id=_text(session_id),
+        kind=_text(kind),
+        future=future,
+        started_ts=_now(),
+        timeout_s=max(0.0, float(timeout_s or 0.0)),
+    )
+    runtime["awaiting_announcement_state"] = state
     runtime["awaiting_announcement"] = True
-    runtime["awaiting_session_id"] = _text(session_id)
-    runtime["awaiting_announcement_kind"] = _text(kind)
+    runtime["awaiting_session_id"] = state.session_id
+    runtime["awaiting_announcement_kind"] = state.kind
     runtime["announcement_future"] = future
-    runtime["awaiting_announcement_started_ts"] = _now()
-    runtime["awaiting_announcement_timeout_s"] = max(0.0, float(timeout_s or 0.0))
+    runtime["awaiting_announcement_started_ts"] = state.started_ts
+    runtime["awaiting_announcement_timeout_s"] = state.timeout_s
 
 
 def _clear_awaiting_announcement_state(runtime: Dict[str, Any]) -> None:
+    runtime["awaiting_announcement_state"] = None
     runtime["awaiting_announcement"] = False
     runtime["awaiting_session_id"] = ""
     runtime["awaiting_announcement_kind"] = ""
     runtime["announcement_future"] = None
     runtime["awaiting_announcement_started_ts"] = 0.0
     runtime["awaiting_announcement_timeout_s"] = 0.0
+
+
+def _awaiting_announcement_state(runtime: Dict[str, Any]) -> Optional[AwaitingAnnouncementState]:
+    state = runtime.get("awaiting_announcement_state")
+    if isinstance(state, AwaitingAnnouncementState):
+        return state
+    if not bool(runtime.get("awaiting_announcement")):
+        return None
+    future = runtime.get("announcement_future")
+    return AwaitingAnnouncementState(
+        session_id=_text(runtime.get("awaiting_session_id")),
+        kind=_text(runtime.get("awaiting_announcement_kind")),
+        future=future if isinstance(future, asyncio.Future) else None,
+        started_ts=_as_float(runtime.get("awaiting_announcement_started_ts"), 0.0),
+        timeout_s=_as_float(runtime.get("awaiting_announcement_timeout_s"), 0.0),
+    )
 
 
 # -------------------- ESPHome Runtime Bridge --------------------
@@ -3501,6 +3936,7 @@ async def _send_voice_run_end(
     reason_token = _text(reason)
     stale_session = False
     pending_followup = False
+    pending_followup_until = 0.0
 
     if token and (sid or skip_if_pending_followup):
         runtime = _selector_runtime(token)
@@ -3514,6 +3950,7 @@ async def _send_voice_run_end(
                 if skip_if_pending_followup:
                     followup_conv = _text(runtime.get("pending_followup_conversation_id"))
                     followup_until = _as_float(runtime.get("pending_followup_until_ts"), 0.0)
+                    pending_followup_until = followup_until
                     pending_followup = bool(followup_conv) and _now() <= followup_until
 
     if stale_session:
@@ -3528,6 +3965,14 @@ async def _send_voice_run_end(
             f"esphome run_end skipped selector={token or '-'} session_id={sid or '-'} "
             f"reason={reason_token or '-'} pending_followup=1"
         )
+        if token and sid and pending_followup_until > 0.0:
+            await _wake_arbitration_extend_room_claim_for_session(
+                selector=token,
+                session_id=sid,
+                until_ts=pending_followup_until + DEFAULT_WAKE_ARBITRATION_RELEASE_GRACE_S,
+                reason="pending_followup",
+                replace=True,
+            )
         return False
 
     ok = await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
@@ -3535,6 +3980,13 @@ async def _send_voice_run_end(
         f"esphome run_end sent selector={token or '-'} session_id={sid or '-'} "
         f"reason={reason_token or '-'} ok={1 if ok else 0}"
     )
+    if token and sid:
+        await _wake_arbitration_release_room_claim_for_session(
+            selector=token,
+            session_id=sid,
+            reason=reason_token or "run_end",
+            delay_s=DEFAULT_WAKE_ARBITRATION_RELEASE_GRACE_S,
+        )
     return ok
 
 
@@ -3658,7 +4110,7 @@ async def _await_and_dispatch_streamed_tts_segment(
                 state = runtime.get("streamed_tts")
                 if not isinstance(state, dict) or _text(state.get("session_id")) != _text(session_id):
                     return
-                if bool(runtime.get("awaiting_announcement")):
+                if _awaiting_announcement_state(runtime) is not None:
                     return
                 ready_segments = state.get("ready_segments") if isinstance(state.get("ready_segments"), list) else []
                 if ready_segments:
@@ -3783,21 +4235,20 @@ async def _finalize_after_announcement(selector: str, client: Any, module: Any, 
     runtime = _selector_runtime(token)
     lock = runtime.get("lock")
     async with lock:
-        kind = _text(runtime.get("awaiting_announcement_kind"))
+        state = _awaiting_announcement_state(runtime)
+        kind = _text(state.kind if state is not None else "")
     if kind == "response_streamed" and await _maybe_continue_streamed_tts(token, client, module, reason=reason):
         return True
 
     future: Optional[asyncio.Future[Any]] = None
     skip_run_end_for_followup = False
     async with lock:
-        waiting = bool(runtime.get("awaiting_announcement"))
-        session_id = _text(runtime.get("awaiting_session_id"))
-        kind = _text(runtime.get("awaiting_announcement_kind"))
-        maybe_future = runtime.get("announcement_future")
-        if isinstance(maybe_future, asyncio.Future):
-            future = maybe_future
-        if not waiting:
+        state = _awaiting_announcement_state(runtime)
+        if state is None:
             return False
+        session_id = _text(state.session_id)
+        kind = _text(state.kind)
+        future = state.future if isinstance(state.future, asyncio.Future) else None
         if reason == "announcement_timeout":
             runtime["last_announcement_timeout_ts"] = _now()
         else:
@@ -3867,6 +4318,9 @@ async def _queue_selector_audio_url(
     *,
     text: str = "",
     timeout_s: float = 180.0,
+    tts_kind: str = "",
+    continue_conversation: bool = False,
+    conversation_id: str = "",
 ) -> Dict[str, Any]:
     token = _text(selector)
     target_url = _text(url).strip()
@@ -3888,6 +4342,8 @@ async def _queue_selector_audio_url(
     lock = runtime.get("lock")
     playback_id = uuid.uuid4().hex
     timeout = max(5.0, min(float(timeout_s or 0.0), 900.0))
+    continue_flag = bool(continue_conversation)
+    conversation_token = _text(conversation_id) or playback_id
 
     async with lock:
         active_session = runtime.get("session")
@@ -3895,10 +4351,13 @@ async def _queue_selector_audio_url(
             raise RuntimeError(f"Satellite {token} is busy with an active voice session")
         _clear_streamed_tts_state(runtime)
         _cancel_announcement_wait(runtime)
+        if continue_flag:
+            runtime["pending_followup_conversation_id"] = conversation_token
+            runtime["pending_followup_until_ts"] = _now() + timeout + float(DEFAULT_CONTINUED_CHAT_REUSE_SECONDS)
         _set_awaiting_announcement_state(
             runtime,
             session_id=playback_id,
-            kind="external",
+            kind="response" if continue_flag else "external",
             future=None,
             timeout_s=timeout,
         )
@@ -3906,15 +4365,31 @@ async def _queue_selector_audio_url(
 
     try:
         await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_START", "RUN_START"), None)
+        if continue_flag:
+            await _esphome_send_event(client, module, ("VOICE_ASSISTANT_INTENT_START", "INTENT_START"), None)
+            await _esphome_send_event(
+                client,
+                module,
+                ("VOICE_ASSISTANT_INTENT_END", "INTENT_END"),
+                {
+                    "conversation_id": conversation_token,
+                    "continue_conversation": "1",
+                },
+            )
         await _esphome_send_event(
             client,
             module,
             ("VOICE_ASSISTANT_TTS_START", "TTS_START"),
-            {"text": _text(text) or "Playing audio."},
+            {
+                "text": _text(text) or "Playing audio.",
+                **({"tts_kind": _text(tts_kind)} if _text(tts_kind) else {}),
+            },
         )
         await _esphome_send_event(client, module, ("VOICE_ASSISTANT_TTS_END", "TTS_END"), {"url": target_url})
     except Exception:
         async with lock:
+            if continue_flag:
+                _clear_pending_followup(runtime)
             _cancel_announcement_wait(runtime)
             _clear_awaiting_announcement_state(runtime)
         with contextlib.suppress(Exception):
@@ -3935,7 +4410,14 @@ async def _queue_selector_audio_url(
         timeout,
         target_url,
     )
-    return {"selector": token, "playback_id": playback_id, "timeout_s": timeout, "url": target_url}
+    return {
+        "selector": token,
+        "playback_id": playback_id,
+        "timeout_s": timeout,
+        "url": target_url,
+        "continue_conversation": continue_flag,
+        "conversation_id": conversation_token if continue_flag else "",
+    }
 
 
 def _transcript_is_low_signal(transcript: str) -> bool:
@@ -3953,6 +4435,86 @@ def _transcript_is_low_signal(transcript: str) -> bool:
         return True
     compact = "".join(words)
     return len(compact) < 3
+
+
+def _apply_startup_preroll(session: VoiceSessionRuntime) -> int:
+    if not isinstance(session, VoiceSessionRuntime):
+        return 0
+    if bool(session.startup_preroll_applied):
+        return 0
+    if not bool(session.startup_preroll_buffer):
+        session.startup_preroll_applied = True
+        return 0
+    if int(session.startup_preroll_max_bytes or 0) <= 0:
+        session.startup_preroll_buffer.clear()
+        session.startup_preroll_applied = True
+        return 0
+
+    max_audio_bytes = int(session.max_audio_bytes or DEFAULT_MAX_AUDIO_BYTES)
+    allowed = max(0, max_audio_bytes - int(session.audio_bytes or 0))
+    applied = 0
+    if allowed > 0:
+        preroll = bytes(session.startup_preroll_buffer)[-allowed:]
+        session.audio_buffer.extend(preroll)
+        session.audio_bytes += len(preroll)
+        applied = len(preroll)
+    session.startup_preroll_buffer.clear()
+    session.startup_preroll_applied = True
+    return applied
+
+
+def _mark_stt_stream_unhealthy(session: VoiceSessionRuntime, reason: str) -> None:
+    reason_token = _text(reason) or "stream_unhealthy"
+    if not bool(session.stt_stream_unhealthy):
+        logger.warning(
+            "[native-voice] STT stream unhealthy selector=%s session_id=%s reason=%s dropped_chunks=%s queue_max=%s",
+            session.selector,
+            session.session_id,
+            reason_token,
+            int(session.stt_queue_dropped_chunks or 0),
+            int(session.stt_queue_max_chunks or 0),
+        )
+    session.stt_stream_unhealthy = True
+    session.stt_stream_fallback_reason = reason_token
+
+
+def _enqueue_stt_stream_item(
+    session: VoiceSessionRuntime,
+    item: Optional[bytes],
+    *,
+    reason: str = "",
+) -> bool:
+    queue = session.stt_queue
+    if queue is None:
+        return False
+    terminal = item is None
+    if bool(session.stt_stream_stop_requested) and not terminal:
+        return False
+    try:
+        queue.put_nowait(item)
+        if terminal:
+            session.stt_stream_stop_requested = True
+        return True
+    except asyncio.QueueFull:
+        if not terminal:
+            session.stt_queue_dropped_chunks += 1
+            if session.stt_queue_dropped_chunks == 1 or session.stt_queue_dropped_chunks % 5 == 0:
+                _native_debug(
+                    f"STT stream queue full selector={session.selector} session_id={session.session_id} "
+                    f"dropped_chunks={session.stt_queue_dropped_chunks} max_chunks={session.stt_queue_max_chunks}"
+                )
+            if session.stt_queue_dropped_chunks >= _wyoming_stt_queue_drop_limit():
+                _mark_stt_stream_unhealthy(session, reason or "stt_stream_queue_full")
+        else:
+            _mark_stt_stream_unhealthy(session, reason or "stt_stream_queue_full_on_stop")
+
+        if bool(session.stt_stream_unhealthy) and not bool(session.stt_stream_stop_requested):
+            with contextlib.suppress(Exception):
+                queue.get_nowait()
+            with contextlib.suppress(Exception):
+                queue.put_nowait(None)
+                session.stt_stream_stop_requested = True
+        return False
 
 
 async def _process_voice_turn(session: VoiceSessionRuntime) -> Dict[str, Any]:
@@ -3997,6 +4559,27 @@ async def _process_voice_turn(session: VoiceSessionRuntime) -> Dict[str, Any]:
     transcript = _text(await _native_transcribe_session_audio(session))
     session.stt_latency_ms = max(0.0, (time.monotonic() - stt_started) * 1000.0)
     _voice_metrics_record_stt(session.selector, session.stt_backend_effective or session.stt_backend, session.stt_latency_ms)
+    from .. import intercom as esphome_intercom
+
+    if esphome_intercom.is_broadcast_wake_word(session.wake_word):
+        return await esphome_intercom.handle_broadcast_voice_turn(
+            selector=session.selector,
+            transcript=transcript,
+            audio_bytes=bytes(session.audio_buffer),
+            audio_format=dict(session.audio_format or {}),
+            speech_s=float(session.speech_duration_s or 0.0),
+        )
+
+    intercom_result = await esphome_intercom.handle_voice_turn(
+        selector=session.selector,
+        transcript=transcript,
+        audio_bytes=bytes(session.audio_buffer),
+        audio_format=dict(session.audio_format or {}),
+        speech_s=float(session.speech_duration_s or 0.0),
+    )
+    if isinstance(intercom_result, dict):
+        return intercom_result
+
     if not transcript:
         return {
             "transcript": "",
@@ -4135,8 +4718,17 @@ async def _finalize_session(
         _cancel_audio_stall_watch(runtime)
         runtime["session"] = None
 
+    preroll_bytes = _apply_startup_preroll(session)
+    if preroll_bytes > 0:
+        _native_debug(
+            f"esphome startup preroll applied at finalize selector={token} session_id={session.session_id} "
+            f"bytes={preroll_bytes} preroll_s={float(session.startup_preroll_s or 0.0):.2f}"
+        )
+        if session.stt_queue is not None:
+            _enqueue_stt_stream_item(session, bytes(session.audio_buffer[-preroll_bytes:]), reason="stt_stream_preroll_finalize")
+
     if session.stt_queue is not None:
-        session.stt_queue.put_nowait(None)
+        _enqueue_stt_stream_item(session, None, reason="session_finalize")
     if session.partial_stt_task is not None:
         session.partial_stt_task.cancel()
         with contextlib.suppress(Exception):
@@ -4185,17 +4777,28 @@ async def _finalize_session(
             recovery_prob_threshold = (
                 max(seg_threshold, 0.28) if is_brief_command else max(0.60, seg_threshold + 0.10)
             )
+            recovery_low_prob_threshold = max(0.10, min(0.24, seg_threshold * 0.5))
+            recovery_prob = float(session.max_probability or 0.0)
+            recovery_by_transcript = (
+                len(recovered_words) >= 3
+                or (len(recovered_words) >= 2 and recovery_prob >= recovery_low_prob_threshold)
+                or (is_brief_command and recovery_prob >= 0.08)
+            )
             recovery_ok = (
                 bool(recovered_transcript)
                 and (not _transcript_is_low_signal(recovered_transcript))
                 and bool(recovered_assessment.get("complete", True))
-                and float(session.max_probability) >= float(recovery_prob_threshold)
+                and (
+                    recovery_prob >= float(recovery_prob_threshold)
+                    or recovery_by_transcript
+                )
             )
             if recovery_ok:
                 _native_debug(
                     f"no-speech guard recovered transcript selector={token} session_id={session.session_id} "
                     f"reason={no_speech_reason} transcript_len={len(recovered_transcript)} "
-                    f"max_prob={session.max_probability:.3f} threshold={recovery_prob_threshold:.3f}"
+                    f"max_prob={session.max_probability:.3f} threshold={recovery_prob_threshold:.3f} "
+                    f"transcript_recovery={bool(recovery_by_transcript)}"
                 )
             else:
                 outcome = _classify_no_op_outcome(
@@ -4224,9 +4827,18 @@ async def _finalize_session(
                     turn_latency_ms=max(0.0, (_now() - float(session.started_ts or _now())) * 1000.0),
                 )
                 with contextlib.suppress(Exception):
+                    from .. import intercom as esphome_intercom
+
+                    await esphome_intercom.close_auto_reply_for_selector(
+                        token,
+                        conversation_id=_text(session.conversation_id),
+                    )
+                with contextlib.suppress(Exception):
                     await _esphome_send_event(client, module, ("VOICE_ASSISTANT_STT_VAD_END", "STT_VAD_END"), None)
                 with contextlib.suppress(Exception):
                     await _esphome_send_event(client, module, ("VOICE_ASSISTANT_STT_END", "STT_END"), {"text": ""})
+                with contextlib.suppress(Exception):
+                    await _send_voice_no_text_recognized(client, module)
                 with contextlib.suppress(Exception):
                     await _send_voice_run_end(
                         client,
@@ -4238,6 +4850,12 @@ async def _finalize_session(
                 return
 
     try:
+        turn_timeout_s = _get_float_setting(
+            "VOICE_NATIVE_TURN_TIMEOUT_S",
+            DEFAULT_VOICE_TURN_PROCESS_TIMEOUT_S,
+            minimum=10.0,
+            maximum=300.0,
+        )
         with contextlib.suppress(Exception):
             await _esphome_send_event(client, module, ("VOICE_ASSISTANT_STT_VAD_END", "STT_VAD_END"), None)
 
@@ -4254,7 +4872,7 @@ async def _finalize_session(
 
         session.live_tool_progress_callback = _live_tool_progress
         try:
-            result = await _process_voice_turn(session)
+            result = await asyncio.wait_for(_process_voice_turn(session), timeout=turn_timeout_s)
         finally:
             session.live_tool_progress_callback = None
         transcript = _text(result.get("transcript"))
@@ -4264,6 +4882,8 @@ async def _finalize_session(
             outcome = _classify_no_op_outcome(session, reason=no_op_reason, transcript=transcript)
             session.turn_outcome = outcome
             await _esphome_send_event(client, module, ("VOICE_ASSISTANT_STT_END", "STT_END"), {"text": transcript})
+            with contextlib.suppress(Exception):
+                await _send_voice_no_text_recognized(client, module)
             logger.info(
                 "[native-voice] no-op transcript finalize selector=%s session_id=%s reason=%s outcome=%s transcript_len=%s stt_ms=%.1f",
                 token,
@@ -4309,11 +4929,20 @@ async def _finalize_session(
         reply_playback_target = _session_reply_playback_target(token, session)
         reply_playback_on_device = reply_playback_target == reply_playback.REPLY_PLAYBACK_DEVICE
 
+        pending_followup_until = 0.0
         async with lock:
             if continue_conversation:
                 _arm_pending_followup(runtime, _text(session.conversation_id) or _text(session.session_id))
+                pending_followup_until = _as_float(runtime.get("pending_followup_until_ts"), 0.0)
             else:
                 _clear_pending_followup(runtime)
+        if continue_conversation and pending_followup_until > 0.0:
+            await _wake_arbitration_extend_room_claim_for_session(
+                selector=token,
+                session_id=session.session_id,
+                until_ts=pending_followup_until + DEFAULT_WAKE_ARBITRATION_RELEASE_GRACE_S,
+                reason="pending_followup",
+            )
 
         streamed_tts = None
         if reply_playback_on_device and not continue_conversation and not bool(session.live_tool_progress_played):
@@ -4526,7 +5155,12 @@ async def _finalize_session(
             )
 
     except Exception as exc:
-        msg = _text(exc)
+        is_timeout = isinstance(exc, asyncio.TimeoutError)
+        msg = (
+            f"Voice turn timed out after {float(locals().get('turn_timeout_s', DEFAULT_VOICE_TURN_PROCESS_TIMEOUT_S)):.1f}s"
+            if is_timeout
+            else _text(exc)
+        )
         _voice_metrics_record_connection_event(token, event="error")
         logger.warning(
             "[native-voice] session finalize failed selector=%s session_id=%s error=%s",
@@ -4535,7 +5169,7 @@ async def _finalize_session(
             msg,
         )
 
-        code = "tater_pipeline_error"
+        code = "tater_pipeline_timeout" if is_timeout else "tater_pipeline_error"
         if "No transcript produced" in msg:
             code = "stt-no-text-recognized"
 
@@ -4587,22 +5221,88 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
         sid = uuid.uuid4().hex
         explicit_conv = _text(conversation_id)
         wake_phrase = _text(wake_word_phrase)
+        legacy_wake_listen_requested = False
+        with contextlib.suppress(Exception):
+            legacy_wake_listen_requested = bool(int(request_flags or 0) & 0x02)
+        if legacy_wake_listen_requested and not wake_phrase:
+            msg = "Legacy continuous wake-listen requests are no longer supported. Flash firmware that uses remote_wake_word and openwakeword_server_url."
+            logger.warning("[native-voice] %s selector=%s", msg, token)
+            await _esphome_send_event(
+                client,
+                module,
+                ("VOICE_ASSISTANT_ERROR", "ERROR"),
+                {"code": "legacy-wake-listen-unsupported", "message": msg},
+            )
+            await _send_voice_run_end(client, module, selector=token, reason="legacy_wake_listen_unsupported")
+            return None
+
         followup_conv = ""
+        continued_chat_reopen = False
         async with lock:
-            if explicit_conv or wake_phrase:
+            pending_conv = _text(runtime.get("pending_followup_conversation_id"))
+            pending_until = _as_float(runtime.get("pending_followup_until_ts"), 0.0)
+            pending_valid = bool(pending_conv) and _now() <= pending_until
+            if wake_phrase:
+                _clear_pending_followup(runtime)
+            elif explicit_conv:
+                if pending_valid and explicit_conv == pending_conv:
+                    followup_conv = explicit_conv
+                    continued_chat_reopen = True
                 _clear_pending_followup(runtime)
             else:
                 followup_conv = _claim_pending_followup(runtime)
+                continued_chat_reopen = bool(followup_conv)
         conv = explicit_conv or followup_conv or sid
-        continued_chat_reopen = bool(followup_conv) and not bool(explicit_conv) and not bool(wake_phrase)
-        if followup_conv:
-            _native_debug(f"continued chat reuse selector={token} session_id={sid} conversation_id={followup_conv}")
+        if continued_chat_reopen:
+            _native_debug(f"continued chat reuse selector={token} session_id={sid} conversation_id={conv}")
+
+        satellite_row = _satellite_lookup(token)
+        area_name = _satellite_area_name(satellite_row)
+        client_row = _esphome_client_row_snapshot_sync(token)
+        busy_claim = await _wake_arbitration_active_room_claim(selector=token, area_name=area_name)
+        if busy_claim is not None:
+            owner = _text(busy_claim.get("selector"))
+            owner_session_id = _text(busy_claim.get("session_id"))
+            owner_area = _text(busy_claim.get("area_name")) or area_name or "unknown"
+            logger.info(
+                "[native-voice] wake arbitration room busy selector=%s session_id=%s owner=%s owner_session_id=%s area=%s reason=%s",
+                token,
+                sid,
+                owner,
+                owner_session_id,
+                owner_area,
+                _text(busy_claim.get("reason")) or "active_session",
+            )
+            with contextlib.suppress(Exception):
+                await _esphome_send_event(
+                    client,
+                    module,
+                    ("VOICE_ASSISTANT_ERROR", "ERROR"),
+                    {
+                        "code": "duplicate_wake_up_detected",
+                        "message": "Another nearby satellite is already handling this room.",
+                    },
+                )
+            await _send_voice_run_end(
+                client,
+                module,
+                selector=token,
+                session_id=sid,
+                reason="wake_arbitration_room_busy",
+                skip_if_active_session_mismatch=False,
+            )
+            return None
+
+        voice_cfg = _voice_config_snapshot()
+        eou_cfg = voice_cfg.get("eou") if isinstance(voice_cfg.get("eou"), dict) else {}
+        limits_cfg = voice_cfg.get("limits") if isinstance(voice_cfg.get("limits"), dict) else {}
 
         try:
             eou_engine = _build_eou_engine(
                 fmt,
                 continued_chat_reopen=continued_chat_reopen,
                 wake_word_session=bool(wake_phrase),
+                cfg=voice_cfg,
             )
         except Exception as exc:
             msg = f"Failed to initialize VAD: {exc}"
@@ -4631,18 +5331,65 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             return None
 
         start_ts = _now()
-        startup_gate_s = float(DEFAULT_STARTUP_GATE_S)
+        startup_gate_s = _as_float(eou_cfg.get("startup_gate_s"), DEFAULT_STARTUP_GATE_S, minimum=0.0, maximum=2.0)
         if wake_phrase:
-            startup_gate_s = max(startup_gate_s, float(DEFAULT_WAKE_STARTUP_GATE_S))
+            startup_gate_s = max(
+                startup_gate_s,
+                _as_float(eou_cfg.get("wake_startup_gate_s"), DEFAULT_WAKE_STARTUP_GATE_S, minimum=0.0, maximum=2.0),
+            )
         if continued_chat_reopen:
-            startup_gate_s = max(startup_gate_s, float(DEFAULT_CONTINUED_CHAT_REOPEN_STARTUP_GATE_S))
+            startup_gate_s = max(
+                startup_gate_s,
+                _as_float(
+                    eou_cfg.get("continued_chat_reopen_startup_gate_s"),
+                    DEFAULT_CONTINUED_CHAT_REOPEN_STARTUP_GATE_S,
+                    minimum=0.0,
+                    maximum=2.0,
+                ),
+            )
+        max_audio_bytes = int(limits_cfg.get("max_audio_bytes") or DEFAULT_MAX_AUDIO_BYTES)
+        startup_preroll_s = (
+            _as_float(
+                eou_cfg.get("continued_chat_reopen_preroll_s"),
+                DEFAULT_CONTINUED_CHAT_REOPEN_PREROLL_S,
+                minimum=0.0,
+                maximum=1.0,
+            )
+            if continued_chat_reopen
+            else 0.0
+        )
+        startup_preroll_max_bytes = _audio_bytes_for_seconds(fmt, startup_preroll_s)
+        segmenter = eou_engine.segmenter if isinstance(eou_engine, EouEngine) else None
+        base_stall_s = _as_float(
+            eou_cfg.get("audio_stall_timeout_s"),
+            DEFAULT_AUDIO_STALL_TIMEOUT_S,
+            minimum=0.4,
+            maximum=20.0,
+        )
+        audio_stall_timeout_s = base_stall_s
+        if isinstance(segmenter, SegmenterState):
+            audio_stall_timeout_s = max(audio_stall_timeout_s, float(segmenter.silence_s) + 0.20)
+        audio_stall_no_speech_timeout_s = _as_float(
+            eou_cfg.get("audio_stall_no_speech_timeout_s"),
+            DEFAULT_AUDIO_STALL_NO_SPEECH_TIMEOUT_S,
+            minimum=1.0,
+            maximum=30.0,
+        )
+        if (wake_phrase or continued_chat_reopen) and isinstance(segmenter, SegmenterState):
+            audio_stall_no_speech_timeout_s = max(
+                audio_stall_no_speech_timeout_s,
+                float(segmenter.no_speech_timeout_s) + 0.25,
+            )
+        blank_wake_timeout_s = _as_float(
+            eou_cfg.get("blank_wake_timeout_s"),
+            DEFAULT_BLANK_WAKE_TIMEOUT_S,
+            minimum=1.0,
+            maximum=20.0,
+        )
         requested_stt_backend = _selected_stt_backend()
         effective_stt_backend, stt_backend_note = _resolve_stt_backend()
         requested_tts_backend = _selected_tts_backend()
         effective_tts_backend, tts_backend_note = _resolve_tts_backend()
-        satellite_row = _satellite_lookup(token)
-        area_name = _satellite_area_name(satellite_row)
-        client_row = _esphome_client_row_snapshot_sync(token)
         device_info = client_row.get("device_info") if isinstance(client_row.get("device_info"), dict) else {}
         satellite_name = _text(satellite_row.get("name"))
         device_info_name = _text(device_info.get("name"))
@@ -4689,13 +5436,21 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             wake_word=wake_phrase,
             audio_format=fmt,
             started_ts=start_ts,
-            startup_gate_until_ts=(start_ts + max(0.0, startup_gate_s)),
+            startup_gate_until_ts=start_ts + max(0.0, startup_gate_s),
             context=session_context,
             stt_backend=requested_stt_backend,
             stt_backend_effective=effective_stt_backend,
             tts_backend=requested_tts_backend,
             tts_backend_effective=effective_tts_backend,
             eou_engine=eou_engine,
+            continued_chat_reopen=continued_chat_reopen,
+            max_audio_bytes=max_audio_bytes,
+            startup_gate_s=startup_gate_s,
+            startup_preroll_s=startup_preroll_s,
+            startup_preroll_max_bytes=startup_preroll_max_bytes,
+            audio_stall_timeout_s=audio_stall_timeout_s,
+            audio_stall_no_speech_timeout_s=audio_stall_no_speech_timeout_s,
+            blank_wake_timeout_s=blank_wake_timeout_s,
         )
         async with lock:
             _cancel_announcement_wait(runtime)
@@ -4712,6 +5467,13 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             wake_phrase=wake_phrase,
             area_name=area_name,
         )
+        if not wake_phrase:
+            await _wake_arbitration_claim_room(
+                selector=token,
+                session=session,
+                area_name=area_name,
+                reason="continued_chat_reopen" if continued_chat_reopen else "active_session",
+            )
 
         _voice_metrics_record_session_start(
             selector=token,
@@ -4723,7 +5485,7 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
         _schedule_audio_stall_watch(token, client, module, session_id=sid)
 
         logger.info(
-            "[native-voice] session start selector=%s conversation_id=%s session_id=%s wake_word=%s followup=%s area=%s stt=%s tts=%s vad=%s rate=%s width=%s ch=%s",
+            "[native-voice] session start selector=%s conversation_id=%s session_id=%s wake_word=%s followup=%s area=%s stt=%s tts=%s vad=%s wake_engine=%s rate=%s width=%s ch=%s",
             token,
             conv,
             sid,
@@ -4733,6 +5495,7 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             effective_stt_backend,
             effective_tts_backend,
             eou_engine.backend_name if isinstance(eou_engine, EouEngine) else "",
+            "device",
             int(fmt.get("rate") or 0),
             int(fmt.get("width") or 0),
             int(fmt.get("channels") or 0),
@@ -4765,7 +5528,11 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                 f"threshold={seg.threshold:.2f} neg_threshold={seg.neg_threshold:.2f} "
                 f"min_speech_frames={seg.min_speech_frames} min_silence_frames={seg.min_silence_frames} "
                 f"silero_threshold={float(getattr(eou_engine.backend, 'threshold', DEFAULT_SILERO_THRESHOLD)):.2f} "
-                f"webrtc_aggressiveness={int(getattr(eou_engine.backend, 'mode', DEFAULT_WEBRTC_VAD_AGGRESSIVENESS))}"
+                f"webrtc_aggressiveness={int(getattr(eou_engine.backend, 'mode', DEFAULT_WEBRTC_VAD_AGGRESSIVENESS))} "
+                f"startup_gate_s={float(session.startup_gate_s or 0.0):.2f} "
+                f"preroll_s={float(session.startup_preroll_s or 0.0):.2f} "
+                f"stall_after_speech_s={float(session.audio_stall_timeout_s or 0.0):.2f} "
+                f"stall_no_speech_s={float(session.audio_stall_no_speech_timeout_s or 0.0):.2f}"
             )
 
         await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_START", "RUN_START"), None)
@@ -4805,10 +5572,16 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                 if isinstance(s, VoiceSessionRuntime) and s.session_id == sid:
                     s.last_audio_ts = now_ts
                     s.dropped_startup_chunks += 1
+                    if bool(s.continued_chat_reopen) and int(s.startup_preroll_max_bytes or 0) > 0:
+                        s.startup_preroll_buffer.extend(audio_bytes)
+                        overflow = len(s.startup_preroll_buffer) - int(s.startup_preroll_max_bytes or 0)
+                        if overflow > 0:
+                            del s.startup_preroll_buffer[:overflow]
                     if s.dropped_startup_chunks == 1:
                         _native_debug(
                             f"esphome startup audio gate selector={token} session_id={sid} "
-                            f"gate_s={max(0.0, gate_ts - s.started_ts):.2f}"
+                            f"gate_s={max(0.0, gate_ts - s.started_ts):.2f} "
+                            f"preroll_s={float(s.startup_preroll_s or 0.0):.2f}"
                         )
             return
 
@@ -4836,13 +5609,18 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                 if p > session.max_probability:
                     session.max_probability = p
 
-            limits_snapshot = _voice_config_snapshot().get("limits")
-            limits_d = limits_snapshot if isinstance(limits_snapshot, dict) else {}
-            max_audio_bytes = int(limits_d.get("max_audio_bytes") or DEFAULT_MAX_AUDIO_BYTES)
+            max_audio_bytes = int(session.max_audio_bytes or DEFAULT_MAX_AUDIO_BYTES)
 
             if not session.capture_started:
+                preroll_bytes = _apply_startup_preroll(session)
+                if preroll_bytes > 0:
+                    _native_debug(
+                        f"esphome startup preroll applied selector={token} session_id={session.session_id} "
+                        f"bytes={preroll_bytes} preroll_s={float(session.startup_preroll_s or 0.0):.2f}"
+                    )
                 if _normalize_stt_backend(session.stt_backend_effective) == "wyoming":
-                    session.stt_queue = asyncio.Queue()
+                    session.stt_queue_max_chunks = _wyoming_stt_queue_max_chunks()
+                    session.stt_queue = asyncio.Queue(maxsize=session.stt_queue_max_chunks)
                     session.stt_task = asyncio.create_task(
                         _native_wyoming_stream_stt_task(
                             token=token,
@@ -4862,9 +5640,12 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                         )
                     )
                 session.capture_started = True
+                if session.stt_queue is not None and session.audio_buffer:
+                    _enqueue_stt_stream_item(session, bytes(session.audio_buffer), reason="stt_stream_preroll_queue_full")
                 _native_debug(
                     f"esphome capture started selector={token} session_id={session.session_id} "
-                    f"mode={'stream' if session.stt_queue is not None else 'buffered'} stt={session.stt_backend_effective}"
+                    f"mode={'stream' if session.stt_queue is not None else 'buffered'} stt={session.stt_backend_effective} "
+                    f"queue_max={session.stt_queue_max_chunks or '-'}"
                 )
 
             if session.audio_bytes + len(audio_bytes) <= max_audio_bytes:
@@ -4872,10 +5653,7 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                 session.audio_bytes += len(audio_bytes)
                 session.audio_chunks += 1
                 if session.stt_queue is not None:
-                    try:
-                        session.stt_queue.put_nowait(audio_bytes)
-                    except asyncio.QueueFull:
-                        pass
+                    _enqueue_stt_stream_item(session, audio_bytes, reason="stt_stream_queue_full")
 
             chunks = int(session.audio_chunks)
             if chunks in {1, 5, 10} or (chunks % 50 == 0):
@@ -4929,6 +5707,20 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                         should_finalize = False
 
         if should_finalize:
+            with contextlib.suppress(Exception):
+                from .. import intercom as esphome_intercom
+
+                async with lock:
+                    active_session = runtime.get("session")
+                    broadcast_hold = (
+                        isinstance(active_session, VoiceSessionRuntime)
+                        and active_session.session_id == sid
+                        and esphome_intercom.is_broadcast_wake_word(active_session.wake_word)
+                    )
+                if broadcast_hold:
+                    should_finalize = False
+
+        if should_finalize:
             _native_debug(
                 f"server_vad finalize selector={token} session_id={sid} reason=server_vad "
                 f"silence_s={float(metrics.get('silence_s') or 0.0):.2f} speech_chunks={int(metrics.get('speech_chunks') or 0)} "
@@ -4941,27 +5733,38 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
         sid = ""
         chunks = 0
         total = 0
+        finalize_abort = bool(abort)
+        finalize_reason = "device_stop"
         async with lock:
             session = runtime.get("session")
             if isinstance(session, VoiceSessionRuntime):
                 sid = session.session_id
                 chunks = session.audio_chunks
                 total = session.audio_bytes
+                if bool(abort):
+                    with contextlib.suppress(Exception):
+                        from .. import intercom as esphome_intercom
+
+                        if esphome_intercom.is_broadcast_wake_word(session.wake_word):
+                            finalize_abort = False
+                            finalize_reason = "push_to_intercom_release"
             _cancel_announcement_wait(runtime)
             _cancel_audio_stall_watch(runtime)
             _clear_awaiting_announcement_state(runtime)
 
         logger.info(
-            "[native-voice] session stop selector=%s session_id=%s abort=%s chunks=%s bytes=%s",
+            "[native-voice] session stop selector=%s session_id=%s abort=%s finalize_abort=%s reason=%s chunks=%s bytes=%s",
             token,
             sid,
             bool(abort),
+            finalize_abort,
+            finalize_reason,
             chunks,
             total,
         )
         if sid:
             with contextlib.suppress(Exception):
-                await _finalize_session(token, client, module, session_id=sid, abort=bool(abort), reason="device_stop")
+                await _finalize_session(token, client, module, session_id=sid, abort=finalize_abort, reason=finalize_reason)
 
     async def _handle_announcement_finished(*_args: Any, **_kwargs: Any) -> None:
         now_ts = _now()
@@ -4970,10 +5773,11 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
         sid = ""
         age_s = 0.0
         async with lock:
-            if bool(runtime.get("awaiting_announcement")):
-                kind = _text(runtime.get("awaiting_announcement_kind"))
-                sid = _text(runtime.get("awaiting_session_id"))
-                started_ts = float(runtime.get("awaiting_announcement_started_ts") or 0.0)
+            state = _awaiting_announcement_state(runtime)
+            if state is not None:
+                kind = _text(state.kind)
+                sid = _text(state.session_id)
+                started_ts = float(state.started_ts or 0.0)
                 age_s = max(0.0, now_ts - started_ts) if started_ts > 0.0 else 0.0
                 last_timeout_ts = float(runtime.get("last_announcement_timeout_ts") or 0.0)
                 if last_timeout_ts > 0.0 and (now_ts - last_timeout_ts) <= 3.0 and age_s < 0.6:

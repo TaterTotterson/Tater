@@ -258,10 +258,24 @@ async def run_minos_validation(
             memory_context_default_summary_max_chars,
         ) or memory_context_default_summary_max_chars
         summary_limit = max(128, min(12000, summary_limit))
-        payload["memory_context"] = {
-            "user_memory": short_text_fn(user_ctx.get("summary"), limit=summary_limit),
-            "room_memory": short_text_fn(room_ctx.get("summary"), limit=summary_limit),
-        }
+        memory_payload: Dict[str, str] = {}
+        user_name = short_text_fn(
+            user_ctx.get("person_name") or user_ctx.get("display_name") or user_ctx.get("user_id"),
+            limit=120,
+        )
+        person_id = short_text_fn(user_ctx.get("person_id"), limit=120)
+        source_user_id = short_text_fn(user_ctx.get("source_user_id") or user_ctx.get("user_id"), limit=120)
+        room_memory = short_text_fn(room_ctx.get("summary"), limit=summary_limit)
+        if user_name:
+            memory_payload["user_name"] = user_name
+        if person_id:
+            memory_payload["person_id"] = person_id
+        if source_user_id:
+            memory_payload["source_user_id"] = source_user_id
+        if room_memory:
+            memory_payload["room_memory"] = room_memory
+        if memory_payload:
+            payload["memory_context"] = memory_payload
     try:
         token_limit = int(max_tokens) if max_tokens is not None else configured_minos_max_tokens_fn()
         chat_kwargs: Dict[str, Any] = {

@@ -19,6 +19,7 @@ _ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 
 _native_lock = asyncio.Lock()
 _reconcile_lock = asyncio.Lock()
+_native_loop: Optional[asyncio.AbstractEventLoop] = None
 _native_clients: Dict[str, Dict[str, Any]] = {}
 _native_stats: Dict[str, Any] = {
     "runs": 0,
@@ -67,6 +68,42 @@ def _as_bool(value: Any, default: bool = False) -> bool:
 
 def _native_debug(message: str) -> None:
     _vp()._native_debug(message)
+
+
+def _remember_native_loop() -> Optional[asyncio.AbstractEventLoop]:
+    global _native_loop
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+    if loop.is_running() and not loop.is_closed():
+        _native_loop = loop
+    return loop
+
+
+def _get_native_loop() -> Optional[asyncio.AbstractEventLoop]:
+    loop = _native_loop
+    if loop is not None and loop.is_running() and not loop.is_closed():
+        return loop
+    return None
+
+
+def run_on_native_loop(coro: Any, *, timeout: float = 45.0) -> Any:
+    """Run ESPHome client work on the loop that owns the API clients."""
+    loop = _get_native_loop()
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+
+    if loop is not None and loop is not current_loop:
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        return future.result(timeout=max(1.0, float(timeout or 45.0)))
+
+    if loop is current_loop and current_loop is not None and current_loop.is_running():
+        raise RuntimeError("Cannot block the ESPHome native loop from inside itself")
+
+    return _vp()._run_async_blocking(coro, timeout=timeout)
 
 
 def _voice_settings() -> Dict[str, Any]:
@@ -343,6 +380,7 @@ def _discover_mdns_sync(scan_seconds: float) -> List[Dict[str, Any]]:
 
 
 async def discover_mdns_once() -> List[Dict[str, Any]]:
+    _remember_native_loop()
     cfg = _voice_config_snapshot()
     discovery = cfg.get("discovery") if isinstance(cfg.get("discovery"), dict) else {}
     timeout_s = float(discovery.get("mdns_timeout_s") or _discovery_timeout_s())
@@ -350,6 +388,7 @@ async def discover_mdns_once() -> List[Dict[str, Any]]:
 
 
 async def discovery_loop() -> None:
+    _remember_native_loop()
     while True:
         try:
             cfg = _voice_config_snapshot()
@@ -950,6 +989,39 @@ async def list_entity_catalog(client: Any) -> Dict[str, Dict[str, Any]]:
     return out
 
 
+async def refresh_entity_catalog(selector: str, *, timeout: float = 8.0) -> Dict[str, Any]:
+    _remember_native_loop()
+    token = _text(selector)
+    if not token:
+        raise ValueError("selector is required")
+
+    async with _native_lock:
+        row = dict(_native_clients.get(token) or {})
+
+    client = row.get("client")
+    if not bool(row.get("connected")) or client is None:
+        raise RuntimeError(f"Satellite {token} is not connected")
+
+    entity_infos = await asyncio.wait_for(list_entity_catalog(client), timeout=max(1.0, float(timeout or 8.0)))
+    updated_ts = _now()
+
+    async with _native_lock:
+        live_row = _native_clients.get(token)
+        if not isinstance(live_row, dict):
+            raise RuntimeError(f"Satellite {token} is unknown")
+        live_row["entity_infos"] = dict(entity_infos)
+        live_row["entity_catalog_updated_ts"] = updated_ts
+        live_row["last_success_ts"] = updated_ts
+        live_row["last_error"] = ""
+        _native_clients[token] = live_row
+
+    wake_engine_found = any(_lower(info.get("name")) == "wake engine" for info in entity_infos.values() if isinstance(info, dict))
+    _native_debug(
+        f"esphome entity catalog refreshed selector={token} count={len(entity_infos)} wake_engine={wake_engine_found}"
+    )
+    return entities_for_selector(token)
+
+
 async def subscribe_states(selector: str, client: Any) -> Optional[Callable[[], None]]:
     method = getattr(client, "subscribe_states", None)
     if not callable(method):
@@ -1107,6 +1179,7 @@ async def _esphome_disable_device_logs(client: Any, module: Any) -> None:
 
 
 async def logs_start(selector: str) -> Dict[str, Any]:
+    _remember_native_loop()
     token = _text(selector)
     if not token:
         raise RuntimeError("selector is required")
@@ -1206,6 +1279,7 @@ async def logs_start(selector: str) -> Dict[str, Any]:
 
 
 async def logs_poll(selector: str, *, after_seq: int = 0) -> Dict[str, Any]:
+    _remember_native_loop()
     token = _text(selector)
     if not token:
         raise RuntimeError("selector is required")
@@ -1228,6 +1302,7 @@ async def logs_poll(selector: str, *, after_seq: int = 0) -> Dict[str, Any]:
 
 
 async def logs_stop(selector: str, *, force: bool = False, reason: str = "viewer_closed") -> Dict[str, Any]:
+    _remember_native_loop()
     token = _text(selector)
     if not token:
         return {"ok": True, "selector": token, "stopped": False, "viewer_count": 0}
@@ -1398,6 +1473,7 @@ async def build_client(module: Any, *, host: str, port: int) -> Any:
 
 
 async def disconnect_selector(selector: str, *, reason: str) -> None:
+    _remember_native_loop()
     token = _text(selector)
     if not token:
         return
@@ -1466,6 +1542,7 @@ async def disconnect_all(reason: str) -> None:
 
 
 async def connect_selector(selector: str, *, host: str, port: Optional[int] = None, source: str = "reconcile") -> Dict[str, Any]:
+    _remember_native_loop()
     token = _text(selector)
     host_token = _lower(host)
     if not token or not host_token:
@@ -1611,6 +1688,7 @@ async def connect_selector(selector: str, *, host: str, port: Optional[int] = No
                     "connected": True,
                     "device_info": dict(device_info_snapshot),
                     "entity_infos": dict(entity_infos),
+                    "entity_catalog_updated_ts": _now(),
                     "entity_states": row.get("entity_states") if isinstance(row.get("entity_states"), dict) else {},
                     "entity_state_updated_ts": _as_float(row.get("entity_state_updated_ts"), _now()),
                     "voice_feature_flags": int(voice_features.get("flags") or 0),
@@ -1670,6 +1748,7 @@ async def connect_selector(selector: str, *, host: str, port: Optional[int] = No
 
 
 async def reconcile_once(*, force: bool = False) -> Dict[str, Any]:
+    _remember_native_loop()
     async with _reconcile_lock:
         _native_stats["runs"] = int(_native_stats.get("runs") or 0) + 1
         _native_stats["last_run_ts"] = _now()
@@ -1697,6 +1776,12 @@ async def reconcile_once(*, force: bool = False) -> Dict[str, Any]:
         for selector, host in targets.items():
             row = snapshot.get(selector) or {}
             if bool(row.get("connected", False)) and esphome_client_connected(row.get("client"), fallback=True):
+                if force:
+                    try:
+                        await refresh_entity_catalog(selector, timeout=8.0)
+                    except Exception as exc:
+                        _native_stats["last_error"] = _text(exc)
+                        _native_debug(f"esphome entity catalog refresh failed selector={selector} error={exc}")
                 continue
             last_attempt = _as_float(row.get("last_attempt_ts"), 0.0)
             if (not force) and ((_now() - last_attempt) < retry_seconds):
@@ -1712,6 +1797,7 @@ async def reconcile_once(*, force: bool = False) -> Dict[str, Any]:
 
 
 async def esphome_loop() -> None:
+    _remember_native_loop()
     while True:
         try:
             await reconcile_once(force=False)
@@ -1726,6 +1812,7 @@ async def esphome_loop() -> None:
 
 
 async def bootstrap_reconnect() -> None:
+    _remember_native_loop()
     try:
         current = await reconcile_once(force=True)
         logger.info(
@@ -1800,6 +1887,7 @@ def status() -> Dict[str, Any]:
             "entity_count": len(entity_infos),
             "entity_row_count": len(entity_rows),
             "entity_rows": entity_rows,
+            "entity_catalog_updated_ts": _as_float(row.get("entity_catalog_updated_ts"), 0.0),
             "entity_state_updated_ts": _as_float(row.get("entity_state_updated_ts"), 0.0),
             "log_active": callable(row.get("log_unsubscribe")),
             "log_viewers": int(row.get("log_viewers") or 0),
@@ -1868,6 +1956,7 @@ def entities_for_selector(selector: str) -> Dict[str, Any]:
         "device_info": dict(device_info),
         "entities": entities,
         "entity_rows": entity_rows,
+        "entity_catalog_updated_ts": _as_float(row.get("entity_catalog_updated_ts"), 0.0),
         "count": len(entities),
     }
 
@@ -1917,6 +2006,7 @@ async def command_entity(
     value: Any = None,
     options: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    _remember_native_loop()
     token = _text(selector)
     key_text = _text(entity_key)
     action = _lower(command)
