@@ -151,6 +151,7 @@ dotenv.load_dotenv()
 logger = logging.getLogger("tateros")
 OPENWAKEWORD_DETECT_LOG_EVERY = 120
 OPENWAKEWORD_DETECT_SLOW_LOG_S = 1.0
+OPENWAKEWORD_STREAM_QUEUE_MAX = 4
 openwakeword_detect_stats_lock = threading.Lock()
 openwakeword_detect_stats: Dict[str, Dict[str, Any]] = {}
 logging.basicConfig(
@@ -7424,30 +7425,66 @@ async def stream_openwakeword(websocket: WebSocket) -> None:
     await websocket.accept()
     logger.info("[openwakeword] stream-start selector=%s client=%s", selector, client_host or "-")
     frame_count = 0
+    processed_count = 0
+    dropped_count = 0
+    audio_queue: asyncio.Queue[Tuple[float, bytes]] = asyncio.Queue(maxsize=OPENWAKEWORD_STREAM_QUEUE_MAX)
+    receiver_done = asyncio.Event()
+    receiver_task: Optional[asyncio.Task[Any]] = None
+
+    def drop_queued_frame() -> None:
+        nonlocal dropped_count
+        try:
+            audio_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return
+        dropped_count += 1
+
+    async def receive_audio_frames() -> None:
+        nonlocal frame_count
+        try:
+            while True:
+                message = await websocket.receive()
+                message_type = str(message.get("type") or "")
+                if message_type == "websocket.disconnect":
+                    break
+                audio_bytes = message.get("bytes")
+                if audio_bytes is None:
+                    continue
+                frame_count += 1
+                audio_bytes_len = len(audio_bytes or b"")
+                if not audio_bytes:
+                    continue
+                if audio_bytes_len > 512 * 1024:
+                    await websocket.send_json({"ok": False, "error": "openWakeWord audio chunk is too large."})
+                    await websocket.close(code=1009)
+                    break
+                while audio_queue.full():
+                    drop_queued_frame()
+                audio_queue.put_nowait((time.time(), bytes(audio_bytes)))
+        except WebSocketDisconnect:
+            pass
+        finally:
+            receiver_done.set()
+
     try:
         if not esphome_openwakeword_module.openwakeword_enabled():
             await websocket.send_json({"ok": False, "error": "openWakeWord is disabled."})
             await websocket.close(code=1013)
             return
 
+        receiver_task = asyncio.create_task(receive_audio_frames())
         while True:
-            started_ts = time.time()
-            message = await websocket.receive()
-            message_type = str(message.get("type") or "")
-            if message_type == "websocket.disconnect":
+            if receiver_done.is_set() and audio_queue.empty():
                 break
-            audio_bytes = message.get("bytes")
-            if audio_bytes is None:
+            try:
+                received_ts, audio_bytes = await asyncio.wait_for(audio_queue.get(), timeout=0.5)
+            except asyncio.TimeoutError:
                 continue
-            frame_count += 1
+            started_ts = time.time()
             audio_bytes_len = len(audio_bytes or b"")
-            if not audio_bytes:
-                await websocket.send_json({"ok": True, "detected": False})
-                continue
-            if audio_bytes_len > 512 * 1024:
-                await websocket.send_json({"ok": False, "error": "openWakeWord audio chunk is too large."})
-                await websocket.close(code=1009)
-                return
+            processed_count += 1
+            queue_delay_ms = max(0.0, (started_ts - received_ts) * 1000.0)
+            detail_prefix = f"transport=ws queue_ms={queue_delay_ms:.1f} dropped={dropped_count}"
 
             try:
                 detection = await asyncio.to_thread(
@@ -7463,7 +7500,7 @@ async def stream_openwakeword(websocket: WebSocket) -> None:
                     status="error",
                     elapsed_s=time.time() - started_ts,
                     audio_bytes_len=audio_bytes_len,
-                    detail=f"transport=ws error={detail}",
+                    detail=f"{detail_prefix} error={detail}",
                 )
                 await websocket.send_json({"ok": False, "error": detail})
                 continue
@@ -7474,9 +7511,8 @@ async def stream_openwakeword(websocket: WebSocket) -> None:
                     status="ok",
                     elapsed_s=time.time() - started_ts,
                     audio_bytes_len=audio_bytes_len,
-                    detail="transport=ws",
+                    detail=detail_prefix,
                 )
-                await websocket.send_json({"ok": True, "detected": False})
                 continue
 
             try:
@@ -7490,7 +7526,7 @@ async def stream_openwakeword(websocket: WebSocket) -> None:
                 detected=True,
                 elapsed_s=time.time() - started_ts,
                 audio_bytes_len=audio_bytes_len,
-                detail=f"transport=ws wake_word={wake_word} score={score:.3f}",
+                detail=f"{detail_prefix} wake_word={wake_word} score={score:.3f}",
             )
             await websocket.send_json(
                 {
@@ -7502,6 +7538,8 @@ async def stream_openwakeword(websocket: WebSocket) -> None:
                     "model_source": str(detection.get("model_source") or ""),
                 }
             )
+            while not audio_queue.empty():
+                drop_queued_frame()
     except WebSocketDisconnect:
         pass
     except asyncio.CancelledError:
@@ -7510,7 +7548,17 @@ async def stream_openwakeword(websocket: WebSocket) -> None:
         with contextlib.suppress(Exception):
             await websocket.send_json({"ok": False, "error": str(exc) or type(exc).__name__})
     finally:
-        logger.info("[openwakeword] stream-stop selector=%s frames=%s", selector, frame_count)
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            if receiver_task is not None:
+                receiver_task.cancel()
+                await receiver_task
+        logger.info(
+            "[openwakeword] stream-stop selector=%s frames=%s processed=%s dropped=%s",
+            selector,
+            frame_count,
+            processed_count,
+            dropped_count,
+        )
 
 
 @app.get("/api/speech/tts/runtime/{asset_id}.wav")
