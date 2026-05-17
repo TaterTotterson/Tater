@@ -78,6 +78,14 @@ Some Portals are paired with companion repos/apps that complete the end-user int
 </p>
 
 <p align="center">
+  <a href="https://github.com/TaterTotterson/Tater-NWW-Server">
+    <img src="images/companion-cards/tater-nww-server.png" alt="Tater NWW Server" width="720">
+  </a>
+  <br>
+  <strong>Purpose:</strong> Standalone NanoWakeWord WebSocket server for Tater satellites using remote NanoWakeWord wake detection.
+</p>
+
+<p align="center">
   <a href="https://github.com/TaterTotterson/microWakeWords">
     <img src="images/companion-cards/microwakewords.png" alt="microWakeWords" width="720">
   </a>
@@ -115,6 +123,14 @@ Some Portals are paired with companion repos/apps that complete the end-user int
   </a>
   <br>
   <strong>Purpose:</strong> Trainer for custom openWakeWord models used by Tater's local or standalone openWakeWord server.
+</p>
+
+<p align="center">
+  <a href="https://github.com/TaterTotterson/nanoWakeWord-Trainer">
+    <img src="images/companion-cards/nanowakeword-trainer.png" alt="NanoWakeWord Trainer" width="720">
+  </a>
+  <br>
+  <strong>Purpose:</strong> Trainer for custom NanoWakeWord models used by Tater's local or standalone NanoWakeWord server.
 </p>
 
 ---
