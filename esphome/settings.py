@@ -39,6 +39,18 @@ VOICE_MODEL_SETTING_GROUPS = [
             "VOICE_OPENWAKEWORD_PATIENCE",
             "VOICE_OPENWAKEWORD_DEBOUNCE_S",
             "VOICE_OPENWAKEWORD_VAD_THRESHOLD",
+            "VOICE_OPENWAKEWORD_DIAGNOSTIC_LOGGING",
+        ],
+    ),
+    (
+        "NanoWakeWord",
+        [
+            "VOICE_NANOWAKEWORD_ENABLED",
+            "VOICE_NANOWAKEWORD_MODEL_SOURCE",
+            "VOICE_NANOWAKEWORD_THRESHOLD",
+            "VOICE_NANOWAKEWORD_PATIENCE",
+            "VOICE_NANOWAKEWORD_DEBOUNCE_S",
+            "VOICE_NANOWAKEWORD_DIAGNOSTIC_LOGGING",
         ],
     ),
 ]
@@ -499,6 +511,65 @@ def voice_ui_setting_specs() -> List[Dict[str, Any]]:
             "description": "Optional openWakeWord internal VAD gate. Leave at 0 unless you are tuning false wakes.",
         },
         {
+            "key": "VOICE_OPENWAKEWORD_DIAGNOSTIC_LOGGING",
+            "label": "openWakeWord Diagnostic Logs",
+            "type": "checkbox",
+            "default": False,
+            "description": "Log best-label, score, threshold, and hit-count details for remote openWakeWord tuning. Leave off during normal use.",
+        },
+        {
+            "key": "VOICE_NANOWAKEWORD_ENABLED",
+            "label": "Enable Tater NanoWakeWord",
+            "type": "checkbox",
+            "default": True,
+            "description": "Enables Tater's NanoWakeWord detector for satellites that stream wake audio to /api/nanowakeword/stream.",
+        },
+        {
+            "key": "VOICE_NANOWAKEWORD_MODEL_SOURCE",
+            "label": "NanoWakeWord Model",
+            "type": "select",
+            "default": "",
+            "options": [],
+            "description": "Choose a downloaded/local NanoWakeWord model or one pulled from a NanoWakeWord trainer.",
+        },
+        {
+            "key": "VOICE_NANOWAKEWORD_THRESHOLD",
+            "label": "NanoWakeWord Threshold",
+            "type": "number",
+            "default": 0.90,
+            "min": 0.01,
+            "max": 0.99,
+            "step": 0.01,
+            "description": "Higher values are stricter and reduce false wake triggers.",
+        },
+        {
+            "key": "VOICE_NANOWAKEWORD_PATIENCE",
+            "label": "NanoWakeWord Patience",
+            "type": "number",
+            "default": 2,
+            "min": 1,
+            "max": 10,
+            "step": 1,
+            "description": "How many consecutive model hits are required before Tater reports a remote wake.",
+        },
+        {
+            "key": "VOICE_NANOWAKEWORD_DEBOUNCE_S",
+            "label": "NanoWakeWord Debounce (sec)",
+            "type": "number",
+            "default": 4.0,
+            "min": 0.0,
+            "max": 30.0,
+            "step": 0.1,
+            "description": "Minimum time between accepted remote NanoWakeWord detections from one satellite.",
+        },
+        {
+            "key": "VOICE_NANOWAKEWORD_DIAGNOSTIC_LOGGING",
+            "label": "NanoWakeWord Diagnostic Logs",
+            "type": "checkbox",
+            "default": False,
+            "description": "Log score, threshold, and hit-count details for remote NanoWakeWord tuning. Leave off during normal use.",
+        },
+        {
             "key": "VOICE_EXPERIMENTAL_LIVE_TOOL_PROGRESS_ENABLED",
             "label": "Live Tool Progress Speech",
             "type": "checkbox",
@@ -673,6 +744,11 @@ def settings_fields() -> List[Dict[str, Any]]:
                     from . import openwakeword_engine
 
                     row["options"] = openwakeword_engine.model_source_options(current=raw_value)
+            if key == "VOICE_NANOWAKEWORD_MODEL_SOURCE":
+                with contextlib.suppress(Exception):
+                    from . import nanowakeword_engine
+
+                    row["options"] = nanowakeword_engine.model_source_options(current=raw_value)
 
         if field_type == "password":
             has_saved = bool(vp._text(stored.get(key)))
@@ -881,6 +957,14 @@ def save_settings_values(values: Dict[str, Any]) -> Dict[str, Any]:
                 )
             except Exception as exc:
                 raise ValueError(str(exc) or "Invalid openWakeWord model source.") from exc
+
+        if key == "VOICE_NANOWAKEWORD_MODEL_SOURCE":
+            try:
+                from . import nanowakeword_engine
+
+                normalized = nanowakeword_engine.normalize_model_source(normalized, copy_external=True)
+            except Exception as exc:
+                raise ValueError(str(exc) or "Invalid NanoWakeWord model source.") from exc
 
         old = vp._text(current.get(key))
         if normalized != old:

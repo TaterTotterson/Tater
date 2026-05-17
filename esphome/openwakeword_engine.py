@@ -32,6 +32,7 @@ DEFAULT_OPENWAKEWORD_PATIENCE = 2
 DEFAULT_OPENWAKEWORD_DEBOUNCE_S = 4.0
 DEFAULT_OPENWAKEWORD_VAD_THRESHOLD = 0.0
 DEFAULT_OPENWAKEWORD_DEVICE = "auto"
+DEFAULT_OPENWAKEWORD_DIAGNOSTIC_LOGGING = False
 FALLBACK_PRETRAINED_MODELS = [
     "hey_jarvis",
     "alexa",
@@ -126,6 +127,10 @@ def settings_snapshot() -> Dict[str, Any]:
         "debounce_s": _as_float(_setting("debounce_s", DEFAULT_OPENWAKEWORD_DEBOUNCE_S), DEFAULT_OPENWAKEWORD_DEBOUNCE_S, minimum=0.0, maximum=30.0),
         "vad_threshold": _as_float(_setting("vad_threshold", DEFAULT_OPENWAKEWORD_VAD_THRESHOLD), DEFAULT_OPENWAKEWORD_VAD_THRESHOLD, minimum=0.0, maximum=0.99),
         "device": _lower(_setting("device", DEFAULT_OPENWAKEWORD_DEVICE)) or DEFAULT_OPENWAKEWORD_DEVICE,
+        "diagnostic_logging": _as_bool(
+            _setting("diagnostic_logging", DEFAULT_OPENWAKEWORD_DIAGNOSTIC_LOGGING),
+            DEFAULT_OPENWAKEWORD_DIAGNOSTIC_LOGGING,
+        ),
     }
 
 
@@ -897,5 +902,17 @@ def process_audio(selector: str, audio_bytes: bytes, audio_format: Dict[str, Any
                 "patience": patience,
                 "engine": "openwakeword",
                 "model_source": detector.model_source,
+                "diagnostic_logging": bool(settings.get("diagnostic_logging")),
             }
+        return {
+            "detected": False,
+            "best_label": best_label,
+            "score": best_score,
+            "threshold": threshold,
+            "patience": patience,
+            "hit_count": int(detector.counts.get(best_label, 0)),
+            "engine": "openwakeword",
+            "model_source": detector.model_source,
+            "diagnostic_logging": bool(settings.get("diagnostic_logging")),
+        }
     return None

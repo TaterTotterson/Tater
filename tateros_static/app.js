@@ -14159,6 +14159,10 @@ async function loadSettingsView() {
     voiceModelUi.openwakeword_trainer && typeof voiceModelUi.openwakeword_trainer === "object"
       ? voiceModelUi.openwakeword_trainer
       : {};
+  const nanoWakeWordTrainer =
+    voiceModelUi.nanowakeword_trainer && typeof voiceModelUi.nanowakeword_trainer === "object"
+      ? voiceModelUi.nanowakeword_trainer
+      : {};
   const voiceModelSettingKeys = new Set(
     voiceModelSections
       .flatMap((section) => (Array.isArray(section?.fields) ? section.fields : []))
@@ -14166,6 +14170,7 @@ async function loadSettingsView() {
       .filter(Boolean)
   );
   const openWakeWordTrainerUrl = String(openWakeWordTrainer.trainer_url || "http://127.0.0.1:8791").trim();
+  const nanoWakeWordTrainerUrl = String(nanoWakeWordTrainer.trainer_url || "http://127.0.0.1:8792").trim();
   const renderVoiceModelSection = (section) => {
     const label = String(section?.label || "").trim();
     const fields = Array.isArray(section?.fields) ? section.fields : [];
@@ -14179,6 +14184,8 @@ async function loadSettingsView() {
           ${escapeHtml(
             label === "openWakeWord"
               ? "Server-side wake model settings used by updated Tater satellite firmware."
+              : label === "NanoWakeWord"
+                ? "Server-side NanoWakeWord model settings used by updated Tater satellite firmware."
               : label === "Voice Activity Detection"
                 ? "Server-side speech endpoint detection used after wake."
                 : "Local model acceleration used by voice identity and emotion models."
@@ -14203,6 +14210,7 @@ async function loadSettingsView() {
         .map((section) => renderVoiceModelSection(section))
         .join("")
     : "";
+  const nanoWakeWordSettingsHtml = voiceModelSectionHtmlByLabel("NanoWakeWord");
   const openWakeWordTrainerHtml = `
     <div class="hydra-model-panel is-active voice-model-settings-panel">
       <div class="hydra-model-panel-title">openWakeWord Trainer</div>
@@ -14224,6 +14232,30 @@ async function loadSettingsView() {
       <div class="inline-row" style="grid-column: 1 / -1;">
         <button type="button" id="settings-openwakeword-download-trainer-model" class="inline-btn">Download and Use Model</button>
         <span class="small">The saved path is written into the openWakeWord Model field above.</span>
+      </div>
+    </div>
+  `;
+  const nanoWakeWordTrainerHtml = `
+    <div class="hydra-model-panel is-active voice-model-settings-panel">
+      <div class="hydra-model-panel-title">NanoWakeWord Trainer</div>
+      <div class="small hydra-model-panel-note" style="grid-column: 1 / -1;">
+        Load trained ONNX/PyTorch artifacts from a NanoWakeWord trainer, download one into Tater, and use it as the active remote NanoWakeWord model.
+      </div>
+      <label style="grid-column: 1 / -1;">Trainer URL
+        <input id="set_nanowakeword_trainer_url" type="text" value="${escapeHtml(nanoWakeWordTrainerUrl)}" placeholder="http://127.0.0.1:8792" />
+      </label>
+      <div class="inline-row" style="grid-column: 1 / -1;">
+        <button type="button" id="settings-nanowakeword-load-trainer-models" class="inline-btn">Load Trainer Models</button>
+        <span id="settings-nanowakeword-trainer-status" class="small"></span>
+      </div>
+      <label style="grid-column: 1 / -1;">Trained Model
+        <select id="settings-nanowakeword-trainer-model">
+          <option value="">Load trainer models</option>
+        </select>
+      </label>
+      <div class="inline-row" style="grid-column: 1 / -1;">
+        <button type="button" id="settings-nanowakeword-download-trainer-model" class="inline-btn">Download and Use Model</button>
+        <span class="small">The saved path is written into the NanoWakeWord Model field above.</span>
       </div>
     </div>
   `;
@@ -14441,6 +14473,8 @@ async function loadSettingsView() {
               ${voiceVadSettingsHtml}
               ${openWakeWordTrainerHtml}
               ${openWakeWordSettingsHtml}
+              ${nanoWakeWordSettingsHtml}
+              ${nanoWakeWordTrainerHtml}
               </div>
 
               <div class="settings-subpanel" data-models-panel="speech">
@@ -16659,6 +16693,11 @@ async function loadSettingsView() {
   const openWakeWordTrainerStatusEl = document.getElementById("settings-openwakeword-trainer-status");
   const openWakeWordLoadTrainerBtnEl = document.getElementById("settings-openwakeword-load-trainer-models");
   const openWakeWordDownloadTrainerBtnEl = document.getElementById("settings-openwakeword-download-trainer-model");
+  const nanoWakeWordTrainerUrlEl = document.getElementById("set_nanowakeword_trainer_url");
+  const nanoWakeWordTrainerModelEl = document.getElementById("settings-nanowakeword-trainer-model");
+  const nanoWakeWordTrainerStatusEl = document.getElementById("settings-nanowakeword-trainer-status");
+  const nanoWakeWordLoadTrainerBtnEl = document.getElementById("settings-nanowakeword-load-trainer-models");
+  const nanoWakeWordDownloadTrainerBtnEl = document.getElementById("settings-nanowakeword-download-trainer-model");
   const getOpenWakeWordCoreField = (key) => document.querySelector(`[data-core-field-key="${key}"]`);
   const collectVoiceModelSettings = () => {
     const values = collectCoreManagerValues(document.getElementById("settings-hydra-model-stack"));
@@ -16689,6 +16728,27 @@ async function loadSettingsView() {
     }
     if (framework) {
       row.dataset.framework = framework;
+    }
+    select.value = value;
+    return true;
+  };
+  const upsertNanoWakeWordModelOption = (rawOption) => {
+    const select = getOpenWakeWordCoreField("VOICE_NANOWAKEWORD_MODEL_SOURCE");
+    if (!(select instanceof HTMLSelectElement)) {
+      return false;
+    }
+    const option = rawOption && typeof rawOption === "object" ? rawOption : {};
+    const value = String(option.value || option.model_source || option.path || "").trim();
+    if (!value) {
+      return false;
+    }
+    const label = String(option.label || option.name || value).trim() || value;
+    let row = Array.from(select.options || []).find((item) => String(item.value || "") === value);
+    if (!row) {
+      row = new Option(label, value);
+      select.appendChild(row);
+    } else {
+      row.textContent = label;
     }
     select.value = value;
     return true;
@@ -16798,8 +16858,93 @@ async function loadSettingsView() {
       openWakeWordDownloadTrainerBtnEl.disabled = false;
     }
   };
+  const setNanoWakeWordTrainerStatus = (message) => {
+    if (nanoWakeWordTrainerStatusEl) {
+      nanoWakeWordTrainerStatusEl.textContent = String(message || "");
+    }
+  };
+  const renderNanoWakeWordTrainerOptions = (items) => {
+    if (!nanoWakeWordTrainerModelEl) {
+      return;
+    }
+    const rows = Array.isArray(items) ? items : [];
+    if (!rows.length) {
+      nanoWakeWordTrainerModelEl.innerHTML = `<option value="">No ONNX/PyTorch models found</option>`;
+      return;
+    }
+    nanoWakeWordTrainerModelEl.innerHTML = rows
+      .map((item) => {
+        const value = String(item?.value || item?.url || "").trim();
+        const label = String(item?.label || item?.name || value).trim() || value;
+        return `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`;
+      })
+      .join("");
+  };
+  const loadNanoWakeWordTrainerModels = async () => {
+    if (!nanoWakeWordTrainerUrlEl || !nanoWakeWordLoadTrainerBtnEl) {
+      return;
+    }
+    nanoWakeWordLoadTrainerBtnEl.disabled = true;
+    setNanoWakeWordTrainerStatus("Loading trainer models...");
+    try {
+      const result = await api("/api/settings/nanowakeword/trainer-models", {
+        method: "POST",
+        body: JSON.stringify({
+          trainer_url: String(nanoWakeWordTrainerUrlEl.value || "").trim(),
+        }),
+      });
+      renderNanoWakeWordTrainerOptions(result?.items || []);
+      const count = Number(result?.count || 0);
+      setNanoWakeWordTrainerStatus(count ? `Loaded ${count} trained model${count === 1 ? "" : "s"}.` : "No matching trained models found.");
+    } catch (error) {
+      setNanoWakeWordTrainerStatus(`Trainer load failed: ${error.message}`);
+      showToast(`NanoWakeWord trainer load failed: ${error.message}`, "error", 3600);
+    } finally {
+      nanoWakeWordLoadTrainerBtnEl.disabled = false;
+    }
+  };
+  const downloadNanoWakeWordTrainerModel = async () => {
+    if (!nanoWakeWordTrainerUrlEl || !nanoWakeWordTrainerModelEl || !nanoWakeWordDownloadTrainerBtnEl) {
+      return;
+    }
+    const artifactUrl = String(nanoWakeWordTrainerModelEl.value || "").trim();
+    if (!artifactUrl) {
+      setNanoWakeWordTrainerStatus("Choose a trained model first.");
+      return;
+    }
+    nanoWakeWordDownloadTrainerBtnEl.disabled = true;
+    setNanoWakeWordTrainerStatus("Downloading trained model into Tater...");
+    try {
+      const result = await api("/api/settings/nanowakeword/download-trainer-model", {
+        method: "POST",
+        body: JSON.stringify({
+          trainer_url: String(nanoWakeWordTrainerUrlEl.value || "").trim(),
+          artifact_url: artifactUrl,
+        }),
+      });
+      const modelSourceEl = getOpenWakeWordCoreField("VOICE_NANOWAKEWORD_MODEL_SOURCE");
+      const modelOption = result?.option && typeof result.option === "object"
+        ? result.option
+        : {
+            value: result?.model_source || result?.path || "",
+            label: result?.name || result?.model_source || result?.path || "",
+          };
+      if (!upsertNanoWakeWordModelOption(modelOption) && modelSourceEl) {
+        modelSourceEl.value = result?.model_source || result?.path || "";
+      }
+      setNanoWakeWordTrainerStatus(`Saved ${result?.name || "trained model"} for NanoWakeWord.`);
+      showToast("NanoWakeWord trainer model downloaded and selected.");
+    } catch (error) {
+      setNanoWakeWordTrainerStatus(`Download failed: ${error.message}`);
+      showToast(`NanoWakeWord model download failed: ${error.message}`, "error", 3600);
+    } finally {
+      nanoWakeWordDownloadTrainerBtnEl.disabled = false;
+    }
+  };
   openWakeWordLoadTrainerBtnEl?.addEventListener("click", loadOpenWakeWordTrainerModels);
   openWakeWordDownloadTrainerBtnEl?.addEventListener("click", downloadOpenWakeWordTrainerModel);
+  nanoWakeWordLoadTrainerBtnEl?.addEventListener("click", loadNanoWakeWordTrainerModels);
+  nanoWakeWordDownloadTrainerBtnEl?.addEventListener("click", downloadNanoWakeWordTrainerModel);
   getOpenWakeWordCoreField("VOICE_OPENWAKEWORD_MODEL_SOURCE")?.addEventListener("change", syncOpenWakeWordFrameworkFromModel);
 
   document.getElementById("settings-hydra-model-save").addEventListener("click", async () => {

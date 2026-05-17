@@ -34,6 +34,7 @@ import verba_registry as verba_registry_module
 import portal_registry as portal_registry_module
 from esphome import firmware as esphome_firmware_module
 from esphome import home as esphome_home_module
+from esphome import nanowakeword_engine as esphome_nanowakeword_module
 from esphome import openwakeword_engine as esphome_openwakeword_module
 from admin_gate import DEFAULT_ADMIN_ONLY_PLUGINS, REDIS_KEY as ADMIN_GATE_KEY, get_admin_only_plugins
 from hydra import estimate_hydra_chat_context_window, get_active_chat_jobs_snapshot, run_hydra_turn
@@ -154,6 +155,8 @@ OPENWAKEWORD_DETECT_SLOW_LOG_S = 1.0
 OPENWAKEWORD_STREAM_QUEUE_MAX = 4
 openwakeword_detect_stats_lock = threading.Lock()
 openwakeword_detect_stats: Dict[str, Dict[str, Any]] = {}
+nanowakeword_detect_stats_lock = threading.Lock()
+nanowakeword_detect_stats: Dict[str, Dict[str, Any]] = {}
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)-8s %(name)-20s %(message)s",
@@ -682,11 +685,15 @@ def _warm_speech_model_item(item: Dict[str, str]) -> str:
 
     if kind == "wake_word":
         from esphome import openwakeword_engine
+        from esphome import nanowakeword_engine
 
         token = backend.lower()
-        if token != "openwakeword":
+        if token == "openwakeword":
+            return openwakeword_engine.warmup_model(enabled_only=True)
+        if token == "nanowakeword":
+            return nanowakeword_engine.warmup_model(enabled_only=True)
+        else:
             raise RuntimeError(f"unsupported wake-word backend: {token or 'unknown'}")
-        return openwakeword_engine.warmup_model(enabled_only=True)
 
     raise RuntimeError(f"unsupported warmup item: {kind or 'unknown'}")
 
@@ -696,6 +703,7 @@ def _run_speech_model_warmup(settings: Dict[str, Any], *, reason: str) -> None:
         {"kind": "stt", "backend": str(settings.get("stt_backend") or "").strip()},
         *_speech_model_warmup_tts_items(settings),
         {"kind": "wake_word", "backend": "openwakeword"},
+        {"kind": "wake_word", "backend": "nanowakeword"},
         {"kind": "speaker_id", "backend": "speechbrain"},
         {"kind": "emotion_id", "backend": "speechbrain"},
     ]
@@ -2983,6 +2991,15 @@ class OpenWakeWordTrainerDownloadRequest(BaseModel):
     trainer_url: Optional[str] = None
     artifact_url: Optional[str] = None
     framework: Optional[str] = None
+
+
+class NanoWakeWordTrainerModelsRequest(BaseModel):
+    trainer_url: Optional[str] = None
+
+
+class NanoWakeWordTrainerDownloadRequest(BaseModel):
+    trainer_url: Optional[str] = None
+    artifact_url: Optional[str] = None
 
 
 class AppSettingsRequest(BaseModel):
@@ -7105,11 +7122,18 @@ def get_settings() -> Dict[str, Any]:
     }
     voice_model_ui = {
         "label": "Voice Models",
-        "description": "Remote openWakeWord, VAD, and voice model runtime settings.",
+        "description": "Remote wake word, VAD, and voice model runtime settings.",
         "sections": voice_model_sections,
         "openwakeword_trainer": {
             "trainer_url": esphome_openwakeword_module.trainer_url(),
             "model_root": str(esphome_openwakeword_module.OPENWAKEWORD_MODEL_ROOT),
+        },
+        "nanowakeword_trainer": {
+            "trainer_url": esphome_nanowakeword_module.trainer_url(),
+            "model_root": str(esphome_nanowakeword_module.NANOWAKEWORD_MODEL_ROOT),
+        },
+        "nanowakeword": {
+            "model_root": str(esphome_nanowakeword_module.NANOWAKEWORD_MODEL_ROOT),
         },
     }
     announcement_speech_ui = get_announcement_tts_ui_payload(
@@ -7328,6 +7352,33 @@ def download_openwakeword_trainer_model(payload: OpenWakeWordTrainerDownloadRequ
         ) from exc
 
 
+@app.post("/api/settings/nanowakeword/trainer-models")
+def list_nanowakeword_trainer_models(payload: NanoWakeWordTrainerModelsRequest) -> Dict[str, Any]:
+    try:
+        return esphome_nanowakeword_module.trainer_model_catalog(
+            trainer_url_value=payload.trainer_url or "",
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc) or "Failed to load NanoWakeWord trainer models.",
+        ) from exc
+
+
+@app.post("/api/settings/nanowakeword/download-trainer-model")
+def download_nanowakeword_trainer_model(payload: NanoWakeWordTrainerDownloadRequest) -> Dict[str, Any]:
+    try:
+        return esphome_nanowakeword_module.download_trainer_model(
+            trainer_url_value=payload.trainer_url or "",
+            artifact_url=payload.artifact_url or "",
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc) or "Failed to download NanoWakeWord trainer model.",
+        ) from exc
+
+
 def _openwakeword_query_int(
     websocket: WebSocket,
     param_name: str,
@@ -7344,6 +7395,14 @@ def _openwakeword_query_int(
     return max(int(minimum), min(int(maximum), parsed))
 
 
+def _openwakeword_detector_selector(selector: str, client_host: str) -> str:
+    selector_token = str(selector or "").strip() or "remote"
+    client_token = str(client_host or "").strip()
+    if client_token and client_token != selector_token:
+        return f"{selector_token}@{client_token}"
+    return selector_token
+
+
 def _record_openwakeword_detect_request(
     *,
     selector: str,
@@ -7352,6 +7411,7 @@ def _record_openwakeword_detect_request(
     audio_bytes_len: int,
     detected: bool = False,
     detail: str = "",
+    force_log: bool = False,
 ) -> None:
     selector_key = str(selector or "remote").strip() or "remote"
     now_ts = time.time()
@@ -7381,6 +7441,7 @@ def _record_openwakeword_detect_request(
         should_log = (
             status != "ok"
             or detected
+            or force_log
             or elapsed_s >= OPENWAKEWORD_DETECT_SLOW_LOG_S
             or count == 1
             or count % OPENWAKEWORD_DETECT_LOG_EVERY == 0
@@ -7406,6 +7467,70 @@ def _record_openwakeword_detect_request(
     )
 
 
+def _record_nanowakeword_detect_request(
+    *,
+    selector: str,
+    status: str,
+    elapsed_s: float,
+    audio_bytes_len: int,
+    detected: bool = False,
+    detail: str = "",
+    force_log: bool = False,
+) -> None:
+    selector_key = str(selector or "remote").strip() or "remote"
+    now_ts = time.time()
+    with nanowakeword_detect_stats_lock:
+        row = nanowakeword_detect_stats.setdefault(
+            selector_key,
+            {
+                "count": 0,
+                "errors": 0,
+                "detected": 0,
+                "slow": 0,
+                "last_log_ts": 0.0,
+            },
+        )
+        row["count"] = int(row.get("count") or 0) + 1
+        if status != "ok":
+            row["errors"] = int(row.get("errors") or 0) + 1
+        if detected:
+            row["detected"] = int(row.get("detected") or 0) + 1
+        if elapsed_s >= OPENWAKEWORD_DETECT_SLOW_LOG_S:
+            row["slow"] = int(row.get("slow") or 0) + 1
+        count = int(row.get("count") or 0)
+        errors = int(row.get("errors") or 0)
+        detections = int(row.get("detected") or 0)
+        slow = int(row.get("slow") or 0)
+        last_log_ts = float(row.get("last_log_ts") or 0.0)
+        should_log = (
+            status != "ok"
+            or detected
+            or force_log
+            or elapsed_s >= OPENWAKEWORD_DETECT_SLOW_LOG_S
+            or count == 1
+            or count % OPENWAKEWORD_DETECT_LOG_EVERY == 0
+            or (now_ts - last_log_ts) >= 300.0
+        )
+        if should_log:
+            row["last_log_ts"] = now_ts
+
+    if not should_log:
+        return
+    logger.info(
+        "[nanowakeword] detect selector=%s status=%s detected=%s elapsed_ms=%.1f bytes=%s count=%s errors=%s slow=%s detections=%s%s",
+        selector_key,
+        status,
+        bool(detected),
+        elapsed_s * 1000.0,
+        int(audio_bytes_len or 0),
+        count,
+        errors,
+        slow,
+        detections,
+        f" detail={detail}" if detail else "",
+    )
+
+
 @app.websocket("/api/openwakeword/stream")
 async def stream_openwakeword(websocket: WebSocket) -> None:
     client_host = getattr(websocket.client, "host", "") if websocket.client is not None else ""
@@ -7415,6 +7540,7 @@ async def stream_openwakeword(websocket: WebSocket) -> None:
         or client_host
         or "remote"
     ).strip()
+    detector_selector = _openwakeword_detector_selector(selector, client_host)
     wake_word_hint = str(websocket.query_params.get("wake_word") or "").strip()
     audio_bits = _openwakeword_query_int(websocket, "bits", 16, minimum=8, maximum=32)
     audio_format = {
@@ -7423,7 +7549,12 @@ async def stream_openwakeword(websocket: WebSocket) -> None:
         "channels": _openwakeword_query_int(websocket, "channels", 1, minimum=1, maximum=2),
     }
     await websocket.accept()
-    logger.info("[openwakeword] stream-start selector=%s client=%s", selector, client_host or "-")
+    logger.info(
+        "[openwakeword] stream-start selector=%s detector=%s client=%s",
+        selector,
+        detector_selector,
+        client_host or "-",
+    )
     frame_count = 0
     processed_count = 0
     dropped_count = 0
@@ -7489,14 +7620,14 @@ async def stream_openwakeword(websocket: WebSocket) -> None:
             try:
                 detection = await asyncio.to_thread(
                     esphome_openwakeword_module.process_audio,
-                    selector,
+                    detector_selector,
                     bytes(audio_bytes),
                     audio_format,
                 )
             except Exception as exc:
                 detail = str(exc) or type(exc).__name__
                 _record_openwakeword_detect_request(
-                    selector=selector,
+                    selector=detector_selector,
                     status="error",
                     elapsed_s=time.time() - started_ts,
                     audio_bytes_len=audio_bytes_len,
@@ -7506,12 +7637,45 @@ async def stream_openwakeword(websocket: WebSocket) -> None:
                 continue
 
             if not isinstance(detection, dict) or not detection.get("detected"):
+                non_detect_detail = detail_prefix
+                force_log = False
+                if isinstance(detection, dict):
+                    diagnostic_logging = bool(detection.get("diagnostic_logging"))
+                    if diagnostic_logging:
+                        best_label = str(detection.get("best_label") or "")
+                        model_source = str(detection.get("model_source") or "")
+                        try:
+                            score = float(detection.get("score") or 0.0)
+                        except Exception:
+                            score = 0.0
+                        try:
+                            threshold = float(detection.get("threshold") or 0.0)
+                        except Exception:
+                            threshold = 0.0
+                        try:
+                            hit_count = int(detection.get("hit_count") or 0)
+                        except Exception:
+                            hit_count = 0
+                        try:
+                            patience = int(detection.get("patience") or 0)
+                        except Exception:
+                            patience = 0
+                        if best_label or model_source or score > 0.0:
+                            non_detect_detail = (
+                                f"{detail_prefix} best_label={best_label or '-'} score={score:.3f} "
+                                f"hits={hit_count}/{patience} threshold={threshold:.3f} model={model_source or '-'}"
+                            )
+                        if threshold > 0.0 and score >= max(0.2, threshold - 0.25):
+                            force_log = True
+                        if hit_count > 0:
+                            force_log = True
                 _record_openwakeword_detect_request(
-                    selector=selector,
+                    selector=detector_selector,
                     status="ok",
                     elapsed_s=time.time() - started_ts,
                     audio_bytes_len=audio_bytes_len,
-                    detail=detail_prefix,
+                    detail=non_detect_detail,
+                    force_log=force_log,
                 )
                 continue
 
@@ -7521,7 +7685,7 @@ async def stream_openwakeword(websocket: WebSocket) -> None:
                 score = 0.0
             wake_word = str(detection.get("wake_word") or wake_word_hint or "openwakeword")
             _record_openwakeword_detect_request(
-                selector=selector,
+                selector=detector_selector,
                 status="ok",
                 detected=True,
                 elapsed_s=time.time() - started_ts,
@@ -7554,11 +7718,214 @@ async def stream_openwakeword(websocket: WebSocket) -> None:
                 await receiver_task
         logger.info(
             "[openwakeword] stream-stop selector=%s frames=%s processed=%s dropped=%s",
-            selector,
+            detector_selector,
             frame_count,
             processed_count,
             dropped_count,
         )
+
+
+@app.websocket("/api/nanowakeword/stream")
+async def stream_nanowakeword(websocket: WebSocket) -> None:
+    client_host = getattr(websocket.client, "host", "") if websocket.client is not None else ""
+    selector = str(
+        websocket.query_params.get("selector")
+        or websocket.query_params.get("source_device")
+        or client_host
+        or "remote"
+    ).strip()
+    detector_selector = _openwakeword_detector_selector(selector, client_host)
+    wake_word_hint = str(websocket.query_params.get("wake_word") or "").strip()
+    audio_bits = _openwakeword_query_int(websocket, "bits", 16, minimum=8, maximum=32)
+    audio_format = {
+        "rate": _openwakeword_query_int(websocket, "rate", 16000, minimum=8000, maximum=48000),
+        "width": max(1, audio_bits // 8),
+        "channels": _openwakeword_query_int(websocket, "channels", 1, minimum=1, maximum=2),
+    }
+    await websocket.accept()
+    logger.info(
+        "[nanowakeword] stream-start selector=%s detector=%s client=%s",
+        selector,
+        detector_selector,
+        client_host or "-",
+    )
+    frame_count = 0
+    processed_count = 0
+    dropped_count = 0
+    audio_queue: asyncio.Queue[Tuple[float, bytes]] = asyncio.Queue(maxsize=OPENWAKEWORD_STREAM_QUEUE_MAX)
+    receiver_done = asyncio.Event()
+    receiver_task: Optional[asyncio.Task[Any]] = None
+
+    def drop_queued_frame() -> None:
+        nonlocal dropped_count
+        try:
+            audio_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return
+        dropped_count += 1
+
+    async def receive_audio_frames() -> None:
+        nonlocal frame_count
+        try:
+            while True:
+                message = await websocket.receive()
+                message_type = str(message.get("type") or "")
+                if message_type == "websocket.disconnect":
+                    break
+                audio_bytes = message.get("bytes")
+                if audio_bytes is None:
+                    continue
+                frame_count += 1
+                audio_bytes_len = len(audio_bytes or b"")
+                if not audio_bytes:
+                    continue
+                if audio_bytes_len > 512 * 1024:
+                    await websocket.send_json({"ok": False, "error": "NanoWakeWord audio chunk is too large."})
+                    await websocket.close(code=1009)
+                    break
+                while audio_queue.full():
+                    drop_queued_frame()
+                audio_queue.put_nowait((time.time(), bytes(audio_bytes)))
+        except WebSocketDisconnect:
+            pass
+        finally:
+            receiver_done.set()
+
+    try:
+        if not esphome_nanowakeword_module.nanowakeword_enabled():
+            await websocket.send_json({"ok": False, "error": "NanoWakeWord is disabled or missing a model."})
+            await websocket.close(code=1013)
+            return
+
+        receiver_task = asyncio.create_task(receive_audio_frames())
+        while True:
+            if receiver_done.is_set() and audio_queue.empty():
+                break
+            try:
+                received_ts, audio_bytes = await asyncio.wait_for(audio_queue.get(), timeout=0.5)
+            except asyncio.TimeoutError:
+                continue
+            started_ts = time.time()
+            audio_bytes_len = len(audio_bytes or b"")
+            processed_count += 1
+            queue_delay_ms = max(0.0, (started_ts - received_ts) * 1000.0)
+            detail_prefix = f"transport=ws queue_ms={queue_delay_ms:.1f} dropped={dropped_count}"
+
+            try:
+                detection = await asyncio.to_thread(
+                    esphome_nanowakeword_module.process_audio,
+                    detector_selector,
+                    bytes(audio_bytes),
+                    audio_format,
+                )
+            except Exception as exc:
+                detail = str(exc) or type(exc).__name__
+                _record_nanowakeword_detect_request(
+                    selector=detector_selector,
+                    status="error",
+                    elapsed_s=time.time() - started_ts,
+                    audio_bytes_len=audio_bytes_len,
+                    detail=f"{detail_prefix} error={detail}",
+                )
+                await websocket.send_json({"ok": False, "error": detail})
+                continue
+
+            if not isinstance(detection, dict) or not detection.get("detected"):
+                non_detect_detail = detail_prefix
+                force_log = False
+                if isinstance(detection, dict) and bool(detection.get("diagnostic_logging")):
+                    best_label = str(detection.get("best_label") or "")
+                    model_source = str(detection.get("model_source") or "")
+                    try:
+                        score = float(detection.get("score") or 0.0)
+                    except Exception:
+                        score = 0.0
+                    try:
+                        threshold = float(detection.get("threshold") or 0.0)
+                    except Exception:
+                        threshold = 0.0
+                    try:
+                        hit_count = int(detection.get("hit_count") or 0)
+                    except Exception:
+                        hit_count = 0
+                    try:
+                        patience = int(detection.get("patience") or 0)
+                    except Exception:
+                        patience = 0
+                    if best_label or model_source or score > 0.0:
+                        non_detect_detail = (
+                            f"{detail_prefix} best_label={best_label or '-'} score={score:.3f} "
+                            f"hits={hit_count}/{patience} threshold={threshold:.3f} model={model_source or '-'}"
+                        )
+                    if threshold > 0.0 and score >= max(0.2, threshold - 0.25):
+                        force_log = True
+                    if hit_count > 0:
+                        force_log = True
+                _record_nanowakeword_detect_request(
+                    selector=detector_selector,
+                    status="ok",
+                    elapsed_s=time.time() - started_ts,
+                    audio_bytes_len=audio_bytes_len,
+                    detail=non_detect_detail,
+                    force_log=force_log,
+                )
+                continue
+
+            try:
+                score = float(detection.get("score") or 0.0)
+            except Exception:
+                score = 0.0
+            wake_word = str(wake_word_hint or detection.get("wake_word") or "nanowakeword")
+            _record_nanowakeword_detect_request(
+                selector=detector_selector,
+                status="ok",
+                detected=True,
+                elapsed_s=time.time() - started_ts,
+                audio_bytes_len=audio_bytes_len,
+                detail=f"{detail_prefix} wake_word={wake_word} score={score:.3f}",
+            )
+            await websocket.send_json(
+                {
+                    "ok": True,
+                    "detected": True,
+                    "wake_word": wake_word,
+                    "score": score,
+                    "engine": "nanowakeword",
+                    "model_source": str(detection.get("model_source") or ""),
+                }
+            )
+            while not audio_queue.empty():
+                drop_queued_frame()
+    except WebSocketDisconnect:
+        pass
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        with contextlib.suppress(Exception):
+            await websocket.send_json({"ok": False, "error": str(exc) or type(exc).__name__})
+    finally:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            if receiver_task is not None:
+                receiver_task.cancel()
+                await receiver_task
+        logger.info(
+            "[nanowakeword] stream-stop selector=%s frames=%s processed=%s dropped=%s",
+            detector_selector,
+            frame_count,
+            processed_count,
+            dropped_count,
+        )
+
+
+@app.get("/api/nanowakeword/status")
+def nanowakeword_status() -> Dict[str, Any]:
+    return esphome_nanowakeword_module.status()
+
+
+@app.post("/api/nanowakeword/reset")
+def nanowakeword_reset() -> Dict[str, Any]:
+    esphome_nanowakeword_module.reset_detectors()
+    return esphome_nanowakeword_module.status()
 
 
 @app.get("/api/speech/tts/runtime/{asset_id}.wav")
@@ -8009,10 +8376,27 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
             for key in (esphome_result.get("changed_keys") or [])
             if str(key or "")
         ]
-        if any(key.startswith("VOICE_OPENWAKEWORD_") for key in changed_esphome_keys):
+        openwakeword_warmup_keys = {
+            "VOICE_OPENWAKEWORD_ENABLED",
+            "VOICE_OPENWAKEWORD_MODEL_SOURCE",
+            "VOICE_OPENWAKEWORD_INFERENCE_FRAMEWORK",
+            "VOICE_OPENWAKEWORD_DEVICE",
+            "VOICE_OPENWAKEWORD_THRESHOLD",
+            "VOICE_OPENWAKEWORD_PATIENCE",
+            "VOICE_OPENWAKEWORD_DEBOUNCE_S",
+            "VOICE_OPENWAKEWORD_VAD_THRESHOLD",
+        }
+        nanowakeword_warmup_keys = {
+            "VOICE_NANOWAKEWORD_ENABLED",
+            "VOICE_NANOWAKEWORD_MODEL_SOURCE",
+            "VOICE_NANOWAKEWORD_THRESHOLD",
+            "VOICE_NANOWAKEWORD_PATIENCE",
+            "VOICE_NANOWAKEWORD_DEBOUNCE_S",
+        }
+        if any(key in openwakeword_warmup_keys or key in nanowakeword_warmup_keys for key in changed_esphome_keys):
             speech_warmup_result = _start_speech_model_warmup(
                 get_shared_speech_settings(),
-                reason="openwakeword-settings-save",
+                reason="wakeword-settings-save",
             )
 
     emoji_keys = {
