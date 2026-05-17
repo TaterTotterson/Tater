@@ -38,11 +38,11 @@ Some Portals are paired with companion repos/apps that complete the end-user int
 </p>
 
 <p align="center">
-  <a href="https://github.com/TaterTotterson/Tater-MacOS">
-    <img src="images/companion-cards/tater-macos.png" alt="Tater MacOS" width="720">
+  <a href="https://taterassistant.com/portals/homekit.html">
+    <img src="images/companion-cards/homekit-shortcuts.png" alt="HomeKit Shortcuts" width="720">
   </a>
   <br>
-  <strong>Purpose:</strong> Menu bar companion app and bridge client for desktop chat, quick actions, and uploads.
+  <strong>Purpose:</strong> Shortcut guide for Siri -> HomeKit bridge -> Tater workflows.
 </p>
 
 <p align="center">
@@ -54,51 +54,11 @@ Some Portals are paired with companion repos/apps that complete the end-user int
 </p>
 
 <p align="center">
-  <a href="https://github.com/TaterTotterson/skin.cortana.tater-xbmc">
-    <img src="images/companion-cards/skin-cortana-tater-xbmc.png" alt="XBMC4Xbox Skin" width="720">
-  </a>
-  <br>
-  <strong>Purpose:</strong> OG Xbox/XBMC4Xbox skin and script integration for on-console Tater access.
-</p>
-
-<p align="center">
-  <a href="https://taterassistant.com/portals/homekit.html">
-    <img src="images/companion-cards/homekit-shortcuts.png" alt="HomeKit Shortcuts" width="720">
-  </a>
-  <br>
-  <strong>Purpose:</strong> Shortcut guide for Siri -> HomeKit bridge -> Tater workflows.
-</p>
-
-<p align="center">
-  <a href="https://github.com/TaterTotterson/Tater-OWW-Server">
-    <img src="images/companion-cards/tater-oww-server.png" alt="Tater OWW Server" width="720">
-  </a>
-  <br>
-  <strong>Purpose:</strong> Standalone openWakeWord WebSocket server for Tater satellites that need remote wake detection outside the main Tater app.
-</p>
-
-<p align="center">
-  <a href="https://github.com/TaterTotterson/Tater-NWW-Server">
-    <img src="images/companion-cards/tater-nww-server.png" alt="Tater NWW Server" width="720">
-  </a>
-  <br>
-  <strong>Purpose:</strong> Standalone NanoWakeWord WebSocket server for Tater satellites using remote NanoWakeWord wake detection.
-</p>
-
-<p align="center">
   <a href="https://github.com/TaterTotterson/microWakeWords">
     <img src="images/companion-cards/microwakewords.png" alt="microWakeWords" width="720">
   </a>
   <br>
   <strong>Purpose:</strong> Tater VoicePE, Satellite1, and related ESPHome firmware plus microWakeWord model assets.
-</p>
-
-<p align="center">
-  <a href="https://github.com/TaterTotterson/Tater-S3Box-Display">
-    <img src="images/companion-cards/tater-s3box-display.png" alt="S3Box Display" width="720">
-  </a>
-  <br>
-  <strong>Purpose:</strong> ESP32-S3-BOX display firmware for Tater voice and dashboard-style device experiences.
 </p>
 
 <p align="center">
@@ -118,6 +78,14 @@ Some Portals are paired with companion repos/apps that complete the end-user int
 </p>
 
 <p align="center">
+  <a href="https://github.com/TaterTotterson/nanoWakeWord-Trainer">
+    <img src="images/companion-cards/nanowakeword-trainer.png" alt="NanoWakeWord Trainer" width="720">
+  </a>
+  <br>
+  <strong>Purpose:</strong> Trainer for custom NanoWakeWord models used by Tater's local or standalone NanoWakeWord server.
+</p>
+
+<p align="center">
   <a href="https://github.com/TaterTotterson/openWakeWord-Trainer">
     <img src="images/companion-cards/openwakeword-trainer.png" alt="OWW Trainer" width="720">
   </a>
@@ -126,11 +94,43 @@ Some Portals are paired with companion repos/apps that complete the end-user int
 </p>
 
 <p align="center">
-  <a href="https://github.com/TaterTotterson/nanoWakeWord-Trainer">
-    <img src="images/companion-cards/nanowakeword-trainer.png" alt="NanoWakeWord Trainer" width="720">
+  <a href="https://github.com/TaterTotterson/Tater-MacOS">
+    <img src="images/companion-cards/tater-macos.png" alt="Tater MacOS" width="720">
   </a>
   <br>
-  <strong>Purpose:</strong> Trainer for custom NanoWakeWord models used by Tater's local or standalone NanoWakeWord server.
+  <strong>Purpose:</strong> Menu bar companion app and bridge client for desktop chat, quick actions, and uploads.
+</p>
+
+<p align="center">
+  <a href="https://github.com/TaterTotterson/Tater-NWW-Server">
+    <img src="images/companion-cards/tater-nww-server.png" alt="Tater NWW Server" width="720">
+  </a>
+  <br>
+  <strong>Purpose:</strong> Standalone NanoWakeWord WebSocket server for Tater satellites using remote NanoWakeWord wake detection.
+</p>
+
+<p align="center">
+  <a href="https://github.com/TaterTotterson/Tater-OWW-Server">
+    <img src="images/companion-cards/tater-oww-server.png" alt="Tater OWW Server" width="720">
+  </a>
+  <br>
+  <strong>Purpose:</strong> Standalone openWakeWord WebSocket server for Tater satellites that need remote wake detection outside the main Tater app.
+</p>
+
+<p align="center">
+  <a href="https://github.com/TaterTotterson/Tater-S3Box-Display">
+    <img src="images/companion-cards/tater-s3box-display.png" alt="S3Box Display" width="720">
+  </a>
+  <br>
+  <strong>Purpose:</strong> ESP32-S3-BOX display firmware for Tater voice and dashboard-style device experiences.
+</p>
+
+<p align="center">
+  <a href="https://github.com/TaterTotterson/skin.cortana.tater-xbmc">
+    <img src="images/companion-cards/skin-cortana-tater-xbmc.png" alt="XBMC4Xbox Skin" width="720">
+  </a>
+  <br>
+  <strong>Purpose:</strong> OG Xbox/XBMC4Xbox skin and script integration for on-console Tater access.
 </p>
 
 ---
