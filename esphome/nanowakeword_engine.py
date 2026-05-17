@@ -584,10 +584,31 @@ def _pcm_to_pcm16_mono_16k(detector: _DetectorState, audio_bytes: bytes, audio_f
     return data
 
 
-def _result_score(result: Any) -> float:
+def _float_score(value: Any) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return 0.0
+
+
+def _result_label_score(result: Any, fallback_label: str) -> Tuple[str, float]:
+    label = _text(fallback_label) or "nanowakeword"
     if isinstance(result, dict):
-        return float(result.get("score") or result.get("probability") or result.get("confidence") or 0.0)
-    return float(getattr(result, "score", 0.0) or getattr(result, "probability", 0.0) or getattr(result, "confidence", 0.0) or 0.0)
+        for key in ("score", "probability", "confidence"):
+            if key in result:
+                return label, _float_score(result.get(key))
+        scored = [
+            (_text(key), _float_score(value))
+            for key, value in result.items()
+            if _text(key)
+        ]
+        if scored:
+            return max(scored, key=lambda item: item[1])
+        return label, 0.0
+    for attr in ("score", "probability", "confidence"):
+        if hasattr(result, attr):
+            return label, _float_score(getattr(result, attr))
+    return label, 0.0
 
 
 def process_audio(selector: str, audio_bytes: bytes, audio_format: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -624,23 +645,25 @@ def process_audio(selector: str, audio_bytes: bytes, audio_format: Dict[str, Any
 
         for frame in frames:
             result = detector.model.predict(frame)
-            score = _result_score(result)
-            best_score = max(best_score, score)
+            label, score = _result_label_score(result, best_label)
+            if score >= best_score:
+                best_score = score
+                best_label = label or best_label
             now_ts = time.time()
             if score >= threshold:
-                detector.counts[best_label] = int(detector.counts.get(best_label, 0)) + 1
+                detector.counts[label] = int(detector.counts.get(label, 0)) + 1
             else:
-                detector.counts[best_label] = 0
+                detector.counts[label] = 0
             if (
                 score >= threshold
-                and int(detector.counts.get(best_label, 0)) >= patience
+                and int(detector.counts.get(label, 0)) >= patience
                 and (now_ts - float(detector.last_detection_ts or 0.0)) >= debounce_s
             ):
                 detector.last_detection_ts = now_ts
                 detector.reset()
                 return {
                     "detected": True,
-                    "wake_word": best_label,
+                    "wake_word": label or best_label,
                     "score": score,
                     "threshold": threshold,
                     "patience": patience,
