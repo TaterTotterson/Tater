@@ -1546,6 +1546,47 @@ def _usb_recovery_client_row(template_spec: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _firmware_action_client_row(selector: str, template_spec: Dict[str, Any]) -> Dict[str, Any]:
+    selector_token = _text(selector)
+    if _is_usb_recovery_selector(selector_token):
+        return _usb_recovery_client_row(template_spec)
+
+    client_row = esphome_runtime.client_row_snapshot_sync(selector_token)
+    if not isinstance(client_row, dict):
+        client_row = {}
+    else:
+        client_row = dict(client_row)
+
+    registry_row = esphome_runtime.satellite_lookup(selector_token)
+    registry_meta = registry_row.get("metadata") if isinstance(registry_row.get("metadata"), dict) else {}
+    registry_selected = bool(registry_meta.get("esphome_selected"))
+
+    if not client_row and isinstance(registry_row, dict) and registry_row:
+        client_row = {
+            "selector": selector_token,
+            "host": _text(registry_row.get("host")) or esphome_runtime.satellite_host_from_selector(selector_token),
+            "port": _as_int(registry_meta.get("esphome_port") or registry_row.get("port"), 0),
+            "connected": False,
+            "selected": registry_selected,
+            "source": _text(registry_row.get("source")) or "satellite_registry",
+            "device_info": {},
+        }
+
+    if client_row:
+        client_row.setdefault("selector", selector_token)
+        if not _text(client_row.get("host")):
+            client_row["host"] = _text(registry_row.get("host")) or esphome_runtime.satellite_host_from_selector(selector_token)
+        client_row["selected"] = bool(client_row.get("selected")) or registry_selected
+        device_info = client_row.get("device_info") if isinstance(client_row.get("device_info"), dict) else {}
+        if not device_info and isinstance(registry_row, dict):
+            display_name = _text(registry_row.get("name")) or selector_token
+            client_row["device_info"] = {
+                "name": display_name,
+                "friendly_name": display_name,
+            }
+    return client_row
+
+
 def _load_template_context(spec: Dict[str, Any], *, force_remote_refresh: bool = False) -> Dict[str, Any]:
     resolved = _resolve_template_source(spec, force_remote_refresh=force_remote_refresh)
     if not isinstance(resolved, dict):
@@ -3767,10 +3808,7 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
     if not isinstance(template_spec, dict):
         raise RuntimeError(f"Firmware template {template_key} is not supported.")
 
-    if _is_usb_recovery_selector(selector):
-        client_row = _usb_recovery_client_row(template_spec)
-    else:
-        client_row = esphome_runtime.client_row_snapshot_sync(selector)
+    client_row = _firmware_action_client_row(selector, template_spec)
     if not isinstance(client_row, dict):
         raise RuntimeError(f"ESPHome device {selector} is not available for firmware actions.")
     if not _is_usb_recovery_selector(selector):
