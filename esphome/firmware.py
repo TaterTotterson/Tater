@@ -1763,6 +1763,7 @@ def _build_device_context(
             "wake_word_model_url",
             "wake_model_stop_url",
             "openwakeword_server_url",
+            "nanowakeword_server_url",
             "openwakeword_http_timeout_ms",
             "openwakeword_max_failures",
         } or key.startswith("wake_cutoff_"):
@@ -1785,6 +1786,8 @@ def _build_device_context(
         if key == "tater_base_url":
             resolved_value = _normalize_http_base_url(resolved_value)
         if key == "openwakeword_server_url":
+            resolved_value = _normalize_http_base_url(resolved_value, default_scheme="ws")
+        if key == "nanowakeword_server_url":
             resolved_value = _normalize_http_base_url(resolved_value, default_scheme="ws")
         if key in auto_keys and host:
             resolved_value = host
@@ -1822,19 +1825,24 @@ def _build_device_context(
         elif key == "wake_engine":
             field_type = "select"
             engine_value = _lower(resolved_value) or "microwakeword"
-            if engine_value not in {"microwakeword", "openwakeword"}:
+            if engine_value not in {"microwakeword", "openwakeword", "nanowakeword"}:
                 engine_value = "microwakeword"
             field_value = engine_value
             field_options = [
                 {"value": "microwakeword", "label": "microWakeWord (device)"},
                 {"value": "openwakeword", "label": "openWakeWord (remote URL)"},
+                {"value": "nanowakeword", "label": "NanoWakeWord (remote URL)"},
             ]
-            description_parts.append("Choose whether the satellite listens locally or streams wake-word audio to the configured openWakeWord URL.")
+            description_parts.append("Choose whether the satellite listens locally or streams wake-word audio to a configured remote wake URL.")
         elif key == "openwakeword_server_url":
             placeholder = placeholder or "ws://tater.local:8501"
             description_parts.append("Base openWakeWord URL for the streaming detector. http:// and https:// values are accepted, but firmware converts them to ws:// or wss:// and streams audio only. If this endpoint fails, the device falls back to microWakeWord.")
+        elif key == "nanowakeword_server_url":
+            placeholder = placeholder or "ws://tater.local:8501"
+            description_parts.append("Base NanoWakeWord URL for the streaming detector. http:// and https:// values are accepted, but firmware converts them to ws:// or wss:// and streams audio only. If this endpoint fails, the device falls back to microWakeWord.")
         elif key == "openwakeword_http_timeout_ms":
             field_type = "number"
+            label = "Remote Wake Transport Timeout"
             field_value = _as_int(resolved_value, 3000, minimum=250, maximum=10000)
             field_min = 250
             field_max = 10000
@@ -1842,6 +1850,7 @@ def _build_device_context(
             description_parts.append("Remote openWakeWord transport timeout before the device counts a failed request.")
         elif key == "openwakeword_max_failures":
             field_type = "number"
+            label = "Remote Wake Max Failures"
             field_value = _as_int(resolved_value, 3, minimum=1, maximum=20)
             field_min = 1
             field_max = 20
@@ -2560,7 +2569,12 @@ def _normalize_profile_values(context: Dict[str, Any], values: Dict[str, Any]) -
 
         if key == "wake_engine":
             engine_value = _lower(raw_value)
-            normalized[key] = "openwakeword" if engine_value in {"openwakeword", "open_wake_word", "open wakeword"} else "microwakeword"
+            if engine_value in {"openwakeword", "open_wake_word", "open wakeword"}:
+                normalized[key] = "openwakeword"
+            elif engine_value in {"nanowakeword", "nano_wake_word", "nano wakeword"}:
+                normalized[key] = "nanowakeword"
+            else:
+                normalized[key] = "microwakeword"
             continue
 
         if key == "wifi_password":
@@ -2573,6 +2587,10 @@ def _normalize_profile_values(context: Dict[str, Any], values: Dict[str, Any]) -
             continue
 
         if key == "openwakeword_server_url":
+            normalized[key] = _normalize_http_base_url(raw_value, default_scheme="ws")
+            continue
+
+        if key == "nanowakeword_server_url":
             normalized[key] = _normalize_http_base_url(raw_value, default_scheme="ws")
             continue
 
