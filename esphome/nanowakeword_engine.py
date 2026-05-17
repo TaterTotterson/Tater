@@ -384,6 +384,7 @@ def download_trainer_model(*, trainer_url_value: Any, artifact_url: Any) -> Dict
     target = NANOWAKEWORD_MODEL_ROOT / "trainer" / (_slug(Path(filename).stem) or "custom") / filename
     path = _download_file(url, target, force=True)
     save_model_source(str(path))
+    reset_detectors()
     return {
         "ok": True,
         "trainer_url": base_url,
