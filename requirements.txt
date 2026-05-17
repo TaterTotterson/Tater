@@ -37,7 +37,7 @@ wyoming
 silero-vad
 webrtcvad-wheels
 openwakeword
-nanowakeword
+nanowakeword==2.1.2
 onnxruntime
 torch
 speechbrain==1.1.0

@@ -7,6 +7,7 @@ import logging
 import shutil
 import threading
 import time
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 from urllib import request as urllib_request
@@ -42,6 +43,12 @@ _LAST_DETECTOR_CLEANUP_TS = 0.0
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _package_version(package_name: str) -> str:
+    with contextlib.suppress(Exception):
+        return importlib_metadata.version(package_name)
+    return "unknown"
 
 
 def _lower(value: Any) -> str:
@@ -539,6 +546,7 @@ def status() -> Dict[str, Any]:
             "available": not bool(_ENGINE_ERROR),
             "error": _ENGINE_ERROR,
             "settings": settings,
+            "nanowakeword_version": _package_version("nanowakeword"),
             "detector_count": len(_DETECTORS),
             "warm_detector_loaded": _WARM_DETECTOR is not None,
             "detectors": {
