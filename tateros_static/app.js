@@ -2026,6 +2026,18 @@ function buildSettingInput(field, inputId) {
     return `<label>${safeLabel}<textarea id="${inputId}" data-setting-type="textarea" data-setting-key="${safeKey}">${escapeHtml(field.value ?? "")}</textarea>${safeDesc}</label>`;
   }
 
+  if (type === "file") {
+    const accept = String(field.accept || "").trim();
+    const acceptAttr = accept ? ` accept="${escapeHtml(accept)}"` : "";
+    const currentValue = String(field.value ?? "");
+    const currentSummary = currentValue
+      ? `Current file content saved (${currentValue.length.toLocaleString()} characters).`
+      : "No file saved.";
+    return `<label>${safeLabel}<input id="${inputId}" type="file"${acceptAttr} data-setting-type="file" data-setting-key="${safeKey}" /><textarea hidden data-setting-current-key="${safeKey}">${escapeHtml(
+      currentValue
+    )}</textarea><div class="small">${escapeHtml(currentSummary)}</div>${safeDesc}</label>`;
+  }
+
   const htmlType = type === "password" ? "password" : type === "number" ? "number" : "text";
   const numberAttrs =
     type === "number"
@@ -2046,7 +2058,7 @@ function buildSettingInput(field, inputId) {
   return `<label>${safeLabel}${inputHtml}${safeDesc}</label>`;
 }
 
-function getInputValue(input) {
+async function getInputValue(input) {
   const type = input.dataset.settingType || input.type;
   if (type === "multiselect") {
     return Array.from(input.selectedOptions || [])
@@ -2056,18 +2068,38 @@ function getInputValue(input) {
   if (type === "checkbox") {
     return input.checked;
   }
+  if (type === "file") {
+    const file = input.files && input.files.length ? input.files[0] : null;
+    if (!file) {
+      const key = String(input.dataset.settingKey || "").trim();
+      const current = Array.from(input.form?.querySelectorAll("[data-setting-current-key]") || []).find(
+        (item) => String(item?.dataset?.settingCurrentKey || "").trim() === key
+      );
+      return current ? current.value : "";
+    }
+    const text = await file.text();
+    const accept = String(input.getAttribute("accept") || "").toLowerCase();
+    if (accept.includes("json") || String(file.name || "").toLowerCase().endsWith(".json")) {
+      try {
+        JSON.parse(text);
+      } catch (error) {
+        throw new Error(`${file.name || "Selected file"} is not valid JSON.`);
+      }
+    }
+    return text;
+  }
   return input.value;
 }
 
-function collectFormValues(formElement) {
+async function collectFormValues(formElement) {
   const values = {};
-  formElement.querySelectorAll("[data-setting-key]").forEach((input) => {
+  for (const input of formElement.querySelectorAll("[data-setting-key]")) {
     const key = String(input.dataset.settingKey || "").trim();
     if (!key) {
-      return;
+      continue;
     }
-    values[key] = parseSettingValue(getInputValue(input), input.dataset.settingType || input.type);
-  });
+    values[key] = parseSettingValue(await getInputValue(input), input.dataset.settingType || input.type);
+  }
   return values;
 }
 
@@ -2186,7 +2218,6 @@ function ensureRuntimeSettingsModal() {
     if (typeof state.runtimeSettingsSaveHandler !== "function") {
       return;
     }
-    const values = collectFormValues(form);
     if (statusEl) {
       statusEl.textContent = "Saving...";
     }
@@ -2197,6 +2228,7 @@ function ensureRuntimeSettingsModal() {
       closeBtn.disabled = true;
     }
     try {
+      const values = await collectFormValues(form);
       const result = await state.runtimeSettingsSaveHandler(values);
       const successText = String(result?.message || "Settings saved.").trim() || "Settings saved.";
       if (statusEl) {

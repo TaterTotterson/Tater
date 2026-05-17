@@ -448,6 +448,7 @@ def _setting_fields(required: Dict[str, Any], current: Dict[str, str]) -> List[D
                 "type": setting_meta.get("type", "text"),
                 "description": setting_meta.get("description", ""),
                 "options": setting_meta.get("options", []),
+                "accept": setting_meta.get("accept", ""),
                 "value": raw_value,
                 "default": default_value,
             }
