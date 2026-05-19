@@ -40,6 +40,8 @@ openwakeword
 nanowakeword==2.1.2
 onnxruntime
 torch
+torchinfo
+matplotlib
 speechbrain==1.1.0
 transformers
 faster-whisper

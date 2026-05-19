@@ -7,6 +7,7 @@ import logging
 import shutil
 import threading
 import time
+from collections import deque
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -21,13 +22,17 @@ logger = logging.getLogger(__name__)
 NANOWAKEWORD_SETTINGS_HASH_KEY = "voice_nanowakeword_settings"
 NANOWAKEWORD_TRAINER_URL_KEY = "voice_nanowakeword:trainer_url"
 NANOWAKEWORD_MODEL_ROOT = Path(__file__).resolve().parents[1] / "agent_lab" / "models" / "nanowakeword"
+NANOWAKEWORD_SUPPORT_MODEL_ROOT = NANOWAKEWORD_MODEL_ROOT / "support"
 
 DEFAULT_NANOWAKEWORD_TRAINER_URL = "http://127.0.0.1:8792"
 DEFAULT_NANOWAKEWORD_ENABLED = True
 DEFAULT_NANOWAKEWORD_MODEL_SOURCE = ""
+DEFAULT_NANOWAKEWORD_DEVICE = "auto"
 DEFAULT_NANOWAKEWORD_THRESHOLD = 0.90
 DEFAULT_NANOWAKEWORD_PATIENCE = 2
 DEFAULT_NANOWAKEWORD_DEBOUNCE_S = 4.0
+DEFAULT_NANOWAKEWORD_STREAM_QUEUE_MAX = 12
+DEFAULT_NANOWAKEWORD_DROP_QUEUED_FRAMES = True
 DEFAULT_NANOWAKEWORD_DIAGNOSTIC_LOGGING = False
 _MODEL_SUFFIXES = {".onnx", ".pt", ".pth"}
 
@@ -82,6 +87,15 @@ def _as_int(value: Any, default: int, *, minimum: int, maximum: int) -> int:
     return max(int(minimum), min(int(maximum), parsed))
 
 
+def _normalize_device(value: Any) -> str:
+    token = _lower(value)
+    if token in {"cpu", "off", "none"}:
+        return "cpu"
+    if token in {"gpu", "cuda", "nvidia", "nvidia_cuda"}:
+        return "gpu"
+    return DEFAULT_NANOWAKEWORD_DEVICE
+
+
 def _setting(name: str, default: Any = "") -> Any:
     key = f"VOICE_NANOWAKEWORD_{name.upper()}"
     with contextlib.suppress(Exception):
@@ -99,9 +113,20 @@ def settings_snapshot() -> Dict[str, Any]:
     return {
         "enabled": _as_bool(_setting("enabled", DEFAULT_NANOWAKEWORD_ENABLED), DEFAULT_NANOWAKEWORD_ENABLED),
         "model_source": _text(_setting("model_source", DEFAULT_NANOWAKEWORD_MODEL_SOURCE)),
+        "device": _normalize_device(_setting("device", DEFAULT_NANOWAKEWORD_DEVICE)),
         "threshold": _as_float(_setting("threshold", DEFAULT_NANOWAKEWORD_THRESHOLD), DEFAULT_NANOWAKEWORD_THRESHOLD, minimum=0.01, maximum=0.99),
         "patience": _as_int(_setting("patience", DEFAULT_NANOWAKEWORD_PATIENCE), DEFAULT_NANOWAKEWORD_PATIENCE, minimum=1, maximum=10),
         "debounce_s": _as_float(_setting("debounce_s", DEFAULT_NANOWAKEWORD_DEBOUNCE_S), DEFAULT_NANOWAKEWORD_DEBOUNCE_S, minimum=0.0, maximum=30.0),
+        "stream_queue_max": _as_int(
+            _setting("stream_queue_max", DEFAULT_NANOWAKEWORD_STREAM_QUEUE_MAX),
+            DEFAULT_NANOWAKEWORD_STREAM_QUEUE_MAX,
+            minimum=1,
+            maximum=120,
+        ),
+        "drop_queued_frames": _as_bool(
+            _setting("drop_queued_frames", DEFAULT_NANOWAKEWORD_DROP_QUEUED_FRAMES),
+            DEFAULT_NANOWAKEWORD_DROP_QUEUED_FRAMES,
+        ),
         "diagnostic_logging": _as_bool(
             _setting("diagnostic_logging", DEFAULT_NANOWAKEWORD_DIAGNOSTIC_LOGGING),
             DEFAULT_NANOWAKEWORD_DIAGNOSTIC_LOGGING,
@@ -128,6 +153,13 @@ def _slug(value: Any) -> str:
     return "_".join(part for part in token.split("_") if part)
 
 
+def _is_support_model_path(path: Path) -> bool:
+    with contextlib.suppress(Exception):
+        path.resolve().relative_to(NANOWAKEWORD_SUPPORT_MODEL_ROOT.resolve())
+        return True
+    return False
+
+
 def _download_file(url: str, target: Path, *, timeout: float = 120.0, force: bool = False) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     if not force and target.exists() and target.stat().st_size > 0:
@@ -143,6 +175,12 @@ def _download_file(url: str, target: Path, *, timeout: float = 120.0, force: boo
     return target
 
 
+def _try_download_file(url: str, target: Path, *, timeout: float = 20.0, force: bool = False) -> Optional[Path]:
+    with contextlib.suppress(Exception):
+        return _download_file(url, target, timeout=timeout, force=force)
+    return None
+
+
 def _local_model_matches(filename: str) -> list[Path]:
     name = _text(filename)
     if not name or not NANOWAKEWORD_MODEL_ROOT.exists():
@@ -150,7 +188,7 @@ def _local_model_matches(filename: str) -> list[Path]:
     return [
         path
         for path in sorted(NANOWAKEWORD_MODEL_ROOT.rglob(name))
-        if path.is_file() and path.suffix.lower() in _MODEL_SUFFIXES
+        if path.is_file() and path.suffix.lower() in _MODEL_SUFFIXES and not _is_support_model_path(path)
     ]
 
 
@@ -168,6 +206,7 @@ def _local_model_option(path: Path) -> Dict[str, Any]:
         "label": f"{stem} ({suffix})",
         "name": path.name,
         "source": source,
+        "format": suffix.lower(),
     }
 
 
@@ -177,7 +216,7 @@ def _local_model_options() -> list[Dict[str, Any]]:
     rows = [
         _local_model_option(path)
         for path in sorted(NANOWAKEWORD_MODEL_ROOT.rglob("*"))
-        if path.is_file() and path.suffix.lower() in _MODEL_SUFFIXES
+        if path.is_file() and path.suffix.lower() in _MODEL_SUFFIXES and not _is_support_model_path(path)
     ]
     rows.sort(key=lambda row: (_text(row.get("source")).lower(), _text(row.get("label")).lower()))
     return rows
@@ -390,6 +429,7 @@ def download_trainer_model(*, trainer_url_value: Any, artifact_url: Any) -> Dict
     filename = _safe_filename(Path(urlparse(url).path).name)
     target = NANOWAKEWORD_MODEL_ROOT / "trainer" / (_slug(Path(filename).stem) or "custom") / filename
     path = _download_file(url, target, force=True)
+    _download_trainer_sidecars(url, path)
     save_model_source(str(path))
     reset_detectors()
     return {
@@ -401,6 +441,24 @@ def download_trainer_model(*, trainer_url_value: Any, artifact_url: Any) -> Dict
         "name": filename,
         "option": _local_model_option(path),
     }
+
+
+def _download_trainer_sidecars(artifact_url: str, model_path: Path) -> None:
+    parsed = urlparse(artifact_url)
+    if not parsed.path:
+        return
+    suffix = Path(parsed.path).suffix
+    if not suffix:
+        return
+    base_url = artifact_url[: -len(suffix)]
+    sidecars = {
+        ".json": model_path.with_suffix(".json"),
+        ".metadata.json": model_path.with_name(f"{model_path.stem}.metadata.json"),
+        ".yaml": model_path.with_suffix(".yaml"),
+        ".train.yaml": model_path.with_name(f"{model_path.stem}.train.yaml"),
+    }
+    for sidecar_suffix, target in sidecars.items():
+        _try_download_file(f"{base_url}{sidecar_suffix}", target, force=True)
 
 
 def _resolve_model_path(source: str) -> Path:
@@ -415,17 +473,342 @@ def _resolve_model_path(source: str) -> Path:
     return path
 
 
+def _onnx_cuda_available() -> bool:
+    with contextlib.suppress(Exception):
+        import onnxruntime as ort
+
+        return "CUDAExecutionProvider" in set(ort.get_available_providers())
+    return False
+
+
+def _torch_cuda_available() -> bool:
+    with contextlib.suppress(Exception):
+        import torch
+
+        cuda_mod = getattr(torch, "cuda", None)
+        return cuda_mod is not None and bool(cuda_mod.is_available())
+    return False
+
+
+def _effective_device(requested: Any, *, runtime: str) -> str:
+    device = _normalize_device(requested)
+    if device == "cpu":
+        return "cpu"
+    if runtime == "torch":
+        return "gpu" if _torch_cuda_available() else "cpu"
+    return "gpu" if _onnx_cuda_available() else "cpu"
+
+
+def _configure_nanowakeword_support_models() -> Path:
+    """Keep NanoWakeWord's feature/VAD ONNX files in Tater's model tree."""
+    target_base = NANOWAKEWORD_SUPPORT_MODEL_ROOT
+    target_base.mkdir(parents=True, exist_ok=True)
+    try:
+        from nanowakeword.interpreter.models import models as nww_models
+    except Exception:
+        logger.debug("[native-voice] failed importing NanoWakeWord model registry", exc_info=True)
+        return target_base
+
+    old_base: Optional[Path] = None
+    with contextlib.suppress(Exception):
+        old_base = Path(getattr(nww_models, "_base_dir")).resolve()
+    registry = getattr(nww_models, "_registry", {})
+    if isinstance(registry, dict) and old_base is not None and old_base != target_base.resolve():
+        for filename, entry in registry.items():
+            if not isinstance(entry, dict):
+                continue
+            subdir = _text(entry.get("subdir"))
+            if not filename or not subdir:
+                continue
+            source = old_base / subdir / str(filename)
+            target = target_base / subdir / str(filename)
+            if source.exists() and source.is_file() and not target.exists():
+                with contextlib.suppress(Exception):
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, target)
+    with contextlib.suppress(Exception):
+        setattr(nww_models, "_base_dir", target_base.resolve())
+    return target_base
+
+
+class _DeviceNanoInterpreter:
+    @staticmethod
+    def load_model(model_path: str, *, device: str = "cpu", **kwargs: Any) -> Any:
+        _configure_nanowakeword_support_models()
+        from nanowakeword import NanoInterpreter
+
+        class DeviceAwareNanoInterpreter(NanoInterpreter):  # type: ignore[misc, valid-type]
+            def __init__(self, wakeword_models: list[str], **inner_kwargs: Any) -> None:
+                requested_device = _normalize_device(inner_kwargs.pop("device", "cpu"))
+                self._tater_nww_device = "gpu" if requested_device == "gpu" else "cpu"
+                inner_kwargs.setdefault("device", self._tater_nww_device)
+                super().__init__(wakeword_models, **inner_kwargs)
+
+            def _create_onnx_session(self, path: str) -> Any:
+                session_options = self._ort.SessionOptions()
+                session_options.inter_op_num_threads = 1
+                session_options.intra_op_num_threads = 1
+                providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if self._tater_nww_device == "gpu" else ["CPUExecutionProvider"]
+                return self._ort.InferenceSession(path, sess_options=session_options, providers=providers)
+
+        return DeviceAwareNanoInterpreter.load_model(model_path, device=device, **kwargs)
+
+
+def _read_json(path: Path) -> Dict[str, Any]:
+    with contextlib.suppress(Exception):
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+    return {}
+
+
+def _read_yaml(path: Path) -> Dict[str, Any]:
+    with contextlib.suppress(Exception):
+        import yaml
+
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+    return {}
+
+
+def _torch_sidecar_config(model_path: Path, metadata: Dict[str, Any]) -> Dict[str, Any]:
+    candidates = [
+        model_path.with_suffix(".yaml"),
+        model_path.with_name(f"{model_path.stem}.train.yaml"),
+        model_path.parent / f"{model_path.stem}.yaml",
+    ]
+    config_path = _text(metadata.get("config"))
+    if config_path:
+        candidates.append(Path(config_path).expanduser())
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            config = _read_yaml(candidate)
+            if config:
+                return config
+    config = metadata.get("training_config") or metadata.get("config_data")
+    return dict(config) if isinstance(config, dict) else {}
+
+
+def _torch_metadata(model_path: Path) -> Dict[str, Any]:
+    for candidate in (
+        model_path.with_suffix(".json"),
+        model_path.with_name(f"{model_path.stem}.metadata.json"),
+        model_path.parent / f"{model_path.stem}.json",
+    ):
+        if candidate.exists() and candidate.is_file():
+            data = _read_json(candidate)
+            if data:
+                return data
+    return {}
+
+
+def _strip_state_dict_prefix(state_dict: Dict[str, Any]) -> Dict[str, Any]:
+    if not state_dict:
+        return state_dict
+    if all(str(key).startswith("module.") for key in state_dict):
+        return {str(key)[7:]: value for key, value in state_dict.items()}
+    return {str(key): value for key, value in state_dict.items()}
+
+
+def _state_dict_model_type(state_dict: Dict[str, Any]) -> str:
+    keys = set(state_dict)
+    if any(key.startswith("model.lstm.") for key in keys):
+        return "lstm"
+    if any(key.startswith("model.gru.") for key in keys):
+        return "gru"
+    if any(key.startswith("model.conv1.") for key in keys):
+        return "cnn"
+    if any(key.startswith("model.layer1.") and "weight_ih_l0" in key for key in keys):
+        return "rnn"
+    if any(key.startswith("model.cnn.") for key in keys):
+        return "crnn"
+    if any(key.startswith("model.tcn_blocks.") for key in keys):
+        return "tcn"
+    if any(key.startswith("model.quartznet_blocks.") for key in keys):
+        return "quartznet"
+    if any(key.startswith("model.conformer_blocks.") for key in keys):
+        return "conformer"
+    if any(key.startswith("model.attn_branch") or key.startswith("model.branchformer") for key in keys):
+        return "e_branchformer"
+    if any(key.startswith("model.input_proj.") for key in keys):
+        return "transformer"
+    return "dnn"
+
+
+def _tensor_shape(state_dict: Dict[str, Any], key: str) -> tuple[int, ...]:
+    tensor = state_dict.get(key)
+    shape = getattr(tensor, "shape", None)
+    if shape is None:
+        return ()
+    return tuple(int(item) for item in shape)
+
+
+def _count_layer_indices(state_dict: Dict[str, Any], prefix: str) -> int:
+    highest = -1
+    for key in state_dict:
+        if not key.startswith(prefix):
+            continue
+        token = key[len(prefix) :].split(".", 1)[0]
+        if not token.startswith("weight_ih_l"):
+            continue
+        with contextlib.suppress(Exception):
+            highest = max(highest, int(token.replace("weight_ih_l", "").replace("_reverse", "")))
+    return max(1, highest + 1)
+
+
+def _infer_torch_config(state_dict: Dict[str, Any], metadata: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
+    model_type = _lower(config.get("model_type") or metadata.get("model_type")) or _state_dict_model_type(state_dict)
+    classifier_shape = _tensor_shape(state_dict, "classifier.0.weight")
+    embedding_dim = int(config.get("embedding_dim") or (classifier_shape[1] if len(classifier_shape) == 2 else 64))
+    input_shape = config.get("input_shape")
+    if not isinstance(input_shape, (list, tuple)) or len(input_shape) != 2:
+        input_shape = (16, 96)
+    input_shape = (int(input_shape[0]), int(input_shape[1]))
+    layer_size = int(config.get("layer_size") or config.get("layer_dim") or 32)
+    n_blocks = int(config.get("n_blocks") or 1)
+
+    if model_type == "dnn":
+        layer1_shape = _tensor_shape(state_dict, "model.layer1.weight")
+        if len(layer1_shape) == 2:
+            layer_size = layer1_shape[0]
+            if layer1_shape[1] % 96 == 0:
+                input_shape = (max(1, layer1_shape[1] // 96), 96)
+        block_indices = [
+            int(key.split(".")[2])
+            for key in state_dict
+            if key.startswith("model.blocks.") and len(key.split(".")) > 3 and key.split(".")[2].isdigit()
+        ]
+        if block_indices:
+            n_blocks = max(block_indices) + 1
+    elif model_type == "lstm":
+        hidden_shape = _tensor_shape(state_dict, "model.lstm.weight_hh_l0")
+        input_shape_ih = _tensor_shape(state_dict, "model.lstm.weight_ih_l0")
+        if len(hidden_shape) == 2:
+            layer_size = hidden_shape[1]
+        if len(input_shape_ih) == 2:
+            input_shape = (input_shape[0], input_shape_ih[1])
+        n_blocks = _count_layer_indices(state_dict, "model.lstm.")
+    elif model_type == "gru":
+        hidden_shape = _tensor_shape(state_dict, "model.gru.weight_hh_l0")
+        input_shape_ih = _tensor_shape(state_dict, "model.gru.weight_ih_l0")
+        if len(hidden_shape) == 2:
+            layer_size = hidden_shape[1]
+        if len(input_shape_ih) == 2:
+            input_shape = (input_shape[0], input_shape_ih[1])
+        n_blocks = _count_layer_indices(state_dict, "model.gru.")
+    elif model_type == "rnn":
+        input_shape_ih = _tensor_shape(state_dict, "model.layer1.weight_ih_l0")
+        if len(input_shape_ih) == 2:
+            input_shape = (input_shape[0], input_shape_ih[1])
+        n_blocks = _count_layer_indices(state_dict, "model.layer1.")
+
+    return {
+        **config,
+        "model_type": model_type,
+        "input_shape": input_shape,
+        "embedding_dim": embedding_dim,
+        "layer_size": layer_size,
+        "n_blocks": n_blocks,
+        "dropout_prob": float(config.get("dropout_prob") or 0.0),
+    }
+
+
+class _TorchNanoInterpreter:
+    def __init__(self, model_path: Path, *, requested_device: str) -> None:
+        _configure_nanowakeword_support_models()
+        import torch
+        from nanowakeword.data.AudioFeatures import AudioFeatures
+        from nanowakeword.modules.model import Model
+
+        self.model_path = str(model_path)
+        self.model_name = model_path.stem or "nanowakeword"
+        self.prediction_buffer: deque[float] = deque(maxlen=30)
+        self.device_name = _effective_device(requested_device, runtime="torch")
+        self.device = torch.device("cuda:0" if self.device_name == "gpu" else "cpu")
+        payload = torch.load(str(model_path), map_location="cpu")
+        if hasattr(payload, "eval") and callable(getattr(payload, "eval", None)):
+            self.model = payload.to(self.device).eval()
+            input_shape = getattr(payload, "input_shape", (16, 96))
+            self.required_frames = int(input_shape[0] if isinstance(input_shape, (list, tuple)) and input_shape else 16)
+            self.preprocessor = AudioFeatures(device="gpu" if self.device_name == "gpu" else "cpu")
+            return
+
+        if isinstance(payload, dict) and isinstance(payload.get("state_dict"), dict):
+            state_dict = payload["state_dict"]
+        elif isinstance(payload, dict) and isinstance(payload.get("model_state_dict"), dict):
+            state_dict = payload["model_state_dict"]
+        elif isinstance(payload, dict):
+            state_dict = payload
+        else:
+            raise RuntimeError("Unsupported NanoWakeWord PyTorch artifact. Expected a state_dict or nn.Module.")
+
+        state_dict = _strip_state_dict_prefix(state_dict)
+        metadata = _torch_metadata(model_path)
+        sidecar_config = _torch_sidecar_config(model_path, metadata)
+        inferred = _infer_torch_config(state_dict, metadata, sidecar_config)
+        input_shape = tuple(inferred["input_shape"])
+        self.required_frames = int(input_shape[0])
+        model = Model(
+            inferred,
+            model_name=self.model_name,
+            n_classes=1,
+            input_shape=input_shape,
+            model_type=str(inferred["model_type"]),
+            layer_dim=int(inferred["layer_size"]),
+            n_blocks=int(inferred["n_blocks"]),
+            dropout_prob=float(inferred["dropout_prob"]),
+        )
+        model.load_state_dict(state_dict)
+        self.model = model.to(self.device).eval()
+        self.preprocessor = AudioFeatures(device="gpu" if self.device_name == "gpu" else "cpu")
+
+    def reset(self) -> None:
+        with contextlib.suppress(Exception):
+            self.preprocessor.reset()
+        self.prediction_buffer.clear()
+
+    def predict(self, x: Any) -> Dict[str, float]:
+        import torch
+
+        n_prepared_samples = self.preprocessor(x)
+        if n_prepared_samples < 1280:
+            return {self.model_name: 0.0}
+        if self.preprocessor.feature_buffer.shape[0] < self.required_frames:
+            return {self.model_name: 0.0}
+        features = self.preprocessor.get_features(self.required_frames)
+        tensor = torch.from_numpy(features).to(self.device)
+        with torch.inference_mode():
+            logits = self.model(tensor)
+            score = torch.sigmoid(logits.reshape(-1)[0]).detach().cpu().item()
+        if len(self.prediction_buffer) < 5:
+            score = 0.0
+        self.prediction_buffer.append(float(score))
+        return {self.model_name: float(score)}
+
+
 class _DetectorState:
     def __init__(self, settings: Dict[str, Any], *, selector: str = "") -> None:
         import numpy as np  # noqa: F401
-        from nanowakeword import NanoInterpreter
 
         model_source = _text(settings.get("model_source"))
         model_path = _resolve_model_path(model_source)
-        self.model = NanoInterpreter.load_model(str(model_path))
+        suffix = model_path.suffix.lower()
+        requested_device = _normalize_device(settings.get("device"))
+        runtime = "torch" if suffix in {".pt", ".pth"} else "onnx"
+        self.device = _effective_device(requested_device, runtime=runtime)
+        if requested_device == "gpu" and self.device != "gpu":
+            logger.warning("[native-voice] NanoWakeWord GPU requested but unavailable; using CPU selector=%s model=%s", selector, model_path)
+        _configure_nanowakeword_support_models()
+        if runtime == "torch":
+            self.model = _TorchNanoInterpreter(model_path, requested_device=requested_device)
+            self.device = getattr(self.model, "device_name", self.device)
+        else:
+            self.model = _DeviceNanoInterpreter.load_model(str(model_path), device=self.device)
         self.selector = selector
         self.model_source = model_source
         self.model_path = str(model_path)
+        self.runtime = runtime
         self.lock = threading.Lock()
         self.ratecv_state: Any = None
         self.counts: Dict[str, int] = {}
@@ -443,6 +826,7 @@ def _engine_key(settings: Dict[str, Any]) -> str:
     return "|".join(
         [
             _text(settings.get("model_source")),
+            _text(settings.get("device")),
             _text(settings.get("threshold")),
             _text(settings.get("patience")),
             _text(settings.get("debounce_s")),
@@ -498,7 +882,13 @@ def _ensure_detector(selector: str) -> _DetectorState:
             detector.last_seen_ts = now_ts
             _DETECTORS[selector_token] = detector
             _WARM_DETECTOR = None
-            logger.info("[native-voice] assigned warm NanoWakeWord detector selector=%s model=%s", selector_token, detector.model_source)
+            logger.info(
+                "[native-voice] assigned warm NanoWakeWord detector selector=%s model=%s runtime=%s device=%s",
+                selector_token,
+                detector.model_source,
+                detector.runtime,
+                detector.device,
+            )
             return detector
     try:
         detector = _new_detector(settings, selector=selector_token)
@@ -511,7 +901,13 @@ def _ensure_detector(selector: str) -> _DetectorState:
         if existing is not None:
             return existing
         _DETECTORS[selector_token] = detector
-        logger.info("[native-voice] loaded NanoWakeWord detector selector=%s model=%s", selector_token, detector.model_source)
+        logger.info(
+            "[native-voice] loaded NanoWakeWord detector selector=%s model=%s runtime=%s device=%s",
+            selector_token,
+            detector.model_source,
+            detector.runtime,
+            detector.device,
+        )
         return detector
 
 
@@ -534,7 +930,7 @@ def warmup_model(*, enabled_only: bool = True) -> str:
         _WARM_DETECTOR = detector
         _DETECTORS["__warmup__"] = detector
         _ENGINE_ERROR = ""
-    return f"loaded NanoWakeWord model {detector.model_source}"
+    return f"loaded NanoWakeWord model {detector.model_source} on {detector.device}/{detector.runtime}"
 
 
 def status() -> Dict[str, Any]:
@@ -547,6 +943,7 @@ def status() -> Dict[str, Any]:
             "error": _ENGINE_ERROR,
             "settings": settings,
             "nanowakeword_version": _package_version("nanowakeword"),
+            "support_model_root": str(NANOWAKEWORD_SUPPORT_MODEL_ROOT),
             "detector_count": len(_DETECTORS),
             "warm_detector_loaded": _WARM_DETECTOR is not None,
             "detectors": {
@@ -555,6 +952,8 @@ def status() -> Dict[str, Any]:
                     "last_detection_ts": detector.last_detection_ts,
                     "model_source": detector.model_source,
                     "model_path": detector.model_path,
+                    "runtime": detector.runtime,
+                    "device": detector.device,
                 }
                 for key, detector in _DETECTORS.items()
             },
@@ -678,6 +1077,8 @@ def process_audio(selector: str, audio_bytes: bytes, audio_format: Dict[str, Any
                     "patience": patience,
                     "engine": "nanowakeword",
                     "model_source": detector.model_source,
+                    "runtime": detector.runtime,
+                    "device": detector.device,
                     "diagnostic_logging": bool(settings.get("diagnostic_logging")),
                 }
         return {
@@ -689,6 +1090,8 @@ def process_audio(selector: str, audio_bytes: bytes, audio_format: Dict[str, Any
             "hit_count": int(detector.counts.get(best_label, 0)),
             "engine": "nanowakeword",
             "model_source": detector.model_source,
+            "runtime": detector.runtime,
+            "device": detector.device,
             "diagnostic_logging": bool(settings.get("diagnostic_logging")),
         }
     return None

@@ -179,6 +179,66 @@ _TEMPLATE_SPECS: tuple[Dict[str, Any], ...] = (
         },
     },
     {
+        "key": "respeaker_lite",
+        "label": "ReSpeaker Lite",
+        "source_urls": [
+            "https://github.com/TaterTotterson/microWakeWords/raw/refs/heads/main/respeakerLite-TaterTimer.yaml",
+        ],
+        "candidates": [
+            ("microWakeWords", "respeakerLite-TaterTimer.yaml"),
+        ],
+        "fixed_keys": {"device_name"},
+        "auto_keys": {"ha_voice_ip"},
+        "match_tokens": {
+            "respeaker lite",
+            "respeaker_lite",
+            "respeakerlite",
+            "tater-respeaker-lite",
+            "tater respeaker lite",
+            "tater.respeaker_lite",
+        },
+    },
+    {
+        "key": "koala",
+        "label": "Koala Satellite",
+        "source_urls": [
+            "https://github.com/TaterTotterson/microWakeWords/raw/refs/heads/main/koala-TaterTimer.yaml",
+        ],
+        "candidates": [
+            ("microWakeWords", "koala-TaterTimer.yaml"),
+        ],
+        "fixed_keys": {"device_name"},
+        "auto_keys": {"ha_voice_ip"},
+        "match_tokens": {
+            "koala",
+            "koala satellite",
+            "tater-koala",
+            "tater koala",
+            "tater.koala",
+        },
+    },
+    {
+        "key": "respeaker_xvf3800",
+        "label": "ReSpeaker XVF3800",
+        "source_urls": [
+            "https://github.com/TaterTotterson/microWakeWords/raw/refs/heads/main/respeakerXVF3800-TaterTimer.yaml",
+        ],
+        "candidates": [
+            ("microWakeWords", "respeakerXVF3800-TaterTimer.yaml"),
+        ],
+        "fixed_keys": {"device_name"},
+        "auto_keys": {"ha_voice_ip"},
+        "match_tokens": {
+            "respeaker xvf3800",
+            "respeaker_xvf3800",
+            "respeakerxvf3800",
+            "xvf3800",
+            "tater-respeaker-xvf3800",
+            "tater respeaker xvf3800",
+            "tater.respeaker_xvf3800",
+        },
+    },
+    {
         "key": "s3box_display",
         "label": "Tater ESP32-S3-BOX-3 Display",
         "source_urls": [
