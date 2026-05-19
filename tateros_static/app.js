@@ -15052,7 +15052,7 @@ async function loadSettingsView() {
             <div class="settings-subpanel" data-esphome-panel="firmware">
               ${renderSettingsSectionIntro(
                 "Firmware",
-                "Build OTA firmware or browser USB installers for VoicePE, Satellite1, and ESP32-S3-BOX-3 display devices after reviewing template substitutions.",
+                "Build OTA firmware or browser USB installers for Tater voice satellites and ESP32-S3-BOX-3 display devices after reviewing template substitutions.",
                 "FW",
                 "subtle"
               )}

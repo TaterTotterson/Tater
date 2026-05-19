@@ -152,7 +152,7 @@ dotenv.load_dotenv()
 logger = logging.getLogger("tateros")
 OPENWAKEWORD_DETECT_LOG_EVERY = 120
 OPENWAKEWORD_DETECT_SLOW_LOG_S = 1.0
-OPENWAKEWORD_STREAM_QUEUE_MAX = 4
+OPENWAKEWORD_STREAM_QUEUE_MAX = 12
 openwakeword_detect_stats_lock = threading.Lock()
 openwakeword_detect_stats: Dict[str, Dict[str, Any]] = {}
 nanowakeword_detect_stats_lock = threading.Lock()
@@ -7549,27 +7549,36 @@ async def stream_openwakeword(websocket: WebSocket) -> None:
         "width": max(1, audio_bits // 8),
         "channels": _openwakeword_query_int(websocket, "channels", 1, minimum=1, maximum=2),
     }
+    stream_settings = esphome_openwakeword_module.settings_snapshot()
+    try:
+        stream_queue_max = max(1, min(120, int(stream_settings.get("stream_queue_max") or OPENWAKEWORD_STREAM_QUEUE_MAX)))
+    except Exception:
+        stream_queue_max = OPENWAKEWORD_STREAM_QUEUE_MAX
+    drop_queued_frames = bool(stream_settings.get("drop_queued_frames", True))
     await websocket.accept()
     logger.info(
-        "[openwakeword] stream-start selector=%s detector=%s client=%s",
+        "[openwakeword] stream-start selector=%s detector=%s client=%s queue_max=%s drop_queued_frames=%s",
         selector,
         detector_selector,
         client_host or "-",
+        stream_queue_max,
+        drop_queued_frames,
     )
     frame_count = 0
     processed_count = 0
     dropped_count = 0
-    audio_queue: asyncio.Queue[Tuple[float, bytes]] = asyncio.Queue(maxsize=OPENWAKEWORD_STREAM_QUEUE_MAX)
+    audio_queue: asyncio.Queue[Tuple[float, bytes]] = asyncio.Queue(maxsize=stream_queue_max)
     receiver_done = asyncio.Event()
     receiver_task: Optional[asyncio.Task[Any]] = None
 
-    def drop_queued_frame() -> None:
+    def drop_queued_frame(*, count_drop: bool = True) -> None:
         nonlocal dropped_count
         try:
             audio_queue.get_nowait()
         except asyncio.QueueEmpty:
             return
-        dropped_count += 1
+        if count_drop:
+            dropped_count += 1
 
     async def receive_audio_frames() -> None:
         nonlocal frame_count
@@ -7590,9 +7599,12 @@ async def stream_openwakeword(websocket: WebSocket) -> None:
                     await websocket.send_json({"ok": False, "error": "openWakeWord audio chunk is too large."})
                     await websocket.close(code=1009)
                     break
-                while audio_queue.full():
-                    drop_queued_frame()
-                audio_queue.put_nowait((time.time(), bytes(audio_bytes)))
+                if drop_queued_frames:
+                    while audio_queue.full():
+                        drop_queued_frame()
+                    audio_queue.put_nowait((time.time(), bytes(audio_bytes)))
+                else:
+                    await audio_queue.put((time.time(), bytes(audio_bytes)))
         except WebSocketDisconnect:
             pass
         finally:
@@ -7704,7 +7716,7 @@ async def stream_openwakeword(websocket: WebSocket) -> None:
                 }
             )
             while not audio_queue.empty():
-                drop_queued_frame()
+                drop_queued_frame(count_drop=False)
     except WebSocketDisconnect:
         pass
     except asyncio.CancelledError:
@@ -7743,27 +7755,36 @@ async def stream_nanowakeword(websocket: WebSocket) -> None:
         "width": max(1, audio_bits // 8),
         "channels": _openwakeword_query_int(websocket, "channels", 1, minimum=1, maximum=2),
     }
+    stream_settings = esphome_nanowakeword_module.settings_snapshot()
+    try:
+        stream_queue_max = max(1, min(120, int(stream_settings.get("stream_queue_max") or OPENWAKEWORD_STREAM_QUEUE_MAX)))
+    except Exception:
+        stream_queue_max = OPENWAKEWORD_STREAM_QUEUE_MAX
+    drop_queued_frames = bool(stream_settings.get("drop_queued_frames", True))
     await websocket.accept()
     logger.info(
-        "[nanowakeword] stream-start selector=%s detector=%s client=%s",
+        "[nanowakeword] stream-start selector=%s detector=%s client=%s queue_max=%s drop_queued_frames=%s",
         selector,
         detector_selector,
         client_host or "-",
+        stream_queue_max,
+        drop_queued_frames,
     )
     frame_count = 0
     processed_count = 0
     dropped_count = 0
-    audio_queue: asyncio.Queue[Tuple[float, bytes]] = asyncio.Queue(maxsize=OPENWAKEWORD_STREAM_QUEUE_MAX)
+    audio_queue: asyncio.Queue[Tuple[float, bytes]] = asyncio.Queue(maxsize=stream_queue_max)
     receiver_done = asyncio.Event()
     receiver_task: Optional[asyncio.Task[Any]] = None
 
-    def drop_queued_frame() -> None:
+    def drop_queued_frame(*, count_drop: bool = True) -> None:
         nonlocal dropped_count
         try:
             audio_queue.get_nowait()
         except asyncio.QueueEmpty:
             return
-        dropped_count += 1
+        if count_drop:
+            dropped_count += 1
 
     async def receive_audio_frames() -> None:
         nonlocal frame_count
@@ -7784,9 +7805,12 @@ async def stream_nanowakeword(websocket: WebSocket) -> None:
                     await websocket.send_json({"ok": False, "error": "NanoWakeWord audio chunk is too large."})
                     await websocket.close(code=1009)
                     break
-                while audio_queue.full():
-                    drop_queued_frame()
-                audio_queue.put_nowait((time.time(), bytes(audio_bytes)))
+                if drop_queued_frames:
+                    while audio_queue.full():
+                        drop_queued_frame()
+                    audio_queue.put_nowait((time.time(), bytes(audio_bytes)))
+                else:
+                    await audio_queue.put((time.time(), bytes(audio_bytes)))
         except WebSocketDisconnect:
             pass
         finally:
@@ -7837,6 +7861,8 @@ async def stream_nanowakeword(websocket: WebSocket) -> None:
                 if isinstance(detection, dict) and bool(detection.get("diagnostic_logging")):
                     best_label = str(detection.get("best_label") or "")
                     model_source = str(detection.get("model_source") or "")
+                    runtime = str(detection.get("runtime") or "")
+                    device = str(detection.get("device") or "")
                     try:
                         score = float(detection.get("score") or 0.0)
                     except Exception:
@@ -7853,10 +7879,11 @@ async def stream_nanowakeword(websocket: WebSocket) -> None:
                         patience = int(detection.get("patience") or 0)
                     except Exception:
                         patience = 0
-                    if best_label or model_source or score > 0.0:
+                    if best_label or model_source or runtime or device or score > 0.0:
                         non_detect_detail = (
                             f"{detail_prefix} best_label={best_label or '-'} score={score:.3f} "
-                            f"hits={hit_count}/{patience} threshold={threshold:.3f} model={model_source or '-'}"
+                            f"hits={hit_count}/{patience} threshold={threshold:.3f} model={model_source or '-'} "
+                            f"runtime={runtime or '-'} device={device or '-'}"
                         )
                     if threshold > 0.0 and score >= max(0.2, threshold - 0.25):
                         force_log = True
@@ -7883,7 +7910,11 @@ async def stream_nanowakeword(websocket: WebSocket) -> None:
                 detected=True,
                 elapsed_s=time.time() - started_ts,
                 audio_bytes_len=audio_bytes_len,
-                detail=f"{detail_prefix} wake_word={wake_word} score={score:.3f}",
+                detail=(
+                    f"{detail_prefix} wake_word={wake_word} score={score:.3f} "
+                    f"runtime={str(detection.get('runtime') or '-')}"
+                    f" device={str(detection.get('device') or '-')}"
+                ),
             )
             await websocket.send_json(
                 {
@@ -7896,7 +7927,7 @@ async def stream_nanowakeword(websocket: WebSocket) -> None:
                 }
             )
             while not audio_queue.empty():
-                drop_queued_frame()
+                drop_queued_frame(count_drop=False)
     except WebSocketDisconnect:
         pass
     except asyncio.CancelledError:
@@ -8390,6 +8421,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         nanowakeword_warmup_keys = {
             "VOICE_NANOWAKEWORD_ENABLED",
             "VOICE_NANOWAKEWORD_MODEL_SOURCE",
+            "VOICE_NANOWAKEWORD_DEVICE",
             "VOICE_NANOWAKEWORD_THRESHOLD",
             "VOICE_NANOWAKEWORD_PATIENCE",
             "VOICE_NANOWAKEWORD_DEBOUNCE_S",
