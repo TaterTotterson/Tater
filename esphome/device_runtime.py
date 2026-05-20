@@ -11,6 +11,8 @@ import time
 from collections import deque
 from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
+from runtime_executors import run_background
+
 logger = logging.getLogger("voice_core")
 
 _ESPHOME_LOG_BUFFER_LIMIT = 500
@@ -384,7 +386,7 @@ async def discover_mdns_once() -> List[Dict[str, Any]]:
     cfg = _voice_config_snapshot()
     discovery = cfg.get("discovery") if isinstance(cfg.get("discovery"), dict) else {}
     timeout_s = float(discovery.get("mdns_timeout_s") or _discovery_timeout_s())
-    return await asyncio.to_thread(_discover_mdns_sync, timeout_s)
+    return await run_background(_discover_mdns_sync, timeout_s)
 
 
 async def discovery_loop() -> None:

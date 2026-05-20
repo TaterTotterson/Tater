@@ -72,6 +72,7 @@ from helpers import (
     set_main_loop,
     test_redis_connection_settings,
 )
+from runtime_executors import configure_runtime_executors, run_dashboard, run_wake, runtime_executor_snapshot, shutdown_runtime_executors
 from verba_settings import (
     get_verba_enabled,
     get_verba_settings,
@@ -186,6 +187,12 @@ WEBUI_AUTH_COOKIE_NAME = "tater_webui_session"
 WEBUI_AUTH_PASSWORD_MIN_LENGTH = 4
 WEBUI_AUTH_PBKDF2_ITERATIONS = 260_000
 WEBUI_AUTH_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 365 * 5
+RUNTIME_EXECUTOR_WORKER_KEYS = {
+    "wake": "tater:runtime_executors:wake_workers",
+    "speech": "tater:runtime_executors:speech_workers",
+    "dashboard": "tater:runtime_executors:dashboard_workers",
+    "background": "tater:runtime_executors:background_workers",
+}
 RUNTIME_CONTEXT_ESTIMATE_TTL_SECONDS = 20
 DASHBOARD_BRIEFS_KEY = "tater:dashboard:briefs:v1"
 DASHBOARD_SNAPSHOT_KEY = "tater:dashboard:snapshot:v1"
@@ -228,6 +235,79 @@ speech_model_warmup_state: Dict[str, Any] = {
 
 def _trim(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _runtime_executor_worker_value(name: str, value: Any, *, default: int) -> int:
+    snapshot = runtime_executor_snapshot()
+    bounds = (snapshot.get("bounds") if isinstance(snapshot, dict) else {}) or {}
+    row = bounds.get(name) if isinstance(bounds, dict) else {}
+    try:
+        parsed = int(float(value))
+    except Exception:
+        parsed = int(default)
+    min_value = int((row or {}).get("min") or 1)
+    max_value = int((row or {}).get("max") or max(1, parsed))
+    return max(min_value, min(max_value, parsed))
+
+
+def _runtime_executor_settings_from_redis() -> Dict[str, Any]:
+    snapshot = runtime_executor_snapshot()
+    current_workers = snapshot.get("workers") if isinstance(snapshot.get("workers"), dict) else {}
+    workers: Dict[str, int] = {}
+    for name, redis_key in RUNTIME_EXECUTOR_WORKER_KEYS.items():
+        workers[name] = _runtime_executor_worker_value(
+            name,
+            redis_client.get(redis_key),
+            default=int(current_workers.get(name) or 1),
+        )
+    return {"workers": workers, "bounds": snapshot.get("bounds") or {}}
+
+
+def _apply_runtime_executor_settings_from_redis() -> Dict[str, Any]:
+    settings = _runtime_executor_settings_from_redis()
+    workers = settings.get("workers") if isinstance(settings.get("workers"), dict) else {}
+    return configure_runtime_executors(
+        wake_workers=workers.get("wake"),
+        speech_workers=workers.get("speech"),
+        dashboard_workers=workers.get("dashboard"),
+        background_workers=workers.get("background"),
+    )
+
+
+def _save_runtime_executor_settings(updates: Dict[str, Any]) -> Dict[str, Any]:
+    current = _runtime_executor_settings_from_redis()
+    current_workers = current.get("workers") if isinstance(current.get("workers"), dict) else {}
+    mapping = {
+        "executor_wake_workers": "wake",
+        "executor_speech_workers": "speech",
+        "executor_dashboard_workers": "dashboard",
+        "executor_background_workers": "background",
+    }
+    next_workers: Dict[str, int] = {}
+    changed = False
+    for payload_key, name in mapping.items():
+        if payload_key in updates:
+            changed = True
+            next_workers[name] = _runtime_executor_worker_value(
+                name,
+                updates.get(payload_key),
+                default=int(current_workers.get(name) or 1),
+            )
+        else:
+            next_workers[name] = int(current_workers.get(name) or 1)
+
+    if not changed:
+        return runtime_executor_snapshot()
+
+    for name, workers in next_workers.items():
+        redis_client.set(RUNTIME_EXECUTOR_WORKER_KEYS[name], int(workers))
+
+    return configure_runtime_executors(
+        wake_workers=next_workers.get("wake"),
+        speech_workers=next_workers.get("speech"),
+        dashboard_workers=next_workers.get("dashboard"),
+        background_workers=next_workers.get("background"),
+    )
 
 
 bootstrap_state: Dict[str, Any] = {
@@ -3095,6 +3175,10 @@ class AppSettingsRequest(BaseModel):
     hydra_step_retry_limit: Optional[int] = None
     hydra_astraeus_plan_review_enabled: Optional[bool] = None
     popup_effect_style: Optional[str] = None
+    executor_wake_workers: Optional[int] = None
+    executor_speech_workers: Optional[int] = None
+    executor_dashboard_workers: Optional[int] = None
+    executor_background_workers: Optional[int] = None
     admin_only_plugins: Optional[List[str]] = None
     webui_password: Optional[str] = None
     webui_password_confirm: Optional[str] = None
@@ -3213,6 +3297,8 @@ async def _startup_event() -> None:
             bootstrap_state["restore_error"] = redis_error or "Redis is unavailable."
             logger.warning("Redis unavailable during startup bootstrap: %s", bootstrap_state["restore_error"])
         else:
+            executor_settings = _apply_runtime_executor_settings_from_redis()
+            logger.info("[startup] runtime executor settings applied: %s", executor_settings.get("workers"))
             start_integration_runtime(redis_client)
             if restore_enabled:
                 bootstrap_state["restore_in_progress"] = True
@@ -3248,6 +3334,7 @@ async def _shutdown_event() -> None:
     await esphome_home_module.shutdown()
     portal_runtime.stop_all()
     await stop_integration_runtime()
+    shutdown_runtime_executors(wait=False, cancel_futures=True)
     logger.info("TaterOS backend stopped")
 
 
@@ -4839,7 +4926,7 @@ async def _dashboard_generate_briefs(
         }
         if error_text and row_id not in generated:
             row["error"] = error_text
-        _dashboard_save_brief(row)
+        await run_dashboard(_dashboard_save_brief, row)
         rows.append(row)
     return rows
 
@@ -4977,16 +5064,17 @@ async def _dashboard_brief_scheduler_loop() -> None:
     await asyncio.sleep(float(DASHBOARD_BRIEF_STARTUP_DELAY_SECONDS))
     while True:
         try:
-            snapshot = _dashboard_build_snapshot()
-            _dashboard_save_snapshot(snapshot)
+            snapshot = await run_dashboard(_dashboard_build_snapshot)
+            await run_dashboard(_dashboard_save_snapshot, snapshot)
             contexts = _dashboard_brief_contexts(snapshot)
-            stale_ids = _dashboard_stale_brief_ids(contexts, _dashboard_cache_rows())
+            cached_rows = await run_dashboard(_dashboard_cache_rows)
+            stale_ids = _dashboard_stale_brief_ids(contexts, cached_rows)
             if stale_ids:
                 await _dashboard_refresh_briefs_job(
                     [context for context in contexts if str(context.get("id") or "").strip() in set(stale_ids)],
                     reason="scheduler",
                 )
-                _dashboard_save_snapshot(snapshot)
+                await run_dashboard(_dashboard_save_snapshot, snapshot)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -5201,20 +5289,20 @@ async def _dashboard_payload(
     snapshot_meta: Dict[str, Any]
     rebuilt_snapshot = False
     if refresh_briefs or refresh_snapshot:
-        snapshot = _dashboard_build_snapshot()
+        snapshot = await run_dashboard(_dashboard_build_snapshot)
         rebuilt_snapshot = True
         snapshot_meta = _dashboard_snapshot_meta(source="live")
     else:
-        cached_snapshot, snapshot_meta = _dashboard_load_snapshot_cache()
+        cached_snapshot, snapshot_meta = await run_dashboard(_dashboard_load_snapshot_cache)
         if isinstance(cached_snapshot, dict) and not bool(snapshot_meta.get("stale")):
             snapshot = cached_snapshot
         else:
-            snapshot = _dashboard_build_snapshot()
+            snapshot = await run_dashboard(_dashboard_build_snapshot)
             rebuilt_snapshot = True
             snapshot_meta = _dashboard_snapshot_meta(source="live")
     contexts = _dashboard_brief_contexts(snapshot)
     context_ids = {str(context.get("id") or "").strip() for context in contexts}
-    cached = _dashboard_cache_rows()
+    cached = await run_dashboard(_dashboard_cache_rows)
     now = time.time()
 
     stale_ids = _dashboard_stale_brief_ids(contexts, cached, now=now)
@@ -5227,7 +5315,7 @@ async def _dashboard_payload(
         _dashboard_schedule_brief_refresh(contexts, stale_ids=stale_ids, reason="dashboard", force=False)
 
     if rebuilt_snapshot:
-        snapshot_meta = _dashboard_save_snapshot(snapshot)
+        snapshot_meta = await run_dashboard(_dashboard_save_snapshot, snapshot)
 
     now = time.time()
     briefs: List[Dict[str, Any]] = []
@@ -5594,8 +5682,9 @@ async def chat_job_events(job_id: str, request: Request):
                 break
 
             try:
-                event = await asyncio.to_thread(event_queue.get, True, 1.0)
+                event = event_queue.get_nowait()
             except queue.Empty:
+                await asyncio.sleep(1.0)
                 tick += 1
                 status_snapshot = chat_jobs.get_snapshot(job_id)
                 if status_snapshot is None:
@@ -7188,6 +7277,8 @@ def get_settings() -> Dict[str, Any]:
         "hydra_step_retry_limit": int(DEFAULT_STEP_RETRY_LIMIT),
         "hydra_astraeus_plan_review_enabled": bool(DEFAULT_ASTRAEUS_PLAN_REVIEW_ENABLED),
     }
+    executor_settings = _runtime_executor_settings_from_redis()
+    executor_workers = executor_settings.get("workers") if isinstance(executor_settings.get("workers"), dict) else {}
 
     return {
         "username": chat_settings.get("username", "User"),
@@ -7282,6 +7373,11 @@ def get_settings() -> Dict[str, Any]:
         ),
         **hydra_role_model_values,
         "hydra_defaults": hydra_defaults,
+        "executor_settings": executor_settings,
+        "executor_wake_workers": int(executor_workers.get("wake") or 2),
+        "executor_speech_workers": int(executor_workers.get("speech") or 2),
+        "executor_dashboard_workers": int(executor_workers.get("dashboard") or 1),
+        "executor_background_workers": int(executor_workers.get("background") or 4),
         "admin_plugin_options": admin_plugin_options,
         "admin_only_plugins": admin_only_plugins,
         "admin_only_plugins_defaults": sorted(DEFAULT_ADMIN_ONLY_PLUGINS),
@@ -7631,7 +7727,7 @@ async def stream_openwakeword(websocket: WebSocket) -> None:
             detail_prefix = f"transport=ws queue_ms={queue_delay_ms:.1f} dropped={dropped_count}"
 
             try:
-                detection = await asyncio.to_thread(
+                detection = await run_wake(
                     esphome_openwakeword_module.process_audio,
                     detector_selector,
                     bytes(audio_bytes),
@@ -7837,7 +7933,7 @@ async def stream_nanowakeword(websocket: WebSocket) -> None:
             detail_prefix = f"transport=ws queue_ms={queue_delay_ms:.1f} dropped={dropped_count}"
 
             try:
-                detection = await asyncio.to_thread(
+                detection = await run_wake(
                     esphome_nanowakeword_module.process_audio,
                     detector_selector,
                     bytes(audio_bytes),
@@ -8126,6 +8222,7 @@ def test_aladdin_settings(payload: AladdinTestRequest) -> Dict[str, Any]:
 def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str, Any]:
     updates = payload.model_dump(exclude_none=True)
     speech_warmup_result: Dict[str, Any] = {}
+    executor_settings_result: Dict[str, Any] = {}
 
     def _bounded_int(
         value: Any,
@@ -8619,6 +8716,15 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
             "true" if enabled_value else "false",
         )
 
+    executor_keys = {
+        "executor_wake_workers",
+        "executor_speech_workers",
+        "executor_dashboard_workers",
+        "executor_background_workers",
+    }
+    if any(key in updates for key in executor_keys):
+        executor_settings_result = _save_runtime_executor_settings(updates)
+
     if "admin_only_plugins" in updates:
         values = [str(item).strip().lower() for item in (updates.get("admin_only_plugins") or []) if str(item).strip()]
         cleaned = sorted(set(values))
@@ -8628,5 +8734,6 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "ok": True,
         "updated": sorted(updates.keys()),
         "esphome": esphome_result,
+        "executor_settings": executor_settings_result or runtime_executor_snapshot(),
         "speech_warmup": speech_warmup_result or _speech_model_warmup_snapshot(),
     }

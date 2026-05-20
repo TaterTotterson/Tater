@@ -22,6 +22,7 @@ import requests
 
 from announcement_targets import split_announcement_targets
 from helpers import redis_client
+from runtime_executors import run_background, run_speech
 from integrations.homeassistant import (
     call_service_sync as ha_call_service_sync,
     remove_local_media_source_sync as ha_remove_local_media_source_sync,
@@ -1215,7 +1216,7 @@ async def fetch_openai_compatible_tts_model_options(
         base_url=base_url,
         api_key=api_key,
     )
-    return await asyncio.to_thread(
+    return await run_background(
         _fetch_openai_compatible_tts_model_options_sync,
         base_url=resolved_base_url,
         api_key=resolved_api_key,
@@ -1341,7 +1342,7 @@ async def fetch_openai_compatible_tts_voice_options(
         base_url=base_url,
         api_key=api_key,
     )
-    return await asyncio.to_thread(
+    return await run_background(
         _fetch_openai_compatible_tts_voice_options_sync,
         base_url=resolved_base_url,
         api_key=resolved_api_key,
@@ -1658,7 +1659,7 @@ async def synthesize_tts_wav(
         raise RuntimeError("Preview text is required.")
 
     if selected_backend == "kokoro":
-        audio_bytes, audio_format = await asyncio.to_thread(
+        audio_bytes, audio_format = await run_speech(
             _synthesize_kokoro_sync,
             prompt,
             _text(model) or DEFAULT_KOKORO_MODEL,
@@ -1668,7 +1669,7 @@ async def synthesize_tts_wav(
         return pcm_to_wav(audio_bytes, audio_format)
 
     if selected_backend == "pocket_tts":
-        audio_bytes, audio_format = await asyncio.to_thread(
+        audio_bytes, audio_format = await run_speech(
             _synthesize_pocket_tts_sync,
             prompt,
             _text(model) or DEFAULT_POCKET_TTS_MODEL,
@@ -1677,7 +1678,7 @@ async def synthesize_tts_wav(
         return pcm_to_wav(audio_bytes, audio_format)
 
     if selected_backend == "piper":
-        audio_bytes, audio_format = await asyncio.to_thread(
+        audio_bytes, audio_format = await run_speech(
             _synthesize_piper_sync,
             prompt,
             _text(model) or DEFAULT_PIPER_MODEL,
@@ -1689,7 +1690,7 @@ async def synthesize_tts_wav(
             base_url=openai_base_url,
             api_key=openai_api_key,
         )
-        return await asyncio.to_thread(
+        return await run_speech(
             _synthesize_openai_compatible_tts_wav_sync,
             prompt,
             model=_text(model) or DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL,
@@ -1953,7 +1954,7 @@ async def speak_announcement_targets(
             warnings.append("Home Assistant announcement targets are selected but Home Assistant is not configured.")
         else:
             try:
-                media_content_id = await asyncio.to_thread(
+                media_content_id = await run_background(
                     ha_upload_local_media_source_file_sync,
                     _text(ha_base),
                     _text(token),
@@ -1969,7 +1970,7 @@ async def speak_announcement_targets(
                     media_content_id,
                     homeassistant_players,
                 )
-                ha_result = await asyncio.to_thread(
+                ha_result = await run_background(
                     _homeassistant_play_media_sync,
                     base_url=_text(ha_base),
                     token=_text(token),
@@ -1990,7 +1991,7 @@ async def speak_announcement_targets(
                 warnings.append(f"Home Assistant media upload failed: {exc}")
 
     if voice_core_selectors:
-        voice_result = await asyncio.to_thread(
+        voice_result = await run_background(
             _voice_core_play_media_sync,
             selectors=voice_core_selectors,
             source_url="",
@@ -2017,7 +2018,7 @@ async def speak_announcement_targets(
             else:
                 sonos_source_url = build_runtime_tts_asset_url(asset_id)
             result["sonos_source_url"] = sonos_source_url
-            sonos_result = await asyncio.to_thread(
+            sonos_result = await run_background(
                 sonos_play_media_sync,
                 speakers=sonos_speakers,
                 source_url=sonos_source_url,
@@ -2032,7 +2033,7 @@ async def speak_announcement_targets(
             warnings.append(f"Sonos playback failed: {exc}")
 
     if unifi_protect_cameras:
-        unifi_result = await asyncio.to_thread(
+        unifi_result = await run_background(
             play_unifi_protect_audio_sync,
             cameras=unifi_protect_cameras,
             audio_bytes=wav_bytes,
@@ -2113,7 +2114,7 @@ async def play_announcement_audio_targets(
             warnings.append("Home Assistant announcement targets are selected but Home Assistant is not configured.")
         else:
             try:
-                media_content_id = await asyncio.to_thread(
+                media_content_id = await run_background(
                     ha_upload_local_media_source_file_sync,
                     _text(ha_base),
                     _text(token),
@@ -2124,7 +2125,7 @@ async def play_announcement_audio_targets(
                     timeout_s=60.0,
                 )
                 result["homeassistant_media_content_id"] = media_content_id
-                ha_result = await asyncio.to_thread(
+                ha_result = await run_background(
                     _homeassistant_play_media_sync,
                     base_url=_text(ha_base),
                     token=_text(token),
@@ -2145,7 +2146,7 @@ async def play_announcement_audio_targets(
                 warnings.append(f"Home Assistant media upload failed: {exc}")
 
     if voice_core_selectors:
-        voice_result = await asyncio.to_thread(
+        voice_result = await run_background(
             _voice_core_play_media_sync,
             selectors=voice_core_selectors,
             source_url="",
@@ -2174,7 +2175,7 @@ async def play_announcement_audio_targets(
             else:
                 sonos_source_url = build_runtime_tts_asset_url(asset_id)
             result["sonos_source_url"] = sonos_source_url
-            sonos_result = await asyncio.to_thread(
+            sonos_result = await run_background(
                 sonos_play_media_sync,
                 speakers=sonos_speakers,
                 source_url=sonos_source_url,
@@ -2189,7 +2190,7 @@ async def play_announcement_audio_targets(
             warnings.append(f"Sonos playback failed: {exc}")
 
     if unifi_protect_cameras:
-        unifi_result = await asyncio.to_thread(
+        unifi_result = await run_background(
             play_unifi_protect_audio_sync,
             cameras=unifi_protect_cameras,
             audio_bytes=audio,

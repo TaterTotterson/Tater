@@ -29,6 +29,7 @@ from integrations.unifi_network import (
     unifi_network_headers,
 )
 from integrations.unifi_protect import load_unifi_protect_config, unifi_protect_configured
+from runtime_executors import run_background
 
 logger = logging.getLogger("integration_runtime")
 
@@ -742,7 +743,7 @@ async def _unifi_network_poll_loop(stop_event: asyncio.Event, client: Any) -> No
                 unifi_network_configured=True,
                 unifi_network_poll_interval_seconds=poll_seconds,
             )
-            snapshot = await asyncio.to_thread(_unifi_network_snapshot_from_settings, settings)
+            snapshot = await run_background(_unifi_network_snapshot_from_settings, settings)
             current = _unifi_network_publish_changes(redis_obj, snapshot, previous, first_snapshot=first_snapshot)
             device_count = len(snapshot.get("devices") or [])
             client_count = len(snapshot.get("clients") or [])
@@ -1005,7 +1006,7 @@ async def _ecobee_homekit_poll_loop(
             maximum=300,
         )
         try:
-            rows = await asyncio.to_thread(list_homekit_thermostats, alias)
+            rows = await run_background(list_homekit_thermostats, alias)
             current: Dict[str, Dict[str, Any]] = {}
             thermostats: List[Dict[str, Any]] = []
             for row in rows:

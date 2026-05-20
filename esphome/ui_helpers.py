@@ -79,6 +79,43 @@ def device_image_src(*name_candidates: Any) -> str:
         if any(
             part in token
             for part in (
+                "respeaker-lite",
+                "respeaker_lite",
+                "respeaker lite",
+                "respeakerlite",
+                "re speaker lite",
+                "seeed respeaker lite",
+            )
+        ):
+            return _named_satellite_image_src("respeaker-lite.png")
+        if any(
+            part in token
+            for part in (
+                "respeaker-xvf3800",
+                "respeaker_xvf3800",
+                "respeaker xvf3800",
+                "respeaker xvf 3800",
+                "respeakerxvf3800",
+                "seeed xvf3800",
+                "xvf3800",
+                "xvf 3800",
+            )
+        ):
+            return _named_satellite_image_src("respeaker-xvf3800.png")
+        if any(
+            part in token
+            for part in (
+                "koala-satellite",
+                "koala_satellite",
+                "koala satellite",
+                "koala voice satellite",
+                "koala",
+            )
+        ):
+            return _named_satellite_image_src("koala-satellite.png")
+        if any(
+            part in token
+            for part in (
                 "taters3box",
                 "tater-s3box",
                 "tater s3box",
