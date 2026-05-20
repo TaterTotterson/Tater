@@ -14056,6 +14056,17 @@ async function loadSettingsView() {
     : `<div class="small hydra-base-server-empty">No additional base servers configured.</div>`;
   const popupEffectStyle = normalizePopupEffectStyle(settings?.popup_effect_style || state.popupEffectStyle);
   applyPopupEffectStyle(popupEffectStyle);
+  const executorSettings = settings?.executor_settings && typeof settings.executor_settings === "object" ? settings.executor_settings : {};
+  const executorBounds = executorSettings.bounds && typeof executorSettings.bounds === "object" ? executorSettings.bounds : {};
+  const executorBound = (name, field, fallback) => {
+    const row = executorBounds[name] && typeof executorBounds[name] === "object" ? executorBounds[name] : {};
+    const value = Number(row[field]);
+    return Number.isFinite(value) ? value : fallback;
+  };
+  const executorWorkerValue = (key, fallback) => {
+    const value = Number(settings?.[key]);
+    return Number.isFinite(value) ? value : fallback;
+  };
   const hydraPlatforms = ["webui", "discord", "irc", "telegram", "matrix", "homeassistant", "homekit", "xbmc", "automation"];
   const hydraPlatformOptionsHtml = hydraPlatforms
     .map((platform) => `<option value="${escapeHtml(platform)}">${escapeHtml(hydraPlatformLabel(platform))}</option>`)
@@ -15308,6 +15319,55 @@ async function loadSettingsView() {
                   <button type="button" id="settings-admin-defaults" class="inline-btn">Reset To Defaults</button>
                   <span class="small">Loads the default admin-only plugin list.</span>
                 </div>
+              </div>
+            </section>
+
+            <section class="core-inline-section">
+              <div class="small core-inline-section-title">Runtime Worker Lanes</div>
+              <div class="small" style="margin-bottom: 10px;">
+                Controls how many blocking jobs each runtime lane can run in parallel. Changes apply immediately to new work.
+              </div>
+              <div class="form-grid two-col">
+                <label>Wake Workers
+                  <input
+                    id="set_executor_wake_workers"
+                    type="number"
+                    min="${executorBound("wake", "min", 1)}"
+                    max="${executorBound("wake", "max", 8)}"
+                    value="${escapeHtml(executorWorkerValue("executor_wake_workers", 2))}"
+                  />
+                  <div class="small">OWW/NWW wake inference. Default: ${escapeHtml(executorBound("wake", "default", 2))}.</div>
+                </label>
+                <label>Speech Workers
+                  <input
+                    id="set_executor_speech_workers"
+                    type="number"
+                    min="${executorBound("speech", "min", 1)}"
+                    max="${executorBound("speech", "max", 8)}"
+                    value="${escapeHtml(executorWorkerValue("executor_speech_workers", 2))}"
+                  />
+                  <div class="small">STT, TTS, speaker ID, and emotion ID. Default: ${escapeHtml(executorBound("speech", "default", 2))}.</div>
+                </label>
+                <label>Dashboard Workers
+                  <input
+                    id="set_executor_dashboard_workers"
+                    type="number"
+                    min="${executorBound("dashboard", "min", 1)}"
+                    max="${executorBound("dashboard", "max", 4)}"
+                    value="${escapeHtml(executorWorkerValue("executor_dashboard_workers", 1))}"
+                  />
+                  <div class="small">Dashboard snapshots, cache, and brief storage. Default: ${escapeHtml(executorBound("dashboard", "default", 1))}.</div>
+                </label>
+                <label>Background Workers
+                  <input
+                    id="set_executor_background_workers"
+                    type="number"
+                    min="${executorBound("background", "min", 1)}"
+                    max="${executorBound("background", "max", 16)}"
+                    value="${escapeHtml(executorWorkerValue("executor_background_workers", 4))}"
+                  />
+                  <div class="small">Integrations, discovery, notification sends, and playback IO. Default: ${escapeHtml(executorBound("background", "default", 4))}.</div>
+                </label>
               </div>
             </section>
 
@@ -17635,6 +17695,10 @@ async function loadSettingsView() {
         "set_hydra_astraeus_plan_review_enabled"
       ).checked,
       popup_effect_style: normalizePopupEffectStyle(document.getElementById("set_popup_effect_style")?.value || "flame"),
+      executor_wake_workers: Number(document.getElementById("set_executor_wake_workers")?.value || 2),
+      executor_speech_workers: Number(document.getElementById("set_executor_speech_workers")?.value || 2),
+      executor_dashboard_workers: Number(document.getElementById("set_executor_dashboard_workers")?.value || 1),
+      executor_background_workers: Number(document.getElementById("set_executor_background_workers")?.value || 4),
       admin_only_plugins: adminOnlyPlugins,
       esphome_settings: esphomeSettingsValues,
     };

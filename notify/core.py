@@ -19,6 +19,7 @@ from notify.queue import (
     queue_key,
     resolve_targets,
 )
+from runtime_executors import run_background
 from verba_settings import get_verba_settings
 
 logger = logging.getLogger("notify_core")
@@ -731,7 +732,7 @@ async def dispatch_notification(
 ) -> str:
     dest = normalize_platform(platform)
     if dest in {"ntfy", "wordpress"}:
-        return await asyncio.to_thread(
+        return await run_background(
             dispatch_notification_sync,
             platform=platform,
             title=title,

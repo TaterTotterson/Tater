@@ -16,6 +16,7 @@ import requests
 
 from .conversation import VoiceSessionRuntime
 from integrations.huggingface import huggingface_environment
+from runtime_executors import run_speech
 
 
 def _vp():
@@ -32,7 +33,7 @@ def _drain_background_task(task: asyncio.Task[Any]) -> None:
 
 async def _run_local_stt_thread(func: Any, *args: Any) -> str:
     vp = _vp()
-    task = asyncio.create_task(asyncio.to_thread(func, *args))
+    task = asyncio.create_task(run_speech(func, *args))
     try:
         timeout_s = vp._get_float_setting(
             "VOICE_NATIVE_LOCAL_STT_TIMEOUT_S",
@@ -1253,7 +1254,7 @@ async def _native_synthesize_text(
     try:
         if effective_backend == "kokoro":
             vp._native_debug(f"TTS (kokoro) local model={selection.get('model')} voice={selection.get('voice') or vp.DEFAULT_KOKORO_VOICE}")
-            audio_bytes, audio_format = await asyncio.to_thread(
+            audio_bytes, audio_format = await run_speech(
                 _synthesize_kokoro_sync,
                 prompt,
                 vp._text(selection.get("model")) or vp.DEFAULT_KOKORO_MODEL,
@@ -1262,7 +1263,7 @@ async def _native_synthesize_text(
             return audio_bytes, audio_format, effective_backend, backend_note
         if effective_backend == "pocket_tts":
             vp._native_debug(f"TTS (pocket-tts) local model={selection.get('model')} voice={selection.get('voice') or vp.DEFAULT_POCKET_TTS_VOICE}")
-            audio_bytes, audio_format = await asyncio.to_thread(
+            audio_bytes, audio_format = await run_speech(
                 _synthesize_pocket_tts_sync,
                 prompt,
                 vp._text(selection.get("model")) or vp.DEFAULT_POCKET_TTS_MODEL,
@@ -1271,7 +1272,7 @@ async def _native_synthesize_text(
             return audio_bytes, audio_format, effective_backend, backend_note
         if effective_backend == "piper":
             vp._native_debug(f"TTS (piper) local model={selection.get('model') or vp.DEFAULT_PIPER_MODEL}")
-            audio_bytes, audio_format = await asyncio.to_thread(_synthesize_piper_sync, prompt, vp._text(selection.get("model")) or vp.DEFAULT_PIPER_MODEL)
+            audio_bytes, audio_format = await run_speech(_synthesize_piper_sync, prompt, vp._text(selection.get("model")) or vp.DEFAULT_PIPER_MODEL)
             return audio_bytes, audio_format, effective_backend, backend_note
         if effective_backend == "openai_compatible":
             vp._native_debug(
@@ -1279,7 +1280,7 @@ async def _native_synthesize_text(
                 f"model={selection.get('model') or vp.DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL} "
                 f"voice={selection.get('voice') or vp.DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE}"
             )
-            audio_bytes, audio_format = await asyncio.to_thread(
+            audio_bytes, audio_format = await run_speech(
                 _native_openai_compatible_synthesize_sync,
                 prompt,
                 model=vp._text(selection.get("model")) or vp.DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL,

@@ -55,6 +55,7 @@ from fastapi import HTTPException
 
 from helpers import extract_json, get_llm_client_from_env, redis_client
 from integrations.homeassistant import load_homeassistant_config
+from runtime_executors import run_background, run_speech
 import verba_registry
 from verba_settings import get_verba_enabled
 from hydra import run_hydra_turn, resolve_agent_limits
@@ -3754,7 +3755,7 @@ async def _download_media_source(source_url: str) -> Tuple[bytes, str]:
         content_type = _text(resp.headers.get("Content-Type")).split(";", 1)[0].strip().lower()
         return bytes(resp.content or b""), content_type
 
-    return await asyncio.to_thread(_fetch)
+    return await run_background(_fetch)
 
 
 def _estimate_pcm_duration_s(audio_bytes: bytes, audio_format: Dict[str, Any]) -> float:
@@ -4523,7 +4524,7 @@ async def _process_voice_turn(session: VoiceSessionRuntime) -> Dict[str, Any]:
     pending_enrollment = esphome_speaker_id.consume_pending_enrollment(session.selector)
     if pending_enrollment:
         try:
-            enrollment = await asyncio.to_thread(
+            enrollment = await run_speech(
                 esphome_speaker_id.add_enrollment_sample,
                 speaker_id=_text(pending_enrollment.get("speaker_id")),
                 audio_bytes=bytes(session.audio_buffer),
@@ -4611,7 +4612,7 @@ async def _process_voice_turn(session: VoiceSessionRuntime) -> Dict[str, Any]:
         }
 
     try:
-        speaker_match = await asyncio.to_thread(
+        speaker_match = await run_speech(
             esphome_speaker_id.match_speaker_for_audio,
             audio_bytes=bytes(session.audio_buffer),
             audio_format=dict(session.audio_format or {}),
@@ -4644,7 +4645,7 @@ async def _process_voice_turn(session: VoiceSessionRuntime) -> Dict[str, Any]:
     try:
         from .. import emotion_id as esphome_emotion_id
 
-        emotion_result = await asyncio.to_thread(
+        emotion_result = await run_speech(
             esphome_emotion_id.classify_emotion_for_audio,
             audio_bytes=bytes(session.audio_buffer),
             audio_format=dict(session.audio_format or {}),
