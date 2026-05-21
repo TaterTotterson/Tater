@@ -8,14 +8,11 @@ from web_research import research_web
 from .policy import normalize_argv, resolve_spudex_cwd
 from .runner import (
     append_session_log,
-    spudex_payload,
     create_spudex_session,
     read_spudex_logs,
     run_argv_in_session,
-    run_spudex_command_once,
     set_spudex_memory_summary,
     set_spudex_verification,
-    stop_spudex_session,
     update_spudex_plan,
     update_spudex_session,
     write_spudex_file_in_session,
@@ -26,24 +23,12 @@ from .system_info import spudex_system_info
 
 SPUDEX_TOOL_ROWS = [
     {
-        "id": "spudex_run",
-        "description": "full terminal console access to run one command or script on the Tater host from the configured working folder when a CLI command is the right way to answer or act and no Verba fits",
-        "usage": '{"function":"spudex_run","arguments":{"command":"<command to run>"}}',
-    },
-    {
-        "id": "spudex_task",
-        "description": "full terminal console access for multi-step tasks: run commands, write scripts/files, inspect output, retry, search if needed, and complete terminal work from the configured working folder when no Verba fits",
-        "usage": '{"function":"spudex_task","arguments":{"goal":"<describe the multi-step terminal task to complete>"}}',
-    },
-    {
-        "id": "spudex_status",
-        "description": "list terminal console settings and recent command sessions",
-        "usage": '{"function":"spudex_status","arguments":{}}',
-    },
-    {
-        "id": "spudex_stop",
-        "description": "stop a running terminal console session",
-        "usage": '{"function":"spudex_stop","arguments":{"session_id":"<session_id>"}}',
+        "id": "run_terminal_task",
+        "description": (
+            "send a natural-language request to run console/terminal commands on the current PC where the assistant is running; "
+            "use for local CPU/GPU/RAM/disk stats, OS/process diagnostics, scripts, file work, local servers, or other command-line tasks when no Verba fits"
+        ),
+        "usage": '{"function":"run_terminal_task","arguments":{"request":"<natural-language terminal task to complete>"}}',
     },
 ]
 
@@ -132,19 +117,19 @@ async def _run_spudex_task(
     session_id: str = "",
 ) -> Dict[str, Any]:
     settings = get_spudex_settings(redis_client)
-    goal = str(args.get("goal") or args.get("task") or args.get("request") or "").strip()
+    goal = str(args.get("request") or args.get("goal") or args.get("task") or args.get("nl") or args.get("prompt") or "").strip()
     if not goal:
         return action_failure(
-            code="spudex_task_missing_goal",
-            message="spudex_task needs a goal.",
-            needs=["Provide arguments.goal."],
-            say_hint="Ask what spudex task should be done.",
+            code="run_terminal_task_missing_request",
+            message="run_terminal_task needs arguments.request with the natural-language terminal task.",
+            needs=["Provide arguments.request as a natural-language terminal task."],
+            say_hint="Ask what terminal task should be done.",
         )
     if llm_client is None or not hasattr(llm_client, "chat"):
         return action_failure(
-            code="spudex_task_model_unavailable",
-            message="spudex_task needs an available language model client.",
-            say_hint="Explain that the spudex loop needs the assistant model to plan commands.",
+            code="run_terminal_task_model_unavailable",
+            message="run_terminal_task needs an available language model client.",
+            say_hint="Explain that terminal task execution needs the assistant model to plan commands.",
         )
 
     steps = max(1, int(settings.get("max_task_steps") or 6))
@@ -154,7 +139,7 @@ async def _run_spudex_task(
         update_spudex_session(str(session_id), status="running")
         append_session_log(str(session_id), stream="user", text=goal, level="info")
     else:
-        session = create_spudex_session(label=f"Spudex task: {goal[:80]}", cwd=str(cwd), goal=goal, source=source, platform=platform)
+        session = create_spudex_session(label=f"Terminal task: {goal[:80]}", cwd=str(cwd), goal=goal, source=source, platform=platform)
         update_spudex_session(session["id"], status="running")
     history: list[Dict[str, Any]] = []
 
@@ -202,8 +187,8 @@ async def _run_spudex_task(
             )
         except Exception as exc:
             update_spudex_session(session["id"], status="failed", finished_ts=time.time())
-            append_session_log(session["id"], stream="system", text=f"Spudex task planning failed: {exc}", level="error")
-            return action_failure(code="spudex_task_llm_failed", message=f"Spudex task planning failed: {exc}")
+            append_session_log(session["id"], stream="system", text=f"Terminal task planning failed: {exc}", level="error")
+            return action_failure(code="run_terminal_task_llm_failed", message=f"Terminal task planning failed: {exc}")
         decision = _strict_json(_messages_content(resp))
         if isinstance(decision.get("plan"), list):
             update_spudex_plan(session["id"], decision.get("plan"))
@@ -398,43 +383,7 @@ async def run_spudex_hydra_tool(
         )
 
     payload = args if isinstance(args, dict) else {}
-    settings = get_spudex_settings(redis_client)
-    if token == "spudex_status":
-        state = spudex_payload(redis_client)
-        return action_success(
-            facts={"active_count": state.get("active_count"), "session_count": len(state.get("sessions") or [])},
-            data=state,
-            summary_for_user=f"Spudex has {state.get('active_count', 0)} active session(s).",
-        )
-    if token == "spudex_stop":
-        session_id = str(payload.get("session_id") or "").strip()
-        if not session_id:
-            return action_failure(code="spudex_stop_missing_session", message="spudex_stop needs a session_id.")
-        result = await stop_spudex_session(session_id)
-        return action_success(facts=result, data=result, summary_for_user="Spudex session stop requested.")
-    if token == "spudex_run":
-        argv = normalize_argv(command=payload.get("command"), argv=payload.get("argv"))
-        approval = _approval_required(settings, argv, actor="Hydra")
-        if approval:
-            return approval
-        result = await run_spudex_command_once(
-            command=payload.get("command"),
-            argv=payload.get("argv"),
-            cwd=settings.get("default_cwd"),
-            source="hydra",
-            platform=platform,
-            redis_client=redis_client,
-            background=bool(payload.get("background")),
-        )
-        ok = bool(result.get("ok"))
-        summary = "Command finished successfully." if ok else "Command failed or was blocked."
-        return action_success(
-            facts={"session_id": result.get("session_id"), "ok": ok, "status": result.get("status"), "returncode": result.get("returncode")},
-            data=result,
-            summary_for_user=summary,
-            say_hint="Summarize the command result and include important output only.",
-        )
-    if token == "spudex_task":
+    if token == "run_terminal_task":
         overrides = spudex_llm_overrides(redis_client)
         if overrides.get("host") or overrides.get("model"):
             from helpers import get_llm_client_from_env
