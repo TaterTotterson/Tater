@@ -4238,28 +4238,3 @@ def _normalize_key_segment(value: Any, *, default: str) -> str:
         raw = default
     cleaned = re.sub(r"[^a-z0-9_.:\-]+", "_", raw).strip("_")
     return cleaned or default
-
-
-
-def write_workspace_note(content: str) -> Dict[str, Any]:
-    _ensure_dirs()
-    ts = time.strftime("%Y%m%d_%H%M%S")
-    suffix = uuid.uuid4().hex[:8]
-    filename = f"note_{ts}_{suffix}.md"
-    path = AGENT_WORKSPACE_DIR / filename
-    try:
-        data = content or ""
-        path.write_text(data, encoding="utf-8")
-        _log_write("write_workspace_note", path, len(data.encode("utf-8")))
-        return {"tool": "write_workspace_note", "ok": True, "path": _display_workspace_path(path)}
-    except Exception as e:
-        return {"tool": "write_workspace_note", "ok": False, "error": str(e)}
-
-
-def list_workspace() -> Dict[str, Any]:
-    _ensure_dirs()
-    try:
-        files = sorted([p.name for p in AGENT_WORKSPACE_DIR.iterdir() if p.is_file()])
-        return {"tool": "list_workspace", "ok": True, "files": files}
-    except Exception as e:
-        return {"tool": "list_workspace", "ok": False, "error": str(e)}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import array
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -46,8 +47,15 @@ def _log_exception(message: str, *args: Any) -> None:
 
 
 @contextlib.contextmanager
-def _temporary_huggingface_env():
+def _temporary_huggingface_env(cache_root: Optional[Path] = None):
     overrides = huggingface_environment()
+    if cache_root is not None:
+        hub_cache = cache_root / "hub"
+        torch_cache = cache_root / "torch"
+        overrides.setdefault("HF_HOME", str(cache_root))
+        overrides.setdefault("HF_HUB_CACHE", str(hub_cache))
+        overrides.setdefault("HUGGINGFACE_HUB_CACHE", str(hub_cache))
+        overrides.setdefault("TORCH_HOME", str(torch_cache))
     previous: Dict[str, Optional[str]] = {}
     try:
         for key, value in overrides.items():
@@ -76,6 +84,13 @@ DEFAULT_SPEAKER_ID_MATCH_THRESHOLD = 0.68
 DEFAULT_SPEAKER_ID_MATCH_MARGIN = 0.05
 DEFAULT_SPEAKER_ID_MIN_SPEECH_S = 1.15
 DEFAULT_SPEAKER_ID_ENROLL_MIN_SPEECH_S = 2.25
+_SPEECHBRAIN_REPO_FILES = (
+    "hyperparams.yaml",
+    "embedding_model.ckpt",
+    "mean_var_norm_emb.ckpt",
+    "classifier.ckpt",
+    "label_encoder.txt",
+)
 
 _AUDIOOP = None
 with contextlib.suppress(Exception):
@@ -86,6 +101,7 @@ _ENGINE: Any = None
 _ENGINE_SOURCE = ""
 _ENGINE_DEVICE = ""
 _ENGINE_REQUESTED_DEVICE = ""
+_ENGINE_AUTH_FINGERPRINT = ""
 _ENGINE_ERROR = ""
 _PENDING_LOCK = threading.Lock()
 _PENDING_ENROLLMENT: Dict[str, Any] = {}
@@ -316,6 +332,52 @@ def save_settings_values(values: Dict[str, Any]) -> Dict[str, Any]:
 def _slugify_token(text: Any) -> str:
     token = re.sub(r"[^a-z0-9]+", "-", str(text or "").strip().lower()).strip("-")
     return token or "speaker"
+
+
+def _model_savedir(source: Optional[str] = None) -> Path:
+    return SPEAKER_ID_MODEL_ROOT / _slugify_token(source or _model_source())
+
+
+def _huggingface_auth_fingerprint() -> str:
+    token = str(huggingface_environment().get("HF_TOKEN") or "").strip()
+    if not token:
+        return "none"
+    return hashlib.sha256(token.encode("utf-8", errors="ignore")).hexdigest()[:12]
+
+
+def _huggingface_auth_label() -> str:
+    return "configured" if _huggingface_auth_fingerprint() != "none" else "missing"
+
+
+def _snapshot_complete(savedir: Path) -> bool:
+    return all((savedir / filename).exists() for filename in _SPEECHBRAIN_REPO_FILES)
+
+
+def _ensure_speechbrain_snapshot(source: str, savedir: Path, hf_cache_dir: Path) -> str:
+    source_path = Path(str(source or "")).expanduser()
+    if source_path.exists():
+        return str(source_path)
+    if _snapshot_complete(savedir):
+        return str(savedir)
+    try:
+        from huggingface_hub import snapshot_download  # type: ignore
+    except Exception as exc:
+        _log_warning("huggingface_hub snapshot download unavailable source=%s detail=%s", source, exc)
+        return source
+
+    env = huggingface_environment()
+    token = str(env.get("HF_TOKEN") or "").strip() or None
+    savedir.mkdir(parents=True, exist_ok=True)
+    _log_info("downloading model snapshot source=%s savedir=%s hf_auth=%s", source, str(savedir), _huggingface_auth_label())
+    snapshot_download(
+        repo_id=source,
+        cache_dir=str(hf_cache_dir / "hub"),
+        local_dir=str(savedir),
+        local_dir_use_symlinks=False,
+        token=token,
+        allow_patterns=list(_SPEECHBRAIN_REPO_FILES),
+    )
+    return str(savedir) if _snapshot_complete(savedir) else source
 
 
 def _load_profiles() -> Dict[str, Any]:
@@ -577,12 +639,18 @@ def _apply_speechbrain_yaml_compat_shim() -> None:
 
 
 def _speechbrain_state() -> Tuple[bool, str]:
-    global _ENGINE, _ENGINE_SOURCE, _ENGINE_DEVICE, _ENGINE_REQUESTED_DEVICE, _ENGINE_ERROR
+    global _ENGINE, _ENGINE_SOURCE, _ENGINE_DEVICE, _ENGINE_REQUESTED_DEVICE, _ENGINE_AUTH_FINGERPRINT, _ENGINE_ERROR
     source = _model_source()
     requested_device = _vp()._speechbrain_device()
-    source_key = f"{source}|{requested_device}"
+    auth_fingerprint = _huggingface_auth_fingerprint()
+    source_key = f"{source}|{requested_device}|{auth_fingerprint}"
     with _ENGINE_LOCK:
-        if _ENGINE is not None and _ENGINE_SOURCE == source and _ENGINE_REQUESTED_DEVICE == requested_device:
+        if (
+            _ENGINE is not None
+            and _ENGINE_SOURCE == source
+            and _ENGINE_REQUESTED_DEVICE == requested_device
+            and _ENGINE_AUTH_FINGERPRINT == auth_fingerprint
+        ):
             return True, ""
         if _ENGINE_ERROR and _ENGINE_SOURCE == source_key:
             return False, _ENGINE_ERROR
@@ -592,6 +660,7 @@ def _speechbrain_state() -> Tuple[bool, str]:
             _ENGINE_SOURCE = source_key
             _ENGINE_DEVICE = requested_device
             _ENGINE_REQUESTED_DEVICE = requested_device
+            _ENGINE_AUTH_FINGERPRINT = auth_fingerprint
             _ENGINE_ERROR = import_detail
             _log_warning("dependencies unavailable source=%s detail=%s", source, import_detail or "unknown")
             _debug(f"dependencies unavailable source={source!r} detail={import_detail!r}")
@@ -601,25 +670,35 @@ def _speechbrain_state() -> Tuple[bool, str]:
         load_errors: List[str] = []
         try:
             _ensure_dirs()
-            savedir = SPEAKER_ID_MODEL_ROOT / _slugify_token(source)
+            savedir = _model_savedir(source)
             savedir.mkdir(parents=True, exist_ok=True)
+            hf_cache_dir = savedir / "huggingface"
             devices = [requested_device]
             if requested_device == "cuda":
                 devices.append("cpu")
             for device in devices:
                 run_device = _speechbrain_run_device(device)
                 try:
-                    _log_info("loading model source=%s savedir=%s device=%s", source, str(savedir), run_device)
+                    _log_info(
+                        "loading model source=%s savedir=%s cache=%s device=%s hf_auth=%s",
+                        source,
+                        str(savedir),
+                        str(hf_cache_dir),
+                        run_device,
+                        _huggingface_auth_label(),
+                    )
                     _debug(f"loading model source={source!r} savedir={str(savedir)!r} device={run_device!r}")
-                    with _temporary_huggingface_env():
+                    with _temporary_huggingface_env(hf_cache_dir):
+                        load_source = _ensure_speechbrain_snapshot(source, savedir, hf_cache_dir)
                         _ENGINE = SpeakerRecognition.from_hparams(
-                            source=source,
+                            source=load_source,
                             savedir=str(savedir),
                             run_opts={"device": run_device},
                         )
                     _ENGINE_SOURCE = source
                     _ENGINE_DEVICE = run_device
                     _ENGINE_REQUESTED_DEVICE = requested_device
+                    _ENGINE_AUTH_FINGERPRINT = auth_fingerprint
                     _ENGINE_ERROR = ""
                     with contextlib.suppress(Exception):
                         if hasattr(_ENGINE, "eval"):
@@ -640,6 +719,7 @@ def _speechbrain_state() -> Tuple[bool, str]:
             _ENGINE_SOURCE = source_key
             _ENGINE_DEVICE = requested_device
             _ENGINE_REQUESTED_DEVICE = requested_device
+            _ENGINE_AUTH_FINGERPRINT = auth_fingerprint
             detail = str(exc) or "unknown SpeechBrain error"
             _ENGINE_ERROR = "; ".join(load_errors) or f"{exc.__class__.__name__}: {detail}"
             _log_exception("model load failed source=%s detail=%s", source, _ENGINE_ERROR)
@@ -651,17 +731,18 @@ def runtime_availability() -> Dict[str, Any]:
     available, detail = _speechbrain_import_state()
     source = _model_source()
     requested_device = _vp()._speechbrain_device()
+    auth_fingerprint = _huggingface_auth_fingerprint()
     actual_device = requested_device
     if available:
         with _ENGINE_LOCK:
             actual_device = _ENGINE_DEVICE or requested_device
-            if _ENGINE is not None and _ENGINE_SOURCE == source:
+            if _ENGINE is not None and _ENGINE_SOURCE == source and _ENGINE_AUTH_FINGERPRINT == auth_fingerprint:
                 detail = ""
                 if _ENGINE_REQUESTED_DEVICE == "cuda" and _ENGINE_DEVICE == "cpu":
                     detail = "CUDA load failed; running on CPU fallback."
                 elif _ENGINE_REQUESTED_DEVICE and _ENGINE_REQUESTED_DEVICE != requested_device:
                     detail = "Loaded with the previous acceleration setting; it will reload on next use."
-            elif _ENGINE_ERROR and _ENGINE_SOURCE == f"{source}|{requested_device}":
+            elif _ENGINE_ERROR and _ENGINE_SOURCE == f"{source}|{requested_device}|{auth_fingerprint}":
                 available = False
                 detail = _ENGINE_ERROR
     return {
@@ -669,6 +750,9 @@ def runtime_availability() -> Dict[str, Any]:
         "label": "available" if available else "unavailable",
         "detail": detail,
         "model_source": _model_source(),
+        "model_dir": str(_model_savedir(source)),
+        "huggingface_cache_dir": str(_model_savedir(source) / "huggingface"),
+        "huggingface_auth": _huggingface_auth_label(),
         "device": actual_device,
         "acceleration": _vp()._speechbrain_acceleration_setting(),
     }

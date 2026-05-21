@@ -41,6 +41,14 @@ function normalizeDashboardRefreshIntervalSeconds(value) {
   return allowed.includes(parsed) ? parsed : 300;
 }
 
+function normalizeSpudexTab(value) {
+  const token = String(value || "").trim().toLowerCase();
+  if (token === "settings" || token === "policy") {
+    return "settings";
+  }
+  return token === "manual" ? "manual" : "workbench";
+}
+
 const state = {
   view: "dashboard",
   sessionId: safeStorageGet("tater_tateros_session_id", "") || createSessionId(),
@@ -53,6 +61,18 @@ const state = {
     safeStorageGet("tater_dashboard_refresh_interval_seconds", "300")
   ),
   dashboardRefreshTimer: 0,
+  spudexPayload: null,
+  spudexSelectedSessionId: safeStorageGet("tater_spudex_selected_session_id", ""),
+  spudexManualSessionId: safeStorageGet("tater_spudex_manual_session_id", ""),
+  spudexLogCursor: 0,
+  spudexLogEntries: [],
+  spudexManualLogCursor: 0,
+  spudexManualLogEntries: [],
+  spudexPollTimer: 0,
+  spudexTab: normalizeSpudexTab(safeStorageGet("tater_spudex_tab", "")),
+  spudexChatMessages: [],
+  spudexChatInFlight: false,
+  spudexDetailsOpen: false,
   coreTopTab: safeStorageGet("tater_tateros_core_tab", "") || "manage",
   coreTabSpecs: {},
   coreTabPayloadCache: {},
@@ -157,6 +177,7 @@ function withBasePath(path) {
 const VIEW_META = {
   dashboard: { title: "Dashboard", subtitle: "Tater status, live signals, and generated briefs." },
   chat: { title: "Chat", subtitle: "Talk to Tater Totterson" },
+  spudex: { title: "Spudex", subtitle: "Sandboxed agent_lab command sessions for Tater." },
   verbas: { title: "Verba", subtitle: "Enable tools and manage Verba settings + shop updates." },
   portals: { title: "Portals", subtitle: "Portal runtime controls and full Portal Shop manager." },
   cores: { title: "Cores", subtitle: "Core runtime controls and full Core Shop manager." },
@@ -9004,7 +9025,7 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
 
   captureEspHomeFirmwareDraft(card);
   setEspHomeFirmwareCardBusy(card, true);
-  setCoreManagerStatus(card, "Opening browser USB flash console...");
+  setCoreManagerStatus(card, "Opening browser USB flash log...");
 
   let stopped = false;
   let sessionId = "";
@@ -9076,7 +9097,7 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
           id: sessionId,
         });
       } catch (_error) {
-        // Ignore cleanup failures while closing the browser flash console.
+        // Ignore cleanup failures while closing the browser flash log.
       }
     }
     setEspHomeFirmwareCardBusy(card, false);
@@ -11730,6 +11751,83 @@ function renderDashboardAwarenessPanel(section, brief) {
   `;
 }
 
+function renderDashboardPersonalPanel(section, brief) {
+  const hasSection = section && typeof section === "object";
+  const hasBrief = brief && typeof brief === "object" && String(brief.text || "").trim();
+  if (!hasSection && !hasBrief) {
+    return "";
+  }
+  const stats = Array.isArray(section?.stats) ? section.stats : [];
+  const title = String(section?.title || brief?.title || "Personal").trim() || "Personal";
+  const subtitle = String(section?.subtitle || brief?.source || "7-day outlook").trim();
+  const personLabel = String(section?.person_label || "").trim();
+  const profileLabel = personLabel === "All people" ? "All linked people" : personLabel;
+  const text = String(brief?.text || section?.summary || "").trim();
+  const meta = dashboardBriefMeta(brief);
+  const briefId = String(brief?.id || section?.id || "").trim();
+  const outlookItems = Array.isArray(section?.outlook_items) ? section.outlook_items.filter((item) => item && typeof item === "object") : [];
+  const typeCounts = Array.isArray(section?.type_counts) ? section.type_counts.filter((item) => item && typeof item === "object") : [];
+  return `
+    <article class="dashboard-core-panel dashboard-personal-panel">
+      <div class="dashboard-panel-head">
+        <div>
+          <div class="dashboard-panel-kicker">Personal</div>
+          <h3 class="card-title">${escapeHtml(title)}</h3>
+          ${subtitle ? `<div class="small muted">${escapeHtml(subtitle)}</div>` : ""}
+          ${profileLabel ? `<div class="small muted">${escapeHtml(profileLabel)}</div>` : ""}
+          ${meta ? `<div class="small muted">${escapeHtml(meta)}</div>` : ""}
+        </div>
+        ${dashboardBriefRefreshButton(briefId)}
+      </div>
+      ${text ? `<p class="dashboard-panel-brief">${escapeHtml(text)}</p>` : ""}
+      ${
+        typeCounts.length
+          ? `<div class="dashboard-personal-counts">
+              ${typeCounts
+                .slice(0, 6)
+                .map(
+                  (item) => `
+                    <span>
+                      <strong>${escapeHtml(item.value ?? "0")}</strong>
+                      ${escapeHtml(item.label || "Item")}
+                    </span>
+                  `
+                )
+                .join("")}
+            </div>`
+          : ""
+      }
+      ${
+        outlookItems.length
+          ? `<div class="dashboard-personal-outlook">
+              ${outlookItems
+                .slice(0, 6)
+                .map((item) => {
+                  const itemType = String(item.type || item.item_type || "Item").trim();
+                  const titleText = String(item.title || itemType || "Personal item").trim();
+                  const when = String(item.when || "").trim();
+                  const source = String(item.source || "").trim();
+                  const detail = String(item.detail || item.summary || "").trim();
+                  const metaParts = [when, source].filter(Boolean);
+                  return `
+                    <article class="dashboard-personal-item">
+                      <div class="dashboard-personal-item-type">${escapeHtml(itemType)}</div>
+                      <strong>${escapeHtml(titleText)}</strong>
+                      ${metaParts.length ? `<span>${escapeHtml(metaParts.join(" • "))}</span>` : ""}
+                      ${detail ? `<p>${escapeHtml(detail)}</p>` : ""}
+                    </article>
+                  `;
+                })
+                .join("")}
+            </div>`
+          : ""
+      }
+      ${renderDashboardSignalStats(stats)}
+      ${section?.error ? `<div class="notice error">${escapeHtml(section.error)}</div>` : ""}
+    </article>
+  `;
+}
+
 function renderDashboardVoiceIdentityPanel(speakerId, emotionId) {
   const speaker = speakerId && typeof speakerId === "object" ? speakerId : null;
   const emotion = emotionId && typeof emotionId === "object" ? emotionId : null;
@@ -11864,13 +11962,14 @@ function renderDashboardSignalBriefs(payload) {
   const sections = Array.isArray(payload?.sections) ? payload.sections.filter((row) => row && typeof row === "object") : [];
   const briefs = dashboardBriefMap(payload?.briefs);
   const environmentSection = dashboardSectionById(sections, "environment");
+  const personalSection = dashboardSectionById(sections, "personal");
   const awarenessSection = dashboardSectionById(sections, "awareness");
   const voiceSection = dashboardSectionById(sections, "voice");
   const extraCards = [];
 
   sections.forEach((section) => {
     const id = String(section.id || "").trim();
-    if (id === "environment" || id === "awareness" || id === "voice") {
+    if (id === "environment" || id === "personal" || id === "awareness" || id === "voice") {
       return;
     }
     const brief = briefs[id];
@@ -11899,11 +11998,12 @@ function renderDashboardSignalBriefs(payload) {
   const overviewHtml = renderDashboardOverviewPanel(briefs.overview);
   const systemHtml = renderDashboardSystemPanel(payload?.cards, briefs.system, payload?.updates);
   const weatherHtml = renderDashboardWeatherPanel(environmentSection, briefs.environment);
+  const personalHtml = renderDashboardPersonalPanel(personalSection, briefs.personal);
   const awarenessHtml = renderDashboardAwarenessPanel(awarenessSection, briefs.awareness);
   const voiceHtml = renderDashboardVoicePanel(voiceSection, briefs.voice);
   const extraHtml = extraCards.map((card) => renderDashboardBriefTile(card)).join("");
 
-  if (!overviewHtml && !systemHtml && !weatherHtml && !awarenessHtml && !voiceHtml && !extraHtml) {
+  if (!overviewHtml && !systemHtml && !weatherHtml && !personalHtml && !awarenessHtml && !voiceHtml && !extraHtml) {
     return "";
   }
 
@@ -11913,6 +12013,7 @@ function renderDashboardSignalBriefs(payload) {
       ${systemHtml}
       <div class="dashboard-core-grid">
         ${weatherHtml}
+        ${personalHtml}
         ${awarenessHtml}
         ${voiceHtml}
       </div>
@@ -11998,6 +12099,25 @@ function dashboardSettingsStatusHtml(payload) {
   `;
 }
 
+function dashboardPersonalSettings(payload = state.dashboardPayload) {
+  const settings = payload?.settings && typeof payload.settings === "object" ? payload.settings : {};
+  return settings.personal && typeof settings.personal === "object" ? settings.personal : {};
+}
+
+function dashboardPersonalOptionsHtml(payload = state.dashboardPayload) {
+  const personal = dashboardPersonalSettings(payload);
+  const selected = String(personal.person_id || "").trim();
+  const options = Array.isArray(personal.people_options) ? personal.people_options.filter((row) => row && typeof row === "object") : [];
+  return [
+    `<option value=""${selected ? "" : " selected"}>All people</option>`,
+    ...options.map((row) => {
+      const value = String(row.value || "").trim();
+      const label = String(row.label || value || "Person").trim();
+      return `<option value="${escapeHtml(value)}"${value === selected ? " selected" : ""}>${escapeHtml(label)}</option>`;
+    }),
+  ].join("");
+}
+
 function ensureDashboardSettingsModal() {
   let modal = document.getElementById("dashboard-settings-modal");
   if (modal) {
@@ -12044,13 +12164,13 @@ function renderDashboardSettingsContent() {
       ${dashboardSettingsToggleHtml({
         key: "status",
         label: "Show Status Tiles",
-        description: "Display Tater, Hydra, surface, voice, environment, and awareness state tiles.",
+        description: "Display Tater, Hydra, surface, voice, environment, personal, and awareness state tiles.",
         checked: state.dashboardShowStatusTiles,
       })}
       ${dashboardSettingsToggleHtml({
         key: "metrics",
         label: "Show Metric Pills",
-        description: "Display compact stat rows inside Environment, Awareness, and Voice sections.",
+        description: "Display compact stat rows inside Environment, Personal, Awareness, and Voice sections.",
         checked: state.dashboardShowMetrics,
       })}
       ${dashboardSettingsToggleHtml({
@@ -12066,6 +12186,15 @@ function renderDashboardSettingsContent() {
         </span>
         <select id="dashboard-refresh-interval" data-dashboard-refresh-interval>
           ${dashboardRefreshIntervalOptionsHtml()}
+        </select>
+      </label>
+      <label class="dashboard-setting-select" for="dashboard-personal-person">
+        <span>
+          <strong>Personal Profile</strong>
+          <small>Choose whose 7-day Personal Core outlook appears on the dashboard.</small>
+        </span>
+        <select id="dashboard-personal-person" data-dashboard-personal-person>
+          ${dashboardPersonalOptionsHtml()}
         </select>
       </label>
     </div>
@@ -12148,6 +12277,31 @@ function bindDashboardSettingsModal() {
     if (statusEl) {
       statusEl.textContent =
         next > 0 ? `Dashboard will refresh every ${dashboardRefreshIntervalLabel(next)}.` : "Dashboard auto refresh is off.";
+    }
+  });
+  content.querySelector("[data-dashboard-personal-person]")?.addEventListener("change", async (event) => {
+    const personId = String(event.currentTarget?.value || "").trim();
+    if (statusEl) {
+      statusEl.textContent = "Updating Personal dashboard profile...";
+    }
+    try {
+      const payload = await api("/api/dashboard/settings", {
+        method: "POST",
+        body: JSON.stringify({ personal_person_id: personId || null }),
+        _timeoutMs: 20000,
+      });
+      state.dashboardPayload = payload;
+      rerenderDashboardFromState();
+      scheduleDashboardRefresh();
+      openDashboardSettingsModal();
+      const nextStatus = document.getElementById("dashboard-settings-action-status");
+      if (nextStatus) {
+        nextStatus.textContent = "Personal dashboard profile updated.";
+      }
+    } catch (error) {
+      if (statusEl) {
+        statusEl.textContent = `Personal profile update failed: ${error.message}`;
+      }
     }
   });
   document.getElementById("dashboard-settings-refresh-now")?.addEventListener("click", async () => {
@@ -14494,6 +14648,21 @@ async function loadSettingsView() {
               </div>
 
               <div class="hydra-model-panel is-active">
+                <div class="hydra-model-panel-title">Spudex LLM</div>
+                <div class="small hydra-model-panel-note">Optional override for Spudex direct chat and Hydra-triggered Spudex tasks. Blank uses the base model.</div>
+                <label>Spudex LLM Endpoint
+                  <input id="set_spudex_llm_host" type="text" value="${escapeHtml(
+                    settings.spudex_llm_host || ""
+                  )}" placeholder="Blank uses base endpoint" />
+                </label>
+                <label>Spudex LLM Model
+                  <input id="set_spudex_llm_model" type="text" value="${escapeHtml(
+                    settings.spudex_llm_model || ""
+                  )}" placeholder="Blank uses base model" />
+                </label>
+              </div>
+
+              <div class="hydra-model-panel is-active">
                 <div class="hydra-model-panel-title">Vision Model</div>
                 <div class="small hydra-model-panel-note">Used for image tools and vision-enabled requests.</div>
                 <label>Vision API Base URL
@@ -15182,7 +15351,7 @@ async function loadSettingsView() {
           <div class="settings-subpanel active" data-hydra-panel="settings">
             ${renderSettingsSectionIntro(
               "Hydra Behavior",
-              "Tune message windows, retry behavior, and optional second-pass planning checks.",
+              "Tune message windows, failure handling, and optional second-pass planning checks.",
               "CFG",
               "subtle"
             )}
@@ -15201,12 +15370,6 @@ async function loadSettingsView() {
                   settings.hydra_max_ledger_items ?? 1500
                 )}" />
               </label>
-              <label>Retry Depth (Step Retry Limit)
-                <input id="set_hydra_step_retry_limit" type="number" min="1" max="10" value="${escapeHtml(
-                  settings.hydra_step_retry_limit ?? 1
-                )}" />
-                <div class="small">Default: 1. Max retry attempts per plan step before Hydra stops and asks/fails.</div>
-              </label>
               <label>Astraeus Second Plan Check
                 ${renderToggleRow(
                   `<input id="set_hydra_astraeus_plan_review_enabled" class="toggle-input" type="checkbox" ${
@@ -15214,6 +15377,14 @@ async function loadSettingsView() {
                   } />`
                 )}
                 <div class="small">May improve planning quality, but slower.</div>
+              </label>
+              <label>Auto-Continue Incomplete Replies
+                ${renderToggleRow(
+                  `<input id="set_hydra_auto_continue_incomplete_final_enabled" class="toggle-input" type="checkbox" ${
+                    settings.hydra_auto_continue_incomplete_final_enabled ? "checked" : ""
+                  } />`
+                )}
+                <div class="small">Lets Hydra keep working when a reply says it will do the next step but stops early. Follow-up questions still wait for the user.</div>
               </label>
               <div class="inline-row" style="grid-column: 1 / -1;">
                 <button type="button" id="settings-hydra-defaults" class="inline-btn">Set Default Values</button>
@@ -15575,8 +15746,8 @@ async function loadSettingsView() {
   document.getElementById("settings-hydra-defaults").addEventListener("click", () => {
     const map = [
       ["set_hydra_max_ledger_items", "hydra_max_ledger_items"],
-      ["set_hydra_step_retry_limit", "hydra_step_retry_limit"],
       ["set_hydra_astraeus_plan_review_enabled", "hydra_astraeus_plan_review_enabled"],
+      ["set_hydra_auto_continue_incomplete_final_enabled", "hydra_auto_continue_incomplete_final_enabled"],
     ];
     map.forEach(([inputId, primaryKey]) => {
       const input = document.getElementById(inputId);
@@ -17047,6 +17218,8 @@ async function loadSettingsView() {
     const visionApiBase = String(document.getElementById("set_vision_api_base")?.value || "").trim();
     const visionModel = String(document.getElementById("set_vision_model")?.value || "").trim();
     const visionApiKey = String(document.getElementById("set_vision_api_key")?.value || "").trim();
+    const spudexLlmHost = String(document.getElementById("set_spudex_llm_host")?.value || "").trim();
+    const spudexLlmModel = String(document.getElementById("set_spudex_llm_model")?.value || "").trim();
     const speechSttBackend = String(document.getElementById("set_speech_stt_backend")?.value || "").trim();
     const speechAcceleration = String(document.getElementById("set_speech_acceleration")?.value || "").trim();
     const speechWyomingSttHost = String(document.getElementById("set_speech_wyoming_stt_host")?.value || "").trim();
@@ -17080,6 +17253,8 @@ async function loadSettingsView() {
       hydra_llm_api_key: baseApiKey,
       hydra_base_servers: hydraBaseServersPayload,
       hydra_beast_mode_enabled: Boolean(document.getElementById("set_hydra_beast_mode_enabled")?.checked),
+      spudex_llm_host: spudexLlmHost,
+      spudex_llm_model: spudexLlmModel,
       vision_api_base: visionApiBase,
       vision_model: visionModel,
       vision_api_key: visionApiKey,
@@ -17690,9 +17865,11 @@ async function loadSettingsView() {
       ),
       emoji_min_message_length: Number(document.getElementById("set_emoji_min_message_length").value || 4),
       hydra_max_ledger_items: Number(document.getElementById("set_hydra_max_ledger_items").value || 1500),
-      hydra_step_retry_limit: Number(document.getElementById("set_hydra_step_retry_limit").value || 1),
       hydra_astraeus_plan_review_enabled: document.getElementById(
         "set_hydra_astraeus_plan_review_enabled"
+      ).checked,
+      hydra_auto_continue_incomplete_final_enabled: document.getElementById(
+        "set_hydra_auto_continue_incomplete_final_enabled"
       ).checked,
       popup_effect_style: normalizePopupEffectStyle(document.getElementById("set_popup_effect_style")?.value || "flame"),
       executor_wake_workers: Number(document.getElementById("set_executor_wake_workers")?.value || 2),
@@ -17788,11 +17965,1731 @@ async function loadSettingsView() {
   });
 }
 
+function clearSpudexPollTimer() {
+  if (state.spudexPollTimer) {
+    window.clearTimeout(state.spudexPollTimer);
+    state.spudexPollTimer = 0;
+  }
+}
+
+function normalizeSpudexSettings(settings = {}) {
+  const value = settings && typeof settings === "object" ? settings : {};
+  return {
+    enabled: Boolean(value.enabled),
+    policy_enabled: value.policy_enabled !== false,
+    require_approval: Boolean(value.require_approval),
+    require_file_approval: Boolean(value.require_file_approval),
+    allow_absolute_executables: Boolean(value.allow_absolute_executables),
+    allow_shell_commands: Boolean(value.allow_shell_commands),
+    allow_host_admin_commands: Boolean(value.allow_host_admin_commands),
+    allow_remote_control: Boolean(value.allow_remote_control),
+    allow_containers: Boolean(value.allow_containers),
+    allow_host_package_managers: Boolean(value.allow_host_package_managers),
+    allow_inline_eval: Boolean(value.allow_inline_eval),
+    allow_network: Boolean(value.allow_network),
+    allow_installs: Boolean(value.allow_installs),
+    allowed_platforms: Array.isArray(value.allowed_platforms) ? value.allowed_platforms : ["webui"],
+    max_task_steps: Number(value.max_task_steps || 6),
+    command_timeout_sec: Number(value.command_timeout_sec || 45),
+    max_output_chars: Number(value.max_output_chars || 12000),
+    max_log_entries: Number(value.max_log_entries || 4000),
+    max_sessions: Number(value.max_sessions || 80),
+    default_cwd: String(value.default_cwd || "workspace"),
+    sandbox_mode: String(value.sandbox_mode || "agent_lab"),
+    llm_host: String(value.llm_host || ""),
+    llm_model: String(value.llm_model || ""),
+  };
+}
+
+function spudexStatusLabel(status) {
+  const token = String(status || "queued").trim().toLowerCase();
+  if (token === "succeeded") {
+    return "Done";
+  }
+  if (token === "failed") {
+    return "Failed";
+  }
+  if (token === "running") {
+    return "Running";
+  }
+  if (token === "blocked") {
+    return "Blocked";
+  }
+  if (token === "timeout") {
+    return "Timeout";
+  }
+  if (token === "stopped") {
+    return "Stopped";
+  }
+  return token ? token[0].toUpperCase() + token.slice(1) : "Queued";
+}
+
+function ensureSpudexSelectedSession(payload) {
+  const sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
+  const current = String(state.spudexSelectedSessionId || "").trim();
+  const exists = current && sessions.some((session) => String(session?.id || "") === current);
+  if (exists) {
+    return current;
+  }
+  const next = String(sessions[0]?.id || "").trim();
+  if (next !== current) {
+    state.spudexSelectedSessionId = next;
+    safeStorageSet("tater_spudex_selected_session_id", next);
+    state.spudexLogCursor = 0;
+    state.spudexLogEntries = [];
+  }
+  return next;
+}
+
+function spudexManualSessions(payload = state.spudexPayload) {
+  const sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
+  return sessions.filter((session) => String(session?.source || "").trim().toLowerCase() === "ui");
+}
+
+function ensureSpudexManualSession(payload) {
+  const sessions = spudexManualSessions(payload);
+  const current = String(state.spudexManualSessionId || "").trim();
+  const exists = current && sessions.some((session) => String(session?.id || "") === current);
+  if (exists) {
+    return current;
+  }
+  const next = String(sessions[0]?.id || "").trim();
+  if (next !== current) {
+    state.spudexManualSessionId = next;
+    safeStorageSet("tater_spudex_manual_session_id", next);
+    state.spudexManualLogCursor = 0;
+    state.spudexManualLogEntries = [];
+  }
+  return next;
+}
+
+function currentSpudexSession(payload = state.spudexPayload) {
+  const sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
+  const selectedId = String(state.spudexSelectedSessionId || "").trim();
+  return sessions.find((session) => String(session?.id || "") === selectedId) || null;
+}
+
+function currentSpudexManualSession(payload = state.spudexPayload) {
+  const sessions = spudexManualSessions(payload);
+  const selectedId = String(state.spudexManualSessionId || "").trim();
+  return sessions.find((session) => String(session?.id || "") === selectedId) || null;
+}
+
+function currentSpudexChatSessionId(payload = state.spudexPayload) {
+  const session = currentSpudexSession(payload);
+  if (!session || String(session.source || "").trim().toLowerCase() !== "spudex_chat") {
+    return "";
+  }
+  return String(session.id || "").trim();
+}
+
+function spudexSettingSwitch(id, label, checked, extraClass = "") {
+  return `
+    <label class="toggle-row spudex-switch-row ${escapeHtml(extraClass)}">
+      <span>${escapeHtml(label)}</span>
+      <input id="${escapeHtml(id)}" class="toggle-input" type="checkbox" ${checked ? "checked" : ""} />
+    </label>
+  `;
+}
+
+function renderSpudexPlatformOptions(settings, payload = state.spudexPayload || {}) {
+  const allowed = new Set(
+    (Array.isArray(settings.allowed_platforms) ? settings.allowed_platforms : ["webui"])
+      .map((item) => String(item || "").trim().toLowerCase())
+      .filter(Boolean)
+  );
+  const rawOptions = Array.isArray(payload?.platform_options) ? payload.platform_options : [];
+  const optionsByValue = new Map();
+  rawOptions.forEach((option) => {
+    const value = String(option?.value || "").trim().toLowerCase();
+    if (!value || optionsByValue.has(value)) {
+      return;
+    }
+    optionsByValue.set(value, {
+      value,
+      label: String(option?.label || value).trim() || value,
+      description: String(option?.description || "").trim(),
+      running: Boolean(option?.running),
+      kind: String(option?.kind || "").trim(),
+    });
+  });
+  allowed.forEach((value) => {
+    if (!optionsByValue.has(value)) {
+      optionsByValue.set(value, {
+        value,
+        label: value === "all" ? "All platforms" : value.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase()),
+        description: "Saved platform, currently stopped",
+        running: value === "all",
+        kind: "saved",
+      });
+    }
+  });
+  if (!optionsByValue.size) {
+    optionsByValue.set("webui", {
+      value: "webui",
+      label: "Web UI",
+      description: "Tater browser UI",
+      running: true,
+      kind: "built_in",
+    });
+  }
+  const options = Array.from(optionsByValue.values());
+  return `
+    <div class="spudex-platform-picker">
+      <div class="spudex-platform-picker-head">
+        <span>Platforms</span>
+        <small>Select the Tater surfaces where Hydra can expose Spudex.</small>
+      </div>
+      <div class="spudex-platform-list">
+        ${options
+          .map((option) => {
+            const checked = allowed.has(option.value);
+            const status = option.value === "all" ? "Every platform" : option.running ? "Running" : "Stopped";
+            const description = option.description || (option.running ? "Available now" : "Saved platform, currently stopped");
+            return `
+              <label class="spudex-platform-option ${option.running ? "running" : "stopped"}">
+                <span class="spudex-platform-copy">
+                  <strong>${escapeHtml(option.label)}</strong>
+                  <small>${escapeHtml(status)} - ${escapeHtml(description)}</small>
+                </span>
+                <input class="toggle-input" type="checkbox" value="${escapeHtml(option.value)}" data-spudex-platform ${checked ? "checked" : ""} />
+              </label>
+            `;
+          })
+          .join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderSpudexSettingsCard(settings, payload = state.spudexPayload || {}) {
+  return `
+    <section class="spudex-card spudex-settings-card">
+      <div class="spudex-card-head">
+        <div>
+          <h3>Hydra Spudex Access</h3>
+          <p>Expose sandboxed spudex tools to Hydra when Tater needs a local command loop.</p>
+        </div>
+        <span class="status-pill ${settings.enabled ? "running" : "muted"}">${settings.enabled ? "Enabled" : "Off"}</span>
+      </div>
+      <div class="spudex-settings-grid">
+        ${spudexSettingSwitch("spudex-enabled", "Enable Spudex tools for Hydra", settings.enabled)}
+        ${renderSpudexPlatformOptions(settings, payload)}
+        <label>
+          <span>Default working folder</span>
+          <input id="spudex-default-cwd" type="text" value="${escapeHtml(settings.default_cwd)}" />
+        </label>
+        <label>
+          <span>Max task steps</span>
+          <input id="spudex-max-steps" type="number" min="1" max="30" value="${escapeHtml(settings.max_task_steps)}" />
+        </label>
+        <label>
+          <span>Command timeout</span>
+          <input id="spudex-timeout" type="number" min="5" max="3600" value="${escapeHtml(settings.command_timeout_sec)}" />
+        </label>
+        <label>
+          <span>Output cap</span>
+          <input id="spudex-output-cap" type="number" min="1000" max="500000" value="${escapeHtml(settings.max_output_chars)}" />
+        </label>
+      </div>
+    </section>
+  `;
+}
+
+function renderSpudexSubtabs(activeTab) {
+  const tab = normalizeSpudexTab(activeTab);
+  return `
+    <div class="spudex-subtabs" role="tablist" aria-label="Spudex sections">
+      <button class="spudex-subtab ${tab === "workbench" ? "active" : ""}" type="button" data-spudex-tab="workbench">Workbench</button>
+      <button class="spudex-subtab ${tab === "manual" ? "active" : ""}" type="button" data-spudex-tab="manual">Manual Session</button>
+      <button class="spudex-subtab ${tab === "settings" ? "active" : ""}" type="button" data-spudex-tab="settings">Settings</button>
+    </div>
+  `;
+}
+
+function spudexPolicyToggle(id, title, description, checked) {
+  return `
+    <label class="spudex-policy-rule">
+      <span>
+        <strong>${escapeHtml(title)}</strong>
+        <small>${escapeHtml(description)}</small>
+      </span>
+      <input id="${escapeHtml(id)}" class="toggle-input" type="checkbox" ${checked ? "checked" : ""} />
+    </label>
+  `;
+}
+
+function renderSpudexPolicyCard(settings) {
+  const policyWarning = settings.policy_enabled
+    ? `<div class="spudex-policy-note">
+        Policy is active. Locked guardrails stay enforced, and only the allowed categories below can pass.
+      </div>`
+    : `<div class="spudex-policy-warning">
+        <strong>Command safety policy is off.</strong>
+        Spudex commands can use shells, host paths, network commands, installs, and host-affecting tools. Only use this when you trust the active model and are watching the session.
+      </div>`;
+  return `
+    <section class="spudex-card spudex-policy-card">
+      <div class="spudex-card-head">
+        <div>
+          <h3>Spudex Policy</h3>
+          <p>Keep the safety policy on, then selectively allow specific command categories when a workflow needs them.</p>
+        </div>
+        <span class="status-pill ${settings.policy_enabled ? "running" : "failed"}">${settings.policy_enabled ? "Policy On" : "Policy Off"}</span>
+      </div>
+      <div class="spudex-policy-master">
+        ${spudexSettingSwitch("spudex-policy-enabled", "Enable command safety policy", settings.policy_enabled, "spudex-policy-toggle")}
+        <div class="spudex-settings-hint spudex-policy-hint">
+          Turning this off bypasses blocked shells, host command checks, network/install checks, and path-argument checks for spudex commands.
+        </div>
+      </div>
+      ${policyWarning}
+      <div class="spudex-policy-section">
+        <h4>Locked Guardrails</h4>
+        <div class="spudex-policy-locks">
+          <span>Commands start inside <code>agent_lab</code>.</span>
+          <span>Spudex file writes stay inside <code>agent_lab</code>.</span>
+          <span>Model-started processes are tracked and can be killed from the UI.</span>
+        </div>
+      </div>
+      <div class="spudex-policy-section">
+        <h4>Configurable Allowances</h4>
+        <div class="spudex-policy-grid">
+          ${spudexPolicyToggle("spudex-require-approval", "Require Hydra approval", "Hydra-triggered spudex actions pause unless this is off. Spudex Chat and manual commands are direct.", settings.require_approval)}
+          ${spudexPolicyToggle("spudex-require-file-approval", "Require file write approval", "Model-proposed file writes become pending diffs until approved or rejected in the Workbench.", settings.require_file_approval)}
+          ${spudexPolicyToggle("spudex-allow-network", "Allow network commands", "Allows curl, wget, and git network actions like clone, fetch, pull, push, and ls-remote.", settings.allow_network)}
+          ${spudexPolicyToggle("spudex-allow-installs", "Allow package/tool installs", "Allows pip install, npm install/add, uv add, and similar tool-environment installs.", settings.allow_installs)}
+          ${spudexPolicyToggle("spudex-allow-absolute-executables", "Allow absolute executable paths", "Allows commands like /usr/bin/python3 instead of requiring commands from PATH.", settings.allow_absolute_executables)}
+          ${spudexPolicyToggle("spudex-allow-shell-commands", "Allow shells", "Allows sh, bash, zsh, fish, cmd, PowerShell, and similar shell entry points.", settings.allow_shell_commands)}
+          ${spudexPolicyToggle("spudex-allow-host-admin-commands", "Allow host/admin commands", "Allows sudo, su, chmod, chown, launchctl, osascript, and open.", settings.allow_host_admin_commands)}
+          ${spudexPolicyToggle("spudex-allow-remote-control", "Allow remote/control tools", "Allows ssh, scp, and sftp. Network access must also be allowed for these to run.", settings.allow_remote_control)}
+          ${spudexPolicyToggle("spudex-allow-containers", "Allow containers", "Allows docker and podman commands.", settings.allow_containers)}
+          ${spudexPolicyToggle("spudex-allow-host-package-managers", "Allow host package managers", "Allows brew, apt, apt-get, yum, dnf, pacman, and apk.", settings.allow_host_package_managers)}
+          ${spudexPolicyToggle("spudex-allow-inline-eval", "Allow inline eval", "Allows python -c, node -e, ruby -e, perl -e, and similar inline interpreter execution.", settings.allow_inline_eval)}
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function renderSpudexSettingsTab(settings, payload = state.spudexPayload || {}) {
+  return `
+    <div class="spudex-settings-stack">
+      ${renderSpudexSettingsCard(settings, payload)}
+      ${renderSpudexPolicyCard(settings)}
+      <div class="spudex-settings-save-row">
+        <button id="spudex-save-settings" class="action-btn" type="button">Save Settings</button>
+        <span id="spudex-settings-status" class="small">Model routing lives in Settings &gt; Models.</span>
+      </div>
+    </div>
+  `;
+}
+
+function renderSpudexRunCard(settings) {
+  return `
+    <section class="spudex-card spudex-manual-run-card">
+      <div class="spudex-card-head">
+        <div>
+          <h3>Manual Session</h3>
+          <p>Run one command inside the same agent_lab sandbox Tater can use.</p>
+        </div>
+        <span class="spudex-console-badge">agent_lab</span>
+      </div>
+      <form id="spudex-run-form" class="spudex-run-form">
+        <label>
+          <span>Command</span>
+          <input id="spudex-command" type="text" autocomplete="off" placeholder="python --version" />
+        </label>
+        <label class="toggle-row spudex-background-row">
+          <input id="spudex-background" type="checkbox" />
+          <span>Keep running</span>
+        </label>
+        <button class="primary-btn" type="submit">Run</button>
+      </form>
+      <p class="spudex-sandbox-note">Sandbox root: <code>${escapeHtml(state.spudexPayload?.agent_lab || "agent_lab")}</code></p>
+    </section>
+  `;
+}
+
+function renderSpudexManualSessions(payload) {
+  const sessions = spudexManualSessions(payload);
+  if (!sessions.length) {
+    return `<div class="spudex-manual-session-empty">No manual runs yet.</div>`;
+  }
+  return `
+    <div class="spudex-manual-session-list">
+      ${sessions
+        .slice(0, 10)
+        .map((session) => {
+          const id = String(session?.id || "");
+          const selected = id && id === state.spudexManualSessionId;
+          const status = String(session?.status || "queued").toLowerCase();
+          const active = Boolean(session?.active) || status === "running" || status === "queued";
+          return `
+            <button class="spudex-manual-session-row ${selected ? "selected" : ""}" type="button" data-manual-session-id="${escapeHtml(id)}">
+              <span>
+                <strong>${escapeHtml(session?.command || session?.label || "Manual run")}</strong>
+                <small>${escapeHtml(_runtimeStartedLabel(session?.updated_ts) || "")}</small>
+              </span>
+              <span class="status-pill ${active ? "running" : status}">${escapeHtml(spudexStatusLabel(status))}</span>
+            </button>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
+function renderSpudexManualLogs() {
+  const entries = Array.isArray(state.spudexManualLogEntries) ? state.spudexManualLogEntries : [];
+  if (!state.spudexManualSessionId) {
+    return `<div class="spudex-console-empty">Run a command to open a manual console session.</div>`;
+  }
+  if (!entries.length) {
+    return `<div class="spudex-console-empty">Console is waiting for output.</div>`;
+  }
+  return entries
+    .map((entry) => {
+      const stream = String(entry?.stream || "log").toLowerCase();
+      const text = String(entry?.text || "");
+      if (stream === "command") {
+        return `
+          <div class="spudex-console-line command">
+            <span class="spudex-console-prompt">$</span>
+            <pre>${escapeHtml(text.replace(/^\$\s*/, ""))}</pre>
+          </div>
+        `;
+      }
+      return `
+        <div class="spudex-console-line ${escapeHtml(stream)}">
+          <span class="spudex-console-stream">${escapeHtml(stream)}</span>
+          <pre>${escapeHtml(text)}</pre>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+function renderSpudexManualTab(settings, payload) {
+  ensureSpudexManualSession(payload);
+  const manualSession = currentSpudexManualSession(payload);
+  const status = String(manualSession?.status || "").toLowerCase();
+  const active = Boolean(manualSession?.active) || status === "running" || status === "queued";
+  const title = manualSession ? String(manualSession.command || manualSession.label || manualSession.id || "Manual console") : "Manual console";
+  return `
+    <div class="spudex-manual-layout">
+      ${renderSpudexRunCard(settings)}
+      <section class="spudex-console-shell">
+        <div class="spudex-console-topbar">
+          <div class="spudex-console-window-controls" aria-hidden="true">
+            <span></span><span></span><span></span>
+          </div>
+          <div>
+            <strong id="spudex-manual-console-title">${escapeHtml(title)}</strong>
+            <small>tater@spudex:${escapeHtml(manualSession?.cwd_display || "workspace")}</small>
+          </div>
+          <div class="spudex-console-actions">
+            <button id="spudex-open-details" class="inline-btn" type="button" ${manualSession ? "" : "disabled"}>Details</button>
+            <button id="spudex-manual-clear-log-view" class="inline-btn" type="button">Clear Console</button>
+            <button id="spudex-manual-stop-session" class="inline-btn danger" type="button" ${active ? "" : "disabled"}>Stop</button>
+          </div>
+        </div>
+        <div id="spudex-manual-log-panel" class="spudex-console-panel">${renderSpudexManualLogs()}</div>
+      </section>
+      <section class="spudex-card spudex-manual-history-card">
+        <div class="spudex-card-head">
+          <div>
+            <h3>Manual History</h3>
+            <p>Recent commands launched from this tab.</p>
+          </div>
+        </div>
+        <div id="spudex-manual-session-list-wrap">${renderSpudexManualSessions(payload)}</div>
+      </section>
+      ${renderSpudexDetailsDrawer(manualSession, payload)}
+    </div>
+  `;
+}
+
+function renderSpudexSessions(payload) {
+  const sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
+  if (!sessions.length) {
+    return `<div class="notice compact">No spudex sessions yet.</div>`;
+  }
+  return `
+    <div class="spudex-session-list">
+      ${sessions
+        .map((session) => {
+          const id = String(session?.id || "");
+          const selected = id && id === state.spudexSelectedSessionId;
+          const status = String(session?.status || "queued").toLowerCase();
+          const active = Boolean(session?.active) || status === "running";
+          const detail = String(session?.command || session?.goal || (status === "draft" ? "Ready for first message" : ""));
+          return `
+            <div class="spudex-session-item ${selected ? "selected" : ""}">
+              <button class="spudex-session-row ${selected ? "selected" : ""}" type="button" data-session-id="${escapeHtml(id)}">
+                <span>
+                  <strong>${escapeHtml(session?.label || session?.command || "Spudex session")}</strong>
+                  <small>${escapeHtml(detail)}</small>
+                </span>
+                <span class="spudex-session-meta">
+                  <span class="status-pill ${active ? "running" : status}">${escapeHtml(spudexStatusLabel(status))}</span>
+                  <small>${escapeHtml(_runtimeStartedLabel(session?.updated_ts) || "")}</small>
+                </span>
+              </button>
+              <button
+                class="spudex-session-close"
+                type="button"
+                data-session-id="${escapeHtml(id)}"
+                data-active="${active ? "true" : "false"}"
+                aria-label="Close Spudex session"
+                title="Close session"
+              >&times;</button>
+            </div>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
+function renderSpudexModelProcesses(payload) {
+  const processes = Array.isArray(payload?.model_processes) ? payload.model_processes : [];
+  if (!processes.length) {
+    return `<div class="spudex-process-empty">No model-launched processes running.</div>`;
+  }
+  return `
+    <div class="spudex-process-list">
+      ${processes
+        .map((process) => {
+          const sessionId = String(process?.session_id || "");
+          const label = String(process?.label || process?.command || "Spudex process");
+          const pid = process?.pid ? `PID ${process.pid}` : "PID pending";
+          const source = String(process?.source || "model").replaceAll("_", " ");
+          return `
+            <div class="spudex-process-row">
+              <div>
+                <strong>${escapeHtml(label)}</strong>
+                <small>${escapeHtml([pid, source, process?.cwd || ""].filter(Boolean).join(" • "))}</small>
+              </div>
+              <button class="inline-btn danger spudex-kill-process" type="button" data-session-id="${escapeHtml(sessionId)}">Kill</button>
+            </div>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
+function renderSpudexTaskPlan(session) {
+  const plan = Array.isArray(session?.plan) ? session.plan.filter((item) => item && typeof item === "object") : [];
+  if (!plan.length) {
+    return `<div class="spudex-insight-empty">No task plan yet.</div>`;
+  }
+  return `
+    <ol class="spudex-plan-list">
+      ${plan
+        .map((item) => {
+          const status = String(item.status || "pending").toLowerCase();
+          return `
+            <li class="${escapeHtml(status)}">
+              <span>${escapeHtml(item.step || "Step")}</span>
+              <small>${escapeHtml(status.replaceAll("_", " "))}${item.detail ? ` • ${escapeHtml(item.detail)}` : ""}</small>
+            </li>
+          `;
+        })
+        .join("")}
+    </ol>
+  `;
+}
+
+function renderSpudexFileChanges(session) {
+  const changes = Array.isArray(session?.file_changes) ? session.file_changes.filter((item) => item && typeof item === "object") : [];
+  if (!changes.length) {
+    return `<div class="spudex-insight-empty">No file changes yet.</div>`;
+  }
+  return `
+    <div class="spudex-file-change-list">
+      ${changes
+        .slice(-6)
+        .reverse()
+        .map((change) => {
+          const pending = Boolean(change.pending);
+          const applied = Boolean(change.applied);
+          const status = pending ? "Pending" : applied ? "Applied" : "Rejected";
+          const sessionId = String(session?.id || "");
+          const changeId = String(change.id || "");
+          return `
+            <article class="spudex-file-change ${pending ? "pending" : applied ? "applied" : "rejected"}">
+              <div class="spudex-file-change-head">
+                <div>
+                  <strong>${escapeHtml(change.path_display || change.path || "File change")}</strong>
+                  <small>${escapeHtml(status)}${change.bytes ? ` • ${escapeHtml(change.bytes)} bytes` : ""}</small>
+                </div>
+                ${
+                  pending
+                    ? `<div class="spudex-file-change-actions">
+                        <button class="inline-btn spudex-file-approve" type="button" data-session-id="${escapeHtml(sessionId)}" data-change-id="${escapeHtml(changeId)}">Approve</button>
+                        <button class="inline-btn danger spudex-file-reject" type="button" data-session-id="${escapeHtml(sessionId)}" data-change-id="${escapeHtml(changeId)}">Reject</button>
+                      </div>`
+                    : ""
+                }
+              </div>
+              <pre>${escapeHtml(change.diff || "No textual diff available.")}</pre>
+            </article>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
+function renderSpudexVerification(session) {
+  const verification = session?.verification && typeof session.verification === "object" ? session.verification : null;
+  if (!verification) {
+    return `<div class="spudex-insight-empty">No verification run yet.</div>`;
+  }
+  const status = String(verification.status || "unknown").toLowerCase();
+  return `
+    <div class="spudex-verification ${escapeHtml(status)}">
+      <strong>${escapeHtml(status === "passed" ? "Verification passed" : status === "failed" ? "Verification failed" : "Verification recorded")}</strong>
+      ${verification.command ? `<small>${escapeHtml(verification.command)}</small>` : ""}
+      ${verification.summary ? `<pre>${escapeHtml(verification.summary)}</pre>` : ""}
+    </div>
+  `;
+}
+
+function renderSpudexPreviews(session) {
+  const previews = Array.isArray(session?.previews) ? session.previews.filter((item) => item && typeof item === "object") : [];
+  if (!previews.length) {
+    return `<div class="spudex-insight-empty">No app previews detected yet.</div>`;
+  }
+  return `
+    <div class="spudex-preview-list">
+      ${previews
+        .slice(-6)
+        .reverse()
+        .map((preview) => {
+          const url = String(preview.url || "").trim();
+          return `
+            <a class="spudex-preview-link" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">
+              <span>${escapeHtml(url)}</span>
+              <small>${escapeHtml(preview.source || "preview")}</small>
+            </a>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
+function renderSpudexGitStatus(payload) {
+  const git = payload?.git && typeof payload.git === "object" ? payload.git : {};
+  if (!git.ok) {
+    return `<div class="spudex-insight-empty">No Git repo detected for the app process.</div>`;
+  }
+  const files = Array.isArray(git.changed_files) ? git.changed_files : [];
+  return `
+    <div class="spudex-git-status">
+      <div>
+        <strong>${escapeHtml(git.branch || "detached")}</strong>
+        <small>${escapeHtml(git.repo || "")}</small>
+      </div>
+      <span class="status-pill ${git.dirty ? "failed" : "running"}">${git.dirty ? `${escapeHtml(git.changed_count || files.length)} changed` : "Clean"}</span>
+      ${
+        files.length
+          ? `<pre>${escapeHtml(files.slice(0, 24).join("\n"))}</pre>`
+          : ""
+      }
+    </div>
+  `;
+}
+
+function renderSpudexMemory(session) {
+  const summary = String(session?.memory_summary || "").trim();
+  if (!summary) {
+    return `<div class="spudex-insight-empty">No session memory yet.</div>`;
+  }
+  return `<p class="spudex-memory-summary">${escapeHtml(summary)}</p>`;
+}
+
+function renderSpudexPolicyExplain(session) {
+  const block = session?.last_policy_block && typeof session.last_policy_block === "object" ? session.last_policy_block : null;
+  if (!block) {
+    return "";
+  }
+  return `
+    <details class="spudex-policy-explain">
+      <summary>Why blocked?</summary>
+      <strong>${escapeHtml(block.title || "Command blocked")}</strong>
+      <p>${escapeHtml(block.reason || block.message || "The spudex policy rejected this command.")}</p>
+      ${block.toggle ? `<small>Policy toggle: ${escapeHtml(block.toggle)}</small>` : ""}
+    </details>
+  `;
+}
+
+function renderSpudexSessionInsights(session, payload) {
+  if (!session) {
+    return `
+      <div class="spudex-insights spudex-insights-empty-state">
+        <div class="spudex-insight-empty">Select a session to see plan, diffs, verification, previews, git, and memory.</div>
+      </div>
+    `;
+  }
+  return `
+    <div class="spudex-insights">
+      ${renderSpudexPolicyExplain(session)}
+      <div class="spudex-insight-grid">
+        <article>
+          <h4>Plan</h4>
+          ${renderSpudexTaskPlan(session)}
+        </article>
+        <article>
+          <h4>Verification</h4>
+          ${renderSpudexVerification(session)}
+        </article>
+        <article>
+          <h4>App Preview</h4>
+          ${renderSpudexPreviews(session)}
+        </article>
+        <article>
+          <h4>Git</h4>
+          ${renderSpudexGitStatus(payload)}
+        </article>
+        <article class="wide">
+          <h4>File Changes</h4>
+          ${renderSpudexFileChanges(session)}
+        </article>
+        <article class="wide">
+          <h4>Session Memory</h4>
+          ${renderSpudexMemory(session)}
+        </article>
+      </div>
+    </div>
+  `;
+}
+
+function renderSpudexDetailsDrawer(session, payload) {
+  const open = Boolean(state.spudexDetailsOpen);
+  const title = session ? String(session.label || session.command || session.id || "Spudex session") : "No session selected";
+  return `
+    <aside id="spudex-details-drawer" class="spudex-details-drawer ${open ? "open" : ""}" aria-hidden="${open ? "false" : "true"}" ${open ? "" : "inert"}>
+      <button class="spudex-details-backdrop" type="button" data-spudex-close-details aria-label="Close session details"></button>
+      <section class="spudex-details-panel" role="dialog" aria-modal="false" aria-label="Session Details">
+        <div class="spudex-details-head">
+          <div>
+            <span class="spudex-details-kicker">Session Details</span>
+            <h3 id="spudex-details-title">${escapeHtml(title)}</h3>
+          </div>
+          <button id="spudex-close-details" class="inline-btn spudex-minimize-details" type="button">Minimize</button>
+        </div>
+        <div id="spudex-session-insights" class="spudex-details-body">${renderSpudexSessionInsights(session, payload)}</div>
+      </section>
+    </aside>
+  `;
+}
+
+function renderSpudexLogEntry(entry) {
+  const stream = String(entry?.stream || "log").toLowerCase();
+  return `
+    <div class="spudex-log-line ${escapeHtml(stream)}">
+      <span class="spudex-log-time">${escapeHtml(_runtimeStartedLabel(entry?.ts) || "")}</span>
+      <span class="spudex-log-stream">${escapeHtml(stream)}</span>
+      <pre>${escapeHtml(entry?.text || "")}</pre>
+    </div>
+  `;
+}
+
+function renderSpudexPendingChatLogs() {
+  if (!state.spudexChatInFlight || !Array.isArray(state.spudexChatMessages)) {
+    return "";
+  }
+  return (
+    state.spudexChatMessages
+      .slice(-4)
+      .map((message) => {
+        const role = String(message?.role || "assistant").toLowerCase() === "user" ? "user" : "assistant";
+        const label = role === "user" ? "user" : "assistant";
+        return `
+          <div class="spudex-log-line ${escapeHtml(role)} pending">
+            <span class="spudex-log-time">now</span>
+            <span class="spudex-log-stream">${escapeHtml(label)}</span>
+            <pre>${escapeHtml(String(message?.text || ""))}</pre>
+          </div>
+        `;
+      })
+      .join("") +
+    `
+      <div class="spudex-log-line assistant pending">
+        <span class="spudex-log-time">now</span>
+        <span class="spudex-log-stream">spudex</span>
+        <pre>Working...</pre>
+      </div>
+    `
+  );
+}
+
+function renderSpudexLogs() {
+  const entries = Array.isArray(state.spudexLogEntries) ? state.spudexLogEntries : [];
+  const pendingChatHtml = renderSpudexPendingChatLogs();
+  if (!state.spudexSelectedSessionId) {
+    if (pendingChatHtml) {
+      return pendingChatHtml;
+    }
+    return `<div class="spudex-log-empty">Select a session to view logs.</div>`;
+  }
+  if (!entries.length) {
+    if (pendingChatHtml) {
+      return pendingChatHtml;
+    }
+    return `<div class="spudex-log-empty">No log output yet.</div>`;
+  }
+  const rows = entries.map((entry) => renderSpudexLogEntry(entry)).join("");
+  return `${rows}${pendingChatHtml}`;
+}
+
+function spudexSelectionTouchesPanel(panel) {
+  const selection = window.getSelection?.();
+  if (!selection || selection.isCollapsed) {
+    return false;
+  }
+  return panel.contains(selection.anchorNode) || panel.contains(selection.focusNode);
+}
+
+function spudexLogIsNearBottom(panel) {
+  return panel.scrollHeight - panel.scrollTop - panel.clientHeight < 72;
+}
+
+function syncSpudexLogPanel({ reset = false, sessionId = String(state.spudexSelectedSessionId || "").trim(), newEntries = [] } = {}) {
+  const panel = document.getElementById("spudex-log-panel");
+  if (!panel) {
+    return;
+  }
+  const previousSessionId = String(panel.dataset.sessionId || "");
+  const shouldReset = reset || previousSessionId !== sessionId || panel.dataset.initialized !== "1";
+  const wasNearBottom = spudexLogIsNearBottom(panel);
+  const userSelecting = spudexSelectionTouchesPanel(panel);
+  if (shouldReset) {
+    panel.innerHTML = renderSpudexLogs();
+    panel.dataset.sessionId = sessionId;
+    panel.dataset.initialized = "1";
+    if (!userSelecting) {
+      panel.scrollTop = panel.scrollHeight;
+    }
+    return;
+  }
+  panel.querySelectorAll(".spudex-log-line.pending, .spudex-log-empty").forEach((node) => node.remove());
+  const entries = Array.isArray(newEntries) ? newEntries : [];
+  if (entries.length) {
+    panel.insertAdjacentHTML("beforeend", entries.map((entry) => renderSpudexLogEntry(entry)).join(""));
+  }
+  const pendingHtml = renderSpudexPendingChatLogs();
+  if (pendingHtml) {
+    panel.insertAdjacentHTML("beforeend", pendingHtml);
+  } else if (!panel.children.length) {
+    panel.insertAdjacentHTML("beforeend", renderSpudexLogs());
+  }
+  if (wasNearBottom && !userSelecting) {
+    panel.scrollTop = panel.scrollHeight;
+  }
+}
+
+function currentSpudexChatSession(payload = state.spudexPayload) {
+  const session = currentSpudexSession(payload);
+  if (!session || String(session.source || "").trim().toLowerCase() !== "spudex_chat") {
+    return null;
+  }
+  return session;
+}
+
+function isCurrentSpudexChatRunning(payload = state.spudexPayload) {
+  const session = currentSpudexChatSession(payload);
+  if (!session) {
+    return false;
+  }
+  const status = String(session.status || "").trim().toLowerCase();
+  return Boolean(session.active) || status === "running" || status === "queued";
+}
+
+function spudexChatMessagesFromLogs() {
+  if (!currentSpudexChatSession()) {
+    return [];
+  }
+  return (Array.isArray(state.spudexLogEntries) ? state.spudexLogEntries : [])
+    .map((entry) => {
+      const stream = String(entry?.stream || "").trim().toLowerCase();
+      const text = String(entry?.text || "").trim();
+      if (!text) {
+        return null;
+      }
+      if (stream === "user") {
+        return { role: "user", text };
+      }
+      if (stream === "assistant") {
+        return { role: "assistant", text };
+      }
+      if (stream === "system" && String(entry?.level || "").trim().toLowerCase() === "error") {
+        return { role: "assistant", text };
+      }
+      return null;
+    })
+    .filter(Boolean);
+}
+
+function spudexChatDisplayMessages() {
+  const fromLogs = spudexChatMessagesFromLogs();
+  if (fromLogs.length) {
+    if (!state.spudexChatInFlight && !isCurrentSpudexChatRunning()) {
+      return fromLogs;
+    }
+    const merged = [...fromLogs];
+    (Array.isArray(state.spudexChatMessages) ? state.spudexChatMessages : []).forEach((message) => {
+      const role = String(message?.role || "assistant").toLowerCase() === "user" ? "user" : "assistant";
+      const text = String(message?.text || "").trim();
+      if (!text) {
+        return;
+      }
+      const exists = merged.some((row) => String(row.role || "") === role && String(row.text || "").trim() === text);
+      if (!exists) {
+        merged.push({ role, text });
+      }
+    });
+    return merged;
+  }
+  return Array.isArray(state.spudexChatMessages) ? state.spudexChatMessages : [];
+}
+
+function renderSpudexChatMessages() {
+  const messages = spudexChatDisplayMessages();
+  const busy = state.spudexChatInFlight || isCurrentSpudexChatRunning();
+  const rows = messages.length
+    ? messages
+        .slice(-12)
+        .map((message) => {
+          const role = String(message?.role || "assistant").toLowerCase();
+          return renderChatMessage({
+            role: role === "user" ? "user" : "assistant",
+            username: state.chatProfile.username,
+            content: String(message?.text || ""),
+          });
+        })
+        .join("")
+    : `<div class="spudex-chat-empty">Ask the spudex loop to inspect, run, or fix something inside agent_lab.</div>`;
+  if (!busy) {
+    return rows;
+  }
+  return `${messages.length ? rows : ""}${renderChatMessage({
+    role: "assistant",
+    content: { marker: "typing" },
+  })}`;
+}
+
+function spudexChatSubtitle() {
+  const chatSessionId = currentSpudexChatSessionId();
+  return chatSessionId
+    ? `Continuing session ${chatSessionId.slice(0, 8)}.`
+    : "New session will start on send.";
+}
+
+function updateSpudexChatCard() {
+  const historyEl = document.getElementById("spudex-chat-history");
+  const subtitleEl = document.getElementById("spudex-chat-subtitle");
+  const submitEl = document.getElementById("spudex-chat-submit");
+  const busy = state.spudexChatInFlight || isCurrentSpudexChatRunning();
+  if (historyEl) {
+    historyEl.innerHTML = renderSpudexChatMessages();
+    historyEl.scrollTop = historyEl.scrollHeight;
+  }
+  if (subtitleEl) {
+    subtitleEl.textContent = spudexChatSubtitle();
+  }
+  if (submitEl instanceof HTMLButtonElement) {
+    submitEl.disabled = Boolean(busy);
+    submitEl.setAttribute("aria-label", busy ? "Spudex is working" : "Send message");
+    submitEl.title = busy ? "Spudex is working" : "Send message";
+  }
+  if (!historyEl && state.spudexChatInFlight && Array.isArray(state.spudexChatMessages) && state.spudexChatMessages.length) {
+    syncSpudexLogPanel();
+  }
+  syncSpudexComposerStatus();
+}
+
+function setSpudexDetailsOpen(open) {
+  state.spudexDetailsOpen = Boolean(open);
+  syncSpudexDetailsDrawer(state.spudexPayload || {}, { refreshBody: false });
+  window.requestAnimationFrame(() => {
+    const target = state.spudexDetailsOpen ? document.getElementById("spudex-close-details") : document.getElementById("spudex-open-details");
+    if (target instanceof HTMLElement && !(target instanceof HTMLButtonElement && target.disabled)) {
+      target.focus();
+    }
+  });
+}
+
+function syncSpudexDetailsDrawer(payload = state.spudexPayload || {}, { refreshBody = true } = {}) {
+  const sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
+  const manualTabActive = normalizeSpudexTab(state.spudexTab) === "manual";
+  const selected = manualTabActive
+    ? currentSpudexManualSession(payload)
+    : sessions.find((session) => String(session?.id || "") === state.spudexSelectedSessionId) || null;
+  const drawer = document.getElementById("spudex-details-drawer");
+  const bodyEl = document.getElementById("spudex-session-insights");
+  const titleEl = document.getElementById("spudex-details-title");
+  const detailsButton = document.getElementById("spudex-open-details");
+  if (detailsButton instanceof HTMLButtonElement) {
+    detailsButton.disabled = !selected;
+  }
+  if (titleEl) {
+    titleEl.textContent = selected ? String(selected.label || selected.command || selected.id || "Spudex session") : "No session selected";
+  }
+  if (bodyEl && refreshBody) {
+    bodyEl.innerHTML = renderSpudexSessionInsights(selected, payload);
+  }
+  if (drawer) {
+    drawer.classList.toggle("open", Boolean(state.spudexDetailsOpen));
+    drawer.setAttribute("aria-hidden", state.spudexDetailsOpen ? "false" : "true");
+    if (state.spudexDetailsOpen) {
+      drawer.removeAttribute("inert");
+    } else {
+      drawer.setAttribute("inert", "");
+    }
+  }
+}
+
+function spudexSessionStatusLabel(session) {
+  const status = String(session?.status || "").trim().toLowerCase();
+  if (status === "running") {
+    return "Running";
+  }
+  if (status === "queued") {
+    return "Queued";
+  }
+  if (status === "completed") {
+    return "Complete";
+  }
+  if (status === "failed") {
+    return "Failed";
+  }
+  if (status === "stopped") {
+    return "Stopped";
+  }
+  if (status === "draft") {
+    return "Draft";
+  }
+  return status ? status.replaceAll("_", " ") : "";
+}
+
+function spudexLiveStatusText(payload = state.spudexPayload || {}) {
+  if (state.spudexChatInFlight) {
+    return "Starting Spudex chat...";
+  }
+  const session = currentSpudexChatSession(payload) || currentSpudexSession(payload);
+  const activeCount = Number(payload?.active_count || 0);
+  const modelCount = Number(payload?.model_process_count || 0);
+  if (!session) {
+    return activeCount > 0
+      ? `${activeCount} active Spudex process${activeCount === 1 ? "" : "es"}`
+      : "Ready for a Spudex task.";
+  }
+  const active = Boolean(session.active) || ["running", "queued"].includes(String(session.status || "").toLowerCase());
+  const plan = Array.isArray(session.plan) ? session.plan : [];
+  const activePlan = plan.find((item) => String(item?.status || "").toLowerCase() === "in_progress");
+  if (activePlan?.step) {
+    return `Working: ${activePlan.step}`;
+  }
+  const statusLabel = spudexSessionStatusLabel(session);
+  const label = String(session.label || session.command || session.goal || "").trim();
+  if (active) {
+    return label ? `${statusLabel || "Running"}: ${label}` : `${statusLabel || "Running"} Spudex task`;
+  }
+  if (modelCount > 0) {
+    return `${modelCount} model-launched process${modelCount === 1 ? "" : "es"} still running.`;
+  }
+  if (statusLabel) {
+    return label ? `${statusLabel}: ${label}` : `${statusLabel}.`;
+  }
+  return "Ready for a Spudex task.";
+}
+
+function syncSpudexComposerStatus(payload = state.spudexPayload || {}) {
+  const statusEl = document.getElementById("spudex-live-status");
+  if (statusEl) {
+    statusEl.textContent = spudexLiveStatusText(payload);
+  }
+}
+
+function renderSpudexChatComposer() {
+  const busy = state.spudexChatInFlight || isCurrentSpudexChatRunning();
+  return `
+    <form id="spudex-chat-form" class="message-box chat-composer-card spudex-chat-composer-card spudex-console-composer">
+      <div class="chat-composer" role="group" aria-label="Spudex chat composer">
+        <div class="chat-composer-bar">
+          <textarea
+            id="spudex-chat-message"
+            class="chat-composer-input"
+            rows="1"
+            placeholder="${escapeHtml(`Message ${getTaterFullName()} through Spudex...`)}"
+          ></textarea>
+          <button id="spudex-chat-submit" class="chat-composer-send" type="submit" title="${busy ? "Spudex is working" : "Send message"}" aria-label="${busy ? "Spudex is working" : "Send message"}" ${busy ? "disabled" : ""}>
+            <span class="chat-composer-icon chat-composer-send-arrow" aria-hidden="true">➤</span>
+          </button>
+        </div>
+        <div class="chat-files-row spudex-chat-options-row">
+          <button id="spudex-new-chat" class="inline-btn" type="button">New Chat</button>
+          <div id="spudex-live-status" class="spudex-live-status small" aria-live="polite">${escapeHtml(spudexLiveStatusText())}</div>
+        </div>
+      </div>
+    </form>
+  `;
+}
+
+function renderSpudexView(payload) {
+  const settings = normalizeSpudexSettings(payload?.settings || {});
+  ensureSpudexSelectedSession(payload);
+  const sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
+  const selected = sessions.find((session) => String(session?.id || "") === state.spudexSelectedSessionId) || null;
+  const active = Boolean(selected?.active) || String(selected?.status || "").toLowerCase() === "running";
+  const activeTab = normalizeSpudexTab(state.spudexTab);
+  if (activeTab === "settings") {
+    return `
+      <div class="spudex-view">
+        ${renderSpudexSubtabs(activeTab)}
+        ${renderSpudexSettingsTab(settings, payload)}
+      </div>
+    `;
+  }
+  if (activeTab === "manual") {
+    return `
+      <div class="spudex-view">
+        ${renderSpudexSubtabs(activeTab)}
+        ${renderSpudexManualTab(settings, payload)}
+      </div>
+    `;
+  }
+  return `
+    <div class="spudex-view">
+      ${renderSpudexSubtabs(activeTab)}
+      <section class="spudex-card spudex-workbench spudex-console-workbench">
+        <div class="spudex-workbench-shell">
+          <div class="spudex-session-console spudex-main-chat-console">
+            <div class="spudex-chat-header-stack">
+              <div class="spudex-chat-header">
+                <div class="spudex-chat-header-main">
+                  <span class="spudex-chat-status-dot ${active ? "live" : ""}" aria-hidden="true"></span>
+                  <div>
+                    <span id="spudex-log-title" class="spudex-chat-session-name">${selected ? escapeHtml(selected.label || selected.command || selected.id) : "New chat"}</span>
+                    <span id="spudex-chat-subtitle">${escapeHtml(spudexChatSubtitle())}</span>
+                  </div>
+                </div>
+                <p id="spudex-sessions-summary">${escapeHtml(payload?.active_count || 0)} active process${Number(payload?.active_count || 0) === 1 ? "" : "es"}; ${escapeHtml(payload?.model_process_count || 0)} model-launched.</p>
+                <div class="spudex-chat-header-actions">
+                  <button id="spudex-refresh" class="inline-btn" type="button">Refresh</button>
+                  <button id="spudex-open-details" class="spudex-details-trigger" type="button" ${selected ? "" : "disabled"}>Details</button>
+                  <button id="spudex-clear-log-view" class="inline-btn" type="button">Clear</button>
+                  <button id="spudex-stop-session" class="inline-btn danger" type="button" ${active ? "" : "disabled"}>Stop</button>
+                </div>
+              </div>
+              <div class="spudex-workbench-strip">
+                <section class="spudex-session-strip">
+                  <span class="spudex-strip-label">Sessions</span>
+                  <div id="spudex-session-list-wrap">${renderSpudexSessions(payload)}</div>
+                </section>
+                <section class="spudex-model-processes spudex-process-strip">
+                  <div class="spudex-model-processes-head">
+                    <strong>Processes</strong>
+                    <span>Chat + Hydra</span>
+                  </div>
+                  <div id="spudex-model-processes-body">${renderSpudexModelProcesses(payload)}</div>
+                </section>
+              </div>
+            </div>
+            <div class="spudex-session-console-body">
+              <div class="spudex-log-wrap">
+                <div id="spudex-log-panel" class="spudex-log-panel">${renderSpudexLogs()}</div>
+                ${renderSpudexChatComposer()}
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+      ${renderSpudexDetailsDrawer(selected, payload)}
+    </div>
+  `;
+}
+
+async function refreshSpudexLogs({ reset = false } = {}) {
+  const sessionId = String(state.spudexSelectedSessionId || "").trim();
+  if (!sessionId) {
+    state.spudexLogEntries = [];
+    state.spudexLogCursor = 0;
+    syncSpudexLogPanel({ reset: true, sessionId: "" });
+    return;
+  }
+  if (reset) {
+    state.spudexLogEntries = [];
+    state.spudexLogCursor = 0;
+  }
+  const payload = await api(
+    `/api/spudex/sessions/${encodeURIComponent(sessionId)}/logs?after_seq=${encodeURIComponent(state.spudexLogCursor)}&limit=500`
+  );
+  const entries = Array.isArray(payload?.entries) ? payload.entries : [];
+  if (entries.length) {
+    state.spudexLogEntries = [...state.spudexLogEntries, ...entries].slice(-1000);
+    state.spudexLogCursor = Number(payload?.last_seq || state.spudexLogCursor || 0);
+  }
+  syncSpudexLogPanel({ reset, sessionId, newEntries: entries });
+  updateSpudexChatCard();
+}
+
+async function refreshSpudexManualLogs({ reset = false } = {}) {
+  const sessionId = String(state.spudexManualSessionId || "").trim();
+  const panel = document.getElementById("spudex-manual-log-panel");
+  if (!sessionId) {
+    state.spudexManualLogEntries = [];
+    state.spudexManualLogCursor = 0;
+    if (panel) {
+      panel.innerHTML = renderSpudexManualLogs();
+    }
+    return;
+  }
+  if (reset) {
+    state.spudexManualLogEntries = [];
+    state.spudexManualLogCursor = 0;
+  }
+  const payload = await api(
+    `/api/spudex/sessions/${encodeURIComponent(sessionId)}/logs?after_seq=${encodeURIComponent(state.spudexManualLogCursor)}&limit=500`
+  );
+  const entries = Array.isArray(payload?.entries) ? payload.entries : [];
+  if (entries.length) {
+    state.spudexManualLogEntries = [...state.spudexManualLogEntries, ...entries].slice(-1000);
+    state.spudexManualLogCursor = Number(payload?.last_seq || state.spudexManualLogCursor || 0);
+  }
+  if (panel) {
+    panel.innerHTML = renderSpudexManualLogs();
+    panel.scrollTop = panel.scrollHeight;
+  }
+}
+
+function updateSpudexDynamicDom(payload) {
+  const sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
+  const selected = sessions.find((session) => String(session?.id || "") === state.spudexSelectedSessionId) || null;
+  const manualSession = currentSpudexManualSession(payload);
+  const active = Boolean(selected?.active) || String(selected?.status || "").toLowerCase() === "running";
+  const manualStatus = String(manualSession?.status || "").toLowerCase();
+  const manualActive = Boolean(manualSession?.active) || manualStatus === "running" || manualStatus === "queued";
+  const summaryEl = document.getElementById("spudex-sessions-summary");
+  const processesEl = document.getElementById("spudex-model-processes-body");
+  const sessionsEl = document.getElementById("spudex-session-list-wrap");
+  const manualSessionsEl = document.getElementById("spudex-manual-session-list-wrap");
+  const logTitleEl = document.getElementById("spudex-log-title");
+  const manualLogTitleEl = document.getElementById("spudex-manual-console-title");
+  const stopButton = document.getElementById("spudex-stop-session");
+  const manualStopButton = document.getElementById("spudex-manual-stop-session");
+  if (summaryEl) {
+    const activeCount = Number(payload?.active_count || 0);
+    summaryEl.textContent = `${activeCount} active process${activeCount === 1 ? "" : "es"}; ${Number(payload?.model_process_count || 0)} model-launched.`;
+  }
+  if (processesEl) {
+    processesEl.innerHTML = renderSpudexModelProcesses(payload);
+  }
+  if (sessionsEl) {
+    sessionsEl.innerHTML = renderSpudexSessions(payload);
+  }
+  if (manualSessionsEl) {
+    manualSessionsEl.innerHTML = renderSpudexManualSessions(payload);
+  }
+  if (logTitleEl) {
+    logTitleEl.textContent = selected ? String(selected.label || selected.command || selected.id || "Spudex log") : "Spudex log";
+  }
+  if (manualLogTitleEl) {
+    manualLogTitleEl.textContent = manualSession ? String(manualSession.command || manualSession.label || manualSession.id || "Manual console") : "Manual console";
+  }
+  if (stopButton instanceof HTMLButtonElement) {
+    stopButton.disabled = !active;
+  }
+  if (manualStopButton instanceof HTMLButtonElement) {
+    manualStopButton.disabled = !manualActive;
+  }
+  syncSpudexDetailsDrawer(payload);
+  syncSpudexComposerStatus(payload);
+  updateSpudexChatCard();
+  bindSpudexDynamicControls();
+}
+
+async function refreshSpudexDynamicState({ resetLogs = false, resetManualLogs = false } = {}) {
+  const previousSelected = String(state.spudexSelectedSessionId || "").trim();
+  const previousManualSelected = String(state.spudexManualSessionId || "").trim();
+  const payload = await api("/api/spudex");
+  state.spudexPayload = payload;
+  ensureSpudexSelectedSession(payload);
+  ensureSpudexManualSession(payload);
+  const selectedChanged = previousSelected !== String(state.spudexSelectedSessionId || "").trim();
+  const manualSelectedChanged = previousManualSelected !== String(state.spudexManualSessionId || "").trim();
+  if (selectedChanged) {
+    state.spudexLogEntries = [];
+    state.spudexLogCursor = 0;
+  }
+  if (manualSelectedChanged) {
+    state.spudexManualLogEntries = [];
+    state.spudexManualLogCursor = 0;
+  }
+  updateSpudexDynamicDom(payload);
+  if (document.getElementById("spudex-log-panel")) {
+    await refreshSpudexLogs({ reset: resetLogs || selectedChanged });
+  }
+  if (document.getElementById("spudex-manual-log-panel")) {
+    await refreshSpudexManualLogs({ reset: resetManualLogs || manualSelectedChanged || state.spudexManualLogCursor === 0 });
+  }
+}
+
+function scheduleSpudexPoll() {
+  clearSpudexPollTimer();
+  if (state.view !== "spudex") {
+    return;
+  }
+  state.spudexPollTimer = window.setTimeout(async () => {
+    state.spudexPollTimer = 0;
+    if (state.view !== "spudex") {
+      return;
+    }
+    try {
+      await refreshSpudexDynamicState();
+    } catch {
+      // Keep polling even if one refresh hits a transient request failure.
+    } finally {
+      scheduleSpudexPoll();
+    }
+  }, 2000);
+}
+
+function bindSpudexDynamicControls() {
+  document.querySelectorAll(".spudex-session-close").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const sessionId = String(button.dataset.sessionId || "").trim();
+      if (!sessionId) {
+        return;
+      }
+      const active = String(button.dataset.active || "").trim().toLowerCase() === "true";
+      if (active && !window.confirm("Close this running Spudex session? Its active command will be stopped.")) {
+        return;
+      }
+      try {
+        await api(`/api/spudex/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+        if (sessionId === state.spudexSelectedSessionId) {
+          state.spudexSelectedSessionId = "";
+          state.spudexLogCursor = 0;
+          state.spudexLogEntries = [];
+          safeStorageSet("tater_spudex_selected_session_id", "");
+        }
+        if (sessionId === state.spudexManualSessionId) {
+          state.spudexManualSessionId = "";
+          state.spudexManualLogCursor = 0;
+          state.spudexManualLogEntries = [];
+          safeStorageSet("tater_spudex_manual_session_id", "");
+        }
+        showToast("Spudex session closed.");
+        await refreshSpudexDynamicState({ resetLogs: true, resetManualLogs: true });
+      } catch (error) {
+        showToast(`Close failed: ${error.message}`, "error", 3600);
+      }
+    });
+  });
+
+  document.querySelectorAll(".spudex-session-row").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const sessionId = String(button.dataset.sessionId || "").trim();
+      if (!sessionId || sessionId === state.spudexSelectedSessionId) {
+        return;
+      }
+      state.spudexSelectedSessionId = sessionId;
+      safeStorageSet("tater_spudex_selected_session_id", sessionId);
+      state.spudexLogEntries = [];
+      state.spudexLogCursor = 0;
+      try {
+        await refreshSpudexDynamicState({ resetLogs: true });
+      } catch (error) {
+        showToast(`Spudex refresh failed: ${error.message}`, "error", 3600);
+      }
+    });
+  });
+
+  document.querySelectorAll(".spudex-manual-session-row").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const sessionId = String(button.dataset.manualSessionId || "").trim();
+      if (!sessionId || sessionId === state.spudexManualSessionId) {
+        return;
+      }
+      state.spudexManualSessionId = sessionId;
+      state.spudexSelectedSessionId = sessionId;
+      safeStorageSet("tater_spudex_manual_session_id", sessionId);
+      safeStorageSet("tater_spudex_selected_session_id", sessionId);
+      state.spudexManualLogEntries = [];
+      state.spudexManualLogCursor = 0;
+      try {
+        await refreshSpudexDynamicState({ resetManualLogs: true });
+      } catch (error) {
+        showToast(`Spudex refresh failed: ${error.message}`, "error", 3600);
+      }
+    });
+  });
+
+  document.querySelectorAll(".spudex-kill-process").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const sessionId = String(button.dataset.sessionId || "").trim();
+      if (!sessionId) {
+        return;
+      }
+      try {
+        await api(`/api/spudex/sessions/${encodeURIComponent(sessionId)}/stop`, { method: "POST" });
+        showToast("Model process kill requested.");
+        await refreshSpudexDynamicState();
+      } catch (error) {
+        showToast(`Kill failed: ${error.message}`, "error", 3600);
+      }
+    });
+  });
+
+  document.querySelectorAll(".spudex-file-approve, .spudex-file-reject").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const sessionId = String(button.dataset.sessionId || "").trim();
+      const changeId = String(button.dataset.changeId || "").trim();
+      const approve = button.classList.contains("spudex-file-approve");
+      if (!sessionId || !changeId) {
+        return;
+      }
+      try {
+        await api(`/api/spudex/sessions/${encodeURIComponent(sessionId)}/file-changes/${approve ? "approve" : "reject"}`, {
+          method: "POST",
+          body: JSON.stringify({ change_id: changeId }),
+        });
+        showToast(approve ? "File change approved." : "File change rejected.");
+        await refreshSpudexDynamicState();
+      } catch (error) {
+        showToast(`File change update failed: ${error.message}`, "error", 3600);
+      }
+    });
+  });
+}
+
+function bindSpudexView() {
+  document.querySelectorAll("[data-spudex-tab]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const nextTab = normalizeSpudexTab(button.dataset.spudexTab || "workbench");
+      if (nextTab === state.spudexTab) {
+        return;
+      }
+      state.spudexTab = nextTab;
+      safeStorageSet("tater_spudex_tab", nextTab);
+      await loadSpudexView({ silent: true, preserveInputs: true });
+    });
+  });
+
+  document.getElementById("spudex-save-settings")?.addEventListener("click", async () => {
+    const statusEl = document.getElementById("spudex-settings-status");
+    const current = normalizeSpudexSettings(state.spudexPayload?.settings || {});
+    const checkboxValue = (id, fallback) => {
+      const el = document.getElementById(id);
+      return el instanceof HTMLInputElement ? Boolean(el.checked) : Boolean(fallback);
+    };
+    const stringValue = (id, fallback) => {
+      const el = document.getElementById(id);
+      return el instanceof HTMLInputElement ? String(el.value || "").trim() : String(fallback || "").trim();
+    };
+    const numberValue = (id, fallback) => {
+      const el = document.getElementById(id);
+      return Number(el instanceof HTMLInputElement ? el.value || fallback : fallback);
+    };
+    const selectedPlatforms = Array.from(document.querySelectorAll("[data-spudex-platform]:checked"))
+      .map((input) => String(input instanceof HTMLInputElement ? input.value || "" : "").trim())
+      .filter(Boolean);
+    const values = {
+      enabled: checkboxValue("spudex-enabled", current.enabled),
+      policy_enabled: checkboxValue("spudex-policy-enabled", current.policy_enabled),
+      require_approval: checkboxValue("spudex-require-approval", current.require_approval),
+      require_file_approval: checkboxValue("spudex-require-file-approval", current.require_file_approval),
+      allow_absolute_executables: checkboxValue("spudex-allow-absolute-executables", current.allow_absolute_executables),
+      allow_shell_commands: checkboxValue("spudex-allow-shell-commands", current.allow_shell_commands),
+      allow_host_admin_commands: checkboxValue("spudex-allow-host-admin-commands", current.allow_host_admin_commands),
+      allow_remote_control: checkboxValue("spudex-allow-remote-control", current.allow_remote_control),
+      allow_containers: checkboxValue("spudex-allow-containers", current.allow_containers),
+      allow_host_package_managers: checkboxValue("spudex-allow-host-package-managers", current.allow_host_package_managers),
+      allow_inline_eval: checkboxValue("spudex-allow-inline-eval", current.allow_inline_eval),
+      allow_network: checkboxValue("spudex-allow-network", current.allow_network),
+      allow_installs: checkboxValue("spudex-allow-installs", current.allow_installs),
+      allowed_platforms: selectedPlatforms.length ? selectedPlatforms : ["webui"],
+      default_cwd: stringValue("spudex-default-cwd", current.default_cwd || "workspace"),
+      max_task_steps: numberValue("spudex-max-steps", current.max_task_steps || 6),
+      command_timeout_sec: numberValue("spudex-timeout", current.command_timeout_sec || 45),
+      max_output_chars: numberValue("spudex-output-cap", current.max_output_chars || 12000),
+    };
+    try {
+      if (statusEl) {
+        statusEl.textContent = "Saving...";
+      }
+      await api("/api/spudex/settings", {
+        method: "POST",
+        body: JSON.stringify({ values }),
+      });
+      showToast("Spudex settings saved.");
+      await loadSpudexView({ silent: true, preserveInputs: true });
+    } catch (error) {
+      if (statusEl) {
+        statusEl.textContent = `Save failed: ${error.message}`;
+      }
+      showToast(`Spudex settings failed: ${error.message}`, "error", 3600);
+    }
+  });
+
+  document.getElementById("spudex-run-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const command = String(document.getElementById("spudex-command")?.value || "").trim();
+    const background = Boolean(document.getElementById("spudex-background")?.checked);
+    if (!command) {
+      showToast("Enter a command first.", "error");
+      return;
+    }
+    try {
+      const result = await api("/api/spudex/run", {
+        method: "POST",
+        body: JSON.stringify({ command, label: command.slice(0, 80), background }),
+      });
+      const sessionId = String(result?.session?.id || "").trim();
+      if (sessionId) {
+        state.spudexSelectedSessionId = sessionId;
+        state.spudexManualSessionId = sessionId;
+        safeStorageSet("tater_spudex_selected_session_id", sessionId);
+        safeStorageSet("tater_spudex_manual_session_id", sessionId);
+        state.spudexLogEntries = [];
+        state.spudexLogCursor = 0;
+        state.spudexManualLogEntries = [];
+        state.spudexManualLogCursor = 0;
+      }
+      showToast("Spudex session started.");
+      await refreshSpudexDynamicState({ resetLogs: true, resetManualLogs: true });
+    } catch (error) {
+      showToast(`Command failed: ${error.message}`, "error", 3600);
+    }
+  });
+
+  document.getElementById("spudex-chat-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const messageEl = document.getElementById("spudex-chat-message");
+    const message = String(messageEl?.value || "").trim();
+    const currentChatSessionId = currentSpudexChatSessionId();
+    if (state.spudexChatInFlight || isCurrentSpudexChatRunning()) {
+      showToast("Spudex is still working in this chat.", "error");
+      updateSpudexChatCard();
+      return;
+    }
+    if (!message) {
+      showToast("Enter a spudex chat message first.", "error");
+      return;
+    }
+    state.spudexChatMessages = [
+      ...state.spudexChatMessages,
+      { role: "user", text: message },
+    ].slice(-24);
+    state.spudexChatInFlight = true;
+    updateSpudexChatCard();
+    try {
+      const result = await api("/api/spudex/chat", {
+        method: "POST",
+        body: JSON.stringify({ message, session_id: currentChatSessionId || null }),
+        _timeoutMs: 20000,
+      });
+      const resultSessionId = String(result?.session?.id || "").trim();
+      if (resultSessionId) {
+        state.spudexSelectedSessionId = resultSessionId;
+        safeStorageSet("tater_spudex_selected_session_id", resultSessionId);
+        state.spudexLogEntries = [];
+        state.spudexLogCursor = 0;
+      }
+      state.spudexChatMessages = [
+        ...state.spudexChatMessages.filter((message) => String(message?.role || "") !== "assistant"),
+      ].slice(-24);
+      if (messageEl) {
+        messageEl.value = "";
+        messageEl.style.height = "auto";
+      }
+      state.spudexChatInFlight = false;
+      updateSpudexChatCard();
+      await refreshSpudexDynamicState({ resetLogs: true });
+    } catch (error) {
+      state.spudexChatMessages = [
+        ...state.spudexChatMessages,
+        { role: "assistant", text: `Spudex chat failed: ${error.message}` },
+      ].slice(-24);
+      showToast(`Spudex chat failed: ${error.message}`, "error", 3600);
+      state.spudexChatInFlight = false;
+      updateSpudexChatCard();
+      await refreshSpudexDynamicState().catch(() => {});
+    } finally {
+      state.spudexChatInFlight = false;
+      updateSpudexChatCard();
+    }
+  });
+
+  const spudexChatInputEl = document.getElementById("spudex-chat-message");
+  const autoSizeSpudexChatInput = () => {
+    if (!(spudexChatInputEl instanceof HTMLTextAreaElement)) {
+      return;
+    }
+    spudexChatInputEl.style.height = "auto";
+    const nextHeight = Math.min(Math.max(spudexChatInputEl.scrollHeight, 44), 180);
+    spudexChatInputEl.style.height = `${nextHeight}px`;
+  };
+  autoSizeSpudexChatInput();
+  spudexChatInputEl?.addEventListener("input", autoSizeSpudexChatInput);
+  spudexChatInputEl?.addEventListener("keydown", (event) => {
+    if (
+      event.key === "Enter" &&
+      !event.shiftKey &&
+      !event.ctrlKey &&
+      !event.altKey &&
+      !event.metaKey &&
+      !event.isComposing
+    ) {
+      event.preventDefault();
+      document.getElementById("spudex-chat-form")?.requestSubmit();
+    }
+  });
+
+  document.getElementById("spudex-refresh")?.addEventListener("click", () => {
+    refreshSpudexDynamicState().catch((error) => showToast(`Spudex refresh failed: ${error.message}`, "error", 3600));
+  });
+  document.getElementById("spudex-open-details")?.addEventListener("click", () => {
+    setSpudexDetailsOpen(true);
+  });
+  document.getElementById("spudex-close-details")?.addEventListener("click", () => {
+    setSpudexDetailsOpen(false);
+  });
+  document.querySelectorAll("[data-spudex-close-details]").forEach((button) => {
+    button.addEventListener("click", () => setSpudexDetailsOpen(false));
+  });
+  document.getElementById("spudex-new-chat")?.addEventListener("click", async () => {
+    const messageEl = document.getElementById("spudex-chat-message");
+    try {
+      const result = await api("/api/spudex/chat/session", {
+        method: "POST",
+        body: JSON.stringify({ label: "New Spudex chat" }),
+      });
+      const sessionId = String(result?.session?.id || "").trim();
+      if (sessionId) {
+        state.spudexSelectedSessionId = sessionId;
+        safeStorageSet("tater_spudex_selected_session_id", sessionId);
+      }
+      state.spudexLogEntries = [];
+      state.spudexLogCursor = 0;
+      state.spudexChatMessages = [];
+      if (messageEl) {
+        messageEl.value = "";
+        messageEl.focus();
+      }
+      showToast("New Spudex chat created.");
+      await refreshSpudexDynamicState({ resetLogs: true });
+    } catch (error) {
+      showToast(`New Spudex chat failed: ${error.message}`, "error", 3600);
+    }
+  });
+  document.getElementById("spudex-clear-log-view")?.addEventListener("click", () => {
+    state.spudexLogEntries = [];
+    state.spudexLogCursor = 0;
+    syncSpudexLogPanel({ reset: true });
+  });
+  document.getElementById("spudex-manual-clear-log-view")?.addEventListener("click", () => {
+    state.spudexManualLogEntries = [];
+    state.spudexManualLogCursor = 0;
+    const panel = document.getElementById("spudex-manual-log-panel");
+    if (panel) {
+      panel.innerHTML = renderSpudexManualLogs();
+    }
+  });
+  document.getElementById("spudex-stop-session")?.addEventListener("click", async () => {
+    const sessionId = String(state.spudexSelectedSessionId || "").trim();
+    if (!sessionId) {
+      return;
+    }
+    try {
+      await api(`/api/spudex/sessions/${encodeURIComponent(sessionId)}/stop`, { method: "POST" });
+      showToast("Spudex session stop requested.");
+      await refreshSpudexDynamicState();
+    } catch (error) {
+      showToast(`Stop failed: ${error.message}`, "error", 3600);
+    }
+  });
+  document.getElementById("spudex-manual-stop-session")?.addEventListener("click", async () => {
+    const sessionId = String(state.spudexManualSessionId || "").trim();
+    if (!sessionId) {
+      return;
+    }
+    try {
+      await api(`/api/spudex/sessions/${encodeURIComponent(sessionId)}/stop`, { method: "POST" });
+      showToast("Manual session stop requested.");
+      await refreshSpudexDynamicState({ resetManualLogs: false });
+    } catch (error) {
+      showToast(`Stop failed: ${error.message}`, "error", 3600);
+    }
+  });
+  bindSpudexDynamicControls();
+}
+
+function captureSpudexInputs() {
+  return {
+    command: String(document.getElementById("spudex-command")?.value || ""),
+    background: Boolean(document.getElementById("spudex-background")?.checked),
+    chatMessage: String(document.getElementById("spudex-chat-message")?.value || ""),
+  };
+}
+
+function restoreSpudexInputs(values) {
+  const payload = values && typeof values === "object" ? values : {};
+  const commandEl = document.getElementById("spudex-command");
+  const chatMessageEl = document.getElementById("spudex-chat-message");
+  const backgroundEl = document.getElementById("spudex-background");
+  if (commandEl instanceof HTMLInputElement && payload.command) {
+    commandEl.value = payload.command;
+  }
+  if (chatMessageEl instanceof HTMLTextAreaElement && payload.chatMessage) {
+    chatMessageEl.value = payload.chatMessage;
+  }
+  if (backgroundEl instanceof HTMLInputElement) {
+    backgroundEl.checked = Boolean(payload.background);
+  }
+}
+
+async function loadSpudexView({ silent = false, resetLogs = false, preserveInputs = false } = {}) {
+  clearSpudexPollTimer();
+  const root = document.getElementById("view-root");
+  const preservedInputs = preserveInputs ? captureSpudexInputs() : null;
+  if (!silent && root) {
+    root.innerHTML = renderNotice("Loading Spudex...");
+  }
+  const payload = await api("/api/spudex");
+  state.spudexPayload = payload;
+  if (root) {
+    root.innerHTML = renderSpudexView(payload);
+  }
+  bindSpudexView();
+  if (preservedInputs) {
+    restoreSpudexInputs(preservedInputs);
+  }
+  if (document.getElementById("spudex-log-panel")) {
+    await refreshSpudexLogs({ reset: resetLogs });
+  }
+  if (document.getElementById("spudex-manual-log-panel")) {
+    await refreshSpudexManualLogs({ reset: resetLogs || state.spudexManualLogCursor === 0 });
+  }
+  scheduleSpudexPoll();
+}
+
 async function loadView(viewName) {
   setRedisBootstrapMode(false);
   state.view = viewName;
   if (state.view !== "dashboard") {
     clearDashboardRefreshTimer();
+  }
+  if (state.view !== "spudex") {
+    clearSpudexPollTimer();
   }
   document.body.dataset.view = String(viewName || "").trim().toLowerCase();
   setActiveNav(viewName);
@@ -17809,6 +19706,10 @@ async function loadView(viewName) {
     }
     if (viewName === "chat") {
       await loadChatView();
+      return;
+    }
+    if (viewName === "spudex") {
+      await loadSpudexView();
       return;
     }
     if (viewName === "verbas") {
@@ -17883,6 +19784,7 @@ window.addEventListener("beforeunload", () => {
     healthRefreshTimer = 0;
   }
   clearDashboardRefreshTimer();
+  clearSpudexPollTimer();
   closeChatEventSource();
   stopAllChatJobPolling();
   stopRuntimeBreakdownPolling();

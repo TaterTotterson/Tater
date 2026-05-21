@@ -40,6 +40,7 @@ from admin_gate import DEFAULT_ADMIN_ONLY_PLUGINS, REDIS_KEY as ADMIN_GATE_KEY, 
 from hydra import estimate_hydra_chat_context_window, get_active_chat_jobs_snapshot, run_hydra_turn
 from hydra import (
     HYDRA_ASTRAEUS_PLAN_REVIEW_ENABLED_KEY,
+    HYDRA_AUTO_CONTINUE_INCOMPLETE_FINAL_ENABLED_KEY,
     HYDRA_BEAST_CONFIG_ROLE_IDS,
     HYDRA_BEAST_MODE_ENABLED_KEY,
     HYDRA_LLM_HOST_KEY,
@@ -47,10 +48,9 @@ from hydra import (
     HYDRA_LLM_PORT_KEY,
     HYDRA_MAX_LEDGER_ITEMS_KEY,
     HYDRA_ROLE_LLM_KEY_PREFIX,
-    HYDRA_STEP_RETRY_LIMIT_KEY,
     DEFAULT_ASTRAEUS_PLAN_REVIEW_ENABLED,
+    DEFAULT_AUTO_CONTINUE_INCOMPLETE_FINAL_ENABLED,
     DEFAULT_MAX_LEDGER_ITEMS,
-    DEFAULT_STEP_RETRY_LIMIT,
 )
 from emoji_responder import get_emoji_settings as get_core_emoji_settings, save_emoji_settings as save_core_emoji_settings
 from notify import notifier_destination_catalog
@@ -196,8 +196,8 @@ RUNTIME_EXECUTOR_WORKER_KEYS = {
 RUNTIME_CONTEXT_ESTIMATE_TTL_SECONDS = 20
 DASHBOARD_BRIEFS_KEY = "tater:dashboard:briefs:v1"
 DASHBOARD_SNAPSHOT_KEY = "tater:dashboard:snapshot:v1"
-DASHBOARD_BRIEF_SCHEMA_VERSION = 8
-DASHBOARD_SNAPSHOT_SCHEMA_VERSION = 5
+DASHBOARD_BRIEF_SCHEMA_VERSION = 10
+DASHBOARD_SNAPSHOT_SCHEMA_VERSION = 7
 DASHBOARD_SNAPSHOT_STALE_SECONDS = 60 * 5
 DASHBOARD_BRIEF_TTL_SECONDS = DASHBOARD_SNAPSHOT_STALE_SECONDS
 DASHBOARD_BRIEF_CHECK_INTERVAL_SECONDS = 60 * 5
@@ -206,6 +206,7 @@ DASHBOARD_BRIEF_RETRY_SECONDS = 60 * 5
 DASHBOARD_AWARENESS_EVENTS_PER_SOURCE = 1000
 DASHBOARD_AWARENESS_EVENT_DETAIL_LIMIT = 320
 DASHBOARD_AWARENESS_EVENT_HIGHLIGHT_LIMIT = 18
+DASHBOARD_PERSONAL_PERSON_KEY = "tater:dashboard:personal_person_id"
 DASHBOARD_AWARENESS_CAMERA_SUMMARY_REQUEST = (
     "Summarize what the cameras saw across all awareness event sources in the last 12 hours. "
     "Focus on camera image descriptions and notable visual activity for the homeowner. "
@@ -3058,6 +3059,34 @@ class DashboardBriefRefreshRequest(BaseModel):
     brief_id: Optional[str] = None
 
 
+class DashboardSettingsRequest(BaseModel):
+    personal_person_id: Optional[str] = None
+
+
+class SpudexSettingsRequest(BaseModel):
+    values: Dict[str, Any] = Field(default_factory=dict)
+
+
+class SpudexRunRequest(BaseModel):
+    command: Optional[str] = None
+    argv: List[str] = Field(default_factory=list)
+    label: Optional[str] = None
+    background: bool = False
+
+
+class SpudexChatRequest(BaseModel):
+    message: str = Field(min_length=1)
+    session_id: Optional[str] = None
+
+
+class SpudexChatSessionRequest(BaseModel):
+    label: Optional[str] = None
+
+
+class SpudexFileChangeRequest(BaseModel):
+    change_id: str = Field(min_length=1)
+
+
 class PeopleActionRequest(BaseModel):
     action: str = Field(min_length=1)
     payload: Dict[str, Any] = Field(default_factory=dict)
@@ -3149,6 +3178,8 @@ class AppSettingsRequest(BaseModel):
     hydra_llm_port: Optional[str] = None
     hydra_llm_model: Optional[str] = None
     hydra_llm_api_key: Optional[str] = None
+    spudex_llm_host: Optional[str] = None
+    spudex_llm_model: Optional[str] = None
     hydra_base_servers: Optional[List[Dict[str, Any]]] = None
     hydra_beast_mode_enabled: Optional[bool] = None
     hydra_llm_chat_host: Optional[str] = None
@@ -3172,8 +3203,8 @@ class AppSettingsRequest(BaseModel):
     hydra_llm_hermes_model: Optional[str] = None
     hydra_llm_hermes_api_key: Optional[str] = None
     hydra_max_ledger_items: Optional[int] = None
-    hydra_step_retry_limit: Optional[int] = None
     hydra_astraeus_plan_review_enabled: Optional[bool] = None
+    hydra_auto_continue_incomplete_final_enabled: Optional[bool] = None
     popup_effect_style: Optional[str] = None
     executor_wake_workers: Optional[int] = None
     executor_speech_workers: Optional[int] = None
@@ -3959,6 +3990,24 @@ def _dashboard_environment_table_rows(item: Dict[str, Any], *, tokens: Tuple[str
     return out
 
 
+def _dashboard_table_rows(item: Dict[str, Any], *, tokens: Tuple[str, ...], limit: int = 8) -> List[Dict[str, Any]]:
+    wanted = tuple(str(token or "").strip().lower() for token in tokens if str(token or "").strip())
+    out: List[Dict[str, Any]] = []
+    for field in _dashboard_item_fields(item):
+        if not isinstance(field, dict) or str(field.get("type") or "").strip().lower() != "table":
+            continue
+        haystack = " ".join(str(field.get(key) or "").strip().lower() for key in ("key", "label"))
+        if wanted and not any(token in haystack for token in wanted):
+            continue
+        rows = field.get("rows") if isinstance(field.get("rows"), list) else []
+        for row in rows:
+            if isinstance(row, dict):
+                out.append(row)
+            if len(out) >= max(1, int(limit)):
+                return out
+    return out
+
+
 def _dashboard_environment_context(payload: Optional[Dict[str, Any]], section: Dict[str, Any]) -> Dict[str, Any]:
     stats = _dashboard_stats((payload or {}).get("header_stats") or (payload or {}).get("stats"), limit=0)
     if not stats:
@@ -4003,6 +4052,196 @@ def _dashboard_environment_context(payload: Optional[Dict[str, Any]], section: D
     context["overview_cards"] = context["overview_cards"][:8]
     context["forecast_cards"] = context["forecast_cards"][:4]
     context["selected_sources"] = context["selected_sources"][:16]
+    return context
+
+
+def _dashboard_invalidate_briefs(*brief_ids: str) -> None:
+    fields = [str(item or "").strip() for item in brief_ids if str(item or "").strip()]
+    if not fields:
+        return
+    try:
+        redis_client.hdel(DASHBOARD_BRIEFS_KEY, *fields)
+    except Exception:
+        logger.debug("[dashboard] failed invalidating dashboard briefs", exc_info=True)
+
+
+def _dashboard_people_options() -> List[Dict[str, str]]:
+    try:
+        store = people_module.load_store(redis_client)
+    except Exception:
+        logger.debug("[dashboard] failed loading People options", exc_info=True)
+        return []
+    raw_people = store.get("people") if isinstance(store, dict) else []
+    options: List[Dict[str, str]] = []
+    for person in raw_people if isinstance(raw_people, list) else []:
+        if not isinstance(person, dict):
+            continue
+        person_id = _dashboard_redis_text(person.get("id") or person.get("person_id"))
+        label = _dashboard_redis_text(person.get("display_name") or person.get("name") or person_id)
+        if person_id and label:
+            options.append({"value": person_id, "label": label})
+    return sorted(options, key=lambda row: str(row.get("label") or "").lower())
+
+
+def _dashboard_personal_settings() -> Dict[str, Any]:
+    selected = _dashboard_redis_text(redis_client.get(DASHBOARD_PERSONAL_PERSON_KEY))
+    options = _dashboard_people_options()
+    option_values = {str(row.get("value") or "") for row in options}
+    if selected and selected not in option_values:
+        selected = ""
+    selected_label = next((str(row.get("label") or "") for row in options if row.get("value") == selected), "")
+    return {
+        "person_id": selected,
+        "person_label": selected_label or ("All people" if not selected else selected),
+        "people_options": options,
+    }
+
+
+def _dashboard_save_personal_settings(person_id: Any) -> Dict[str, Any]:
+    wanted = _dashboard_redis_text(person_id)
+    options = _dashboard_people_options()
+    option_values = {str(row.get("value") or "") for row in options}
+    if wanted and wanted not in option_values:
+        raise HTTPException(status_code=400, detail="Unknown Personal Core person.")
+    if wanted:
+        redis_client.set(DASHBOARD_PERSONAL_PERSON_KEY, wanted)
+    else:
+        redis_client.delete(DASHBOARD_PERSONAL_PERSON_KEY)
+    _dashboard_invalidate_briefs("overview", "personal")
+    return _dashboard_personal_settings()
+
+
+def _dashboard_personal_calendar_payload(person_id: str = "") -> Dict[str, Any]:
+    try:
+        module = core_runtime._import_module("personal_core", reload_module=False)
+    except Exception:
+        logger.debug("[dashboard] failed importing personal_core for calendar payload", exc_info=True)
+        return {}
+    provider = getattr(module, "get_personal_calendar_payload", None)
+    if not callable(provider):
+        return {}
+    try:
+        query: Dict[str, Any] = {"range": "week", "limit": 250}
+        selected_person = _dashboard_redis_text(person_id)
+        if selected_person:
+            query["person_id"] = selected_person
+        payload = provider(query)
+    except Exception:
+        logger.debug("[dashboard] failed loading personal calendar payload", exc_info=True)
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _dashboard_personal_item_type_label(value: Any) -> str:
+    token = str(value if value is not None else "").strip().replace("_", " ").replace("-", " ")
+    if not token:
+        return "Item"
+    aliases = {
+        "calendar event": "Calendar",
+        "email event": "Plan",
+        "action": "Action",
+        "subscription": "Renewal",
+        "delivery": "Delivery",
+    }
+    lowered = " ".join(token.lower().split())
+    return aliases.get(lowered, " ".join(part.capitalize() for part in lowered.split()))
+
+
+def _dashboard_personal_compact_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    title = _dashboard_short_text(item.get("title"), limit=140)
+    item_type = _dashboard_personal_item_type_label(item.get("item_type") or item.get("type"))
+    detail_parts = [
+        _dashboard_redis_text(item.get("when")),
+        _dashboard_redis_text(item.get("location")),
+        _dashboard_redis_text(item.get("status")),
+    ]
+    detail = " • ".join(part for part in detail_parts if part)
+    summary = _dashboard_short_text(item.get("summary"), limit=180)
+    if not summary and item.get("merchant"):
+        summary = _dashboard_short_text(item.get("merchant"), limit=180)
+    return {
+        "title": title or item_type,
+        "type": item_type,
+        "when": _dashboard_redis_text(item.get("when")),
+        "source": _dashboard_redis_text(item.get("source")),
+        "person": _dashboard_redis_text(item.get("person_name") or item.get("person")),
+        "location": _dashboard_redis_text(item.get("location")),
+        "status": _dashboard_redis_text(item.get("status")),
+        "detail": detail,
+        "summary": summary,
+    }
+
+
+def _dashboard_personal_context(
+    payload: Optional[Dict[str, Any]],
+    section: Dict[str, Any],
+    calendar_payload: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    stats = _dashboard_stats((payload or {}).get("header_stats") or (payload or {}).get("stats"), limit=0)
+    if not stats:
+        stats = _dashboard_stats(section.get("stats"), limit=0)
+    calendar = calendar_payload if isinstance(calendar_payload, dict) else {}
+    context: Dict[str, Any] = {
+        "summary": section.get("summary"),
+        "stats": stats,
+        "person_id": section.get("person_id"),
+        "person_label": section.get("person_label"),
+        "calendar": {
+            "range": calendar.get("range"),
+            "date_from": calendar.get("date_from"),
+            "date_to": calendar.get("date_to"),
+            "item_count": calendar.get("item_count"),
+            "counts_by_type": calendar.get("counts_by_type") if isinstance(calendar.get("counts_by_type"), dict) else {},
+            "counts_by_source": calendar.get("counts_by_source") if isinstance(calendar.get("counts_by_source"), dict) else {},
+            "items": [
+                _dashboard_personal_compact_item(item)
+                for item in (calendar.get("items") if isinstance(calendar.get("items"), list) else [])
+                if isinstance(item, dict)
+            ][:80],
+        },
+        "calendar_today_rows": [],
+        "calendar_week_rows": [],
+        "overview_cards": [],
+        "subscriptions": [],
+        "deliveries": [],
+        "actions": [],
+        "notes": [],
+    }
+    for item in _dashboard_item_forms(payload):
+        group = str(item.get("group") or "").strip().lower()
+        compact = _dashboard_compact_item(item, include_image=False)
+        if group == "calendar_dashboard":
+            context["overview_cards"].append(compact)
+            context["calendar_today_rows"] = _dashboard_table_rows(item, tokens=("today",), limit=12)
+            context["calendar_week_rows"] = _dashboard_table_rows(item, tokens=("next 7", "week"), limit=24)
+        elif group == "overview_dashboard":
+            context["overview_cards"].append(compact)
+            context["subscriptions"] = _dashboard_table_rows(item, tokens=("subscription", "recurring"), limit=12)
+            context["deliveries"] = _dashboard_table_rows(item, tokens=("delivery", "tracking"), limit=12)
+            context["actions"] = _dashboard_table_rows(item, tokens=("action", "open action"), limit=12)
+            context["notes"] = _dashboard_table_rows(item, tokens=("important", "notes"), limit=12)
+    if not context["calendar"]["items"] and context["calendar_week_rows"]:
+        context["calendar"]["items"] = [
+            _dashboard_personal_compact_item(
+                {
+                    "when": row.get("when"),
+                    "item_type": row.get("type"),
+                    "title": row.get("title"),
+                    "source": row.get("source"),
+                    "person_name": row.get("person"),
+                    "location": row.get("location"),
+                    "status": row.get("status"),
+                }
+            )
+            for row in context["calendar_week_rows"]
+            if isinstance(row, dict)
+        ][:80]
+    calendar_items = [item for item in context["calendar"].get("items") or [] if isinstance(item, dict)]
+    if calendar_items and _dashboard_safe_int(context["calendar"].get("item_count"), 0) <= 0:
+        context["calendar"]["item_count"] = len(calendar_items)
+    counts_by_type = context["calendar"].get("counts_by_type") if isinstance(context["calendar"].get("counts_by_type"), dict) else {}
+    if calendar_items and not counts_by_type:
+        context["calendar"]["counts_by_type"] = dict(Counter(str(item.get("type") or "Item").strip() or "Item" for item in calendar_items))
     return context
 
 
@@ -4339,6 +4578,28 @@ def _dashboard_overview_context_data(snapshot: Dict[str, Any]) -> Dict[str, Any]
                     if item.get("message") or item.get("title")
                 ],
             }
+        elif section_id == "personal":
+            personal_context = section.get("brief_context") if isinstance(section.get("brief_context"), dict) else {}
+            calendar = personal_context.get("calendar") if isinstance(personal_context.get("calendar"), dict) else {}
+            row["person_id"] = section.get("person_id")
+            row["person_label"] = section.get("person_label")
+            row["calendar"] = {
+                "range": calendar.get("range"),
+                "date_from": calendar.get("date_from"),
+                "date_to": calendar.get("date_to"),
+                "item_count": calendar.get("item_count"),
+                "counts_by_type": calendar.get("counts_by_type") or {},
+                "next_items": [
+                    {
+                        "when": item.get("when"),
+                        "type": item.get("type"),
+                        "title": item.get("title"),
+                        "status": item.get("status"),
+                    }
+                    for item in calendar.get("items") or []
+                    if isinstance(item, dict)
+                ][:8],
+            }
         compact_sections.append(row)
 
     return {
@@ -4374,7 +4635,7 @@ def _dashboard_brief_contexts(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "Write the top dashboard greeting for the user. Start with local_time.greeting as the first words, but do not attach local_time.date directly after it as a comma phrase or standalone date label. "
                 "If local_time.date is useful, weave it into a natural dashboard sentence such as 'Good morning. For Friday, May 15, ...' or omit it when it sounds forced. "
                 "Use the available cards and sections to summarize the whole home and Tater state in one friendly paragraph. "
-                "Prefer concrete useful details: Tater health, weather, connected voice devices, and what cameras recently saw. "
+                "Prefer concrete useful details: Tater health, weather, connected voice devices, the 7-day Personal outlook, and what cameras recently saw. "
                 "If updates.total is greater than zero, mention that updates are waiting and summarize the affected groups from updates.summary. "
                 "Mention only data that is present; do not imply a missing core is installed. "
                 "Keep it concise, warm, and practical: one to three sentences, no markdown."
@@ -4445,6 +4706,40 @@ def _dashboard_brief_contexts(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
                     "overview_cards": environment_context.get("overview_cards") or [],
                     "forecast_cards": environment_context.get("forecast_cards") or [],
                     "selected_sources": environment_context.get("selected_sources") or [],
+                },
+            }
+        )
+
+    personal_section = snapshot.get("personal_section")
+    if isinstance(personal_section, dict):
+        personal_context = personal_section.get("brief_context") if isinstance(personal_section.get("brief_context"), dict) else {}
+        contexts.append(
+            {
+                "id": "personal",
+                "title": "Personal Outlook",
+                "source": "personal_core",
+                "instructions": (
+                    "Write a 7-day Personal Core outlook for the dashboard. "
+                    "When person_label is All people, summarize all linked profiles; otherwise write for that selected person only. "
+                    "Use calendar.items plus subscriptions, deliveries, actions, notes, and stats when present. "
+                    "Focus on what the user needs to know this week: calendar events, email-derived plans, open actions, deliveries, and upcoming renewals. "
+                    "Call out today or tomorrow only when the data supports it. "
+                    "Do not expose raw account IDs, internal implementation details, or pretend missing personal data exists. "
+                    "One to three practical sentences, no markdown."
+                ),
+                "data": {
+                    "summary": personal_context.get("summary") or personal_section.get("summary"),
+                    "stats": personal_context.get("stats") or personal_section.get("stats"),
+                    "person_id": personal_context.get("person_id") or personal_section.get("person_id"),
+                    "person_label": personal_context.get("person_label") or personal_section.get("person_label"),
+                    "calendar": personal_context.get("calendar") or {},
+                    "calendar_today_rows": personal_context.get("calendar_today_rows") or [],
+                    "calendar_week_rows": personal_context.get("calendar_week_rows") or [],
+                    "overview_cards": personal_context.get("overview_cards") or [],
+                    "subscriptions": personal_context.get("subscriptions") or [],
+                    "deliveries": personal_context.get("deliveries") or [],
+                    "actions": personal_context.get("actions") or [],
+                    "notes": personal_context.get("notes") or [],
                 },
             }
         )
@@ -4613,6 +4908,58 @@ def _dashboard_environment_fallback_text(data: Dict[str, Any]) -> str:
     return _dashboard_short_text(text, limit=420)
 
 
+def _dashboard_personal_fallback_text(data: Dict[str, Any]) -> str:
+    calendar = data.get("calendar") if isinstance(data.get("calendar"), dict) else {}
+    items = [item for item in calendar.get("items") or [] if isinstance(item, dict)]
+    counts = calendar.get("counts_by_type") if isinstance(calendar.get("counts_by_type"), dict) else {}
+    item_count = _dashboard_safe_int(calendar.get("item_count"), len(items))
+    date_from = str(calendar.get("date_from") or "").strip()
+    date_to = str(calendar.get("date_to") or "").strip()
+    window = f"{date_from} through {date_to}" if date_from and date_to else "the next 7 days"
+    person_label = str(data.get("person_label") or "").strip()
+    subject = f"Personal for {person_label}" if person_label and person_label != "All people" else "Personal"
+
+    if item_count <= 0 and not items:
+        return f"{subject} is available, but there is nothing scheduled in the next 7 days yet."
+
+    parts: List[str] = []
+    for raw_type, label, plural in (
+        ("calendar_event", "calendar event", "calendar events"),
+        ("email_event", "email-derived plan", "email-derived plans"),
+        ("action", "action item", "action items"),
+        ("delivery", "delivery", "deliveries"),
+        ("subscription", "renewal", "renewals"),
+    ):
+        count = _dashboard_safe_int(counts.get(raw_type), 0) if isinstance(counts, dict) else 0
+        if count > 0:
+            parts.append(f"{count} {label if count == 1 else plural}")
+    if not parts and isinstance(counts, dict):
+        for raw_type, raw_count in counts.items():
+            count = _dashboard_safe_int(raw_count, 0)
+            if count <= 0:
+                continue
+            label = _dashboard_personal_item_type_label(raw_type).lower()
+            plural = f"{label[:-1]}ies" if label.endswith("y") else f"{label}s"
+            parts.append(f"{count} {label if count == 1 else plural}")
+
+    text = f"{subject} has {item_count} item{'s' if item_count != 1 else ''} on the {window} outlook"
+    if parts:
+        text = f"{text}: " + ", ".join(parts[:5])
+    highlights = [
+        _dashboard_short_text(
+            " • ".join(part for part in [item.get("when"), item.get("title"), item.get("status")] if part),
+            limit=120,
+        )
+        for item in items[:3]
+    ]
+    highlights = [item for item in highlights if item]
+    if highlights:
+        text = f"{text}. Up next: {'; '.join(highlights)}."
+    else:
+        text = f"{text}."
+    return _dashboard_short_text(text, limit=520)
+
+
 def _dashboard_fallback_brief(context: Dict[str, Any]) -> Dict[str, Any]:
     brief_id = str(context.get("id") or "").strip()
     title = str(context.get("title") or brief_id.title()).strip()
@@ -4654,6 +5001,17 @@ def _dashboard_fallback_brief(context: Dict[str, Any]) -> Dict[str, Any]:
                     ]
                     if messages:
                         parts.append("cameras recently saw " + "; ".join(messages))
+            elif section_id == "personal":
+                calendar = section.get("calendar") if isinstance(section.get("calendar"), dict) else {}
+                item_count = _dashboard_safe_int(calendar.get("item_count"), 0)
+                next_items = [item for item in calendar.get("next_items") or [] if isinstance(item, dict)]
+                if item_count > 0:
+                    first = next_items[0] if next_items else {}
+                    first_title = _dashboard_short_text(first.get("title"), limit=80) if isinstance(first, dict) else ""
+                    if first_title:
+                        parts.append(f"Personal has {item_count} item{'s' if item_count != 1 else ''} this week, starting with {first_title}")
+                    else:
+                        parts.append(f"Personal has {item_count} item{'s' if item_count != 1 else ''} on the 7-day outlook")
         update_total = _dashboard_safe_int(updates.get("total")) if isinstance(updates, dict) else 0
         update_summary = str(updates.get("summary") or "").strip() if isinstance(updates, dict) else ""
         if update_total > 0:
@@ -4706,6 +5064,8 @@ def _dashboard_fallback_brief(context: Dict[str, Any]) -> Dict[str, Any]:
             text = f"{text} STT is {stt or 'unknown'} and TTS is {tts or 'unknown'}."
     elif brief_id == "environment":
         text = _dashboard_environment_fallback_text(data)
+    elif brief_id == "personal":
+        text = _dashboard_personal_fallback_text(data)
     elif brief_id == "awareness":
         event_summary = data.get("event_summary") if isinstance(data.get("event_summary"), dict) else {}
         has_event_summary = "event_count" in event_summary
@@ -5154,6 +5514,34 @@ def _dashboard_build_snapshot() -> Dict[str, Any]:
         )
         environment_section["brief_context"] = _dashboard_environment_context(environment_payload, environment_section)
 
+    personal_settings = _dashboard_personal_settings()
+    personal_payload = _dashboard_tab_payload("personal_core")
+    personal_section = _dashboard_section(
+        section_id="personal",
+        title="Personal",
+        subtitle="7-day calendar, plans, deliveries, and actions",
+        payload=personal_payload,
+        stats_limit=8,
+        require_signal=False,
+    )
+    if isinstance(personal_section, dict):
+        personal_section["person_id"] = personal_settings.get("person_id")
+        personal_section["person_label"] = personal_settings.get("person_label")
+        personal_section["personal_settings"] = personal_settings
+        personal_calendar = _dashboard_personal_calendar_payload(str(personal_settings.get("person_id") or ""))
+        personal_context = _dashboard_personal_context(personal_payload, personal_section, personal_calendar)
+        personal_section["brief_context"] = personal_context
+        calendar = personal_context.get("calendar") if isinstance(personal_context.get("calendar"), dict) else {}
+        personal_section["outlook_items"] = [
+            item for item in calendar.get("items") or [] if isinstance(item, dict)
+        ][:8]
+        counts = calendar.get("counts_by_type") if isinstance(calendar.get("counts_by_type"), dict) else {}
+        personal_section["type_counts"] = [
+            {"label": _dashboard_personal_item_type_label(key), "value": value}
+            for key, value in counts.items()
+            if _dashboard_safe_int(value) > 0
+        ][:6]
+
     awareness_payload = _dashboard_tab_payload("awareness_core")
     awareness_section = _dashboard_section(
         section_id="awareness",
@@ -5251,6 +5639,29 @@ def _dashboard_build_snapshot() -> Dict[str, Any]:
                 "tone": "normal",
             }
         )
+    if isinstance(personal_section, dict):
+        personal_context = personal_section.get("brief_context") if isinstance(personal_section.get("brief_context"), dict) else {}
+        calendar = personal_context.get("calendar") if isinstance(personal_context.get("calendar"), dict) else {}
+        item_count = _dashboard_safe_int(calendar.get("item_count"), len(calendar.get("items") or []))
+        counts = calendar.get("counts_by_type") if isinstance(calendar.get("counts_by_type"), dict) else {}
+        top_parts = [
+            f"{_dashboard_safe_int(value)} {_dashboard_personal_item_type_label(key).lower()}"
+            for key, value in counts.items()
+            if _dashboard_safe_int(value) > 0
+        ]
+        selected_label = str(personal_settings.get("person_label") or "All people").strip() or "All people"
+        detail = selected_label if selected_label != "All people" else "All people"
+        if top_parts:
+            detail = f"{detail} • {', '.join(top_parts[:2])}"
+        cards.append(
+            {
+                "id": "personal",
+                "label": "Personal",
+                "value": f"{item_count} this week",
+                "detail": detail,
+                "tone": "normal",
+            }
+        )
     if isinstance(awareness_section, dict):
         total = _dashboard_stat_value(_dashboard_stats(awareness_section.get("stats")), "Total Events")
         cards.append(
@@ -5263,7 +5674,7 @@ def _dashboard_build_snapshot() -> Dict[str, Any]:
             }
         )
 
-    sections = [section for section in (voice_section, environment_section, awareness_section) if isinstance(section, dict)]
+    sections = [section for section in (voice_section, environment_section, personal_section, awareness_section) if isinstance(section, dict)]
     return {
         "health": health_payload,
         "runtime": {
@@ -5276,7 +5687,9 @@ def _dashboard_build_snapshot() -> Dict[str, Any]:
         "sections": sections,
         "voice_section": voice_section,
         "environment_section": environment_section,
+        "personal_section": personal_section,
         "awareness_section": awareness_section,
+        "settings": {"personal": personal_settings},
     }
 
 
@@ -5339,6 +5752,7 @@ async def _dashboard_payload(
         "cards": snapshot.get("cards") or [],
         "sections": snapshot.get("sections") or [],
         "briefs": [row for row in briefs if str(row.get("id") or "").strip() in context_ids],
+        "settings": snapshot.get("settings") if isinstance(snapshot.get("settings"), dict) else {},
     }
 
 
@@ -5516,6 +5930,297 @@ async def dashboard(refresh_briefs: bool = False, refresh_snapshot: bool = False
 @app.post("/api/dashboard/briefs/refresh")
 async def dashboard_briefs_refresh(payload: DashboardBriefRefreshRequest) -> Dict[str, Any]:
     return await _dashboard_payload(refresh_briefs=True, brief_id=str(payload.brief_id or "").strip())
+
+
+@app.post("/api/dashboard/settings")
+async def dashboard_settings(payload: DashboardSettingsRequest) -> Dict[str, Any]:
+    await run_dashboard(_dashboard_save_personal_settings, payload.personal_person_id)
+    return await _dashboard_payload(refresh_snapshot=True)
+
+
+def _spudex_platform_token(value: Any) -> str:
+    text = str(value or "").strip().lower().replace("-", "_")
+    for suffix in ("_portal",):
+        if text.endswith(suffix):
+            text = text[: -len(suffix)]
+    return normalize_platform(text) or text
+
+
+def _spudex_clean_platform_label(value: Any, fallback: str = "") -> str:
+    text = str(value or fallback or "").strip()
+    text = re.sub(r"\s+Portal\s+Settings$", "", text, flags=re.IGNORECASE)
+    return text or fallback or "Unknown"
+
+
+def _spudex_platform_options(settings: Any) -> List[Dict[str, Any]]:
+    settings_map = settings if isinstance(settings, dict) else {}
+    allowed = {
+        str(item or "").strip().lower()
+        for item in settings_map.get("allowed_platforms", [])
+        if str(item or "").strip()
+    }
+    options: Dict[str, Dict[str, Any]] = {}
+
+    def add(value: Any, label: str, *, running: bool, description: str, kind: str) -> None:
+        token = _spudex_platform_token(value)
+        if not token:
+            return
+        existing = options.get(token)
+        row = {
+            "value": token,
+            "label": _spudex_clean_platform_label(label, _runtime_platform_label(token)),
+            "running": bool(running),
+            "description": str(description or "").strip(),
+            "kind": str(kind or "").strip(),
+            "saved": token in allowed,
+        }
+        if existing:
+            existing["running"] = bool(existing.get("running")) or row["running"]
+            existing["saved"] = bool(existing.get("saved")) or row["saved"]
+            if row["description"] and not existing.get("description"):
+                existing["description"] = row["description"]
+            return
+        options[token] = row
+
+    add("webui", "Web UI", running=True, description="Tater browser UI", kind="built_in")
+    if esphome_home_module.is_running():
+        add("voice_core", "Native Voice", running=True, description="ESPHome satellite voice path", kind="built_in")
+    if core_runtime.is_running("voice_core"):
+        add("voice_core", "Native Voice", running=True, description="Running native voice core", kind="core")
+
+    try:
+        portal_entries = portal_registry_module.refresh_portal_registry()
+    except Exception:
+        portal_entries = []
+    for portal in portal_entries:
+        key = str(portal.get("key") or "").strip()
+        if not key:
+            continue
+        token = _spudex_platform_token(key)
+        running = portal_runtime.is_running(key)
+        if not running and token not in allowed:
+            continue
+        label = _spudex_clean_platform_label(portal.get("label"), _runtime_platform_label(token))
+        description = "Running portal" if running else "Saved platform, currently stopped"
+        add(token, label, running=running, description=description, kind="portal")
+
+    for token in sorted(allowed):
+        if token == "all":
+            add("all", "All platforms", running=True, description="Allow Spudex anywhere Hydra is running", kind="special")
+        elif token not in options:
+            add(token, _runtime_platform_label(token), running=False, description="Saved platform, currently stopped", kind="saved")
+
+    def sort_key(row: Dict[str, Any]) -> Tuple[int, int, str]:
+        value = str(row.get("value") or "")
+        if value == "webui":
+            return (0, 0, "")
+        if value == "all":
+            return (2, 0, "")
+        return (1, 0 if row.get("running") else 1, str(row.get("label") or value).lower())
+
+    return sorted(options.values(), key=sort_key)
+
+
+@app.get("/api/spudex")
+def get_spudex_state() -> Dict[str, Any]:
+    from spudex.runner import spudex_payload
+
+    payload = spudex_payload(redis_client)
+    payload["platform_options"] = _spudex_platform_options(payload.get("settings") if isinstance(payload, dict) else {})
+    return payload
+
+
+@app.post("/api/spudex/settings")
+def update_spudex_settings(payload: SpudexSettingsRequest) -> Dict[str, Any]:
+    from spudex.settings import save_spudex_settings
+
+    settings = save_spudex_settings(payload.values, redis_client)
+    return {"ok": True, "settings": settings}
+
+
+@app.post("/api/spudex/run")
+async def run_spudex_command(payload: SpudexRunRequest) -> Dict[str, Any]:
+    from spudex.runner import start_spudex_command
+
+    return await start_spudex_command(
+        command=payload.command,
+        argv=payload.argv,
+        cwd="",
+        label=payload.label or "Spudex command",
+        source="ui",
+        platform="webui",
+        redis_client=redis_client,
+        background=payload.background,
+    )
+
+
+@app.post("/api/spudex/chat/session")
+def create_spudex_chat_session(payload: SpudexChatSessionRequest) -> Dict[str, Any]:
+    from spudex.policy import display_agent_path, resolve_spudex_cwd
+    from spudex.runner import append_session_log, create_spudex_session, update_spudex_session
+    from spudex.settings import get_spudex_settings
+
+    settings = get_spudex_settings(redis_client)
+    cwd_value = settings.get("default_cwd") or "workspace"
+    cwd = resolve_spudex_cwd(cwd_value)
+    label = str(payload.label or "").strip() or "New Spudex chat"
+    session = create_spudex_session(
+        label=label,
+        cwd=str(cwd),
+        goal="",
+        source="spudex_chat",
+        platform="webui",
+    )
+    session = update_spudex_session(str(session.get("id") or ""), status="draft", cwd=str(cwd), cwd_display=display_agent_path(cwd))
+    append_session_log(
+        str(session.get("id") or ""),
+        stream="system",
+        text="New Spudex chat created. Send a message to start the loop.",
+        level="info",
+    )
+    return {"ok": True, "session": session}
+
+
+@app.post("/api/spudex/chat")
+async def run_spudex_chat(payload: SpudexChatRequest) -> Dict[str, Any]:
+    from spudex.chat_loop import run_spudex_chat_turn
+    from spudex.policy import display_agent_path, resolve_spudex_cwd
+    from spudex.runner import append_session_log, create_spudex_session, finish_spudex_plan, get_spudex_session, register_spudex_task, update_spudex_session
+    from spudex.settings import spudex_llm_overrides, get_spudex_settings
+
+    message = str(payload.message or "").strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="Spudex chat message is required.")
+    settings = get_spudex_settings(redis_client)
+    cwd_value = settings.get("default_cwd") or "workspace"
+    cwd = resolve_spudex_cwd(cwd_value)
+    wanted_session_id = str(payload.session_id or "").strip()
+    session = get_spudex_session(wanted_session_id) if wanted_session_id else {}
+    if session and str(session.get("source") or "").strip().lower() != "spudex_chat":
+        session = {}
+    if session and str(session.get("status") or "").strip().lower() == "running":
+        raise HTTPException(status_code=409, detail="Spudex chat session is already running. Wait for it to finish or stop it first.")
+    if not session:
+        session = create_spudex_session(
+            label=f"Spudex chat: {message[:80]}",
+            cwd=str(cwd),
+            goal=message,
+            source="spudex_chat",
+            platform="webui",
+        )
+    else:
+        session = update_spudex_session(
+            str(session.get("id") or ""),
+            label=f"Spudex chat: {message[:80]}",
+            cwd=str(cwd),
+            cwd_display=display_agent_path(cwd),
+            goal=message,
+        )
+
+    async def _run() -> None:
+        try:
+            overrides = spudex_llm_overrides(redis_client)
+            async with get_llm_client_from_env(
+                host=overrides.get("host"),
+                model=overrides.get("model"),
+                redis_conn=redis_client,
+            ) as llm_client:
+                result = await run_spudex_chat_turn(
+                    session_id=str(session.get("id") or ""),
+                    message=message,
+                    platform="webui",
+                    llm_client=llm_client,
+                    redis_client=redis_client,
+                )
+            if not bool(result.get("ok")):
+                err = result.get("error") if isinstance(result.get("error"), dict) else {}
+                append_session_log(
+                    str(session.get("id") or ""),
+                    stream="system",
+                    text=str(err.get("message") or "Spudex chat loop failed."),
+                    level="error",
+                )
+        except asyncio.CancelledError:
+            append_session_log(
+                str(session.get("id") or ""),
+                stream="system",
+                text="Spudex chat task cancelled from UI.",
+                level="warning",
+            )
+            finish_spudex_plan(str(session.get("id") or ""), success=False)
+            update_spudex_session(str(session.get("id") or ""), status="stopped", finished_ts=time.time())
+        except Exception as exc:
+            logger.exception("[spudex] chat loop failed")
+            append_session_log(
+                str(session.get("id") or ""),
+                stream="system",
+                text=f"Spudex chat loop failed: {exc}",
+                level="error",
+            )
+            finish_spudex_plan(str(session.get("id") or ""), success=False)
+            update_spudex_session(str(session.get("id") or ""), status="failed", finished_ts=time.time())
+        finally:
+            latest = get_spudex_session(str(session.get("id") or ""))
+            if str(latest.get("status") or "").strip().lower() in {"queued", "running"}:
+                append_session_log(
+                    str(session.get("id") or ""),
+                    stream="system",
+                    text="Spudex chat loop ended without a final status; marking the session failed.",
+                    level="error",
+                )
+                finish_spudex_plan(str(session.get("id") or ""), success=False)
+                update_spudex_session(str(session.get("id") or ""), status="failed", finished_ts=time.time())
+
+    task = asyncio.create_task(_run())
+    register_spudex_task(str(session.get("id") or ""), task)
+    return {"ok": True, "session": session}
+
+
+@app.get("/api/spudex/sessions/{session_id}/logs")
+def get_spudex_session_logs(session_id: str, after_seq: int = 0, limit: int = 200) -> Dict[str, Any]:
+    from spudex.runner import read_spudex_logs
+
+    return read_spudex_logs(session_id, after_seq=after_seq, limit=limit)
+
+
+@app.post("/api/spudex/sessions/{session_id}/file-changes/approve")
+def approve_spudex_file_change_api(session_id: str, payload: SpudexFileChangeRequest) -> Dict[str, Any]:
+    from spudex.runner import approve_spudex_file_change
+
+    result = approve_spudex_file_change(session_id, payload.change_id)
+    if not bool(result.get("ok")):
+        err = result.get("error") if isinstance(result.get("error"), dict) else {}
+        raise HTTPException(status_code=400, detail=str(err.get("message") or "Failed to approve file change."))
+    return result
+
+
+@app.post("/api/spudex/sessions/{session_id}/file-changes/reject")
+def reject_spudex_file_change_api(session_id: str, payload: SpudexFileChangeRequest) -> Dict[str, Any]:
+    from spudex.runner import reject_spudex_file_change
+
+    result = reject_spudex_file_change(session_id, payload.change_id)
+    if not bool(result.get("ok")):
+        err = result.get("error") if isinstance(result.get("error"), dict) else {}
+        raise HTTPException(status_code=400, detail=str(err.get("message") or "Failed to reject file change."))
+    return result
+
+
+@app.post("/api/spudex/sessions/{session_id}/stop")
+async def stop_spudex_command(session_id: str) -> Dict[str, Any]:
+    from spudex.runner import stop_spudex_session
+
+    return await stop_spudex_session(session_id)
+
+
+@app.delete("/api/spudex/sessions/{session_id}")
+async def close_spudex_session_api(session_id: str) -> Dict[str, Any]:
+    from spudex.runner import close_spudex_session
+
+    result = await close_spudex_session(session_id)
+    if not bool(result.get("ok")):
+        err = result.get("error") if isinstance(result.get("error"), dict) else {}
+        raise HTTPException(status_code=404, detail=str(err.get("message") or "Spudex session was not found."))
+    return result
 
 
 @app.get("/api/runtime/breakdown")
@@ -7255,6 +7960,13 @@ def get_settings() -> Dict[str, Any]:
     hydra_llm_port = str(first_hydra_base.get("port") or redis_client.get(HYDRA_LLM_PORT_KEY) or "").strip()
     hydra_llm_model = str(first_hydra_base.get("model") or redis_client.get(HYDRA_LLM_MODEL_KEY) or "").strip()
     hydra_llm_api_key = str(first_hydra_base.get("api_key") or "").strip()
+    try:
+        from spudex.settings import get_spudex_settings
+
+        spudex_settings = get_spudex_settings(redis_client)
+    except Exception:
+        logger.exception("[settings] failed loading spudex model settings")
+        spudex_settings = {}
     hydra_beast_mode_enabled = _as_bool_flag(redis_client.get(HYDRA_BEAST_MODE_ENABLED_KEY), default=False)
     hydra_role_model_values: Dict[str, str] = {}
     for role in HYDRA_BEAST_CONFIG_ROLE_IDS:
@@ -7274,8 +7986,8 @@ def get_settings() -> Dict[str, Any]:
         "hydra_llm_api_key": "",
         "hydra_beast_mode_enabled": False,
         "hydra_max_ledger_items": int(DEFAULT_MAX_LEDGER_ITEMS),
-        "hydra_step_retry_limit": int(DEFAULT_STEP_RETRY_LIMIT),
         "hydra_astraeus_plan_review_enabled": bool(DEFAULT_ASTRAEUS_PLAN_REVIEW_ENABLED),
+        "hydra_auto_continue_incomplete_final_enabled": bool(DEFAULT_AUTO_CONTINUE_INCOMPLETE_FINAL_ENABLED),
     }
     executor_settings = _runtime_executor_settings_from_redis()
     executor_workers = executor_settings.get("workers") if isinstance(executor_settings.get("workers"), dict) else {}
@@ -7363,13 +8075,18 @@ def get_settings() -> Dict[str, Any]:
         "hydra_llm_port": hydra_llm_port,
         "hydra_llm_model": hydra_llm_model,
         "hydra_llm_api_key": hydra_llm_api_key,
+        "spudex_llm_host": str(spudex_settings.get("llm_host") or ""),
+        "spudex_llm_model": str(spudex_settings.get("llm_model") or ""),
         "hydra_base_servers": hydra_base_servers,
         "hydra_beast_mode_enabled": hydra_beast_mode_enabled,
         "hydra_max_ledger_items": _read_positive_int(HYDRA_MAX_LEDGER_ITEMS_KEY, DEFAULT_MAX_LEDGER_ITEMS),
-        "hydra_step_retry_limit": _read_positive_int(HYDRA_STEP_RETRY_LIMIT_KEY, DEFAULT_STEP_RETRY_LIMIT),
         "hydra_astraeus_plan_review_enabled": _as_bool_flag(
             redis_client.get(HYDRA_ASTRAEUS_PLAN_REVIEW_ENABLED_KEY),
             default=DEFAULT_ASTRAEUS_PLAN_REVIEW_ENABLED,
+        ),
+        "hydra_auto_continue_incomplete_final_enabled": _as_bool_flag(
+            redis_client.get(HYDRA_AUTO_CONTINUE_INCOMPLETE_FINAL_ENABLED_KEY),
+            default=DEFAULT_AUTO_CONTINUE_INCOMPLETE_FINAL_ENABLED,
         ),
         **hydra_role_model_values,
         "hydra_defaults": hydra_defaults,
@@ -8494,6 +9211,20 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         )
         speech_warmup_result = _start_speech_model_warmup(get_shared_speech_settings(), reason="settings-save")
 
+    spudex_model_keys = {"spudex_llm_host", "spudex_llm_model"}
+    if any(key in updates for key in spudex_model_keys):
+        from spudex.settings import get_spudex_settings, save_spudex_settings
+
+        current_spudex = get_spudex_settings(redis_client)
+        save_spudex_settings(
+            {
+                **current_spudex,
+                "llm_host": str(updates.get("spudex_llm_host", current_spudex.get("llm_host") or "") or "").strip(),
+                "llm_model": str(updates.get("spudex_llm_model", current_spudex.get("llm_model") or "") or "").strip(),
+            },
+            redis_client,
+        )
+
     esphome_result: Dict[str, Any] = {}
     if "esphome_settings" in updates:
         raw_esphome_settings = updates.get("esphome_settings")
@@ -8693,7 +9424,6 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
 
     hydra_mappings = {
         "hydra_max_ledger_items": (HYDRA_MAX_LEDGER_ITEMS_KEY, DEFAULT_MAX_LEDGER_ITEMS, 1, None),
-        "hydra_step_retry_limit": (HYDRA_STEP_RETRY_LIMIT_KEY, DEFAULT_STEP_RETRY_LIMIT, 1, 10),
     }
     for payload_key, (redis_key, default, min_value, max_value) in hydra_mappings.items():
         if payload_key not in updates:
@@ -8713,6 +9443,16 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         )
         redis_client.set(
             HYDRA_ASTRAEUS_PLAN_REVIEW_ENABLED_KEY,
+            "true" if enabled_value else "false",
+        )
+
+    if "hydra_auto_continue_incomplete_final_enabled" in updates:
+        enabled_value = _as_bool_flag(
+            updates.get("hydra_auto_continue_incomplete_final_enabled"),
+            default=DEFAULT_AUTO_CONTINUE_INCOMPLETE_FINAL_ENABLED,
+        )
+        redis_client.set(
+            HYDRA_AUTO_CONTINUE_INCOMPLETE_FINAL_ENABLED_KEY,
             "true" if enabled_value else "false",
         )
 

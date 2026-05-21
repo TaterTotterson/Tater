@@ -1,0 +1,449 @@
+import json
+import time
+from typing import Any, Dict, List, Optional
+
+from verba_result import action_failure, action_success
+from web_research import research_web
+
+from .policy import normalize_argv, resolve_spudex_cwd
+from .runner import (
+    append_session_log,
+    spudex_payload,
+    create_spudex_session,
+    read_spudex_logs,
+    run_argv_in_session,
+    run_spudex_command_once,
+    set_spudex_memory_summary,
+    set_spudex_verification,
+    stop_spudex_session,
+    update_spudex_plan,
+    update_spudex_session,
+    write_spudex_file_in_session,
+)
+from .settings import spudex_enabled_for_platform, spudex_llm_overrides, get_spudex_settings
+from .system_info import spudex_system_info
+
+
+SPUDEX_TOOL_ROWS = [
+    {
+        "id": "spudex_run",
+        "description": "full terminal console access to run one command or script on the Tater host from the configured working folder when a CLI command is the right way to answer or act and no Verba fits",
+        "usage": '{"function":"spudex_run","arguments":{"command":"<command to run>"}}',
+    },
+    {
+        "id": "spudex_task",
+        "description": "full terminal console access for multi-step tasks: run commands, write scripts/files, inspect output, retry, search if needed, and complete terminal work from the configured working folder when no Verba fits",
+        "usage": '{"function":"spudex_task","arguments":{"goal":"<describe the multi-step terminal task to complete>"}}',
+    },
+    {
+        "id": "spudex_status",
+        "description": "list terminal console settings and recent command sessions",
+        "usage": '{"function":"spudex_status","arguments":{}}',
+    },
+    {
+        "id": "spudex_stop",
+        "description": "stop a running terminal console session",
+        "usage": '{"function":"spudex_stop","arguments":{"session_id":"<session_id>"}}',
+    },
+]
+
+
+def spudex_hydra_tool_rows(*, platform: str, redis_client: Any = None) -> list[Dict[str, str]]:
+    if not spudex_enabled_for_platform(platform, redis_client):
+        return []
+    return [dict(row) for row in SPUDEX_TOOL_ROWS]
+
+
+def spudex_has_hydra_tool(tool_id: str, *, platform: str = "", redis_client: Any = None) -> bool:
+    token = str(tool_id or "").strip()
+    if token not in {str(row["id"]) for row in SPUDEX_TOOL_ROWS}:
+        return False
+    if platform:
+        return spudex_enabled_for_platform(platform, redis_client)
+    return bool(get_spudex_settings(redis_client).get("enabled"))
+
+
+def spudex_tool_purpose_hint(tool_id: str) -> str:
+    token = str(tool_id or "").strip()
+    for row in SPUDEX_TOOL_ROWS:
+        if row["id"] == token:
+            return str(row.get("description") or "")
+    return ""
+
+
+def spudex_tool_usage_hint(tool_id: str) -> str:
+    token = str(tool_id or "").strip()
+    for row in SPUDEX_TOOL_ROWS:
+        if row["id"] == token:
+            return str(row.get("usage") or "")
+    return ""
+
+
+def _approval_required(settings: Dict[str, Any], argv: List[str], *, actor: str = "Hydra") -> Optional[Dict[str, Any]]:
+    if not bool(settings.get("require_approval")):
+        return None
+    label = str(actor or "Hydra").strip() or "Hydra"
+    return action_failure(
+        code="spudex_approval_required",
+        message=f"Spudex approval is enabled, so {label} did not run: {' '.join(argv)}",
+        diagnosis={"argv": json.dumps(argv)},
+        needs=["Turn off Spudex approval in the Spudex tab, or run the command manually from the Spudex tab."],
+        say_hint="Explain that the spudex command needs approval in the Tater UI.",
+    )
+
+
+def _messages_content(resp: Any) -> str:
+    if not isinstance(resp, dict):
+        return ""
+    message = resp.get("message")
+    if isinstance(message, dict):
+        return str(message.get("content") or "").strip()
+    return ""
+
+
+def _strict_json(text: str) -> Dict[str, Any]:
+    raw = str(text or "").strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`").strip()
+        if raw.lower().startswith("json"):
+            raw = raw[4:].strip()
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _int_default(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+async def _run_spudex_task(
+    *,
+    args: Dict[str, Any],
+    platform: str,
+    llm_client: Any,
+    redis_client: Any,
+    source: str = "hydra",
+    approval_actor: str = "Hydra",
+    session_id: str = "",
+) -> Dict[str, Any]:
+    settings = get_spudex_settings(redis_client)
+    goal = str(args.get("goal") or args.get("task") or args.get("request") or "").strip()
+    if not goal:
+        return action_failure(
+            code="spudex_task_missing_goal",
+            message="spudex_task needs a goal.",
+            needs=["Provide arguments.goal."],
+            say_hint="Ask what spudex task should be done.",
+        )
+    if llm_client is None or not hasattr(llm_client, "chat"):
+        return action_failure(
+            code="spudex_task_model_unavailable",
+            message="spudex_task needs an available language model client.",
+            say_hint="Explain that the spudex loop needs the assistant model to plan commands.",
+        )
+
+    steps = max(1, int(settings.get("max_task_steps") or 6))
+    cwd = resolve_spudex_cwd(settings.get("default_cwd"))
+    if session_id:
+        session = {"id": str(session_id)}
+        update_spudex_session(str(session_id), status="running")
+        append_session_log(str(session_id), stream="user", text=goal, level="info")
+    else:
+        session = create_spudex_session(label=f"Spudex task: {goal[:80]}", cwd=str(cwd), goal=goal, source=source, platform=platform)
+        update_spudex_session(session["id"], status="running")
+    history: list[Dict[str, Any]] = []
+
+    system_prompt = (
+        "You operate Tater's local Spudex terminal.\n"
+        "Return exactly one strict JSON object.\n"
+        "Allowed shapes:\n"
+        "{\"done\":true,\"final\":\"...\"}\n"
+        "{\"done\":false,\"action\":\"write_file\",\"path\":\"<relative/path>\",\"content\":\"...\",\"reason\":\"...\"}\n"
+        "{\"done\":false,\"argv\":[\"command\",\"arg\"],\"reason\":\"...\"}\n"
+        "{\"done\":false,\"action\":\"verify\",\"argv\":[\"command\",\"arg\"],\"reason\":\"...\"}\n"
+        "{\"done\":false,\"action\":\"search\",\"query\":\"how to check free memory on Linux command line\",\"reason\":\"...\"}\n"
+        "Rules:\n"
+        "- Include a compact plan array when the task has multiple steps: [{\"step\":\"Inspect\",\"status\":\"in_progress\"}]. Keep it updated as you work.\n"
+        "- Use system_info to choose commands that fit the host OS and path style.\n"
+        "- Use search only when you are genuinely unsure about the right command or need current external instructions.\n"
+        "- For multi-step logic, data parsing, calculations, or file generation, prefer writing a small Python script in workspace and running it with python3.\n"
+        "- Do not use inline interpreter eval such as python -c; write a script file first, then run it.\n"
+        "- Use argv arrays only. Do not use shells, pipes, redirects, or command separators.\n"
+        "- Commands run from the configured working folder. Do not include or change cwd.\n"
+        "- Use small inspection commands before changing anything.\n"
+        "- Before claiming a change is done, run a verify action when a practical command can confirm it.\n"
+        "- If you start a long-running web server, set \"background\": true on the command so it stays attached to the session.\n"
+        "- When you finish, include memory_summary with what changed and what should be remembered next time.\n"
+        "- Stop when you have enough information or the task is done.\n"
+    )
+
+    final_text = ""
+    for step in range(steps):
+        payload = {
+            "goal": goal,
+            "step": step + 1,
+            "max_steps": steps,
+            "working_folder": str(cwd),
+            "system_info": spudex_system_info(),
+            "history": history[-8:],
+        }
+        try:
+            resp = await llm_client.chat(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)},
+                ],
+                temperature=0.0,
+            )
+        except Exception as exc:
+            update_spudex_session(session["id"], status="failed", finished_ts=time.time())
+            append_session_log(session["id"], stream="system", text=f"Spudex task planning failed: {exc}", level="error")
+            return action_failure(code="spudex_task_llm_failed", message=f"Spudex task planning failed: {exc}")
+        decision = _strict_json(_messages_content(resp))
+        if isinstance(decision.get("plan"), list):
+            update_spudex_plan(session["id"], decision.get("plan"))
+        if bool(decision.get("done")):
+            final_text = str(decision.get("final") or "Spudex task complete.").strip()
+            set_spudex_memory_summary(session["id"], decision.get("memory_summary") or final_text)
+            break
+        action = str(decision.get("action") or decision.get("type") or "").strip().lower()
+        if action in {"search", "research", "websearch", "web_search", "search_web", "research_web"} or (
+            decision.get("query") is not None and decision.get("argv") is None
+        ):
+            query = str(decision.get("query") or decision.get("question") or "").strip()
+            if not query:
+                append_session_log(session["id"], stream="system", text="Spudex task requested web research with no query.", level="error")
+                history.append({"action": "search", "ok": False, "error": "missing query"})
+                continue
+            reason = str(decision.get("reason") or "").strip()
+            if reason:
+                append_session_log(session["id"], stream="assistant", text=reason, level="info")
+            append_session_log(session["id"], stream="search", text=f"? {query}", level="info")
+            search_result = await research_web(
+                query=query,
+                question=goal,
+                llm_client=llm_client,
+                max_results=_int_default(decision.get("max_results"), 5),
+                max_pages=_int_default(decision.get("max_pages"), 3),
+                platform=platform,
+            )
+            search_data = search_result.get("data") if isinstance(search_result.get("data"), dict) else {}
+            search_summary = str(search_result.get("summary_for_user") or search_data.get("answer") or "")
+            append_session_log(
+                session["id"],
+                stream="research",
+                text=search_summary or str((search_result.get("error") or {}).get("message") or "Web research returned no answer."),
+                level="info" if bool(search_result.get("ok")) else "error",
+            )
+            history.append(
+                {
+                    "action": "search",
+                    "query": query,
+                    "ok": bool(search_result.get("ok")),
+                    "enough": bool(search_data.get("enough")),
+                    "answer": str(search_data.get("answer") or search_summary or ""),
+                    "reason": str(search_data.get("reason") or ""),
+                    "missing": str(search_data.get("missing") or ""),
+                    "sources": list(search_data.get("sources") or [])[:5],
+                }
+            )
+            continue
+        if action in {"write_file", "file", "write", "create_file"} or (
+            decision.get("path") is not None and decision.get("content") is not None and decision.get("argv") is None
+        ):
+            path = str(decision.get("path") or decision.get("filename") or "").strip()
+            if not path:
+                append_session_log(session["id"], stream="system", text="Spudex task requested file write with no path.", level="error")
+                history.append({"action": "write_file", "ok": False, "error": "missing path"})
+                continue
+            approval = _approval_required(settings, ["write_file", path], actor=approval_actor)
+            if approval:
+                append_session_log(session["id"], stream="system", text=str(approval.get("error", {}).get("message") or "Spudex approval required."), level="warning")
+                update_spudex_session(session["id"], status="blocked", finished_ts=time.time())
+                return approval
+            reason = str(decision.get("reason") or "").strip()
+            if reason:
+                append_session_log(session["id"], stream="assistant", text=reason, level="info")
+            next_cwd = resolve_spudex_cwd(settings.get("default_cwd"))
+            write_result = write_spudex_file_in_session(
+                session["id"],
+                path=path,
+                content=decision.get("content"),
+                cwd=next_cwd,
+                append=bool(decision.get("append")),
+                require_approval=bool(settings.get("require_file_approval")),
+            )
+            history.append(
+                {
+                    "action": "write_file",
+                    "path": path,
+                    "ok": bool(write_result.get("ok")),
+                    "path_display": str(write_result.get("path_display") or ""),
+                    "bytes": int(write_result.get("bytes") or 0),
+                    "append": bool(write_result.get("append")),
+                    "error": write_result.get("error") if isinstance(write_result.get("error"), dict) else {},
+                }
+            )
+            continue
+        if action in {"verify", "verification", "check"} or decision.get("verify_argv") is not None:
+            argv = normalize_argv(argv=decision.get("argv") or decision.get("verify_argv"))
+            approval = _approval_required(settings, argv, actor=approval_actor)
+            if approval:
+                append_session_log(session["id"], stream="system", text=str(approval.get("error", {}).get("message") or "Spudex approval required."), level="warning")
+                update_spudex_session(session["id"], status="blocked", finished_ts=time.time())
+                return approval
+            reason = str(decision.get("reason") or "").strip()
+            if reason:
+                append_session_log(session["id"], stream="assistant", text=reason, level="info")
+            next_cwd = resolve_spudex_cwd(settings.get("default_cwd"))
+            result = await run_argv_in_session(session["id"], argv=argv, cwd=next_cwd, settings=settings, capture_output=True)
+            summary = str(result.get("stdout") or result.get("stderr") or result.get("status") or "").strip()
+            set_spudex_verification(
+                session["id"],
+                command=argv,
+                status="passed" if bool(result.get("ok")) else "failed",
+                summary=summary,
+                returncode=result.get("returncode"),
+            )
+            history.append(
+                {
+                    "action": "verify",
+                    "argv": argv,
+                    "ok": bool(result.get("ok")),
+                    "status": result.get("status"),
+                    "returncode": result.get("returncode"),
+                    "recent_output": summary[-2000:],
+                }
+            )
+            continue
+        argv = normalize_argv(argv=decision.get("argv"))
+        approval = _approval_required(settings, argv, actor=approval_actor)
+        if approval:
+            append_session_log(session["id"], stream="system", text=str(approval.get("error", {}).get("message") or "Spudex approval required."), level="warning")
+            update_spudex_session(session["id"], status="blocked", finished_ts=time.time())
+            return approval
+        next_cwd = resolve_spudex_cwd(settings.get("default_cwd"))
+        result = await run_argv_in_session(session["id"], argv=argv, cwd=next_cwd, settings=settings, background=bool(decision.get("background")))
+        logs = read_spudex_logs(session["id"], after_seq=0, limit=80).get("entries") or []
+        history.append(
+            {
+                "argv": argv,
+                "ok": bool(result.get("ok")),
+                "status": result.get("status"),
+                "returncode": result.get("returncode"),
+                "background": bool(result.get("background")),
+                "recent_output": "\n".join(str(entry.get("text") or "") for entry in logs[-12:]),
+            }
+        )
+    else:
+        final_text = "Spudex task stopped at the configured step limit."
+
+    if final_text:
+        set_spudex_memory_summary(session["id"], final_text)
+        append_session_log(session["id"], stream="assistant", text=final_text, level="info")
+    update_spudex_session(session["id"], status="succeeded", finished_ts=time.time())
+    logs = read_spudex_logs(session["id"], after_seq=0, limit=200).get("entries") or []
+    return action_success(
+        facts={"session_id": session["id"], "steps": len(history), "final": final_text},
+        data={"session_id": session["id"], "history": history, "logs": logs},
+        summary_for_user=final_text or "Spudex task complete.",
+        say_hint="Summarize the spudex task result briefly and mention the session id if useful.",
+    )
+
+
+async def run_spudex_loop_task(
+    *,
+    args: Dict[str, Any],
+    platform: str,
+    llm_client: Any,
+    redis_client: Any,
+    source: str = "spudex_chat",
+    approval_actor: str = "Spudex chat",
+    session_id: str = "",
+) -> Dict[str, Any]:
+    return await _run_spudex_task(
+        args=args,
+        platform=platform,
+        llm_client=llm_client,
+        redis_client=redis_client,
+        source=source,
+        approval_actor=approval_actor,
+        session_id=session_id,
+    )
+
+
+async def run_spudex_hydra_tool(
+    *,
+    tool_id: str,
+    args: Dict[str, Any],
+    platform: str,
+    origin: Optional[Dict[str, Any]] = None,
+    llm_client: Any = None,
+    redis_client: Any = None,
+) -> Optional[Dict[str, Any]]:
+    del origin
+    token = str(tool_id or "").strip()
+    if token not in {str(row["id"]) for row in SPUDEX_TOOL_ROWS}:
+        return None
+    if not spudex_enabled_for_platform(platform, redis_client):
+        return action_failure(
+            code="spudex_disabled",
+            message="Tater Spudex is disabled for this platform.",
+            say_hint="Explain that the Spudex feature must be enabled in the Spudex tab first.",
+        )
+
+    payload = args if isinstance(args, dict) else {}
+    settings = get_spudex_settings(redis_client)
+    if token == "spudex_status":
+        state = spudex_payload(redis_client)
+        return action_success(
+            facts={"active_count": state.get("active_count"), "session_count": len(state.get("sessions") or [])},
+            data=state,
+            summary_for_user=f"Spudex has {state.get('active_count', 0)} active session(s).",
+        )
+    if token == "spudex_stop":
+        session_id = str(payload.get("session_id") or "").strip()
+        if not session_id:
+            return action_failure(code="spudex_stop_missing_session", message="spudex_stop needs a session_id.")
+        result = await stop_spudex_session(session_id)
+        return action_success(facts=result, data=result, summary_for_user="Spudex session stop requested.")
+    if token == "spudex_run":
+        argv = normalize_argv(command=payload.get("command"), argv=payload.get("argv"))
+        approval = _approval_required(settings, argv, actor="Hydra")
+        if approval:
+            return approval
+        result = await run_spudex_command_once(
+            command=payload.get("command"),
+            argv=payload.get("argv"),
+            cwd=settings.get("default_cwd"),
+            source="hydra",
+            platform=platform,
+            redis_client=redis_client,
+            background=bool(payload.get("background")),
+        )
+        ok = bool(result.get("ok"))
+        summary = "Command finished successfully." if ok else "Command failed or was blocked."
+        return action_success(
+            facts={"session_id": result.get("session_id"), "ok": ok, "status": result.get("status"), "returncode": result.get("returncode")},
+            data=result,
+            summary_for_user=summary,
+            say_hint="Summarize the command result and include important output only.",
+        )
+    if token == "spudex_task":
+        overrides = spudex_llm_overrides(redis_client)
+        if overrides.get("host") or overrides.get("model"):
+            from helpers import get_llm_client_from_env
+
+            async with get_llm_client_from_env(
+                host=overrides.get("host"),
+                model=overrides.get("model"),
+                redis_conn=redis_client,
+            ) as spudex_llm_client:
+                return await _run_spudex_task(args=payload, platform=platform, llm_client=spudex_llm_client, redis_client=redis_client)
+        return await _run_spudex_task(args=payload, platform=platform, llm_client=llm_client, redis_client=redis_client)
+    return None
