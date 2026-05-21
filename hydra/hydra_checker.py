@@ -9,7 +9,7 @@ def normalize_minos_decision(label: str) -> str:
     if norm in {"CONTINUE", "NEXT", "PROCEED"}:
         return "CONTINUE"
     if norm in {"RETRY", "RETRY_TOOL", "TRY_AGAIN"}:
-        return "RETRY"
+        return "FAIL"
     if norm in {"ASK_USER", "NEED_USER_INFO", "ASK", "QUESTION"}:
         return "ASK_USER"
     if norm in {"FAIL", "FAILED", "BLOCKED", "CANNOT_COMPLETE"}:
@@ -21,8 +21,6 @@ def normalize_minos_decision(label: str) -> str:
 
 def normalize_minos_kind(label: str) -> str:
     decision = normalize_minos_decision(label)
-    if decision == "RETRY":
-        return "RETRY_TOOL"
     if decision == "ASK_USER":
         return "NEED_USER_INFO"
     return "FINAL_ANSWER"
@@ -42,8 +40,6 @@ def parse_minos_decision(
 
     def _compat_kind(decision: str) -> str:
         normalized = str(decision or "").strip().upper()
-        if normalized == "RETRY":
-            return "RETRY_TOOL"
         if normalized == "ASK_USER":
             return "NEED_USER_INFO"
         return "FINAL_ANSWER"
@@ -108,19 +104,9 @@ def parse_minos_decision(
         decision = normalize_minos_decision_fn(str(match.group(1) or ""))
         body = str(match.group(2) or "").strip()
         if decision == "RETRY":
-            parsed = parse_function_json_fn(body)
-            if isinstance(parsed, dict):
-                return _decision_payload(
-                    decision="RETRY",
-                    reason="retry_requested",
-                    repair="Retry the current step.",
-                    text=body,
-                    tool_call=parsed,
-                )
             return _decision_payload(
-                decision="RETRY",
-                reason="retry_requested",
-                repair=body or "Retry the current step.",
+                decision="FAIL",
+                reason=body or "step_failed",
                 text=body,
             )
         if decision == "ASK_USER":
@@ -168,15 +154,13 @@ def parse_minos_decision(
                 repair = _extract_dict_text(obj, "repair", "fix", "hint")
                 question = _extract_dict_text(obj, "question", "ask", "prompt")
                 body_text = _extract_dict_text(obj, "text", "message", "final_answer", "answer", "content")
-                tool_call = _dict_tool_call(obj.get("tool_call") or obj.get("retry_tool") or obj.get("tool"))
+                tool_call = _dict_tool_call(obj.get("tool_call") or obj.get("tool"))
                 if tool_call is None:
                     text_candidate = obj.get("text") or obj.get("content")
                     if isinstance(text_candidate, str):
                         parsed_candidate = parse_function_json_fn(text_candidate)
                         if isinstance(parsed_candidate, dict):
                             tool_call = parsed_candidate
-                if decision == "RETRY" and not repair:
-                    repair = body_text or "Retry the current step."
                 if decision == "ASK_USER" and not question:
                     question = body_text
                 if decision == "FINAL" and not reason:
@@ -197,9 +181,8 @@ def parse_minos_decision(
         parsed = parse_function_json_fn(raw)
         if isinstance(parsed, dict):
             return _decision_payload(
-                decision="RETRY",
-                reason="retry_requested",
-                repair="Retry the current step.",
+                decision="FAIL",
+                reason="validator_returned_tool_call",
                 text=raw,
                 tool_call=parsed,
             )
@@ -235,6 +218,7 @@ async def run_minos_validation(
     platform_preamble: str = "",
     max_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
+    del retry_count, retry_allowed
     normalized_goal = short_text_fn(goal or turn_request_text, limit=240) or str(turn_request_text or "").strip()
     payload = {
         "current_user_message": current_user_text,
@@ -242,8 +226,6 @@ async def run_minos_validation(
         "goal": normalized_goal,
         "agent_state": normalize_agent_state_fn(agent_state, turn_request_text),
         "current_step": current_step if isinstance(current_step, dict) else None,
-        "retry_count": int(max(0, retry_count or 0)),
-        "retry_allowed": bool(retry_allowed),
         "planned_tool": planned_tool,
         "tool_result": tool_result,
         "draft_response": draft_response,
@@ -281,7 +263,7 @@ async def run_minos_validation(
         chat_kwargs: Dict[str, Any] = {
             "messages": with_platform_preamble_fn(
                 [
-                    {"role": "system", "content": minos_system_prompt_fn(platform, retry_allowed)},
+                    {"role": "system", "content": minos_system_prompt_fn(platform, False)},
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
                 ],
                 platform_preamble,

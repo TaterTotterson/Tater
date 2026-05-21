@@ -12,7 +12,6 @@ from verba_kernel import (
 )
 from kernel_tools import (
     read_file,
-    search_web,
     search_files,
     write_file,
     list_directory,
@@ -21,13 +20,12 @@ from kernel_tools import (
     download_file,
     list_archive,
     extract_archive,
-    write_workspace_note,
-    list_workspace,
     image_describe,
     attach_file,
     send_message,
 )
 from verba_result import action_failure, action_success, normalize_verba_result
+from web_research import research_web
 from helpers import redis_client as default_redis
 from hydra_core_extensions import (
     get_hydra_kernel_tools,
@@ -36,6 +34,13 @@ from hydra_core_extensions import (
     hydra_kernel_tool_usage,
     run_hydra_kernel_tool,
 )
+from spudex.hydra_tools import (
+    spudex_has_hydra_tool,
+    spudex_hydra_tool_rows,
+    spudex_tool_purpose_hint,
+    spudex_tool_usage_hint,
+    run_spudex_hydra_tool,
+)
 
 
 META_TOOLS = {
@@ -43,7 +48,7 @@ META_TOOLS = {
     "get_verba_help",
     "rewrite_text",
     "read_file",
-    "search_web",
+    "websearch",
     "search_files",
     "write_file",
     "list_directory",
@@ -52,8 +57,6 @@ META_TOOLS = {
     "download_file",
     "list_archive",
     "extract_archive",
-    "write_workspace_note",
-    "list_workspace",
     "image_describe",
     "attach_file",
     "send_message",
@@ -65,7 +68,8 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
     "get_verba_help": "show verba usage example and guidance",
     "rewrite_text": "rewrite provided text according to natural-language instruction for downstream use",
     "read_file": "read local file contents",
-    "search_web": "retrieve ranked link candidates with snippet metadata only (discovery-only; no full-page fetch and no file retrieval)",
+    "websearch": "search the web, inspect top result pages, and synthesize an answer when enough evidence is found",
+    "search_web": "alias for websearch; searches, inspects pages, and synthesizes an answer",
     "search_files": "search text across local files",
     "write_file": "write content to a local file",
     "list_directory": "list files and folders",
@@ -74,8 +78,6 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
     "download_file": "download a file from a concrete file URL after discovery/inspection (actual file retrieval)",
     "list_archive": "inspect archive entries",
     "extract_archive": "extract archives to a target directory",
-    "write_workspace_note": "append a workspace note",
-    "list_workspace": "list workspace notes",
     "image_describe": "describe an explicit image using an artifact_id, URL, blob, or local path",
     "attach_file": "attach an available artifact/local file and optionally send it to a destination platform/target",
     "send_message": "queue a cross-portal notification/message only when the user explicitly asks to notify or message a destination (never for normal chat replies)",
@@ -87,7 +89,8 @@ _KERNEL_TOOL_USAGE_HINTS = {
     "get_verba_help": '{"function":"get_verba_help","arguments":{"verba_id":"<verba_id>"}}',
     "rewrite_text": '{"function":"rewrite_text","arguments":{"instruction":"rewrite this to be funny","text":"the dog ran over the cow"}}',
     "read_file": '{"function":"read_file","arguments":{"path":"<path>"}}',
-    "search_web": '{"function":"search_web","arguments":{"query":"<query>"}}',
+    "websearch": '{"function":"websearch","arguments":{"query":"<query>","question":"<what to answer>"}}',
+    "search_web": '{"function":"search_web","arguments":{"query":"<query>","question":"<what to answer>"}}',
     "search_files": '{"function":"search_files","arguments":{"query":"<query>","path":"/"}}',
     "write_file": '{"function":"write_file","arguments":{"path":"<path>","content":"<content>"}}',
     "list_directory": '{"function":"list_directory","arguments":{"path":"<path>"}}',
@@ -96,8 +99,6 @@ _KERNEL_TOOL_USAGE_HINTS = {
     "download_file": '{"function":"download_file","arguments":{"url":"https://example.com/file"}}',
     "list_archive": '{"function":"list_archive","arguments":{"path":"<archive_path>"}}',
     "extract_archive": '{"function":"extract_archive","arguments":{"path":"<archive_path>","destination":"<dest_path>"}}',
-    "write_workspace_note": '{"function":"write_workspace_note","arguments":{"content":"<note_text>"}}',
-    "list_workspace": '{"function":"list_workspace","arguments":{}}',
     "image_describe": '{"function":"image_describe","arguments":{"artifact_id":"<artifact_id>","query":"Describe this image."}}',
     "attach_file": '{"function":"attach_file","arguments":{"artifact_id":"<artifact_id>","message":"Attachment"}}',
     "send_message": '{"function":"send_message","arguments":{"message":"<message>"}}',
@@ -116,6 +117,21 @@ def _kernel_tool_rows(*, platform: str) -> list[Dict[str, str]]:
                 "id": token,
                 "description": str(_KERNEL_TOOL_PURPOSE_HINTS.get(token) or "").strip(),
                 "usage": str(_KERNEL_TOOL_USAGE_HINTS.get(token) or "").strip(),
+            }
+        )
+
+    spudex_rows = spudex_hydra_tool_rows(platform=platform, redis_client=default_redis)
+    for row in spudex_rows:
+        if not isinstance(row, dict):
+            continue
+        token = str(row.get("id") or "").strip()
+        if not token:
+            continue
+        rows.append(
+            {
+                "id": token,
+                "description": str(row.get("description") or "").strip(),
+                "usage": str(row.get("usage") or "").strip(),
             }
         )
 
@@ -145,6 +161,13 @@ def _kernel_tool_rows(*, platform: str) -> list[Dict[str, str]]:
     return out
 
 
+def _int_default(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
 def kernel_tool_ids(*, platform: str) -> list[str]:
     return [str(row.get("id") or "").strip() for row in _kernel_tool_rows(platform=platform) if str(row.get("id") or "").strip()]
 
@@ -156,6 +179,9 @@ def kernel_tool_purpose_hint(*, tool_id: str, platform: str) -> str:
     direct = str(_KERNEL_TOOL_PURPOSE_HINTS.get(key) or "").strip()
     if direct:
         return direct
+    spudex_hint = spudex_tool_purpose_hint(key)
+    if spudex_hint:
+        return str(spudex_hint).strip()
     core_hint = hydra_kernel_tool_purpose(
         key,
         platform=platform,
@@ -173,6 +199,9 @@ def kernel_tool_usage_hint(*, tool_id: str, platform: str) -> str:
     direct = str(_KERNEL_TOOL_USAGE_HINTS.get(key) or "").strip()
     if direct:
         return direct
+    spudex_hint = spudex_tool_usage_hint(key)
+    if spudex_hint:
+        return str(spudex_hint).strip()
     core_hint = hydra_kernel_tool_usage(
         key,
         platform=platform,
@@ -213,6 +242,14 @@ def is_meta_tool(name: Optional[str]) -> bool:
     if not token:
         return False
     if token in META_TOOLS:
+        return True
+    if token in {"search_web", "research_web", "web_search", "web_research", "deep_search", "google_search", "google_cse_search"}:
+        return True
+    if spudex_has_hydra_tool(
+        token,
+        platform="",
+        redis_client=default_redis,
+    ):
         return True
     return has_hydra_kernel_tool(
         token,
@@ -496,16 +533,19 @@ async def run_meta_tool(
             start=args.get("start", 0),
             max_chars=args.get("max_chars"),
         )
-    if func == "search_web":
-        return search_web(
-            str(args.get("query") or ""),
-            num_results=int(args.get("num_results") or args.get("max_results") or 5),
-            start=int(args.get("start") or 1),
+    if func in {"websearch", "search_web", "research_web", "web_search", "web_research", "deep_search", "google_search", "google_cse_search"}:
+        return await research_web(
+            query=args.get("query") or args.get("q") or args.get("question"),
+            question=args.get("question") or args.get("goal") or args.get("query"),
+            llm_client=llm_client,
+            max_results=_int_default(args.get("num_results") or args.get("max_results"), 5),
+            max_pages=_int_default(args.get("max_pages") or args.get("page_limit"), 3),
             site=args.get("site") or args.get("domain"),
             safe=str(args.get("safe") or "active"),
             country=args.get("country"),
             language=args.get("language"),
-            timeout_sec=int(args.get("timeout_sec") or 15),
+            platform=platform,
+            origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
         )
     if func == "search_files":
         raw_case = args.get("case_sensitive", False)
@@ -582,10 +622,6 @@ async def run_meta_tool(
             max_files=int(args.get("max_files") or 1000),
         )
 
-    if func == "write_workspace_note":
-        return write_workspace_note(str(args.get("content") or ""))
-    if func == "list_workspace":
-        return list_workspace()
     if func == "image_describe":
         return image_describe(
             request=args.get("request"),
@@ -668,6 +704,17 @@ async def run_meta_tool(
         or (origin or {}).get("scope")
         or ""
     ).strip()
+    spudex_result = await run_spudex_hydra_tool(
+        tool_id=func,
+        args=args,
+        platform=platform,
+        origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
+        llm_client=llm_client,
+        redis_client=default_redis,
+    )
+    if isinstance(spudex_result, dict):
+        return spudex_result
+
     core_result = await run_hydra_kernel_tool(
         tool_id=func,
         args=args,

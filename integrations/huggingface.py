@@ -101,6 +101,7 @@ def huggingface_environment(overrides: Optional[Dict[str, Any]] = None, client: 
         env["HF_TOKEN"] = token
         env["HUGGINGFACE_HUB_TOKEN"] = token
         env["HUGGING_FACE_HUB_TOKEN"] = token
+        env["HUGGINGFACE_TOKEN"] = token
     return env
 
 

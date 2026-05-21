@@ -63,9 +63,13 @@ from tool_runtime import (
 from notify import notifier_destination_catalog
 
 TOOL_NAME_ALIASES = {
-    "web_search": "search_web",
-    "google_search": "search_web",
-    "google_cse_search": "search_web",
+    "search_web": "websearch",
+    "web_search": "websearch",
+    "google_search": "websearch",
+    "google_cse_search": "websearch",
+    "research_web": "websearch",
+    "web_research": "websearch",
+    "deep_search": "websearch",
     "inspect_page": "inspect_webpage",
     "inspect_website": "inspect_webpage",
 }
@@ -75,7 +79,8 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
     "get_verba_help": "show verba usage example and guidance",
     "rewrite_text": "rewrite provided text according to natural-language instruction for downstream use",
     "read_file": "read local file contents",
-    "search_web": "retrieve ranked link candidates with snippet metadata only (discovery-only; no full-page fetch and no file retrieval)",
+    "websearch": "search the web, inspect top result pages, and synthesize an answer when enough evidence is found",
+    "search_web": "alias for websearch; searches, inspects pages, and synthesizes an answer",
     "search_files": "search text across local files",
     "write_file": "write content to a local file",
     "list_directory": "list files and folders",
@@ -84,8 +89,6 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
     "download_file": "download a file from a concrete file URL after discovery/inspection (actual file retrieval)",
     "list_archive": "inspect archive entries",
     "extract_archive": "extract archives to a target directory",
-    "write_workspace_note": "append a workspace note",
-    "list_workspace": "list workspace notes",
     "image_describe": "describe an explicit image using an artifact_id, URL, blob, or local path",
     "attach_file": "attach an available artifact or local file, and optionally send it to a destination platform/target",
     "send_message": "queue a cross-portal notification/message only when the user explicitly asks to notify or message a destination (never for normal chat replies)",
@@ -95,7 +98,8 @@ _KERNEL_TOOL_USAGE_HINTS = {
     "get_verba_help": '{"function":"get_verba_help","arguments":{"verba_id":"<verba_id>"}}',
     "rewrite_text": '{"function":"rewrite_text","arguments":{"instruction":"rewrite this to be funny","text":"the dog ran over the cow"}}',
     "read_file": '{"function":"read_file","arguments":{"path":"<path>"}}',
-    "search_web": '{"function":"search_web","arguments":{"query":"<query>"}}',
+    "websearch": '{"function":"websearch","arguments":{"query":"<query>","question":"<what to answer>"}}',
+    "search_web": '{"function":"search_web","arguments":{"query":"<query>","question":"<what to answer>"}}',
     "search_files": '{"function":"search_files","arguments":{"query":"<query>","path":"/"}}',
     "write_file": '{"function":"write_file","arguments":{"path":"<path>","content":"<content>"}}',
     "list_directory": '{"function":"list_directory","arguments":{"path":"<path>"}}',
@@ -104,8 +108,6 @@ _KERNEL_TOOL_USAGE_HINTS = {
     "download_file": '{"function":"download_file","arguments":{"url":"https://example.com/file"}}',
     "list_archive": '{"function":"list_archive","arguments":{"path":"<archive_path>"}}',
     "extract_archive": '{"function":"extract_archive","arguments":{"path":"<archive_path>","destination":"<dest_path>"}}',
-    "write_workspace_note": '{"function":"write_workspace_note","arguments":{"content":"<note_text>"}}',
-    "list_workspace": '{"function":"list_workspace","arguments":{}}',
     "image_describe": '{"function":"image_describe","arguments":{"artifact_id":"<artifact_id>","query":"Describe this image."}}',
     "attach_file": '{"function":"attach_file","arguments":{"artifact_id":"<artifact_id>","message":"Attachment"}}',
     "send_message": '{"function":"send_message","arguments":{"message":"<message>"}}',
@@ -118,8 +120,8 @@ DEFAULT_MAX_TOOL_CALLS = 0
 DEFAULT_MAX_LEDGER_ITEMS = 1500
 DEFAULT_RESULT_MEMORY_MAX_SETS = 6
 DEFAULT_RESULT_MEMORY_MAX_ITEMS = 8
-DEFAULT_STEP_RETRY_LIMIT = 1
 DEFAULT_ASTRAEUS_PLAN_REVIEW_ENABLED = False
+DEFAULT_AUTO_CONTINUE_INCOMPLETE_FINAL_ENABLED = True
 HYDRA_LLM_HOST_KEY = "tater:hydra:llm_host"
 HYDRA_LLM_PORT_KEY = "tater:hydra:llm_port"
 HYDRA_LLM_MODEL_KEY = "tater:hydra:llm_model"
@@ -142,15 +144,14 @@ HYDRA_BEAST_CONFIG_ROLE_IDS = (
 )
 HYDRA_ROLE_LLM_KEY_PREFIX = "tater:hydra:llm:"
 HYDRA_MAX_LEDGER_ITEMS_KEY = "tater:hydra:max_ledger_items"
-HYDRA_STEP_RETRY_LIMIT_KEY = "tater:hydra:step_retry_limit"
 HYDRA_ASTRAEUS_PLAN_REVIEW_ENABLED_KEY = "tater:hydra:astraeus_plan_review_enabled"
+HYDRA_AUTO_CONTINUE_INCOMPLETE_FINAL_ENABLED_KEY = "tater:hydra:auto_continue_incomplete_final_enabled"
 HYDRA_RESULT_MEMORY_MAX_SETS_KEY = "tater:hydra:result_memory_max_sets"
 HYDRA_RESULT_MEMORY_MAX_ITEMS_KEY = "tater:hydra:result_memory_max_items"
 AGENT_STATE_PROMPT_MAX_CHARS = 800
 AGENT_STATE_LEDGER_MAX_CHARS = 900
 RESULT_MEMORY_MAX_SETS = DEFAULT_RESULT_MEMORY_MAX_SETS
 RESULT_MEMORY_MAX_ITEMS = DEFAULT_RESULT_MEMORY_MAX_ITEMS
-STEP_RETRY_LIMIT = DEFAULT_STEP_RETRY_LIMIT
 ASTRAEUS_PLAN_REVIEW_ENABLED = DEFAULT_ASTRAEUS_PLAN_REVIEW_ENABLED
 HYDRA_LEDGER_SCHEMA_VERSION = "2"
 
@@ -943,18 +944,6 @@ def _configured_chat_history_max_items(redis_client: Any = None) -> int:
     return max(0, min(200, int(value)))
 
 
-def _configured_step_retry_limit(redis_client: Any = None) -> int:
-    global STEP_RETRY_LIMIT
-    value = runtime_config.configured_positive_int(
-        redis_client=(redis_client or default_redis),
-        key=HYDRA_STEP_RETRY_LIMIT_KEY,
-        default=DEFAULT_STEP_RETRY_LIMIT,
-        redis_config_positive_int_fn=_redis_config_positive_int,
-    )
-    STEP_RETRY_LIMIT = max(1, min(10, int(value)))
-    return STEP_RETRY_LIMIT
-
-
 def _configured_astraeus_plan_review_enabled(redis_client: Any = None) -> bool:
     global ASTRAEUS_PLAN_REVIEW_ENABLED
     ASTRAEUS_PLAN_REVIEW_ENABLED = _redis_config_bool(
@@ -963,6 +952,14 @@ def _configured_astraeus_plan_review_enabled(redis_client: Any = None) -> bool:
         redis_client=(redis_client or default_redis),
     )
     return bool(ASTRAEUS_PLAN_REVIEW_ENABLED)
+
+
+def _configured_auto_continue_incomplete_final_enabled(redis_client: Any = None) -> bool:
+    return _redis_config_bool(
+        HYDRA_AUTO_CONTINUE_INCOMPLETE_FINAL_ENABLED_KEY,
+        DEFAULT_AUTO_CONTINUE_INCOMPLETE_FINAL_ENABLED,
+        redis_client=(redis_client or default_redis),
+    )
 
 
 def _normalize_token_limit(
@@ -3346,15 +3343,124 @@ def _agent_state_has_remaining_actions(state: Optional[Dict[str, Any]]) -> bool:
     return bool(_state_next_step(state.get("next_step")))
 
 
-def _should_continue_after_incomplete_final_answer(
+_INCOMPLETE_FINAL_ACTION_RE = re.compile(
+    r"\b("
+    r"i(?:'|\u2019)ll|"
+    r"i will|"
+    r"i am going to|"
+    r"i(?:'|\u2019)m going to|"
+    r"let me|"
+    r"first,?\s+i(?:'|\u2019)ll|"
+    r"next,?\s+i(?:'|\u2019)ll|"
+    r"now,?\s+i(?:'|\u2019)ll|"
+    r"i can do that"
+    r")\b",
+    flags=re.IGNORECASE,
+)
+_INCOMPLETE_FINAL_WORK_VERB_RE = re.compile(
+    r"\b(create|write|run|start|host|check|search|look|inspect|install|update|build|fix|"
+    r"download|open|fetch|read|list|make|save|deploy|generate)\b",
+    flags=re.IGNORECASE,
+)
+_COMPLETE_FINAL_SIGNAL_RE = re.compile(
+    r"\b(done|finished|completed|created|saved|updated|started|hosted|running at|"
+    r"available at|here is|here are|i found|i created|i saved|i updated|i started|"
+    r"i(?:'|\u2019)ve created|i(?:'|\u2019)ve saved|i(?:'|\u2019)ve updated)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _incomplete_final_answer_heuristic(
     *,
+    final_text: str,
+    agent_state: Optional[Dict[str, Any]],
+    continue_allowed: bool,
+) -> bool:
+    if not continue_allowed:
+        return False
+    text = _coerce_text(final_text).strip()
+    tail = text[-700:] if text else ""
+    if tail and tail.rstrip().endswith("?"):
+        return False
+    if tail and _COMPLETE_FINAL_SIGNAL_RE.search(tail):
+        return False
+    if _agent_state_has_remaining_actions(agent_state):
+        return True
+    if not tail:
+        return False
+    return bool(_INCOMPLETE_FINAL_ACTION_RE.search(tail) and _INCOMPLETE_FINAL_WORK_VERB_RE.search(tail))
+
+
+async def _should_continue_after_incomplete_final_answer(
+    *,
+    llm_client: Any,
+    platform: str,
     user_text: str,
     final_text: str,
     agent_state: Optional[Dict[str, Any]],
-    retry_allowed: bool,
+    continue_allowed: bool,
+    enabled: bool,
 ) -> bool:
-    del user_text, final_text
-    return bool(retry_allowed and _agent_state_has_remaining_actions(agent_state))
+    if not enabled or not continue_allowed:
+        return False
+
+    heuristic = _incomplete_final_answer_heuristic(
+        final_text=final_text,
+        agent_state=agent_state,
+        continue_allowed=continue_allowed,
+    )
+    if not heuristic:
+        return False
+
+    state_payload = {}
+    if isinstance(agent_state, dict):
+        state_payload = {
+            "has_remaining_actions": _agent_state_has_remaining_actions(agent_state),
+            "next_step": _state_next_step(agent_state.get("next_step")),
+            "plan": _state_list(agent_state.get("plan"), max_items=5, item_limit=140),
+        }
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Classify whether Tater should continue internally after an assistant reply.\n"
+                "Return strict JSON only with this exact shape: {\"auto_continue\": true} or {\"auto_continue\": false}.\n\n"
+                "Mark true only when the assistant reply clearly stopped before doing work it promised to do next, "
+                "or when the agent state still has concrete remaining actions and the reply is not a real final answer.\n"
+                "Mark false when the reply asks the user a direct question, invites a spoken/chat response, reports completed work, "
+                "gives a final answer, says it cannot proceed, or needs user input.\n"
+                "For voice-like platforms, user follow-up questions must stay false so the mic/reply flow can reopen first."
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                {
+                    "platform": platform,
+                    "user_request": _short_text(user_text, limit=900),
+                    "assistant_reply": _short_text(final_text, limit=1200),
+                    "agent_state": state_payload,
+                    "heuristic_guess": bool(heuristic),
+                },
+                ensure_ascii=False,
+            ),
+        },
+    ]
+    try:
+        resp = await llm_client.chat(
+            messages=messages,
+            temperature=0,
+            max_tokens=40,
+        )
+        content = _coerce_text(((resp or {}).get("message") or {}).get("content", ""))
+        parsed = _first_json_object(content)
+        if isinstance(parsed, dict) and isinstance(parsed.get("auto_continue"), bool):
+            return bool(parsed.get("auto_continue"))
+    except Exception:
+        pass
+
+    return heuristic
 
 
 def _tool_failure_minos_reason(tool_result: Optional[Dict[str, Any]]) -> str:
@@ -4560,8 +4666,8 @@ async def _run_hydra_turn_impl(
     result_memory_max_sets = _configured_result_memory_max_sets(r)
     result_memory_max_items = _configured_result_memory_max_items(r)
     chat_history_max_items = _configured_chat_history_max_items(r)
-    step_retry_limit = _configured_step_retry_limit(r)
     astraeus_plan_review_enabled = _configured_astraeus_plan_review_enabled(r)
+    auto_continue_incomplete_final_enabled = _configured_auto_continue_incomplete_final_enabled(r)
     turn_started_at = time.perf_counter()
     astraeus_ms_total = 0.0
     tool_ms_total = 0.0
@@ -4596,8 +4702,7 @@ async def _run_hydra_turn_impl(
     rounds_used = 0
     tool_calls_used = 0
     critic_continue_count = 0
-    step_retry_counts: Dict[str, int] = {}
-    step_retry_hints: Dict[str, str] = {}
+    auto_continue_incomplete_count = 0
     step_failed_source_urls: Dict[str, set[str]] = {}
     step_failed_source_pages: Dict[str, set[str]] = {}
     turn_failed_source_urls: set[str] = set()
@@ -4655,7 +4760,6 @@ async def _run_hydra_turn_impl(
         memory_context_payload=memory_context_payload,
     )
     queued_retry_tool_for_ledger: Optional[Dict[str, Any]] = None
-    repair_returned_no_tool_retries = 0
     structured_plan_queue: List[Dict[str, str]] = []
     structured_plan_total_steps = 0
     astraeus_mode = "unknown"
@@ -4753,25 +4857,13 @@ async def _run_hydra_turn_impl(
             scope=scope,
             state=agent_state,
         )
-    def _retry_allowed_within_limits() -> bool:
+    def _continue_allowed_within_limits() -> bool:
         rounds_left = effective_max_rounds == 0 or rounds_used < effective_max_rounds
         tools_left = effective_max_tool_calls == 0 or tool_calls_used < effective_max_tool_calls
         return rounds_left and tools_left
 
-    def _step_retry_allowed(step_id: str, retry_count: int) -> bool:
-        del step_id
-        return int(max(0, retry_count or 0)) < int(max(1, step_retry_limit))
-
-    def _retry_allowed_for_step(step_id: str, retry_count: int) -> bool:
-        return _retry_allowed_within_limits() and _step_retry_allowed(step_id, retry_count)
-
-    def _remember_step_retry_hint(step_id: str, decision: Optional[Dict[str, Any]]) -> None:
-        hint_text = _short_text(
-            _checker_decision_text(decision, "repair", "next_action", "reason"),
-            limit=220,
-        )
-        if hint_text:
-            step_retry_hints[step_id] = hint_text
+    def _auto_continue_incomplete_allowed() -> bool:
+        return _continue_allowed_within_limits() and auto_continue_incomplete_count < 2
 
     def _remember_failed_source_for_step(step_id: str, candidate: Any) -> str:
         normalized = _canonical_web_source_url(candidate)
@@ -4811,17 +4903,40 @@ async def _run_hydra_turn_impl(
             return candidate
         return ""
 
-    def _clear_step_retry_state(step_id: str) -> None:
-        step_retry_counts.pop(step_id, None)
-        step_retry_hints.pop(step_id, None)
+    def _clear_step_failure_state(step_id: str) -> None:
         step_failed_source_urls.pop(step_id, None)
         step_failed_source_pages.pop(step_id, None)
 
-    def _retry_limit_message(decision: Optional[Dict[str, Any]]) -> str:
-        return (
-            _checker_decision_text(decision, "question", "repair", "reason")
-            or "I could not complete that step after retry attempts. Please clarify or rephrase the step."
-        )
+    def _failed_step_message(
+        decision: Optional[Dict[str, Any]],
+        draft_response_text: str = "",
+        tool_result_payload: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        if isinstance(tool_result_payload, dict):
+            for key in ("summary_for_user", "summary", "message", "text", "error"):
+                candidate = _short_text(tool_result_payload.get(key), limit=700)
+                if candidate:
+                    return candidate
+            data = tool_result_payload.get("data")
+            if isinstance(data, dict):
+                error = data.get("error")
+                if isinstance(error, dict):
+                    candidate = _short_text(
+                        error.get("message") or error.get("detail") or error.get("code"),
+                        limit=700,
+                    )
+                    if candidate:
+                        return candidate
+                candidate = _short_text(data.get("message") or data.get("detail"), limit=700)
+                if candidate:
+                    return candidate
+        candidate = _checker_decision_text(decision, "text", "reason", "question", "next_action", "repair")
+        if candidate and candidate != DEFAULT_CLARIFICATION:
+            return candidate
+        candidate = _short_text(draft_response_text, limit=700)
+        if candidate:
+            return candidate
+        return "I could not complete that step. The tool or validation result did not provide enough detail to continue."
 
     async def _compose_final_answer_text(
         *,
@@ -5004,8 +5119,6 @@ async def _run_hydra_turn_impl(
             if isinstance(current_plan_step, dict)
             else ""
         ) or "ad_hoc"
-        current_step_retry_count = max(0, int(step_retry_counts.get(current_step_id, 0)))
-        current_step_retry_hint = str(step_retry_hints.get(current_step_id) or "").strip()
 
         state_message = _agent_state_prompt_message(
             agent_state,
@@ -5048,7 +5161,7 @@ async def _run_hydra_turn_impl(
                         intent=str(current_plan_step.get("intent") or ""),
                         nl=str(current_plan_step.get("nl") or ""),
                         goal=astraeus_goal or turn_request_text or current_user_turn_text,
-                        repair_hint=current_step_retry_hint,
+                        repair_hint="",
                         tool_hint=str(current_plan_step.get("tool_hint") or ""),
                         blocked_sources=current_failed_sources,
                     ),
@@ -5099,8 +5212,8 @@ async def _run_hydra_turn_impl(
                 planned_tool=None,
                 tool_result=tool_result_for_checker,
                 draft_response=draft_response,
-                retry_count=current_step_retry_count,
-                retry_allowed=_retry_allowed_for_step(current_step_id, current_step_retry_count),
+                retry_count=0,
+                retry_allowed=False,
                 platform_preamble=tool_platform_preamble,
                 max_tokens=None,
             )
@@ -5118,54 +5231,40 @@ async def _run_hydra_turn_impl(
                 )
 
             if checker_action == "RETRY":
-                if not _retry_allowed_for_step(current_step_id, current_step_retry_count):
-                    checker_reason = "step_retry_limit_reached"
-                    return _finish(
-                        text=_retry_limit_message(checker_decision),
-                        status="blocked",
-                        checker_action_value="NEED_USER_INFO",
-                        checker_reason_value=checker_reason,
-                    )
-                step_retry_counts[current_step_id] = current_step_retry_count + 1
-                _remember_step_retry_hint(current_step_id, checker_decision)
-                checker_reason = _checker_decision_text(checker_decision, "reason", "repair") or "retry_current_step"
-                critic_continue_count += 1
-                continue
+                checker_reason = "retry_removed"
+                return _finish(
+                    text=_failed_step_message(checker_decision, draft_response, tool_result_for_checker),
+                    status="blocked",
+                    checker_action_value="FAIL",
+                    checker_reason_value=checker_reason,
+                )
 
             if checker_action == "CONTINUE":
-                if structured_plan_queue:
-                    if not _retry_allowed_for_step(current_step_id, current_step_retry_count):
-                        checker_reason = "step_retry_limit_reached"
-                        return _finish(
-                            text=_retry_limit_message(checker_decision),
-                            status="blocked",
-                            checker_action_value="NEED_USER_INFO",
-                            checker_reason_value=checker_reason,
-                        )
-                    step_retry_counts[current_step_id] = current_step_retry_count + 1
-                    _remember_step_retry_hint(current_step_id, checker_decision)
-                    checker_reason = _checker_decision_text(checker_decision, "reason", "repair") or "retry_current_step"
+                if await _should_continue_after_incomplete_final_answer(
+                    llm_client=llm_client_minos,
+                    platform=platform,
+                    user_text=turn_request_text or user_text,
+                    final_text=draft_response,
+                    agent_state=agent_state,
+                    continue_allowed=_auto_continue_incomplete_allowed(),
+                    enabled=auto_continue_incomplete_final_enabled,
+                ):
+                    auto_continue_incomplete_count += 1
+                    checker_reason = "continue_after_incomplete_final_answer"
                     critic_continue_count += 1
                     continue
-                if not _retry_allowed_for_step(current_step_id, current_step_retry_count):
-                    checker_reason = "step_retry_limit_reached"
-                    return _finish(
-                        text=_retry_limit_message(checker_decision),
-                        status="blocked",
-                        checker_action_value="NEED_USER_INFO",
-                        checker_reason_value=checker_reason,
-                    )
-                step_retry_counts[current_step_id] = current_step_retry_count + 1
-                _remember_step_retry_hint(current_step_id, checker_decision)
-                checker_reason = _checker_decision_text(checker_decision, "reason", "next_action") or "continue"
-                critic_continue_count += 1
-                continue
+                checker_reason = "step_not_executed"
+                return _finish(
+                    text=_failed_step_message(checker_decision, draft_response, tool_result_for_checker),
+                    status="blocked",
+                    checker_action_value="FAIL",
+                    checker_reason_value=checker_reason,
+                )
 
             if checker_action == "FAIL":
-                fail_text = _checker_decision_text(checker_decision, "reason", "text") or DEFAULT_CLARIFICATION
                 checker_reason = "minos_fail"
                 return _finish(
-                    text=fail_text,
+                    text=_failed_step_message(checker_decision, draft_response, tool_result_for_checker),
                     status="blocked",
                     checker_action_value="FAIL",
                     checker_reason_value=checker_reason,
@@ -5178,27 +5277,36 @@ async def _run_hydra_turn_impl(
                 tool_result_payload=tool_result_for_checker,
             )
             if structured_plan_queue:
-                if not _retry_allowed_for_step(current_step_id, current_step_retry_count):
-                    checker_reason = "step_retry_limit_reached"
-                    return _finish(
-                        text=_retry_limit_message(checker_decision),
-                        status="blocked",
-                        checker_action_value="NEED_USER_INFO",
-                        checker_reason_value=checker_reason,
-                    )
-                step_retry_counts[current_step_id] = current_step_retry_count + 1
-                _remember_step_retry_hint(current_step_id, checker_decision)
-                checker_reason = "continue_plan_step"
-                critic_continue_count += 1
-                continue
-            if _should_continue_after_incomplete_final_answer(
+                if await _should_continue_after_incomplete_final_answer(
+                    llm_client=llm_client_minos,
+                    platform=platform,
+                    user_text=turn_request_text or user_text,
+                    final_text=final_text_candidate,
+                    agent_state=agent_state,
+                    continue_allowed=_auto_continue_incomplete_allowed(),
+                    enabled=auto_continue_incomplete_final_enabled,
+                ):
+                    auto_continue_incomplete_count += 1
+                    checker_reason = "continue_after_incomplete_final_answer"
+                    critic_continue_count += 1
+                    continue
+                checker_reason = "step_not_executed"
+                return _finish(
+                    text=final_text_candidate or _failed_step_message(checker_decision, draft_response, tool_result_for_checker),
+                    status="blocked",
+                    checker_action_value="FAIL",
+                    checker_reason_value=checker_reason,
+                )
+            if await _should_continue_after_incomplete_final_answer(
+                llm_client=llm_client_minos,
+                platform=platform,
                 user_text=turn_request_text or user_text,
                 final_text=final_text_candidate,
                 agent_state=agent_state,
-                retry_allowed=_retry_allowed_for_step(current_step_id, current_step_retry_count),
+                continue_allowed=_auto_continue_incomplete_allowed(),
+                enabled=auto_continue_incomplete_final_enabled,
             ):
-                step_retry_counts[current_step_id] = current_step_retry_count + 1
-                _remember_step_retry_hint(current_step_id, checker_decision)
+                auto_continue_incomplete_count += 1
                 checker_reason = "continue_after_incomplete_final_answer"
                 critic_continue_count += 1
                 continue
@@ -5258,16 +5366,6 @@ async def _run_hydra_turn_impl(
                     validation_status_override=validation_status,
                     attempted_tool_override=str(tool_eval.get("attempted_tool") or ""),
                 )
-            if (
-                reason == "repair_returned_no_tool"
-                and _retry_allowed_within_limits()
-                and repair_returned_no_tool_retries < 2
-            ):
-                repair_returned_no_tool_retries += 1
-                checker_reason = "continue_after_repair_returned_no_tool"
-                critic_continue_count += 1
-                continue
-
             validation_failures_count += 1
             planner_kind = round_thanatos_kind
             checker_reason = f"validation_failed:{reason}"
@@ -5317,28 +5415,17 @@ async def _run_hydra_turn_impl(
         )
         blocked_source = _tool_call_matches_failed_source(current_step_id, planned_tool)
         if blocked_source:
-            if not _retry_allowed_for_step(current_step_id, current_step_retry_count):
-                checker_reason = "blocked_failed_source_repeat"
-                return _finish(
-                    text=(
-                        f"I already tried that source and it failed: {blocked_source}. "
-                        "Do you want me to try a different link or stop?"
-                    ),
-                    status="blocked",
-                    checker_action_value="NEED_USER_INFO",
-                    checker_reason_value=checker_reason,
-                    retry_tool=queued_retry_tool_for_ledger,
-                )
-            step_retry_counts[current_step_id] = current_step_retry_count + 1
-            blocked_sources = _failed_sources_for_step(current_step_id, limit=4)
-            if blocked_sources:
-                step_retry_hints[current_step_id] = (
-                    "Use a different source URL than the failed ones: "
-                    + " | ".join(blocked_sources)
-                )
             checker_reason = "blocked_failed_source_repeat"
-            critic_continue_count += 1
-            continue
+            return _finish(
+                text=(
+                    f"I already tried that source and it failed: {blocked_source}. "
+                    "Do you want me to try a different link or stop?"
+                ),
+                status="blocked",
+                checker_action_value="NEED_USER_INFO",
+                checker_reason_value=checker_reason,
+                retry_tool=queued_retry_tool_for_ledger,
+            )
         tool_used = True
         tool_user_text = round_request_text
         _set_active_chat_job_current_tool(
@@ -5394,17 +5481,10 @@ async def _run_hydra_turn_impl(
         if isinstance(tool_result_for_checker, dict) and not bool(tool_result_for_checker.get("ok")):
             tool_failures_count += 1
             failed_source = _tool_call_primary_web_url(planned_tool)
-            remembered_failed_source = _remember_failed_source_for_step(current_step_id, failed_source)
-            if remembered_failed_source:
-                blocked_sources = _failed_sources_for_step(current_step_id, limit=4)
-                if blocked_sources:
-                    step_retry_hints[current_step_id] = (
-                        "Do not reuse failed source URLs for this step. Try a different source: "
-                        + " | ".join(blocked_sources)
-                    )
+            _remember_failed_source_for_step(current_step_id, failed_source)
         draft_response = str((tool_result_for_checker or {}).get("summary_for_user") or "").strip()
         if isinstance(tool_result_for_checker, dict) and bool(tool_result_for_checker.get("ok")):
-            _clear_step_retry_state(current_step_id)
+            _clear_step_failure_state(current_step_id)
             completed_tool_steps.append(
                 {
                     "request": str(tool_user_text or round_request_text or "").strip(),
@@ -5499,8 +5579,8 @@ async def _run_hydra_turn_impl(
             planned_tool=planned_tool,
             tool_result=tool_result_for_checker,
             draft_response=turn_draft_response,
-            retry_count=current_step_retry_count,
-            retry_allowed=_retry_allowed_for_step(current_step_id, current_step_retry_count),
+            retry_count=0,
+            retry_allowed=False,
             platform_preamble=tool_platform_preamble,
             max_tokens=None,
         )
@@ -5512,7 +5592,7 @@ async def _run_hydra_turn_impl(
                 checker_action = "FINAL"
             elif isinstance(tool_result_for_checker, dict) and bool(tool_result_for_checker.get("ok")):
                 structured_plan_queue = structured_plan_queue[1:]
-                _clear_step_retry_state(current_step_id)
+                _clear_step_failure_state(current_step_id)
                 agent_state = _sync_agent_state_with_plan_queue(
                     agent_state=agent_state,
                     plan_queue=structured_plan_queue,
@@ -5542,18 +5622,12 @@ async def _run_hydra_turn_impl(
                 checker_reason = _checker_decision_text(checker_decision, "reason", "next_action") or "continue_plan_step"
                 critic_continue_count += 1
                 continue
-            elif _retry_allowed_for_step(current_step_id, current_step_retry_count):
-                step_retry_counts[current_step_id] = current_step_retry_count + 1
-                _remember_step_retry_hint(current_step_id, checker_decision)
-                checker_reason = _checker_decision_text(checker_decision, "reason", "repair") or "retry_current_step"
-                critic_continue_count += 1
-                continue
             else:
-                checker_reason = "step_retry_limit_reached"
+                checker_reason = _tool_failure_checker_reason(tool_result_for_checker) or "step_failed"
                 return _finish(
-                    text=_retry_limit_message(checker_decision),
+                    text=_failed_step_message(checker_decision, turn_draft_response, tool_result_for_checker),
                     status="blocked",
-                    checker_action_value="NEED_USER_INFO",
+                    checker_action_value="FAIL",
                     checker_reason_value=checker_reason,
                     retry_tool=queued_retry_tool_for_ledger,
                 )
@@ -5570,26 +5644,19 @@ async def _run_hydra_turn_impl(
             )
 
         if checker_action == "RETRY":
-            if not _retry_allowed_for_step(current_step_id, current_step_retry_count):
-                checker_reason = "step_retry_limit_reached"
-                return _finish(
-                    text=_retry_limit_message(checker_decision),
-                    status="blocked",
-                    checker_action_value="NEED_USER_INFO",
-                    checker_reason_value=checker_reason,
-                    retry_tool=queued_retry_tool_for_ledger,
-                )
-            step_retry_counts[current_step_id] = current_step_retry_count + 1
-            _remember_step_retry_hint(current_step_id, checker_decision)
-            checker_reason = _checker_decision_text(checker_decision, "reason", "repair") or "retry_current_step"
-            critic_continue_count += 1
-            continue
+            checker_reason = "retry_removed"
+            return _finish(
+                text=_failed_step_message(checker_decision, turn_draft_response, tool_result_for_checker),
+                status="blocked",
+                checker_action_value="FAIL",
+                checker_reason_value=checker_reason,
+                retry_tool=queued_retry_tool_for_ledger,
+            )
 
         if checker_action == "FAIL":
-            fail_text = _checker_decision_text(checker_decision, "reason", "text") or DEFAULT_CLARIFICATION
             checker_reason = "minos_fail"
             return _finish(
-                text=fail_text,
+                text=_failed_step_message(checker_decision, turn_draft_response, tool_result_for_checker),
                 status="blocked",
                 checker_action_value="FAIL",
                 checker_reason_value=checker_reason,
@@ -5601,10 +5668,9 @@ async def _run_hydra_turn_impl(
             and structured_plan_queue
             and isinstance(tool_result_for_checker, dict)
             and bool(tool_result_for_checker.get("ok"))
-            and _retry_allowed_for_step(current_step_id, current_step_retry_count)
         ):
             structured_plan_queue = structured_plan_queue[1:]
-            _clear_step_retry_state(current_step_id)
+            _clear_step_failure_state(current_step_id)
             agent_state = _sync_agent_state_with_plan_queue(
                 agent_state=agent_state,
                 plan_queue=structured_plan_queue,
@@ -5641,14 +5707,16 @@ async def _run_hydra_turn_impl(
             user_request_text=turn_request_text or user_text,
             tool_result_payload=tool_result_for_checker,
         )
-        if _should_continue_after_incomplete_final_answer(
+        if await _should_continue_after_incomplete_final_answer(
+            llm_client=llm_client_minos,
+            platform=platform,
             user_text=turn_request_text or user_text,
             final_text=final_text_candidate,
             agent_state=agent_state,
-            retry_allowed=_retry_allowed_for_step(current_step_id, current_step_retry_count),
+            continue_allowed=_auto_continue_incomplete_allowed(),
+            enabled=auto_continue_incomplete_final_enabled,
         ):
-            step_retry_counts[current_step_id] = current_step_retry_count + 1
-            _remember_step_retry_hint(current_step_id, checker_decision)
+            auto_continue_incomplete_count += 1
             checker_reason = "continue_after_incomplete_final_answer"
             critic_continue_count += 1
             continue
@@ -5681,12 +5749,6 @@ async def _run_hydra_turn_impl(
         tool_result=tool_result_for_checker,
     )
     fallback_step = structured_plan_queue[0] if structured_plan_queue else None
-    fallback_step_id = (
-        _short_text((fallback_step or {}).get("id"), limit=24)
-        if isinstance(fallback_step, dict)
-        else ""
-    ) or "ad_hoc"
-    fallback_step_retry_count = max(0, int(step_retry_counts.get(fallback_step_id, 0)))
     checker_started = time.perf_counter()
     checker_decision = await _run_minos_validation(
         llm_client=llm_client_minos,
@@ -5701,8 +5763,8 @@ async def _run_hydra_turn_impl(
         planned_tool=planned_tool,
         tool_result=tool_result_for_checker,
         draft_response=best_effort,
-        retry_count=fallback_step_retry_count,
-        retry_allowed=_retry_allowed_for_step(fallback_step_id, fallback_step_retry_count),
+        retry_count=0,
+        retry_allowed=False,
         platform_preamble=tool_platform_preamble,
         max_tokens=None,
     )
@@ -5729,18 +5791,17 @@ async def _run_hydra_turn_impl(
             tool_result_payload=tool_result_for_checker,
         )
         return _finish(
-            text=final_text_candidate or best_effort or "Completed.",
-            status="done",
-            checker_action_value="FINAL_ANSWER",
+            text=final_text_candidate or _failed_step_message(checker_decision, best_effort, tool_result_for_checker),
+            status="blocked",
+            checker_action_value="FAIL",
             checker_reason_value=checker_reason,
             retry_tool=queued_retry_tool_for_ledger,
         )
 
     if checker_action == "FAIL":
-        fail_text = _checker_decision_text(checker_decision, "reason", "text") or DEFAULT_CLARIFICATION
         checker_reason = "minos_fail"
         return _finish(
-            text=fail_text,
+            text=_failed_step_message(checker_decision, best_effort, tool_result_for_checker),
             status="blocked",
             checker_action_value="FAIL",
             checker_reason_value=checker_reason,

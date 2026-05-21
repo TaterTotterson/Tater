@@ -96,8 +96,8 @@ def enabled_tool_mini_index(
         plugin_rows.append("- (none)")
 
     return (
-        "Kernel tools:\n"
-        + "\n".join(kernel_rows)
-        + "\nEnabled verba tools on this platform:\n"
+        "Enabled verba tools on this platform (use one when it can do the task):\n"
         + "\n".join(plugin_rows)
+        + "\nKernel tools (built-ins; terminal console tools provide full terminal console access to run commands when no Verba can do the task):\n"
+        + "\n".join(kernel_rows)
     )
