@@ -15384,7 +15384,7 @@ async function loadSettingsView() {
                     settings.hydra_auto_continue_incomplete_final_enabled ? "checked" : ""
                   } />`
                 )}
-                <div class="small">Lets Hydra keep working when a reply says it will do the next step but stops early. Follow-up questions still wait for the user.</div>
+                <div class="small">Checks final Chat and Hermes replies for "I'll do that now" style stops, then sends an internal continue turn. Follow-up questions still wait for the user.</div>
               </label>
               <div class="inline-row" style="grid-column: 1 / -1;">
                 <button type="button" id="settings-hydra-defaults" class="inline-btn">Set Default Values</button>

@@ -3334,15 +3334,6 @@ def _state_best_effort_answer(
     )
 
 
-def _agent_state_has_remaining_actions(state: Optional[Dict[str, Any]]) -> bool:
-    if not isinstance(state, dict):
-        return False
-    plan_items = _state_list(state.get("plan"), max_items=8, item_limit=140)
-    if any(str(item or "").strip() for item in plan_items):
-        return True
-    return bool(_state_next_step(state.get("next_step")))
-
-
 _INCOMPLETE_FINAL_ACTION_RE = re.compile(
     r"\b("
     r"i(?:'|\u2019)ll|"
@@ -3373,7 +3364,6 @@ _COMPLETE_FINAL_SIGNAL_RE = re.compile(
 def _incomplete_final_answer_heuristic(
     *,
     final_text: str,
-    agent_state: Optional[Dict[str, Any]],
     continue_allowed: bool,
 ) -> bool:
     if not continue_allowed:
@@ -3384,20 +3374,18 @@ def _incomplete_final_answer_heuristic(
         return False
     if tail and _COMPLETE_FINAL_SIGNAL_RE.search(tail):
         return False
-    if _agent_state_has_remaining_actions(agent_state):
-        return True
     if not tail:
         return False
     return bool(_INCOMPLETE_FINAL_ACTION_RE.search(tail) and _INCOMPLETE_FINAL_WORK_VERB_RE.search(tail))
 
 
-async def _should_continue_after_incomplete_final_answer(
+async def _should_auto_continue_head_response(
     *,
     llm_client: Any,
     platform: str,
+    head: str,
     user_text: str,
     final_text: str,
-    agent_state: Optional[Dict[str, Any]],
     continue_allowed: bool,
     enabled: bool,
 ) -> bool:
@@ -3406,31 +3394,22 @@ async def _should_continue_after_incomplete_final_answer(
 
     heuristic = _incomplete_final_answer_heuristic(
         final_text=final_text,
-        agent_state=agent_state,
         continue_allowed=continue_allowed,
     )
     if not heuristic:
         return False
 
-    state_payload = {}
-    if isinstance(agent_state, dict):
-        state_payload = {
-            "has_remaining_actions": _agent_state_has_remaining_actions(agent_state),
-            "next_step": _state_next_step(agent_state.get("next_step")),
-            "plan": _state_list(agent_state.get("plan"), max_items=5, item_limit=140),
-        }
-
     messages = [
         {
             "role": "system",
             "content": (
-                "Classify whether Tater should continue internally after an assistant reply.\n"
+                "Classify whether Tater should continue internally after a final response head.\n"
                 "Return strict JSON only with this exact shape: {\"auto_continue\": true} or {\"auto_continue\": false}.\n\n"
-                "Mark true only when the assistant reply clearly stopped before doing work it promised to do next, "
-                "or when the agent state still has concrete remaining actions and the reply is not a real final answer.\n"
+                "Mark true only when the assistant reply clearly stopped before doing work it promised to do next.\n"
                 "Mark false when the reply asks the user a direct question, invites a spoken/chat response, reports completed work, "
                 "gives a final answer, says it cannot proceed, or needs user input.\n"
-                "For voice-like platforms, user follow-up questions must stay false so the mic/reply flow can reopen first."
+                "For voice-like platforms, user follow-up questions must stay false so the mic/reply flow can reopen first.\n"
+                "This check is only for final text produced by the Chat head or Hermes head."
             ),
         },
         {
@@ -3438,9 +3417,9 @@ async def _should_continue_after_incomplete_final_answer(
             "content": json.dumps(
                 {
                     "platform": platform,
+                    "head": str(head or "").strip().lower(),
                     "user_request": _short_text(user_text, limit=900),
                     "assistant_reply": _short_text(final_text, limit=1200),
-                    "agent_state": state_payload,
                     "heuristic_guess": bool(heuristic),
                 },
                 ensure_ascii=False,
@@ -4702,7 +4681,8 @@ async def _run_hydra_turn_impl(
     rounds_used = 0
     tool_calls_used = 0
     critic_continue_count = 0
-    auto_continue_incomplete_count = 0
+    auto_continue_requested = False
+    auto_continue_head = ""
     step_failed_source_urls: Dict[str, set[str]] = {}
     step_failed_source_pages: Dict[str, set[str]] = {}
     turn_failed_source_urls: set[str] = set()
@@ -4862,9 +4842,6 @@ async def _run_hydra_turn_impl(
         tools_left = effective_max_tool_calls == 0 or tool_calls_used < effective_max_tool_calls
         return rounds_left and tools_left
 
-    def _auto_continue_incomplete_allowed() -> bool:
-        return _continue_allowed_within_limits() and auto_continue_incomplete_count < 2
-
     def _remember_failed_source_for_step(step_id: str, candidate: Any) -> str:
         normalized = _canonical_web_source_url(candidate)
         if not normalized:
@@ -4938,6 +4915,30 @@ async def _run_hydra_turn_impl(
             return candidate
         return "I could not complete that step. The tool or validation result did not provide enough detail to continue."
 
+    async def _mark_auto_continue_from_head(
+        *,
+        head: str,
+        final_text: str,
+        user_request_text: str,
+    ) -> None:
+        nonlocal auto_continue_requested, auto_continue_head, minos_ms_total
+        if auto_continue_requested:
+            return
+        auto_continue_started = time.perf_counter()
+        should_continue = await _should_auto_continue_head_response(
+            llm_client=llm_client_minos,
+            platform=platform,
+            head=head,
+            user_text=user_request_text,
+            final_text=final_text,
+            continue_allowed=True,
+            enabled=auto_continue_incomplete_final_enabled,
+        )
+        minos_ms_total += (time.perf_counter() - auto_continue_started) * 1000.0
+        if should_continue:
+            auto_continue_requested = True
+            auto_continue_head = str(head or "").strip().lower()
+
     async def _compose_final_answer_text(
         *,
         checker_decision: Optional[Dict[str, Any]],
@@ -4983,6 +4984,11 @@ async def _run_hydra_turn_impl(
         )
         if hermes_text:
             composed_text = hermes_text
+            await _mark_auto_continue_from_head(
+                head="hermes",
+                final_text=composed_text,
+                user_request_text=user_request_text,
+            )
         return composed_text
 
     def _finish(
@@ -5059,6 +5065,8 @@ async def _run_hydra_turn_impl(
             "status": final_status,
             "task_id": task_id,
             "task_name": task_name,
+            "auto_continue_requested": bool(auto_continue_requested and final_status == "done"),
+            "auto_continue_head": auto_continue_head if final_status == "done" else "",
             "artifacts": artifacts_out,
             "raw_tool_payload": raw_tool_payload_out,
             "normalized_minos_result": normalized_minos_result_out,
@@ -5086,8 +5094,14 @@ async def _run_hydra_turn_impl(
             planner_kind = "answer"
             planner_text_is_tool_candidate = False
             checker_reason = "complete"
+            chat_final_text = chat_text or _generic_chat_fallback_text(current_user_turn_text)
+            await _mark_auto_continue_from_head(
+                head="chat",
+                final_text=chat_final_text,
+                user_request_text=turn_request_text or current_user_turn_text or user_text,
+            )
             return _finish(
-                text=chat_text or _generic_chat_fallback_text(current_user_turn_text),
+                text=chat_final_text,
                 status="done",
                 checker_action_value="FINAL_ANSWER",
                 checker_reason_value=checker_reason,
@@ -5240,19 +5254,6 @@ async def _run_hydra_turn_impl(
                 )
 
             if checker_action == "CONTINUE":
-                if await _should_continue_after_incomplete_final_answer(
-                    llm_client=llm_client_minos,
-                    platform=platform,
-                    user_text=turn_request_text or user_text,
-                    final_text=draft_response,
-                    agent_state=agent_state,
-                    continue_allowed=_auto_continue_incomplete_allowed(),
-                    enabled=auto_continue_incomplete_final_enabled,
-                ):
-                    auto_continue_incomplete_count += 1
-                    checker_reason = "continue_after_incomplete_final_answer"
-                    critic_continue_count += 1
-                    continue
                 checker_reason = "step_not_executed"
                 return _finish(
                     text=_failed_step_message(checker_decision, draft_response, tool_result_for_checker),
@@ -5277,19 +5278,6 @@ async def _run_hydra_turn_impl(
                 tool_result_payload=tool_result_for_checker,
             )
             if structured_plan_queue:
-                if await _should_continue_after_incomplete_final_answer(
-                    llm_client=llm_client_minos,
-                    platform=platform,
-                    user_text=turn_request_text or user_text,
-                    final_text=final_text_candidate,
-                    agent_state=agent_state,
-                    continue_allowed=_auto_continue_incomplete_allowed(),
-                    enabled=auto_continue_incomplete_final_enabled,
-                ):
-                    auto_continue_incomplete_count += 1
-                    checker_reason = "continue_after_incomplete_final_answer"
-                    critic_continue_count += 1
-                    continue
                 checker_reason = "step_not_executed"
                 return _finish(
                     text=final_text_candidate or _failed_step_message(checker_decision, draft_response, tool_result_for_checker),
@@ -5297,19 +5285,6 @@ async def _run_hydra_turn_impl(
                     checker_action_value="FAIL",
                     checker_reason_value=checker_reason,
                 )
-            if await _should_continue_after_incomplete_final_answer(
-                llm_client=llm_client_minos,
-                platform=platform,
-                user_text=turn_request_text or user_text,
-                final_text=final_text_candidate,
-                agent_state=agent_state,
-                continue_allowed=_auto_continue_incomplete_allowed(),
-                enabled=auto_continue_incomplete_final_enabled,
-            ):
-                auto_continue_incomplete_count += 1
-                checker_reason = "continue_after_incomplete_final_answer"
-                critic_continue_count += 1
-                continue
             checker_reason = _tool_failure_checker_reason(tool_result_for_checker) or "complete"
             return _finish(
                 text=final_text_candidate,
@@ -5707,19 +5682,6 @@ async def _run_hydra_turn_impl(
             user_request_text=turn_request_text or user_text,
             tool_result_payload=tool_result_for_checker,
         )
-        if await _should_continue_after_incomplete_final_answer(
-            llm_client=llm_client_minos,
-            platform=platform,
-            user_text=turn_request_text or user_text,
-            final_text=final_text_candidate,
-            agent_state=agent_state,
-            continue_allowed=_auto_continue_incomplete_allowed(),
-            enabled=auto_continue_incomplete_final_enabled,
-        ):
-            auto_continue_incomplete_count += 1
-            checker_reason = "continue_after_incomplete_final_answer"
-            critic_continue_count += 1
-            continue
         checker_reason = _tool_failure_checker_reason(tool_result_for_checker) or "complete"
         return _finish(
             text=final_text_candidate,
@@ -5857,27 +5819,64 @@ async def run_hydra_turn(
             redis_client=r,
         )
         try:
-            return await _run_hydra_turn_impl(
-                llm_client=llm_client,
-                llm_clients=llm_pool.role_clients,
-                platform=platform,
-                history_messages=history_messages,
-                registry=registry,
-                enabled_predicate=enabled_predicate,
-                context=context,
-                user_text=user_text,
-                scope=scope,
-                task_id=task_id,
-                active_job_id=active_job_id,
-                origin=origin,
-                wait_callback=wait_callback,
-                admin_guard=admin_guard,
-                redis_client=r,
-                max_rounds=max_rounds,
-                max_tool_calls=max_tool_calls,
-                platform_preamble=platform_preamble,
-                tool_platform_preamble=tool_platform_preamble,
-            )
+            current_user_text = str(user_text or "")
+            current_history_messages = list(history_messages or [])
+            current_context = dict(context) if isinstance(context, dict) else context
+            current_origin = dict(origin) if isinstance(origin, dict) else origin
+            result: Dict[str, Any] = {}
+            max_head_auto_continues = 2
+
+            for auto_continue_depth in range(max_head_auto_continues + 1):
+                result = await _run_hydra_turn_impl(
+                    llm_client=llm_client,
+                    llm_clients=llm_pool.role_clients,
+                    platform=platform,
+                    history_messages=current_history_messages,
+                    registry=registry,
+                    enabled_predicate=enabled_predicate,
+                    context=current_context,
+                    user_text=current_user_text,
+                    scope=scope,
+                    task_id=task_id,
+                    active_job_id=active_job_id,
+                    origin=current_origin,
+                    wait_callback=wait_callback,
+                    admin_guard=admin_guard,
+                    redis_client=r,
+                    max_rounds=max_rounds,
+                    max_tool_calls=max_tool_calls,
+                    platform_preamble=platform_preamble,
+                    tool_platform_preamble=tool_platform_preamble,
+                )
+                if not (
+                    isinstance(result, dict)
+                    and str(result.get("status") or "").strip().lower() == "done"
+                    and bool(result.get("auto_continue_requested"))
+                ):
+                    return result
+                if auto_continue_depth >= max_head_auto_continues:
+                    result["auto_continue_requested"] = False
+                    result["auto_continue_limit_reached"] = True
+                    return result
+
+                previous_user_text = str(current_user_text or "").strip()
+                previous_assistant_text = _coerce_text(result.get("text")).strip()
+                next_history = list(current_history_messages or [])
+                if previous_user_text:
+                    next_history.append({"role": "user", "content": previous_user_text})
+                if previous_assistant_text:
+                    next_history.append({"role": "assistant", "content": previous_assistant_text})
+
+                current_history_messages = next_history
+                current_user_text = "continue"
+                current_context = dict(current_context) if isinstance(current_context, dict) else {}
+                current_context["auto_continue_from_head"] = str(result.get("auto_continue_head") or "")
+                current_context["auto_continue_depth"] = auto_continue_depth + 1
+                current_origin = dict(current_origin) if isinstance(current_origin, dict) else {}
+                current_origin["auto_continue_from_head"] = str(result.get("auto_continue_head") or "")
+                current_origin["auto_continue_depth"] = auto_continue_depth + 1
+
+            return result
         finally:
             await llm_pool.aclose()
     finally:
