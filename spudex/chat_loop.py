@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 from verba_result import action_failure, action_success
 from web_research import research_web
 
+from .loop_feedback import command_failure_context, execution_settings_summary, repeated_missing_executable
 from .policy import display_agent_path, normalize_argv, resolve_spudex_cwd
 from .runner import (
     append_session_log,
@@ -257,7 +258,9 @@ async def run_spudex_chat_turn(
         "- If the user asks you to create, edit, run, host, serve, inspect, or verify something, your first response must usually be write_file, command, search, or verify JSON, not a conversational promise.\n"
         "- Do not reply with 'I will run/check/try...' as a final answer. If you need to run/check/try something, return command, write_file, search, or verify now.\n"
         "- After a command fails, never stop at 'I can try another way'. Return the next action JSON immediately.\n"
-        "- If an executable is missing, choose an alternate action immediately. On Linux/Unraid, write a small Python script that reads /proc when ps, free, or similar utilities are unavailable.\n"
+        "- If command_feedback shows error_code executable_not_found, do not retry that executable until you have installed it or completed another successful recovery action.\n"
+        "- If an executable is missing and the task truly needs it, install the package that provides it when execution_settings allow installs/package managers or policy_disabled is true; then retry after the install succeeds.\n"
+        "- If installing is not allowed or not worth it, choose an installed tool or a Python/stdlib fallback immediately. On Linux/Unraid, write a small Python script that reads /proc when ps, free, top, or similar utilities are unavailable.\n"
         "- For multi-step logic, data parsing, calculations, or file generation, prefer writing a small Python script in workspace and running it with python3.\n"
         "- Do not use inline interpreter eval such as python -c; write a script file first, then run it.\n"
         "- Use search only when you are genuinely unsure about the right command or need current external instructions.\n"
@@ -279,6 +282,8 @@ async def run_spudex_chat_turn(
             "max_steps": max_steps,
             "working_folder": str(cwd_path),
             "system_info": spudex_system_info(),
+            "execution_settings": execution_settings_summary(settings),
+            "command_feedback": command_failure_context(ran_commands),
             "session_context": _recent_session_context(session_id),
             "commands_this_turn": ran_commands,
             "searches_this_turn": ran_searches,
@@ -423,6 +428,23 @@ async def run_spudex_chat_turn(
 
         if kind == "verify":
             argv = normalize_argv(argv=decision.get("argv") or decision.get("verify_argv"))
+            repeat_error = repeated_missing_executable(argv, ran_commands)
+            if repeat_error:
+                append_session_log(session_id, stream="system", text=str(repeat_error.get("message") or "Repeated missing executable skipped."), level="warning")
+                ran_commands.append(
+                    {
+                        "argv": argv,
+                        "cwd": str(resolve_spudex_cwd(settings.get("default_cwd"))),
+                        "ok": False,
+                        "status": "skipped",
+                        "returncode": None,
+                        "stdout": "",
+                        "stderr": str(repeat_error.get("message") or ""),
+                        "verification": True,
+                        "error": repeat_error,
+                    }
+                )
+                continue
             reason = str(decision.get("reason") or "").strip()
             if reason:
                 append_session_log(session_id, stream="assistant", text=reason, level="info")
@@ -453,6 +475,7 @@ async def run_spudex_chat_turn(
                     "stdout": str(result.get("stdout") or ""),
                     "stderr": str(result.get("stderr") or ""),
                     "verification": True,
+                    "error": result.get("error") if isinstance(result.get("error"), dict) else {},
                 }
             )
             continue
@@ -465,6 +488,24 @@ async def run_spudex_chat_turn(
             return action_failure(code="spudex_chat_bad_decision", message=final_text)
 
         argv = normalize_argv(argv=decision.get("argv"))
+        repeat_error = repeated_missing_executable(argv, ran_commands)
+        if repeat_error:
+            append_session_log(session_id, stream="system", text=str(repeat_error.get("message") or "Repeated missing executable skipped."), level="warning")
+            ran_commands.append(
+                {
+                    "argv": argv,
+                    "cwd": str(resolve_spudex_cwd(settings.get("default_cwd"))),
+                    "ok": False,
+                    "status": "skipped",
+                    "returncode": None,
+                    "stdout": "",
+                    "stderr": str(repeat_error.get("message") or ""),
+                    "output_truncated": False,
+                    "background": False,
+                    "error": repeat_error,
+                }
+            )
+            continue
         reason = str(decision.get("reason") or "").strip()
         if reason:
             append_session_log(session_id, stream="assistant", text=reason, level="info")

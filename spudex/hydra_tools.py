@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 from verba_result import action_failure, action_success
 from web_research import research_web
 
+from .loop_feedback import command_failure_context, execution_settings_summary, repeated_missing_executable
 from .policy import normalize_argv, resolve_spudex_cwd
 from .runner import (
     append_session_log,
@@ -155,6 +156,9 @@ async def _run_spudex_task(
         "Rules:\n"
         "- Include a compact plan array when the task has multiple steps: [{\"step\":\"Inspect\",\"status\":\"in_progress\"}]. Keep it updated as you work.\n"
         "- Use system_info to choose commands that fit the host OS and path style.\n"
+        "- If command_feedback shows error_code executable_not_found, do not retry that executable until you have installed it or completed another successful recovery action.\n"
+        "- If an executable is missing and the task truly needs it, install the package that provides it when execution_settings allow installs/package managers or policy_disabled is true; then retry after the install succeeds.\n"
+        "- If installing is not allowed or not worth it, choose an installed tool or a Python/stdlib fallback immediately. On Linux/Unraid, write a small Python script that reads /proc when ps, free, top, or similar utilities are unavailable.\n"
         "- Use search only when you are genuinely unsure about the right command or need current external instructions.\n"
         "- For multi-step logic, data parsing, calculations, or file generation, prefer writing a small Python script in workspace and running it with python3.\n"
         "- Do not use inline interpreter eval such as python -c; write a script file first, then run it.\n"
@@ -175,6 +179,8 @@ async def _run_spudex_task(
             "max_steps": steps,
             "working_folder": str(cwd),
             "system_info": spudex_system_info(),
+            "execution_settings": execution_settings_summary(settings),
+            "command_feedback": command_failure_context(history),
             "history": history[-8:],
         }
         try:
@@ -277,6 +283,11 @@ async def _run_spudex_task(
             continue
         if action in {"verify", "verification", "check"} or decision.get("verify_argv") is not None:
             argv = normalize_argv(argv=decision.get("argv") or decision.get("verify_argv"))
+            repeat_error = repeated_missing_executable(argv, history)
+            if repeat_error:
+                append_session_log(session["id"], stream="system", text=str(repeat_error.get("message") or "Repeated missing executable skipped."), level="warning")
+                history.append({"action": "verify", "argv": argv, "ok": False, "status": "skipped", "returncode": None, "error": repeat_error})
+                continue
             approval = _approval_required(settings, argv, actor=approval_actor)
             if approval:
                 append_session_log(session["id"], stream="system", text=str(approval.get("error", {}).get("message") or "Spudex approval required."), level="warning")
@@ -302,11 +313,27 @@ async def _run_spudex_task(
                     "ok": bool(result.get("ok")),
                     "status": result.get("status"),
                     "returncode": result.get("returncode"),
+                    "error": result.get("error") if isinstance(result.get("error"), dict) else {},
                     "recent_output": summary[-2000:],
                 }
             )
             continue
         argv = normalize_argv(argv=decision.get("argv"))
+        repeat_error = repeated_missing_executable(argv, history)
+        if repeat_error:
+            append_session_log(session["id"], stream="system", text=str(repeat_error.get("message") or "Repeated missing executable skipped."), level="warning")
+            history.append(
+                {
+                    "argv": argv,
+                    "ok": False,
+                    "status": "skipped",
+                    "returncode": None,
+                    "background": False,
+                    "error": repeat_error,
+                    "recent_output": str(repeat_error.get("message") or ""),
+                }
+            )
+            continue
         approval = _approval_required(settings, argv, actor=approval_actor)
         if approval:
             append_session_log(session["id"], stream="system", text=str(approval.get("error", {}).get("message") or "Spudex approval required."), level="warning")
@@ -322,6 +349,7 @@ async def _run_spudex_task(
                 "status": result.get("status"),
                 "returncode": result.get("returncode"),
                 "background": bool(result.get("background")),
+                "error": result.get("error") if isinstance(result.get("error"), dict) else {},
                 "recent_output": "\n".join(str(entry.get("text") or "") for entry in logs[-12:]),
             }
         )
