@@ -46,6 +46,25 @@ def _subprocess_env() -> dict[str, str]:
     return env
 
 
+def _command_start_error(exc: Exception, argv: List[str]) -> Dict[str, Any]:
+    executable = Path(str(argv[0] or "")).name if argv else ""
+    if isinstance(exc, FileNotFoundError):
+        return {
+            "code": "executable_not_found",
+            "message": f"Executable not found: {executable or 'unknown'}",
+            "executable": executable,
+            "argv": list(argv),
+            "retriable_without_change": False,
+            "recovery": "Install the missing executable if installs are allowed and the task needs it, otherwise choose an installed tool or Python/stdlib fallback.",
+        }
+    return {
+        "code": "start_failed",
+        "message": str(exc) or "Failed to start command.",
+        "exception_type": type(exc).__name__,
+        "argv": list(argv),
+    }
+
+
 def _paths(session_id: str) -> tuple[Path, Path]:
     safe_id = "".join(ch for ch in str(session_id or "") if ch.isalnum() or ch in {"_", "-"})
     if not safe_id:
@@ -639,12 +658,16 @@ async def run_argv_in_session(
             stderr=asyncio.subprocess.PIPE,
         )
     except Exception as exc:
-        message = str(exc) or "Failed to start command."
+        error = _command_start_error(exc, argv)
+        message = str(error.get("message") or str(exc) or "Failed to start command.")
         append_session_log(session_id, stream="system", text=message, level="error")
         meta = _load_meta(session_id)
         meta.update({"status": "failed", "returncode": None, "finished_ts": _now(), "updated_ts": _now()})
         _save_meta(meta)
-        return {"ok": False, "session_id": session_id, "status": "failed", "returncode": None, "error": {"code": "start_failed", "message": message}}
+        result = {"ok": False, "session_id": session_id, "status": "failed", "returncode": None, "error": error}
+        if capture_output:
+            result.update({"stdout": "", "stderr": message, "output_truncated": False})
+        return result
     _ACTIVE_PROCESSES[session_id] = process
     meta = _load_meta(session_id)
     meta.update({"pid": getattr(process, "pid", None), "updated_ts": _now()})
