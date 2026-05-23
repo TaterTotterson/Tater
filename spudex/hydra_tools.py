@@ -107,6 +107,54 @@ def _int_default(value: Any, default: int) -> int:
         return default
 
 
+async def _ai_review_terminal_attempt(
+    *,
+    llm_client: Any,
+    settings: Dict[str, Any],
+    goal: str,
+    attempt: Dict[str, Any],
+    history: List[Dict[str, Any]],
+    attempt_reviews: List[str],
+) -> str:
+    review_prompt = (
+        "You are Tater's Spudex terminal attempt reviewer.\n"
+        "Review the latest failed or weak action and produce one short model-facing note for the next planning step.\n"
+        "Return exactly one JSON object: {\"note\":\"...\"}.\n"
+        "The note should explain what was tried, why it did not answer the user's request, and what kind of meaningfully different next move should be considered.\n"
+        "Do not reveal hidden chain-of-thought. Do not list hard-coded command names. Prefer tool/action categories, observed facts, and constraints from the payload.\n"
+        "If the task is now blocked, say what specific user input is missing. If it is not blocked, say what should change about the approach.\n"
+    )
+    payload = {
+        "goal": goal,
+        "latest_attempt": attempt,
+        "history": history[-8:],
+        "attempt_reviews": attempt_reviews[-5:],
+    }
+    try:
+        resp = await llm_client.chat(
+            messages=[
+                {"role": "system", "content": review_prompt},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)},
+            ],
+            temperature=0.0,
+        )
+        decision = _strict_json(_messages_content(resp))
+        return str(decision.get("note") or "").strip()[:900]
+    except Exception as exc:
+        return f"Attempt review unavailable: {exc}"
+
+
+def _search_attempt_needs_review(search_row: Dict[str, Any]) -> bool:
+    if not bool(search_row.get("ok")):
+        return True
+    if bool(search_row.get("enough")):
+        return False
+    answer = str(search_row.get("answer") or "").strip()
+    sources = search_row.get("sources") if isinstance(search_row.get("sources"), list) else []
+    missing = str(search_row.get("missing") or "").strip()
+    return not answer or not sources or bool(missing)
+
+
 async def _run_spudex_task(
     *,
     args: Dict[str, Any],
@@ -143,6 +191,7 @@ async def _run_spudex_task(
         session = create_spudex_session(label=f"Terminal task: {goal[:80]}", cwd=str(cwd), goal=goal, source=source, platform=platform)
         update_spudex_session(session["id"], status="running")
     history: list[Dict[str, Any]] = []
+    attempt_reviews: list[str] = []
 
     system_prompt = (
         "You operate Tater's local Spudex terminal.\n"
@@ -165,6 +214,8 @@ async def _run_spudex_task(
         "- Use argv arrays only. Do not use shells, pipes, redirects, or command separators.\n"
         "- Commands run from the configured working folder. Do not include or change cwd.\n"
         "- Use small inspection commands before changing anything.\n"
+        "- Before every action after the first, read history and attempt_reviews. Your next action must account for what already happened.\n"
+        "- If the last attempt failed, returned no useful result, or did not answer the user's request, explain in the action reason how the new approach differs or why stopping/asking is now appropriate.\n"
         "- Before claiming a change is done, run a verify action when a practical command can confirm it.\n"
         "- If you start a long-running web server, set \"background\": true on the command so it stays attached to the session.\n"
         "- When you finish, include memory_summary with what changed and what should be remembered next time.\n"
@@ -182,6 +233,7 @@ async def _run_spudex_task(
             "execution_settings": execution_settings_summary(settings),
             "command_feedback": command_failure_context(history),
             "history": history[-8:],
+            "attempt_reviews": attempt_reviews[-5:],
         }
         try:
             resp = await llm_client.chat(
@@ -232,18 +284,30 @@ async def _run_spudex_task(
                 text=search_summary or str((search_result.get("error") or {}).get("message") or "Web research returned no answer."),
                 level="info" if bool(search_result.get("ok")) else "error",
             )
-            history.append(
-                {
-                    "action": "search",
-                    "query": query,
-                    "ok": bool(search_result.get("ok")),
-                    "enough": bool(search_data.get("enough")),
-                    "answer": str(search_data.get("answer") or search_summary or ""),
-                    "reason": str(search_data.get("reason") or ""),
-                    "missing": str(search_data.get("missing") or ""),
-                    "sources": list(search_data.get("sources") or [])[:5],
-                }
-            )
+            search_row = {
+                "action": "search",
+                "query": query,
+                "ok": bool(search_result.get("ok")),
+                "enough": bool(search_data.get("enough")),
+                "answer": str(search_data.get("answer") or search_summary or ""),
+                "reason": str(search_data.get("reason") or ""),
+                "missing": str(search_data.get("missing") or ""),
+                "sources": list(search_data.get("sources") or [])[:5],
+            }
+            history.append(search_row)
+            if _search_attempt_needs_review(search_row) and step < steps - 1:
+                review_note = await _ai_review_terminal_attempt(
+                    llm_client=llm_client,
+                    settings=settings,
+                    goal=goal,
+                    attempt=search_row,
+                    history=history,
+                    attempt_reviews=attempt_reviews,
+                )
+                if review_note:
+                    note = f"Attempt review after weak search result: {review_note}"
+                    attempt_reviews.append(note)
+                    append_session_log(session["id"], stream="system", text=note, level="warning")
             continue
         if action in {"write_file", "file", "write", "create_file"} or (
             decision.get("path") is not None and decision.get("content") is not None and decision.get("argv") is None
@@ -281,6 +345,19 @@ async def _run_spudex_task(
                     "error": write_result.get("error") if isinstance(write_result.get("error"), dict) else {},
                 }
             )
+            if not bool(write_result.get("ok")) and step < steps - 1:
+                review_note = await _ai_review_terminal_attempt(
+                    llm_client=llm_client,
+                    settings=settings,
+                    goal=goal,
+                    attempt=history[-1],
+                    history=history,
+                    attempt_reviews=attempt_reviews,
+                )
+                if review_note:
+                    note = f"Attempt review after failed file write: {review_note}"
+                    attempt_reviews.append(note)
+                    append_session_log(session["id"], stream="system", text=note, level="warning")
             continue
         if action in {"verify", "verification", "check"} or decision.get("verify_argv") is not None:
             argv = normalize_argv(argv=decision.get("argv") or decision.get("verify_argv"))
@@ -318,6 +395,19 @@ async def _run_spudex_task(
                     "recent_output": summary[-2000:],
                 }
             )
+            if not bool(result.get("ok")) and step < steps - 1:
+                review_note = await _ai_review_terminal_attempt(
+                    llm_client=llm_client,
+                    settings=settings,
+                    goal=goal,
+                    attempt=history[-1],
+                    history=history,
+                    attempt_reviews=attempt_reviews,
+                )
+                if review_note:
+                    note = f"Attempt review after failed verification: {review_note}"
+                    attempt_reviews.append(note)
+                    append_session_log(session["id"], stream="system", text=note, level="warning")
             continue
         argv = normalize_argv(argv=decision.get("argv"))
         repeat_error = repeated_missing_executable(argv, history)
@@ -354,6 +444,19 @@ async def _run_spudex_task(
                 "recent_output": "\n".join(str(entry.get("text") or "") for entry in logs[-12:]),
             }
         )
+        if not bool(result.get("ok")) and step < steps - 1:
+            review_note = await _ai_review_terminal_attempt(
+                llm_client=llm_client,
+                settings=settings,
+                goal=goal,
+                attempt=history[-1],
+                history=history,
+                attempt_reviews=attempt_reviews,
+            )
+            if review_note:
+                note = f"Attempt review after failed command: {review_note}"
+                attempt_reviews.append(note)
+                append_session_log(session["id"], stream="system", text=note, level="warning")
     else:
         final_text = "Spudex task stopped at the configured step limit."
 
