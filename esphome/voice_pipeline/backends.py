@@ -27,8 +27,7 @@ _LOCAL_STT_TRANSCRIBE_LOCK = asyncio.Lock()
 
 
 def huggingface_environment(overrides: Optional[Dict[str, Any]] = None, client: Any = None) -> Dict[str, Any]:
-    fn = integration_store_module.integration_function("huggingface", "huggingface_environment")
-    return fn(overrides, client) if fn else dict(overrides or {})
+    return integration_store_module.huggingface_environment(overrides, client)
 
 
 def _drain_background_task(task: asyncio.Task[Any]) -> None:

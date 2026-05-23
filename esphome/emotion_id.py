@@ -22,8 +22,11 @@ logger = logging.getLogger("voice_core")
 
 
 def huggingface_environment(overrides: Optional[Dict[str, Any]] = None, client: Any = None) -> Dict[str, Any]:
-    fn = integration_store_module.integration_function("huggingface", "huggingface_environment")
-    return fn(overrides, client) if fn else dict(overrides or {})
+    return integration_store_module.huggingface_environment(overrides, client)
+
+
+def huggingface_token(client: Any = None) -> str:
+    return integration_store_module.huggingface_token(client)
 
 
 def _vp():
@@ -247,7 +250,7 @@ def _model_source() -> str:
 
 
 def _huggingface_auth_fingerprint() -> str:
-    token = str(huggingface_environment().get("HF_TOKEN") or "").strip()
+    token = str(huggingface_token() or "").strip()
     if not token:
         return "none"
     return hashlib.sha256(token.encode("utf-8", errors="ignore")).hexdigest()[:12]
@@ -255,6 +258,18 @@ def _huggingface_auth_fingerprint() -> str:
 
 def _huggingface_auth_label() -> str:
     return "configured" if _huggingface_auth_fingerprint() != "none" else "missing"
+
+
+def _call_speechbrain_loader_with_hf_token(loader: Any, kwargs: Dict[str, Any]) -> Any:
+    token = str(huggingface_token() or "").strip()
+    if token:
+        try:
+            return loader(**{**kwargs, "use_auth_token": token})
+        except TypeError as exc:
+            if "use_auth_token" not in str(exc):
+                raise
+            _log_warning("SpeechBrain loader does not accept use_auth_token; using Hugging Face environment token only.")
+    return loader(**kwargs)
 
 
 def _snapshot_complete(savedir: Path) -> bool:
@@ -292,8 +307,7 @@ def _ensure_speechbrain_snapshot(source: str, savedir: Path, hf_cache_dir: Path)
         _log_warning("huggingface_hub snapshot download unavailable source=%s detail=%s", source, exc)
         return source
 
-    env = huggingface_environment()
-    token = str(env.get("HF_TOKEN") or "").strip() or None
+    token = str(huggingface_token() or "").strip() or None
     savedir.mkdir(parents=True, exist_ok=True)
     _log_info("downloading model snapshot source=%s savedir=%s hf_auth=%s", source, str(savedir), _huggingface_auth_label())
     snapshot_download(
@@ -475,13 +489,14 @@ def _speechbrain_state() -> Tuple[bool, str]:
                     )
                     with _temporary_huggingface_env(hf_cache_dir):
                         load_source = _ensure_speechbrain_snapshot(source, savedir, hf_cache_dir)
-                        _ENGINE = foreign_class(
-                            source=load_source,
-                            pymodule_file="custom_interface.py",
-                            classname="CustomEncoderWav2vec2Classifier",
-                            savedir=str(savedir),
-                            run_opts={"device": run_device},
-                        )
+                        kwargs = {
+                            "source": load_source,
+                            "pymodule_file": "custom_interface.py",
+                            "classname": "CustomEncoderWav2vec2Classifier",
+                            "savedir": str(savedir),
+                            "run_opts": {"device": run_device},
+                        }
+                        _ENGINE = _call_speechbrain_loader_with_hf_token(foreign_class, kwargs)
                     _ENGINE_SOURCE = source
                     _ENGINE_DEVICE = run_device
                     _ENGINE_REQUESTED_DEVICE = requested_device
