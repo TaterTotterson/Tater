@@ -1105,12 +1105,16 @@ def _memory_context_payload(
     platform: str,
     scope: str,
     origin: Optional[Dict[str, Any]],
+    user_text: str = "",
+    request_text: str = "",
 ) -> Dict[str, Any]:
     return get_hydra_memory_context_payload(
         platform=platform,
         scope=scope,
         origin=origin,
         redis_client=redis_client,
+        user_text=str(user_text or ""),
+        request_text=str(request_text or ""),
     )
 
 
@@ -1153,6 +1157,8 @@ def _core_system_prompt_fragments(
     origin: Optional[Dict[str, Any]],
     redis_client: Any,
     memory_context_payload: Optional[Dict[str, Any]],
+    user_text: str = "",
+    request_text: str = "",
 ) -> List[str]:
     out: List[str] = []
     if str(role or "").strip().lower() in {"chat", "hermes", "memory_context", ""}:
@@ -1172,6 +1178,8 @@ def _core_system_prompt_fragments(
         origin=origin,
         redis_client=redis_client,
         memory_context=memory_context_payload,
+        user_text=str(user_text or ""),
+        request_text=str(request_text or ""),
     )
     seen: set[str] = set(out)
     for item in fragments:
@@ -1191,6 +1199,8 @@ def _core_system_prompt_message(
     origin: Optional[Dict[str, Any]],
     redis_client: Any,
     memory_context_payload: Optional[Dict[str, Any]],
+    user_text: str = "",
+    request_text: str = "",
 ) -> str:
     merged: List[str] = []
     for fragment in _core_system_prompt_fragments(
@@ -1200,6 +1210,8 @@ def _core_system_prompt_message(
         origin=origin,
         redis_client=redis_client,
         memory_context_payload=memory_context_payload,
+        user_text=user_text,
+        request_text=request_text,
     ):
         merged.append(fragment)
     if role != "memory_context":
@@ -1210,6 +1222,8 @@ def _core_system_prompt_message(
             origin=origin,
             redis_client=redis_client,
             memory_context_payload=memory_context_payload,
+            user_text=user_text,
+            request_text=request_text,
         ):
             if fragment not in merged:
                 merged.append(fragment)
@@ -2850,6 +2864,8 @@ def estimate_hydra_chat_context_window(
         platform=normalized_platform,
         scope=resolved_scope,
         origin=origin_payload,
+        user_text=user_text,
+        request_text=user_text,
     )
     chat_core_context = _core_system_prompt_message(
         role="chat",
@@ -2858,6 +2874,8 @@ def estimate_hydra_chat_context_window(
         origin=origin_payload,
         redis_client=r,
         memory_context_payload=memory_context_payload,
+        user_text=user_text,
+        request_text=user_text,
     )
     chat_system_prompt = _chat_fallback_system_prompt(normalized_platform)
     status_prompt = _render_tater_system_status_prompt(
@@ -4721,6 +4739,8 @@ async def _run_hydra_turn_impl(
         platform=platform,
         scope=scope,
         origin=origin_payload,
+        user_text=current_user_turn_text,
+        request_text=turn_request_text,
     )
     tool_memory_context_payload = _tool_memory_context_payload(memory_context_payload)
     chat_context_message = _core_system_prompt_message(
@@ -4730,6 +4750,8 @@ async def _run_hydra_turn_impl(
         origin=origin_payload,
         redis_client=r,
         memory_context_payload=memory_context_payload,
+        user_text=current_user_turn_text,
+        request_text=turn_request_text,
     )
     hermes_context_message = _core_system_prompt_message(
         role="hermes",
@@ -4738,6 +4760,8 @@ async def _run_hydra_turn_impl(
         origin=origin_payload,
         redis_client=r,
         memory_context_payload=memory_context_payload,
+        user_text=current_user_turn_text,
+        request_text=turn_request_text,
     )
     queued_retry_tool_for_ledger: Optional[Dict[str, Any]] = None
     structured_plan_queue: List[Dict[str, str]] = []
