@@ -324,6 +324,8 @@ def get_hydra_memory_context_payload(
     scope: str,
     origin: Optional[Dict[str, Any]],
     redis_client: Any = None,
+    user_text: str = "",
+    request_text: str = "",
 ) -> Dict[str, Any]:
     merged: Dict[str, Any] = {}
     normalized_platform = _canonical_platform(platform) or str(platform or "").strip().lower() or "webui"
@@ -336,6 +338,8 @@ def get_hydra_memory_context_payload(
                 "scope": str(scope or "").strip(),
                 "origin": dict(origin or {}),
                 "redis_client": redis_client if redis_client is not None else default_redis,
+                "user_text": str(user_text or ""),
+                "request_text": str(request_text or ""),
                 "core_key": core_key,
             },
         )
@@ -372,6 +376,8 @@ def collect_hydra_system_prompt_fragments(
     origin: Optional[Dict[str, Any]],
     redis_client: Any = None,
     memory_context: Optional[Dict[str, Any]] = None,
+    user_text: str = "",
+    request_text: str = "",
 ) -> List[str]:
     normalized_role = str(role or "").strip().lower()
     normalized_platform = _canonical_platform(platform) or str(platform or "").strip().lower() or "webui"
@@ -388,6 +394,8 @@ def collect_hydra_system_prompt_fragments(
                 "origin": dict(origin or {}),
                 "redis_client": redis_client if redis_client is not None else default_redis,
                 "memory_context": dict(memory_context or {}),
+                "user_text": str(user_text or ""),
+                "request_text": str(request_text or ""),
                 "core_key": core_key,
             },
         )
