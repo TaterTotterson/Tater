@@ -1,6 +1,5 @@
 import asyncio
 import json
-import re
 import time
 from typing import Any, Dict, List
 
@@ -105,37 +104,6 @@ def _decision_type(decision: Dict[str, Any]) -> str:
     return ""
 
 
-def _message_likely_requires_action(text: str) -> bool:
-    lowered = str(text or "").strip().lower()
-    if not lowered:
-        return False
-    action_patterns = [
-        r"\b(create|make|write|edit|update|change|fix|run|execute|start|stop|host|serve|install|download|build|test|check|inspect|find|list|show)\b",
-        r"\b(can|could|will|would)\s+you\s+(create|make|write|edit|update|change|fix|run|execute|start|stop|host|serve|install|download|build|test|check|inspect|find|list|show)\b",
-    ]
-    return any(re.search(pattern, lowered) for pattern in action_patterns)
-
-
-def _reply_is_unfinished_intent(text: str, *, has_observations: bool, user_message: str = "") -> bool:
-    lowered = str(text or "").strip().lower()
-    if not lowered:
-        return False
-    if not has_observations and not _message_likely_requires_action(user_message):
-        return False
-    action_verbs = r"try|use|run|execute|check|look|inspect|read|search|write|create|make|edit|update|change|fix|start|stop|host|serve|build|test|list|show|find|open"
-    intent_patterns = [
-        rf"\bi\s+(?:will|can|could|should|would|am going to|\'ll)\s+(?:{action_verbs})",
-        rf"\blet me\s+(?:{action_verbs})",
-        r"\bnext[,]?\s+i\s+(?:will|can|could|should|would|am going to|\'ll)",
-        rf"\bi(?:'|’)ll\s+(?:{action_verbs})",
-        rf"\bi(?:'|’)m going to\s+(?:{action_verbs})",
-        rf"\bfirst[,]?\s+let me\s+(?:{action_verbs})",
-    ]
-    if any(re.search(pattern, lowered) for pattern in intent_patterns):
-        return True
-    return "i can try" in lowered or "i will try" in lowered or "i'll try" in lowered
-
-
 async def _ai_should_continue_reply(
     *,
     llm_client: Any,
@@ -149,18 +117,17 @@ async def _ai_should_continue_reply(
     wrote_files: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
     has_observations = bool(ran_commands or ran_searches or wrote_files)
-    fallback_continue = _reply_is_unfinished_intent(
-        assistant_reply,
-        has_observations=has_observations,
-        user_message=user_message,
-    )
     judge_prompt = (
         "You are a strict continuation judge for Tater's Spudex Chat loop.\n"
-        "Return exactly one JSON object: {\"continue\":true|false,\"reason\":\"...\"}.\n"
+        "Return exactly one JSON object with this shape: "
+        "{\"continue\":true|false,\"reason\":\"...\",\"next_action\":\"reply|command|write_file|search|verify\",\"instruction\":\"...\"}.\n"
         "Say continue=true when the assistant reply is only a promise, plan, or next-step narration and the user's task still needs action.\n"
-        "Say continue=true when the user asked Spudex to create, edit, run, host, serve, inspect, verify, or fix something, but no command/file/search/verify action has happened yet.\n"
-        "Say continue=false when the reply directly answers a question, refuses/asks for clarification, reports completed work based on observations, or no command is needed.\n"
-        "Be conservative about stopping: if the assistant says it will do something next, continue.\n"
+        "Say continue=true when the user asked Spudex to take an action, but no command/file/search/verify action has happened yet.\n"
+        "Say continue=true when the assistant asks the user for missing input, but the user's task can still start from a reasonable generic action such as search, inspection, or a local command.\n"
+        "Say continue=false when the reply directly answers a question, reports completed work based on observations, no command is needed, or a genuinely specific private link/file/path/secret/detail is required before any useful action can happen.\n"
+        "When continue=true, reason through what useful action is available now, then set next_action and instruction for the next Spudex model call without hard-coded provider-specific assumptions.\n"
+        "The reason should briefly explain the semantic decision; the instruction should be a direct next-step instruction, not a transcript of hidden reasoning.\n"
+        "Be conservative about stopping: if a useful next action can be taken now, continue.\n"
     )
     judge_payload = {
         "user_message": user_message,
@@ -189,23 +156,31 @@ async def _ai_should_continue_reply(
             return {
                 "continue": raw_continue,
                 "reason": str(decision.get("reason") or "AI continuation judge decision.").strip(),
+                "next_action": str(decision.get("next_action") or "").strip(),
+                "instruction": str(decision.get("instruction") or "").strip(),
                 "source": "ai",
             }
         if isinstance(raw_continue, str) and raw_continue.strip().lower() in {"true", "false"}:
             return {
                 "continue": raw_continue.strip().lower() == "true",
                 "reason": str(decision.get("reason") or "AI continuation judge decision.").strip(),
+                "next_action": str(decision.get("next_action") or "").strip(),
+                "instruction": str(decision.get("instruction") or "").strip(),
                 "source": "ai",
             }
     except Exception as exc:
         return {
-            "continue": fallback_continue,
-            "reason": f"Continuation judge failed; used fallback guard: {exc}",
+            "continue": False,
+            "reason": f"Continuation judge failed; stopping instead of using pattern fallback: {exc}",
+            "next_action": "",
+            "instruction": "",
             "source": "fallback",
         }
     return {
-        "continue": fallback_continue,
-        "reason": "Continuation judge returned malformed JSON; used fallback guard.",
+        "continue": False,
+        "reason": "Continuation judge returned malformed JSON; stopping instead of using pattern fallback.",
+        "next_action": "",
+        "instruction": "",
         "source": "fallback",
     }
 
@@ -256,6 +231,8 @@ async def run_spudex_chat_turn(
         "- If the user is asking a question or clarifying direction, reply without running a command.\n"
         "- Run commands only when command execution is actually useful.\n"
         "- If the user asks you to create, edit, run, host, serve, inspect, or verify something, your first response must usually be write_file, command, search, or verify JSON, not a conversational promise.\n"
+        "- If the user asks you to look up, research, inspect examples, find docs, or gather public information, start with search JSON when no exact local file or URL is required.\n"
+        "- Ask for missing details only when the task genuinely cannot start without that specific user-provided input.\n"
         "- Do not reply with 'I will run/check/try...' as a final answer. If you need to run/check/try something, return command, write_file, search, or verify now.\n"
         "- After a command fails, never stop at 'I can try another way'. Return the next action JSON immediately.\n"
         "- If command_feedback shows error_code executable_not_found, do not retry that executable until you have installed it or completed another successful recovery action.\n"
@@ -274,6 +251,38 @@ async def run_spudex_chat_turn(
         "- When you finish, include memory_summary with what changed and what the user should remember next time.\n"
         "- After command output gives enough information, reply with the result instead of running another command.\n"
     )
+
+    async def _run_search_query(query: str, *, reason: str = "", decision: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        search_decision = decision or {}
+        if reason:
+            append_session_log(session_id, stream="assistant", text=reason, level="info")
+        append_session_log(session_id, stream="search", text=f"? {query}", level="info")
+        search_result = await research_web(
+            query=query,
+            question=user_message,
+            llm_client=llm_client,
+            max_results=_int_default(search_decision.get("max_results"), 5),
+            max_pages=_int_default(search_decision.get("max_pages"), 3),
+            provider=search_decision.get("provider") or search_decision.get("search_provider"),
+            platform=platform,
+        )
+        search_data = search_result.get("data") if isinstance(search_result.get("data"), dict) else {}
+        search_summary = str(search_result.get("summary_for_user") or search_data.get("answer") or "")
+        append_session_log(
+            session_id,
+            stream="research",
+            text=search_summary or str((search_result.get("error") or {}).get("message") or "Web research returned no answer."),
+            level="info" if bool(search_result.get("ok")) else "error",
+        )
+        return {
+            "query": query,
+            "ok": bool(search_result.get("ok")),
+            "enough": bool(search_data.get("enough")),
+            "answer": str(search_data.get("answer") or search_summary or ""),
+            "reason": str(search_data.get("reason") or ""),
+            "missing": str(search_data.get("missing") or ""),
+            "sources": list(search_data.get("sources") or [])[:5],
+        }
 
     for step in range(max_steps):
         payload = {
@@ -335,9 +344,15 @@ async def run_spudex_chat_turn(
                     wrote_files=wrote_files,
                 )
                 if bool(continuation.get("continue")):
+                    next_action = str(continuation.get("next_action") or "").strip()
+                    instruction = str(continuation.get("instruction") or "").strip()
+                    instruction_note = ""
+                    if next_action or instruction:
+                        instruction_note = f" Suggested next_action={next_action or 'action'}: {instruction or 'choose the next useful action.'}"
                     note = (
                         f"Continuation judge ({continuation.get('source')}) said to continue: {continuation.get('reason')}. "
                         "Return the next command, write_file, search, or verify object now."
+                        f" {instruction_note}".rstrip()
                     )
                     loop_notes.append(note)
                     append_session_log(session_id, stream="system", text=f"Continuing Spudex loop: {continuation.get('reason')}", level="warning")
@@ -361,37 +376,7 @@ async def run_spudex_chat_turn(
                 update_spudex_session(session_id, status="failed", finished_ts=time.time())
                 return action_failure(code="spudex_chat_bad_search", message=final_text)
             reason = str(decision.get("reason") or "").strip()
-            if reason:
-                append_session_log(session_id, stream="assistant", text=reason, level="info")
-            append_session_log(session_id, stream="search", text=f"? {query}", level="info")
-            search_result = await research_web(
-                query=query,
-                question=user_message,
-                llm_client=llm_client,
-                max_results=_int_default(decision.get("max_results"), 5),
-                max_pages=_int_default(decision.get("max_pages"), 3),
-                provider=decision.get("provider") or decision.get("search_provider"),
-                platform=platform,
-            )
-            search_data = search_result.get("data") if isinstance(search_result.get("data"), dict) else {}
-            search_summary = str(search_result.get("summary_for_user") or search_data.get("answer") or "")
-            append_session_log(
-                session_id,
-                stream="research",
-                text=search_summary or str((search_result.get("error") or {}).get("message") or "Web research returned no answer."),
-                level="info" if bool(search_result.get("ok")) else "error",
-            )
-            ran_searches.append(
-                {
-                    "query": query,
-                    "ok": bool(search_result.get("ok")),
-                    "enough": bool(search_data.get("enough")),
-                    "answer": str(search_data.get("answer") or search_summary or ""),
-                    "reason": str(search_data.get("reason") or ""),
-                    "missing": str(search_data.get("missing") or ""),
-                    "sources": list(search_data.get("sources") or [])[:5],
-                }
-            )
+            ran_searches.append(await _run_search_query(query, reason=reason, decision=decision))
             continue
 
         if kind == "write_file":
