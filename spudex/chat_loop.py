@@ -23,6 +23,9 @@ from .settings import get_spudex_settings
 from .system_info import spudex_system_info
 
 
+_ACTIONABLE_CONTINUATION_ACTIONS = {"command", "write_file", "search", "verify"}
+
+
 def _messages_content(resp: Any) -> str:
     if not isinstance(resp, dict):
         return ""
@@ -119,13 +122,16 @@ async def _ai_should_continue_reply(
     has_observations = bool(ran_commands or ran_searches or wrote_files)
     judge_prompt = (
         "You are a strict continuation judge for Tater's Spudex Chat loop.\n"
+        "Continuation means Spudex should take another action immediately in this same user turn. "
+        "It does not mean staying alive, waiting for the user, or asking the user for a future task.\n"
         "Return exactly one JSON object with this shape: "
-        "{\"continue\":true|false,\"reason\":\"...\",\"next_action\":\"reply|command|write_file|search|verify\",\"instruction\":\"...\"}.\n"
+        "{\"continue\":true|false,\"reason\":\"...\",\"next_action\":\"none|command|write_file|search|verify\",\"instruction\":\"...\"}.\n"
         "Say continue=true when the assistant reply is only a promise, plan, or next-step narration and the user's task still needs action.\n"
         "Say continue=true when the user asked Spudex to take an action, but no command/file/search/verify action has happened yet.\n"
         "Say continue=true when the assistant asks the user for missing input, but the user's task can still start from a reasonable generic action such as search, inspection, or a local command.\n"
-        "Say continue=false when the reply directly answers a question, reports completed work based on observations, no command is needed, or a genuinely specific private link/file/path/secret/detail is required before any useful action can happen.\n"
-        "When continue=true, reason through what useful action is available now, then set next_action and instruction for the next Spudex model call without hard-coded provider-specific assumptions.\n"
+        "Say continue=false for greetings, small talk, capability questions, or normal conversational replies, even when the assistant is waiting for the user's next message.\n"
+        "Say continue=false when the reply directly answers a question, asks for a future user task, reports completed work based on observations, no command is needed, or a genuinely specific private link/file/path/secret/detail is required before any useful action can happen.\n"
+        "When continue=true, reason through what useful action is available now, then set next_action to command, write_file, search, or verify and give an instruction for the next Spudex model call without hard-coded provider-specific assumptions.\n"
         "The reason should briefly explain the semantic decision; the instruction should be a direct next-step instruction, not a transcript of hidden reasoning.\n"
         "Be conservative about stopping: if a useful next action can be taken now, continue.\n"
     )
@@ -344,11 +350,23 @@ async def run_spudex_chat_turn(
                     wrote_files=wrote_files,
                 )
                 if bool(continuation.get("continue")):
-                    next_action = str(continuation.get("next_action") or "").strip()
+                    next_action = str(continuation.get("next_action") or "").strip().lower()
+                    if next_action in {"research", "websearch", "web_search", "search_web", "research_web"}:
+                        next_action = "search"
                     instruction = str(continuation.get("instruction") or "").strip()
+                    if next_action not in _ACTIONABLE_CONTINUATION_ACTIONS:
+                        set_spudex_memory_summary(session_id, decision.get("memory_summary") or final_text)
+                        append_session_log(session_id, stream="assistant", text=final_text, level="info")
+                        finish_spudex_plan(session_id, success=True)
+                        update_spudex_session(session_id, status="succeeded", finished_ts=time.time())
+                        return action_success(
+                            facts={"session_id": session_id, "commands": len(ran_commands), "searches": len(ran_searches), "files": len(wrote_files)},
+                            data={"session_id": session_id, "commands": ran_commands, "searches": ran_searches, "files": wrote_files},
+                            summary_for_user=final_text,
+                        )
                     instruction_note = ""
-                    if next_action or instruction:
-                        instruction_note = f" Suggested next_action={next_action or 'action'}: {instruction or 'choose the next useful action.'}"
+                    if instruction:
+                        instruction_note = f" Suggested next_action={next_action}: {instruction}"
                     note = (
                         f"Continuation judge ({continuation.get('source')}) said to continue: {continuation.get('reason')}. "
                         "Return the next command, write_file, search, or verify object now."
