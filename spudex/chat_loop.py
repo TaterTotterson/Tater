@@ -191,6 +191,62 @@ async def _ai_should_continue_reply(
     }
 
 
+async def _ai_review_attempt(
+    *,
+    llm_client: Any,
+    settings: Dict[str, Any],
+    user_message: str,
+    attempt: Dict[str, Any],
+    ran_commands: List[Dict[str, Any]],
+    ran_searches: List[Dict[str, Any]],
+    wrote_files: List[Dict[str, Any]],
+    loop_notes: List[str],
+) -> str:
+    review_prompt = (
+        "You are Tater's Spudex attempt reviewer.\n"
+        "Review the latest failed or weak action and produce one short model-facing note for the next planning step.\n"
+        "Return exactly one JSON object: {\"note\":\"...\"}.\n"
+        "The note should explain what was tried, why it did not answer the user's request, and what kind of meaningfully different next move should be considered.\n"
+        "Do not reveal hidden chain-of-thought. Do not list hard-coded command names. Prefer tool/action categories, observed facts, and constraints from the payload.\n"
+        "If the task is now blocked, say what specific user input is missing. If it is not blocked, say what should change about the approach.\n"
+    )
+    review_payload = {
+        "user_message": user_message,
+        "latest_attempt": attempt,
+        "commands_this_turn": ran_commands[-5:],
+        "searches_this_turn": ran_searches[-5:],
+        "files_this_turn": wrote_files[-5:],
+        "recent_loop_notes": loop_notes[-5:],
+    }
+    try:
+        resp = await asyncio.wait_for(
+            llm_client.chat(
+                messages=[
+                    {"role": "system", "content": review_prompt},
+                    {"role": "user", "content": json.dumps(review_payload, ensure_ascii=False, default=str)},
+                ],
+                temperature=0.0,
+            ),
+            timeout=min(10, max(5, int(settings.get("command_timeout_sec") or 45) // 3)),
+        )
+        decision = _strict_json(_messages_content(resp))
+        note = str(decision.get("note") or "").strip()
+        return note[:900]
+    except Exception as exc:
+        return f"Attempt review unavailable: {exc}"
+
+
+def _search_attempt_needs_review(search_row: Dict[str, Any]) -> bool:
+    if not bool(search_row.get("ok")):
+        return True
+    if bool(search_row.get("enough")):
+        return False
+    answer = str(search_row.get("answer") or "").strip()
+    sources = search_row.get("sources") if isinstance(search_row.get("sources"), list) else []
+    missing = str(search_row.get("missing") or "").strip()
+    return not answer or not sources or bool(missing)
+
+
 async def run_spudex_chat_turn(
     *,
     session_id: str,
@@ -240,6 +296,8 @@ async def run_spudex_chat_turn(
         "- If the user asks you to look up, research, inspect examples, find docs, or gather public information, start with search JSON when no exact local file or URL is required.\n"
         "- Ask for missing details only when the task genuinely cannot start without that specific user-provided input.\n"
         "- Do not reply with 'I will run/check/try...' as a final answer. If you need to run/check/try something, return command, write_file, search, or verify now.\n"
+        "- Before every action after the first, read loop_notes, commands_this_turn, searches_this_turn, and files_this_turn. Your next action must account for what already happened.\n"
+        "- If the last attempt failed, returned no useful result, or did not answer the user's correction, explain in the action reason how the new approach differs or why stopping/asking is now appropriate.\n"
         "- After a command fails, never stop at 'I can try another way'. Return the next action JSON immediately.\n"
         "- If command_feedback shows error_code executable_not_found, do not retry that executable until you have installed it or completed another successful recovery action.\n"
         "- If an executable is missing and the task truly needs it, install the package that provides it when execution_settings allow installs/package managers or policy_disabled is true; then retry after the install succeeds.\n"
@@ -394,7 +452,23 @@ async def run_spudex_chat_turn(
                 update_spudex_session(session_id, status="failed", finished_ts=time.time())
                 return action_failure(code="spudex_chat_bad_search", message=final_text)
             reason = str(decision.get("reason") or "").strip()
-            ran_searches.append(await _run_search_query(query, reason=reason, decision=decision))
+            search_row = await _run_search_query(query, reason=reason, decision=decision)
+            ran_searches.append(search_row)
+            if _search_attempt_needs_review(search_row) and step < max_steps - 1:
+                review_note = await _ai_review_attempt(
+                    llm_client=llm_client,
+                    settings=settings,
+                    user_message=user_message,
+                    attempt={"action": "search", **search_row},
+                    ran_commands=ran_commands,
+                    ran_searches=ran_searches,
+                    wrote_files=wrote_files,
+                    loop_notes=loop_notes,
+                )
+                if review_note:
+                    note = f"Attempt review after weak search result: {review_note}"
+                    loop_notes.append(note)
+                    append_session_log(session_id, stream="system", text=note, level="warning")
             continue
 
         if kind == "write_file":
@@ -428,6 +502,21 @@ async def run_spudex_chat_turn(
                     "error": write_result.get("error") if isinstance(write_result.get("error"), dict) else {},
                 }
             )
+            if not bool(write_result.get("ok")) and step < max_steps - 1:
+                review_note = await _ai_review_attempt(
+                    llm_client=llm_client,
+                    settings=settings,
+                    user_message=user_message,
+                    attempt={"action": "write_file", **wrote_files[-1]},
+                    ran_commands=ran_commands,
+                    ran_searches=ran_searches,
+                    wrote_files=wrote_files,
+                    loop_notes=loop_notes,
+                )
+                if review_note:
+                    note = f"Attempt review after failed file write: {review_note}"
+                    loop_notes.append(note)
+                    append_session_log(session_id, stream="system", text=note, level="warning")
             continue
 
         if kind == "verify":
@@ -482,6 +571,21 @@ async def run_spudex_chat_turn(
                     "error": result.get("error") if isinstance(result.get("error"), dict) else {},
                 }
             )
+            if not bool(result.get("ok")) and step < max_steps - 1:
+                review_note = await _ai_review_attempt(
+                    llm_client=llm_client,
+                    settings=settings,
+                    user_message=user_message,
+                    attempt={"action": "verify", **ran_commands[-1]},
+                    ran_commands=ran_commands,
+                    ran_searches=ran_searches,
+                    wrote_files=wrote_files,
+                    loop_notes=loop_notes,
+                )
+                if review_note:
+                    note = f"Attempt review after failed verification: {review_note}"
+                    loop_notes.append(note)
+                    append_session_log(session_id, stream="system", text=note, level="warning")
             continue
 
         if kind != "command":
@@ -537,6 +641,21 @@ async def run_spudex_chat_turn(
                 "error": error,
             }
         )
+        if not bool(result.get("ok")) and step < max_steps - 1:
+            review_note = await _ai_review_attempt(
+                llm_client=llm_client,
+                settings=settings,
+                user_message=user_message,
+                attempt={"action": "command", **ran_commands[-1]},
+                ran_commands=ran_commands,
+                ran_searches=ran_searches,
+                wrote_files=wrote_files,
+                loop_notes=loop_notes,
+            )
+            if review_note:
+                note = f"Attempt review after failed command: {review_note}"
+                loop_notes.append(note)
+                append_session_log(session_id, stream="system", text=note, level="warning")
         if not bool(result.get("ok")) and result.get("error"):
             continue
 
