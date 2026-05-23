@@ -74,8 +74,7 @@ def ha_upload_local_media_source_file_sync(*args, **kwargs):
 
 
 def huggingface_environment(overrides: Optional[Dict[str, Any]] = None, client: Any = None) -> Dict[str, Any]:
-    fn = _integration_function("huggingface", "huggingface_environment")
-    return fn(overrides, client) if fn else dict(overrides or {})
+    return integration_store_module.huggingface_environment(overrides, client)
 
 
 def sonos_play_media_sync(*args, **kwargs):

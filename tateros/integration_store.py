@@ -78,6 +78,15 @@ KNOWN_INTEGRATION_REDIS_KEYS = {
 }
 
 
+def _redis_text(value) -> str:
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8", errors="ignore").strip()
+        except Exception:
+            return str(value or "").strip()
+    return str(value or "").strip()
+
+
 def ensure_integration_import_context() -> None:
     integration_dir = Path(INTEGRATION_DIR).resolve()
     parent = str(integration_dir.parent)
@@ -627,12 +636,94 @@ def integration_module(
         return None
 
 
-def integration_function(integration_id: str, function_name: str, *, require_enabled: bool = True):
-    module = integration_module(integration_id, require_enabled=require_enabled)
+def integration_function(
+    integration_id: str,
+    function_name: str,
+    *,
+    require_enabled: bool = True,
+    auto_restore: bool = True,
+):
+    module = integration_module(integration_id, require_enabled=require_enabled, auto_restore=auto_restore)
     if module is None:
         return None
     fn = getattr(module, str(function_name or "").strip(), None)
     return fn if callable(fn) else None
+
+
+def _huggingface_saved_token(client=None) -> str:
+    store = client or redis_client
+    try:
+        raw = store.hgetall("huggingface_settings") or {}
+    except Exception:
+        raw = {}
+    normalized: dict[str, str] = {}
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            key_text = _redis_text(key)
+            if key_text:
+                value_text = _redis_text(value)
+                normalized[key_text] = value_text
+                normalized[key_text.lower()] = value_text
+    return (
+        normalized.get("HUGGINGFACE_TOKEN")
+        or normalized.get("huggingface_token")
+        or normalized.get("HF_TOKEN")
+        or normalized.get("hf_token")
+        or ""
+    ).strip()
+
+
+def huggingface_token(client=None) -> str:
+    saved = _huggingface_saved_token(client)
+    if saved:
+        return saved
+    for key in (
+        "HF_TOKEN",
+        "HUGGINGFACE_HUB_TOKEN",
+        "HUGGING_FACE_HUB_TOKEN",
+        "HUGGINGFACE_TOKEN",
+        "HF_HUB_TOKEN",
+        "HUGGINGFACE_API_TOKEN",
+    ):
+        token = _redis_text(os.getenv(key))
+        if token:
+            return token
+    return ""
+
+
+def huggingface_environment(overrides: dict | None = None, client=None) -> dict:
+    env = dict(overrides or {})
+    fn = integration_function(
+        "huggingface",
+        "huggingface_environment",
+        require_enabled=False,
+        auto_restore=False,
+    )
+    if fn:
+        try:
+            provided = fn(env, client)
+            if isinstance(provided, dict):
+                env.update(provided)
+        except Exception as exc:
+            logger.debug("[integrations] Hugging Face environment provider failed: %s", exc)
+
+    token = _redis_text(
+        env.get("HF_TOKEN")
+        or env.get("HUGGINGFACE_HUB_TOKEN")
+        or env.get("HUGGING_FACE_HUB_TOKEN")
+        or env.get("HUGGINGFACE_TOKEN")
+        or env.get("HF_HUB_TOKEN")
+        or env.get("HUGGINGFACE_API_TOKEN")
+        or huggingface_token(client)
+    )
+    if token:
+        env["HF_TOKEN"] = token
+        env["HUGGINGFACE_HUB_TOKEN"] = token
+        env["HUGGING_FACE_HUB_TOKEN"] = token
+        env["HUGGINGFACE_TOKEN"] = token
+        env["HF_HUB_TOKEN"] = token
+        env["HUGGINGFACE_API_TOKEN"] = token
+    return env
 
 
 def _installed_integration_ids() -> list[str]:
