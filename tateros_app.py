@@ -2535,6 +2535,91 @@ def _dashboard_updates_snapshot() -> Dict[str, Any]:
     }
 
 
+_DASHBOARD_SHOP_UPDATE_CARD_KINDS = (
+    ("verbas", "Verba"),
+    ("portals", "Portals"),
+    ("cores", "Cores"),
+    ("integrations", "Integrations"),
+)
+
+
+def _dashboard_update_group_map(updates: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    groups = updates.get("groups") if isinstance(updates, dict) and isinstance(updates.get("groups"), list) else []
+    out: Dict[str, Dict[str, Any]] = {}
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        kind = str(group.get("kind") or "").strip()
+        if kind:
+            out[kind] = group
+    return out
+
+
+def _dashboard_update_group_error(group: Dict[str, Any]) -> str:
+    error = str(group.get("error") or "").strip()
+    if error:
+        return error
+    errors = group.get("errors") if isinstance(group.get("errors"), list) else []
+    return "; ".join(str(item).strip() for item in errors[:2] if str(item).strip())
+
+
+def _dashboard_update_card_detail(group: Dict[str, Any], *, count: int) -> str:
+    error = _dashboard_update_group_error(group)
+    if error:
+        return error
+    items = group.get("items") if isinstance(group.get("items"), list) else []
+    names = [
+        str(item.get("name") or item.get("id") or "").strip()
+        for item in items[:2]
+        if isinstance(item, dict) and str(item.get("name") or item.get("id") or "").strip()
+    ]
+    if names:
+        more = count - len(names)
+        return ", ".join(names) + (f" +{more} more" if more > 0 else "")
+    return "No pending updates."
+
+
+def _dashboard_update_status_cards(updates: Dict[str, Any]) -> List[Dict[str, Any]]:
+    groups = _dashboard_update_group_map(updates)
+    cards: List[Dict[str, Any]] = []
+    for kind, fallback_label in _DASHBOARD_SHOP_UPDATE_CARD_KINDS:
+        group = groups.get(kind) or {"kind": kind, "label": fallback_label, "count": 0, "items": []}
+        label = str(group.get("label") or fallback_label).strip() or fallback_label
+        count = _dashboard_safe_int(group.get("count"))
+        error = _dashboard_update_group_error(group)
+        cards.append(
+            {
+                "id": f"updates_{kind}",
+                "label": label,
+                "value": "Needs check" if error else (f"{count} available" if count > 0 else "Current"),
+                "detail": _dashboard_update_card_detail(group, count=count),
+                "tone": "warning" if error or count > 0 else "good",
+                "action_target": kind,
+                "action_label": f"Open {label}",
+            }
+        )
+    return cards
+
+
+def _dashboard_apply_live_updates(snapshot: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+    out = dict(snapshot)
+    out["updates"] = updates
+    existing_cards = snapshot.get("cards") if isinstance(snapshot.get("cards"), list) else []
+    cards = [
+        dict(card)
+        for card in existing_cards
+        if isinstance(card, dict)
+        and str(card.get("id") or "").strip() != "updates"
+        and not str(card.get("id") or "").strip().startswith("updates_")
+    ]
+    update_cards = _dashboard_update_status_cards(updates)
+    insert_at = 1 if cards else 0
+    out["cards"] = cards[:insert_at] + update_cards + cards[insert_at:]
+    return out
+
+
 def _autostart_enabled_surfaces() -> None:
     core_entries = core_registry_module.refresh_core_registry()
     portal_entries = portal_registry_module.refresh_portal_registry()
@@ -5670,19 +5755,6 @@ def _dashboard_build_snapshot() -> Dict[str, Any]:
             include_image=False,
         )
 
-    update_total = _dashboard_safe_int(updates.get("total"))
-    update_errors = updates.get("errors") if isinstance(updates.get("errors"), list) else []
-    update_groups = updates.get("groups") if isinstance(updates.get("groups"), list) else []
-    update_target = ""
-    for wanted_kind in ("firmware", "cores", "portals", "verbas"):
-        if any(
-            isinstance(group, dict)
-            and str(group.get("kind") or "").strip() == wanted_kind
-            and _dashboard_safe_int(group.get("count")) > 0
-            for group in update_groups
-        ):
-            update_target = wanted_kind
-            break
     cards: List[Dict[str, Any]] = [
         {
             "id": "tater",
@@ -5691,19 +5763,7 @@ def _dashboard_build_snapshot() -> Dict[str, Any]:
             "detail": "Redis connected" if bool(health_payload.get("redis")) else "Redis needs attention",
             "tone": "good" if bool(health_payload.get("ok")) else "warning",
         },
-        {
-            "id": "updates",
-            "label": "Updates",
-            "value": (
-                f"{update_total} available"
-                if update_total > 0
-                else ("Check needed" if update_errors else "Current")
-            ),
-            "detail": str(updates.get("summary") or ("Update scan needs attention." if update_errors else "")).strip(),
-            "tone": "warning" if update_total > 0 or update_errors else "good",
-            "action_target": update_target,
-            "action_label": "Open Firmware" if update_target == "firmware" else ("Open Updates" if update_target else ""),
-        },
+        *_dashboard_update_status_cards(updates),
         {
             "id": "hydra",
             "label": "Hydra",
@@ -5816,6 +5876,9 @@ async def _dashboard_payload(
             snapshot = await run_dashboard(_dashboard_build_snapshot)
             rebuilt_snapshot = True
             snapshot_meta = _dashboard_snapshot_meta(source="live")
+    if not rebuilt_snapshot:
+        live_updates = await run_dashboard(_dashboard_updates_snapshot)
+        snapshot = await run_dashboard(_dashboard_apply_live_updates, snapshot, live_updates)
     contexts = _dashboard_brief_contexts(snapshot)
     context_ids = {str(context.get("id") or "").strip() for context in contexts}
     cached = await run_dashboard(_dashboard_cache_rows)
@@ -5853,6 +5916,7 @@ async def _dashboard_payload(
         "brief_ttl_seconds": DASHBOARD_BRIEF_TTL_SECONDS,
         "brief_refresh": _dashboard_brief_refresh_snapshot(stale_ids),
         "cards": snapshot.get("cards") or [],
+        "updates": snapshot.get("updates") if isinstance(snapshot.get("updates"), dict) else {},
         "sections": snapshot.get("sections") or [],
         "briefs": [row for row in briefs if str(row.get("id") or "").strip() in context_ids],
         "settings": snapshot.get("settings") if isinstance(snapshot.get("settings"), dict) else {},

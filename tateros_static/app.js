@@ -11708,8 +11708,21 @@ function dashboardUpdateGroups(updates) {
 function renderDashboardUpdatesPanel(updates) {
   const body = updates && typeof updates === "object" ? updates : {};
   const total = Number(body.total || 0);
-  const groups = dashboardUpdateGroups(body).filter((group) => Number(group.count || 0) > 0 || String(group.error || "").trim());
-  if (!groups.length && total <= 0) {
+  const allGroups = dashboardUpdateGroups(body);
+  const shopKinds = [
+    ["verbas", "Verba"],
+    ["portals", "Portals"],
+    ["cores", "Cores"],
+    ["integrations", "Integrations"],
+  ];
+  const groupsByKind = new Map(allGroups.map((group) => [String(group.kind || "").trim(), group]));
+  const shopGroups = shopKinds.map(([kind, label]) => groupsByKind.get(kind) || { kind, label, count: 0, items: [] });
+  const extraGroups = allGroups.filter((group) => {
+    const kind = String(group.kind || "").trim();
+    return !shopKinds.some(([shopKind]) => shopKind === kind) && (Number(group.count || 0) > 0 || String(group.error || "").trim());
+  });
+  const groups = [...shopGroups, ...extraGroups];
+  if (!groups.length) {
     return "";
   }
   return `
@@ -11729,7 +11742,7 @@ function renderDashboardUpdatesPanel(updates) {
             const count = Number(group.count || 0);
             const error = String(group.error || "").trim();
             const items = Array.isArray(group.items) ? group.items : [];
-            const openLabel = kind === "firmware" ? "Open Firmware" : "Open Updates";
+            const openLabel = kind === "firmware" ? "Open Firmware" : `Open ${label}`;
             const openAttrs = kind
               ? ` data-dashboard-update-target="${escapeHtml(kind)}" role="button" tabindex="0"`
               : "";
@@ -12631,6 +12644,17 @@ async function openDashboardUpdateTarget(rawTarget) {
       await ensureEspHomeRuntimeLoaded({ force: true, panel: "firmware" });
     }
     document.getElementById("settings-esphome-runtime-firmware")?.scrollIntoView({ block: "start", behavior: "smooth" });
+    return;
+  }
+  if (target === "integrations") {
+    setPreferredSettingsTab("integrations");
+    setPreferredIntegrationTab("manager");
+    await loadView("settings");
+    const managerButton = document.querySelector("#settings-integrations-shell .settings-subtab-btn[data-integrations-tab='manager']");
+    if (managerButton instanceof HTMLElement) {
+      managerButton.click();
+    }
+    document.getElementById("settings-integrations-shell")?.scrollIntoView({ block: "start", behavior: "smooth" });
     return;
   }
   if (["cores", "portals", "verbas"].includes(target)) {
