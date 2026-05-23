@@ -53,6 +53,7 @@ const state = {
   view: "dashboard",
   sessionId: safeStorageGet("tater_tateros_session_id", "") || createSessionId(),
   settingsTab: safeStorageGet("tater_tateros_settings_tab", "") || "general",
+  integrationSubtab: safeStorageGet("tater_tateros_integration_tab", "") || "setup",
   dashboardPayload: null,
   dashboardShowStatusTiles: String(safeStorageGet("tater_dashboard_show_status_tiles", "true")).trim().toLowerCase() !== "false",
   dashboardShowMetrics: String(safeStorageGet("tater_dashboard_show_metrics", "true")).trim().toLowerCase() !== "false",
@@ -1175,6 +1176,14 @@ function setPreferredSettingsTab(tabKey) {
   return normalized;
 }
 
+function setPreferredIntegrationTab(tabKey) {
+  const token = String(tabKey || "").trim().toLowerCase();
+  const normalized = ["setup", "manager", "devices", "runtime"].includes(token) ? token : "setup";
+  state.integrationSubtab = normalized;
+  safeStorageSet("tater_tateros_integration_tab", normalized);
+  return normalized;
+}
+
 function parseSettingValue(raw, type) {
   if (type === "number") {
     const parsed = Number(raw);
@@ -1367,30 +1376,90 @@ function integrationRuntimeTimeLabel(epochRaw) {
   return `${_runtimeAgeLabel(Math.max(0, Date.now() / 1000 - epoch))} ago`;
 }
 
+function integrationRuntimeNameFromId(integrationId) {
+  const id = String(integrationId || "").trim();
+  const known = {
+    aladdin: "Aladdin",
+    brave_search: "Brave Search",
+    ecobee_homekit: "Ecobee",
+    google_search: "Google Search",
+    homeassistant: "Home Assistant",
+    homekit: "HomeKit",
+    hue: "Philips Hue",
+    searxng_search: "SearXNG Search",
+    serper_search: "Serper Search",
+    sonos: "Sonos",
+    unifi_network: "UniFi Network",
+    unifi_protect: "UniFi Protect",
+    weather_api: "WeatherAPI",
+  };
+  if (known[id]) {
+    return known[id];
+  }
+  return id
+    .split("_")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ") || "Integration";
+}
+
+function integrationRuntimeProviderIds(runtime) {
+  const enabled = Array.isArray(runtime?.enabled_integrations)
+    ? runtime.enabled_integrations.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  if (enabled.length) {
+    return enabled;
+  }
+  return ["homeassistant", "unifi_protect", "unifi_network", "hue", "homekit"].filter((id) =>
+    Object.prototype.hasOwnProperty.call(runtime || {}, `${id === "homekit" ? "ecobee_homekit" : id}_connected`) ||
+    Object.prototype.hasOwnProperty.call(runtime || {}, `${id === "homekit" ? "ecobee_homekit" : id}_configured`)
+  );
+}
+
+function integrationRuntimeStatusPrefix(integrationId) {
+  return integrationId === "homekit" ? "ecobee_homekit" : integrationId;
+}
+
+function integrationRuntimeProviderIsEnabled(provider, enabledIds) {
+  const token = String(provider || "").trim();
+  const owner = token === "ecobee_homekit" ? "homekit" : token;
+  const enabled = new Set((Array.isArray(enabledIds) ? enabledIds : []).map((item) => String(item || "").trim()).filter(Boolean));
+  return !token || enabled.has(token) || enabled.has(owner);
+}
+
 function renderSettingsIntegrationRuntimeSummary(runtime) {
   const row = runtime && typeof runtime === "object" ? runtime : {};
+  const providerIds = integrationRuntimeProviderIds(row);
+  const showLastEvent = row.last_event_ts && integrationRuntimeProviderIsEnabled(row.last_event_provider, providerIds);
+  const providerHtml = providerIds.length
+    ? providerIds
+        .map((integrationId) => {
+          const prefix = integrationRuntimeStatusPrefix(integrationId);
+          const hasRuntimeFields = [
+            `${prefix}_configured`,
+            `${prefix}_connected`,
+            `${prefix}_ws_connected`,
+            `${prefix}_poll_connected`,
+            `${prefix}_eventstream_connected`,
+          ].some((field) => Object.prototype.hasOwnProperty.call(row, field));
+          const statusText = hasRuntimeFields ? integrationRuntimeStatusLabel(row, prefix) : "Enabled";
+          return `
+            <div class="core-metric-pill">
+              <div class="small">${escapeHtml(integrationRuntimeNameFromId(integrationId))}</div>
+              <strong>${escapeHtml(statusText)}</strong>
+            </div>
+          `;
+        })
+        .join("")
+    : `
+      <div class="core-metric-pill">
+        <div class="small">Integrations</div>
+        <strong>None enabled</strong>
+      </div>
+    `;
   return `
     <div class="core-metric-row">
-      <div class="core-metric-pill">
-        <div class="small">Home Assistant</div>
-        <strong>${escapeHtml(integrationRuntimeStatusLabel(row, "homeassistant"))}</strong>
-      </div>
-      <div class="core-metric-pill">
-        <div class="small">UniFi Protect</div>
-        <strong>${escapeHtml(integrationRuntimeStatusLabel(row, "unifi_protect"))}</strong>
-      </div>
-      <div class="core-metric-pill">
-        <div class="small">UniFi Network</div>
-        <strong>${escapeHtml(integrationRuntimeStatusLabel(row, "unifi_network"))}</strong>
-      </div>
-      <div class="core-metric-pill">
-        <div class="small">Philips Hue</div>
-        <strong>${escapeHtml(integrationRuntimeStatusLabel(row, "hue"))}</strong>
-      </div>
-      <div class="core-metric-pill">
-        <div class="small">Ecobee</div>
-        <strong>${escapeHtml(integrationRuntimeStatusLabel(row, "ecobee_homekit"))}</strong>
-      </div>
+      ${providerHtml}
       <div class="core-metric-pill">
         <div class="small">Events</div>
         <strong>${escapeHtml(String(row.last_event_seq || 0))}</strong>
@@ -1401,7 +1470,7 @@ function renderSettingsIntegrationRuntimeSummary(runtime) {
       </div>
     </div>
     ${
-      row.last_event_ts
+      showLastEvent
         ? `<div class="small" style="margin-top: 8px;">Last event ${escapeHtml(
             integrationRuntimeTimeLabel(row.last_event_ts)
           )}</div>`
@@ -1699,6 +1768,7 @@ function bindSettingsIntegrationTabs(root = document) {
   }
   const activate = (tabKey) => {
     const key = String(tabKey || "setup").trim() || "setup";
+    setPreferredIntegrationTab(key);
     host.dataset.integrationsActiveTab = key;
     buttons.forEach((button) => {
       button.classList.toggle("active", button.dataset.integrationsTab === key);
@@ -1712,14 +1782,40 @@ function bindSettingsIntegrationTabs(root = document) {
       document.getElementById("settings-integration-devices-refresh")?.click();
     }
   };
+  const refreshIntegrationSubtab = async (tabKey) => {
+    const key = String(tabKey || "setup").trim() || "setup";
+    if (host.dataset.integrationsSubtabRefreshing === "1") {
+      return;
+    }
+    host.dataset.integrationsSubtabRefreshing = "1";
+    setPreferredSettingsTab("integrations");
+    setPreferredIntegrationTab(key);
+    try {
+      await loadSettingsView();
+    } catch (error) {
+      activate(key);
+      showToast(`Integration ${key} refresh failed: ${error.message}`, "error", 3600);
+    } finally {
+      if (document.body.contains(host)) {
+        delete host.dataset.integrationsSubtabRefreshing;
+      }
+    }
+  };
   buttons.forEach((button) => {
     if (button.dataset.integrationsTabBound === "1") {
       return;
     }
     button.dataset.integrationsTabBound = "1";
-    button.addEventListener("click", () => activate(button.dataset.integrationsTab));
+    button.addEventListener("click", () => {
+      const key = String(button.dataset.integrationsTab || "setup").trim() || "setup";
+      if (key === "setup" || key === "devices") {
+        refreshIntegrationSubtab(key);
+        return;
+      }
+      activate(key);
+    });
   });
-  activate(String(host.dataset.integrationsActiveTab || "setup").trim() || "setup");
+  activate(String(host.dataset.integrationsActiveTab || state.integrationSubtab || "setup").trim() || "setup");
 }
 
 function collectSettingsIntegrationPayload(integration) {
@@ -3551,6 +3647,9 @@ function shopEndpoint(kind) {
   if (kind === "verbas") {
     return "/api/shop/verbas";
   }
+  if (kind === "integrations") {
+    return "/api/shop/integrations";
+  }
   if (kind === "cores") {
     return "/api/shop/cores";
   }
@@ -3563,6 +3662,9 @@ function shopLabel(kind) {
   }
   if (kind === "cores") {
     return "Core";
+  }
+  if (kind === "integrations") {
+    return "Integration";
   }
   return "Portal";
 }
@@ -3681,8 +3783,9 @@ function renderShopManager(kind, data) {
   const installedHtml = installed.length
     ? installed
         .map((entry) => {
-          const enabledText = kind === "verbas" ? ` • enabled: ${entry.enabled ? "yes" : "no"}` : "";
-          const runtimeText = kind !== "verbas" ? ` • running: ${entry.running ? "yes" : "no"}` : "";
+          const enabledText = kind === "verbas" || kind === "integrations" ? ` • enabled: ${entry.enabled ? "yes" : "no"}` : "";
+          const runtimeText = Object.prototype.hasOwnProperty.call(entry, "running") ? ` • running: ${entry.running ? "yes" : "no"}` : "";
+          const requiredText = entry.required ? " • required" : "";
           const platformText = entry.platforms_str ? `<div class="small">Portals: ${escapeHtml(entry.platforms_str)}</div>` : "";
 
           return `
@@ -3691,9 +3794,17 @@ function renderShopManager(kind, data) {
                 <h3 class="card-title">${escapeHtml(entry.name || entry.id)}</h3>
                 <span class="small">${escapeHtml(entry.id)}</span>
               </div>
-              <div class="small">installed: ${escapeHtml(entry.installed_ver || "0.0.0")} • store: ${escapeHtml(entry.store_ver || "-")} • source: ${escapeHtml(entry.source_label || "local")}${enabledText}${runtimeText}</div>
+              <div class="small">installed: ${escapeHtml(entry.installed_ver || "0.0.0")} • store: ${escapeHtml(entry.store_ver || "-")} • source: ${escapeHtml(entry.source_label || "local")}${enabledText}${runtimeText}${requiredText}</div>
               <div class="muted">${escapeHtml(entry.description || "")}</div>
               ${platformText}
+              ${kind === "integrations" ? `
+              <div class="inline-row" style="margin-top:8px;">
+                ${entry.enabled
+                  ? entry.required
+                    ? `<button class="inline-btn" disabled>Required</button>`
+                    : `<button class="inline-btn shop-action" data-kind="${kind}" data-action="disable" data-id="${escapeHtml(entry.id)}">Disable</button>`
+                  : `<button class="action-btn shop-action" data-kind="${kind}" data-action="enable" data-id="${escapeHtml(entry.id)}">Enable</button>`}
+              </div>` : ""}
               <div class="small" style="margin-top:8px;">Use <strong>Manage</strong> tab for update/remove actions.</div>
             </article>
           `;
@@ -3714,7 +3825,7 @@ function renderShopManager(kind, data) {
               <div class="small">version: ${escapeHtml(item.version || "-")} • source: ${escapeHtml(item.source_label || "")}${escapeHtml(platforms)}</div>
               <div class="muted">${escapeHtml(item.description || "")}</div>
               <div class="inline-row" style="margin-top:8px;">
-                <button class="action-btn shop-action" data-kind="${kind}" data-action="install" data-id="${escapeHtml(item.id)}">Install</button>
+                <button class="action-btn shop-action" data-kind="${kind}" data-action="install" data-id="${escapeHtml(item.id)}">${kind === "integrations" ? "Download" : "Install"}</button>
               </div>
             </article>
           `;
@@ -3776,14 +3887,19 @@ function renderShopTabbedManager(kind, data, options = {}) {
   const runtimeHtml = String(options.runtimeHtml || "").trim();
   const runtimeTitle = String(options.runtimeTitle || `${noun} Runtime`).trim();
   const runtimeCard = options.runtimeCard !== false;
+  const showInstalledTab = Object.prototype.hasOwnProperty.call(options, "showInstalledTab")
+    ? Boolean(options.showInstalledTab)
+    : kind !== "integrations";
+  const defaultTab = showInstalledTab ? "installed" : "store";
 
   const warningsHtml = errors.map((entry) => renderNotice(`${noun} shop: ${entry}`)).join("");
 
   const installedHtml = installed.length
     ? installed
         .map((entry) => {
-          const enabledText = kind === "verbas" ? ` • enabled: ${entry.enabled ? "yes" : "no"}` : "";
-          const runtimeText = kind !== "verbas" ? ` • running: ${entry.running ? "yes" : "no"}` : "";
+          const enabledText = kind === "verbas" || kind === "integrations" ? ` • enabled: ${entry.enabled ? "yes" : "no"}` : "";
+          const runtimeText = Object.prototype.hasOwnProperty.call(entry, "running") ? ` • running: ${entry.running ? "yes" : "no"}` : "";
+          const requiredText = entry.required ? " • required" : "";
           const platformText = entry.platforms_str ? `<div class="small">Portals: ${escapeHtml(entry.platforms_str)}</div>` : "";
 
           return `
@@ -3792,9 +3908,17 @@ function renderShopTabbedManager(kind, data, options = {}) {
                 <h3 class="card-title">${escapeHtml(entry.name || entry.id)}</h3>
                 <span class="small">${escapeHtml(entry.id)}</span>
               </div>
-              <div class="small">installed: ${escapeHtml(entry.installed_ver || "0.0.0")} • store: ${escapeHtml(entry.store_ver || "-")} • source: ${escapeHtml(entry.source_label || "local")}${enabledText}${runtimeText}</div>
+              <div class="small">installed: ${escapeHtml(entry.installed_ver || "0.0.0")} • store: ${escapeHtml(entry.store_ver || "-")} • source: ${escapeHtml(entry.source_label || "local")}${enabledText}${runtimeText}${requiredText}</div>
               <div class="muted">${escapeHtml(entry.description || "")}</div>
               ${platformText}
+              ${kind === "integrations" ? `
+              <div class="inline-row" style="margin-top:8px;">
+                ${entry.enabled
+                  ? entry.required
+                    ? `<button class="inline-btn" disabled>Required</button>`
+                    : `<button class="inline-btn shop-action" data-kind="${kind}" data-action="disable" data-id="${escapeHtml(entry.id)}">Disable</button>`
+                  : `<button class="action-btn shop-action" data-kind="${kind}" data-action="enable" data-id="${escapeHtml(entry.id)}">Enable</button>`}
+              </div>` : ""}
             </article>
           `;
         })
@@ -3814,7 +3938,7 @@ function renderShopTabbedManager(kind, data, options = {}) {
               <div class="small">version: ${escapeHtml(item.version || "-")} • source: ${escapeHtml(item.source_label || "")}${escapeHtml(platforms)}</div>
               <div class="muted">${escapeHtml(item.description || "")}</div>
               <div class="inline-row" style="margin-top:8px;">
-                <button class="action-btn shop-action" data-kind="${kind}" data-action="install" data-id="${escapeHtml(item.id)}">Install</button>
+                <button class="action-btn shop-action" data-kind="${kind}" data-action="install" data-id="${escapeHtml(item.id)}">${kind === "integrations" ? "Download" : "Install"}</button>
               </div>
             </article>
           `;
@@ -3828,23 +3952,35 @@ function renderShopTabbedManager(kind, data, options = {}) {
           const updateButton = entry.update_available
             ? `<button class="action-btn shop-action" data-kind="${kind}" data-action="update" data-id="${escapeHtml(entry.id)}">Update</button>`
             : `<button class="inline-btn" disabled>Up to date</button>`;
-          const enabledText = kind === "verbas" ? ` • enabled: ${entry.enabled ? "yes" : "no"}` : "";
-          const runtimeText = kind !== "verbas" ? ` • running: ${entry.running ? "yes" : "no"}` : "";
+          const enabledText = kind === "verbas" || kind === "integrations" ? ` • enabled: ${entry.enabled ? "yes" : "no"}` : "";
+          const runtimeText = Object.prototype.hasOwnProperty.call(entry, "running") ? ` • running: ${entry.running ? "yes" : "no"}` : "";
+          const requiredText = entry.required ? " • required" : "";
+          const enableButton = kind === "integrations"
+            ? entry.enabled
+              ? entry.required
+                ? `<button class="inline-btn" disabled>Required</button>`
+                : `<button class="inline-btn shop-action" data-kind="${kind}" data-action="disable" data-id="${escapeHtml(entry.id)}">Disable</button>`
+              : `<button class="action-btn shop-action" data-kind="${kind}" data-action="enable" data-id="${escapeHtml(entry.id)}">Enable</button>`
+            : "";
+          const removeButton = entry.required
+            ? `<button class="inline-btn" disabled>Required</button>`
+            : `<button class="inline-btn shop-action" data-kind="${kind}" data-action="remove" data-id="${escapeHtml(entry.id)}">Remove</button>`;
           return `
             <article class="card">
               <div class="card-head">
                 <h3 class="card-title">${escapeHtml(entry.name || entry.id)}</h3>
                 <span class="small">${escapeHtml(entry.id)}</span>
               </div>
-              <div class="small">installed: ${escapeHtml(entry.installed_ver || "0.0.0")} • store: ${escapeHtml(entry.store_ver || "-")} • source: ${escapeHtml(entry.source_label || "local")}${enabledText}${runtimeText}</div>
+              <div class="small">installed: ${escapeHtml(entry.installed_ver || "0.0.0")} • store: ${escapeHtml(entry.store_ver || "-")} • source: ${escapeHtml(entry.source_label || "local")}${enabledText}${runtimeText}${requiredText}</div>
               <div class="muted">${escapeHtml(entry.description || "")}</div>
               <div class="inline-row" style="margin-top:8px;">
                 ${updateButton}
+                ${enableButton}
                 <label class="small inline-row">
                   <input type="checkbox" class="shop-purge" />
                   <span>Delete Data?</span>
                 </label>
-                <button class="inline-btn shop-action" data-kind="${kind}" data-action="remove" data-id="${escapeHtml(entry.id)}">Remove</button>
+                ${removeButton}
               </div>
             </article>
           `;
@@ -3883,17 +4019,17 @@ function renderShopTabbedManager(kind, data, options = {}) {
       <div id="shop-status-${kind}" class="small"></div>
       ${warningsHtml}
       <div class="shop-tabs" data-kind="${kind}">
-        <button class="shop-tab-btn active" data-kind="${kind}" data-tab="installed">Installed</button>
-        <button class="shop-tab-btn" data-kind="${kind}" data-tab="store">Store</button>
+        ${showInstalledTab ? `<button class="shop-tab-btn ${defaultTab === "installed" ? "active" : ""}" data-kind="${kind}" data-tab="installed">Installed</button>` : ""}
+        <button class="shop-tab-btn ${defaultTab === "store" ? "active" : ""}" data-kind="${kind}" data-tab="store">Store</button>
         <button class="shop-tab-btn" data-kind="${kind}" data-tab="manage">Manage</button>
         <button class="shop-tab-btn" data-kind="${kind}" data-tab="settings">Settings</button>
       </div>
 
-      <section class="shop-tab-panel active" data-kind="${kind}" data-tab-panel="installed">
+      ${showInstalledTab ? `<section class="shop-tab-panel ${defaultTab === "installed" ? "active" : ""}" data-kind="${kind}" data-tab-panel="installed">
         ${installedPanelHtml}
-      </section>
+      </section>` : ""}
 
-      <section class="shop-tab-panel" data-kind="${kind}" data-tab-panel="store">
+      <section class="shop-tab-panel ${defaultTab === "store" ? "active" : ""}" data-kind="${kind}" data-tab-panel="store">
         <div class="form-grid shop-grid">${storeHtml}</div>
       </section>
 
@@ -4169,6 +4305,20 @@ async function refreshShopManagerInPlace(kind, preferredTab = "") {
     bindShopTabs(kind);
     bindShopActions(kind);
     activateShopTab(kind, targetTab);
+    return true;
+  }
+
+  if (kind === "integrations") {
+    const shopData = await api("/api/shop/integrations");
+    const managerHtml = renderShopTabbedManager("integrations", shopData, {
+      runtimeCard: false,
+    });
+    if (!replaceShopManagerInPlace("integrations", managerHtml)) {
+      return false;
+    }
+    bindShopTabs("integrations");
+    bindShopActions("integrations");
+    activateShopTab("integrations", targetTab);
     return true;
   }
 
@@ -11017,7 +11167,17 @@ function bindShopActions(kind) {
       setStatus(`${action} ${id}...`);
       try {
         const activeTab = getActiveShopTab(kind);
-        const verb = action === "install" ? "Installing" : action === "update" ? "Updating" : action === "remove" ? "Removing" : "Running";
+        const verb = action === "install"
+          ? kind === "integrations" ? "Downloading" : "Installing"
+          : action === "enable"
+            ? "Enabling"
+            : action === "disable"
+              ? "Disabling"
+              : action === "update"
+                ? "Updating"
+                : action === "remove"
+                  ? "Removing"
+                  : "Running";
         const result = await runActionWithProgress(
           {
             title: `${verb} ${shopLabel(kind).toLowerCase()}`,
@@ -11028,8 +11188,23 @@ function bindShopActions(kind) {
           },
           () => runShopAction(kind, action, payload)
         );
-        await refreshShopManagerInPlace(kind, activeTab || (action === "install" ? "installed" : "manage"));
         const message = result.message || `${shopLabel(kind)} action completed.`;
+        if (kind === "integrations" && ["install", "enable", "disable", "remove", "update"].includes(action)) {
+          const refreshTab = action === "install"
+            ? activeTab || "store"
+            : activeTab || "manage";
+          state.notice = message;
+          const refreshed = await refreshShopManagerInPlace(kind, refreshTab);
+          if (!refreshed) {
+            setPreferredSettingsTab("integrations");
+            setPreferredIntegrationTab("manager");
+            await loadSettingsView();
+          }
+          setStatus(message);
+          showToast(message);
+          return;
+        }
+        await refreshShopManagerInPlace(kind, action === "install" ? "installed" : activeTab || (action === "enable" ? "installed" : "manage"));
         state.notice = message;
         setStatus(message);
         showToast(message);
@@ -15094,24 +15269,13 @@ async function loadSettingsView() {
           <div id="settings-integrations-shell">
             <div class="settings-subtabs">
               <button type="button" class="settings-subtab-btn active" data-integrations-tab="setup">Setup</button>
+              <button type="button" class="settings-subtab-btn" data-integrations-tab="manager">Manager</button>
               <button type="button" class="settings-subtab-btn" data-integrations-tab="devices">Devices</button>
               <button type="button" class="settings-subtab-btn" data-integrations-tab="runtime">Live Runtime</button>
             </div>
 
             <div class="settings-subpanel active" data-integrations-panel="setup">
               <div class="form-grid">
-                <section class="core-inline-section">
-                  <div class="small core-inline-section-title">Web Search</div>
-                  <div class="form-grid two-col">
-                    <label>Google API Key
-                      <input id="set_web_search_google_api_key" type="password" value="${escapeHtml(settings.web_search_google_api_key || "")}" />
-                    </label>
-                    <label>Google Search CX
-                      <input id="set_web_search_google_cx" type="text" value="${escapeHtml(settings.web_search_google_cx || "")}" />
-                    </label>
-                  </div>
-                </section>
-
                 ${renderSettingsIntegrationSections(settings)}
 
                 <div class="inline-row" style="grid-column: 1 / -1;">
@@ -15119,6 +15283,12 @@ async function loadSettingsView() {
                   <span class="small">Saves Integrations and non-model settings.</span>
                 </div>
               </div>
+            </div>
+
+            <div class="settings-subpanel" data-integrations-panel="manager">
+              ${renderShopTabbedManager("integrations", settings.integration_shop || {}, {
+                runtimeCard: false,
+              })}
             </div>
 
             <div class="settings-subpanel" data-integrations-panel="devices">
@@ -17785,6 +17955,8 @@ async function loadSettingsView() {
   bindSettingsIntegrationDevices();
   bindSettingsIntegrationTabs(root);
   bindSettingsIntegrationRuntime();
+  bindShopTabs("integrations");
+  bindShopActions("integrations");
   bindSettingsPeopleActions();
 
   document.getElementById("settings-form").addEventListener("submit", (event) => {
@@ -17844,8 +18016,6 @@ async function loadSettingsView() {
       tater_last_name: document.getElementById("set_tater_last_name").value,
       tater_personality: document.getElementById("set_tater_personality").value,
       show_speed_stats: document.getElementById("set_show_speed_stats").checked,
-      web_search_google_api_key: document.getElementById("set_web_search_google_api_key").value,
-      web_search_google_cx: document.getElementById("set_web_search_google_cx").value,
       vision_api_base: document.getElementById("set_vision_api_base").value,
       vision_model: document.getElementById("set_vision_model").value,
       vision_api_key: document.getElementById("set_vision_api_key").value,

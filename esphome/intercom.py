@@ -11,8 +11,8 @@ from io import BytesIO
 from typing import Any, Dict, List, Optional
 
 from announcement_targets import VOICE_CORE_TARGET_PREFIX, normalize_announcement_targets
-from integrations.homeassistant import load_homeassistant_config
 from speech_tts import play_announcement_audio_targets
+from tateros import integration_store as integration_store_module
 
 from . import device_runtime
 
@@ -21,6 +21,7 @@ logger = logging.getLogger("voice_intercom")
 DEFAULT_INTERCOM_CAPTURE_TIMEOUT_S = 90.0
 DEFAULT_INTERCOM_REPLY_TIMEOUT_S = 120.0
 DEFAULT_INTERCOM_PLAYBACK_TIMEOUT_S = 180.0
+HOMEASSISTANT_DEFAULT_BASE_URL = "http://homeassistant.local:8123"
 INTERCOM_STOP_PHRASES = {
     "cancel broadcast",
     "cancel intercom",
@@ -48,6 +49,15 @@ _pending_by_selector: Dict[str, Dict[str, Any]] = {}
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def load_homeassistant_config(*, required: bool = False, client: Any = None) -> Dict[str, str]:
+    fn = integration_store_module.integration_function("homeassistant", "load_homeassistant_config")
+    if fn:
+        return fn(required=required, client=client)
+    if required:
+        raise ValueError("Home Assistant integration is not enabled.")
+    return {"base": HOMEASSISTANT_DEFAULT_BASE_URL, "token": ""}
 
 
 def _lower(value: Any) -> str:

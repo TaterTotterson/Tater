@@ -1,20 +1,147 @@
 from __future__ import annotations
 
 import importlib
+import logging
+import os
 import pkgutil
+import sys
+from pathlib import Path
+from types import ModuleType
 from typing import Any, Dict, List
+
+from tateros import integration_store as integration_store_module
 
 
 INTEGRATION_PACKAGE = "integrations"
+INTEGRATION_DIR = Path(os.getenv("TATER_INTEGRATION_DIR", "integrations"))
+logger = logging.getLogger("integration_registry")
+integration_registry_errors: List[str] = []
 
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _as_list(value: Any) -> List[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    if value in (None, ""):
+        return []
+    return [value]
+
+
+def _normalize_token(value: Any) -> str:
+    return _text(value).lower().replace(" ", "_").replace("-", "_")
+
+
+def _normalize_capabilities(value: Any) -> List[str]:
+    out: List[str] = []
+    seen: set[str] = set()
+    for item in _as_list(value):
+        token = _normalize_token(item)
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        out.append(token)
+    return out
+
+
+def _infer_device_capabilities(device_type: str, source: Dict[str, Any], details: Dict[str, Any]) -> List[str]:
+    capabilities = _normalize_capabilities(source.get("capabilities"))
+    for token in (device_type, details.get("device_class"), details.get("resource_type"), details.get("sensor_type")):
+        normalized = _normalize_token(token)
+        if normalized and normalized not in capabilities:
+            capabilities.append(normalized)
+
+    haystack = " ".join(
+        _text(value).lower()
+        for value in (
+            source.get("id"),
+            source.get("name"),
+            source.get("type"),
+            details.get("device_class"),
+            details.get("resource_type"),
+            details.get("sensor_type"),
+        )
+    )
+
+    def add(token: str) -> None:
+        if token not in capabilities:
+            capabilities.append(token)
+
+    sensorish = device_type in {
+        "sensor",
+        "binary_sensor",
+        "contact",
+        "entry_sensor",
+        "garage",
+        "garage_door",
+        "thermostat",
+        "temperature",
+        "humidity",
+        "device",
+    }
+    detail_tokens = {
+        _normalize_token(details.get("device_class")),
+        _normalize_token(details.get("resource_type")),
+        _normalize_token(details.get("sensor_type")),
+    }
+
+    if device_type == "camera" or "camera" in haystack:
+        add("camera")
+        add("snapshot")
+    if "doorbell" in haystack or "ring" in haystack:
+        add("doorbell")
+    if (
+        device_type in {"contact", "entry_sensor", "garage_door"}
+        or detail_tokens.intersection({"door", "window", "garage", "garage_door", "contact", "opening"})
+        or (
+            sensorish
+            and device_type != "camera"
+            and any(token in haystack for token in ("door", "window", "garage", "contact", "opening"))
+        )
+    ):
+        add("entry_sensor")
+    if "motion" in haystack:
+        add("motion")
+    if device_type in {"temperature", "thermostat"} or (
+        sensorish and any(token in haystack for token in ("temperature", "temp"))
+    ):
+        add("temperature")
+    if device_type in {"humidity"} or (sensorish and "humidity" in haystack):
+        add("humidity")
+    return capabilities
+
+
+def _ensure_import_context() -> None:
+    parent = str(INTEGRATION_DIR.resolve().parent)
+    if parent and parent not in sys.path:
+        sys.path.insert(0, parent)
+
+    package = sys.modules.get(INTEGRATION_PACKAGE)
+    if package is not None and not isinstance(package, ModuleType):
+        sys.modules.pop(INTEGRATION_PACKAGE, None)
+        package = None
+
+    importlib.invalidate_caches()
+    if package is None:
+        package = importlib.import_module(INTEGRATION_PACKAGE)
+
+    package_paths = getattr(package, "__path__", None)
+    if package_paths is not None:
+        expected = str(INTEGRATION_DIR.resolve())
+        normalized = {str(Path(path).resolve()) for path in package_paths}
+        if expected not in normalized:
+            package_paths.append(expected)
+
+
 def _integration_modules() -> List[Any]:
+    _ensure_import_context()
     package = importlib.import_module(INTEGRATION_PACKAGE)
     modules: List[Any] = []
+    errors: List[str] = []
     package_paths = getattr(package, "__path__", None)
     if package_paths is None:
         return modules
@@ -23,10 +150,21 @@ def _integration_modules() -> List[Any]:
         name = _text(item.name)
         if not name or name.startswith("_"):
             continue
-        module = importlib.import_module(f"{INTEGRATION_PACKAGE}.{name}")
+        if not integration_store_module.get_integration_enabled(name):
+            continue
+        module_name = f"{INTEGRATION_PACKAGE}.{name}"
+        try:
+            module = importlib.import_module(module_name)
+        except Exception as exc:
+            errors.append(f"{module_name}: {exc}")
+            continue
         definition = getattr(module, "INTEGRATION", None)
         if isinstance(definition, dict) and _text(definition.get("id")):
             modules.append(module)
+    integration_registry_errors.clear()
+    integration_registry_errors.extend(errors)
+    if errors:
+        logger.warning("Integration registry load issues: %s", "; ".join(errors))
     return modules
 
 
@@ -53,6 +191,7 @@ def _coerce_definition(module: Any) -> Dict[str, Any]:
     actions = definition.get("actions")
     if not isinstance(actions, list):
         actions = []
+    capabilities = _normalize_capabilities(definition.get("capabilities"))
 
     return {
         "id": integration_id,
@@ -60,6 +199,7 @@ def _coerce_definition(module: Any) -> Dict[str, Any]:
         "description": _text(definition.get("description")),
         "badge": _text(definition.get("badge")) or integration_id[:3].upper(),
         "order": int(definition.get("order") or 1000),
+        "capabilities": capabilities,
         "fields": [dict(field) for field in fields if isinstance(field, dict)],
         "actions": [dict(action) for action in actions if isinstance(action, dict)],
     }
@@ -98,12 +238,20 @@ def _coerce_device_row(integration_id: str, row: Dict[str, Any]) -> Dict[str, An
         }
     device_id = _text(source.get("id") or source.get("device_id") or source.get("entity_id") or source.get("mac"))
     name = _text(source.get("name") or source.get("label") or source.get("friendly_name") or device_id)
-    device_type = _text(source.get("type") or source.get("kind") or source.get("domain") or "device")
+    device_type = _normalize_token(source.get("type") or source.get("kind") or source.get("domain") or "device")
+    ref = _text(source.get("ref") or source.get("resource_ref"))
+    if not ref and device_id:
+        ref = f"{device_type or 'device'}:{device_id}"
+    capabilities = _infer_device_capabilities(device_type, source, details)
     return {
         "integration_id": integration_id,
         "id": device_id or name,
         "name": name or device_id or "Device",
         "type": device_type or "device",
+        "ref": ref or device_id or name,
+        "capabilities": capabilities,
+        "actions": _normalize_capabilities(source.get("actions")),
+        "event_sources": [dict(item) for item in _as_list(source.get("event_sources")) if isinstance(item, dict)],
         "status": _text(source.get("status")),
         "state": _text(source.get("state")),
         "area": _text(source.get("area")),
@@ -200,6 +348,25 @@ def get_integration_device_group(integration_id: str) -> Dict[str, Any]:
     return {"group": group}
 
 
+def get_integration_devices_by_capability(capability: str) -> List[Dict[str, Any]]:
+    token = _normalize_token(capability)
+    out: List[Dict[str, Any]] = []
+    if not token:
+        return out
+    groups = get_integration_devices().get("groups") or []
+    for group in groups if isinstance(groups, list) else []:
+        devices = group.get("devices") if isinstance(group, dict) else []
+        for device in devices if isinstance(devices, list) else []:
+            if not isinstance(device, dict):
+                continue
+            caps = set(_normalize_capabilities(device.get("capabilities")))
+            if token in caps:
+                row = dict(device)
+                row.setdefault("integration_name", _text(group.get("name")) if isinstance(group, dict) else "")
+                out.append(row)
+    return out
+
+
 def save_integration_settings(integration_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     module = _module_for_integration(integration_id)
     saver = getattr(module, "save_integration_settings", None)
@@ -229,3 +396,32 @@ def run_integration_action(integration_id: str, action_id: str, payload: Dict[st
     result.setdefault("action", _text(action_id))
     result["status"] = _read_status(module)
     return result
+
+
+def run_integration_device_action(integration_id: str, action_id: str, device_id: str, payload: Dict[str, Any] | None = None) -> Any:
+    module = _module_for_integration(integration_id)
+    action = _text(action_id)
+    device = _text(device_id)
+    if not action:
+        raise KeyError("Device action is required.")
+    if not device:
+        raise KeyError("Device id is required.")
+
+    runner = getattr(module, "run_integration_device_action", None)
+    if callable(runner):
+        return runner(action, device, dict(payload or {}))
+
+    runner = getattr(module, "integration_device_action", None)
+    if callable(runner):
+        return runner(action, device, dict(payload or {}))
+
+    if action in {"camera_snapshot", "snapshot"}:
+        snapshotter = getattr(module, "get_camera_snapshot", None)
+        if callable(snapshotter):
+            return snapshotter(device)
+
+    raise KeyError(f"{integration_id} does not support device action {action}.")
+
+
+def get_integration_registry_errors() -> List[str]:
+    return list(integration_registry_errors)

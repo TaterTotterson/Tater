@@ -22,6 +22,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
 import dotenv
+
+dotenv.load_dotenv()
+
+from tateros import integration_store as integration_store_module
+
 from fastapi import Cookie, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -97,50 +102,20 @@ from integration_registry import (
     get_integration_catalog,
     get_integration_device_group,
     get_integration_devices,
+    get_integration_devices_by_capability,
     run_integration_action as run_registered_integration_action,
     save_integration_settings as save_registered_integration_settings,
 )
 from integration_runtime import (
+    bind_integration_runtime_loop,
+    clear_integration_runtime_provider,
+    ensure_integration_runtime_started,
     integration_runtime_events,
     integration_runtime_states,
     integration_runtime_status,
+    restart_integration_runtime,
     start_integration_runtime,
     stop_integration_runtime,
-)
-from integrations.aladdin import (
-    ALADDIN_DEFAULT_TIMEOUT_SECONDS,
-    read_aladdin_settings,
-    save_aladdin_settings,
-    test_aladdin_connection,
-)
-from integrations.hue import (
-    HUE_DEFAULT_BRIDGE_HOST,
-    HUE_DEFAULT_DEVICE_TYPE,
-    HUE_DEFAULT_TIMEOUT_SECONDS,
-    pair_hue_bridge,
-    read_hue_settings,
-    save_hue_settings,
-)
-from integrations.homeassistant import (
-    HOMEASSISTANT_DEFAULT_BASE_URL,
-    load_homeassistant_config,
-    save_homeassistant_config,
-)
-from integrations.sonos import (
-    SONOS_DEFAULT_DISCOVERY_TIMEOUT_SECONDS,
-    SONOS_DEFAULT_ENABLED,
-    read_sonos_settings,
-    save_sonos_settings,
-)
-from integrations.unifi_network import (
-    UNIFI_NETWORK_DEFAULT_BASE_URL,
-    read_unifi_network_settings,
-    save_unifi_network_settings,
-)
-from integrations.unifi_protect import (
-    UNIFI_PROTECT_DEFAULT_BASE_URL,
-    read_unifi_protect_settings,
-    save_unifi_protect_settings,
 )
 from vision_settings import get_vision_settings as get_shared_vision_settings, save_vision_settings as save_shared_vision_settings
 from tateros import core_store as core_store_module
@@ -148,9 +123,16 @@ from tateros import verba_store as verba_store_module
 from tateros import portal_store as portal_store_module
 
 
-dotenv.load_dotenv()
-
 logger = logging.getLogger("tateros")
+HOMEASSISTANT_DEFAULT_BASE_URL = "http://homeassistant.local:8123"
+HUE_DEFAULT_BRIDGE_HOST = "http://philips-hue.local"
+HUE_DEFAULT_DEVICE_TYPE = "tater_shop#tater"
+HUE_DEFAULT_TIMEOUT_SECONDS = 10
+ALADDIN_DEFAULT_TIMEOUT_SECONDS = 5
+SONOS_DEFAULT_ENABLED = True
+SONOS_DEFAULT_DISCOVERY_TIMEOUT_SECONDS = 2
+UNIFI_NETWORK_DEFAULT_BASE_URL = "https://10.4.20.1"
+UNIFI_PROTECT_DEFAULT_BASE_URL = "https://10.4.20.127"
 OPENWAKEWORD_DETECT_LOG_EVERY = 120
 OPENWAKEWORD_DETECT_SLOW_LOG_S = 1.0
 OPENWAKEWORD_STREAM_QUEUE_MAX = 12
@@ -165,6 +147,22 @@ logging.basicConfig(
 
 redis_client = shared_redis_client
 redis_blob_client = shared_redis_blob_client
+
+
+def _integration_module(integration_id: str, *, auto_restore: bool = True):
+    return integration_store_module.integration_module(integration_id, auto_restore=auto_restore)
+
+
+def _integration_module_or_400(integration_id: str, display_name: str | None = None):
+    module = _integration_module(integration_id)
+    if module is not None:
+        return module
+    name = str(display_name or integration_id or "integration").strip()
+    raise HTTPException(
+        status_code=400,
+        detail=f"{name} integration is not enabled. Enable it in Integration Manager first.",
+    )
+
 
 CHAT_HISTORY_KEY = "webui:chat_history"
 DEFAULT_MAX_STORE = 20
@@ -2349,6 +2347,79 @@ def _portal_shop_raw() -> Dict[str, Any]:
     }
 
 
+def _integration_shop_raw() -> Dict[str, Any]:
+    manifest_repos = integration_store_module.get_configured_integration_shop_manifest_repos()
+    catalog_items, catalog_errors = integration_store_module.load_integration_shop_catalog(manifest_repos)
+
+    build_entries = getattr(integration_store_module, "_build_installed_integration_entries", None)
+    installed_entries = build_entries(catalog_items) if callable(build_entries) else []
+    if not isinstance(installed_entries, list):
+        installed_entries = []
+
+    installed_payload: List[Dict[str, Any]] = []
+    installed_ids = set()
+    for entry in installed_entries:
+        if not isinstance(entry, dict):
+            continue
+        integration_id = str(entry.get("id") or "").strip()
+        if not integration_id:
+            continue
+        installed_ids.add(integration_id)
+        installed_payload.append(
+            {
+                "id": integration_id,
+                "name": str(entry.get("display_name") or integration_id),
+                "description": str(entry.get("description") or ""),
+                "installed_ver": str(entry.get("installed_ver") or "0.0.0"),
+                "store_ver": str(entry.get("store_ver") or ""),
+                "source_label": str(entry.get("source_label") or ""),
+                "update_available": bool(entry.get("update_available")),
+                "catalog_backed": bool(entry.get("catalog_item")),
+                "required": bool(entry.get("required")),
+                "enabled": bool(entry.get("enabled")),
+            }
+        )
+
+    catalog_payload: List[Dict[str, Any]] = []
+    for item in catalog_items:
+        if not isinstance(item, dict):
+            continue
+        integration_id = str(item.get("id") or "").strip()
+        if not integration_id:
+            continue
+        catalog_payload.append(
+            {
+                "id": integration_id,
+                "name": str(item.get("name") or integration_id).strip() or integration_id,
+                "description": str(item.get("description") or "").strip(),
+                "version": str(item.get("version") or "").strip(),
+                "source_label": str(item.get("_source_label") or "").strip(),
+                "installed": integration_id in installed_ids,
+                "required": integration_id in integration_store_module.REQUIRED_INTEGRATION_IDS,
+                "enabled": integration_store_module.get_integration_enabled(integration_id),
+            }
+        )
+
+    installed_payload.sort(key=_shop_payload_sort_key)
+    catalog_payload.sort(key=_shop_payload_sort_key)
+
+    return {
+        "repos": {
+            "configured": manifest_repos,
+            "additional": integration_store_module.get_additional_integration_shop_manifest_repos(),
+            "default": manifest_repos[0] if manifest_repos else {"name": "", "url": ""},
+        },
+        "errors": list(catalog_errors or []),
+        "installed": installed_payload,
+        "catalog": catalog_payload,
+        "updates_available": len(
+            [entry for entry in installed_payload if entry.get("update_available") and entry.get("enabled")]
+        ),
+        "_catalog_items_raw": catalog_items,
+        "_installed_entries_raw": installed_entries,
+    }
+
+
 def _dashboard_shop_update_group(kind: str, label: str, loader: Callable[[], Dict[str, Any]]) -> Dict[str, Any]:
     try:
         snapshot = loader()
@@ -2366,6 +2437,8 @@ def _dashboard_shop_update_group(kind: str, label: str, loader: Callable[[], Dic
     rows: List[Dict[str, Any]] = []
     for entry in installed:
         if not isinstance(entry, dict) or not bool(entry.get("update_available")):
+            continue
+        if kind == "integrations" and not bool(entry.get("enabled")):
             continue
         item_id = str(entry.get("id") or entry.get("module_key") or "").strip()
         name = str(entry.get("name") or entry.get("display_name") or item_id or label).strip()
@@ -2435,6 +2508,7 @@ def _dashboard_updates_snapshot() -> Dict[str, Any]:
     groups = [
         _dashboard_firmware_update_group(),
         _dashboard_shop_update_group("cores", "Cores", _core_shop_raw),
+        _dashboard_shop_update_group("integrations", "Integrations", _integration_shop_raw),
         _dashboard_shop_update_group("portals", "Portals", _portal_shop_raw),
         _dashboard_shop_update_group("verbas", "Verba", _verba_shop_raw),
     ]
@@ -2557,6 +2631,9 @@ def _restore_enabled_surfaces() -> Dict[str, Any]:
     Restore enabled surfaces that are missing on disk.
     """
     summary: Dict[str, Any] = {
+        "integrations_enabled": 0,
+        "integrations_missing_before": 0,
+        "integrations_missing_after": 0,
         "plugins_missing_before": 0,
         "plugins_missing_after": 0,
         "cores_missing_before": 0,
@@ -2566,7 +2643,33 @@ def _restore_enabled_surfaces() -> Dict[str, Any]:
         "builtin_platforms": [],
     }
 
-    # 1) Verbas
+    # 1) Enabled integrations
+    try:
+        enabled_integrations = list(integration_store_module.get_enabled_integration_ids() or [])
+    except Exception:
+        enabled_integrations = []
+    summary["integrations_enabled"] = len(enabled_integrations)
+    try:
+        missing_integrations_before = list(integration_store_module._enabled_missing_integration_ids(enabled_integrations) or [])
+    except Exception:
+        missing_integrations_before = []
+    summary["integrations_missing_before"] = len(missing_integrations_before)
+    if missing_integrations_before:
+        logger.info("[startup-restore] restoring %d enabled integration(s)", len(missing_integrations_before))
+        integration_store_module.ensure_enabled_integrations_ready(progress_cb=_restore_progress_logger("integrations"))
+    elif enabled_integrations:
+        logger.info("[startup-restore] enabled integrations already present: %s", ", ".join(enabled_integrations))
+    else:
+        logger.info("[startup-restore] no enabled integrations configured")
+    try:
+        missing_integrations_after = list(integration_store_module._enabled_missing_integration_ids(enabled_integrations) or [])
+    except Exception:
+        missing_integrations_after = []
+    summary["integrations_missing_after"] = len(missing_integrations_after)
+    if missing_integrations_after:
+        logger.warning("[startup-restore] enabled integrations still missing: %s", ", ".join(missing_integrations_after))
+
+    # 2) Verbas
     try:
         missing_plugins_before = list(verba_store_module._enabled_missing_verba_ids() or [])
     except Exception:
@@ -2582,7 +2685,7 @@ def _restore_enabled_surfaces() -> Dict[str, Any]:
         missing_plugins_after = []
     summary["plugins_missing_after"] = len(missing_plugins_after)
 
-    # 2) Cores
+    # 3) Cores
     try:
         missing_cores_before = list(core_store_module._enabled_missing_core_ids() or [])
     except Exception:
@@ -2597,7 +2700,7 @@ def _restore_enabled_surfaces() -> Dict[str, Any]:
         missing_cores_after = []
     summary["cores_missing_after"] = len(missing_cores_after)
 
-    # 3) Portals
+    # 4) Portals
     try:
         missing_portals_before = list(portal_store_module._enabled_missing_portal_ids() or [])
     except Exception:
@@ -2649,6 +2752,7 @@ def _replay_startup_after_redis_configure() -> Dict[str, Any]:
         else:
             logger.info("[runtime-restore] skipped (HTMLUI_RESTORE_ENABLED_SURFACES_ON_STARTUP=false)")
 
+        _run_async_sync(ensure_integration_runtime_started(redis_client), timeout=15.0)
         if bool(bootstrap_state.get("autostart_enabled")):
             _autostart_enabled_surfaces()
             result["ran_autostart"] = True
@@ -3125,8 +3229,6 @@ class AppSettingsRequest(BaseModel):
     tater_personality: Optional[str] = None
     max_store: Optional[int] = None
     max_llm: Optional[int] = None
-    web_search_google_api_key: Optional[str] = None
-    web_search_google_cx: Optional[str] = None
     homeassistant_base_url: Optional[str] = None
     homeassistant_token: Optional[str] = None
     hue_bridge_host: Optional[str] = None
@@ -3302,6 +3404,7 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 @app.on_event("startup")
 async def _startup_event() -> None:
     set_main_loop(asyncio.get_running_loop())
+    bind_integration_runtime_loop()
     verba_registry_module.ensure_verbas_loaded()
     restore_enabled = str(os.getenv("HTMLUI_RESTORE_ENABLED_SURFACES_ON_STARTUP", "true")).strip().lower() in {
         "1",
@@ -3330,7 +3433,6 @@ async def _startup_event() -> None:
         else:
             executor_settings = _apply_runtime_executor_settings_from_redis()
             logger.info("[startup] runtime executor settings applied: %s", executor_settings.get("workers"))
-            start_integration_runtime(redis_client)
             if restore_enabled:
                 bootstrap_state["restore_in_progress"] = True
                 summary = _restore_enabled_surfaces()
@@ -3338,6 +3440,7 @@ async def _startup_event() -> None:
                 logger.info("[startup-restore] summary: %s", summary)
             else:
                 logger.info("[startup-restore] skipped (HTMLUI_RESTORE_ENABLED_SURFACES_ON_STARTUP=false)")
+            start_integration_runtime(redis_client)
             if autostart_enabled:
                 _autostart_enabled_surfaces()
             else:
@@ -6962,6 +7065,209 @@ def save_portal_settings(portal_key: str, payload: SettingsUpdateRequest) -> Dic
     return {"key": portal_key, "saved": True}
 
 
+def _restart_integration_runtime_if_running() -> str:
+    try:
+        running = bool(integration_runtime_status(redis_client).get("running"))
+    except Exception:
+        running = False
+    if not running:
+        return ""
+    _run_async_sync(restart_integration_runtime(redis_client), timeout=15.0)
+    return "runtime restarted"
+
+
+@app.get("/api/shop/integrations")
+def get_integration_shop() -> Dict[str, Any]:
+    snapshot = _integration_shop_raw()
+    return {
+        "repos": snapshot["repos"],
+        "errors": snapshot["errors"],
+        "installed": snapshot["installed"],
+        "catalog": snapshot["catalog"],
+        "updates_available": snapshot["updates_available"],
+    }
+
+
+@app.post("/api/shop/integrations/repos")
+def save_integration_repos(payload: ShopReposRequest) -> Dict[str, Any]:
+    rows = _normalize_repo_rows(payload.repos)
+    integration_store_module.save_additional_integration_shop_manifest_repos(rows)
+    snapshot = _integration_shop_raw()
+    return {"ok": True, "repos": snapshot["repos"]}
+
+
+@app.post("/api/shop/integrations/install")
+def install_integration(payload: ShopItemRequest) -> Dict[str, Any]:
+    integration_id = str(payload.id or "").strip()
+    if not integration_id:
+        raise HTTPException(status_code=400, detail="Integration id is required.")
+
+    snapshot = _integration_shop_raw()
+    item = None
+    for raw in snapshot.get("_catalog_items_raw", []):
+        if str((raw or {}).get("id") or "").strip() == integration_id:
+            item = raw
+            break
+    if not isinstance(item, dict):
+        raise HTTPException(status_code=404, detail=f"Integration not found in catalog: {integration_id}")
+
+    ok, msg = integration_store_module.install_integration_from_shop_item(item)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+
+    return {"ok": True, "message": msg}
+
+
+@app.post("/api/shop/integrations/enable")
+def enable_integration(payload: ShopItemRequest) -> Dict[str, Any]:
+    integration_id = str(payload.id or "").strip()
+    if not integration_id:
+        raise HTTPException(status_code=400, detail="Integration id is required.")
+
+    snapshot = _integration_shop_raw()
+    item = None
+    for raw in snapshot.get("_catalog_items_raw", []):
+        if str((raw or {}).get("id") or "").strip() == integration_id:
+            item = raw
+            break
+    if not isinstance(item, dict):
+        raise HTTPException(status_code=404, detail=f"Integration not found in catalog: {integration_id}")
+
+    msg = f"Enabled {integration_id}"
+    if not integration_store_module.is_integration_installed(integration_id):
+        ok, msg = integration_store_module.install_integration_from_shop_item(item)
+        if not ok:
+            raise HTTPException(status_code=400, detail=msg)
+    integration_store_module.set_integration_enabled(integration_id, True)
+    restart_note = _restart_integration_runtime_if_running()
+    return {
+        "ok": True,
+        "message": msg if msg.lower().startswith("enabled") else f"{msg}; enabled {integration_id}",
+        "restart": restart_note,
+    }
+
+
+@app.post("/api/shop/integrations/disable")
+def disable_integration(payload: ShopItemRequest) -> Dict[str, Any]:
+    integration_id = str(payload.id or "").strip()
+    if not integration_id:
+        raise HTTPException(status_code=400, detail="Integration id is required.")
+    if integration_id in integration_store_module.REQUIRED_INTEGRATION_IDS:
+        raise HTTPException(status_code=400, detail=f"{integration_id} is required by Tater and cannot be disabled.")
+
+    integration_store_module.set_integration_enabled(integration_id, False)
+    cleanup = clear_integration_runtime_provider(integration_id, redis_client)
+    restart_note = _restart_integration_runtime_if_running()
+    return {
+        "ok": True,
+        "message": f"Disabled {integration_id}",
+        "cleanup": cleanup,
+        "restart": restart_note,
+    }
+
+
+@app.post("/api/shop/integrations/update")
+def update_integration(payload: ShopItemRequest) -> Dict[str, Any]:
+    integration_id = str(payload.id or "").strip()
+    if not integration_id:
+        raise HTTPException(status_code=400, detail="Integration id is required.")
+
+    snapshot = _integration_shop_raw()
+    entry = None
+    for raw in snapshot.get("_installed_entries_raw", []):
+        if str((raw or {}).get("id") or "").strip() == integration_id:
+            entry = raw
+            break
+    if not isinstance(entry, dict):
+        raise HTTPException(status_code=404, detail=f"Installed integration not found: {integration_id}")
+
+    catalog_item = entry.get("catalog_item")
+    if not isinstance(catalog_item, dict):
+        raise HTTPException(status_code=400, detail=f"No catalog update source for {integration_id}")
+
+    ok, msg = integration_store_module.install_integration_from_shop_item(catalog_item)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+
+    restart_note = _restart_integration_runtime_if_running()
+    return {
+        "ok": True,
+        "message": msg,
+        "restart": restart_note,
+    }
+
+
+@app.post("/api/shop/integrations/update-all")
+def update_all_integrations() -> Dict[str, Any]:
+    snapshot = _integration_shop_raw()
+    updated: List[str] = []
+    failed: List[str] = []
+
+    for entry in snapshot.get("_installed_entries_raw", []):
+        if not isinstance(entry, dict):
+            continue
+        if not bool(entry.get("update_available")):
+            continue
+        if not bool(entry.get("enabled")):
+            continue
+        integration_id = str(entry.get("id") or "").strip()
+        catalog_item = entry.get("catalog_item")
+        if not integration_id or not isinstance(catalog_item, dict):
+            continue
+        ok, msg = integration_store_module.install_integration_from_shop_item(catalog_item)
+        if ok:
+            updated.append(integration_id)
+        else:
+            failed.append(msg)
+
+    restart_note = _restart_integration_runtime_if_running() if updated else ""
+    return {
+        "ok": True,
+        "updated": updated,
+        "failed": failed,
+        "restart": restart_note,
+    }
+
+
+@app.post("/api/shop/integrations/remove")
+def remove_integration(payload: ShopRemoveRequest) -> Dict[str, Any]:
+    integration_id = str(payload.id or "").strip()
+    if not integration_id:
+        raise HTTPException(status_code=400, detail="Integration id is required.")
+
+    snapshot = _integration_shop_raw()
+    catalog_item = None
+    for raw in snapshot.get("_installed_entries_raw", []):
+        if str((raw or {}).get("id") or "").strip() == integration_id:
+            catalog_item = raw.get("catalog_item") if isinstance(raw, dict) else None
+            break
+
+    integration_store_module.set_integration_enabled(integration_id, False)
+    cleanup = clear_integration_runtime_provider(integration_id, redis_client)
+    ok, msg = integration_store_module.uninstall_integration_file(integration_id)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+
+    cleanup_message = ""
+    if bool(payload.purge_redis):
+        ok2, msg2 = integration_store_module.clear_integration_redis_data(
+            integration_id,
+            catalog_item=catalog_item if isinstance(catalog_item, dict) else None,
+        )
+        cleanup_message = msg2
+        if not ok2:
+            raise HTTPException(status_code=400, detail=f"Removed file, but Redis cleanup failed: {msg2}")
+
+    restart_note = _restart_integration_runtime_if_running()
+    return {
+        "ok": True,
+        "message": msg,
+        "cleanup": cleanup_message,
+        "runtime_cleanup": cleanup,
+        "restart": restart_note,
+    }
+
+
 @app.get("/api/shop/verbas")
 def get_verba_shop() -> Dict[str, Any]:
     snapshot = _verba_shop_raw()
@@ -7874,13 +8180,24 @@ def run_people_settings_action(payload: PeopleActionRequest) -> Dict[str, Any]:
 @app.get("/api/settings")
 def get_settings() -> Dict[str, Any]:
     chat_settings = redis_client.hgetall("chat_settings") or {}
-    legacy_web_search = redis_client.hgetall("verba_settings:Web Search") or {}
-    homeassistant_settings = load_homeassistant_config(required=False)
-    hue_settings = read_hue_settings()
-    aladdin_settings = read_aladdin_settings()
-    sonos_settings = read_sonos_settings()
-    unifi_network_settings = read_unifi_network_settings()
-    unifi_protect_settings = read_unifi_protect_settings()
+    homeassistant_module = _integration_module("homeassistant", auto_restore=False)
+    hue_module = _integration_module("hue", auto_restore=False)
+    aladdin_module = _integration_module("aladdin", auto_restore=False)
+    sonos_module = _integration_module("sonos", auto_restore=False)
+    unifi_network_module = _integration_module("unifi_network", auto_restore=False)
+    unifi_protect_module = _integration_module("unifi_protect", auto_restore=False)
+    homeassistant_settings = (
+        homeassistant_module.load_homeassistant_config(required=False) if homeassistant_module is not None else {}
+    )
+    hue_settings = hue_module.read_hue_settings() if hue_module is not None else {}
+    aladdin_settings = aladdin_module.read_aladdin_settings() if aladdin_module is not None else {}
+    sonos_settings = sonos_module.read_sonos_settings() if sonos_module is not None else {}
+    unifi_network_settings = (
+        unifi_network_module.read_unifi_network_settings() if unifi_network_module is not None else {}
+    )
+    unifi_protect_settings = (
+        unifi_protect_module.read_unifi_protect_settings() if unifi_protect_module is not None else {}
+    )
 
     vision_settings = get_shared_vision_settings(
         default_api_base="http://127.0.0.1:1234",
@@ -7991,6 +8308,14 @@ def get_settings() -> Dict[str, Any]:
     }
     executor_settings = _runtime_executor_settings_from_redis()
     executor_workers = executor_settings.get("workers") if isinstance(executor_settings.get("workers"), dict) else {}
+    integration_shop_snapshot = _integration_shop_raw()
+    integration_shop_payload = {
+        "repos": integration_shop_snapshot.get("repos") or {},
+        "errors": integration_shop_snapshot.get("errors") or [],
+        "installed": integration_shop_snapshot.get("installed") or [],
+        "catalog": integration_shop_snapshot.get("catalog") or [],
+        "updates_available": integration_shop_snapshot.get("updates_available") or 0,
+    }
 
     return {
         "username": chat_settings.get("username", "User"),
@@ -8007,12 +8332,6 @@ def get_settings() -> Dict[str, Any]:
             redis_client.get(WEBUI_POPUP_EFFECT_STYLE_KEY),
             default=DEFAULT_WEBUI_POPUP_EFFECT_STYLE,
         ),
-        "web_search_google_api_key": redis_client.get("tater:web_search:google_api_key")
-        or legacy_web_search.get("GOOGLE_API_KEY")
-        or "",
-        "web_search_google_cx": redis_client.get("tater:web_search:google_cx")
-        or legacy_web_search.get("GOOGLE_CX")
-        or "",
         "homeassistant_base_url": homeassistant_settings.get("base") or HOMEASSISTANT_DEFAULT_BASE_URL,
         "homeassistant_token": homeassistant_settings.get("token", ""),
         "hue_bridge_host": hue_settings.get("HUE_BRIDGE_HOST", HUE_DEFAULT_BRIDGE_HOST),
@@ -8034,6 +8353,7 @@ def get_settings() -> Dict[str, Any]:
         "unifi_protect_base_url": unifi_protect_settings.get("base") or UNIFI_PROTECT_DEFAULT_BASE_URL,
         "unifi_protect_api_key": unifi_protect_settings.get("api_key", ""),
         "integrations": get_integration_catalog(),
+        "integration_shop": integration_shop_payload,
         "integration_runtime": integration_runtime_status(redis_client),
         "people": people_module.panel_payload(redis_client),
         "vision_api_base": str(vision_settings.get("api_base") or "http://127.0.0.1:1234"),
@@ -8869,7 +9189,12 @@ def get_settings_integrations_runtime_states() -> Dict[str, Any]:
 
 
 @app.get("/api/settings/integrations/devices")
-def get_settings_integrations_devices() -> Dict[str, Any]:
+def get_settings_integrations_devices(capability: str = "") -> Dict[str, Any]:
+    if str(capability or "").strip():
+        return {
+            "capability": str(capability or "").strip(),
+            "devices": get_integration_devices_by_capability(capability),
+        }
     return get_integration_devices()
 
 
@@ -8916,7 +9241,8 @@ def run_registered_settings_integration_action(
 
 @app.post("/api/settings/hue/link")
 def link_hue_bridge(payload: HueLinkRequest) -> Dict[str, Any]:
-    return pair_hue_bridge(
+    hue_module = _integration_module_or_400("hue", "Hue")
+    return hue_module.pair_hue_bridge(
         bridge_host=payload.hue_bridge_host,
         device_type=payload.hue_device_type,
         timeout_seconds=payload.hue_timeout_seconds,
@@ -8926,7 +9252,8 @@ def link_hue_bridge(payload: HueLinkRequest) -> Dict[str, Any]:
 @app.post("/api/settings/aladdin/test")
 def test_aladdin_settings(payload: AladdinTestRequest) -> Dict[str, Any]:
     try:
-        return test_aladdin_connection(
+        aladdin_module = _integration_module_or_400("aladdin", "Aladdin")
+        return aladdin_module.test_aladdin_connection(
             username=payload.aladdin_username,
             password=payload.aladdin_password,
             timeout_seconds=payload.aladdin_timeout_seconds,
@@ -9049,23 +9376,19 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         normalized_style = _normalize_popup_effect_style(raw_style, default=DEFAULT_WEBUI_POPUP_EFFECT_STYLE)
         redis_client.set(WEBUI_POPUP_EFFECT_STYLE_KEY, normalized_style)
 
-    if "web_search_google_api_key" in updates:
-        redis_client.set("tater:web_search:google_api_key", str(updates["web_search_google_api_key"]).strip())
-
-    if "web_search_google_cx" in updates:
-        redis_client.set("tater:web_search:google_cx", str(updates["web_search_google_cx"]).strip())
-
     if "homeassistant_base_url" in updates or "homeassistant_token" in updates:
-        current_ha = load_homeassistant_config(required=False)
-        save_homeassistant_config(
+        homeassistant_module = _integration_module_or_400("homeassistant", "Home Assistant")
+        current_ha = homeassistant_module.load_homeassistant_config(required=False)
+        homeassistant_module.save_homeassistant_config(
             base_url=updates.get("homeassistant_base_url", current_ha.get("base")),
             token=updates.get("homeassistant_token", current_ha.get("token")),
         )
 
     hue_update_keys = {"hue_bridge_host", "hue_app_key", "hue_device_type", "hue_timeout_seconds"}
     if any(key in updates for key in hue_update_keys):
-        current_hue = read_hue_settings()
-        save_hue_settings(
+        hue_module = _integration_module_or_400("hue", "Hue")
+        current_hue = hue_module.read_hue_settings()
+        hue_module.save_hue_settings(
             bridge_host=updates.get("hue_bridge_host", current_hue.get("HUE_BRIDGE_HOST")),
             app_key=updates.get("hue_app_key", current_hue.get("HUE_APP_KEY")),
             device_type=updates.get("hue_device_type", current_hue.get("HUE_DEVICE_TYPE")),
@@ -9074,8 +9397,9 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
 
     aladdin_update_keys = {"aladdin_username", "aladdin_password", "aladdin_timeout_seconds"}
     if any(key in updates for key in aladdin_update_keys):
-        current_aladdin = read_aladdin_settings()
-        save_aladdin_settings(
+        aladdin_module = _integration_module_or_400("aladdin", "Aladdin")
+        current_aladdin = aladdin_module.read_aladdin_settings()
+        aladdin_module.save_aladdin_settings(
             username=updates.get("aladdin_username", current_aladdin.get("ALADDIN_USERNAME")),
             password=updates.get("aladdin_password", current_aladdin.get("ALADDIN_PASSWORD")),
             timeout_seconds=updates.get("aladdin_timeout_seconds", current_aladdin.get("ALADDIN_TIMEOUT_SECONDS")),
@@ -9083,8 +9407,9 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
 
     sonos_update_keys = {"sonos_enabled", "sonos_discovery_timeout_seconds", "sonos_speaker_hosts"}
     if any(key in updates for key in sonos_update_keys):
-        current_sonos = read_sonos_settings()
-        save_sonos_settings(
+        sonos_module = _integration_module_or_400("sonos", "Sonos")
+        current_sonos = sonos_module.read_sonos_settings()
+        sonos_module.save_sonos_settings(
             enabled=updates.get("sonos_enabled", current_sonos.get("SONOS_ENABLED")),
             discovery_timeout_seconds=updates.get(
                 "sonos_discovery_timeout_seconds",
@@ -9094,15 +9419,17 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         )
 
     if "unifi_network_base_url" in updates or "unifi_network_api_key" in updates:
-        current_network = read_unifi_network_settings()
-        save_unifi_network_settings(
+        unifi_network_module = _integration_module_or_400("unifi_network", "UniFi Network")
+        current_network = unifi_network_module.read_unifi_network_settings()
+        unifi_network_module.save_unifi_network_settings(
             base_url=updates.get("unifi_network_base_url", current_network.get("UNIFI_BASE_URL")),
             api_key=updates.get("unifi_network_api_key", current_network.get("UNIFI_API_KEY")),
         )
 
     if "unifi_protect_base_url" in updates or "unifi_protect_api_key" in updates:
-        current_protect = read_unifi_protect_settings()
-        save_unifi_protect_settings(
+        unifi_protect_module = _integration_module_or_400("unifi_protect", "UniFi Protect")
+        current_protect = unifi_protect_module.read_unifi_protect_settings()
+        unifi_protect_module.save_unifi_protect_settings(
             base_url=updates.get("unifi_protect_base_url", current_protect.get("base")),
             api_key=updates.get("unifi_protect_api_key", current_protect.get("api_key")),
         )

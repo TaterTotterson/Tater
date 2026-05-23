@@ -5,31 +5,13 @@ import json
 import logging
 import os
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import aiohttp
 
 from helpers import redis_client as shared_redis_client
-from integrations.hue import HUE_DEFAULT_TIMEOUT_SECONDS, hue_clip_v2_root, read_hue_settings
-from integrations.homekit import (
-    ecobee_homekit_paired,
-    homekit_dependency_available,
-    list_homekit_thermostats,
-    read_ecobee_homekit_settings,
-    watch_homekit_thermostats,
-)
-from integrations.homeassistant import load_homeassistant_config, ws_url as homeassistant_ws_url
-from integrations.unifi_network import (
-    get_unifi_clients_all,
-    get_unifi_devices_all,
-    get_unifi_sites,
-    pick_unifi_site,
-    read_unifi_network_settings,
-    unifi_network_base,
-    unifi_network_headers,
-)
-from integrations.unifi_protect import load_unifi_protect_config, unifi_protect_configured
 from runtime_executors import run_background
+from tateros import integration_store as integration_store_module
 
 logger = logging.getLogger("integration_runtime")
 
@@ -42,9 +24,44 @@ _DEFAULT_EVENT_MAX = 1000
 _DEFAULT_RECONNECT_SECONDS = 5
 _DEFAULT_ECOBEE_HOMEKIT_POLL_SECONDS = 30
 _DEFAULT_UNIFI_NETWORK_POLL_SECONDS = 30
+HUE_DEFAULT_TIMEOUT_SECONDS = 10
 _TASKS: List[asyncio.Task] = []
 _STOP_EVENT: Optional[asyncio.Event] = None
 _RUNTIME_CLIENT: Any = None
+_RUNTIME_LOOP: Optional[asyncio.AbstractEventLoop] = None
+_GENERIC_RUNTIME_CURSOR: Dict[str, Any] = {}
+_GENERIC_RUNTIME_NEXT_POLL: Dict[str, float] = {}
+_RUNTIME_PROVIDER_OWNER = {
+    "ecobee_homekit": "homekit",
+}
+
+
+def bind_integration_runtime_loop(loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
+    global _RUNTIME_LOOP
+    if loop is None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+    if loop is not None and not loop.is_closed():
+        _RUNTIME_LOOP = loop
+
+
+def _active_runtime_loop() -> Optional[asyncio.AbstractEventLoop]:
+    loop = _RUNTIME_LOOP
+    if loop is None or loop.is_closed():
+        return None
+    return loop
+
+
+async def _run_on_runtime_loop(factory: Callable[[], Awaitable[Any]]) -> Any:
+    loop = _active_runtime_loop()
+    current_loop = asyncio.get_running_loop()
+    if loop is not None and loop.is_running() and loop is not current_loop:
+        future = asyncio.run_coroutine_threadsafe(factory(), loop)
+        return await asyncio.wrap_future(future)
+    bind_integration_runtime_loop(current_loop)
+    return await factory()
 
 
 def _text(value: Any) -> str:
@@ -118,6 +135,10 @@ def _runtime_client(client: Any = None) -> Any:
     return client or _RUNTIME_CLIENT or shared_redis_client
 
 
+def _integration_module(integration_id: str):
+    return integration_store_module.integration_module(integration_id)
+
+
 def _event_max() -> int:
     return _as_int(os.getenv("TATER_INTEGRATION_RUNTIME_EVENT_MAX"), _DEFAULT_EVENT_MAX, minimum=100, maximum=10000)
 
@@ -150,7 +171,10 @@ def _status_set(client: Any, **fields: Any) -> None:
         return
     payload = {str(key): _status_value(value) for key, value in fields.items()}
     payload["updated_at"] = _status_value(time.time())
-    redis_obj.hset(INTEGRATION_RUNTIME_STATUS_KEY, mapping=payload)
+    try:
+        redis_obj.hset(INTEGRATION_RUNTIME_STATUS_KEY, mapping=payload)
+    except Exception as exc:
+        logger.debug("[integrations] runtime status write skipped: %s", exc)
 
 
 def _json_loads(raw: Any) -> Optional[Dict[str, Any]]:
@@ -162,6 +186,40 @@ def _json_loads(raw: Any) -> Optional[Dict[str, Any]]:
     except Exception:
         return None
     return data if isinstance(data, dict) else None
+
+
+def _enabled_integration_ids() -> set[str]:
+    try:
+        return {
+            _text(integration_id).lower()
+            for integration_id in integration_store_module.get_enabled_integration_ids()
+            if _text(integration_id)
+        }
+    except Exception:
+        return set()
+
+
+def _runtime_provider_owner(provider: Any) -> str:
+    token = _text(provider).lower()
+    return _RUNTIME_PROVIDER_OWNER.get(token, token)
+
+
+def _runtime_provider_enabled(provider: Any, enabled_ids: Optional[set[str]] = None) -> bool:
+    token = _text(provider).lower()
+    if not token:
+        return False
+    enabled = enabled_ids if enabled_ids is not None else _enabled_integration_ids()
+    owner = _runtime_provider_owner(token)
+    return token in enabled or owner in enabled
+
+
+def _runtime_providers_for_integration(integration_id: str) -> List[str]:
+    owner = _text(integration_id).lower()
+    if not owner:
+        return []
+    providers = {owner}
+    providers.update(provider for provider, mapped_owner in _RUNTIME_PROVIDER_OWNER.items() if mapped_owner == owner)
+    return sorted(providers)
 
 
 def _state_set(client: Any, provider: str, state_id: Any, payload: Dict[str, Any]) -> None:
@@ -208,6 +266,220 @@ def _publish_event(client: Any, provider: str, kind: str, payload: Dict[str, Any
     return record
 
 
+def _runtime_state_records(redis_obj: Any, *, enabled_only: bool = True) -> List[Dict[str, Any]]:
+    try:
+        raw = redis_obj.hgetall(INTEGRATION_RUNTIME_STATES_KEY) or {} if redis_obj else {}
+    except Exception:
+        raw = {}
+    states: List[Dict[str, Any]] = []
+    enabled_ids = _enabled_integration_ids() if enabled_only else set()
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            record = _json_loads(value)
+            if not record:
+                continue
+            provider = _text(record.get("provider"))
+            if enabled_only and not _runtime_provider_enabled(provider, enabled_ids):
+                continue
+            record.setdefault("key", _text(key))
+            states.append(record)
+    states.sort(key=lambda item: (_text(item.get("provider")).casefold(), _text(item.get("id")).casefold()))
+    return states
+
+
+def clear_integration_runtime_provider(integration_id: str, client: Any = None) -> Dict[str, Any]:
+    redis_obj = _runtime_client(client)
+    providers = _runtime_providers_for_integration(integration_id)
+    if not redis_obj or not providers:
+        return {"providers": providers, "states_deleted": 0, "status_fields_deleted": 0}
+
+    states_deleted = 0
+    try:
+        raw_states = redis_obj.hgetall(INTEGRATION_RUNTIME_STATES_KEY) or {}
+    except Exception:
+        raw_states = {}
+    if isinstance(raw_states, dict):
+        for key, value in raw_states.items():
+            key_text = _text(key)
+            record = _json_loads(value)
+            provider = _text(record.get("provider") if record else key_text.split(":", 1)[0]).lower()
+            if provider in providers:
+                try:
+                    redis_obj.hdel(INTEGRATION_RUNTIME_STATES_KEY, key)
+                    states_deleted += 1
+                except Exception:
+                    pass
+
+    status_fields: set[str] = set()
+    for provider in providers:
+        status_fields.update(
+            {
+                f"{provider}_configured",
+                f"{provider}_connected",
+                f"{provider}_ws_connected",
+                f"{provider}_poll_connected",
+                f"{provider}_eventstream_connected",
+                f"{provider}_last_error",
+                f"{provider}_last_poll_ts",
+                f"{provider}_ws_url",
+                f"{provider}_poll_interval_seconds",
+                f"{provider}_monitor_mode",
+                f"{provider}_notice",
+                f"{provider}_alias",
+                f"{provider}_site_id",
+                f"{provider}_site_name",
+                f"{provider}_device_count",
+                f"{provider}_client_count",
+            }
+        )
+
+    status_fields_deleted = 0
+    if status_fields:
+        try:
+            status_fields_deleted = int(redis_obj.hdel(INTEGRATION_RUNTIME_STATUS_KEY, *sorted(status_fields)) or 0)
+        except Exception:
+            status_fields_deleted = 0
+
+    return {
+        "providers": providers,
+        "states_deleted": states_deleted,
+        "status_fields_deleted": status_fields_deleted,
+    }
+
+
+def _runtime_poll_seconds(module: Any) -> int:
+    for attr in ("INTEGRATION_RUNTIME_POLL_SECONDS", "RUNTIME_POLL_SECONDS"):
+        value = getattr(module, attr, None)
+        if value not in (None, ""):
+            return _as_int(value, 30, minimum=1, maximum=86400)
+    definition = getattr(module, "INTEGRATION", None)
+    if isinstance(definition, dict):
+        return _as_int(
+            definition.get("runtime_poll_seconds") or definition.get("poll_seconds"),
+            30,
+            minimum=1,
+            maximum=86400,
+        )
+    return 30
+
+
+def _runtime_poller(module: Any):
+    for name in ("integration_poll_events", "poll_integration_events", "integration_runtime_poll"):
+        fn = getattr(module, name, None)
+        if callable(fn):
+            return fn
+    return None
+
+
+def _call_runtime_poller(fn: Any, *, client: Any, cursor: Any) -> Any:
+    try:
+        return fn(client=client, cursor=cursor)
+    except TypeError:
+        try:
+            return fn(cursor=cursor)
+        except TypeError:
+            try:
+                return fn(client)
+            except TypeError:
+                return fn()
+
+
+def _event_payload_id(payload: Dict[str, Any]) -> str:
+    for key in ("entity_id", "ref", "device_ref", "resource_ref", "id", "device_id"):
+        token = _text(payload.get(key))
+        if token:
+            return token
+    return ""
+
+
+def _publish_generic_runtime_result(client: Any, integration_id: str, result: Any) -> None:
+    if result is None:
+        return
+    if isinstance(result, list):
+        result = {"events": result}
+    if not isinstance(result, dict):
+        return
+
+    cursor = result.get("cursor")
+    if cursor not in (None, ""):
+        _GENERIC_RUNTIME_CURSOR[integration_id] = cursor
+
+    states = result.get("states") if isinstance(result.get("states"), list) else []
+    for state in states:
+        if not isinstance(state, dict):
+            continue
+        state_id = _event_payload_id(state)
+        if state_id:
+            _state_set(client, integration_id, state_id, state)
+
+    events = result.get("events") if isinstance(result.get("events"), list) else []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        kind = _text(event.get("kind") or event.get("type") or "state_changed")
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {
+            key: value for key, value in event.items() if key not in {"kind", "type"}
+        }
+        state_id = _event_payload_id(payload)
+        if state_id:
+            _state_set(client, integration_id, state_id, payload)
+        _publish_event(client, integration_id, kind, payload)
+
+
+async def _generic_integration_poll_loop(stop_event: asyncio.Event, client: Any) -> None:
+    redis_obj = _runtime_client(client)
+    while not stop_event.is_set():
+        now = time.time()
+        next_wake = now + 30.0
+        try:
+            for integration_id in integration_store_module.get_enabled_integration_ids():
+                module = _integration_module(integration_id)
+                if module is None:
+                    continue
+                poller = _runtime_poller(module)
+                if poller is None:
+                    continue
+                poll_seconds = _runtime_poll_seconds(module)
+                due_at = _GENERIC_RUNTIME_NEXT_POLL.get(integration_id, 0.0)
+                if now < due_at:
+                    next_wake = min(next_wake, due_at)
+                    continue
+                _GENERIC_RUNTIME_NEXT_POLL[integration_id] = now + poll_seconds
+                next_wake = min(next_wake, now + poll_seconds)
+                try:
+                    result = await run_background(
+                        _call_runtime_poller,
+                        poller,
+                        client=redis_obj,
+                        cursor=_GENERIC_RUNTIME_CURSOR.get(integration_id),
+                    )
+                    _publish_generic_runtime_result(redis_obj, integration_id, result)
+                    _status_set(
+                        redis_obj,
+                        **{
+                            f"{integration_id}_generic_poll_connected": True,
+                            f"{integration_id}_generic_poll_last_ts": time.time(),
+                            f"{integration_id}_generic_poll_last_error": "",
+                        },
+                    )
+                except Exception as exc:
+                    _status_set(
+                        redis_obj,
+                        **{
+                            f"{integration_id}_generic_poll_connected": False,
+                            f"{integration_id}_generic_poll_last_error": str(exc),
+                            "last_error": str(exc),
+                        },
+                    )
+                    logger.warning("[integrations] %s generic poll error: %s", integration_id, exc)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _status_set(redis_obj, generic_poll_last_error=str(exc), last_error=str(exc))
+            logger.warning("[integrations] generic integration poll loop error: %s", exc)
+        await _sleep(stop_event, max(1.0, min(30.0, next_wake - time.time())))
+
+
 async def _sleep(stop_event: asyncio.Event, seconds: float) -> None:
     deadline = time.monotonic() + max(0.1, float(seconds or 0.1))
     while not stop_event.is_set() and time.monotonic() < deadline:
@@ -250,7 +522,19 @@ async def _homeassistant_loop(stop_event: asyncio.Event, client: Any) -> None:
             maximum=60,
         )
         try:
-            conf = load_homeassistant_config(required=False, client=redis_obj)
+            ha_module = _integration_module("homeassistant")
+            if ha_module is None:
+                _status_set(
+                    redis_obj,
+                    homeassistant_configured=False,
+                    homeassistant_connected=False,
+                    homeassistant_ws_connected=False,
+                    homeassistant_last_error="",
+                )
+                await _sleep(stop_event, reconnect_seconds)
+                continue
+
+            conf = ha_module.load_homeassistant_config(required=False, client=redis_obj)
             token = _text(conf.get("token"))
             base = _text(conf.get("base"))
             if not token:
@@ -264,7 +548,7 @@ async def _homeassistant_loop(stop_event: asyncio.Event, client: Any) -> None:
                 await _sleep(stop_event, reconnect_seconds)
                 continue
 
-            ws_addr = homeassistant_ws_url(base)
+            ws_addr = ha_module.ws_url(base)
             _status_set(redis_obj, homeassistant_configured=True, homeassistant_ws_url=ws_addr)
             async with aiohttp.ClientSession() as session:
                 async with session.ws_connect(ws_addr, heartbeat=30) as ws:
@@ -394,7 +678,8 @@ async def _unifi_protect_loop(stop_event: asyncio.Event, client: Any) -> None:
             maximum=60,
         )
         try:
-            if not unifi_protect_configured(redis_obj):
+            protect_module = _integration_module("unifi_protect")
+            if protect_module is None or not protect_module.unifi_protect_configured(redis_obj):
                 _status_set(
                     redis_obj,
                     unifi_protect_configured=False,
@@ -405,7 +690,7 @@ async def _unifi_protect_loop(stop_event: asyncio.Event, client: Any) -> None:
                 await _sleep(stop_event, reconnect_seconds)
                 continue
 
-            conf = load_unifi_protect_config(required=True, client=redis_obj)
+            conf = protect_module.load_unifi_protect_config(required=True, client=redis_obj)
             override = _text(_settings(redis_obj, "awareness_core_settings").get("unifi_ws_url"))
             ws_addr = _unifi_ws_url(conf["base"], override)
             headers = {"X-API-KEY": conf["api_key"], "Accept": "application/json"}
@@ -615,15 +900,18 @@ def _unifi_network_fingerprint(row: Dict[str, Any], category: str) -> str:
 
 
 def _unifi_network_snapshot_from_settings(settings: Dict[str, str]) -> Dict[str, Any]:
+    network_module = _integration_module("unifi_network")
+    if network_module is None:
+        return {"configured": False, "site_id": "", "site_name": "", "devices": [], "clients": []}
     api_key = _text((settings or {}).get("UNIFI_API_KEY"))
     if not api_key:
         return {"configured": False, "site_id": "", "site_name": "", "devices": [], "clients": []}
-    base = unifi_network_base(settings)
-    headers = unifi_network_headers(api_key)
-    sites = get_unifi_sites(base, headers)
-    site_id, site_name = pick_unifi_site(sites)
-    devices_payload = get_unifi_devices_all(base, headers, site_id)
-    clients_payload = get_unifi_clients_all(base, headers, site_id)
+    base = network_module.unifi_network_base(settings)
+    headers = network_module.unifi_network_headers(api_key)
+    sites = network_module.get_unifi_sites(base, headers)
+    site_id, site_name = network_module.pick_unifi_site(sites)
+    devices_payload = network_module.get_unifi_devices_all(base, headers, site_id)
+    clients_payload = network_module.get_unifi_clients_all(base, headers, site_id)
     devices = [dict(row) for row in devices_payload.get("data") or [] if isinstance(row, dict)]
     clients = [dict(row) for row in clients_payload.get("data") or [] if isinstance(row, dict)]
     return {
@@ -722,7 +1010,22 @@ async def _unifi_network_poll_loop(stop_event: asyncio.Event, client: Any) -> No
             maximum=300,
         )
         try:
-            settings = read_unifi_network_settings(redis_obj)
+            network_module = _integration_module("unifi_network")
+            if network_module is None:
+                previous = {}
+                first_snapshot = True
+                _status_set(
+                    redis_obj,
+                    unifi_network_configured=False,
+                    unifi_network_connected=False,
+                    unifi_network_poll_connected=False,
+                    unifi_network_last_error="",
+                    unifi_network_poll_interval_seconds=poll_seconds,
+                )
+                await _sleep(stop_event, poll_seconds)
+                continue
+
+            settings = network_module.read_unifi_network_settings(redis_obj)
             api_key = _text(settings.get("UNIFI_API_KEY"))
             if not api_key:
                 previous = {}
@@ -791,7 +1094,9 @@ async def _unifi_network_poll_loop(stop_event: asyncio.Event, client: Any) -> No
 
 
 def _hue_eventstream_url(root: Any) -> str:
-    return f"{hue_clip_v2_root(root)}/eventstream/clip/v2"
+    hue_module = _integration_module("hue")
+    clip_root = hue_module.hue_clip_v2_root(root) if hue_module is not None else _text(root).rstrip("/")
+    return f"{clip_root}/eventstream/clip/v2"
 
 
 def _hue_resource_state(resource: Dict[str, Any]) -> str:
@@ -834,7 +1139,20 @@ async def _hue_eventstream_loop(stop_event: asyncio.Event, client: Any) -> None:
     while not stop_event.is_set():
         reconnect_seconds = _DEFAULT_RECONNECT_SECONDS
         try:
-            settings = read_hue_settings(redis_obj)
+            hue_module = _integration_module("hue")
+            if hue_module is None:
+                _status_set(
+                    redis_obj,
+                    hue_configured=False,
+                    hue_connected=False,
+                    hue_ws_connected=False,
+                    hue_eventstream_connected=False,
+                    hue_last_error="",
+                )
+                await _sleep(stop_event, reconnect_seconds)
+                continue
+
+            settings = hue_module.read_hue_settings(redis_obj)
             app_key = _text(settings.get("HUE_APP_KEY"))
             if not app_key:
                 _status_set(
@@ -850,7 +1168,7 @@ async def _hue_eventstream_loop(stop_event: asyncio.Event, client: Any) -> None:
 
             timeout_seconds = _as_int(
                 settings.get("HUE_TIMEOUT_SECONDS"),
-                HUE_DEFAULT_TIMEOUT_SECONDS,
+                getattr(hue_module, "HUE_DEFAULT_TIMEOUT_SECONDS", HUE_DEFAULT_TIMEOUT_SECONDS),
                 minimum=2,
                 maximum=60,
             )
@@ -1006,7 +1324,22 @@ async def _ecobee_homekit_poll_loop(
             maximum=300,
         )
         try:
-            rows = await run_background(list_homekit_thermostats, alias)
+            homekit_module = _integration_module("homekit")
+            if homekit_module is None:
+                previous = {}
+                first_snapshot = True
+                _status_set(
+                    redis_obj,
+                    ecobee_homekit_configured=False,
+                    ecobee_homekit_connected=False,
+                    ecobee_homekit_ws_connected=False,
+                    ecobee_homekit_poll_connected=False,
+                    ecobee_homekit_last_error="",
+                )
+                await _sleep(stop_event, poll_seconds)
+                continue
+
+            rows = await run_background(homekit_module.list_homekit_thermostats, alias)
             current: Dict[str, Dict[str, Any]] = {}
             thermostats: List[Dict[str, Any]] = []
             for row in rows:
@@ -1111,9 +1444,22 @@ async def _ecobee_homekit_loop(stop_event: asyncio.Event, client: Any) -> None:
         reconnect_seconds = _DEFAULT_RECONNECT_SECONDS
         alias = "ecobee"
         try:
-            settings = read_ecobee_homekit_settings(redis_obj)
+            homekit_module = _integration_module("homekit")
+            if homekit_module is None:
+                _status_set(
+                    redis_obj,
+                    ecobee_homekit_configured=False,
+                    ecobee_homekit_connected=False,
+                    ecobee_homekit_ws_connected=False,
+                    ecobee_homekit_poll_connected=False,
+                    ecobee_homekit_last_error="",
+                )
+                await _sleep(stop_event, reconnect_seconds)
+                continue
+
+            settings = homekit_module.read_ecobee_homekit_settings(redis_obj)
             alias = _text(settings.get("ECOBEE_HOMEKIT_ALIAS")) or "ecobee"
-            if not homekit_dependency_available():
+            if not homekit_module.homekit_dependency_available():
                 _status_set(
                     redis_obj,
                     ecobee_homekit_configured=False,
@@ -1123,7 +1469,7 @@ async def _ecobee_homekit_loop(stop_event: asyncio.Event, client: Any) -> None:
                 )
                 await _sleep(stop_event, reconnect_seconds)
                 continue
-            if not ecobee_homekit_paired(alias, client=redis_obj):
+            if not homekit_module.ecobee_homekit_paired(alias, client=redis_obj):
                 _status_set(
                     redis_obj,
                     ecobee_homekit_configured=False,
@@ -1163,7 +1509,7 @@ async def _ecobee_homekit_loop(stop_event: asyncio.Event, client: Any) -> None:
                 )
 
             logger.info("[integrations] Ecobee HomeKit monitor connecting: %s", alias)
-            await watch_homekit_thermostats(alias=alias, on_update=on_update, stop_event=stop_event)
+            await homekit_module.watch_homekit_thermostats(alias=alias, on_update=on_update, stop_event=stop_event)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1191,7 +1537,11 @@ async def _ecobee_homekit_loop(stop_event: asyncio.Event, client: Any) -> None:
 
 
 def start_integration_runtime(client: Any = None) -> Dict[str, Any]:
-    global _RUNTIME_CLIENT, _STOP_EVENT, _TASKS
+    global _RUNTIME_CLIENT, _RUNTIME_LOOP, _STOP_EVENT, _TASKS
+    try:
+        _RUNTIME_LOOP = asyncio.get_running_loop()
+    except RuntimeError:
+        raise RuntimeError("Integration runtime must be started from the application event loop.")
     running_tasks = [task for task in _TASKS if not task.done()]
     if running_tasks:
         _TASKS = running_tasks
@@ -1206,6 +1556,7 @@ def start_integration_runtime(client: Any = None) -> Dict[str, Any]:
         asyncio.create_task(_unifi_network_poll_loop(_STOP_EVENT, redis_obj), name="integration-runtime-unifi-network"),
         asyncio.create_task(_hue_eventstream_loop(_STOP_EVENT, redis_obj), name="integration-runtime-hue"),
         asyncio.create_task(_ecobee_homekit_loop(_STOP_EVENT, redis_obj), name="integration-runtime-ecobee-homekit"),
+        asyncio.create_task(_generic_integration_poll_loop(_STOP_EVENT, redis_obj), name="integration-runtime-generic-poll"),
     ]
     _status_set(
         redis_obj,
@@ -1229,7 +1580,14 @@ def start_integration_runtime(client: Any = None) -> Dict[str, Any]:
     return integration_runtime_status(redis_obj)
 
 
-async def stop_integration_runtime() -> Dict[str, Any]:
+async def ensure_integration_runtime_started(client: Any = None) -> Dict[str, Any]:
+    async def _start() -> Dict[str, Any]:
+        return start_integration_runtime(client)
+
+    return await _run_on_runtime_loop(_start)
+
+
+async def _stop_integration_runtime_on_loop() -> Dict[str, Any]:
     global _STOP_EVENT, _TASKS
     redis_obj = _runtime_client()
     if _STOP_EVENT is not None:
@@ -1261,15 +1619,32 @@ async def stop_integration_runtime() -> Dict[str, Any]:
     return integration_runtime_status(redis_obj)
 
 
+async def stop_integration_runtime() -> Dict[str, Any]:
+    return await _run_on_runtime_loop(_stop_integration_runtime_on_loop)
+
+
+async def restart_integration_runtime(client: Any = None) -> Dict[str, Any]:
+    async def _restart() -> Dict[str, Any]:
+        await _stop_integration_runtime_on_loop()
+        return start_integration_runtime(client)
+
+    return await _run_on_runtime_loop(_restart)
+
+
 def integration_runtime_status(client: Any = None) -> Dict[str, Any]:
     redis_obj = _runtime_client(client)
-    raw = redis_obj.hgetall(INTEGRATION_RUNTIME_STATUS_KEY) or {} if redis_obj else {}
+    try:
+        raw = redis_obj.hgetall(INTEGRATION_RUNTIME_STATUS_KEY) or {} if redis_obj else {}
+    except Exception:
+        raw = {}
     status = {_text(k): _decode_status_value(_text(k), v) for k, v in raw.items()} if isinstance(raw, dict) else {}
+    enabled_ids = sorted(_enabled_integration_ids())
+    status["enabled_integrations"] = enabled_ids
     status["running"] = any(task for task in _TASKS if not task.done())
     try:
         status["last_event_seq"] = _as_int(redis_obj.get(INTEGRATION_RUNTIME_EVENT_SEQ_KEY), int(status.get("last_event_seq") or 0), minimum=0)
         status["event_count"] = _as_int(redis_obj.llen(INTEGRATION_RUNTIME_EVENTS_KEY), 0, minimum=0)
-        status["state_count"] = _as_int(redis_obj.hlen(INTEGRATION_RUNTIME_STATES_KEY), 0, minimum=0)
+        status["state_count"] = len(_runtime_state_records(redis_obj, enabled_only=True))
     except Exception:
         status.setdefault("last_event_seq", 0)
         status.setdefault("event_count", 0)
@@ -1302,14 +1677,5 @@ def integration_runtime_events(client: Any = None, *, after_seq: Any = 0, limit:
 
 def integration_runtime_states(client: Any = None) -> Dict[str, Any]:
     redis_obj = _runtime_client(client)
-    raw = redis_obj.hgetall(INTEGRATION_RUNTIME_STATES_KEY) or {} if redis_obj else {}
-    states: List[Dict[str, Any]] = []
-    if isinstance(raw, dict):
-        for key, value in raw.items():
-            record = _json_loads(value)
-            if not record:
-                continue
-            record.setdefault("key", _text(key))
-            states.append(record)
-    states.sort(key=lambda item: (_text(item.get("provider")).casefold(), _text(item.get("id")).casefold()))
-    return {"states": states, "count": len(states)}
+    states = _runtime_state_records(redis_obj, enabled_only=True)
+    return {"states": states, "count": len(states), "enabled_integrations": sorted(_enabled_integration_ids())}

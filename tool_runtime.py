@@ -544,6 +544,7 @@ async def run_meta_tool(
             safe=str(args.get("safe") or "active"),
             country=args.get("country"),
             language=args.get("language"),
+            provider=args.get("provider") or args.get("search_provider"),
             platform=platform,
             origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
         )

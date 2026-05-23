@@ -3,14 +3,24 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from announcement_targets import build_announcement_target_options, normalize_announcement_targets
-from integrations.homeassistant import load_homeassistant_config
+from tateros import integration_store as integration_store_module
 
 REPLY_PLAYBACK_DEVICE = "device"
 REPLY_PLAYBACK_SILENT = "silent"
+HOMEASSISTANT_DEFAULT_BASE_URL = "http://homeassistant.local:8123"
 
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def load_homeassistant_config(*, required: bool = False, client: Any = None) -> Dict[str, str]:
+    fn = integration_store_module.integration_function("homeassistant", "load_homeassistant_config")
+    if fn:
+        return fn(required=required, client=client)
+    if required:
+        raise ValueError("Home Assistant integration is not enabled.")
+    return {"base": HOMEASSISTANT_DEFAULT_BASE_URL, "token": ""}
 
 
 def _lower(value: Any) -> str:
