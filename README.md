@@ -18,10 +18,15 @@ Tater is built around a modular system:
 - **Cores** → core systems that extend Tater's capabilities
 - **Portals** → integrations with platforms like Discord, Home Assistant, and more
 - **Verbas** → AI-driven tools and actions Tater can perform
+- **Integrations** → modular provider packages for devices, services, search providers, and external APIs
 
 These catalogs, versions, metadata, and update paths are managed through **Tater Shop**:
 
 👉 **https://github.com/TaterTotterson/Tater_Shop**
+
+Integration packages are maintained here:
+
+👉 **[TaterTotterson/Tater_Integrations](https://github.com/TaterTotterson/Tater_Integrations)**
 
 ---
 
