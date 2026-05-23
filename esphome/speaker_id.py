@@ -15,12 +15,17 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from helpers import redis_client
-from integrations.huggingface import huggingface_environment
+from tateros import integration_store as integration_store_module
 
 from . import runtime as esphome_runtime
 
 
 logger = logging.getLogger("voice_core")
+
+
+def huggingface_environment(overrides: Optional[Dict[str, Any]] = None, client: Any = None) -> Dict[str, Any]:
+    fn = integration_store_module.integration_function("huggingface", "huggingface_environment")
+    return fn(overrides, client) if fn else dict(overrides or {})
 
 
 def _vp():

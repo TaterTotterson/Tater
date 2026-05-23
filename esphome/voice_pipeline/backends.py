@@ -15,8 +15,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from .conversation import VoiceSessionRuntime
-from integrations.huggingface import huggingface_environment
 from runtime_executors import run_speech
+from tateros import integration_store as integration_store_module
 
 
 def _vp():
@@ -24,6 +24,11 @@ def _vp():
 
 
 _LOCAL_STT_TRANSCRIBE_LOCK = asyncio.Lock()
+
+
+def huggingface_environment(overrides: Optional[Dict[str, Any]] = None, client: Any = None) -> Dict[str, Any]:
+    fn = integration_store_module.integration_function("huggingface", "huggingface_environment")
+    return fn(overrides, client) if fn else dict(overrides or {})
 
 
 def _drain_background_task(task: asyncio.Task[Any]) -> None:

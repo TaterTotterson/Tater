@@ -4,25 +4,92 @@ import json
 from typing import Any, Dict, List
 
 from helpers import redis_client
-from integrations.homeassistant import entity_registry_list_sync
-from integrations.sonos import SONOS_TARGET_PREFIX, discover_sonos_speakers, sonos_target_id
-from integrations.unifi_protect import (
-    list_unifi_cameras,
-    unifi_camera_entity,
-    unifi_camera_has_speaker_hint,
-    unifi_camera_id_from_target,
-    unifi_camera_name,
-    unifi_protect_configured,
-)
+from tateros import integration_store as integration_store_module
 
 REDIS_VOICE_SATELLITE_REGISTRY_KEY = "tater:voice:satellites:registry:v1"
 HOMEASSISTANT_TARGET_PREFIX = "ha:"
 VOICE_CORE_TARGET_PREFIX = "voice_core:"
 UNIFI_PROTECT_TARGET_PREFIX = "unifi:"
+SONOS_TARGET_PREFIX = "sonos:"
 
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _integration_function(integration_id: str, function_name: str):
+    return integration_store_module.integration_function(integration_id, function_name)
+
+
+def entity_registry_list_sync(*args, **kwargs):
+    fn = _integration_function("homeassistant", "entity_registry_list_sync")
+    return fn(*args, **kwargs) if fn else []
+
+
+def discover_sonos_speakers(*args, **kwargs):
+    fn = _integration_function("sonos", "discover_sonos_speakers")
+    return fn(*args, **kwargs) if fn else []
+
+
+def sonos_target_id(value: Any) -> str:
+    fn = _integration_function("sonos", "sonos_target_id")
+    if fn:
+        return fn(value)
+    token = _text(value)
+    if token.lower().startswith(SONOS_TARGET_PREFIX):
+        token = _text(token[len(SONOS_TARGET_PREFIX) :])
+    if token.lower().startswith("uuid:"):
+        token = _text(token[5:])
+    return token
+
+
+def list_unifi_cameras(*args, **kwargs):
+    fn = _integration_function("unifi_protect", "list_unifi_cameras")
+    return fn(*args, **kwargs) if fn else []
+
+
+def unifi_camera_entity(camera_id: Any) -> str:
+    fn = _integration_function("unifi_protect", "unifi_camera_entity")
+    if fn:
+        return fn(camera_id)
+    token = _text(camera_id).lower()
+    return f"camera.unifi_{token}" if token else ""
+
+
+def unifi_camera_id_from_target(target: Any) -> str:
+    fn = _integration_function("unifi_protect", "unifi_camera_id_from_target")
+    if fn:
+        return fn(target)
+    token = _text(target)
+    lower = token.lower()
+    if lower.startswith(UNIFI_PROTECT_TARGET_PREFIX):
+        token = _text(token.split(":", 1)[1])
+        lower = token.lower()
+    if lower.startswith("camera."):
+        object_id = lower.split(".", 1)[1]
+        return object_id[len("unifi_") :] if object_id.startswith("unifi_") else object_id
+    return lower[len("unifi_") :] if lower.startswith("unifi_") else lower
+
+
+def unifi_camera_name(row: Dict[str, Any], camera_id: str) -> str:
+    fn = _integration_function("unifi_protect", "unifi_camera_name")
+    if fn:
+        return fn(row, camera_id)
+    for key in ("name", "displayName", "display_name", "friendlyName", "friendly_name"):
+        value = _text((row or {}).get(key))
+        if value:
+            return value
+    return camera_id
+
+
+def unifi_camera_has_speaker_hint(row: Dict[str, Any]) -> bool:
+    fn = _integration_function("unifi_protect", "unifi_camera_has_speaker_hint")
+    return bool(fn(row)) if fn else False
+
+
+def unifi_protect_configured(*args, **kwargs) -> bool:
+    fn = _integration_function("unifi_protect", "unifi_protect_configured")
+    return bool(fn(*args, **kwargs)) if fn else False
 
 
 def _normalize_voice_target(raw: Any) -> str:

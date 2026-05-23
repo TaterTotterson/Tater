@@ -370,6 +370,7 @@ async def run_spudex_chat_turn(
                 llm_client=llm_client,
                 max_results=_int_default(decision.get("max_results"), 5),
                 max_pages=_int_default(decision.get("max_pages"), 3),
+                provider=decision.get("provider") or decision.get("search_provider"),
                 platform=platform,
             )
             search_data = search_result.get("data") if isinstance(search_result.get("data"), dict) else {}

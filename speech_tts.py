@@ -23,14 +23,7 @@ import requests
 from announcement_targets import split_announcement_targets
 from helpers import redis_client
 from runtime_executors import run_background, run_speech
-from integrations.homeassistant import (
-    call_service_sync as ha_call_service_sync,
-    remove_local_media_source_sync as ha_remove_local_media_source_sync,
-    upload_local_media_source_file_sync as ha_upload_local_media_source_file_sync,
-)
-from integrations.huggingface import huggingface_environment
-from integrations.sonos import SONOS_DEFAULT_PLAY_TIMEOUT_SECONDS, sonos_play_media_sync
-from integrations.unifi_protect import DEFAULT_UNIFI_PROTECT_AUDIO_TIMEOUT_SECONDS, play_unifi_protect_audio_sync
+from tateros import integration_store as integration_store_module
 from speech_settings import (
     DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
     DEFAULT_KOKORO_MODEL,
@@ -50,6 +43,53 @@ from speech_settings import (
     normalize_announcement_tts_backend,
     normalize_speech_acceleration,
 )
+
+SONOS_DEFAULT_PLAY_TIMEOUT_SECONDS = 30.0
+DEFAULT_UNIFI_PROTECT_AUDIO_TIMEOUT_SECONDS = 90.0
+
+
+def _integration_function(integration_id: str, function_name: str):
+    return integration_store_module.integration_function(integration_id, function_name)
+
+
+def ha_call_service_sync(*args, **kwargs):
+    fn = _integration_function("homeassistant", "call_service_sync")
+    if not fn:
+        raise RuntimeError("Home Assistant integration is not enabled.")
+    return fn(*args, **kwargs)
+
+
+def ha_remove_local_media_source_sync(*args, **kwargs):
+    fn = _integration_function("homeassistant", "remove_local_media_source_sync")
+    if not fn:
+        return None
+    return fn(*args, **kwargs)
+
+
+def ha_upload_local_media_source_file_sync(*args, **kwargs):
+    fn = _integration_function("homeassistant", "upload_local_media_source_file_sync")
+    if not fn:
+        raise RuntimeError("Home Assistant integration is not enabled.")
+    return fn(*args, **kwargs)
+
+
+def huggingface_environment(overrides: Optional[Dict[str, Any]] = None, client: Any = None) -> Dict[str, Any]:
+    fn = _integration_function("huggingface", "huggingface_environment")
+    return fn(overrides, client) if fn else dict(overrides or {})
+
+
+def sonos_play_media_sync(*args, **kwargs):
+    fn = _integration_function("sonos", "sonos_play_media_sync")
+    if not fn:
+        raise RuntimeError("Sonos integration is not enabled.")
+    return fn(*args, **kwargs)
+
+
+def play_unifi_protect_audio_sync(*args, **kwargs):
+    fn = _integration_function("unifi_protect", "play_unifi_protect_audio_sync")
+    if not fn:
+        raise RuntimeError("UniFi Protect integration is not enabled.")
+    return fn(*args, **kwargs)
 
 try:
     from wyoming.client import AsyncTcpClient

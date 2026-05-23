@@ -54,8 +54,8 @@ from dotenv import load_dotenv
 from fastapi import HTTPException
 
 from helpers import extract_json, get_llm_client_from_env, redis_client
-from integrations.homeassistant import load_homeassistant_config
 from runtime_executors import run_background, run_speech
+from tateros import integration_store as integration_store_module
 import verba_registry
 from verba_settings import get_verba_enabled
 from hydra import run_hydra_turn, resolve_agent_limits
@@ -118,6 +118,17 @@ from .backends import (
     _build_piper_segment_plan,
 )
 from .routes import router, shutdown, startup
+
+HOMEASSISTANT_DEFAULT_BASE_URL = "http://homeassistant.local:8123"
+
+
+def load_homeassistant_config(*, required: bool = False, client: Any = None) -> Dict[str, str]:
+    fn = integration_store_module.integration_function("homeassistant", "load_homeassistant_config")
+    if fn:
+        return fn(required=required, client=client)
+    if required:
+        raise ValueError("Home Assistant integration is not enabled.")
+    return {"base": HOMEASSISTANT_DEFAULT_BASE_URL, "token": ""}
 from .satellites import (
     _arm_pending_followup,
     _cancel_announcement_wait,

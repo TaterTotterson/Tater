@@ -65,6 +65,7 @@ async def research_web(
     safe: str = "active",
     country: Any = None,
     language: Any = None,
+    provider: Any = None,
     platform: str = "",
     origin: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
@@ -83,6 +84,7 @@ async def research_web(
         safe=safe,
         country=country,
         language=language,
+        provider=provider,
         timeout_sec=15,
     )
     if not bool(search_result.get("ok")):

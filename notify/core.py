@@ -10,7 +10,6 @@ from urllib.parse import parse_qs, urlparse, urlunparse
 import requests
 
 from helpers import redis_client
-from integrations.homeassistant import load_homeassistant_config
 from notify.media import store_queue_attachments
 from notify.queue import (
     build_queue_item,
@@ -20,6 +19,7 @@ from notify.queue import (
     resolve_targets,
 )
 from runtime_executors import run_background
+from tateros import integration_store as integration_store_module
 from verba_settings import get_verba_settings
 
 logger = logging.getLogger("notify_core")
@@ -44,6 +44,16 @@ _URL_PATTERN = re.compile(r"https?://\S+")
 _BARE_URL_PATTERN = re.compile(r"(?<!\()(?<!\])\bhttps?://\S+\b")
 _WEBUI_CHAT_HISTORY_KEY = "webui:chat_history"
 _WEBUI_DEFAULT_MAX_STORE = 20
+HOMEASSISTANT_DEFAULT_BASE_URL = "http://homeassistant.local:8123"
+
+
+def load_homeassistant_config(*, required: bool = False, client: Any = None) -> Dict[str, str]:
+    fn = integration_store_module.integration_function("homeassistant", "load_homeassistant_config")
+    if fn:
+        return fn(required=required, client=client)
+    if required:
+        raise ValueError("Home Assistant integration is not enabled.")
+    return {"base": HOMEASSISTANT_DEFAULT_BASE_URL, "token": ""}
 
 
 def core_notifier_platforms() -> Tuple[str, ...]:

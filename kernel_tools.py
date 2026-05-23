@@ -76,13 +76,27 @@ _SEARCH_MAX_FILE_CHARS = int(os.getenv("TATER_SEARCH_MAX_FILE_CHARS", "200000"))
 _ARCHIVE_LIST_MAX_ENTRIES = int(os.getenv("TATER_ARCHIVE_LIST_MAX_ENTRIES", "1000"))
 _ARCHIVE_EXTRACT_MAX_FILES = int(os.getenv("TATER_ARCHIVE_EXTRACT_MAX_FILES", "1000"))
 
-WEB_SEARCH_API_KEY_REDIS_KEY = "tater:web_search:google_api_key"
-WEB_SEARCH_CX_REDIS_KEY = "tater:web_search:google_cx"
-WEB_SEARCH_LEGACY_SETTINGS_KEY = "verba_settings:Web Search"
 WEB_SEARCH_TIMEOUT_SEC = int(os.getenv("TATER_WEB_SEARCH_TIMEOUT_SEC", "15"))
 WEB_SEARCH_MAX_RESULTS = int(os.getenv("TATER_WEB_SEARCH_MAX_RESULTS", "10"))
-WEB_SEARCH_MAX_RESPONSE_BYTES = int(os.getenv("TATER_WEB_SEARCH_MAX_RESPONSE_BYTES", "2000000"))
-WEB_SEARCH_MAX_SNIPPET_CHARS = int(os.getenv("TATER_WEB_SEARCH_MAX_SNIPPET_CHARS", "600"))
+WEB_SEARCH_INTEGRATION_CAPABILITY = "web_search"
+WEB_SEARCH_PROVIDER_ALIASES = {
+    "google": "google_search",
+    "google_cse": "google_search",
+    "google_custom_search": "google_search",
+    "brave": "brave_search",
+    "searx": "searxng_search",
+    "searxng": "searxng_search",
+    "searx_ng": "searxng_search",
+    "serper": "serper_search",
+    "serper_google": "serper_search",
+}
+WEB_SEARCH_PROVIDER_LABELS = {
+    "google_search": "Google Custom Search",
+    "brave_search": "Brave Search",
+    "searxng_search": "SearXNG",
+    "serper_search": "Serper",
+    "auto": "Auto",
+}
 WEBPAGE_TIMEOUT_SEC = int(os.getenv("TATER_WEBPAGE_TIMEOUT_SEC", "20"))
 WEBPAGE_MAX_RESPONSE_BYTES = int(os.getenv("TATER_WEBPAGE_MAX_RESPONSE_BYTES", "4000000"))
 WEBPAGE_MAX_TEXT_CHARS = int(os.getenv("TATER_WEBPAGE_MAX_TEXT_CHARS", "180000"))
@@ -927,28 +941,88 @@ def _clean_redis_str(value: Any) -> str:
     return str(value).strip()
 
 
-def _web_search_settings() -> Tuple[str, str]:
-    api_key = ""
-    cx = ""
-    try:
-        api_key = _clean_redis_str(redis_client.get(WEB_SEARCH_API_KEY_REDIS_KEY))
-        cx = _clean_redis_str(redis_client.get(WEB_SEARCH_CX_REDIS_KEY))
-    except Exception:
-        api_key = ""
-        cx = ""
+def _normalize_web_search_provider(value: Any, *, default: str = "auto") -> str:
+    token = str(value or "").strip().lower().replace("-", "_")
+    if not token:
+        return default
+    if token == "auto":
+        return "auto"
+    token = WEB_SEARCH_PROVIDER_ALIASES.get(token, token)
+    return token if re.fullmatch(r"[a-z0-9_]+", token or "") else default
 
-    if api_key and cx:
-        return api_key, cx
 
+def _web_search_provider_label(provider: str) -> str:
+    return WEB_SEARCH_PROVIDER_LABELS.get(provider, provider.replace("_", " ").title())
+
+
+def _web_search_error(provider: str, message: str, *, needs: Optional[List[str]] = None) -> Dict[str, Any]:
+    out: Dict[str, Any] = {
+        "tool": "search_web",
+        "ok": False,
+        "provider": provider,
+        "provider_label": _web_search_provider_label(provider),
+        "error": message,
+    }
+    if needs:
+        out["needs"] = needs
+    return out
+
+
+def _web_search_candidate_modules(requested_provider: str) -> List[Dict[str, Any]]:
     try:
-        legacy = redis_client.hgetall(WEB_SEARCH_LEGACY_SETTINGS_KEY) or {}
-    except Exception:
-        legacy = {}
-    if not api_key:
-        api_key = _clean_redis_str(legacy.get("GOOGLE_API_KEY") or legacy.get("google_api_key"))
-    if not cx:
-        cx = _clean_redis_str(legacy.get("GOOGLE_CX") or legacy.get("google_cx"))
-    return api_key, cx
+        from tateros import integration_store as integration_store_module
+    except Exception as exc:
+        logger.warning("[web_search] failed loading integration store: %s", exc)
+        return []
+
+    target = _normalize_web_search_provider(requested_provider, default="auto")
+    enabled_ids = integration_store_module.get_enabled_integration_ids()
+    if target != "auto":
+        enabled_ids = [target] if target in enabled_ids else []
+
+    candidates: List[Dict[str, Any]] = []
+    for integration_id in enabled_ids:
+        module = integration_store_module.integration_module(integration_id, require_enabled=True)
+        if module is None:
+            continue
+        searcher = getattr(module, "integration_web_search", None)
+        if not callable(searcher):
+            continue
+        definition = getattr(module, "INTEGRATION", None)
+        definition = definition if isinstance(definition, dict) else {}
+        raw_caps = definition.get("capabilities") or []
+        caps = {
+            str(item or "").strip().lower().replace("-", "_").replace(" ", "_")
+            for item in raw_caps if str(item or "").strip()
+        }
+        if caps and WEB_SEARCH_INTEGRATION_CAPABILITY not in caps:
+            continue
+        candidates.append(
+            {
+                "id": integration_id,
+                "name": str(definition.get("name") or _web_search_provider_label(integration_id)).strip(),
+                "order": int(definition.get("order") or 1000),
+                "searcher": searcher,
+            }
+        )
+    candidates.sort(key=lambda item: (int(item.get("order") or 1000), str(item.get("name") or "").casefold(), str(item.get("id") or "")))
+    return candidates
+
+
+def _web_search_missing_integrations_error(requested_provider: str) -> Dict[str, Any]:
+    provider = _normalize_web_search_provider(requested_provider, default="auto")
+    if provider != "auto":
+        label = _web_search_provider_label(provider)
+        return _web_search_error(
+            provider,
+            f"{label} integration is not enabled or installed.",
+            needs=[f"Enable {label} in WebUI Settings > Integrations > Manager."],
+        )
+    return _web_search_error(
+        "auto",
+        "No web search integrations are enabled.",
+        needs=["Install and enable a web search integration such as Google Search, Brave Search, SearXNG, or Serper."],
+    )
 
 
 def search_web(
@@ -960,149 +1034,79 @@ def search_web(
     safe: str = "active",
     country: Optional[str] = None,
     language: Optional[str] = None,
+    provider: Optional[str] = None,
     timeout_sec: int = WEB_SEARCH_TIMEOUT_SEC,
 ) -> Dict[str, Any]:
     q = str(query or "").strip()
     if not q:
         return {"tool": "search_web", "ok": False, "error": "query is required."}
 
-    api_key, cx = _web_search_settings()
-    if not api_key or not cx:
-        return {
-            "tool": "search_web",
-            "ok": False,
-            "error": "Web search is not configured. Set Google API Key and Search Engine ID (CX) in WebUI Settings.",
-            "needs": [
-                "Please set Google API Key in WebUI Settings > Web Search.",
-                "Please set Google Search Engine ID (CX) in WebUI Settings > Web Search.",
-            ],
-        }
-
+    requested_provider = _normalize_web_search_provider(
+        provider or os.getenv("TATER_WEB_SEARCH_PROVIDER") or "auto",
+        default="auto",
+    )
+    providers = _web_search_candidate_modules(requested_provider)
     max_results = _coerce_int(num_results, default=5, min_value=1, max_value=WEB_SEARCH_MAX_RESULTS)
     start_index = _coerce_int(start, default=1, min_value=1, max_value=91)
     timeout_val = _coerce_int(timeout_sec, default=WEB_SEARCH_TIMEOUT_SEC, min_value=3, max_value=60)
     safe_mode = str(safe or "active").strip().lower()
     if safe_mode not in {"active", "off"}:
         safe_mode = "active"
-
-    params: Dict[str, Any] = {
-        "key": api_key,
-        "cx": cx,
-        "q": q,
-        "num": max_results,
-        "start": start_index,
-        "safe": safe_mode,
-    }
     site_val = str(site or "").strip()
-    if site_val:
-        params["siteSearch"] = site_val
-        params["siteSearchFilter"] = "i"
-
     country_val = str(country or "").strip().lower()
-    if country_val and re.fullmatch(r"[a-z]{2}", country_val):
-        params["gl"] = country_val
-
+    if not re.fullmatch(r"[a-z]{2}", country_val or ""):
+        country_val = ""
     language_val = str(language or "").strip().lower()
-    if language_val:
-        if language_val.startswith("lang_"):
-            params["lr"] = language_val
-        elif re.fullmatch(r"[a-z]{2}", language_val):
-            params["lr"] = f"lang_{language_val}"
+    if language_val.startswith("lang_"):
+        language_val = language_val[5:]
+    if not re.fullmatch(r"[a-z]{2}", language_val or ""):
+        language_val = ""
 
-    endpoint = "https://www.googleapis.com/customsearch/v1"
-    url = endpoint + "?" + urllib.parse.urlencode(params, doseq=True)
-    req = urllib.request.Request(url, headers={"User-Agent": "Tater-AgentLab/1.0"})
+    if not providers:
+        return _web_search_missing_integrations_error(requested_provider)
 
-    try:
-        with urllib.request.urlopen(req, timeout=timeout_val) as resp:
-            raw = resp.read(WEB_SEARCH_MAX_RESPONSE_BYTES)
-    except urllib.error.HTTPError as e:
-        body = ""
+    attempts: List[Dict[str, Any]] = []
+    for provider_row in providers:
+        provider_id = str(provider_row.get("id") or "").strip()
+        provider_label = str(provider_row.get("name") or _web_search_provider_label(provider_id)).strip()
+        searcher = provider_row.get("searcher")
+        if not callable(searcher):
+            continue
         try:
-            body = e.read(1000).decode("utf-8", errors="replace")
-        except Exception:
-            body = ""
-        message = body.strip() or str(e)
-        return {"tool": "search_web", "ok": False, "error": f"Google CSE request failed ({e.code}): {message}"}
-    except Exception as e:
-        return {"tool": "search_web", "ok": False, "error": f"Web search failed: {e}"}
+            result = searcher(
+                q,
+                num_results=max_results,
+                start=start_index,
+                site=site_val or None,
+                safe=safe_mode,
+                country=country_val or None,
+                language=language_val or None,
+                timeout_sec=timeout_val,
+            )
+        except Exception as exc:
+            result = _web_search_error(provider_id, f"{provider_label} search failed: {exc}")
 
-    try:
-        payload = json.loads(raw.decode("utf-8", errors="replace"))
-    except Exception:
-        return {"tool": "search_web", "ok": False, "error": "Invalid response from Google CSE."}
+        if not isinstance(result, dict):
+            result = {"tool": "search_web", "ok": False, "provider": provider_id, "error": "Search integration returned an invalid response."}
+        result.setdefault("tool", "search_web")
+        result.setdefault("provider", provider_id)
+        result.setdefault("provider_label", provider_label)
 
-    if isinstance(payload, dict) and payload.get("error"):
-        err = payload.get("error") or {}
-        msg = str(err.get("message") or "Unknown Google CSE error.")
-        return {"tool": "search_web", "ok": False, "error": msg}
-
-    items = payload.get("items") if isinstance(payload, dict) else []
-    if not isinstance(items, list):
-        items = []
-
-    results: List[Dict[str, Any]] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        link = str(item.get("link") or "").strip()
-        if not link:
-            continue
-        title = str(item.get("title") or "").strip() or link
-        snippet = str(item.get("snippet") or "").strip()
-        if len(snippet) > WEB_SEARCH_MAX_SNIPPET_CHARS:
-            snippet = snippet[:WEB_SEARCH_MAX_SNIPPET_CHARS].rstrip() + "..."
-        results.append(
+        if bool(result.get("ok")):
+            return result
+        if requested_provider != "auto":
+            return result
+        attempts.append(
             {
-                "title": title,
-                "url": link,
-                "snippet": snippet,
-                "display_url": str(item.get("displayLink") or "").strip(),
+                "provider": provider_id,
+                "provider_label": _web_search_provider_label(provider_id),
+                "error": str(result.get("error") or "Search failed."),
             }
         )
 
-    search_info = payload.get("searchInformation") if isinstance(payload, dict) else {}
-    search_time = None
-    if isinstance(search_info, dict):
-        search_time = search_info.get("searchTime")
-
-    next_start = None
-    total_results = None
-    queries_blob = payload.get("queries") if isinstance(payload, dict) else None
-    if isinstance(queries_blob, dict):
-        req_pages = queries_blob.get("request")
-        if isinstance(req_pages, list) and req_pages:
-            req0 = req_pages[0] if isinstance(req_pages[0], dict) else {}
-            raw_total = req0.get("totalResults")
-            if raw_total is not None:
-                try:
-                    total_results = int(str(raw_total))
-                except Exception:
-                    total_results = None
-        next_pages = queries_blob.get("nextPage")
-        if isinstance(next_pages, list) and next_pages:
-            np0 = next_pages[0] if isinstance(next_pages[0], dict) else {}
-            raw_next = np0.get("startIndex")
-            if raw_next is not None:
-                try:
-                    next_start = int(raw_next)
-                except Exception:
-                    next_start = None
-
-    return {
-        "tool": "search_web",
-        "ok": True,
-        "query": q,
-        "start": start_index,
-        "count": len(results),
-        "num_results": max_results,
-        "results": results,
-        "site_filter": site_val or None,
-        "search_time_sec": search_time,
-        "total_results": total_results,
-        "has_more": bool(next_start),
-        "next_start": next_start,
-    }
+    error = _web_search_error("auto", "All configured web search providers failed.")
+    error["attempted_providers"] = attempts
+    return error
 
 
 def _download_file_detect_media(path: Path, content_type: str) -> Tuple[str, str]:

@@ -21,5 +21,9 @@ portals/*
 cores/*
 !cores/__init__.py
 
+# Integration source now lives in the integration store; keep local integration files out of this repo.
+integrations/*
+!integrations/__init__.py
+
 # Local runtime config/cache.
 .runtime/
