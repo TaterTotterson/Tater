@@ -9,6 +9,14 @@ from . import ui_helpers as esphome_ui_helpers
 
 VOICE_MODEL_SETTING_GROUPS = [
     (
+        "Faster Whisper",
+        [
+            "VOICE_FASTER_WHISPER_BEAM_SIZE",
+            "VOICE_FASTER_WHISPER_COMPUTE_TYPE",
+            "VOICE_FASTER_WHISPER_INITIAL_PROMPT",
+        ],
+    ),
+    (
         "SpeechBrain Models",
         ["VOICE_SPEECHBRAIN_ACCELERATION"],
     ),
@@ -848,9 +856,6 @@ def settings_sections() -> List[Dict[str, Any]]:
             "Speech Recognition",
             [
                 "VOICE_INPUT_GAIN",
-                "VOICE_FASTER_WHISPER_BEAM_SIZE",
-                "VOICE_FASTER_WHISPER_COMPUTE_TYPE",
-                "VOICE_FASTER_WHISPER_INITIAL_PROMPT",
             ],
         ),
         (

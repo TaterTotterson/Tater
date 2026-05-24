@@ -14725,6 +14725,8 @@ async function loadSettingsView() {
               ? "Server-side wake model settings used by updated Tater satellite firmware."
               : label === "NanoWakeWord"
                 ? "Server-side NanoWakeWord model settings used by updated Tater satellite firmware."
+              : label === "Faster Whisper"
+                ? "Local STT decode settings used when STT Backend is Faster Whisper."
               : label === "Voice Activity Detection"
                 ? "Server-side speech endpoint detection used after wake."
                 : "Local model acceleration used by voice identity and emotion models."
@@ -14742,6 +14744,7 @@ async function loadSettingsView() {
           .join("")
       : "";
   const voiceVadSettingsHtml = voiceModelSectionHtmlByLabel("Voice Activity Detection");
+  const fasterWhisperSettingsHtml = voiceModelSectionHtmlByLabel("Faster Whisper");
   const speechBrainSettingsHtml = voiceModelSectionHtmlByLabel("SpeechBrain Models");
   const openWakeWordSettingsHtml = voiceModelSections.length
     ? voiceModelSections
@@ -15066,6 +15069,8 @@ async function loadSettingsView() {
                   )}" />
                 </label>
               </div>
+
+              ${fasterWhisperSettingsHtml}
 
               <div class="hydra-model-panel is-active">
                 <div class="hydra-model-panel-title">TTS</div>
