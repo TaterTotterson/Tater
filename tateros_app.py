@@ -189,7 +189,7 @@ RUNTIME_CONTEXT_ESTIMATE_TTL_SECONDS = 20
 DASHBOARD_BRIEFS_KEY = "tater:dashboard:briefs:v1"
 DASHBOARD_SNAPSHOT_KEY = "tater:dashboard:snapshot:v1"
 DASHBOARD_BRIEF_SCHEMA_VERSION = 10
-DASHBOARD_SNAPSHOT_SCHEMA_VERSION = 7
+DASHBOARD_SNAPSHOT_SCHEMA_VERSION = 8
 DASHBOARD_SNAPSHOT_STALE_SECONDS = 60 * 5
 DASHBOARD_BRIEF_TTL_SECONDS = DASHBOARD_SNAPSHOT_STALE_SECONDS
 DASHBOARD_BRIEF_CHECK_INTERVAL_SECONDS = 60 * 5
@@ -2451,23 +2451,6 @@ def _dashboard_updates_snapshot() -> Dict[str, Any]:
     }
 
 
-def _dashboard_apply_live_updates(snapshot: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
-    if not isinstance(snapshot, dict):
-        snapshot = {}
-    out = dict(snapshot)
-    out["updates"] = updates
-    existing_cards = snapshot.get("cards") if isinstance(snapshot.get("cards"), list) else []
-    cards = [
-        dict(card)
-        for card in existing_cards
-        if isinstance(card, dict)
-        and str(card.get("id") or "").strip() != "updates"
-        and not str(card.get("id") or "").strip().startswith("updates_")
-    ]
-    out["cards"] = cards
-    return out
-
-
 def _autostart_enabled_surfaces() -> None:
     core_entries = core_registry_module.refresh_core_registry()
     portal_entries = portal_registry_module.refresh_portal_registry()
@@ -4609,6 +4592,31 @@ def _dashboard_overview_context_data(snapshot: Dict[str, Any]) -> Dict[str, Any]
                     if item.get("message") or item.get("title")
                 ],
             }
+        elif section_id == "guardian":
+            row["devices"] = [
+                {
+                    "title": item.get("title"),
+                    "subtitle": item.get("subtitle"),
+                    "detail": item.get("detail"),
+                    "description": item.get("description"),
+                    "summary_rows": item.get("summary_rows") or [],
+                    "sensor_rows": item.get("sensor_rows") or [],
+                }
+                for item in section.get("devices") or []
+                if isinstance(item, dict)
+            ][:8]
+            row["events"] = [
+                {
+                    "title": item.get("title"),
+                    "subtitle": item.get("subtitle"),
+                    "detail": item.get("detail"),
+                    "description": item.get("description"),
+                    "summary_rows": item.get("summary_rows") or [],
+                    "sensor_rows": item.get("sensor_rows") or [],
+                }
+                for item in section.get("events") or []
+                if isinstance(item, dict)
+            ][:8]
         elif section_id == "personal":
             personal_context = section.get("brief_context") if isinstance(section.get("brief_context"), dict) else {}
             calendar = personal_context.get("calendar") if isinstance(personal_context.get("calendar"), dict) else {}
@@ -4795,6 +4803,27 @@ def _dashboard_brief_contexts(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
                     "stats": awareness_section.get("stats"),
                     "event_summary": awareness_section.get("event_summary") or {},
                     "recent_events": awareness_section.get("recent_events") or [],
+                },
+            }
+        )
+
+    guardian_section = snapshot.get("guardian_section")
+    if isinstance(guardian_section, dict):
+        contexts.append(
+            {
+                "id": "guardian",
+                "title": "Guardian Summary",
+                "source": "guardian_core",
+                "instructions": (
+                    "Write a concise Guardian dashboard brief from the available Guardian stats, devices, and events. "
+                    "Focus on network/home safety state, device count, recent events, and whether AI analysis is healthy. "
+                    "Use only the provided data, do not invent threats, and keep it one or two useful sentences with no markdown."
+                ),
+                "data": {
+                    "summary": guardian_section.get("summary"),
+                    "stats": guardian_section.get("stats"),
+                    "devices": guardian_section.get("devices") or [],
+                    "events": guardian_section.get("events") or [],
                 },
             }
         )
@@ -5032,6 +5061,14 @@ def _dashboard_fallback_brief(context: Dict[str, Any]) -> Dict[str, Any]:
                     ]
                     if messages:
                         parts.append("cameras recently saw " + "; ".join(messages))
+            elif section_id == "guardian":
+                devices = _dashboard_stat_value(stats, "Devices") or _dashboard_stat_value(stats, "Known Devices")
+                events = _dashboard_stat_value(stats, "Events") or _dashboard_stat_value(stats, "Recent Events")
+                if devices:
+                    detail = f"Guardian is tracking {devices} device{'s' if str(devices) != '1' else ''}"
+                    if events:
+                        detail = f"{detail} with {events} recent event{'s' if str(events) != '1' else ''}"
+                    parts.append(detail)
             elif section_id == "personal":
                 calendar = section.get("calendar") if isinstance(section.get("calendar"), dict) else {}
                 item_count = _dashboard_safe_int(calendar.get("item_count"), 0)
@@ -5135,6 +5172,34 @@ def _dashboard_fallback_brief(context: Dict[str, Any]) -> Dict[str, Any]:
                 text = f"{text}. Recent highlights: {'; '.join(messages)}."
             else:
                 text = f"{text}."
+    elif brief_id == "guardian":
+        stats = _dashboard_stats(data.get("stats"))
+        devices = _dashboard_stat_value(stats, "Devices") or _dashboard_stat_value(stats, "Known Devices") or _dashboard_stat_value(stats, "Device Count")
+        events = _dashboard_stat_value(stats, "Events") or _dashboard_stat_value(stats, "Recent Events") or _dashboard_stat_value(stats, "Event Count")
+        ok = _dashboard_stat_value(stats, "OK") or _dashboard_stat_value(stats, "Status")
+        ai = _dashboard_stat_value(stats, "AI") or _dashboard_stat_value(stats, "AI Enabled")
+        parts = []
+        if devices:
+            parts.append(f"{devices} tracked device{'s' if str(devices) != '1' else ''}")
+        if events:
+            parts.append(f"{events} recent event{'s' if str(events) != '1' else ''}")
+        if ai:
+            parts.append(f"AI {ai}")
+        if ok:
+            parts.append(f"status {ok}")
+        event_rows = [item for item in data.get("events") or [] if isinstance(item, dict)]
+        if event_rows:
+            highlights = [
+                _dashboard_short_text(item.get("title") or item.get("detail") or item.get("description") or item.get("subtitle"), limit=110)
+                for item in event_rows[:3]
+                if _dashboard_short_text(item.get("title") or item.get("detail") or item.get("description") or item.get("subtitle"), limit=110)
+            ]
+            if highlights:
+                parts.append("recent signals include " + "; ".join(highlights))
+        text = "Guardian is live"
+        if parts:
+            text = f"{text}: " + ", ".join(parts)
+        text = f"{text}."
     else:
         text = str(data.get("summary") or "").strip() or "No summary is available yet."
 
@@ -5598,6 +5663,34 @@ def _dashboard_build_snapshot() -> Dict[str, Any]:
             include_image=False,
         )
 
+    guardian_payload = _dashboard_tab_payload("guardian_core")
+    guardian_section = _dashboard_section(
+        section_id="guardian",
+        title="Guardian",
+        subtitle="Device protection, events, and network signals",
+        payload=guardian_payload,
+        stats_limit=8,
+        require_signal=False,
+    )
+    if isinstance(guardian_section, dict):
+        guardian_items = _dashboard_core_items(
+            guardian_payload,
+            groups=(),
+            limit=10,
+            require_image=False,
+            include_image=False,
+        )
+        guardian_section["devices"] = [
+            item for item in guardian_items
+            if str(item.get("group") or "").strip().lower() in {"device", "devices", "network", "host", "client"}
+        ][:6]
+        guardian_section["events"] = [
+            item for item in guardian_items
+            if str(item.get("group") or "").strip().lower() in {"event", "events", "alert", "alerts", "security"}
+        ][:6]
+        if not guardian_section["devices"] and not guardian_section["events"]:
+            guardian_section["devices"] = guardian_items[:6]
+
     cards: List[Dict[str, Any]] = [
         {
             "id": "tater",
@@ -5678,8 +5771,34 @@ def _dashboard_build_snapshot() -> Dict[str, Any]:
                 "tone": "normal",
             }
         )
+    if isinstance(guardian_section, dict):
+        guardian_stats = _dashboard_stats(guardian_section.get("stats"))
+        devices = (
+            _dashboard_stat_value(guardian_stats, "Devices")
+            or _dashboard_stat_value(guardian_stats, "Known Devices")
+            or _dashboard_stat_value(guardian_stats, "Device Count")
+        )
+        events = (
+            _dashboard_stat_value(guardian_stats, "Events")
+            or _dashboard_stat_value(guardian_stats, "Recent Events")
+            or _dashboard_stat_value(guardian_stats, "Event Count")
+        )
+        ai = _dashboard_stat_value(guardian_stats, "AI") or _dashboard_stat_value(guardian_stats, "AI Enabled")
+        cards.append(
+            {
+                "id": "guardian",
+                "label": "Guardian",
+                "value": f"{devices or 'Live'} devices" if devices else "Live",
+                "detail": f"{events or '0'} events" + (f" • AI {ai}" if ai else ""),
+                "tone": "normal",
+            }
+        )
 
-    sections = [section for section in (voice_section, environment_section, personal_section, awareness_section) if isinstance(section, dict)]
+    sections = [
+        section
+        for section in (voice_section, environment_section, personal_section, awareness_section, guardian_section)
+        if isinstance(section, dict)
+    ]
     return {
         "health": health_payload,
         "runtime": {
@@ -5694,6 +5813,7 @@ def _dashboard_build_snapshot() -> Dict[str, Any]:
         "environment_section": environment_section,
         "personal_section": personal_section,
         "awareness_section": awareness_section,
+        "guardian_section": guardian_section,
         "settings": {"personal": personal_settings},
     }
 
@@ -5718,9 +5838,6 @@ async def _dashboard_payload(
             snapshot = await run_dashboard(_dashboard_build_snapshot)
             rebuilt_snapshot = True
             snapshot_meta = _dashboard_snapshot_meta(source="live")
-    if not rebuilt_snapshot:
-        live_updates = await run_dashboard(_dashboard_updates_snapshot)
-        snapshot = await run_dashboard(_dashboard_apply_live_updates, snapshot, live_updates)
     contexts = _dashboard_brief_contexts(snapshot)
     context_ids = {str(context.get("id") or "").strip() for context in contexts}
     cached = await run_dashboard(_dashboard_cache_rows)
