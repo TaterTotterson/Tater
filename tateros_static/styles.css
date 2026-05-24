@@ -2399,6 +2399,7 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 }
 
 .dashboard-awareness-panel,
+.dashboard-guardian-panel,
 .dashboard-personal-panel,
 .dashboard-voice-panel {
   align-content: start;
@@ -2416,6 +2417,13 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   --dashboard-section-accent-soft: rgba(232, 132, 78, 0.11);
   --dashboard-section-rim: rgba(180, 172, 160, 0.17);
   --dashboard-section-grey: rgba(180, 172, 160, 0.07);
+}
+
+.dashboard-guardian-panel {
+  --dashboard-section-accent: rgba(196, 150, 92, 0.82);
+  --dashboard-section-accent-soft: rgba(196, 150, 92, 0.11);
+  --dashboard-section-rim: rgba(176, 169, 160, 0.17);
+  --dashboard-section-grey: rgba(176, 169, 160, 0.07);
 }
 
 .dashboard-voice-panel {
@@ -2501,6 +2509,11 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 
 .dashboard-awareness-panel .dashboard-panel-kicker {
   border-style: dashed;
+}
+
+.dashboard-guardian-panel .dashboard-panel-kicker {
+  border-radius: 10px;
+  border-color: rgba(196, 150, 92, 0.26);
 }
 
 .dashboard-personal-panel .dashboard-panel-kicker {
@@ -3095,6 +3108,66 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 .dashboard-personal-item p {
   margin: 0;
   overflow-wrap: anywhere;
+}
+
+.dashboard-guardian-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.dashboard-guardian-card {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid rgba(196, 150, 92, 0.16);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, rgba(196, 150, 92, 0.095), rgba(176, 169, 160, 0.052)),
+    rgba(255, 255, 255, 0.024);
+}
+
+.dashboard-guardian-card strong,
+.dashboard-guardian-card span {
+  display: block;
+  min-width: 0;
+}
+
+.dashboard-guardian-card strong {
+  color: var(--text-main);
+  line-height: 1.24;
+  overflow-wrap: anywhere;
+}
+
+.dashboard-guardian-card span,
+.dashboard-guardian-card p {
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.dashboard-guardian-card p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.dashboard-guardian-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.dashboard-guardian-card-meta span {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 3px 7px;
+  border: 1px solid rgba(196, 150, 92, 0.16);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.13);
+  color: var(--text-muted);
+  font-size: 0.7rem;
 }
 
 .dashboard-device-grid {
@@ -6628,6 +6701,7 @@ body[data-popup-effect="melt"] .toast-item.flame-out::after {
   .dashboard-secondary-grid,
   .dashboard-core-grid,
   .dashboard-updates-grid,
+  .dashboard-guardian-grid,
   .dashboard-personal-outlook,
   .firmware-update-row,
   .dashboard-weather-visuals,

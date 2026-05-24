@@ -12170,6 +12170,78 @@ function renderDashboardPersonalPanel(section, brief) {
   `;
 }
 
+function renderDashboardGuardianPanel(section, brief) {
+  const hasSection = section && typeof section === "object";
+  const hasBrief = brief && typeof brief === "object" && String(brief.text || "").trim();
+  if (!hasSection && !hasBrief) {
+    return "";
+  }
+  const stats = Array.isArray(section?.stats) ? section.stats : [];
+  const title = String(section?.title || brief?.title || "Guardian").trim() || "Guardian";
+  const subtitle = String(section?.subtitle || brief?.source || "Device protection").trim();
+  const text = String(brief?.text || section?.summary || "").trim();
+  const meta = dashboardBriefMeta(brief);
+  const briefId = String(brief?.id || section?.id || "").trim();
+  const deviceRows = dashboardSectionItems(section, "devices");
+  const eventRows = dashboardSectionItems(section, "events");
+  const rows = [...deviceRows, ...eventRows].slice(0, 6);
+  return `
+    <article class="dashboard-core-panel dashboard-guardian-panel">
+      <div class="dashboard-panel-head">
+        <div>
+          <div class="dashboard-panel-kicker">Guardian</div>
+          <h3 class="card-title">${escapeHtml(title)}</h3>
+          ${subtitle ? `<div class="small muted">${escapeHtml(subtitle)}</div>` : ""}
+          ${meta ? `<div class="small muted">${escapeHtml(meta)}</div>` : ""}
+        </div>
+        ${dashboardBriefRefreshButton(briefId)}
+      </div>
+      ${text ? `<p class="dashboard-panel-brief">${escapeHtml(text)}</p>` : ""}
+      ${
+        rows.length
+          ? `<div class="dashboard-guardian-grid">
+              ${rows
+                .map((item) => {
+                  const summaryRows = Array.isArray(item.summary_rows) ? item.summary_rows : [];
+                  const sensorRows = Array.isArray(item.sensor_rows) ? item.sensor_rows : [];
+                  const detail = String(item.description || item.detail || "").trim();
+                  return `
+                    <article class="dashboard-guardian-card">
+                      <div>
+                        <strong>${escapeHtml(item.title || "Guardian Signal")}</strong>
+                        ${item.subtitle ? `<span>${escapeHtml(item.subtitle)}</span>` : ""}
+                        ${detail ? `<p>${escapeHtml(detail)}</p>` : ""}
+                      </div>
+                      ${
+                        summaryRows.length || sensorRows.length
+                          ? `<div class="dashboard-guardian-card-meta">
+                              ${[...summaryRows, ...sensorRows]
+                                .slice(0, 4)
+                                .map((row) => {
+                                  const label = String(row.label || row.key || "").trim();
+                                  const value = String(row.value ?? row.text ?? "").trim();
+                                  if (!label && !value) {
+                                    return "";
+                                  }
+                                  return `<span>${escapeHtml(label ? `${label}: ${value || "-"}` : value)}</span>`;
+                                })
+                                .join("")}
+                            </div>`
+                          : ""
+                      }
+                    </article>
+                  `;
+                })
+                .join("")}
+            </div>`
+          : ""
+      }
+      ${renderDashboardSignalStats(stats)}
+      ${section?.error ? `<div class="notice error">${escapeHtml(section.error)}</div>` : ""}
+    </article>
+  `;
+}
+
 function renderDashboardVoiceIdentityPanel(speakerId, emotionId) {
   const speaker = speakerId && typeof speakerId === "object" ? speakerId : null;
   const emotion = emotionId && typeof emotionId === "object" ? emotionId : null;
@@ -12306,12 +12378,13 @@ function renderDashboardSignalBriefs(payload) {
   const environmentSection = dashboardSectionById(sections, "environment");
   const personalSection = dashboardSectionById(sections, "personal");
   const awarenessSection = dashboardSectionById(sections, "awareness");
+  const guardianSection = dashboardSectionById(sections, "guardian");
   const voiceSection = dashboardSectionById(sections, "voice");
   const extraCards = [];
 
   sections.forEach((section) => {
     const id = String(section.id || "").trim();
-    if (id === "environment" || id === "personal" || id === "awareness" || id === "voice") {
+    if (id === "environment" || id === "personal" || id === "awareness" || id === "guardian" || id === "voice") {
       return;
     }
     const brief = briefs[id];
@@ -12342,10 +12415,11 @@ function renderDashboardSignalBriefs(payload) {
   const weatherHtml = renderDashboardWeatherPanel(environmentSection, briefs.environment);
   const personalHtml = renderDashboardPersonalPanel(personalSection, briefs.personal);
   const awarenessHtml = renderDashboardAwarenessPanel(awarenessSection, briefs.awareness);
+  const guardianHtml = renderDashboardGuardianPanel(guardianSection, briefs.guardian);
   const voiceHtml = renderDashboardVoicePanel(voiceSection, briefs.voice);
   const extraHtml = extraCards.map((card) => renderDashboardBriefTile(card)).join("");
 
-  if (!overviewHtml && !systemHtml && !weatherHtml && !personalHtml && !awarenessHtml && !voiceHtml && !extraHtml) {
+  if (!overviewHtml && !systemHtml && !weatherHtml && !personalHtml && !awarenessHtml && !guardianHtml && !voiceHtml && !extraHtml) {
     return "";
   }
 
@@ -12355,6 +12429,7 @@ function renderDashboardSignalBriefs(payload) {
       ${systemHtml}
       <div class="dashboard-core-grid">
         ${weatherHtml}
+        ${guardianHtml}
         ${personalHtml}
         ${awarenessHtml}
         ${voiceHtml}
