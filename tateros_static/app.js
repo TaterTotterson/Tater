@@ -12109,6 +12109,7 @@ function renderDashboardPersonalPanel(section, brief) {
   const briefId = String(brief?.id || section?.id || "").trim();
   const outlookItems = Array.isArray(section?.outlook_items) ? section.outlook_items.filter((item) => item && typeof item === "object") : [];
   const typeCounts = Array.isArray(section?.type_counts) ? section.type_counts.filter((item) => item && typeof item === "object") : [];
+  const personalScene = renderDashboardPersonalScene(profileLabel, typeCounts, outlookItems);
   return `
     <article class="dashboard-core-panel dashboard-personal-panel">
       <div class="dashboard-panel-head">
@@ -12121,7 +12122,12 @@ function renderDashboardPersonalPanel(section, brief) {
         </div>
         ${dashboardBriefRefreshButton(briefId)}
       </div>
-      ${text ? `<p class="dashboard-panel-brief">${escapeHtml(text)}</p>` : ""}
+      <div class="dashboard-personal-hero">
+        ${personalScene}
+        <div class="dashboard-personal-hero-copy">
+          ${text ? `<p class="dashboard-panel-brief">${escapeHtml(text)}</p>` : ""}
+        </div>
+      </div>
       ${
         typeCounts.length
           ? `<div class="dashboard-personal-counts">
@@ -12170,6 +12176,51 @@ function renderDashboardPersonalPanel(section, brief) {
   `;
 }
 
+function renderDashboardPersonalScene(profileLabel, typeCounts, outlookItems) {
+  const counts = Array.isArray(typeCounts) ? typeCounts : [];
+  const items = Array.isArray(outlookItems) ? outlookItems : [];
+  const totalFromCounts = counts.reduce((sum, row) => {
+    const value = Number(row?.value || 0);
+    return sum + (Number.isFinite(value) ? value : 0);
+  }, 0);
+  const total = totalFromCounts || items.length;
+  const displayTotal = total > 0 ? `${total} item${total === 1 ? "" : "s"}` : "Ready";
+  const profile = String(profileLabel || "All linked people").trim() || "All linked people";
+  const topKinds = counts
+    .slice(0, 3)
+    .map((row) => `${String(row.value ?? "0").trim()} ${String(row.label || "Item").trim()}`)
+    .filter(Boolean);
+  return `
+    <div class="dashboard-personal-scene" aria-hidden="true">
+      <span class="personal-arc personal-arc-one"></span>
+      <span class="personal-arc personal-arc-two"></span>
+      <span class="personal-node personal-node-one"></span>
+      <span class="personal-node personal-node-two"></span>
+      <span class="personal-node personal-node-three"></span>
+      <span class="personal-card-art personal-card-art-one"></span>
+      <span class="personal-card-art personal-card-art-two"></span>
+    </div>
+    <div class="dashboard-personal-hero-info">
+      <div>
+        <div class="small muted">7-day Outlook</div>
+        <strong>${escapeHtml(displayTotal)}</strong>
+        <span>${escapeHtml(profile)}</span>
+      </div>
+      ${
+        topKinds.length
+          ? `<div class="dashboard-personal-hero-tags">
+              ${topKinds.map((kind) => `<span>${escapeHtml(kind)}</span>`).join("")}
+            </div>`
+          : ""
+      }
+    </div>
+  `;
+}
+
+function dashboardGuardianMetric(stats, labels) {
+  return dashboardStatMatch(Array.isArray(stats) ? stats : [], Array.isArray(labels) ? labels : [labels]);
+}
+
 function renderDashboardGuardianPanel(section, brief) {
   const hasSection = section && typeof section === "object";
   const hasBrief = brief && typeof brief === "object" && String(brief.text || "").trim();
@@ -12185,6 +12236,9 @@ function renderDashboardGuardianPanel(section, brief) {
   const deviceRows = dashboardSectionItems(section, "devices");
   const eventRows = dashboardSectionItems(section, "events");
   const rows = [...deviceRows, ...eventRows].slice(0, 6);
+  const devices = dashboardGuardianMetric(stats, ["Devices", "Known Devices", "Device Count"])?.value || "";
+  const events = dashboardGuardianMetric(stats, ["Events", "Recent Events", "Event Count"])?.value || "";
+  const ai = dashboardGuardianMetric(stats, ["AI", "AI Enabled"])?.value || "";
   return `
     <article class="dashboard-core-panel dashboard-guardian-panel">
       <div class="dashboard-panel-head">
@@ -12196,7 +12250,26 @@ function renderDashboardGuardianPanel(section, brief) {
         </div>
         ${dashboardBriefRefreshButton(briefId)}
       </div>
-      ${text ? `<p class="dashboard-panel-brief">${escapeHtml(text)}</p>` : ""}
+      <div class="dashboard-guardian-hero">
+        <div class="dashboard-guardian-scene" aria-hidden="true">
+          <span class="guardian-shield"></span>
+          <span class="guardian-radar guardian-radar-one"></span>
+          <span class="guardian-radar guardian-radar-two"></span>
+          <span class="guardian-node guardian-node-one"></span>
+          <span class="guardian-node guardian-node-two"></span>
+          <span class="guardian-node guardian-node-three"></span>
+          <span class="guardian-scan"></span>
+        </div>
+        <div class="dashboard-guardian-hero-content">
+          <div>
+            <div class="small muted">Protection Watch</div>
+            <strong>${escapeHtml(devices ? `${devices} devices` : "Guardian live")}</strong>
+            <span>${escapeHtml(events ? `${events} recent events` : "Monitoring device and network signals")}</span>
+          </div>
+          ${ai ? `<div class="dashboard-guardian-ai">AI ${escapeHtml(ai)}</div>` : ""}
+        </div>
+        ${text ? `<p class="dashboard-panel-brief dashboard-guardian-brief">${escapeHtml(text)}</p>` : ""}
+      </div>
       ${
         rows.length
           ? `<div class="dashboard-guardian-grid">

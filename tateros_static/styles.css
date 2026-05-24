@@ -3033,6 +3033,201 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   line-height: 1.3;
 }
 
+.dashboard-personal-hero {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(185px, 0.85fr) minmax(0, 1.15fr);
+  gap: 14px;
+  min-height: 196px;
+  padding: 14px;
+  border: 1px solid rgba(240, 131, 69, 0.15);
+  border-radius: 8px;
+  overflow: hidden;
+  background:
+    linear-gradient(145deg, rgba(33, 34, 35, 0.76), rgba(12, 13, 14, 0.94)),
+    linear-gradient(110deg, rgba(240, 131, 69, 0.11), rgba(57, 151, 141, 0.08) 48%, transparent);
+}
+
+.dashboard-personal-scene {
+  position: relative;
+  z-index: 1;
+  grid-column: 1;
+  grid-row: 1;
+  min-height: 168px;
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: 8px;
+  overflow: hidden;
+  background:
+    linear-gradient(150deg, rgba(240, 131, 69, 0.12), rgba(57, 151, 141, 0.075)),
+    rgba(255, 255, 255, 0.025);
+}
+
+.personal-arc,
+.personal-node,
+.personal-card-art {
+  position: absolute;
+  display: block;
+}
+
+.personal-arc {
+  border: 1px solid rgba(116, 207, 190, 0.26);
+  border-left-color: rgba(240, 131, 69, 0.28);
+  border-bottom-color: transparent;
+  border-radius: 999px;
+}
+
+.personal-arc-one {
+  left: 26px;
+  top: 18px;
+  width: 156px;
+  height: 156px;
+  transform: rotate(-14deg);
+}
+
+.personal-arc-two {
+  left: 62px;
+  top: 48px;
+  width: 104px;
+  height: 104px;
+  opacity: 0.72;
+  transform: rotate(28deg);
+}
+
+.personal-node {
+  width: 34px;
+  height: 34px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 999px;
+  background:
+    radial-gradient(circle at 34% 30%, rgba(255, 255, 255, 0.75), transparent 18%),
+    linear-gradient(145deg, rgba(240, 131, 69, 0.88), rgba(52, 159, 149, 0.82));
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28);
+}
+
+.personal-node-one {
+  left: 32px;
+  top: 34px;
+}
+
+.personal-node-two {
+  right: 34px;
+  top: 62px;
+  transform: scale(0.82);
+}
+
+.personal-node-three {
+  left: 88px;
+  bottom: 26px;
+  transform: scale(0.68);
+  opacity: 0.86;
+}
+
+.personal-card-art {
+  width: 82px;
+  height: 48px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 7px;
+  background:
+    linear-gradient(90deg, rgba(240, 131, 69, 0.56), transparent 5px),
+    linear-gradient(145deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.035));
+  box-shadow: 0 16px 30px rgba(0, 0, 0, 0.24);
+}
+
+.personal-card-art::before,
+.personal-card-art::after {
+  content: "";
+  position: absolute;
+  left: 14px;
+  right: 12px;
+  height: 2px;
+  border-radius: 999px;
+  background: rgba(247, 239, 231, 0.58);
+}
+
+.personal-card-art::before {
+  top: 16px;
+}
+
+.personal-card-art::after {
+  top: 27px;
+  right: 28px;
+  opacity: 0.48;
+}
+
+.personal-card-art-one {
+  right: 15px;
+  bottom: 16px;
+  transform: rotate(-5deg);
+}
+
+.personal-card-art-two {
+  left: 20px;
+  bottom: 18px;
+  opacity: 0.68;
+  transform: rotate(7deg) scale(0.78);
+}
+
+.dashboard-personal-hero-info {
+  position: relative;
+  z-index: 2;
+  grid-column: 1;
+  grid-row: 1;
+  align-self: end;
+  display: grid;
+  gap: 10px;
+  padding: 13px;
+  color: #f7efe7;
+  pointer-events: none;
+}
+
+.dashboard-personal-hero-info strong,
+.dashboard-personal-hero-info span {
+  display: block;
+}
+
+.dashboard-personal-hero-info strong {
+  margin-top: 2px;
+  font-size: 1.42rem;
+  line-height: 1.05;
+}
+
+.dashboard-personal-hero-info > div > span {
+  color: #d8cdc2;
+  font-size: 0.8rem;
+}
+
+.dashboard-personal-hero-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.dashboard-personal-hero-tags span {
+  width: fit-content;
+  padding: 3px 7px;
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.22);
+  color: #f0e4d6;
+  font-size: 0.68rem;
+  font-weight: 800;
+}
+
+.dashboard-personal-hero-copy {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: flex-end;
+  min-width: 0;
+}
+
+.dashboard-personal-hero-copy .dashboard-panel-brief {
+  max-width: none;
+  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(8, 9, 10, 0.42);
+  backdrop-filter: blur(8px);
+}
+
 .dashboard-personal-counts {
   display: flex;
   flex-wrap: wrap;
@@ -3108,6 +3303,175 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 .dashboard-personal-item p {
   margin: 0;
   overflow-wrap: anywhere;
+}
+
+.dashboard-guardian-hero {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(185px, 0.82fr) minmax(0, 1.18fr);
+  gap: 14px;
+  min-height: 198px;
+  padding: 14px;
+  border: 1px solid rgba(93, 177, 154, 0.18);
+  border-radius: 8px;
+  overflow: hidden;
+  background:
+    linear-gradient(145deg, rgba(28, 33, 32, 0.8), rgba(10, 12, 13, 0.94)),
+    linear-gradient(115deg, rgba(93, 177, 154, 0.11), rgba(196, 150, 92, 0.08) 52%, transparent);
+}
+
+.dashboard-guardian-scene {
+  position: relative;
+  z-index: 1;
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  min-height: 170px;
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: 8px;
+  overflow: hidden;
+  background:
+    linear-gradient(145deg, rgba(47, 138, 121, 0.13), rgba(196, 150, 92, 0.08)),
+    rgba(255, 255, 255, 0.022);
+}
+
+.guardian-shield,
+.guardian-radar,
+.guardian-node,
+.guardian-scan {
+  position: absolute;
+  display: block;
+}
+
+.guardian-shield {
+  left: 50%;
+  top: 50%;
+  width: 92px;
+  height: 108px;
+  border: 1px solid rgba(224, 245, 235, 0.28);
+  background:
+    linear-gradient(145deg, rgba(93, 177, 154, 0.7), rgba(196, 150, 92, 0.32)),
+    rgba(255, 255, 255, 0.06);
+  clip-path: polygon(50% 0, 91% 17%, 82% 72%, 50% 100%, 18% 72%, 9% 17%);
+  filter: drop-shadow(0 18px 24px rgba(0, 0, 0, 0.26));
+  transform: translate(-50%, -47%);
+}
+
+.guardian-shield::after {
+  content: "";
+  position: absolute;
+  inset: 24px 30px;
+  border: 2px solid rgba(8, 12, 12, 0.54);
+  border-top: 0;
+  border-right: 0;
+  transform: rotate(-45deg);
+}
+
+.guardian-radar {
+  left: 50%;
+  top: 50%;
+  border: 1px solid rgba(116, 207, 190, 0.2);
+  border-radius: 999px;
+  transform: translate(-50%, -50%);
+}
+
+.guardian-radar-one {
+  width: 154px;
+  height: 154px;
+}
+
+.guardian-radar-two {
+  width: 110px;
+  height: 110px;
+  border-color: rgba(240, 194, 128, 0.18);
+}
+
+.guardian-node {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  background: #7be0c7;
+  box-shadow: 0 0 18px rgba(123, 224, 199, 0.45);
+}
+
+.guardian-node-one {
+  left: 34px;
+  top: 40px;
+}
+
+.guardian-node-two {
+  right: 30px;
+  top: 58px;
+  background: #f0c280;
+  box-shadow: 0 0 18px rgba(240, 194, 128, 0.36);
+}
+
+.guardian-node-three {
+  left: 66px;
+  bottom: 30px;
+  transform: scale(0.82);
+}
+
+.guardian-scan {
+  left: 50%;
+  top: 50%;
+  width: 78px;
+  height: 2px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, transparent, rgba(123, 224, 199, 0.82));
+  transform-origin: left center;
+  transform: rotate(-34deg);
+}
+
+.dashboard-guardian-hero-content {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.dashboard-guardian-hero-content strong,
+.dashboard-guardian-hero-content span {
+  display: block;
+  min-width: 0;
+}
+
+.dashboard-guardian-hero-content strong {
+  margin-top: 3px;
+  color: #f7efe7;
+  font-size: 1.32rem;
+  line-height: 1.08;
+  overflow-wrap: anywhere;
+}
+
+.dashboard-guardian-hero-content span {
+  color: #d7cfc4;
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+.dashboard-guardian-ai {
+  align-self: flex-start;
+  flex: 0 0 auto;
+  padding: 5px 8px;
+  border: 1px solid rgba(123, 224, 199, 0.2);
+  border-radius: 999px;
+  background: rgba(123, 224, 199, 0.09);
+  color: #c8fff1;
+  font-size: 0.72rem;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.dashboard-guardian-brief {
+  position: relative;
+  z-index: 1;
+  align-self: end;
+  max-width: none;
+  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(8, 9, 10, 0.42);
+  backdrop-filter: blur(8px);
 }
 
 .dashboard-guardian-grid {
@@ -6716,6 +7080,41 @@ body[data-popup-effect="melt"] .toast-item.flame-out::after {
 
   .dashboard-weather-panel {
     grid-row: auto;
+  }
+
+  .dashboard-personal-hero,
+  .dashboard-guardian-hero {
+    grid-template-columns: 1fr;
+  }
+
+  .dashboard-personal-scene,
+  .dashboard-personal-hero-info,
+  .dashboard-personal-hero-copy,
+  .dashboard-guardian-scene,
+  .dashboard-guardian-hero-content,
+  .dashboard-guardian-brief {
+    grid-column: 1;
+  }
+
+  .dashboard-personal-scene,
+  .dashboard-personal-hero-info {
+    grid-row: 1;
+  }
+
+  .dashboard-personal-hero-copy {
+    grid-row: 2;
+  }
+
+  .dashboard-guardian-scene {
+    grid-row: 1;
+  }
+
+  .dashboard-guardian-hero-content {
+    grid-row: 2;
+  }
+
+  .dashboard-guardian-brief {
+    grid-row: 3;
   }
 
   .dashboard-snapshot-strip {
