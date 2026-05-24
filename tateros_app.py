@@ -77,7 +77,7 @@ from helpers import (
     set_main_loop,
     test_redis_connection_settings,
 )
-from runtime_executors import configure_runtime_executors, run_dashboard, run_wake, runtime_executor_snapshot, shutdown_runtime_executors
+from runtime_executors import configure_runtime_executors, run_dashboard, run_wake, shutdown_runtime_executors
 from verba_settings import (
     get_verba_enabled,
     get_verba_settings,
@@ -185,12 +185,6 @@ WEBUI_AUTH_COOKIE_NAME = "tater_webui_session"
 WEBUI_AUTH_PASSWORD_MIN_LENGTH = 4
 WEBUI_AUTH_PBKDF2_ITERATIONS = 260_000
 WEBUI_AUTH_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 365 * 5
-RUNTIME_EXECUTOR_WORKER_KEYS = {
-    "wake": "tater:runtime_executors:wake_workers",
-    "speech": "tater:runtime_executors:speech_workers",
-    "dashboard": "tater:runtime_executors:dashboard_workers",
-    "background": "tater:runtime_executors:background_workers",
-}
 RUNTIME_CONTEXT_ESTIMATE_TTL_SECONDS = 20
 DASHBOARD_BRIEFS_KEY = "tater:dashboard:briefs:v1"
 DASHBOARD_SNAPSHOT_KEY = "tater:dashboard:snapshot:v1"
@@ -234,79 +228,6 @@ speech_model_warmup_state: Dict[str, Any] = {
 
 def _trim(value: Any) -> str:
     return str(value or "").strip()
-
-
-def _runtime_executor_worker_value(name: str, value: Any, *, default: int) -> int:
-    snapshot = runtime_executor_snapshot()
-    bounds = (snapshot.get("bounds") if isinstance(snapshot, dict) else {}) or {}
-    row = bounds.get(name) if isinstance(bounds, dict) else {}
-    try:
-        parsed = int(float(value))
-    except Exception:
-        parsed = int(default)
-    min_value = int((row or {}).get("min") or 1)
-    max_value = int((row or {}).get("max") or max(1, parsed))
-    return max(min_value, min(max_value, parsed))
-
-
-def _runtime_executor_settings_from_redis() -> Dict[str, Any]:
-    snapshot = runtime_executor_snapshot()
-    current_workers = snapshot.get("workers") if isinstance(snapshot.get("workers"), dict) else {}
-    workers: Dict[str, int] = {}
-    for name, redis_key in RUNTIME_EXECUTOR_WORKER_KEYS.items():
-        workers[name] = _runtime_executor_worker_value(
-            name,
-            redis_client.get(redis_key),
-            default=int(current_workers.get(name) or 1),
-        )
-    return {"workers": workers, "bounds": snapshot.get("bounds") or {}}
-
-
-def _apply_runtime_executor_settings_from_redis() -> Dict[str, Any]:
-    settings = _runtime_executor_settings_from_redis()
-    workers = settings.get("workers") if isinstance(settings.get("workers"), dict) else {}
-    return configure_runtime_executors(
-        wake_workers=workers.get("wake"),
-        speech_workers=workers.get("speech"),
-        dashboard_workers=workers.get("dashboard"),
-        background_workers=workers.get("background"),
-    )
-
-
-def _save_runtime_executor_settings(updates: Dict[str, Any]) -> Dict[str, Any]:
-    current = _runtime_executor_settings_from_redis()
-    current_workers = current.get("workers") if isinstance(current.get("workers"), dict) else {}
-    mapping = {
-        "executor_wake_workers": "wake",
-        "executor_speech_workers": "speech",
-        "executor_dashboard_workers": "dashboard",
-        "executor_background_workers": "background",
-    }
-    next_workers: Dict[str, int] = {}
-    changed = False
-    for payload_key, name in mapping.items():
-        if payload_key in updates:
-            changed = True
-            next_workers[name] = _runtime_executor_worker_value(
-                name,
-                updates.get(payload_key),
-                default=int(current_workers.get(name) or 1),
-            )
-        else:
-            next_workers[name] = int(current_workers.get(name) or 1)
-
-    if not changed:
-        return runtime_executor_snapshot()
-
-    for name, workers in next_workers.items():
-        redis_client.set(RUNTIME_EXECUTOR_WORKER_KEYS[name], int(workers))
-
-    return configure_runtime_executors(
-        wake_workers=next_workers.get("wake"),
-        speech_workers=next_workers.get("speech"),
-        dashboard_workers=next_workers.get("dashboard"),
-        background_workers=next_workers.get("background"),
-    )
 
 
 bootstrap_state: Dict[str, Any] = {
@@ -724,25 +645,20 @@ def _warm_speech_model_item(item: Dict[str, str]) -> str:
         return f"loaded STT {token}"
 
     if kind == "tts":
-        from speech_tts import (
-            _load_kokoro_pipeline,
-            _load_piper_voice_model,
-            _load_pocket_tts_model,
-            normalize_tts_backend,
-        )
+        from esphome import voice_pipeline
 
-        token = normalize_tts_backend(backend)
+        token = voice_pipeline._normalize_tts_backend(backend)
         model = str(item.get("model") or "").strip()
         if token == "wyoming":
             return "skipped remote Wyoming TTS"
         if token == "openai_compatible":
             return "skipped remote OpenAI-compatible TTS"
         if token == "kokoro":
-            _load_kokoro_pipeline(model, acceleration=item.get("acceleration"))
+            voice_pipeline._load_kokoro_pipeline(model or voice_pipeline.DEFAULT_KOKORO_MODEL)
         elif token == "piper":
-            _load_piper_voice_model(model)
+            voice_pipeline._load_piper_voice_model(model or voice_pipeline.DEFAULT_PIPER_MODEL)
         elif token == "pocket_tts":
-            _load_pocket_tts_model(model)
+            voice_pipeline._load_pocket_tts_model(model or voice_pipeline.DEFAULT_POCKET_TTS_MODEL)
         else:
             raise RuntimeError(f"unsupported TTS backend: {token}")
         return f"loaded TTS {token}"
@@ -2535,72 +2451,6 @@ def _dashboard_updates_snapshot() -> Dict[str, Any]:
     }
 
 
-_DASHBOARD_SHOP_UPDATE_CARD_KINDS = (
-    ("verbas", "Verba"),
-    ("portals", "Portals"),
-    ("cores", "Cores"),
-    ("integrations", "Integrations"),
-)
-
-
-def _dashboard_update_group_map(updates: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    groups = updates.get("groups") if isinstance(updates, dict) and isinstance(updates.get("groups"), list) else []
-    out: Dict[str, Dict[str, Any]] = {}
-    for group in groups:
-        if not isinstance(group, dict):
-            continue
-        kind = str(group.get("kind") or "").strip()
-        if kind:
-            out[kind] = group
-    return out
-
-
-def _dashboard_update_group_error(group: Dict[str, Any]) -> str:
-    error = str(group.get("error") or "").strip()
-    if error:
-        return error
-    errors = group.get("errors") if isinstance(group.get("errors"), list) else []
-    return "; ".join(str(item).strip() for item in errors[:2] if str(item).strip())
-
-
-def _dashboard_update_card_detail(group: Dict[str, Any], *, count: int) -> str:
-    error = _dashboard_update_group_error(group)
-    if error:
-        return error
-    items = group.get("items") if isinstance(group.get("items"), list) else []
-    names = [
-        str(item.get("name") or item.get("id") or "").strip()
-        for item in items[:2]
-        if isinstance(item, dict) and str(item.get("name") or item.get("id") or "").strip()
-    ]
-    if names:
-        more = count - len(names)
-        return ", ".join(names) + (f" +{more} more" if more > 0 else "")
-    return "No pending updates."
-
-
-def _dashboard_update_status_cards(updates: Dict[str, Any]) -> List[Dict[str, Any]]:
-    groups = _dashboard_update_group_map(updates)
-    cards: List[Dict[str, Any]] = []
-    for kind, fallback_label in _DASHBOARD_SHOP_UPDATE_CARD_KINDS:
-        group = groups.get(kind) or {"kind": kind, "label": fallback_label, "count": 0, "items": []}
-        label = str(group.get("label") or fallback_label).strip() or fallback_label
-        count = _dashboard_safe_int(group.get("count"))
-        error = _dashboard_update_group_error(group)
-        cards.append(
-            {
-                "id": f"updates_{kind}",
-                "label": label,
-                "value": "Needs check" if error else (f"{count} available" if count > 0 else "Current"),
-                "detail": _dashboard_update_card_detail(group, count=count),
-                "tone": "warning" if error or count > 0 else "good",
-                "action_target": kind,
-                "action_label": f"Open {label}",
-            }
-        )
-    return cards
-
-
 def _dashboard_apply_live_updates(snapshot: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(snapshot, dict):
         snapshot = {}
@@ -2614,9 +2464,7 @@ def _dashboard_apply_live_updates(snapshot: Dict[str, Any], updates: Dict[str, A
         and str(card.get("id") or "").strip() != "updates"
         and not str(card.get("id") or "").strip().startswith("updates_")
     ]
-    update_cards = _dashboard_update_status_cards(updates)
-    insert_at = 1 if cards else 0
-    out["cards"] = cards[:insert_at] + update_cards + cards[insert_at:]
+    out["cards"] = cards
     return out
 
 
@@ -3393,10 +3241,6 @@ class AppSettingsRequest(BaseModel):
     hydra_astraeus_plan_review_enabled: Optional[bool] = None
     hydra_auto_continue_incomplete_final_enabled: Optional[bool] = None
     popup_effect_style: Optional[str] = None
-    executor_wake_workers: Optional[int] = None
-    executor_speech_workers: Optional[int] = None
-    executor_dashboard_workers: Optional[int] = None
-    executor_background_workers: Optional[int] = None
     admin_only_plugins: Optional[List[str]] = None
     webui_password: Optional[str] = None
     webui_password_confirm: Optional[str] = None
@@ -3516,8 +3360,7 @@ async def _startup_event() -> None:
             bootstrap_state["restore_error"] = redis_error or "Redis is unavailable."
             logger.warning("Redis unavailable during startup bootstrap: %s", bootstrap_state["restore_error"])
         else:
-            executor_settings = _apply_runtime_executor_settings_from_redis()
-            logger.info("[startup] runtime executor settings applied: %s", executor_settings.get("workers"))
+            logger.info("[startup] runtime executor settings applied: %s", configure_runtime_executors())
             if restore_enabled:
                 bootstrap_state["restore_in_progress"] = True
                 summary = _restore_enabled_surfaces()
@@ -5763,7 +5606,6 @@ def _dashboard_build_snapshot() -> Dict[str, Any]:
             "detail": "Redis connected" if bool(health_payload.get("redis")) else "Redis needs attention",
             "tone": "good" if bool(health_payload.get("ok")) else "warning",
         },
-        *_dashboard_update_status_cards(updates),
         {
             "id": "hydra",
             "label": "Hydra",
@@ -8370,8 +8212,6 @@ def get_settings() -> Dict[str, Any]:
         "hydra_astraeus_plan_review_enabled": bool(DEFAULT_ASTRAEUS_PLAN_REVIEW_ENABLED),
         "hydra_auto_continue_incomplete_final_enabled": bool(DEFAULT_AUTO_CONTINUE_INCOMPLETE_FINAL_ENABLED),
     }
-    executor_settings = _runtime_executor_settings_from_redis()
-    executor_workers = executor_settings.get("workers") if isinstance(executor_settings.get("workers"), dict) else {}
     integration_shop_snapshot = _integration_shop_raw()
     integration_shop_payload = {
         "repos": integration_shop_snapshot.get("repos") or {},
@@ -8474,11 +8314,6 @@ def get_settings() -> Dict[str, Any]:
         ),
         **hydra_role_model_values,
         "hydra_defaults": hydra_defaults,
-        "executor_settings": executor_settings,
-        "executor_wake_workers": int(executor_workers.get("wake") or 2),
-        "executor_speech_workers": int(executor_workers.get("speech") or 2),
-        "executor_dashboard_workers": int(executor_workers.get("dashboard") or 1),
-        "executor_background_workers": int(executor_workers.get("background") or 4),
         "admin_plugin_options": admin_plugin_options,
         "admin_only_plugins": admin_only_plugins,
         "admin_only_plugins_defaults": sorted(DEFAULT_ADMIN_ONLY_PLUGINS),
@@ -9330,7 +9165,6 @@ def test_aladdin_settings(payload: AladdinTestRequest) -> Dict[str, Any]:
 def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str, Any]:
     updates = payload.model_dump(exclude_none=True)
     speech_warmup_result: Dict[str, Any] = {}
-    executor_settings_result: Dict[str, Any] = {}
 
     def _bounded_int(
         value: Any,
@@ -9847,15 +9681,6 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
             "true" if enabled_value else "false",
         )
 
-    executor_keys = {
-        "executor_wake_workers",
-        "executor_speech_workers",
-        "executor_dashboard_workers",
-        "executor_background_workers",
-    }
-    if any(key in updates for key in executor_keys):
-        executor_settings_result = _save_runtime_executor_settings(updates)
-
     if "admin_only_plugins" in updates:
         values = [str(item).strip().lower() for item in (updates.get("admin_only_plugins") or []) if str(item).strip()]
         cleaned = sorted(set(values))
@@ -9865,6 +9690,5 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "ok": True,
         "updated": sorted(updates.keys()),
         "esphome": esphome_result,
-        "executor_settings": executor_settings_result or runtime_executor_snapshot(),
         "speech_warmup": speech_warmup_result or _speech_model_warmup_snapshot(),
     }

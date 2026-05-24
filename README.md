@@ -352,6 +352,10 @@ The NVIDIA image is amd64-only. Use the default `latest` image for CPU-first ins
 
 The NVIDIA build uses CUDA 12.8 PyTorch wheels plus CUDA/cuDNN runtime packages for RTX 30, 40, and 50 series cards. Piper and Pocket TTS remain CPU-backed. In TaterOS, use **Settings → Models → Voice Acceleration** to select Auto, CPU, or NVIDIA CUDA for STT/TTS models. Tater starts a background warmup for the selected local STT and TTS models during app startup and after saving voice model settings so the first real voice turn is less likely to pause on model loading. If Speaker ID or Emotion ID is enabled, the warmup also loads the matching SpeechBrain model; use **Settings → ESPHome → Voice Pipeline → SpeechBrain Models** to let those models use CUDA in the NVIDIA image, with CPU fallback if CUDA load fails. Emotion ID uses a SpeechBrain wav2vec2 model and requires Hugging Face `transformers`, which is included in current Tater images. Set `TATER_SPEECH_WARMUP_ON_STARTUP=false` to disable startup warmup.
 
+Faster Whisper compute type defaults to Auto. Auto uses `float16` on newer CUDA GPUs and switches to `int8` on older CUDA cards such as Pascal / GTX 10-series, where `float16` can fail with an unsupported compute type error. To override it, set **Settings → ESPHome → Voice Pipeline → Speech Recognition → Faster Whisper Compute Type** or set `TATER_FASTER_WHISPER_COMPUTE_TYPE` to `auto`, `int8`, `float32`, `float16`, `int8_float32`, or `int8_float16`.
+
+To restrict which GPUs Tater can see in the NVIDIA compose setup, set `NVIDIA_VISIBLE_DEVICES` before launching, for example `NVIDIA_VISIBLE_DEVICES=0` or a GPU UUID. Inside the container, CUDA device `0` maps to the first visible GPU.
+
 Kokoro output is boosted slightly by default for clearer satellite playback. Tune it with `TATER_KOKORO_OUTPUT_GAIN` if needed; the default is `1.5`.
 
 Voice activity detection defaults to Silero VAD. Low-power hosts can switch the Voice Pipeline Settings VAD backend to WebRTC, which uses the lightweight `webrtcvad-wheels` package.

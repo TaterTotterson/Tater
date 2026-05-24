@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 import wave
 from typing import Any, Dict, List, Optional, Tuple
@@ -15,7 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from .conversation import VoiceSessionRuntime
-from runtime_executors import run_speech
+from runtime_executors import run_stt, run_tts
 from tateros import integration_store as integration_store_module
 
 
@@ -24,6 +25,7 @@ def _vp():
 
 
 _LOCAL_STT_TRANSCRIBE_LOCK = asyncio.Lock()
+_FASTER_WHISPER_MODEL_TRANSCRIBE_LOCK = threading.RLock()
 
 
 def huggingface_environment(overrides: Optional[Dict[str, Any]] = None, client: Any = None) -> Dict[str, Any]:
@@ -37,7 +39,7 @@ def _drain_background_task(task: asyncio.Task[Any]) -> None:
 
 async def _run_local_stt_thread(func: Any, *args: Any) -> str:
     vp = _vp()
-    task = asyncio.create_task(run_speech(func, *args))
+    task = asyncio.create_task(run_stt(func, *args))
     try:
         timeout_s = vp._get_float_setting(
             "VOICE_NATIVE_LOCAL_STT_TIMEOUT_S",
@@ -174,6 +176,7 @@ def _load_faster_whisper_model() -> Any:
     model_source = vp._resolve_faster_whisper_model_source()
     device = vp._faster_whisper_device()
     compute_type = vp._faster_whisper_compute_type()
+    compute_type_label = vp._faster_whisper_compute_type_label()
     key = (model_source, device, compute_type)
     ctranslate2_cuda_devices = "unknown"
     with contextlib.suppress(Exception):
@@ -187,11 +190,12 @@ def _load_faster_whisper_model() -> Any:
             if not os.path.isdir(model_source):
                 kwargs["download_root"] = vp._ensure_stt_backend_model_root("faster_whisper")
             vp.logger.info(
-                "[native-voice] faster-whisper model source=%s kind=%s device=%s compute_type=%s ctranslate2_cuda_devices=%s",
+                "[native-voice] faster-whisper model source=%s kind=%s device=%s compute_type=%s selected_compute=%s ctranslate2_cuda_devices=%s",
                 model_source,
                 "local" if os.path.isdir(model_source) else "alias",
                 device,
                 compute_type,
+                compute_type_label,
                 ctranslate2_cuda_devices,
             )
             with _temporary_env(huggingface_environment()):
@@ -218,7 +222,12 @@ def _load_vosk_model() -> Any:
         return model
 
 
-def _transcribe_faster_whisper_sync(audio_bytes: bytes, audio_format: Dict[str, int], language: Optional[str]) -> str:
+def _transcribe_faster_whisper_sync(
+    audio_bytes: bytes,
+    audio_format: Dict[str, int],
+    language: Optional[str],
+    partial: bool = False,
+) -> str:
     vp = _vp()
     pcm16, _state = vp._pcm_to_pcm16_mono_16k(audio_bytes, audio_format)
     if not pcm16:
@@ -227,18 +236,35 @@ def _transcribe_faster_whisper_sync(audio_bytes: bytes, audio_format: Dict[str, 
     np_mod = importlib.import_module("numpy")
     audio_np = np_mod.frombuffer(pcm16, dtype=np_mod.int16).astype(np_mod.float32) / 32768.0
     model = _load_faster_whisper_model()
-    segments, _info = model.transcribe(
-        audio_np,
-        language=vp._text(language) or None,
-        beam_size=1,
-        vad_filter=False,
-        condition_on_previous_text=False,
-    )
     parts = []
-    for segment in segments:
-        text = vp._text(getattr(segment, "text", ""))
-        if text:
-            parts.append(text)
+    beam_size = vp._faster_whisper_beam_size(partial=bool(partial))
+    initial_prompt = "" if bool(partial) else vp._faster_whisper_initial_prompt()
+    # Faster Whisper is stateless for a complete audio buffer, but the cached
+    # model object may not be safe to decode from multiple worker threads at
+    # once. Partial STT cancellation can leave a worker running, so this lock
+    # protects the actual model call and segment iteration.
+    if bool(partial):
+        acquired = _FASTER_WHISPER_MODEL_TRANSCRIBE_LOCK.acquire(blocking=False)
+        if not acquired:
+            return ""
+    else:
+        _FASTER_WHISPER_MODEL_TRANSCRIBE_LOCK.acquire()
+    try:
+        segments, _info = model.transcribe(
+            audio_np,
+            language=vp._text(language) or "en",
+            beam_size=beam_size,
+            vad_filter=False,
+            condition_on_previous_text=False,
+            initial_prompt=initial_prompt or None,
+            temperature=0.0,
+        )
+        for segment in segments:
+            text = vp._text(getattr(segment, "text", ""))
+            if text:
+                parts.append(text)
+    finally:
+        _FASTER_WHISPER_MODEL_TRANSCRIBE_LOCK.release()
     return re.sub(r"\s+", " ", " ".join(parts)).strip()
 
 
@@ -691,8 +717,17 @@ async def _native_transcribe_local_audio_bytes(
     mode_label = "partial" if partial else "final"
     async with _LOCAL_STT_TRANSCRIBE_LOCK:
         if token == "faster_whisper":
-            vp._native_debug(f"STT ({mode_label} faster-whisper) local selector={selector} session_id={session_id} bytes={len(data)}")
-            transcript = await _run_local_stt_thread(_transcribe_faster_whisper_sync, data, audio_format, language)
+            vp._native_debug(
+                f"STT ({mode_label} faster-whisper) local selector={selector} session_id={session_id} "
+                f"bytes={len(data)} beam={vp._faster_whisper_beam_size(partial=bool(partial))}"
+            )
+            transcript = await _run_local_stt_thread(
+                _transcribe_faster_whisper_sync,
+                data,
+                audio_format,
+                language,
+                bool(partial),
+            )
         elif token == "vosk":
             vp._native_debug(f"STT ({mode_label} vosk) local selector={selector} session_id={session_id} bytes={len(data)}")
             transcript = await _run_local_stt_thread(_transcribe_vosk_sync, data, audio_format)
@@ -737,8 +772,6 @@ async def _native_local_partial_stt_task(
                 speech_s = float(session.speech_duration_s or 0.0)
                 partial_updates = int(session.partial_transcript_updates or 0)
 
-            if speech_s < float(vp.DEFAULT_EXPERIMENTAL_PARTIAL_STT_MIN_AUDIO_S):
-                continue
             if not audio_bytes:
                 continue
 
@@ -746,6 +779,10 @@ async def _native_local_partial_stt_task(
             width = int(audio_format.get("width") or vp.DEFAULT_VOICE_SAMPLE_WIDTH)
             channels = int(audio_format.get("channels") or vp.DEFAULT_VOICE_CHANNELS)
             bytes_per_second = max(1, rate * width * channels)
+            audio_s = float(len(audio_bytes)) / float(bytes_per_second)
+            min_audio_s = float(vp.DEFAULT_EXPERIMENTAL_PARTIAL_STT_MIN_AUDIO_S)
+            if speech_s < min_audio_s and audio_s < min_audio_s:
+                continue
             min_new_bytes = int(bytes_per_second * float(vp.DEFAULT_EXPERIMENTAL_PARTIAL_STT_MIN_NEW_AUDIO_S))
             if last_audio_bytes > 0 and (len(audio_bytes) - last_audio_bytes) < min_new_bytes and partial_updates > 0:
                 continue
@@ -1258,7 +1295,7 @@ async def _native_synthesize_text(
     try:
         if effective_backend == "kokoro":
             vp._native_debug(f"TTS (kokoro) local model={selection.get('model')} voice={selection.get('voice') or vp.DEFAULT_KOKORO_VOICE}")
-            audio_bytes, audio_format = await run_speech(
+            audio_bytes, audio_format = await run_tts(
                 _synthesize_kokoro_sync,
                 prompt,
                 vp._text(selection.get("model")) or vp.DEFAULT_KOKORO_MODEL,
@@ -1267,7 +1304,7 @@ async def _native_synthesize_text(
             return audio_bytes, audio_format, effective_backend, backend_note
         if effective_backend == "pocket_tts":
             vp._native_debug(f"TTS (pocket-tts) local model={selection.get('model')} voice={selection.get('voice') or vp.DEFAULT_POCKET_TTS_VOICE}")
-            audio_bytes, audio_format = await run_speech(
+            audio_bytes, audio_format = await run_tts(
                 _synthesize_pocket_tts_sync,
                 prompt,
                 vp._text(selection.get("model")) or vp.DEFAULT_POCKET_TTS_MODEL,
@@ -1276,7 +1313,7 @@ async def _native_synthesize_text(
             return audio_bytes, audio_format, effective_backend, backend_note
         if effective_backend == "piper":
             vp._native_debug(f"TTS (piper) local model={selection.get('model') or vp.DEFAULT_PIPER_MODEL}")
-            audio_bytes, audio_format = await run_speech(_synthesize_piper_sync, prompt, vp._text(selection.get("model")) or vp.DEFAULT_PIPER_MODEL)
+            audio_bytes, audio_format = await run_tts(_synthesize_piper_sync, prompt, vp._text(selection.get("model")) or vp.DEFAULT_PIPER_MODEL)
             return audio_bytes, audio_format, effective_backend, backend_note
         if effective_backend == "openai_compatible":
             vp._native_debug(
@@ -1284,7 +1321,7 @@ async def _native_synthesize_text(
                 f"model={selection.get('model') or vp.DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL} "
                 f"voice={selection.get('voice') or vp.DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE}"
             )
-            audio_bytes, audio_format = await run_speech(
+            audio_bytes, audio_format = await run_tts(
                 _native_openai_compatible_synthesize_sync,
                 prompt,
                 model=vp._text(selection.get("model")) or vp.DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL,
