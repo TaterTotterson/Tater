@@ -358,14 +358,9 @@ def _huggingface_auth_label() -> str:
 
 
 def _call_speechbrain_loader_with_hf_token(loader: Any, kwargs: Dict[str, Any]) -> Any:
-    token = str(huggingface_token() or "").strip()
-    if token:
-        try:
-            return loader(**{**kwargs, "use_auth_token": token})
-        except TypeError as exc:
-            if "use_auth_token" not in str(exc):
-                raise
-            _log_warning("SpeechBrain loader does not accept use_auth_token; using Hugging Face environment token only.")
+    # SpeechBrain loaders can reject use_auth_token after partially building the
+    # model, which causes an expensive second load. The temporary HF environment
+    # above carries the token without triggering that retry path.
     return loader(**kwargs)
 
 

@@ -348,6 +348,14 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
         message = f"Saved {updated} setting(s)." if updated > 0 else "No settings changed."
         return {"ok": True, "action": action_name, "message": message, **result, "status": esphome_runtime.status()}
 
+    if action_name == "voice_settings_reset_defaults":
+        result = esphome_settings.reset_settings_defaults()
+        with contextlib.suppress(Exception):
+            esphome_runtime.reconcile_once(force=True, timeout=45.0)
+        updated = int(result.get("updated_count") or 0)
+        message = f"Restored {updated} setting(s) to defaults." if updated > 0 else "Settings already use defaults."
+        return {"ok": True, "action": action_name, "message": message, **result, "status": esphome_runtime.status()}
+
     if action_name == "voice_satellite_add_manual":
         values = esphome_runtime.payload_values(body)
         host = esphome_runtime.lower(values.get("host") or body.get("host"))

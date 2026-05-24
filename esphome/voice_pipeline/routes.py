@@ -106,7 +106,7 @@ async def startup() -> None:
     vp.logger.info(
         "[native-voice] pcm path audioop=%s input_gain=%.2f",
         "enabled" if vp._audioop is not None else "fallback",
-        float(vp.DEFAULT_AUDIO_INPUT_GAIN),
+        vp._as_float(eou_cfg.get("input_gain"), vp.DEFAULT_AUDIO_INPUT_GAIN, minimum=0.5, maximum=16.0),
     )
     if vp._audioop is None:
         if sys.version_info < (3, 13):
@@ -165,7 +165,25 @@ async def startup() -> None:
         try:
             vp.SileroVadBackend._ensure_shared()
             if vp.SileroVadBackend._shared_ready:
-                vp.logger.info("[native-voice] silero VAD model pre-loaded successfully")
+                owner_keys = []
+                with vp.contextlib.suppress(Exception):
+                    for row in vp._load_satellite_registry():
+                        meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+                        if not vp._as_bool(meta.get("esphome_selected"), False):
+                            continue
+                        selector = vp._text(row.get("selector"))
+                        if selector:
+                            owner_keys.append(selector)
+                if not owner_keys:
+                    owner_keys = ["default"]
+                preloaded = 0
+                for owner_key in owner_keys:
+                    if vp.SileroVadBackend.preload_owner(eou_cfg, owner_key=owner_key):
+                        preloaded += 1
+                vp.logger.info(
+                    "[native-voice] silero VAD model pre-loaded successfully owners=%s",
+                    preloaded,
+                )
             else:
                 vp.logger.warning("[native-voice] silero VAD model pre-load failed: %s", vp.SileroVadBackend._shared_error)
         except Exception as exc:

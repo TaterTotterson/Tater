@@ -2291,6 +2291,7 @@ function ensureRuntimeSettingsModal() {
             <div id="runtime-settings-fields" class="form-grid runtime-settings-fields"></div>
             <div class="inline-row">
               <button type="submit" id="runtime-settings-save" class="action-btn">Save Settings</button>
+              <button type="button" id="runtime-settings-reset" class="inline-btn danger" style="display:none;">Restore Default Settings</button>
             </div>
           </form>
           <div id="runtime-settings-status" class="small"></div>
@@ -2303,6 +2304,7 @@ function ensureRuntimeSettingsModal() {
   const form = document.getElementById("runtime-settings-form");
   const closeBtn = document.getElementById("runtime-settings-close");
   const saveBtn = document.getElementById("runtime-settings-save");
+  const resetBtn = document.getElementById("runtime-settings-reset");
   const statusEl = document.getElementById("runtime-settings-status");
 
   const closeModal = () => {
@@ -2314,6 +2316,8 @@ function ensureRuntimeSettingsModal() {
       }
     }
     state.runtimeSettingsSaveHandler = null;
+    state.runtimeSettingsResetHandler = null;
+    state.runtimeSettingsResetConfirm = "";
     state.runtimeSettingsOpenHandler = null;
     state.runtimeSettingsCloseHandler = null;
     closePopupModal(modal);
@@ -2344,6 +2348,9 @@ function ensureRuntimeSettingsModal() {
     if (closeBtn) {
       closeBtn.disabled = true;
     }
+    if (resetBtn) {
+      resetBtn.disabled = true;
+    }
     try {
       const values = await collectFormValues(form);
       const result = await state.runtimeSettingsSaveHandler(values);
@@ -2366,18 +2373,69 @@ function ensureRuntimeSettingsModal() {
       if (closeBtn) {
         closeBtn.disabled = false;
       }
+      if (resetBtn) {
+        resetBtn.disabled = false;
+      }
+    }
+  });
+  resetBtn?.addEventListener("click", async () => {
+    if (typeof state.runtimeSettingsResetHandler !== "function") {
+      return;
+    }
+    const confirmText =
+      String(state.runtimeSettingsResetConfirm || "").trim() || "Restore these settings to their defaults?";
+    if (!window.confirm(confirmText)) {
+      return;
+    }
+    if (statusEl) {
+      statusEl.textContent = "Restoring defaults...";
+    }
+    if (saveBtn) {
+      saveBtn.disabled = true;
+    }
+    if (resetBtn) {
+      resetBtn.disabled = true;
+    }
+    if (closeBtn) {
+      closeBtn.disabled = true;
+    }
+    try {
+      const result = await state.runtimeSettingsResetHandler();
+      const successText = String(result?.message || "Default settings restored.").trim() || "Default settings restored.";
+      if (statusEl) {
+        statusEl.textContent = successText;
+      }
+      showToast(successText);
+      closeModal();
+    } catch (error) {
+      const msg = String(error?.message || "unknown error");
+      if (statusEl) {
+        statusEl.textContent = `Restore failed: ${msg}`;
+      }
+      showToast(`Restore failed: ${msg}`, "error", 3600);
+    } finally {
+      if (saveBtn) {
+        saveBtn.disabled = false;
+      }
+      if (resetBtn) {
+        resetBtn.disabled = false;
+      }
+      if (closeBtn) {
+        closeBtn.disabled = false;
+      }
     }
   });
   return modal;
 }
 
-function openRuntimeSettingsModal({ title, meta, fields, onSave, onOpen, onClose }) {
+function openRuntimeSettingsModal({ title, meta, fields, onSave, onReset, resetLabel, resetConfirm, onOpen, onClose }) {
   const modal = ensureRuntimeSettingsModal();
   const titleEl = document.getElementById("runtime-settings-title");
   const metaEl = document.getElementById("runtime-settings-meta");
   const fieldsEl = document.getElementById("runtime-settings-fields");
   const statusEl = document.getElementById("runtime-settings-status");
   const saveBtn = document.getElementById("runtime-settings-save");
+  const resetBtn = document.getElementById("runtime-settings-reset");
   const normalizedFields = Array.isArray(fields) ? fields : [];
 
   if (typeof state.runtimeSettingsCloseHandler === "function") {
@@ -2388,6 +2446,8 @@ function openRuntimeSettingsModal({ title, meta, fields, onSave, onOpen, onClose
     }
   }
   state.runtimeSettingsSaveHandler = typeof onSave === "function" ? onSave : null;
+  state.runtimeSettingsResetHandler = typeof onReset === "function" ? onReset : null;
+  state.runtimeSettingsResetConfirm = String(resetConfirm || "").trim();
   state.runtimeSettingsOpenHandler = typeof onOpen === "function" ? onOpen : null;
   state.runtimeSettingsCloseHandler = typeof onClose === "function" ? onClose : null;
 
@@ -2403,6 +2463,11 @@ function openRuntimeSettingsModal({ title, meta, fields, onSave, onOpen, onClose
   if (saveBtn) {
     saveBtn.disabled = false;
     saveBtn.style.display = typeof state.runtimeSettingsSaveHandler === "function" ? "" : "none";
+  }
+  if (resetBtn) {
+    resetBtn.disabled = false;
+    resetBtn.textContent = String(resetLabel || "Restore Default Settings").trim() || "Restore Default Settings";
+    resetBtn.style.display = typeof state.runtimeSettingsResetHandler === "function" ? "" : "none";
   }
 
   if (fieldsEl) {
@@ -2468,7 +2533,7 @@ function openRuntimeSettingsModal({ title, meta, fields, onSave, onOpen, onClose
   openPopupModal(modal);
   if (typeof state.runtimeSettingsOpenHandler === "function") {
     try {
-      state.runtimeSettingsOpenHandler({ modal, fieldsEl, statusEl, saveBtn, titleEl, metaEl });
+      state.runtimeSettingsOpenHandler({ modal, fieldsEl, statusEl, saveBtn, resetBtn, titleEl, metaEl });
     } catch (_error) {
       // Ignore modal setup errors.
     }
@@ -4854,10 +4919,12 @@ function renderCoreSettingsManager(body, tabSpec) {
     const itemFieldsDropdownLabelLocal = String(item?.fields_dropdown_label || itemFieldsDropdownLabel).trim() || "Settings";
     const itemSectionsInDropdownEnabled = boolFromAny(item?.sections_in_dropdown, itemSectionsInDropdown);
     const saveAction = String(item?.save_action || "").trim();
+    const resetAction = String(item?.reset_action || "").trim();
     const removeAction = String(item?.remove_action || "").trim();
     const runAction = String(item?.run_action || "").trim();
     const runConfirm = String(item?.run_confirm || "").trim();
     const removeConfirm = String(item?.remove_confirm || "Remove this item?").trim();
+    const resetConfirm = String(item?.reset_confirm || "Reset this item to defaults?").trim();
     const itemFieldContent = itemFields.map((field) => renderCoreManagerField(field)).join("");
     const popupFields = [];
     explicitPopupFields.forEach((field) => {
@@ -4971,7 +5038,8 @@ function renderCoreSettingsManager(body, tabSpec) {
 
     const hasPopupSettingsBtn = Boolean(popupFieldsEncoded) && (itemFieldsPopupEnabled || explicitPopupFields.length > 0);
     const hasSaveBtn = saveAction && (!itemFieldsPopupEnabled || !popupFieldsEncoded);
-    const hasAnyAction = Boolean(hasPopupSettingsBtn || hasSaveBtn || removeAction || runAction);
+    const hasResetBtn = Boolean(resetAction);
+    const hasAnyAction = Boolean(hasPopupSettingsBtn || hasSaveBtn || hasResetBtn || removeAction || runAction);
     const actionRowHtml = hasAnyAction
       ? `
         <div class="inline-row" style="margin-top:10px;">
@@ -4979,6 +5047,13 @@ function renderCoreSettingsManager(body, tabSpec) {
             hasSaveBtn
               ? `<button type="button" class="action-btn core-manager-save">${escapeHtml(
                   String(item?.save_label || "Save")
+                )}</button>`
+              : ""
+          }
+          ${
+            hasResetBtn
+              ? `<button type="button" class="inline-btn danger core-manager-reset-defaults">${escapeHtml(
+                  String(item?.reset_label || "Restore Default Settings")
                 )}</button>`
               : ""
           }
@@ -5101,10 +5176,12 @@ function renderCoreSettingsManager(body, tabSpec) {
         data-core-item-id="${encodedId}"
         data-core-item-group="${escapeHtml(itemGroup)}"
         data-core-save-action="${escapeHtml(saveAction)}"
+        data-core-reset-action="${escapeHtml(resetAction)}"
         data-core-remove-action="${escapeHtml(removeAction)}"
         data-core-run-action="${escapeHtml(runAction)}"
         data-core-run-confirm="${escapeHtml(runConfirm)}"
         data-core-remove-confirm="${escapeHtml(removeConfirm)}"
+        data-core-reset-confirm="${escapeHtml(resetConfirm)}"
         data-core-item-popup-fields="${escapeHtml(popupFieldsEncoded)}"
         data-core-item-popup-mode="${escapeHtml(popupMode)}"
         data-core-item-popup-config="${escapeHtml(popupConfigEncoded)}"
@@ -5965,13 +6042,17 @@ function renderEspHomeSettingsCard(item, coreKey = "esphome") {
   const title = String(item?.title || "Voice Pipeline Settings").trim() || "Voice Pipeline Settings";
   const subtitle = String(item?.subtitle || "").trim();
   const saveAction = String(item?.save_action || "").trim();
+  const resetAction = String(item?.reset_action || "").trim();
+  const resetConfirm = String(item?.reset_confirm || "Reset ESPHome voice settings to defaults?").trim();
   const sections = Array.isArray(item?.sections) ? item.sections : [];
   return `
     <article class="card core-manager-item"
       data-core-key="${escapeHtml(coreKey)}"
       data-core-item-id="${escapeHtml(encodeCoreManagerId(String(item?.id || "voice_settings")))}"
       data-core-item-group="settings"
-      data-core-save-action="${escapeHtml(saveAction)}">
+      data-core-save-action="${escapeHtml(saveAction)}"
+      data-core-reset-action="${escapeHtml(resetAction)}"
+      data-core-reset-confirm="${escapeHtml(resetConfirm)}">
       <div class="card-head">
         <h3 class="card-title">${escapeHtml(title)}</h3>
         <span class="small">${escapeHtml(coreKey)}</span>
@@ -5993,6 +6074,7 @@ function renderEspHomeSettingsCard(item, coreKey = "esphome") {
         .join("")}
       <div class="inline-row" style="margin-top:12px;">
         ${saveAction ? `<button type="button" class="action-btn core-manager-save">${escapeHtml(String(item?.save_label || "Save Settings"))}</button>` : ""}
+        ${resetAction ? `<button type="button" class="inline-btn danger core-manager-reset-defaults">${escapeHtml(String(item?.reset_label || "Restore Default Settings"))}</button>` : ""}
         <span class="small core-manager-status"></span>
       </div>
     </article>
@@ -10842,6 +10924,8 @@ function bindCoreTabManagers() {
       const card = event.currentTarget.closest(".core-manager-item");
       const coreKey = String(card?.dataset?.coreKey || "").trim();
       const action = String(card?.dataset?.coreSaveAction || "").trim();
+      const resetAction = String(card?.dataset?.coreResetAction || "").trim();
+      const resetConfirm = String(card?.dataset?.coreResetConfirm || "").trim();
       const itemId = decodeCoreManagerId(card?.dataset?.coreItemId || "");
       if (!card || !coreKey) {
         return;
@@ -10881,6 +10965,27 @@ function bindCoreTabManagers() {
               return result;
             }
           : undefined,
+        onReset: resetAction
+          ? async () => {
+              setCoreManagerStatus(card, "Restoring defaults...");
+              const activeTab = persistCoreTabFromNode(card);
+              const result = await runActionWithProgress(
+                {
+                  title: "Restoring default settings",
+                  detail: itemId || coreKey,
+                  workingText: "Restoring defaults...",
+                  successText: "Defaults restored.",
+                  errorPrefix: "Settings restore failed",
+                },
+                () => runCoreManagerAction(card, coreKey, resetAction, { id: itemId })
+              );
+              await refreshCoreManagerInPlace(card, activeTab);
+              state.notice = String(result?.message || "Default settings restored.");
+              return result;
+            }
+          : undefined,
+        resetLabel: "Restore Default Settings",
+        resetConfirm,
       });
     });
   });
@@ -10914,6 +11019,47 @@ function bindCoreTabManagers() {
         );
         await refreshCoreManagerInPlace(card, activeTab);
         state.notice = String(result?.message || "Saved.");
+        setCoreManagerStatus(card, state.notice);
+        showToast(state.notice);
+      } catch (error) {
+        setCoreManagerStatus(card, `Failed: ${error.message}`);
+        showToast(`Failed: ${error.message}`, "error", 3600);
+      }
+    });
+  });
+
+  document.querySelectorAll(".core-manager-reset-defaults").forEach((button) => {
+    if (button.dataset.coreManagerActionBound === "1") {
+      return;
+    }
+    button.dataset.coreManagerActionBound = "1";
+    button.addEventListener("click", async (event) => {
+      const card = event.currentTarget.closest(".core-manager-item");
+      const coreKey = String(card?.dataset?.coreKey || "").trim();
+      const action = String(card?.dataset?.coreResetAction || "").trim();
+      const itemId = decodeCoreManagerId(card?.dataset?.coreItemId || "");
+      const confirmText = String(card?.dataset?.coreResetConfirm || "Reset this item to defaults?").trim();
+      if (!card || !coreKey || !action) {
+        return;
+      }
+      if (confirmText && !window.confirm(confirmText)) {
+        return;
+      }
+      setCoreManagerStatus(card, "Resetting...");
+      try {
+        const activeTab = persistCoreTabFromNode(card);
+        const result = await runActionWithProgress(
+          {
+            title: "Resetting core item",
+            detail: itemId || coreKey,
+            workingText: "Resetting settings...",
+            successText: "Reset.",
+            errorPrefix: "Core manager reset failed",
+          },
+          () => runCoreManagerAction(card, coreKey, action, { id: itemId })
+        );
+        await refreshCoreManagerInPlace(card, activeTab);
+        state.notice = String(result?.message || "Reset.");
         setCoreManagerStatus(card, state.notice);
         showToast(state.notice);
       } catch (error) {
@@ -11381,7 +11527,15 @@ function renderDashboardCards(cards) {
   if (!state.dashboardShowStatusTiles) {
     return "";
   }
-  const rows = Array.isArray(cards) ? cards.filter((row) => row && typeof row === "object") : [];
+  const rows = Array.isArray(cards)
+    ? cards.filter((row) => {
+        if (!row || typeof row !== "object") {
+          return false;
+        }
+        const id = String(row.id || "").trim();
+        return id !== "updates" && !id.startsWith("updates_");
+      })
+    : [];
   if (!rows.length) {
     return "";
   }
@@ -14409,17 +14563,6 @@ async function loadSettingsView() {
     : `<div class="small hydra-base-server-empty">No additional base servers configured.</div>`;
   const popupEffectStyle = normalizePopupEffectStyle(settings?.popup_effect_style || state.popupEffectStyle);
   applyPopupEffectStyle(popupEffectStyle);
-  const executorSettings = settings?.executor_settings && typeof settings.executor_settings === "object" ? settings.executor_settings : {};
-  const executorBounds = executorSettings.bounds && typeof executorSettings.bounds === "object" ? executorSettings.bounds : {};
-  const executorBound = (name, field, fallback) => {
-    const row = executorBounds[name] && typeof executorBounds[name] === "object" ? executorBounds[name] : {};
-    const value = Number(row[field]);
-    return Number.isFinite(value) ? value : fallback;
-  };
-  const executorWorkerValue = (key, fallback) => {
-    const value = Number(settings?.[key]);
-    return Number.isFinite(value) ? value : fallback;
-  };
   const hydraPlatforms = ["webui", "discord", "irc", "telegram", "matrix", "homeassistant", "homekit", "xbmc", "automation"];
   const hydraPlatformOptionsHtml = hydraPlatforms
     .map((platform) => `<option value="${escapeHtml(platform)}">${escapeHtml(hydraPlatformLabel(platform))}</option>`)
@@ -15418,6 +15561,7 @@ async function loadSettingsView() {
 
                 <div class="inline-row" style="margin-top:12px;">
                   <button type="button" id="settings-save-esphome" class="action-btn">Save Settings</button>
+                  <button type="button" id="settings-reset-esphome-defaults" class="inline-btn danger">Restore Default Settings</button>
                   <span class="small">Saves built-in ESPHome device settings for Tater.</span>
                 </div>
               </div>
@@ -15684,55 +15828,6 @@ async function loadSettingsView() {
                   <button type="button" id="settings-admin-defaults" class="inline-btn">Reset To Defaults</button>
                   <span class="small">Loads the default admin-only plugin list.</span>
                 </div>
-              </div>
-            </section>
-
-            <section class="core-inline-section">
-              <div class="small core-inline-section-title">Runtime Worker Lanes</div>
-              <div class="small" style="margin-bottom: 10px;">
-                Controls how many blocking jobs each runtime lane can run in parallel. Changes apply immediately to new work.
-              </div>
-              <div class="form-grid two-col">
-                <label>Wake Workers
-                  <input
-                    id="set_executor_wake_workers"
-                    type="number"
-                    min="${executorBound("wake", "min", 1)}"
-                    max="${executorBound("wake", "max", 8)}"
-                    value="${escapeHtml(executorWorkerValue("executor_wake_workers", 2))}"
-                  />
-                  <div class="small">OWW/NWW wake inference. Default: ${escapeHtml(executorBound("wake", "default", 2))}.</div>
-                </label>
-                <label>Speech Workers
-                  <input
-                    id="set_executor_speech_workers"
-                    type="number"
-                    min="${executorBound("speech", "min", 1)}"
-                    max="${executorBound("speech", "max", 8)}"
-                    value="${escapeHtml(executorWorkerValue("executor_speech_workers", 2))}"
-                  />
-                  <div class="small">STT, TTS, speaker ID, and emotion ID. Default: ${escapeHtml(executorBound("speech", "default", 2))}.</div>
-                </label>
-                <label>Dashboard Workers
-                  <input
-                    id="set_executor_dashboard_workers"
-                    type="number"
-                    min="${executorBound("dashboard", "min", 1)}"
-                    max="${executorBound("dashboard", "max", 4)}"
-                    value="${escapeHtml(executorWorkerValue("executor_dashboard_workers", 1))}"
-                  />
-                  <div class="small">Dashboard snapshots, cache, and brief storage. Default: ${escapeHtml(executorBound("dashboard", "default", 1))}.</div>
-                </label>
-                <label>Background Workers
-                  <input
-                    id="set_executor_background_workers"
-                    type="number"
-                    min="${executorBound("background", "min", 1)}"
-                    max="${executorBound("background", "max", 16)}"
-                    value="${escapeHtml(executorWorkerValue("executor_background_workers", 4))}"
-                  />
-                  <div class="small">Integrations, discovery, notification sends, and playback IO. Default: ${escapeHtml(executorBound("background", "default", 4))}.</div>
-                </label>
               </div>
             </section>
 
@@ -18066,10 +18161,6 @@ async function loadSettingsView() {
         "set_hydra_auto_continue_incomplete_final_enabled"
       ).checked,
       popup_effect_style: normalizePopupEffectStyle(document.getElementById("set_popup_effect_style")?.value || "flame"),
-      executor_wake_workers: Number(document.getElementById("set_executor_wake_workers")?.value || 2),
-      executor_speech_workers: Number(document.getElementById("set_executor_speech_workers")?.value || 2),
-      executor_dashboard_workers: Number(document.getElementById("set_executor_dashboard_workers")?.value || 1),
-      executor_background_workers: Number(document.getElementById("set_executor_background_workers")?.value || 4),
       admin_only_plugins: adminOnlyPlugins,
       esphome_settings: esphomeSettingsValues,
     };
@@ -18156,6 +18247,41 @@ async function loadSettingsView() {
     "settings-save-advanced",
   ].forEach((buttonId) => {
     document.getElementById(buttonId)?.addEventListener("click", runSettingsSave);
+  });
+
+  document.getElementById("settings-reset-esphome-defaults")?.addEventListener("click", async () => {
+    const message = "Restore ESPHome voice settings to defaults? This also clears the saved ESPHome API password and Noise PSK.";
+    if (!window.confirm(message)) {
+      return;
+    }
+    statusEl.textContent = "Restoring ESPHome settings...";
+    try {
+      const result = await runActionWithProgress(
+        {
+          title: "Restoring ESPHome settings",
+          detail: "voice pipeline",
+          workingText: "Restoring settings...",
+          successText: "Restored.",
+          errorPrefix: "ESPHome reset failed",
+        },
+        () =>
+          api("/api/settings/esphome/runtime/action", {
+            method: "POST",
+            body: JSON.stringify({
+              action: "voice_settings_reset_defaults",
+              payload: { id: "voice_settings" },
+            }),
+          })
+      );
+      const notice = String(result?.message || "ESPHome settings restored to defaults.");
+      state.notice = notice;
+      statusEl.textContent = notice;
+      showToast(notice);
+      await loadSettingsView();
+    } catch (error) {
+      statusEl.textContent = `Restore failed: ${error.message}`;
+      showToast(`Restore failed: ${error.message}`, "error", 3600);
+    }
   });
 }
 

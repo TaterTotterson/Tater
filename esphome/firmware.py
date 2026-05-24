@@ -135,6 +135,7 @@ _WAKE_SOUND_CATALOG_CACHE: Dict[str, Any] = {"ts": 0.0, "payload": {}}
 _WAKE_SOUND_CATALOG_LOCK = threading.Lock()
 _WAKE_SOUND_DISABLED_PICKER_VALUE = "__none__"
 _WAKE_SOUND_ENABLED_PROFILE_KEY = "wake_sound_enabled"
+_WAKE_SOUND_DEFAULT_ENABLED = False
 
 _TEMPLATE_SPECS: tuple[Dict[str, Any], ...] = (
     {
@@ -364,6 +365,12 @@ def _humanize_key(key: str) -> str:
         lower = raw.lower()
         parts.append(special.get(lower, raw.capitalize()))
     return " ".join(parts) or token
+
+
+def _firmware_field_label(key: str) -> str:
+    if key == "ha_voice_ip":
+        return "Satellite IP"
+    return _S3BOX_SENSOR_FIELD_LABELS.get(key, _humanize_key(key))
 
 
 def _current_tater_first_name() -> str:
@@ -2001,7 +2008,7 @@ def _build_device_context(
         effective_read_only = read_only or field_disabled
         field_row = {
             "key": key,
-            "label": _S3BOX_SENSOR_FIELD_LABELS.get(key, _humanize_key(key)),
+            "label": _firmware_field_label(key),
             "type": field_type,
             "value": field_value,
             "read_only": effective_read_only,
@@ -2132,7 +2139,7 @@ def _build_device_context(
     wake_sound_section = section_lookup.get("Wake Sound") if isinstance(section_lookup.get("Wake Sound"), list) else None
     if isinstance(wake_sound_section, list) and "wake_word_triggered_sound_file" in fields_meta:
         wake_sound_entries = wake_sound_catalog.get("entries") if isinstance(wake_sound_catalog.get("entries"), list) else []
-        wake_sound_enabled = _as_bool(profile.get(_WAKE_SOUND_ENABLED_PROFILE_KEY), True)
+        wake_sound_enabled = _as_bool(profile.get(_WAKE_SOUND_ENABLED_PROFILE_KEY), _WAKE_SOUND_DEFAULT_ENABLED)
         current_wake_sound_url = _text(
             (
                 fields_meta.get("wake_word_triggered_sound_file", {}).get("resolved_value")
@@ -2150,9 +2157,9 @@ def _build_device_context(
         )
         catalog_description = (
             f"Choose from {len(wake_sound_entries)} prebuilt wake sounds, "
-            "select No wake sound, or leave this on Custom URL and paste your own audio URL below."
+            "select No wake sound, or leave this on Custom URL and paste your own audio URL below. No wake sound gives the fastest first-word capture."
             if wake_sound_entries
-            else "Prebuilt wake-sound catalog is unavailable right now. You can still select No wake sound or paste any custom audio URL below."
+            else "Prebuilt wake-sound catalog is unavailable right now. You can still select No wake sound for fastest first-word capture or paste any custom audio URL below."
         )
         catalog_warning = _text(wake_sound_catalog.get("warning"))
         if catalog_warning and not wake_sound_entries:
@@ -2742,7 +2749,7 @@ def _validate_profile_values(context: Dict[str, Any], values: Dict[str, str]) ->
     if "wifi_password" in values and not _text(values.get("wifi_password")):
         required.append("Wi-Fi password")
     if "ha_voice_ip" in values and not _text(values.get("ha_voice_ip")):
-        required.append("connected device IP")
+        required.append("satellite IP")
     if required:
         raise RuntimeError(f"Missing required firmware values: {', '.join(required)}.")
 
@@ -2801,7 +2808,7 @@ def _append_esphome_on_boot(config: Dict[str, Any], automation: Dict[str, Any]) 
 
 
 def _apply_wake_sound_profile(config: Dict[str, Any], values: Dict[str, str]) -> None:
-    if _as_bool((values or {}).get(_WAKE_SOUND_ENABLED_PROFILE_KEY), True):
+    if _as_bool((values or {}).get(_WAKE_SOUND_ENABLED_PROFILE_KEY), _WAKE_SOUND_DEFAULT_ENABLED):
         return
     substitutions = config.get("substitutions") if isinstance(config.get("substitutions"), dict) else {}
     if "wake_sound_restore_mode" in substitutions:

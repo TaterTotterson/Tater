@@ -283,6 +283,23 @@ DEFAULT_PIPER_TAIL_PAD_SECONDS = 0.18
 DEFAULT_FASTER_WHISPER_MODEL = "base.en"
 DEFAULT_FASTER_WHISPER_DEVICE = "cpu"
 DEFAULT_FASTER_WHISPER_COMPUTE_TYPE = "int8"
+DEFAULT_FASTER_WHISPER_CUDA_COMPUTE_TYPE = "float16"
+DEFAULT_FASTER_WHISPER_COMPUTE_TYPE_SETTING = "auto"
+FASTER_WHISPER_COMPUTE_TYPES = {
+    "auto",
+    "float16",
+    "float32",
+    "int8",
+    "int8_float16",
+    "int8_float32",
+}
+DEFAULT_FASTER_WHISPER_BEAM_SIZE = 5
+DEFAULT_FASTER_WHISPER_PARTIAL_BEAM_SIZE = 1
+DEFAULT_FASTER_WHISPER_INITIAL_PROMPT = (
+    "Tater is a home voice assistant. Common words include Tater, timer, lights, weather, "
+    "music, pause, resume, stop, cancel, volume, kitchen, living room, office, bedroom, "
+    "garage, Home Assistant, UniFi, Ecobee, Ecowitt, Sonos, Discord, and Kodi."
+)
 DEFAULT_VOSK_MODEL_NAME = "vosk-model-small-en-us-0.15"
 DEFAULT_VOSK_MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
 DEFAULT_STT_MODEL_ROOT = os.path.abspath(
@@ -331,8 +348,8 @@ DEFAULT_CONTINUED_CHAT_REOPEN_PREROLL_S = 0.30
 DEFAULT_EXPERIMENTAL_LIVE_TOOL_PROGRESS_ENABLED = False
 DEFAULT_EXPERIMENTAL_PARTIAL_STT_ENABLED = False
 DEFAULT_EXPERIMENTAL_TTS_EARLY_START_ENABLED = False
-DEFAULT_EXPERIMENTAL_PARTIAL_STT_INTERVAL_S = 0.85
-DEFAULT_EXPERIMENTAL_PARTIAL_STT_MIN_AUDIO_S = 0.55
+DEFAULT_EXPERIMENTAL_PARTIAL_STT_INTERVAL_S = 0.50
+DEFAULT_EXPERIMENTAL_PARTIAL_STT_MIN_AUDIO_S = 0.45
 DEFAULT_EXPERIMENTAL_PARTIAL_STT_MIN_NEW_AUDIO_S = 0.28
 DEFAULT_EXPERIMENTAL_TTS_EARLY_START_MIN_CHARS = 90
 DEFAULT_EXPERIMENTAL_TTS_EARLY_START_MIN_FIRST_CHARS = 28
@@ -343,12 +360,6 @@ DEFAULT_WAKE_ARBITRATION_BUSY_TIMEOUT_S = 120.0
 DEFAULT_WAKE_ARBITRATION_RELEASE_GRACE_S = 1.5
 DEFAULT_SPEECHBRAIN_ACCELERATION = "auto"
 DEFAULT_STARTUP_GATE_S = 0.0
-DEFAULT_WAKE_STARTUP_GATE_S = 0.15
-DEFAULT_WAKE_SILENCE_SECONDS = 0.96
-DEFAULT_WAKE_NO_SPEECH_TIMEOUT_S = 5.75
-DEFAULT_WAKE_MIN_SPEECH_FRAMES = 3
-DEFAULT_WAKE_MIN_SILENCE_SHORT_S = 0.70
-DEFAULT_WAKE_MIN_SILENCE_LONG_S = 0.86
 DEFAULT_TTS_URL_TTL_S = 180
 DEFAULT_TTS_ANNOUNCEMENT_TIMEOUT_MAX_S = 170.0
 
@@ -406,6 +417,8 @@ _voice_selector_runtime: Dict[str, Dict[str, Any]] = {}
 _wake_arbitration_lock = asyncio.Lock()
 _wake_arbitration_groups: Dict[str, Dict[str, Any]] = {}
 _wake_arbitration_room_claims: Dict[str, Dict[str, Any]] = {}
+_CUDA_RUNTIME_AVAILABLE_CACHE: Optional[bool] = None
+_CUDA_RUNTIME_AVAILABLE_LOCK = threading.RLock()
 
 _background_tasks: Dict[str, asyncio.Task] = {}
 
@@ -1499,6 +1512,30 @@ def _voice_metrics_record_session_start(
         _voice_metrics_persist_locked()
 
 
+def _drain_task_result(task: asyncio.Task[Any]) -> None:
+    with contextlib.suppress(BaseException):
+        task.result()
+
+
+async def _voice_metrics_record_session_start_async(
+    *,
+    selector: str,
+    continued_chat_reopen: bool,
+    stt_fallback_used: bool,
+    tts_fallback_used: bool,
+) -> None:
+    try:
+        await run_background(
+            _voice_metrics_record_session_start,
+            selector=selector,
+            continued_chat_reopen=continued_chat_reopen,
+            stt_fallback_used=stt_fallback_used,
+            tts_fallback_used=tts_fallback_used,
+        )
+    except Exception as exc:
+        logger.debug("[native-voice] voice metrics session-start persist skipped: %s", exc)
+
+
 def _voice_metrics_record_connection_event(selector: str, *, event: str) -> None:
     token = _text(event)
     if token not in {"disconnect", "reconnect", "error"}:
@@ -1798,16 +1835,27 @@ def _voice_settings_with_shared_speech(extra_values: Optional[Dict[str, Any]] = 
 
 
 def _cuda_runtime_available() -> bool:
-    with contextlib.suppress(Exception):
-        ctranslate2_mod = importlib.import_module("ctranslate2")
-        if int(getattr(ctranslate2_mod, "get_cuda_device_count")()) > 0:
-            return True
-    with contextlib.suppress(Exception):
-        torch_mod = importlib.import_module("torch")
-        cuda_mod = getattr(torch_mod, "cuda", None)
-        if cuda_mod is not None and bool(cuda_mod.is_available()):
-            return True
-    return False
+    global _CUDA_RUNTIME_AVAILABLE_CACHE
+    cached = _CUDA_RUNTIME_AVAILABLE_CACHE
+    if cached is not None:
+        return bool(cached)
+    with _CUDA_RUNTIME_AVAILABLE_LOCK:
+        cached = _CUDA_RUNTIME_AVAILABLE_CACHE
+        if cached is not None:
+            return bool(cached)
+        available = False
+        with contextlib.suppress(Exception):
+            ctranslate2_mod = importlib.import_module("ctranslate2")
+            if int(getattr(ctranslate2_mod, "get_cuda_device_count")()) > 0:
+                available = True
+        if not available:
+            with contextlib.suppress(Exception):
+                torch_mod = importlib.import_module("torch")
+                cuda_mod = getattr(torch_mod, "cuda", None)
+                if cuda_mod is not None and bool(cuda_mod.is_available()):
+                    available = True
+        _CUDA_RUNTIME_AVAILABLE_CACHE = bool(available)
+        return bool(available)
 
 
 def _effective_speech_acceleration() -> str:
@@ -1826,11 +1874,70 @@ def _faster_whisper_device() -> str:
     return "cuda" if _effective_speech_acceleration() == "cuda" else DEFAULT_FASTER_WHISPER_DEVICE
 
 
+def _normalize_faster_whisper_compute_type(value: Any) -> str:
+    token = _text(value).lower().replace("-", "_").replace(" ", "_")
+    if token in {"", "default"}:
+        return DEFAULT_FASTER_WHISPER_COMPUTE_TYPE_SETTING
+    return token if token in FASTER_WHISPER_COMPUTE_TYPES else DEFAULT_FASTER_WHISPER_COMPUTE_TYPE_SETTING
+
+
+def _cuda_device_capability() -> Optional[Tuple[int, int]]:
+    with contextlib.suppress(Exception):
+        torch_mod = importlib.import_module("torch")
+        cuda_mod = getattr(torch_mod, "cuda", None)
+        if cuda_mod is None or not bool(cuda_mod.is_available()):
+            return None
+        major, minor = cuda_mod.get_device_capability(0)
+        return int(major), int(minor)
+    return None
+
+
 def _faster_whisper_compute_type() -> str:
-    env_compute_type = _text(os.getenv("TATER_FASTER_WHISPER_COMPUTE_TYPE"))
-    if env_compute_type:
-        return env_compute_type
-    return "float16" if _faster_whisper_device() == "cuda" else DEFAULT_FASTER_WHISPER_COMPUTE_TYPE
+    env_compute_type = _normalize_faster_whisper_compute_type(os.getenv("TATER_FASTER_WHISPER_COMPUTE_TYPE"))
+    selected = env_compute_type
+    if not _text(os.getenv("TATER_FASTER_WHISPER_COMPUTE_TYPE")):
+        selected = _normalize_faster_whisper_compute_type(_voice_settings().get("VOICE_FASTER_WHISPER_COMPUTE_TYPE"))
+    if selected != "auto":
+        return selected
+    if _faster_whisper_device() != "cuda":
+        return DEFAULT_FASTER_WHISPER_COMPUTE_TYPE
+    capability = _cuda_device_capability()
+    if capability is not None and capability[0] < 7:
+        return DEFAULT_FASTER_WHISPER_COMPUTE_TYPE
+    return DEFAULT_FASTER_WHISPER_CUDA_COMPUTE_TYPE
+
+
+def _faster_whisper_compute_type_label() -> str:
+    env_raw = os.getenv("TATER_FASTER_WHISPER_COMPUTE_TYPE")
+    selected = _normalize_faster_whisper_compute_type(env_raw if _text(env_raw) else _voice_settings().get("VOICE_FASTER_WHISPER_COMPUTE_TYPE"))
+    effective = _faster_whisper_compute_type()
+    if selected == "auto":
+        capability = _cuda_device_capability()
+        cap = f" cc={capability[0]}.{capability[1]}" if capability else ""
+        return f"auto->{effective}{cap}"
+    source = "env" if _text(env_raw) else "settings"
+    return f"{source}->{effective}"
+
+
+def _faster_whisper_beam_size(*, partial: bool = False) -> int:
+    if partial:
+        return DEFAULT_FASTER_WHISPER_PARTIAL_BEAM_SIZE
+    return _get_int_setting(
+        "VOICE_FASTER_WHISPER_BEAM_SIZE",
+        DEFAULT_FASTER_WHISPER_BEAM_SIZE,
+        minimum=1,
+        maximum=8,
+    )
+
+
+def _faster_whisper_initial_prompt() -> str:
+    raw = _voice_settings().get("VOICE_FASTER_WHISPER_INITIAL_PROMPT")
+    prompt = _text(raw)
+    if raw is None or prompt == "":
+        return DEFAULT_FASTER_WHISPER_INITIAL_PROMPT
+    if prompt.lower() in {"none", "off", "disabled"}:
+        return ""
+    return prompt[:1000]
 
 
 def _kokoro_provider() -> str:
@@ -2288,6 +2395,8 @@ def _voice_config_snapshot() -> Dict[str, Any]:
                 "model": DEFAULT_FASTER_WHISPER_MODEL,
                 "device": _faster_whisper_device(),
                 "compute_type": _faster_whisper_compute_type(),
+                "beam_size": _faster_whisper_beam_size(partial=False),
+                "partial_beam_size": DEFAULT_FASTER_WHISPER_PARTIAL_BEAM_SIZE,
                 "model_root": _stt_backend_model_root("faster_whisper"),
             },
             "vosk": {
@@ -2364,6 +2473,7 @@ def _voice_config_snapshot() -> Dict[str, Any]:
         },
         "eou": {
             "mode": DEFAULT_EOU_MODE,
+            "input_gain": _get_float_setting("VOICE_INPUT_GAIN", DEFAULT_AUDIO_INPUT_GAIN, minimum=0.5, maximum=16.0),
             "backend": vad_backend,
             "silence_s": _get_float_setting("VOICE_VAD_SILENCE_SECONDS", DEFAULT_VAD_SILENCE_SECONDS, minimum=0.2, maximum=5.0),
             "timeout_s": _get_float_setting("VOICE_VAD_TIMEOUT_SECONDS", DEFAULT_VAD_TIMEOUT_SECONDS, minimum=2.0, maximum=60.0),
@@ -2375,12 +2485,6 @@ def _voice_config_snapshot() -> Dict[str, Any]:
             "min_silence_frames": _get_int_setting("VOICE_SILERO_MIN_SILENCE_FRAMES", DEFAULT_SILERO_MIN_SILENCE_FRAMES, minimum=3, maximum=60),
             "min_silence_short_s": _get_float_setting("VOICE_VAD_MIN_SILENCE_SHORT_S", DEFAULT_VAD_MIN_SILENCE_SHORT_S, minimum=0.1, maximum=5.0),
             "min_silence_long_s": _get_float_setting("VOICE_VAD_MIN_SILENCE_LONG_S", DEFAULT_VAD_MIN_SILENCE_LONG_S, minimum=0.1, maximum=5.0),
-            "wake_startup_gate_s": _get_float_setting("VOICE_WAKE_STARTUP_GATE_S", DEFAULT_WAKE_STARTUP_GATE_S, minimum=0.0, maximum=2.0),
-            "wake_silence_s": _get_float_setting("VOICE_WAKE_SILENCE_SECONDS", DEFAULT_WAKE_SILENCE_SECONDS, minimum=0.2, maximum=5.0),
-            "wake_no_speech_timeout_s": _get_float_setting("VOICE_WAKE_NO_SPEECH_TIMEOUT_S", DEFAULT_WAKE_NO_SPEECH_TIMEOUT_S, minimum=1.0, maximum=20.0),
-            "wake_min_speech_frames": _get_int_setting("VOICE_WAKE_MIN_SPEECH_FRAMES", DEFAULT_WAKE_MIN_SPEECH_FRAMES, minimum=1, maximum=30),
-            "wake_min_silence_short_s": _get_float_setting("VOICE_WAKE_MIN_SILENCE_SHORT_S", DEFAULT_WAKE_MIN_SILENCE_SHORT_S, minimum=0.1, maximum=5.0),
-            "wake_min_silence_long_s": _get_float_setting("VOICE_WAKE_MIN_SILENCE_LONG_S", DEFAULT_WAKE_MIN_SILENCE_LONG_S, minimum=0.1, maximum=5.0),
             "continued_chat_reopen_startup_gate_s": _get_float_setting("VOICE_CONTINUED_CHAT_REOPEN_STARTUP_GATE_S", DEFAULT_CONTINUED_CHAT_REOPEN_STARTUP_GATE_S, minimum=0.0, maximum=2.0),
             "continued_chat_reopen_preroll_s": _get_float_setting("VOICE_CONTINUED_CHAT_REOPEN_PREROLL_S", DEFAULT_CONTINUED_CHAT_REOPEN_PREROLL_S, minimum=0.0, maximum=1.0),
             "continued_chat_reopen_silence_s": _get_float_setting("VOICE_CONTINUED_CHAT_REOPEN_SILENCE_SECONDS", DEFAULT_CONTINUED_CHAT_REOPEN_SILENCE_SECONDS, minimum=0.2, maximum=5.0),
@@ -2717,33 +2821,37 @@ class SileroVadBackend(VadBackendBase):
     _shared_error: str = ""
     _shared_torch: Any = None
     _shared_np: Any = None
-    _shared_model: Any = None
+    _shared_load_fn: Any = None
+    _shared_lock = threading.RLock()
+    _model_cache: Dict[str, Any] = {}
+    _model_locks: Dict[str, threading.RLock] = {}
 
     @classmethod
     def _ensure_shared(cls) -> None:
-        if cls._shared_ready is not None:
-            return
-        try:
-            torch_mod = importlib.import_module("torch")
-            np_mod = importlib.import_module("numpy")
-            silero = importlib.import_module("silero_vad")
-            load_fn = getattr(silero, "load_silero_vad", None)
-            if not callable(load_fn):
-                raise RuntimeError("silero_vad missing load_silero_vad")
-            model = load_fn()
-            cls._shared_torch = torch_mod
-            cls._shared_np = np_mod
-            cls._shared_model = model
-            cls._shared_error = ""
-            cls._shared_ready = True
-        except Exception as exc:
-            cls._shared_torch = None
-            cls._shared_np = None
-            cls._shared_model = None
-            cls._shared_error = str(exc)
-            cls._shared_ready = False
+        with cls._shared_lock:
+            if cls._shared_ready is not None:
+                return
+            try:
+                torch_mod = importlib.import_module("torch")
+                np_mod = importlib.import_module("numpy")
+                silero = importlib.import_module("silero_vad")
+                load_fn = getattr(silero, "load_silero_vad", None)
+                if not callable(load_fn):
+                    raise RuntimeError("silero_vad missing load_silero_vad")
+                cls._shared_torch = torch_mod
+                cls._shared_np = np_mod
+                cls._shared_load_fn = load_fn
+                cls._shared_error = ""
+                cls._shared_ready = True
+            except Exception as exc:
+                cls._shared_torch = None
+                cls._shared_np = None
+                cls._shared_load_fn = None
+                cls._shared_error = str(exc)
+                cls._shared_ready = False
 
-    def __init__(self, cfg: Dict[str, Any]):
+    def __init__(self, cfg: Dict[str, Any], *, owner_key: str = ""):
+        self._owner_key = _text(owner_key) or "default"
         self.threshold = float(cfg.get("silero_threshold") or DEFAULT_SILERO_THRESHOLD)
         self.neg_threshold = _as_float(
             cfg.get("silero_neg_threshold"),
@@ -2751,6 +2859,7 @@ class SileroVadBackend(VadBackendBase):
             minimum=0.0,
             maximum=1.0,
         )
+        self._model_lock = threading.RLock()
         self._available = False
         self._load_error = ""
         self._ratecv_state = None
@@ -2763,18 +2872,45 @@ class SileroVadBackend(VadBackendBase):
                 raise RuntimeError(self.__class__._shared_error or "silero shared init failed")
             self._torch = self.__class__._shared_torch
             self._np = self.__class__._shared_np
-            self._model = self.__class__._shared_model
+            load_fn = self.__class__._shared_load_fn
+            if not callable(load_fn):
+                raise RuntimeError("silero_vad loader unavailable")
+            with self.__class__._shared_lock:
+                lock = self.__class__._model_locks.get(self._owner_key)
+                if lock is None:
+                    lock = threading.RLock()
+                    self.__class__._model_locks[self._owner_key] = lock
+                model = self.__class__._model_cache.get(self._owner_key)
+                if model is None:
+                    model = load_fn()
+                    with contextlib.suppress(Exception):
+                        model.eval()
+                    self.__class__._model_cache[self._owner_key] = model
+                self._model_lock = lock
+                self._model = model
+            with self._model_lock:
+                with contextlib.suppress(Exception):
+                    self._model.reset_states()
             self._available = True
         except Exception as exc:
+            self._torch = None
+            self._np = None
+            self._model = None
             self._load_error = str(exc)
             self._available = False
 
     def reset_state(self) -> None:
         if self._available and self._model is not None:
-            with contextlib.suppress(Exception):
-                self._model.reset_states()
+            with self._model_lock:
+                with contextlib.suppress(Exception):
+                    self._model.reset_states()
         self._buffer = b""
         self._ratecv_state = None
+
+    @classmethod
+    def preload_owner(cls, cfg: Dict[str, Any], *, owner_key: str = "") -> bool:
+        backend = cls(cfg, owner_key=owner_key)
+        return bool(getattr(backend, "_available", False))
 
     def _to_pcm16_mono_16k(self, audio_bytes: bytes, audio_format: Dict[str, int]) -> bytes:
         data, self._ratecv_state = _pcm_to_pcm16_mono_16k(
@@ -2799,26 +2935,30 @@ class SileroVadBackend(VadBackendBase):
             return {"backend": "silero", "probability": 0.0, "is_speech": False, "frames": 0}
 
         try:
-            payload = self._buffer + pcm16
-            if len(payload) < self._frame_bytes:
-                self._buffer = payload
-                return {"backend": "silero", "probability": 0.0, "is_speech": False, "frames": 0}
+            with self._model_lock:
+                payload = self._buffer + pcm16
+                if len(payload) < self._frame_bytes:
+                    self._buffer = payload
+                    return {"backend": "silero", "probability": 0.0, "is_speech": False, "frames": 0}
 
-            offset = 0
-            total_frames = 0
-            prob_sum = 0.0
-            max_prob = 0.0
-            while (offset + self._frame_bytes) <= len(payload):
-                frame = payload[offset: offset + self._frame_bytes]
-                offset += self._frame_bytes
-                total_frames += 1
-                samples = self._np.frombuffer(frame, dtype=self._np.int16).astype(self._np.float32) / 32768.0
-                tensor = self._torch.from_numpy(samples)
-                prob = float(self._model(tensor, 16000).item())
-                prob_sum += prob
-                if prob > max_prob:
-                    max_prob = prob
-            self._buffer = payload[offset:]
+                offset = 0
+                total_frames = 0
+                prob_sum = 0.0
+                max_prob = 0.0
+                no_grad = getattr(self._torch, "no_grad", None)
+                grad_ctx = no_grad() if callable(no_grad) else contextlib.nullcontext()
+                with grad_ctx:
+                    while (offset + self._frame_bytes) <= len(payload):
+                        frame = payload[offset: offset + self._frame_bytes]
+                        offset += self._frame_bytes
+                        total_frames += 1
+                        samples = self._np.frombuffer(frame, dtype=self._np.int16).astype(self._np.float32) / 32768.0
+                        tensor = self._torch.from_numpy(samples)
+                        prob = float(self._model(tensor, 16000).item())
+                        prob_sum += prob
+                        if prob > max_prob:
+                            max_prob = prob
+                self._buffer = payload[offset:]
 
             avg_prob = prob_sum / total_frames if total_frames > 0 else 0.0
             is_speech = avg_prob >= self.threshold
@@ -3032,6 +3172,7 @@ class SegmenterState:
         probability = min(1.0, max(0.0, float(speech_probability or 0.0)))
         peak = min(1.0, max(0.0, float(peak_probability if peak_probability is not None else probability)))
         start_probability = max(probability, peak)
+        start_threshold = min(self.threshold, max(self.neg_threshold, self.threshold * 0.75))
 
         # Hard timeout safety net
         if self._elapsed_s >= self.timeout_s:
@@ -3040,11 +3181,11 @@ class SegmenterState:
             should_finalize = True
         elif not self.in_command:
             # WAITING_FOR_SPEECH
-            if start_probability >= self.threshold:
+            if start_probability >= start_threshold:
                 self._consecutive_speech += 1
                 self._consecutive_silence = 0
                 self._soft_silence_s = 0.0
-                self._strong_speech_streak = 0
+                self._strong_speech_streak = self._consecutive_speech if start_probability >= self.threshold else 0
                 if self._consecutive_speech >= self.min_speech_frames:
                     self.in_command = True
                     self.voice_seen = True
@@ -3052,7 +3193,9 @@ class SegmenterState:
                     self.speech_seconds_total += chunk_seconds * self._consecutive_speech
                     self._consecutive_silence = 0
                     self._soft_silence_s = 0.0
-                    self._strong_speech_streak = self._consecutive_speech
+                    self._strong_speech_streak = (
+                        self._consecutive_speech if start_probability >= self.threshold else 0
+                    )
             else:
                 self._consecutive_speech = 0
                 self._soft_silence_s = 0.0
@@ -3131,6 +3274,24 @@ class EouEngine:
         bytes_per_second = max(1, rate * width * channels)
         chunk_seconds = float(len(audio_bytes or b"")) / float(bytes_per_second)
 
+        backend_error = _text(backend_data.get("error"))
+        if backend_error:
+            return {
+                "backend": self.backend_name,
+                "binary_active": False,
+                "score": 0.0,
+                "chunk_score": 0.0,
+                "should_finalize": True,
+                "vad_error": True,
+                "voice_seen": False,
+                "speech_chunks": 0,
+                "speech_s": 0.0,
+                "silence_s": 0.0,
+                "timed_out": False,
+                "in_command": False,
+                **backend_data,
+            }
+
         probability = float(backend_data.get("probability", 0.0))
         peak_probability = float(backend_data.get("max_probability", probability))
         seg = self.segmenter.process(
@@ -3168,52 +3329,34 @@ class AwaitingAnnouncementState:
 def _build_eou_engine(
     audio_format: Dict[str, int],
     *,
-    continued_chat_reopen: bool = False,
-    wake_word_session: bool = False,
+    selector: str = "",
+    reopen_capture_profile: bool = False,
     cfg: Optional[Dict[str, Any]] = None,
 ) -> EouEngine:
     cfg_row = cfg if isinstance(cfg, dict) else _voice_config_snapshot()
     eou = cfg_row.get("eou") if isinstance(cfg_row.get("eou"), dict) else {}
     selected_backend = _normalize_vad_backend(eou.get("backend"))
-    backend_name = selected_backend if selected_backend != "auto" else DEFAULT_VAD_BACKEND
+    if selected_backend == "auto":
+        selected_backend = DEFAULT_VAD_BACKEND
+    backend_name = selected_backend
     mode = DEFAULT_EOU_MODE
 
     threshold = _as_float(eou.get("silero_threshold"), DEFAULT_SILERO_THRESHOLD, minimum=0.01, maximum=0.99)
     neg_threshold = _as_float(eou.get("silero_neg_threshold"), DEFAULT_SILERO_NEG_THRESHOLD, minimum=0.0, maximum=0.99)
 
     backend: VadBackendBase
-    backend_note = ""
-    if selected_backend in {"silero", "auto"}:
-        silero_backend = SileroVadBackend(eou)
-        if bool(getattr(silero_backend, "_available", False)):
-            backend = silero_backend
-            backend_name = "silero"
-        else:
-            backend_note = _text(getattr(silero_backend, "_load_error", "")) or "silero unavailable"
-            webrtc_backend = WebRtcVadBackend(eou)
-            if bool(getattr(webrtc_backend, "_available", False)):
-                backend = webrtc_backend
-                backend_name = "webrtc"
-                if selected_backend == "silero":
-                    logger.warning("[native-voice] Silero VAD unavailable; falling back to WebRTC VAD: %s", backend_note)
-            else:
-                backend = silero_backend
-                backend_name = "silero"
+    if selected_backend == "silero":
+        backend = SileroVadBackend(eou, owner_key=selector)
+        backend_name = "silero"
     else:
-        webrtc_backend = WebRtcVadBackend(eou)
-        if bool(getattr(webrtc_backend, "_available", False)):
-            backend = webrtc_backend
-            backend_name = "webrtc"
-        else:
-            backend_note = _text(getattr(webrtc_backend, "_load_error", "")) or "webrtcvad unavailable"
-            silero_backend = SileroVadBackend(eou)
-            if bool(getattr(silero_backend, "_available", False)):
-                backend = silero_backend
-                backend_name = "silero"
-                logger.warning("[native-voice] WebRTC VAD unavailable; falling back to Silero VAD: %s", backend_note)
-            else:
-                backend = webrtc_backend
-                backend_name = "webrtc"
+        backend = WebRtcVadBackend(eou)
+        backend_name = "webrtc"
+    if not bool(getattr(backend, "_available", True)):
+        logger.error(
+            "[native-voice] selected VAD backend unavailable backend=%s error=%s",
+            backend_name,
+            _text(getattr(backend, "_load_error", "")) or "unknown",
+        )
 
     segmenter = SegmenterState(
         silence_s=_as_float(eou.get("silence_s"), DEFAULT_VAD_SILENCE_SECONDS, minimum=0.2, maximum=5.0),
@@ -3226,32 +3369,7 @@ def _build_eou_engine(
         min_silence_short_s=_as_float(eou.get("min_silence_short_s"), DEFAULT_VAD_MIN_SILENCE_SHORT_S, minimum=0.1, maximum=5.0),
         min_silence_long_s=_as_float(eou.get("min_silence_long_s"), DEFAULT_VAD_MIN_SILENCE_LONG_S, minimum=0.1, maximum=5.0),
     )
-    if wake_word_session:
-        # Wake-triggered turns are the most likely to catch wake tail or room
-        # noise at the front, so require a slightly more confident speech
-        # start and allow a touch more pause tolerance once the user is in a
-        # real utterance.
-        segmenter.silence_s = max(
-            float(segmenter.silence_s),
-            _as_float(eou.get("wake_silence_s"), DEFAULT_WAKE_SILENCE_SECONDS, minimum=0.2, maximum=5.0),
-        )
-        segmenter.no_speech_timeout_s = max(
-            float(segmenter.no_speech_timeout_s),
-            _as_float(eou.get("wake_no_speech_timeout_s"), DEFAULT_WAKE_NO_SPEECH_TIMEOUT_S, minimum=1.0, maximum=20.0),
-        )
-        segmenter.min_speech_frames = max(
-            int(segmenter.min_speech_frames),
-            _as_int(eou.get("wake_min_speech_frames"), DEFAULT_WAKE_MIN_SPEECH_FRAMES, minimum=1, maximum=30),
-        )
-        segmenter.min_silence_short_s = max(
-            float(segmenter.min_silence_short_s),
-            _as_float(eou.get("wake_min_silence_short_s"), DEFAULT_WAKE_MIN_SILENCE_SHORT_S, minimum=0.1, maximum=5.0),
-        )
-        segmenter.min_silence_long_s = max(
-            float(segmenter.min_silence_long_s),
-            _as_float(eou.get("wake_min_silence_long_s"), DEFAULT_WAKE_MIN_SILENCE_LONG_S, minimum=0.1, maximum=5.0),
-        )
-    if continued_chat_reopen:
+    if reopen_capture_profile:
         segmenter.silence_s = max(
             float(segmenter.silence_s),
             _as_float(eou.get("continued_chat_reopen_silence_s"), DEFAULT_CONTINUED_CHAT_REOPEN_SILENCE_SECONDS, minimum=0.2, maximum=5.0),
@@ -3277,8 +3395,6 @@ def _build_eou_engine(
             _as_float(eou.get("continued_chat_reopen_min_silence_long_s"), DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_LONG_S, minimum=0.1, maximum=5.0),
         )
 
-    if backend_note:
-        setattr(backend, "_fallback_note", backend_note)
     return EouEngine(mode=mode, backend_name=backend_name, backend=backend, segmenter=segmenter)
 
 
@@ -3321,6 +3437,30 @@ def _stt_backend_available(backend: str) -> Tuple[bool, str]:
             return False, f"No Vosk model directory found under {_stt_backend_model_root('vosk')}"
         return True, ""
     return False, f"unsupported STT backend: {token}"
+
+
+def _resolve_stt_backend_selected(selected: str) -> Tuple[str, str]:
+    token = _normalize_stt_backend(selected)
+    ok, reason = _stt_backend_available(token)
+    if ok:
+        return token, ""
+    if token != "wyoming":
+        wyoming_ok, _wyoming_reason = _stt_backend_available("wyoming")
+        if wyoming_ok:
+            return "wyoming", f"{token} unavailable: {reason}. Falling back to Wyoming."
+    return token, reason
+
+
+def _resolve_tts_backend_selected(selected: str) -> Tuple[str, str]:
+    token = _normalize_tts_backend(selected)
+    ok, reason = _tts_backend_available(token)
+    if ok:
+        return token, ""
+    if token != "wyoming":
+        wyoming_ok, _wyoming_reason = _tts_backend_available("wyoming")
+        if wyoming_ok:
+            return "wyoming", f"{token} unavailable: {reason}. Falling back to Wyoming."
+    return token, reason
 
 
 async def _ensure_voice_stt_end_sent(
@@ -4567,10 +4707,19 @@ async def _process_voice_turn(session: VoiceSessionRuntime) -> Dict[str, Any]:
                 "speaker_id_enrollment": True,
             }
 
-    stt_started = time.monotonic()
-    transcript = _text(await _native_transcribe_session_audio(session))
-    session.stt_latency_ms = max(0.0, (time.monotonic() - stt_started) * 1000.0)
-    _voice_metrics_record_stt(session.selector, session.stt_backend_effective or session.stt_backend, session.stt_latency_ms)
+    if bool(getattr(session, "no_speech_recovered_transcript", False)) and _text(session.stt_transcript):
+        transcript = _text(session.stt_transcript)
+    else:
+        stt_started = time.monotonic()
+        transcript = _text(await _native_transcribe_session_audio(session))
+        session.stt_latency_ms = max(0.0, (time.monotonic() - stt_started) * 1000.0)
+        if not bool(getattr(session, "stt_metric_recorded", False)):
+            _voice_metrics_record_stt(
+                session.selector,
+                session.stt_backend_effective or session.stt_backend,
+                session.stt_latency_ms,
+            )
+            session.stt_metric_recorded = True
     from .. import intercom as esphome_intercom
 
     if esphome_intercom.is_broadcast_wake_word(session.wake_word):
@@ -4612,6 +4761,18 @@ async def _process_voice_turn(session: VoiceSessionRuntime) -> Dict[str, Any]:
     completeness = _transcript_completeness_assessment(transcript)
     word_count = len(re.findall(r"[a-z0-9']+", transcript.lower()))
     if (not bool(completeness.get("complete"))) and word_count <= 6:
+        if bool(getattr(session, "no_speech_recovered_partial", False)) or bool(_text(session.wake_word)):
+            logger.info(
+                "[native-voice] partial transcript recovery selector=%s session_id=%s words=%s reason=%s",
+                session.selector,
+                session.session_id,
+                word_count,
+                _text(completeness.get("reason")) or "incomplete",
+            )
+            return {
+                "transcript": transcript,
+                "response_text": "I only caught part of that. Please say it again.",
+            }
         _native_debug(
             f"clipped transcript bypass selector={session.selector} session_id={session.session_id} "
             f"reason={_text(completeness.get('reason'))} transcript={transcript!r}"
@@ -4690,13 +4851,18 @@ async def _process_voice_turn(session: VoiceSessionRuntime) -> Dict[str, Any]:
     _native_debug(
         f"hydra turn start selector={session.selector} session_id={session.session_id} transcript_len={len(transcript)}"
     )
-    response_text = await _run_hydra_turn_for_voice(
-        transcript=transcript,
-        conv_id=_text(session.conversation_id) or session.session_id,
-        session=session,
-    )
+    hydra_started = time.monotonic()
+    try:
+        response_text = await _run_hydra_turn_for_voice(
+            transcript=transcript,
+            conv_id=_text(session.conversation_id) or session.session_id,
+            session=session,
+        )
+    finally:
+        session.hydra_latency_ms = max(0.0, (time.monotonic() - hydra_started) * 1000.0)
     _native_debug(
-        f"hydra turn result selector={session.selector} session_id={session.session_id} response_len={len(_text(response_text))}"
+        f"hydra turn result selector={session.selector} session_id={session.session_id} "
+        f"response_len={len(_text(response_text))} hydra_ms={float(session.hydra_latency_ms or 0.0):.1f}"
     )
 
     return {
@@ -4773,8 +4939,17 @@ async def _finalize_session(
         seg_chunks = int(seg.speech_chunks) if isinstance(seg, SegmenterState) else 0
         seg_speech_s = float(seg._speech_seconds()) if isinstance(seg, SegmenterState) else 0.0
         if (not seg_voice_seen) or seg_chunks <= 0 or seg_speech_s < 0.05:
+            stt_started = time.monotonic()
             with contextlib.suppress(Exception):
                 await _native_transcribe_session_audio(session)
+                session.stt_latency_ms = max(0.0, (time.monotonic() - stt_started) * 1000.0)
+                if not bool(session.stt_metric_recorded):
+                    _voice_metrics_record_stt(
+                        session.selector,
+                        session.stt_backend_effective or session.stt_backend,
+                        session.stt_latency_ms,
+                    )
+                    session.stt_metric_recorded = True
 
             recovered_transcript = _text(session.stt_transcript)
             seg_threshold = float(seg.threshold) if isinstance(seg, SegmenterState) else float(DEFAULT_SILERO_THRESHOLD)
@@ -4782,6 +4957,8 @@ async def _finalize_session(
             recovered_assessment = (
                 _transcript_completeness_assessment(recovered_transcript) if recovered_transcript else {"complete": True}
             )
+            recovered_complete = bool(recovered_assessment.get("complete", True))
+            recovered_low_signal = _transcript_is_low_signal(recovered_transcript)
             is_brief_command = bool(
                 len(recovered_words) == 1
                 and recovered_words[0] in {"yes", "no", "stop", "cancel", "play", "pause", "next", "back"}
@@ -4796,21 +4973,35 @@ async def _finalize_session(
                 or (len(recovered_words) >= 2 and recovery_prob >= recovery_low_prob_threshold)
                 or (is_brief_command and recovery_prob >= 0.08)
             )
+            partial_recovery = (
+                bool(recovered_transcript)
+                and (not recovered_low_signal)
+                and (not recovered_complete)
+                and 2 <= len(recovered_words) <= 6
+                and (
+                    recovery_prob >= 0.05
+                    or float(session.audio_peak_dbfs or -120.0) >= -42.0
+                )
+            )
             recovery_ok = (
                 bool(recovered_transcript)
-                and (not _transcript_is_low_signal(recovered_transcript))
-                and bool(recovered_assessment.get("complete", True))
+                and (not recovered_low_signal)
+                and (recovered_complete or len(recovered_words) >= 7 or partial_recovery)
                 and (
                     recovery_prob >= float(recovery_prob_threshold)
                     or recovery_by_transcript
+                    or partial_recovery
                 )
             )
             if recovery_ok:
+                session.no_speech_recovered_transcript = True
+                session.no_speech_recovered_partial = bool(partial_recovery)
                 _native_debug(
                     f"no-speech guard recovered transcript selector={token} session_id={session.session_id} "
-                    f"reason={no_speech_reason} transcript_len={len(recovered_transcript)} "
+                    f"reason={no_speech_reason} transcript_len={len(recovered_transcript)} words={len(recovered_words)} "
                     f"max_prob={session.max_probability:.3f} threshold={recovery_prob_threshold:.3f} "
-                    f"transcript_recovery={bool(recovery_by_transcript)}"
+                    f"transcript_recovery={bool(recovery_by_transcript)} partial={bool(partial_recovery)} "
+                    f"complete={recovered_complete} complete_reason={_text(recovered_assessment.get('reason')) or '-'}"
                 )
             else:
                 outcome = _classify_no_op_outcome(
@@ -4820,15 +5011,21 @@ async def _finalize_session(
                 )
                 session.turn_outcome = outcome
                 logger.info(
-                    "[native-voice] no speech finalize selector=%s session_id=%s reason=%s outcome=%s chunks=%s speech_s=%.2f bytes=%s max_prob=%.3f",
+                    "[native-voice] no speech finalize selector=%s session_id=%s reason=%s outcome=%s speech_chunks=%s speech_s=%.2f audio_chunks=%s bytes=%s audio_peak_dbfs=%.1f max_prob=%.3f transcript_len=%s transcript_words=%s complete=%s complete_reason=%s",
                     token,
                     _text(session_id),
                     no_speech_reason,
                     outcome,
                     seg_chunks,
                     seg_speech_s,
+                    int(session.audio_chunks),
                     int(session.audio_bytes),
+                    float(session.audio_peak_dbfs or -120.0),
                     float(session.max_probability),
+                    len(recovered_transcript),
+                    len(recovered_words),
+                    recovered_complete,
+                    _text(recovered_assessment.get("reason")) or "-",
                 )
                 _voice_metrics_record_turn(
                     selector=token,
@@ -4897,13 +5094,18 @@ async def _finalize_session(
             with contextlib.suppress(Exception):
                 await _send_voice_no_text_recognized(client, module)
             logger.info(
-                "[native-voice] no-op transcript finalize selector=%s session_id=%s reason=%s outcome=%s transcript_len=%s stt_ms=%.1f",
+                "[native-voice] no-op transcript finalize selector=%s session_id=%s reason=%s outcome=%s transcript_len=%s stt_ms=%.1f audio_chunks=%s bytes=%s audio_peak_dbfs=%.1f max_prob=%.3f speech_s=%.2f",
                 token,
                 _text(session.session_id),
                 no_op_reason or "unknown",
                 outcome,
                 len(transcript),
                 float(session.stt_latency_ms or 0.0),
+                int(session.audio_chunks),
+                int(session.audio_bytes),
+                float(session.audio_peak_dbfs or -120.0),
+                float(session.max_probability or 0.0),
+                float(session.speech_duration_s or 0.0),
             )
             _voice_metrics_record_turn(
                 selector=token,
@@ -5142,13 +5344,14 @@ async def _finalize_session(
             turn_latency_ms=max(0.0, (_now() - float(session.started_ts or _now())) * 1000.0),
         )
         logger.info(
-            "[native-voice] session result selector=%s session_id=%s transcript_len=%s response_len=%s live_tool_progress=%s stt_ms=%.1f tts_ms=%.1f turn_ms=%.1f tts_backend=%s tts_bytes=%s tts_mode=%s run_end_mode=%s continue_conversation=%s tts_url=%s",
+            "[native-voice] session result selector=%s session_id=%s transcript_len=%s response_len=%s live_tool_progress=%s stt_ms=%.1f hydra_ms=%.1f tts_ms=%.1f turn_ms=%.1f tts_backend=%s tts_bytes=%s tts_mode=%s run_end_mode=%s continue_conversation=%s tts_url=%s",
             token,
             _text(session.session_id),
             len(transcript),
             len(response_text),
             "1" if bool(session.live_tool_progress_played) else "0",
             float(session.stt_latency_ms or 0.0),
+            float(session.hydra_latency_ms or 0.0),
             float(session.tts_latency_ms or 0.0),
             max(0.0, (_now() - float(session.started_ts or _now())) * 1000.0),
             tts_backend_used,
@@ -5212,6 +5415,7 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
     lock = runtime.get("lock")
 
     async def _handle_start(conversation_id: str, request_flags: int, audio_settings: Any, wake_word_phrase: Optional[str]) -> Optional[int]:
+        handler_started_ts = _now()
         if not api_audio_supported:
             msg = "Device does not report API_AUDIO support. Voice Core currently requires API_AUDIO for stable operation."
             logger.warning("[native-voice] %s selector=%s", msg, token)
@@ -5309,11 +5513,14 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
         eou_cfg = voice_cfg.get("eou") if isinstance(voice_cfg.get("eou"), dict) else {}
         limits_cfg = voice_cfg.get("limits") if isinstance(voice_cfg.get("limits"), dict) else {}
 
+        wake_word_session = bool(wake_phrase)
+        capture_reopen_profile = bool(continued_chat_reopen or wake_word_session)
+
         try:
             eou_engine = _build_eou_engine(
                 fmt,
-                continued_chat_reopen=continued_chat_reopen,
-                wake_word_session=bool(wake_phrase),
+                selector=token,
+                reopen_capture_profile=capture_reopen_profile,
                 cfg=voice_cfg,
             )
         except Exception as exc:
@@ -5344,11 +5551,6 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
 
         start_ts = _now()
         startup_gate_s = _as_float(eou_cfg.get("startup_gate_s"), DEFAULT_STARTUP_GATE_S, minimum=0.0, maximum=2.0)
-        if wake_phrase:
-            startup_gate_s = max(
-                startup_gate_s,
-                _as_float(eou_cfg.get("wake_startup_gate_s"), DEFAULT_WAKE_STARTUP_GATE_S, minimum=0.0, maximum=2.0),
-            )
         if continued_chat_reopen:
             startup_gate_s = max(
                 startup_gate_s,
@@ -5359,17 +5561,20 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                     maximum=2.0,
                 ),
             )
+        elif wake_word_session:
+            startup_gate_s = min(startup_gate_s, 0.05)
         max_audio_bytes = int(limits_cfg.get("max_audio_bytes") or DEFAULT_MAX_AUDIO_BYTES)
-        startup_preroll_s = (
-            _as_float(
+        if capture_reopen_profile:
+            startup_preroll_s = _as_float(
                 eou_cfg.get("continued_chat_reopen_preroll_s"),
                 DEFAULT_CONTINUED_CHAT_REOPEN_PREROLL_S,
                 minimum=0.0,
                 maximum=1.0,
             )
-            if continued_chat_reopen
-            else 0.0
-        )
+            if wake_word_session and startup_gate_s > 0.0:
+                startup_preroll_s = min(1.0, max(startup_preroll_s, startup_gate_s + 0.10))
+        else:
+            startup_preroll_s = 0.0
         startup_preroll_max_bytes = _audio_bytes_for_seconds(fmt, startup_preroll_s)
         segmenter = eou_engine.segmenter if isinstance(eou_engine, EouEngine) else None
         base_stall_s = _as_float(
@@ -5387,7 +5592,7 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             minimum=1.0,
             maximum=30.0,
         )
-        if (wake_phrase or continued_chat_reopen) and isinstance(segmenter, SegmenterState):
+        if capture_reopen_profile and isinstance(segmenter, SegmenterState):
             audio_stall_no_speech_timeout_s = max(
                 audio_stall_no_speech_timeout_s,
                 float(segmenter.no_speech_timeout_s) + 0.25,
@@ -5398,10 +5603,18 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             minimum=1.0,
             maximum=20.0,
         )
-        requested_stt_backend = _selected_stt_backend()
-        effective_stt_backend, stt_backend_note = _resolve_stt_backend()
-        requested_tts_backend = _selected_tts_backend()
-        effective_tts_backend, tts_backend_note = _resolve_tts_backend()
+        audio_input_gain = _as_float(
+            eou_cfg.get("input_gain"),
+            DEFAULT_AUDIO_INPUT_GAIN,
+            minimum=0.5,
+            maximum=16.0,
+        )
+        stt_cfg = voice_cfg.get("stt") if isinstance(voice_cfg.get("stt"), dict) else {}
+        tts_cfg = voice_cfg.get("tts") if isinstance(voice_cfg.get("tts"), dict) else {}
+        requested_stt_backend = _normalize_stt_backend(stt_cfg.get("backend"))
+        effective_stt_backend, stt_backend_note = _resolve_stt_backend_selected(requested_stt_backend)
+        requested_tts_backend = _normalize_tts_backend(tts_cfg.get("backend"))
+        effective_tts_backend, tts_backend_note = _resolve_tts_backend_selected(requested_tts_backend)
         device_info = client_row.get("device_info") if isinstance(client_row.get("device_info"), dict) else {}
         satellite_name = _text(satellite_row.get("name"))
         device_info_name = _text(device_info.get("name"))
@@ -5463,6 +5676,7 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             audio_stall_timeout_s=audio_stall_timeout_s,
             audio_stall_no_speech_timeout_s=audio_stall_no_speech_timeout_s,
             blank_wake_timeout_s=blank_wake_timeout_s,
+            audio_input_gain=audio_input_gain,
         )
         async with lock:
             _cancel_announcement_wait(runtime)
@@ -5487,22 +5701,27 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                 reason="continued_chat_reopen" if continued_chat_reopen else "active_session",
             )
 
-        _voice_metrics_record_session_start(
-            selector=token,
-            continued_chat_reopen=continued_chat_reopen,
-            stt_fallback_used=bool(stt_backend_note) or (requested_stt_backend != effective_stt_backend),
-            tts_fallback_used=bool(tts_backend_note) or (requested_tts_backend != effective_tts_backend),
+        metrics_task = asyncio.create_task(
+            _voice_metrics_record_session_start_async(
+                selector=token,
+                continued_chat_reopen=continued_chat_reopen,
+                stt_fallback_used=bool(stt_backend_note) or (requested_stt_backend != effective_stt_backend),
+                tts_fallback_used=bool(tts_backend_note) or (requested_tts_backend != effective_tts_backend),
+            )
         )
+        metrics_task.add_done_callback(_drain_task_result)
 
         _schedule_audio_stall_watch(token, client, module, session_id=sid)
 
+        log_ts = _now()
         logger.info(
-            "[native-voice] session start selector=%s conversation_id=%s session_id=%s wake_word=%s followup=%s area=%s stt=%s tts=%s vad=%s wake_engine=%s rate=%s width=%s ch=%s",
+            "[native-voice] session start selector=%s conversation_id=%s session_id=%s wake_word=%s followup=%s capture_profile=%s area=%s stt=%s tts=%s vad=%s wake_engine=%s rate=%s width=%s ch=%s input_gain=%.2f gate_s=%.2f preroll_s=%.2f setup_ms=%.1f ready_ms=%.1f",
             token,
             conv,
             sid,
             _text(wake_word_phrase),
             "1" if continued_chat_reopen else "0",
+            "reopen" if capture_reopen_profile else "default",
             area_name,
             effective_stt_backend,
             effective_tts_backend,
@@ -5511,6 +5730,11 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             int(fmt.get("rate") or 0),
             int(fmt.get("width") or 0),
             int(fmt.get("channels") or 0),
+            float(session.audio_input_gain or DEFAULT_AUDIO_INPUT_GAIN),
+            float(session.startup_gate_s or 0.0),
+            float(session.startup_preroll_s or 0.0),
+            max(0.0, (log_ts - handler_started_ts) * 1000.0),
+            max(0.0, (log_ts - start_ts) * 1000.0),
         )
         if stt_backend_note:
             logger.warning(
@@ -5542,6 +5766,7 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                 f"silero_threshold={float(getattr(eou_engine.backend, 'threshold', DEFAULT_SILERO_THRESHOLD)):.2f} "
                 f"webrtc_aggressiveness={int(getattr(eou_engine.backend, 'mode', DEFAULT_WEBRTC_VAD_AGGRESSIVENESS))} "
                 f"startup_gate_s={float(session.startup_gate_s or 0.0):.2f} "
+                f"input_gain={float(session.audio_input_gain or DEFAULT_AUDIO_INPUT_GAIN):.2f} "
                 f"preroll_s={float(session.startup_preroll_s or 0.0):.2f} "
                 f"stall_after_speech_s={float(session.audio_stall_timeout_s or 0.0):.2f} "
                 f"stall_no_speech_s={float(session.audio_stall_no_speech_timeout_s or 0.0):.2f}"
@@ -5566,11 +5791,13 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             audio_format = session.audio_format
             eou_engine = session.eou_engine
             gate_ts = float(session.startup_gate_until_ts)
+            input_gain = float(session.audio_input_gain or DEFAULT_AUDIO_INPUT_GAIN)
 
         width = int(audio_format.get("width") or DEFAULT_VOICE_SAMPLE_WIDTH)
-        audio_bytes = _pcm_apply_gain(audio_bytes, sample_width=width, gain=DEFAULT_AUDIO_INPUT_GAIN)
+        audio_bytes = _pcm_apply_gain(audio_bytes, sample_width=width, gain=input_gain)
         if not audio_bytes:
             return
+        chunk_dbfs = _pcm_dbfs(audio_bytes, sample_width=width)
 
         now_ts = _now()
         async with lock:
@@ -5584,7 +5811,7 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                 if isinstance(s, VoiceSessionRuntime) and s.session_id == sid:
                     s.last_audio_ts = now_ts
                     s.dropped_startup_chunks += 1
-                    if bool(s.continued_chat_reopen) and int(s.startup_preroll_max_bytes or 0) > 0:
+                    if int(s.startup_preroll_max_bytes or 0) > 0:
                         s.startup_preroll_buffer.extend(audio_bytes)
                         overflow = len(s.startup_preroll_buffer) - int(s.startup_preroll_max_bytes or 0)
                         if overflow > 0:
@@ -5611,6 +5838,18 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                 return
 
             session.last_audio_ts = now_ts
+            if float(session.first_audio_ts or 0.0) <= 0.0:
+                session.first_audio_ts = now_ts
+                logger.info(
+                    "[native-voice] capture first audio selector=%s session_id=%s delay_ms=%.1f dropped_startup_chunks=%s gate_s=%.2f preroll_s=%.2f chunk_dbfs=%s",
+                    token,
+                    sid,
+                    max(0.0, (now_ts - float(session.started_ts or now_ts)) * 1000.0),
+                    int(session.dropped_startup_chunks or 0),
+                    float(session.startup_gate_s or 0.0),
+                    float(session.startup_preroll_s or 0.0),
+                    f"{float(chunk_dbfs):.1f}" if chunk_dbfs is not None else "-",
+                )
             session.speech_duration_s = max(
                 float(session.speech_duration_s or 0.0),
                 float(metrics.get("speech_s") or 0.0),
@@ -5620,6 +5859,22 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                 p = float(metrics.get("max_probability", metrics.get("probability", 0.0)) or 0.0)
                 if p > session.max_probability:
                     session.max_probability = p
+            if chunk_dbfs is not None:
+                session.audio_level_chunks += 1
+                if float(chunk_dbfs) > float(session.audio_peak_dbfs or -120.0):
+                    session.audio_peak_dbfs = float(chunk_dbfs)
+            if bool(metrics.get("voice_seen")) and float(session.first_vad_speech_ts or 0.0) <= 0.0:
+                session.first_vad_speech_ts = now_ts
+                logger.info(
+                    "[native-voice] vad speech start selector=%s session_id=%s elapsed_ms=%.1f speech_chunks=%s speech_s=%.2f max_prob=%.3f peak_dbfs=%.1f",
+                    token,
+                    sid,
+                    max(0.0, (now_ts - float(session.started_ts or now_ts)) * 1000.0),
+                    int(metrics.get("speech_chunks") or 0),
+                    float(metrics.get("speech_s") or 0.0),
+                    float(metrics.get("max_probability", metrics.get("probability", 0.0)) or 0.0),
+                    float(session.audio_peak_dbfs or -120.0),
+                )
 
             max_audio_bytes = int(session.max_audio_bytes or DEFAULT_MAX_AUDIO_BYTES)
 
@@ -5676,7 +5931,9 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                     f"selector={token} session_id={sid} chunks={chunks} bytes={session.audio_bytes} "
                     f"probability={prob} peak_probability={peak_prob} voice_seen={bool(metrics.get('voice_seen'))} "
                     f"in_command={bool(metrics.get('in_command'))} speech_s={metrics.get('speech_s', '-')} "
-                    f"silence_s={metrics.get('silence_s', '-')} timed_out={bool(metrics.get('timed_out'))}"
+                    f"silence_s={metrics.get('silence_s', '-')} timed_out={bool(metrics.get('timed_out'))} "
+                    f"chunk_dbfs={chunk_dbfs if chunk_dbfs is not None else '-'} "
+                    f"peak_dbfs={float(session.audio_peak_dbfs or -120.0):.1f}"
                 )
 
             if session.completeness_hold_until_ts > 0.0 and float(metrics.get("silence_s") or 0.0) <= 0.05:
@@ -5718,7 +5975,7 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                         )
                         should_finalize = False
 
-        if should_finalize:
+        if should_finalize and not bool(metrics.get("vad_error")):
             with contextlib.suppress(Exception):
                 from .. import intercom as esphome_intercom
 
@@ -5733,13 +5990,23 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                     should_finalize = False
 
         if should_finalize:
+            vad_error = bool(metrics.get("vad_error"))
+            finalize_reason = "vad_unavailable" if vad_error else "server_vad"
+            if vad_error:
+                logger.error(
+                    "[native-voice] VAD backend error selector=%s session_id=%s backend=%s error=%s",
+                    token,
+                    sid,
+                    _text(metrics.get("backend")) or "-",
+                    _text(metrics.get("error")) or "unknown",
+                )
             _native_debug(
-                f"server_vad finalize selector={token} session_id={sid} reason=server_vad "
+                f"server_vad finalize selector={token} session_id={sid} reason={finalize_reason} "
                 f"silence_s={float(metrics.get('silence_s') or 0.0):.2f} speech_chunks={int(metrics.get('speech_chunks') or 0)} "
                 f"speech_s={float(metrics.get('speech_s') or 0.0):.2f} timed_out={bool(metrics.get('timed_out'))}"
             )
             with contextlib.suppress(Exception):
-                await _finalize_session(token, client, module, session_id=sid, abort=False, reason="server_vad")
+                await _finalize_session(token, client, module, session_id=sid, abort=vad_error, reason=finalize_reason)
 
     async def _handle_stop(abort: bool) -> None:
         sid = ""

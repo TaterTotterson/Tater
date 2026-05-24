@@ -22,7 +22,7 @@ import requests
 
 from announcement_targets import split_announcement_targets
 from helpers import redis_client
-from runtime_executors import run_background, run_speech
+from runtime_executors import run_background, run_tts
 from tateros import integration_store as integration_store_module
 from speech_settings import (
     DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
@@ -1698,7 +1698,7 @@ async def synthesize_tts_wav(
         raise RuntimeError("Preview text is required.")
 
     if selected_backend == "kokoro":
-        audio_bytes, audio_format = await run_speech(
+        audio_bytes, audio_format = await run_tts(
             _synthesize_kokoro_sync,
             prompt,
             _text(model) or DEFAULT_KOKORO_MODEL,
@@ -1708,7 +1708,7 @@ async def synthesize_tts_wav(
         return pcm_to_wav(audio_bytes, audio_format)
 
     if selected_backend == "pocket_tts":
-        audio_bytes, audio_format = await run_speech(
+        audio_bytes, audio_format = await run_tts(
             _synthesize_pocket_tts_sync,
             prompt,
             _text(model) or DEFAULT_POCKET_TTS_MODEL,
@@ -1717,7 +1717,7 @@ async def synthesize_tts_wav(
         return pcm_to_wav(audio_bytes, audio_format)
 
     if selected_backend == "piper":
-        audio_bytes, audio_format = await run_speech(
+        audio_bytes, audio_format = await run_tts(
             _synthesize_piper_sync,
             prompt,
             _text(model) or DEFAULT_PIPER_MODEL,
@@ -1729,7 +1729,7 @@ async def synthesize_tts_wav(
             base_url=openai_base_url,
             api_key=openai_api_key,
         )
-        return await run_speech(
+        return await run_tts(
             _synthesize_openai_compatible_tts_wav_sync,
             prompt,
             model=_text(model) or DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL,

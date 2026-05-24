@@ -9,22 +9,6 @@ from . import ui_helpers as esphome_ui_helpers
 
 VOICE_MODEL_SETTING_GROUPS = [
     (
-        "Voice Activity Detection",
-        [
-            "VOICE_VAD_BACKEND",
-            "VOICE_VAD_SILENCE_SECONDS",
-            "VOICE_VAD_TIMEOUT_SECONDS",
-            "VOICE_VAD_NO_SPEECH_TIMEOUT_S",
-            "VOICE_SILERO_THRESHOLD",
-            "VOICE_SILERO_NEG_THRESHOLD",
-            "VOICE_SILERO_MIN_SPEECH_FRAMES",
-            "VOICE_SILERO_MIN_SILENCE_FRAMES",
-            "VOICE_VAD_MIN_SILENCE_SHORT_S",
-            "VOICE_VAD_MIN_SILENCE_LONG_S",
-            "VOICE_WEBRTC_VAD_AGGRESSIVENESS",
-        ],
-    ),
-    (
         "SpeechBrain Models",
         ["VOICE_SPEECHBRAIN_ACCELERATION"],
     ),
@@ -66,6 +50,16 @@ VOICE_MODEL_SETTING_KEYS = {
     for key in keys
 }
 
+LEGACY_RUNTIME_SETTING_KEYS = {
+    "VOICE_WAKE_STARTUP_GATE_S",
+    "VOICE_WAKE_SILENCE_SECONDS",
+    "VOICE_WAKE_NO_SPEECH_TIMEOUT_S",
+    "VOICE_WAKE_MIN_SPEECH_FRAMES",
+    "VOICE_WAKE_MIN_SILENCE_SHORT_S",
+    "VOICE_WAKE_MIN_SILENCE_LONG_S",
+    "VOICE_WAKE_PREROLL_S",
+}
+
 
 def _vp():
     from . import voice_pipeline as vp
@@ -103,67 +97,7 @@ def voice_ui_setting_specs() -> List[Dict[str, Any]]:
             "min": 0.0,
             "max": 2.0,
             "step": 0.05,
-            "description": "Ignored audio window at the start of non-wake listening.",
-        },
-        {
-            "key": "VOICE_WAKE_STARTUP_GATE_S",
-            "label": "Wake Startup Gate (sec)",
-            "type": "number",
-            "default": vp.DEFAULT_WAKE_STARTUP_GATE_S,
-            "min": 0.0,
-            "max": 2.0,
-            "step": 0.05,
-            "description": "Ignored audio window after a wake word before server VAD starts.",
-        },
-        {
-            "key": "VOICE_WAKE_SILENCE_SECONDS",
-            "label": "Wake Silence Seconds",
-            "type": "number",
-            "default": vp.DEFAULT_WAKE_SILENCE_SECONDS,
-            "min": 0.2,
-            "max": 5.0,
-            "step": 0.05,
-            "description": "Minimum silence used for wake-word turns.",
-        },
-        {
-            "key": "VOICE_WAKE_NO_SPEECH_TIMEOUT_S",
-            "label": "Wake No-Speech Seconds",
-            "type": "number",
-            "default": vp.DEFAULT_WAKE_NO_SPEECH_TIMEOUT_S,
-            "min": 1.0,
-            "max": 20.0,
-            "step": 0.1,
-            "description": "No-speech timeout used for wake-word turns.",
-        },
-        {
-            "key": "VOICE_WAKE_MIN_SPEECH_FRAMES",
-            "label": "Wake Min Speech Frames",
-            "type": "number",
-            "default": vp.DEFAULT_WAKE_MIN_SPEECH_FRAMES,
-            "min": 1,
-            "max": 30,
-            "step": 1,
-            "description": "Minimum speech frames used for wake-word turns.",
-        },
-        {
-            "key": "VOICE_WAKE_MIN_SILENCE_SHORT_S",
-            "label": "Wake Short Silence",
-            "type": "number",
-            "default": vp.DEFAULT_WAKE_MIN_SILENCE_SHORT_S,
-            "min": 0.1,
-            "max": 5.0,
-            "step": 0.05,
-            "description": "Minimum silence before ending short wake-word commands.",
-        },
-        {
-            "key": "VOICE_WAKE_MIN_SILENCE_LONG_S",
-            "label": "Wake Long Silence",
-            "type": "number",
-            "default": vp.DEFAULT_WAKE_MIN_SILENCE_LONG_S,
-            "min": 0.1,
-            "max": 5.0,
-            "step": 0.05,
-            "description": "Minimum silence before ending longer wake-word commands.",
+            "description": "Ignored audio window at the start of a listening turn. Leave at 0 unless a device sends a click/pop at session start.",
         },
         {
             "key": "VOICE_CONTINUED_CHAT_REOPEN_STARTUP_GATE_S",
@@ -173,77 +107,77 @@ def voice_ui_setting_specs() -> List[Dict[str, Any]]:
             "min": 0.0,
             "max": 2.0,
             "step": 0.05,
-            "description": "Ignored audio window after a continued-chat mic reopen.",
+            "description": "Ignored audio window after continued-chat mic reopen. First wake listens use a near-zero gate so early words are not clipped.",
         },
         {
             "key": "VOICE_CONTINUED_CHAT_REOPEN_PREROLL_S",
-            "label": "Reopen Pre-Roll (sec)",
+            "label": "Wake/Reopen Pre-Roll (sec)",
             "type": "number",
             "default": vp.DEFAULT_CONTINUED_CHAT_REOPEN_PREROLL_S,
             "min": 0.0,
             "max": 1.0,
             "step": 0.05,
-            "description": "Buffered audio kept from the reopen gate so fast replies can still reach STT without driving endpointing.",
+            "description": "Buffered audio kept from the wake/reopen gate so fast speech can still reach STT without driving endpointing.",
         },
         {
             "key": "VOICE_CONTINUED_CHAT_REOPEN_SILENCE_SECONDS",
-            "label": "Reopen Silence Seconds",
+            "label": "Wake/Reopen Silence Seconds",
             "type": "number",
             "default": vp.DEFAULT_CONTINUED_CHAT_REOPEN_SILENCE_SECONDS,
             "min": 0.2,
             "max": 5.0,
             "step": 0.05,
-            "description": "Minimum silence used for continued-chat reopened listening.",
+            "description": "Minimum silence used for wake-word and continued-chat reopened listening.",
         },
         {
             "key": "VOICE_CONTINUED_CHAT_REOPEN_TIMEOUT_SECONDS",
-            "label": "Reopen Max Listen Seconds",
+            "label": "Wake/Reopen Max Listen Seconds",
             "type": "number",
             "default": vp.DEFAULT_CONTINUED_CHAT_REOPEN_TIMEOUT_SECONDS,
             "min": 2.0,
             "max": 60.0,
             "step": 0.1,
-            "description": "Hard cap for continued-chat reopened listening.",
+            "description": "Hard cap for wake-word and continued-chat reopened listening.",
         },
         {
             "key": "VOICE_CONTINUED_CHAT_REOPEN_NO_SPEECH_TIMEOUT_S",
-            "label": "Reopen No-Speech Seconds",
+            "label": "Wake/Reopen No-Speech Seconds",
             "type": "number",
             "default": vp.DEFAULT_CONTINUED_CHAT_REOPEN_NO_SPEECH_TIMEOUT_S,
             "min": 1.0,
             "max": 20.0,
             "step": 0.1,
-            "description": "No-speech timeout used for continued-chat reopened listening.",
+            "description": "No-speech timeout used for wake-word and continued-chat reopened listening.",
         },
         {
             "key": "VOICE_CONTINUED_CHAT_REOPEN_MIN_SILENCE_FRAMES",
-            "label": "Reopen Min Silence Frames",
+            "label": "Wake/Reopen Min Silence Frames",
             "type": "number",
             "default": vp.DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_FRAMES,
             "min": 3,
             "max": 60,
             "step": 1,
-            "description": "Minimum silence frames used for continued-chat reopened listening.",
+            "description": "Minimum silence frames used for wake-word and continued-chat reopened listening.",
         },
         {
             "key": "VOICE_CONTINUED_CHAT_REOPEN_MIN_SILENCE_SHORT_S",
-            "label": "Reopen Short Silence",
+            "label": "Wake/Reopen Short Silence",
             "type": "number",
             "default": vp.DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_SHORT_S,
             "min": 0.1,
             "max": 5.0,
             "step": 0.05,
-            "description": "Minimum silence before ending short continued-chat replies.",
+            "description": "Minimum silence before ending short wake-word or continued-chat replies.",
         },
         {
             "key": "VOICE_CONTINUED_CHAT_REOPEN_MIN_SILENCE_LONG_S",
-            "label": "Reopen Long Silence",
+            "label": "Wake/Reopen Long Silence",
             "type": "number",
             "default": vp.DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_LONG_S,
             "min": 0.1,
             "max": 5.0,
             "step": 0.05,
-            "description": "Minimum silence before ending longer continued-chat replies.",
+            "description": "Minimum silence before ending longer wake-word or continued-chat replies.",
         },
         {
             "key": "VOICE_AUDIO_STALL_TIMEOUT_S",
@@ -312,6 +246,48 @@ def voice_ui_setting_specs() -> List[Dict[str, Any]]:
                 {"value": "global", "label": "Whole home"},
             ],
             "description": "Same room is safer when multiple people may use Tater in different rooms at once. Whole home is useful when nearby satellites are assigned to different rooms.",
+        },
+        {
+            "key": "VOICE_INPUT_GAIN",
+            "label": "Input Gain",
+            "type": "number",
+            "default": vp.DEFAULT_AUDIO_INPUT_GAIN,
+            "min": 0.5,
+            "max": 16.0,
+            "step": 0.1,
+            "description": "Server-side gain applied to satellite microphone audio before VAD and STT. Raise this if normal speech logs low audio_peak_dbfs values.",
+        },
+        {
+            "key": "VOICE_FASTER_WHISPER_BEAM_SIZE",
+            "label": "Faster Whisper Beam Size",
+            "type": "number",
+            "default": vp.DEFAULT_FASTER_WHISPER_BEAM_SIZE,
+            "min": 1,
+            "max": 8,
+            "step": 1,
+            "description": "Final Faster Whisper decode quality. 1 is fastest and least accurate; 5 is a good quality default on CUDA hosts. Partial STT always stays at 1.",
+        },
+        {
+            "key": "VOICE_FASTER_WHISPER_COMPUTE_TYPE",
+            "label": "Faster Whisper Compute Type",
+            "type": "select",
+            "default": vp.DEFAULT_FASTER_WHISPER_COMPUTE_TYPE_SETTING,
+            "options": [
+                {"value": "auto", "label": "Auto"},
+                {"value": "int8", "label": "Int8"},
+                {"value": "float32", "label": "Float32"},
+                {"value": "float16", "label": "Float16"},
+                {"value": "int8_float32", "label": "Int8 + Float32"},
+                {"value": "int8_float16", "label": "Int8 + Float16"},
+            ],
+            "description": "Auto uses float16 on newer CUDA GPUs and int8 on older CUDA cards such as Pascal/GTX 10-series. Override this if Faster Whisper reports an unsupported compute type.",
+        },
+        {
+            "key": "VOICE_FASTER_WHISPER_INITIAL_PROMPT",
+            "label": "Faster Whisper Prompt",
+            "type": "textarea",
+            "default": vp.DEFAULT_FASTER_WHISPER_INITIAL_PROMPT,
+            "description": "Optional vocabulary hint for Faster Whisper. Use off to disable the built-in Tater/home-assistant prompt.",
         },
         {
             "key": "VOICE_VAD_BACKEND",
@@ -869,15 +845,34 @@ def settings_sections() -> List[Dict[str, Any]]:
             ],
         ),
         (
+            "Speech Recognition",
+            [
+                "VOICE_INPUT_GAIN",
+                "VOICE_FASTER_WHISPER_BEAM_SIZE",
+                "VOICE_FASTER_WHISPER_COMPUTE_TYPE",
+                "VOICE_FASTER_WHISPER_INITIAL_PROMPT",
+            ],
+        ),
+        (
+            "Voice Activity Detection",
+            [
+                "VOICE_VAD_BACKEND",
+                "VOICE_VAD_SILENCE_SECONDS",
+                "VOICE_VAD_TIMEOUT_SECONDS",
+                "VOICE_VAD_NO_SPEECH_TIMEOUT_S",
+                "VOICE_SILERO_THRESHOLD",
+                "VOICE_SILERO_NEG_THRESHOLD",
+                "VOICE_SILERO_MIN_SPEECH_FRAMES",
+                "VOICE_SILERO_MIN_SILENCE_FRAMES",
+                "VOICE_VAD_MIN_SILENCE_SHORT_S",
+                "VOICE_VAD_MIN_SILENCE_LONG_S",
+                "VOICE_WEBRTC_VAD_AGGRESSIVENESS",
+            ],
+        ),
+        (
             "Listening",
             [
                 "VOICE_STARTUP_GATE_S",
-                "VOICE_WAKE_STARTUP_GATE_S",
-                "VOICE_WAKE_SILENCE_SECONDS",
-                "VOICE_WAKE_NO_SPEECH_TIMEOUT_S",
-                "VOICE_WAKE_MIN_SPEECH_FRAMES",
-                "VOICE_WAKE_MIN_SILENCE_SHORT_S",
-                "VOICE_WAKE_MIN_SILENCE_LONG_S",
                 "VOICE_CONTINUED_CHAT_REOPEN_STARTUP_GATE_S",
                 "VOICE_CONTINUED_CHAT_REOPEN_PREROLL_S",
                 "VOICE_CONTINUED_CHAT_REOPEN_SILENCE_SECONDS",
@@ -938,6 +933,9 @@ def settings_item_form() -> Dict[str, Any]:
         "sections": list(settings_sections()),
         "save_action": "voice_settings_save",
         "save_label": "Save Settings",
+        "reset_action": "voice_settings_reset_defaults",
+        "reset_label": "Restore Default Settings",
+        "reset_confirm": "Restore ESPHome voice settings to defaults? This also clears the saved ESPHome API password and Noise PSK.",
         "settings_title": "Voice Pipeline Settings",
         "fields_dropdown": False,
         "sections_in_dropdown": False,
@@ -1058,5 +1056,37 @@ def save_settings_values(values: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "updated_count": len(changed_keys),
         "changed_keys": changed_keys,
+        "restart_required": False,
+    }
+
+
+def runtime_setting_keys() -> List[str]:
+    vp = _vp()
+    keys: List[str] = []
+    seen = set()
+    for spec in voice_ui_setting_specs():
+        if not isinstance(spec, dict):
+            continue
+        key = vp._text(spec.get("key"))
+        if not key or key in seen or key in VOICE_MODEL_SETTING_KEYS:
+            continue
+        seen.add(key)
+        keys.append(key)
+    return keys
+
+
+def reset_settings_defaults() -> Dict[str, Any]:
+    keys = runtime_setting_keys()
+    delete_keys = sorted(set(keys) | LEGACY_RUNTIME_SETTING_KEYS)
+    current = _vp()._voice_settings()
+    changed_keys = [key for key in delete_keys if key in current]
+
+    if delete_keys:
+        redis_client.hdel(settings_hash_key(), *delete_keys)
+
+    return {
+        "updated_count": len(changed_keys),
+        "changed_keys": changed_keys,
+        "reset_keys": keys,
         "restart_required": False,
     }
