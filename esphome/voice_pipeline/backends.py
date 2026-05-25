@@ -65,9 +65,13 @@ def _resolve_stt_backend() -> Tuple[str, str]:
     if ok:
         return selected, ""
     if selected != "wyoming":
-        wyoming_ok, _wyoming_reason = vp._stt_backend_available("wyoming")
-        if wyoming_ok:
-            return "wyoming", f"{selected} unavailable: {reason}. Falling back to Wyoming."
+        for candidate in (vp.DEFAULT_STT_BACKEND, "faster_whisper", "mlx_whisper", "vosk"):
+            fallback = vp._normalize_stt_backend(candidate)
+            if fallback == selected or fallback == "wyoming":
+                continue
+            fallback_ok, _fallback_reason = vp._stt_backend_available(fallback)
+            if fallback_ok:
+                return fallback, f"{selected} unavailable: {reason}. Falling back to {fallback}."
     return selected, reason
 
 

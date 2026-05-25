@@ -3,6 +3,7 @@ import base64
 import html
 import json
 import logging
+import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse, urlunparse
@@ -32,6 +33,7 @@ ALWAYS_ON_NOTIFIERS: Tuple[str, ...] = (
     "homeassistant",
     "ntfy",
     "telegram",
+    "meshtastic",
     "macos",
     "webui",
     "display",
@@ -564,6 +566,125 @@ def _send_ntfy(title: Optional[str], message: str, targets: Optional[Dict[str, A
         return False
 
 
+def _setting_first(settings: Dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = settings.get(key)
+        if value not in (None, ""):
+            return str(value).strip()
+    return ""
+
+
+def _env_first(*keys: str) -> str:
+    for key in keys:
+        value = os.getenv(key)
+        if value not in (None, ""):
+            return str(value).strip()
+    return ""
+
+
+def _meshtastic_int(value: Any, default: int, *, minimum: int = 0, maximum: int = 1024) -> int:
+    try:
+        out = int(value)
+    except Exception:
+        out = int(default)
+    return max(minimum, min(maximum, out))
+
+
+def _meshtastic_settings(targets: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    settings = get_verba_settings("Meshtastic Notifier") or {}
+    target_map = dict(targets or {})
+
+    bridge_url = (
+        str(target_map.get("bridge_url") or "").strip()
+        or _setting_first(settings, "bridge_url", "meshtastic_bridge_url", "MESHTASTIC_BRIDGE_URL")
+        or _env_first("TATER_MESHTASTIC_BRIDGE_URL", "MESHTASTIC_BRIDGE_URL")
+        or "http://127.0.0.1:8433"
+    ).rstrip("/")
+
+    token = (
+        _setting_first(settings, "api_token", "bridge_token", "token", "MESHTASTIC_API_TOKEN")
+        or _env_first("TATER_MESHTASTIC_BRIDGE_TOKEN", "MESHTASTIC_API_TOKEN", "MESHTASTIC_BRIDGE_TOKEN")
+    )
+
+    timeout = _meshtastic_int(
+        target_map.get("timeout")
+        or _setting_first(settings, "timeout", "timeout_seconds", "MESHTASTIC_TIMEOUT_SECONDS")
+        or _env_first("TATER_MESHTASTIC_TIMEOUT_SECONDS", "MESHTASTIC_TIMEOUT_SECONDS")
+        or 10,
+        10,
+        minimum=1,
+        maximum=60,
+    )
+    channel = _meshtastic_int(
+        target_map.get("channel")
+        or _setting_first(settings, "DEFAULT_CHANNEL", "channel", "default_channel")
+        or 0,
+        0,
+        minimum=0,
+        maximum=1024,
+    )
+    destination = (
+        str(target_map.get("destination") or target_map.get("node_id") or "").strip()
+        or _setting_first(settings, "DEFAULT_DESTINATION", "destination", "default_destination")
+        or "broadcast"
+    )
+
+    return {
+        "bridge_url": bridge_url,
+        "token": token,
+        "timeout": timeout,
+        "channel": channel,
+        "destination": destination,
+    }
+
+
+def _meshtastic_body(title: Optional[str], message: str) -> str:
+    body = (message or "").strip()
+    head = str(title or "").strip()
+    if head and body:
+        return f"{head}: {body}"
+    return body or head
+
+
+def _send_meshtastic(title: Optional[str], message: str, targets: Optional[Dict[str, Any]]) -> bool:
+    cfg = _meshtastic_settings(targets)
+    body = _meshtastic_body(title, message)
+    if not body:
+        return False
+
+    headers = {"Content-Type": "application/json"}
+    if cfg.get("token"):
+        headers["X-Tater-Token"] = cfg["token"]
+
+    payload = {
+        "text": body,
+        "channel": int(cfg["channel"]),
+        "destination": cfg["destination"],
+    }
+
+    try:
+        resp = requests.post(
+            f"{cfg['bridge_url']}/send",
+            headers=headers,
+            json=payload,
+            timeout=int(cfg["timeout"]),
+        )
+        if resp.status_code >= 300:
+            logger.warning("Meshtastic notify failed (%s): %s", resp.status_code, resp.text[:300])
+            return False
+        try:
+            data = resp.json()
+        except Exception:
+            data = {}
+        if isinstance(data, dict) and data.get("ok") is False:
+            logger.warning("Meshtastic notify failed: %s", data)
+            return False
+        return True
+    except Exception as exc:
+        logger.warning("Failed to send Meshtastic notification: %s", exc)
+        return False
+
+
 def _wordpress_markdown_to_html(text: str) -> str:
     body = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
     body = re.sub(r"\*(.+?)\*", r"<i>\1</i>", body)
@@ -721,6 +842,15 @@ def dispatch_notification_sync(
         if ok:
             return "Queued notification for ntfy"
         return "Cannot queue: missing ntfy topic or send failed"
+
+    if dest == "meshtastic":
+        resolved, err = resolve_targets("meshtastic", targets, origin, load_default_targets("meshtastic", redis_client))
+        if err:
+            return err
+        ok = _send_meshtastic(title, content, resolved)
+        if ok:
+            return "Queued notification for meshtastic"
+        return "Cannot queue: meshtastic bridge send failed"
 
     if dest == "wordpress":
         ok = _send_wordpress(title, content, targets)

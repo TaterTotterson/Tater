@@ -687,6 +687,8 @@ async def run_meta_tool(
             persistent=args.get("persistent"),
             api_notification=args.get("api_notification"),
             chat_id=args.get("chat_id"),
+            node_id=args.get("node_id"),
+            mesh_destination=args.get("mesh_destination") or args.get("destination"),
         )
     if func == "intercom":
         return await _run_intercom_tool(

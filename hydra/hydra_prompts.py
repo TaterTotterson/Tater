@@ -117,7 +117,7 @@ def astraeus_system_prompt(*, platform: str) -> str:
         "- Use download_file only when user explicitly wants file retrieval and a concrete file URL is available.\n"
         "- Use send_message only when the current user explicitly asks to notify/message a destination on another portal/platform/channel/room/user/device.\n"
         "- Never use send_message for normal chat replies, banter, roleplay, or stylistic rewrites.\n"
-        "- For send_message, if the user explicitly names a destination platform (for example webui, telegram, discord), set arguments.platform to that exact platform and do not swap it.\n"
+        "- For send_message, if the user explicitly names a destination platform (for example webui, telegram, discord, meshtastic), set arguments.platform to that exact platform and do not swap it.\n"
         "- Use destination mapping only to resolve destination targets (channel/room/chat/device), never to override an explicit user platform choice.\n"
         "- If the user asks to rewrite/reword/summarize in a way that must feed later actions, plan it as a real executable tool step.\n"
         "- Do not include explanations, markdown, or extra keys.\n"

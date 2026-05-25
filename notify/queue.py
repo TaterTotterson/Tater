@@ -3,7 +3,18 @@ import uuid
 import re
 from typing import Any, Dict, Optional, Tuple
 
-ALLOWED_PLATFORMS = ("discord", "irc", "matrix", "homeassistant", "ntfy", "telegram", "macos", "webui", "display")
+ALLOWED_PLATFORMS = (
+    "discord",
+    "irc",
+    "matrix",
+    "homeassistant",
+    "ntfy",
+    "telegram",
+    "meshtastic",
+    "macos",
+    "webui",
+    "display",
+)
 
 QUEUE_KEYS = {
     "discord": "notifyq:discord",
@@ -12,6 +23,7 @@ QUEUE_KEYS = {
     "homeassistant": "notifyq:homeassistant",
     "ntfy": "notifyq:ntfy",
     "telegram": "notifyq:telegram",
+    "meshtastic": "notifyq:meshtastic",
     "macos": "notifyq:macos",
 }
 
@@ -40,6 +52,13 @@ _DEFAULT_SETTINGS = {
             "chat_id": "DEFAULT_CHAT_ID",
         },
     },
+    "meshtastic": {
+        "category": "Meshtastic Notifier",
+        "fields": {
+            "channel": "DEFAULT_CHANNEL",
+            "destination": "DEFAULT_DESTINATION",
+        },
+    },
 }
 
 
@@ -65,6 +84,10 @@ _PLATFORM_ALIASES = {
     "web ui": "webui",
     "web-ui": "webui",
     "web_ui": "webui",
+    "mesh": "meshtastic",
+    "meshtastic mesh": "meshtastic",
+    "lora": "meshtastic",
+    "lo ra": "meshtastic",
     "screen": "display",
     "screens": "display",
     "tater display": "display",
@@ -286,6 +309,17 @@ def resolve_targets(
     elif platform == "homeassistant":
         # No required target for persistent notifications
         pass
+    elif platform == "meshtastic":
+        if not resolved.get("channel") and defaults.get("channel"):
+            resolved["channel"] = defaults["channel"]
+        if not resolved.get("destination") and resolved.get("node_id"):
+            resolved["destination"] = resolved["node_id"]
+        if not resolved.get("destination") and defaults.get("destination"):
+            resolved["destination"] = defaults["destination"]
+        if not resolved.get("channel"):
+            resolved["channel"] = "0"
+        if not resolved.get("destination"):
+            resolved["destination"] = "broadcast"
     elif platform == "webui":
         # No required target; writes directly to WebUI chat history.
         pass

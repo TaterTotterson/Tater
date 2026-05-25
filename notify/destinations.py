@@ -10,6 +10,7 @@ _PLATFORM_ORDER: Tuple[str, ...] = (
     "irc",
     "matrix",
     "telegram",
+    "meshtastic",
     "macos",
     "homeassistant",
     "ntfy",
@@ -38,6 +39,11 @@ _PLATFORM_META: Dict[str, Dict[str, Any]] = {
         "label": "Telegram",
         "requires_target": True,
         "fields": ("chat_id", "channel"),
+    },
+    "meshtastic": {
+        "label": "Meshtastic",
+        "requires_target": False,
+        "fields": ("channel", "destination", "node_id"),
     },
     "macos": {
         "label": "macOS",
@@ -174,6 +180,10 @@ def _candidate_identity_key(platform: str, targets: Dict[str, str]) -> str:
         room_id = _to_text(targets.get("room_id"))
         if room_id:
             return f"matrix:room_id:{room_id}"
+    if platform == "meshtastic":
+        destination = _to_text(targets.get("destination") or targets.get("node_id") or "broadcast")
+        channel = _to_text(targets.get("channel") or "0")
+        return f"meshtastic:{channel}:{destination}"
     return _targets_key(targets)
 
 
@@ -229,6 +239,14 @@ def _platform_target_label(platform: str, targets: Dict[str, str]) -> str:
         if channel and chat_id and channel != chat_id:
             return f"{channel} • {chat_id}"
         return channel or chat_id or "Telegram chat"
+    if platform == "meshtastic":
+        destination = _to_text(targets.get("destination") or targets.get("node_id")) or "broadcast"
+        channel = _to_text(targets.get("channel")) or "0"
+        if destination in {"broadcast", "^all", "all"}:
+            destination = "Broadcast"
+        elif destination in {"local", "^local", "me"}:
+            destination = "Local node"
+        return f"{destination} • channel {channel}"
     if platform == "macos":
         scope = _to_text(targets.get("scope"))
         device = _to_text(targets.get("device_id"))
@@ -381,6 +399,17 @@ def _default_targets_for_platform(platform: str, redis_client: Any) -> Dict[str,
             defaults["topic"] = topic
         if server:
             defaults["server"] = server
+    elif platform == "meshtastic":
+        settings = {}
+        if redis_client is not None:
+            try:
+                settings = redis_client.hgetall("verba_settings:Meshtastic Notifier") or {}
+            except Exception:
+                settings = {}
+        channel = _to_text((settings or {}).get("DEFAULT_CHANNEL") or (settings or {}).get("channel"))
+        destination = _to_text((settings or {}).get("DEFAULT_DESTINATION") or (settings or {}).get("destination"))
+        defaults["channel"] = channel or "0"
+        defaults["destination"] = destination or "broadcast"
     elif platform == "wordpress":
         settings = {}
         if redis_client is not None:
@@ -469,6 +498,13 @@ def _recent_history_targets_for_platform(platform: str, redis_client: Any) -> Li
             token = _to_text(token)
             if token:
                 out.append({"room_id": token})
+    elif platform == "meshtastic":
+        for key in _scan_keys(redis_client, "tater:meshtastic:*:history", max_keys=_MAX_RECENT_KEYS):
+            token = key.split("tater:meshtastic:", 1)[-1]
+            token = token.rsplit(":history", 1)[0]
+            token = _to_text(token)
+            if token:
+                out.append({"destination": token, "node_id": token})
     return out
 
 
