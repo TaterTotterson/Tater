@@ -706,6 +706,13 @@ def _semver_tuple(value: Any) -> tuple[int, int, int]:
         return (0, 0, 0)
 
 
+def _known_firmware_version(value: Any) -> str:
+    token = _text(value)
+    if _lower(token) in {"unknown", "unavailable", "none", "null"}:
+        return ""
+    return token
+
+
 def _resolve_template_refs(value: Any, substitutions: Dict[str, Any]) -> str:
     token = _template_default_string(value)
     if not token:
@@ -794,18 +801,18 @@ def _firmware_version_snapshot(
     *,
     update_if_missing_installed: bool = False,
 ) -> Dict[str, Any]:
-    device_version = _text(device_info.get("project_version"))
+    device_version = _known_firmware_version(device_info.get("project_version"))
     recorded = _load_recorded_firmware_version(selector, template_key)
-    recorded_version = _text(recorded.get("version"))
+    recorded_version = _known_firmware_version(recorded.get("version"))
     installed_version = device_version or recorded_version
     source = "device" if device_version else ("recorded" if recorded_version else "")
-    missing_installed_update = bool(latest_version and not installed_version and update_if_missing_installed)
     versioned_update = bool(
         latest_version
         and installed_version
         and _semver_tuple(latest_version) > _semver_tuple(installed_version)
     )
-    update_available = missing_installed_update or versioned_update
+    missing_installed_update = bool(latest_version and not installed_version and update_if_missing_installed)
+    update_available = versioned_update
     return {
         "latest": latest_version,
         "installed": installed_version,
@@ -2605,6 +2612,10 @@ def firmware_panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
             if bool(item.get("connected")) and not bool(item.get("unmatched_template")):
                 firmware_flash_targets.append(dict(row_payload))
             if not bool(item.get("firmware_update_available")):
+                continue
+            if bool(item.get("unmatched_template")):
+                continue
+            if not _text(item.get("installed_firmware_version")):
                 continue
             firmware_updates.append(
                 row_payload
