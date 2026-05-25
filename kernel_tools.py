@@ -1185,7 +1185,7 @@ def _send_message_extract_target_hint(raw: Any) -> str:
             return match.group(0)
     text = re.sub(r"^(?:room|channel|chat)\s+", "", text, flags=re.IGNORECASE)
     text = re.sub(
-        r"\s+(?:to|in|on)\s+(?:discord|irc|matrix|telegram|home\s*assistant|homeassistant|ntfy|web\s*ui|webui)\b.*$",
+        r"\s+(?:to|in|on)\s+(?:discord|irc|matrix|telegram|meshtastic|mesh|home\s*assistant|homeassistant|ntfy|web\s*ui|webui)\b.*$",
         "",
         text,
         flags=re.IGNORECASE,
@@ -1211,14 +1211,25 @@ def _send_message_coerce_targets(payload: Any) -> Dict[str, Any]:
 
 
 def _send_message_has_explicit_target(target_map: Dict[str, Any]) -> bool:
-    for key in ("channel_id", "channel", "guild_id", "room_id", "room_alias", "chat_id", "scope", "device_id"):
+    for key in (
+        "channel_id",
+        "channel",
+        "guild_id",
+        "room_id",
+        "room_alias",
+        "chat_id",
+        "scope",
+        "device_id",
+        "node_id",
+        "destination",
+    ):
         if str(target_map.get(key) or "").strip():
             return True
     return False
 
 
 def _send_message_target_hint_from_map(target_map: Dict[str, Any]) -> str:
-    for key in ("channel", "room_alias", "room_id", "chat_id", "channel_id"):
+    for key in ("destination", "node_id", "channel", "room_alias", "room_id", "chat_id", "channel_id"):
         token = str(target_map.get(key) or "").strip()
         if not token:
             continue
@@ -1303,7 +1314,15 @@ def _send_message_resolve_catalog_destination(
     # Prefer live/discovered and historical destinations over queued items.
     # Recent queue entries may include stale or failed attempts.
     source_rank = {"room_label": 8, "recent_history": 7, "default": 6, "recent_queue": 1}
-    field_rank = {"channel_id": 7, "chat_id": 7, "room_id": 7, "room_alias": 6, "channel": 5}
+    field_rank = {
+        "channel_id": 7,
+        "chat_id": 7,
+        "room_id": 7,
+        "node_id": 7,
+        "destination": 7,
+        "room_alias": 6,
+        "channel": 5,
+    }
     platform_priority = {
         "discord": 9,
         "matrix": 8,
@@ -1313,6 +1332,7 @@ def _send_message_resolve_catalog_destination(
         "homeassistant": 4,
         "ntfy": 3,
         "wordpress": 2,
+        "meshtastic": 2,
         "webui": 1,
     }
     origin_platform = normalize_notify_platform(origin.get("platform")) if isinstance(origin, dict) else ""
@@ -1333,7 +1353,7 @@ def _send_message_resolve_catalog_destination(
                 continue
             targets = row.get("targets") if isinstance(row.get("targets"), dict) else {}
             matched_field = ""
-            for field_name in ("channel_id", "channel", "room_id", "room_alias", "chat_id"):
+            for field_name in ("channel_id", "channel", "room_id", "room_alias", "chat_id", "destination", "node_id"):
                 value = str(targets.get(field_name) or "").strip()
                 if not value:
                     continue
@@ -1843,6 +1863,8 @@ def send_message(
     chat_id: Any = None,
     device_id: Any = None,
     scope: Any = None,
+    node_id: Any = None,
+    mesh_destination: Any = None,
 ) -> Dict[str, Any]:
     text_message = str(message or content or "").strip()
     destination = normalize_notify_platform(platform)
@@ -1860,6 +1882,8 @@ def send_message(
         ("chat_id", chat_id),
         ("device_id", device_id),
         ("scope", scope),
+        ("node_id", node_id),
+        ("destination", mesh_destination),
     ):
         if value not in (None, "") and key not in target_map:
             target_map[key] = value
@@ -1944,7 +1968,7 @@ def send_message(
             code="missing_destination_platform",
             message="Cannot queue: missing destination platform",
             needs=[
-                "Specify a destination platform such as discord, matrix, telegram, macos, homeassistant, ntfy, irc, or webui.",
+                "Specify a destination platform such as discord, matrix, telegram, meshtastic, macos, homeassistant, ntfy, irc, or webui.",
                 "For macOS you can also say 'my mac' or 'mac os'.",
             ],
             say_hint="Explain that a destination platform is required.",
@@ -1977,6 +2001,9 @@ def send_message(
         if "api_notification" not in target_map:
             settings = _send_message_load_settings()
             target_map["api_notification"] = _send_message_boolish(settings.get("ENABLE_HA_API_NOTIFICATION"), True)
+    elif destination == "meshtastic":
+        if not target_map.get("destination") and target_map.get("node_id"):
+            target_map["destination"] = target_map.get("node_id")
 
     meta = {
         "priority": priority,

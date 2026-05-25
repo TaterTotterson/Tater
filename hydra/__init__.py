@@ -163,6 +163,7 @@ _PLATFORM_DISPLAY = {
     "telegram": "Telegram",
     "matrix": "Matrix",
     "homeassistant": "Home Assistant",
+    "meshtastic": "Meshtastic",
     "voice_core": "Voice Core",
     "homekit": "HomeKit",
     "xbmc": "XBMC",
@@ -592,6 +593,8 @@ _SEND_MESSAGE_TARGET_KEYS: tuple[str, ...] = (
     "chat_id",
     "scope",
     "device_id",
+    "node_id",
+    "destination",
 )
 
 _SEND_MESSAGE_PLATFORM_ALIASES: Dict[str, str] = {
@@ -599,6 +602,8 @@ _SEND_MESSAGE_PLATFORM_ALIASES: Dict[str, str] = {
     "irc": "irc",
     "matrix": "matrix",
     "telegram": "telegram",
+    "meshtastic": "meshtastic",
+    "mesh": "meshtastic",
     "homeassistant": "homeassistant",
     "home assistant": "homeassistant",
     "ntfy": "ntfy",

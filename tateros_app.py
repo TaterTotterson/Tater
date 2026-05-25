@@ -188,11 +188,14 @@ WEBUI_AUTH_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 365 * 5
 RUNTIME_CONTEXT_ESTIMATE_TTL_SECONDS = 20
 DASHBOARD_BRIEFS_KEY = "tater:dashboard:briefs:v1"
 DASHBOARD_SNAPSHOT_KEY = "tater:dashboard:snapshot:v1"
+DASHBOARD_SETTINGS_KEY = "tater:dashboard:settings:v1"
 DASHBOARD_BRIEF_SCHEMA_VERSION = 10
 DASHBOARD_SNAPSHOT_SCHEMA_VERSION = 8
 DASHBOARD_SNAPSHOT_STALE_SECONDS = 60 * 5
-DASHBOARD_BRIEF_TTL_SECONDS = DASHBOARD_SNAPSHOT_STALE_SECONDS
-DASHBOARD_BRIEF_CHECK_INTERVAL_SECONDS = 60 * 5
+DASHBOARD_BRIEF_TTL_SECONDS = 60 * 60
+DASHBOARD_BRIEF_CHECK_INTERVAL_SECONDS = DASHBOARD_BRIEF_TTL_SECONDS
+DASHBOARD_REFRESH_INTERVAL_OPTIONS_SECONDS = (0, 30, 60, 300, 900, 1800, 3600, 7200, 14400)
+DASHBOARD_BRIEF_INTERVAL_OPTIONS_SECONDS = (0, 300, 900, 1800, 3600, 7200, 14400, 21600, 43200)
 DASHBOARD_BRIEF_STARTUP_DELAY_SECONDS = 20
 DASHBOARD_BRIEF_RETRY_SECONDS = 60 * 5
 DASHBOARD_AWARENESS_EVENTS_PER_SOURCE = 1000
@@ -3081,6 +3084,8 @@ class DashboardBriefRefreshRequest(BaseModel):
 
 class DashboardSettingsRequest(BaseModel):
     personal_person_id: Optional[str] = None
+    refresh_interval_seconds: Optional[int] = None
+    brief_refresh_interval_seconds: Optional[int] = None
 
 
 class SpudexSettingsRequest(BaseModel):
@@ -3788,6 +3793,87 @@ def _dashboard_safe_int(value: Any, default: int = 0) -> int:
         return int(default)
 
 
+def _dashboard_interval_option(value: Any, *, allowed: Tuple[int, ...], default: int) -> int:
+    parsed = _dashboard_safe_int(value, default)
+    if parsed in allowed:
+        return parsed
+    return int(default)
+
+
+def _dashboard_refresh_settings() -> Dict[str, Any]:
+    try:
+        raw_settings = redis_client.hgetall(DASHBOARD_SETTINGS_KEY) or {}
+    except Exception:
+        raw_settings = {}
+    settings = {
+        _dashboard_redis_text(key): _dashboard_redis_text(value)
+        for key, value in raw_settings.items()
+        if _dashboard_redis_text(key)
+    } if isinstance(raw_settings, dict) else {}
+    refresh_interval = _dashboard_interval_option(
+        settings.get("refresh_interval_seconds"),
+        allowed=DASHBOARD_REFRESH_INTERVAL_OPTIONS_SECONDS,
+        default=DASHBOARD_SNAPSHOT_STALE_SECONDS,
+    )
+    brief_interval = _dashboard_interval_option(
+        settings.get("brief_refresh_interval_seconds"),
+        allowed=DASHBOARD_BRIEF_INTERVAL_OPTIONS_SECONDS,
+        default=DASHBOARD_BRIEF_TTL_SECONDS,
+    )
+    return {
+        "refresh_interval_seconds": refresh_interval,
+        "brief_refresh_interval_seconds": brief_interval,
+        "refresh_interval_options_seconds": list(DASHBOARD_REFRESH_INTERVAL_OPTIONS_SECONDS),
+        "brief_refresh_interval_options_seconds": list(DASHBOARD_BRIEF_INTERVAL_OPTIONS_SECONDS),
+    }
+
+
+def _dashboard_save_refresh_settings(
+    *,
+    refresh_interval_seconds: Optional[int] = None,
+    brief_refresh_interval_seconds: Optional[int] = None,
+) -> Dict[str, Any]:
+    current = _dashboard_refresh_settings()
+    updates: Dict[str, str] = {}
+    if refresh_interval_seconds is not None:
+        refresh_interval = _dashboard_interval_option(
+            refresh_interval_seconds,
+            allowed=DASHBOARD_REFRESH_INTERVAL_OPTIONS_SECONDS,
+            default=DASHBOARD_SNAPSHOT_STALE_SECONDS,
+        )
+        current["refresh_interval_seconds"] = refresh_interval
+        updates["refresh_interval_seconds"] = str(refresh_interval)
+    if brief_refresh_interval_seconds is not None:
+        brief_interval = _dashboard_interval_option(
+            brief_refresh_interval_seconds,
+            allowed=DASHBOARD_BRIEF_INTERVAL_OPTIONS_SECONDS,
+            default=DASHBOARD_BRIEF_TTL_SECONDS,
+        )
+        current["brief_refresh_interval_seconds"] = brief_interval
+        updates["brief_refresh_interval_seconds"] = str(brief_interval)
+    if updates:
+        try:
+            redis_client.hset(DASHBOARD_SETTINGS_KEY, mapping=updates)
+        except Exception:
+            logger.debug("[dashboard] failed saving dashboard refresh settings", exc_info=True)
+    return current
+
+
+def _dashboard_snapshot_stale_seconds() -> int:
+    settings = _dashboard_refresh_settings()
+    seconds = _dashboard_safe_int(settings.get("refresh_interval_seconds"), DASHBOARD_SNAPSHOT_STALE_SECONDS)
+    return seconds if seconds > 0 else DASHBOARD_SNAPSHOT_STALE_SECONDS
+
+
+def _dashboard_brief_ttl_seconds() -> int:
+    settings = _dashboard_refresh_settings()
+    return _dashboard_safe_int(settings.get("brief_refresh_interval_seconds"), DASHBOARD_BRIEF_TTL_SECONDS)
+
+
+def _dashboard_brief_check_interval_seconds() -> int:
+    return _dashboard_brief_ttl_seconds()
+
+
 def _dashboard_stats(rows: Any, *, limit: int = 0) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     for item in rows if isinstance(rows, list) else []:
@@ -4478,12 +4564,13 @@ def _dashboard_save_brief(row: Dict[str, Any]) -> None:
 def _dashboard_snapshot_meta(*, cached_at: float = 0.0, source: str = "live") -> Dict[str, Any]:
     now = time.time()
     age = max(0.0, now - float(cached_at or now))
+    stale_after = _dashboard_snapshot_stale_seconds()
     return {
         "source": str(source or "live").strip() or "live",
         "cached_at": float(cached_at or now),
         "age_seconds": age,
-        "stale": bool(age > DASHBOARD_SNAPSHOT_STALE_SECONDS),
-        "stale_after_seconds": DASHBOARD_SNAPSHOT_STALE_SECONDS,
+        "stale": bool(age > stale_after),
+        "stale_after_seconds": stale_after,
     }
 
 
@@ -5392,7 +5479,14 @@ def _dashboard_stale_brief_ids(
     cached: Dict[str, Dict[str, Any]],
     *,
     now: Optional[float] = None,
+    ttl_seconds: Optional[int] = None,
 ) -> List[str]:
+    if ttl_seconds is None:
+        ttl = _dashboard_brief_ttl_seconds()
+    else:
+        ttl = _dashboard_safe_int(ttl_seconds, DASHBOARD_BRIEF_TTL_SECONDS)
+    if ttl <= 0:
+        return []
     current = time.time() if now is None else float(now)
     stale: List[str] = []
     for context in contexts or []:
@@ -5401,7 +5495,7 @@ def _dashboard_stale_brief_ids(
             continue
         row = cached.get(row_id)
         updated_at = float(row.get("updated_at") or 0.0) if isinstance(row, dict) else 0.0
-        if not isinstance(row, dict) or not row.get("text") or not updated_at or (current - updated_at) > DASHBOARD_BRIEF_TTL_SECONDS:
+        if not isinstance(row, dict) or not row.get("text") or not updated_at or (current - updated_at) > ttl:
             stale.append(row_id)
     return stale
 
@@ -5411,8 +5505,10 @@ def _dashboard_brief_refresh_snapshot(stale_ids: Optional[List[str]] = None) -> 
         state = dict(dashboard_brief_refresh_state)
         state["last_ids"] = list(state.get("last_ids") or [])
     state["stale_ids"] = [str(item).strip() for item in (stale_ids or []) if str(item).strip()]
-    state["check_interval_seconds"] = DASHBOARD_BRIEF_CHECK_INTERVAL_SECONDS
-    state["ttl_seconds"] = DASHBOARD_BRIEF_TTL_SECONDS
+    ttl = _dashboard_brief_ttl_seconds()
+    state["check_interval_seconds"] = _dashboard_brief_check_interval_seconds()
+    state["ttl_seconds"] = ttl
+    state["auto_enabled"] = bool(ttl > 0)
     return state
 
 
@@ -5519,23 +5615,25 @@ def _dashboard_schedule_brief_refresh(
 async def _dashboard_brief_scheduler_loop() -> None:
     await asyncio.sleep(float(DASHBOARD_BRIEF_STARTUP_DELAY_SECONDS))
     while True:
+        interval = _dashboard_brief_check_interval_seconds()
         try:
-            snapshot = await run_dashboard(_dashboard_build_snapshot)
-            await run_dashboard(_dashboard_save_snapshot, snapshot)
-            contexts = _dashboard_brief_contexts(snapshot)
-            cached_rows = await run_dashboard(_dashboard_cache_rows)
-            stale_ids = _dashboard_stale_brief_ids(contexts, cached_rows)
-            if stale_ids:
-                await _dashboard_refresh_briefs_job(
-                    [context for context in contexts if str(context.get("id") or "").strip() in set(stale_ids)],
-                    reason="scheduler",
-                )
+            if interval > 0:
+                snapshot = await run_dashboard(_dashboard_build_snapshot)
                 await run_dashboard(_dashboard_save_snapshot, snapshot)
+                contexts = _dashboard_brief_contexts(snapshot)
+                cached_rows = await run_dashboard(_dashboard_cache_rows)
+                stale_ids = _dashboard_stale_brief_ids(contexts, cached_rows)
+                if stale_ids:
+                    await _dashboard_refresh_briefs_job(
+                        [context for context in contexts if str(context.get("id") or "").strip() in set(stale_ids)],
+                        reason="scheduler",
+                    )
+                    await run_dashboard(_dashboard_save_snapshot, snapshot)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.debug("[dashboard] brief scheduler tick failed: %s", exc, exc_info=True)
-        await asyncio.sleep(float(DASHBOARD_BRIEF_CHECK_INTERVAL_SECONDS))
+        await asyncio.sleep(float(max(60, interval or 300)))
 
 
 def _start_dashboard_brief_scheduler() -> None:
@@ -5814,7 +5912,10 @@ def _dashboard_build_snapshot() -> Dict[str, Any]:
         "personal_section": personal_section,
         "awareness_section": awareness_section,
         "guardian_section": guardian_section,
-        "settings": {"personal": personal_settings},
+        "settings": {
+            "personal": personal_settings,
+            "refresh": _dashboard_refresh_settings(),
+        },
     }
 
 
@@ -5842,8 +5943,9 @@ async def _dashboard_payload(
     context_ids = {str(context.get("id") or "").strip() for context in contexts}
     cached = await run_dashboard(_dashboard_cache_rows)
     now = time.time()
+    brief_ttl_seconds = await run_dashboard(_dashboard_brief_ttl_seconds)
 
-    stale_ids = _dashboard_stale_brief_ids(contexts, cached, now=now)
+    stale_ids = _dashboard_stale_brief_ids(contexts, cached, now=now, ttl_seconds=brief_ttl_seconds)
     target_id = str(brief_id or "").strip()
     if target_id and target_id not in context_ids:
         raise HTTPException(status_code=404, detail=f"Unknown dashboard brief: {target_id}")
@@ -5863,22 +5965,26 @@ async def _dashboard_payload(
         if isinstance(row, dict) and row.get("text"):
             out = dict(row)
             updated_at = float(out.get("updated_at") or 0.0)
-            out["stale"] = bool(updated_at and (now - updated_at) > DASHBOARD_BRIEF_TTL_SECONDS)
+            out["stale"] = bool(brief_ttl_seconds > 0 and updated_at and (now - updated_at) > brief_ttl_seconds)
             briefs.append(out)
         else:
             briefs.append(_dashboard_fallback_brief(context))
+
+    settings = snapshot.get("settings") if isinstance(snapshot.get("settings"), dict) else {}
+    settings = dict(settings)
+    settings["refresh"] = await run_dashboard(_dashboard_refresh_settings)
 
     return {
         "ok": True,
         "generated_at": float(snapshot_meta.get("cached_at") or time.time()),
         "snapshot": snapshot_meta,
-        "brief_ttl_seconds": DASHBOARD_BRIEF_TTL_SECONDS,
+        "brief_ttl_seconds": brief_ttl_seconds,
         "brief_refresh": _dashboard_brief_refresh_snapshot(stale_ids),
         "cards": snapshot.get("cards") or [],
         "updates": snapshot.get("updates") if isinstance(snapshot.get("updates"), dict) else {},
         "sections": snapshot.get("sections") or [],
         "briefs": [row for row in briefs if str(row.get("id") or "").strip() in context_ids],
-        "settings": snapshot.get("settings") if isinstance(snapshot.get("settings"), dict) else {},
+        "settings": settings,
     }
 
 
@@ -6060,7 +6166,18 @@ async def dashboard_briefs_refresh(payload: DashboardBriefRefreshRequest) -> Dic
 
 @app.post("/api/dashboard/settings")
 async def dashboard_settings(payload: DashboardSettingsRequest) -> Dict[str, Any]:
-    await run_dashboard(_dashboard_save_personal_settings, payload.personal_person_id)
+    fields_set = getattr(payload, "model_fields_set", None)
+    if fields_set is None:
+        fields_set = getattr(payload, "__fields_set__", set())
+    fields_set = set(fields_set or set())
+    if "personal_person_id" in fields_set:
+        await run_dashboard(_dashboard_save_personal_settings, payload.personal_person_id)
+    if {"refresh_interval_seconds", "brief_refresh_interval_seconds"} & fields_set:
+        await run_dashboard(
+            _dashboard_save_refresh_settings,
+            refresh_interval_seconds=payload.refresh_interval_seconds,
+            brief_refresh_interval_seconds=payload.brief_refresh_interval_seconds,
+        )
     return await _dashboard_payload(refresh_snapshot=True)
 
 

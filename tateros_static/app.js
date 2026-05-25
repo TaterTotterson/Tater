@@ -33,12 +33,33 @@ const DASHBOARD_REFRESH_INTERVAL_OPTIONS = [
   { value: 300, label: "5 minutes" },
   { value: 900, label: "15 minutes" },
   { value: 1800, label: "30 minutes" },
+  { value: 3600, label: "1 hour" },
+  { value: 7200, label: "2 hours" },
+  { value: 14400, label: "4 hours" },
+];
+
+const DASHBOARD_BRIEF_REFRESH_INTERVAL_OPTIONS = [
+  { value: 0, label: "Off" },
+  { value: 300, label: "5 minutes" },
+  { value: 900, label: "15 minutes" },
+  { value: 1800, label: "30 minutes" },
+  { value: 3600, label: "1 hour" },
+  { value: 7200, label: "2 hours" },
+  { value: 14400, label: "4 hours" },
+  { value: 21600, label: "6 hours" },
+  { value: 43200, label: "12 hours" },
 ];
 
 function normalizeDashboardRefreshIntervalSeconds(value) {
   const parsed = Number(value);
   const allowed = DASHBOARD_REFRESH_INTERVAL_OPTIONS.map((item) => Number(item.value));
   return allowed.includes(parsed) ? parsed : 300;
+}
+
+function normalizeDashboardBriefRefreshIntervalSeconds(value) {
+  const parsed = Number(value);
+  const allowed = DASHBOARD_BRIEF_REFRESH_INTERVAL_OPTIONS.map((item) => Number(item.value));
+  return allowed.includes(parsed) ? parsed : 3600;
 }
 
 function normalizeSpudexTab(value) {
@@ -60,6 +81,9 @@ const state = {
   dashboardShowMedia: String(safeStorageGet("tater_dashboard_show_media", "true")).trim().toLowerCase() !== "false",
   dashboardRefreshIntervalSeconds: normalizeDashboardRefreshIntervalSeconds(
     safeStorageGet("tater_dashboard_refresh_interval_seconds", "300")
+  ),
+  dashboardBriefRefreshIntervalSeconds: normalizeDashboardBriefRefreshIntervalSeconds(
+    safeStorageGet("tater_dashboard_brief_refresh_interval_seconds", "3600")
   ),
   dashboardRefreshTimer: 0,
   spudexPayload: null,
@@ -12555,6 +12579,39 @@ function dashboardRefreshIntervalOptionsHtml() {
   }).join("");
 }
 
+function dashboardRefreshSettings(payload = state.dashboardPayload) {
+  const settings = payload?.settings && typeof payload.settings === "object" ? payload.settings : {};
+  return settings.refresh && typeof settings.refresh === "object" ? settings.refresh : {};
+}
+
+function syncDashboardRefreshSettingsFromPayload(payload = state.dashboardPayload) {
+  const refresh = dashboardRefreshSettings(payload);
+  if (Object.prototype.hasOwnProperty.call(refresh, "refresh_interval_seconds")) {
+    const next = normalizeDashboardRefreshIntervalSeconds(refresh.refresh_interval_seconds);
+    state.dashboardRefreshIntervalSeconds = next;
+    safeStorageSet("tater_dashboard_refresh_interval_seconds", String(next));
+  }
+  if (Object.prototype.hasOwnProperty.call(refresh, "brief_refresh_interval_seconds")) {
+    const next = normalizeDashboardBriefRefreshIntervalSeconds(refresh.brief_refresh_interval_seconds);
+    state.dashboardBriefRefreshIntervalSeconds = next;
+    safeStorageSet("tater_dashboard_brief_refresh_interval_seconds", String(next));
+  }
+}
+
+function dashboardBriefRefreshIntervalLabel(value = state.dashboardBriefRefreshIntervalSeconds) {
+  const seconds = normalizeDashboardBriefRefreshIntervalSeconds(value);
+  const found = DASHBOARD_BRIEF_REFRESH_INTERVAL_OPTIONS.find((item) => Number(item.value) === seconds);
+  return found ? found.label : "1 hour";
+}
+
+function dashboardBriefRefreshIntervalOptionsHtml() {
+  const current = normalizeDashboardBriefRefreshIntervalSeconds(state.dashboardBriefRefreshIntervalSeconds);
+  return DASHBOARD_BRIEF_REFRESH_INTERVAL_OPTIONS.map((item) => {
+    const value = Number(item.value);
+    return `<option value="${escapeHtml(String(value))}"${value === current ? " selected" : ""}>${escapeHtml(item.label)}</option>`;
+  }).join("");
+}
+
 function dashboardSettingsToggleHtml({ key, label, description, checked }) {
   return `
     <label class="dashboard-setting-toggle">
@@ -12572,7 +12629,7 @@ function dashboardSettingsStatusHtml(payload) {
   const briefRefreshLabel = dashboardBriefRefreshLabel(payload);
   const snapshotLabel = dashboardSnapshotLabel(payload);
   const ttl = Number(payload?.brief_ttl_seconds || 0);
-  const ttlLabel = ttl > 0 ? `${Math.round(ttl / 60)} min brief TTL` : "scheduled brief refresh";
+  const ttlLabel = ttl > 0 ? `Briefs every ${dashboardBriefRefreshIntervalLabel(ttl)}` : "Brief auto refresh off";
   return `
     <div class="dashboard-settings-status">
       <div>
@@ -12671,11 +12728,20 @@ function renderDashboardSettingsContent() {
       })}
       <label class="dashboard-setting-select" for="dashboard-refresh-interval">
         <span>
-          <strong>Auto Refresh</strong>
-          <small>How often the open dashboard updates the full dashboard package.</small>
+          <strong>Dashboard Refresh</strong>
+          <small>How often the open dashboard refreshes status, updates, and live core data.</small>
         </span>
         <select id="dashboard-refresh-interval" data-dashboard-refresh-interval>
           ${dashboardRefreshIntervalOptionsHtml()}
+        </select>
+      </label>
+      <label class="dashboard-setting-select" for="dashboard-brief-refresh-interval">
+        <span>
+          <strong>Brief Refresh</strong>
+          <small>How often Tater regenerates AI dashboard briefs.</small>
+        </span>
+        <select id="dashboard-brief-refresh-interval" data-dashboard-brief-refresh-interval>
+          ${dashboardBriefRefreshIntervalOptionsHtml()}
         </select>
       </label>
       <label class="dashboard-setting-select" for="dashboard-personal-person">
@@ -12733,6 +12799,27 @@ function scheduleDashboardRefresh() {
   }, seconds * 1000);
 }
 
+async function saveDashboardRefreshIntervals(statusEl, message = "Dashboard refresh settings saved.") {
+  const payload = await api("/api/dashboard/settings", {
+    method: "POST",
+    body: JSON.stringify({
+      refresh_interval_seconds: state.dashboardRefreshIntervalSeconds,
+      brief_refresh_interval_seconds: state.dashboardBriefRefreshIntervalSeconds,
+    }),
+    _timeoutMs: 20000,
+  });
+  state.dashboardPayload = payload;
+  syncDashboardRefreshSettingsFromPayload(payload);
+  rerenderDashboardFromState();
+  scheduleDashboardRefresh();
+  openDashboardSettingsModal();
+  const nextStatus = document.getElementById("dashboard-settings-action-status") || statusEl;
+  if (nextStatus) {
+    nextStatus.textContent = message;
+  }
+  return payload;
+}
+
 function bindDashboardSettingsModal() {
   const content = document.getElementById("dashboard-settings-content");
   const statusEl = document.getElementById("dashboard-settings-action-status");
@@ -12759,14 +12846,40 @@ function bindDashboardSettingsModal() {
       }
     });
   });
-  content.querySelector("[data-dashboard-refresh-interval]")?.addEventListener("change", (event) => {
+  content.querySelector("[data-dashboard-refresh-interval]")?.addEventListener("change", async (event) => {
     const next = normalizeDashboardRefreshIntervalSeconds(event.currentTarget?.value);
     state.dashboardRefreshIntervalSeconds = next;
     safeStorageSet("tater_dashboard_refresh_interval_seconds", String(next));
-    scheduleDashboardRefresh();
     if (statusEl) {
-      statusEl.textContent =
-        next > 0 ? `Dashboard will refresh every ${dashboardRefreshIntervalLabel(next)}.` : "Dashboard auto refresh is off.";
+      statusEl.textContent = "Saving dashboard refresh interval...";
+    }
+    try {
+      await saveDashboardRefreshIntervals(
+        statusEl,
+        next > 0 ? `Dashboard will refresh every ${dashboardRefreshIntervalLabel(next)}.` : "Dashboard auto refresh is off."
+      );
+    } catch (error) {
+      if (statusEl) {
+        statusEl.textContent = `Dashboard refresh interval save failed: ${error.message}`;
+      }
+    }
+  });
+  content.querySelector("[data-dashboard-brief-refresh-interval]")?.addEventListener("change", async (event) => {
+    const next = normalizeDashboardBriefRefreshIntervalSeconds(event.currentTarget?.value);
+    state.dashboardBriefRefreshIntervalSeconds = next;
+    safeStorageSet("tater_dashboard_brief_refresh_interval_seconds", String(next));
+    if (statusEl) {
+      statusEl.textContent = "Saving brief refresh interval...";
+    }
+    try {
+      await saveDashboardRefreshIntervals(
+        statusEl,
+        next > 0 ? `Dashboard briefs will refresh every ${dashboardBriefRefreshIntervalLabel(next)}.` : "Dashboard brief auto refresh is off."
+      );
+    } catch (error) {
+      if (statusEl) {
+        statusEl.textContent = `Brief refresh interval save failed: ${error.message}`;
+      }
     }
   });
   content.querySelector("[data-dashboard-personal-person]")?.addEventListener("change", async (event) => {
@@ -12781,6 +12894,7 @@ function bindDashboardSettingsModal() {
         _timeoutMs: 20000,
       });
       state.dashboardPayload = payload;
+      syncDashboardRefreshSettingsFromPayload(payload);
       rerenderDashboardFromState();
       scheduleDashboardRefresh();
       openDashboardSettingsModal();
@@ -12836,7 +12950,7 @@ function openDashboardSettingsModal() {
     content.innerHTML = renderDashboardSettingsContent();
   }
   if (statusEl) {
-    statusEl.textContent = "Briefs normally update on schedule; use manual actions only when you want to force it.";
+    statusEl.textContent = "Live dashboard data and AI briefs can refresh on separate schedules.";
   }
   bindDashboardSettingsModal();
   openPopupModal(modal);
@@ -12877,6 +12991,7 @@ async function refreshDashboardBriefs(briefId = "", options = {}) {
       _timeoutMs: 30000,
     });
     state.dashboardPayload = payload;
+    syncDashboardRefreshSettingsFromPayload(payload);
     root.innerHTML = renderDashboardView(payload);
     bindDashboardControls();
     scheduleDashboardRefresh();
@@ -12974,6 +13089,7 @@ async function loadDashboardView(options = {}) {
   const endpoint = refreshSnapshot ? "/api/dashboard?refresh_snapshot=true" : "/api/dashboard";
   const payload = await api(endpoint, { _timeoutMs: refreshSnapshot ? 20000 : 12000 });
   state.dashboardPayload = payload;
+  syncDashboardRefreshSettingsFromPayload(payload);
   root.innerHTML = renderDashboardView(payload);
   bindDashboardControls();
   scheduleDashboardRefresh();

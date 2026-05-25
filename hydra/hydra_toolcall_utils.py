@@ -78,11 +78,15 @@ _SEND_MESSAGE_TARGET_KEYS = (
     "chat_id",
     "scope",
     "device_id",
+    "node_id",
+    "destination",
 )
 _SEND_MESSAGE_PLATFORM_ALIASES = {
     "home assistant": "homeassistant",
     "home-assistant": "homeassistant",
     "home_assistant": "homeassistant",
+    "meshtastic": "meshtastic",
+    "mesh": "meshtastic",
     "web ui": "webui",
     "web-ui": "webui",
     "web_ui": "webui",
