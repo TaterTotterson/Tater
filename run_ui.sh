@@ -4,7 +4,12 @@ set -eu
 SCRIPT_DIR="$(CDPATH= cd "$(dirname "$0")" && pwd -P)"
 cd "${SCRIPT_DIR}"
 
-if [ -f ".runtime/tater_profile.env" ]; then
+TATER_LOAD_PROFILE_ENV="${TATER_LOAD_PROFILE_ENV:-auto}"
+if [ "${TATER_LOAD_PROFILE_ENV}" = "auto" ] && [ -f "/.dockerenv" ]; then
+  TATER_LOAD_PROFILE_ENV="0"
+fi
+
+if [ -f ".runtime/tater_profile.env" ] && [ "${TATER_LOAD_PROFILE_ENV}" != "0" ] && [ "${TATER_LOAD_PROFILE_ENV}" != "false" ]; then
   # shellcheck disable=SC1091
   . ".runtime/tater_profile.env"
 fi
