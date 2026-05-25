@@ -1,6 +1,9 @@
 #!/bin/sh
 set -eu
 
+SCRIPT_DIR="$(CDPATH= cd "$(dirname "$0")" && pwd -P)"
+cd "${SCRIPT_DIR}"
+
 if [ -f ".runtime/tater_profile.env" ]; then
   # shellcheck disable=SC1091
   . ".runtime/tater_profile.env"
