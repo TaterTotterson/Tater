@@ -1,6 +1,9 @@
 #!/bin/sh
 set -eu
 
+SCRIPT_DIR="$(CDPATH= cd "$(dirname "$0")" && pwd -P)"
+cd "${SCRIPT_DIR}"
+
 VENV_DIR=".venv"
 RUNTIME_DIR=".runtime"
 PROFILE_FILE="${RUNTIME_DIR}/setup_profile"
