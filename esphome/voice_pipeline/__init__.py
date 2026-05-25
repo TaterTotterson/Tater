@@ -103,6 +103,7 @@ from .backends import (
     _synthesize_pocket_tts_sync,
     _synthesize_spoken_response_audio,
     _transcribe_faster_whisper_sync,
+    _transcribe_mlx_whisper_sync,
     _transcribe_vosk_sync,
     _trim_pcm_for_playback,
     _tts_backend_available,
@@ -187,6 +188,13 @@ except Exception as exc:  # pragma: no cover - runtime dependency guard
     FASTER_WHISPER_IMPORT_ERROR = str(exc)
 
 try:
+    import mlx_whisper as MLXWhisper
+    MLX_WHISPER_IMPORT_ERROR: Optional[str] = None
+except Exception as exc:  # pragma: no cover - runtime dependency guard
+    MLXWhisper = None
+    MLX_WHISPER_IMPORT_ERROR = str(exc)
+
+try:
     from vosk import Model as VoskModel, KaldiRecognizer, SetLogLevel as VoskSetLogLevel
     with contextlib.suppress(Exception):
         VoskSetLogLevel(-1)
@@ -208,6 +216,13 @@ except Exception as exc:  # pragma: no cover - runtime dependency guard
     KokoroTokenizerConfig = None
     KOKORO_VOICE_NAMES_BY_VARIANT = {}
     KOKORO_IMPORT_ERROR = str(exc)
+
+try:
+    from kokoro import KPipeline as KokoroTorchPipeline
+    KOKORO_TORCH_IMPORT_ERROR: Optional[str] = None
+except Exception as exc:  # pragma: no cover - runtime dependency guard
+    KokoroTorchPipeline = None
+    KOKORO_TORCH_IMPORT_ERROR = str(exc)
 
 try:
     from pocket_tts import TTSModel as PocketTTSModel
@@ -300,6 +315,7 @@ DEFAULT_FASTER_WHISPER_INITIAL_PROMPT = (
     "music, pause, resume, stop, cancel, volume, kitchen, living room, office, bedroom, "
     "garage, Home Assistant, UniFi, Ecobee, Ecowitt, Sonos, Discord, and Kodi."
 )
+DEFAULT_MLX_WHISPER_MODEL = "mlx-community/whisper-base.en-mlx"
 DEFAULT_VOSK_MODEL_NAME = "vosk-model-small-en-us-0.15"
 DEFAULT_VOSK_MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
 DEFAULT_STT_MODEL_ROOT = os.path.abspath(
@@ -310,8 +326,11 @@ DEFAULT_TTS_MODEL_ROOT = os.path.abspath(
 )
 DEFAULT_KOKORO_MODEL = "v1.0:q8"
 DEFAULT_KOKORO_VOICE = "af_bella"
+DEFAULT_KOKORO_ENGINE = "auto"
 DEFAULT_KOKORO_PROVIDER = "cpu"
 DEFAULT_KOKORO_OUTPUT_GAIN = 1.5
+DEFAULT_KOKORO_TORCH_REPO_ID = "hexgrad/Kokoro-82M"
+DEFAULT_KOKORO_TORCH_ZH_REPO_ID = "hexgrad/Kokoro-82M-v1.1-zh"
 DEFAULT_OPENAI_COMPATIBLE_TTS_BASE_URL = ""
 DEFAULT_OPENAI_COMPATIBLE_TTS_API_KEY = ""
 DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL = "tts-1"
@@ -444,7 +463,7 @@ _faster_whisper_model_lock = threading.Lock()
 _vosk_model_cache: Dict[str, Any] = {}
 _vosk_model_lock = threading.Lock()
 _vosk_bootstrap_lock = threading.Lock()
-_kokoro_pipeline_cache: Dict[Tuple[str, str], Any] = {}
+_kokoro_pipeline_cache: Dict[Tuple[str, ...], Any] = {}
 _kokoro_pipeline_lock = threading.Lock()
 _pocket_tts_model_cache: Dict[str, Any] = {}
 _pocket_tts_model_lock = threading.Lock()
@@ -663,16 +682,27 @@ def _speechbrain_acceleration_setting() -> str:
         _voice_settings().get("VOICE_SPEECHBRAIN_ACCELERATION"),
         default=DEFAULT_SPEECHBRAIN_ACCELERATION,
     )
-    return token if token in {"auto", "cpu", "cuda"} else DEFAULT_SPEECHBRAIN_ACCELERATION
+    return token if token in {"auto", "cpu", "cuda", "rocm", "mps"} else DEFAULT_SPEECHBRAIN_ACCELERATION
 
 
 def _speechbrain_device() -> str:
     selected = _speechbrain_acceleration_setting()
     if selected == "cuda":
-        return "cuda" if _cuda_runtime_available() else "cpu"
+        return "cuda" if _torch_cuda_available() else "cpu"
+    if selected == "rocm":
+        return "cuda" if _torch_rocm_available() else "cpu"
+    if selected == "mps":
+        return "mps" if _mps_runtime_available() else "cpu"
     if selected == "cpu":
         return "cpu"
-    return "cuda" if _cuda_runtime_available() else "cpu"
+    effective = _effective_speech_acceleration()
+    if effective == "cuda":
+        return "cuda" if _torch_cuda_available() else "cpu"
+    if effective == "rocm":
+        return "cuda" if _torch_rocm_available() else "cpu"
+    if effective == "mps":
+        return "mps" if _mps_runtime_available() else "cpu"
+    return "cpu"
 
 
 def _wyoming_stt_queue_max_chunks() -> int:
@@ -1852,26 +1882,102 @@ def _cuda_runtime_available() -> bool:
             with contextlib.suppress(Exception):
                 torch_mod = importlib.import_module("torch")
                 cuda_mod = getattr(torch_mod, "cuda", None)
-                if cuda_mod is not None and bool(cuda_mod.is_available()):
+                if cuda_mod is not None and bool(cuda_mod.is_available()) and not _torch_has_rocm(torch_mod):
                     available = True
         _CUDA_RUNTIME_AVAILABLE_CACHE = bool(available)
         return bool(available)
 
 
+def _torch_has_rocm(torch_mod: Any) -> bool:
+    version = getattr(torch_mod, "version", None)
+    return bool(getattr(version, "hip", None))
+
+
+def _ctranslate2_cuda_available() -> bool:
+    with contextlib.suppress(Exception):
+        ctranslate2_mod = importlib.import_module("ctranslate2")
+        return int(getattr(ctranslate2_mod, "get_cuda_device_count")()) > 0
+    return False
+
+
+def _onnx_cuda_available() -> bool:
+    with contextlib.suppress(Exception):
+        ort_mod = importlib.import_module("onnxruntime")
+        providers = set(getattr(ort_mod, "get_available_providers")() or [])
+        return "CUDAExecutionProvider" in providers
+    return False
+
+
+def _onnx_rocm_available() -> bool:
+    with contextlib.suppress(Exception):
+        ort_mod = importlib.import_module("onnxruntime")
+        providers = set(getattr(ort_mod, "get_available_providers")() or [])
+        return "ROCMExecutionProvider" in providers or "MIGraphXExecutionProvider" in providers
+    return False
+
+
+def _torch_cuda_available() -> bool:
+    with contextlib.suppress(Exception):
+        torch_mod = importlib.import_module("torch")
+        cuda_mod = getattr(torch_mod, "cuda", None)
+        return cuda_mod is not None and bool(cuda_mod.is_available()) and not _torch_has_rocm(torch_mod)
+    return False
+
+
+def _torch_rocm_available() -> bool:
+    with contextlib.suppress(Exception):
+        torch_mod = importlib.import_module("torch")
+        cuda_mod = getattr(torch_mod, "cuda", None)
+        return cuda_mod is not None and bool(cuda_mod.is_available()) and _torch_has_rocm(torch_mod)
+    return False
+
+
+def _mps_runtime_available() -> bool:
+    with contextlib.suppress(Exception):
+        torch_mod = importlib.import_module("torch")
+        backends = getattr(torch_mod, "backends", None)
+        mps = getattr(backends, "mps", None)
+        if mps is not None and bool(mps.is_available()):
+            return True
+    return False
+
+
 def _effective_speech_acceleration() -> str:
     selected = normalize_speech_acceleration(_voice_settings_with_shared_speech().get("VOICE_ACCELERATION"))
     if selected != "auto":
+        if selected == "cuda":
+            return "cuda" if _cuda_runtime_available() else "cpu"
+        if selected == "rocm":
+            return "rocm" if _torch_rocm_available() else "cpu"
+        if selected == "mps":
+            return "mps" if _mps_runtime_available() else "cpu"
         return selected
     env_selected = normalize_speech_acceleration(
         os.getenv("TATER_SPEECH_ACCELERATION") or os.getenv("TATER_VOICE_ACCELERATION")
     )
     if env_selected != "auto":
+        if env_selected == "cuda":
+            return "cuda" if _cuda_runtime_available() else "cpu"
+        if env_selected == "rocm":
+            return "rocm" if _torch_rocm_available() else "cpu"
+        if env_selected == "mps":
+            return "mps" if _mps_runtime_available() else "cpu"
         return env_selected
-    return "cuda" if _cuda_runtime_available() else "cpu"
+    if _cuda_runtime_available():
+        return "cuda"
+    if _torch_rocm_available():
+        return "rocm"
+    if _mps_runtime_available():
+        return "mps"
+    return "cpu"
 
 
 def _faster_whisper_device() -> str:
-    return "cuda" if _effective_speech_acceleration() == "cuda" else DEFAULT_FASTER_WHISPER_DEVICE
+    return "cuda" if _effective_speech_acceleration() == "cuda" and _ctranslate2_cuda_available() else DEFAULT_FASTER_WHISPER_DEVICE
+
+
+def _mlx_whisper_model() -> str:
+    return _text(os.getenv("TATER_MLX_WHISPER_MODEL")) or DEFAULT_MLX_WHISPER_MODEL
 
 
 def _normalize_faster_whisper_compute_type(value: Any) -> str:
@@ -1940,13 +2046,45 @@ def _faster_whisper_initial_prompt() -> str:
     return prompt[:1000]
 
 
+def _kokoro_engine(acceleration: Any = None) -> str:
+    env_engine = _text(os.getenv("TATER_KOKORO_ENGINE") or os.getenv("TATER_KOKORO_RUNTIME")).lower().replace("-", "_")
+    env_provider = _text(os.getenv("TATER_KOKORO_PROVIDER")).lower().replace("-", "_")
+    token = env_engine or env_provider
+    if token in {"torch", "pytorch"}:
+        return "torch"
+    if token in {"rocm", "amd", "amd_rocm"}:
+        return "torch"
+    if token in {"onnx", "pykokoro", "onnxruntime", "cpu", "cuda", "gpu", "nvidia", "nvidia_cuda"}:
+        return "onnx"
+
+    selected = normalize_speech_acceleration(acceleration)
+    effective = _effective_speech_acceleration() if selected == "auto" else selected
+    if effective in {"mps", "rocm"} and KokoroTorchPipeline is not None:
+        return "torch"
+    return "onnx"
+
+
+def _kokoro_torch_device(acceleration: Any = None) -> str:
+    selected = normalize_speech_acceleration(acceleration)
+    effective = _effective_speech_acceleration() if selected == "auto" else selected
+    if effective == "cuda" and _torch_cuda_available():
+        return "cuda"
+    if effective == "rocm" and _torch_rocm_available():
+        return "cuda"
+    if effective == "mps" and _mps_runtime_available():
+        return "mps"
+    return "cpu"
+
+
 def _kokoro_provider() -> str:
+    if _kokoro_engine() == "torch":
+        return f"torch:{_kokoro_torch_device()}"
     env_provider = _text(os.getenv("TATER_KOKORO_PROVIDER")).lower().replace("-", "_")
     if env_provider in {"cuda", "gpu", "nvidia", "nvidia_cuda"}:
         return "cuda"
     if env_provider in {"cpu", "none", "off"}:
         return "cpu"
-    return "cuda" if _effective_speech_acceleration() == "cuda" else DEFAULT_KOKORO_PROVIDER
+    return "cuda" if _effective_speech_acceleration() == "cuda" and _onnx_cuda_available() else DEFAULT_KOKORO_PROVIDER
 
 
 def _get_bool_setting(name: str, default: bool) -> bool:
@@ -1967,6 +2105,8 @@ def _normalize_stt_backend(value: Any) -> str:
         return DEFAULT_STT_BACKEND
     if token in {"faster_whisper", "fasterwhisper", "whisper"}:
         return "faster_whisper"
+    if token in {"mlx_whisper", "mlxwhisper", "mlx"}:
+        return "mlx_whisper"
     if token == "vosk":
         return "vosk"
     if token == "wyoming":
@@ -2383,6 +2523,12 @@ def _voice_config_snapshot() -> Dict[str, Any]:
             "selected": selected_acceleration,
             "effective": effective_acceleration,
             "cuda_available": _cuda_runtime_available(),
+            "ctranslate2_cuda_available": _ctranslate2_cuda_available(),
+            "onnx_cuda_available": _onnx_cuda_available(),
+            "onnx_rocm_available": _onnx_rocm_available(),
+            "torch_cuda_available": _torch_cuda_available(),
+            "torch_rocm_available": _torch_rocm_available(),
+            "mps_available": _mps_runtime_available(),
         },
         "wyoming_stt": {
             "host": _text(settings.get("VOICE_WYOMING_STT_HOST")) or DEFAULT_WYOMING_STT_HOST,
@@ -2398,6 +2544,10 @@ def _voice_config_snapshot() -> Dict[str, Any]:
                 "beam_size": _faster_whisper_beam_size(partial=False),
                 "partial_beam_size": DEFAULT_FASTER_WHISPER_PARTIAL_BEAM_SIZE,
                 "model_root": _stt_backend_model_root("faster_whisper"),
+            },
+            "mlx_whisper": {
+                "model": _mlx_whisper_model(),
+                "model_root": _stt_backend_model_root("mlx_whisper"),
             },
             "vosk": {
                 "model_root": _stt_backend_model_root("vosk"),
@@ -3424,6 +3574,8 @@ def _stt_backend_available(backend: str) -> Tuple[bool, str]:
         return ok, _text(WYOMING_IMPORT_ERROR) or "wyoming dependency unavailable"
     if token == "faster_whisper":
         return WhisperModel is not None, _text(FASTER_WHISPER_IMPORT_ERROR) or "faster-whisper dependency unavailable"
+    if token == "mlx_whisper":
+        return MLXWhisper is not None, _text(MLX_WHISPER_IMPORT_ERROR) or "mlx-whisper dependency unavailable"
     if token == "vosk":
         if VoskModel is None or KaldiRecognizer is None:
             return False, _text(VOSK_IMPORT_ERROR) or "vosk dependency unavailable"

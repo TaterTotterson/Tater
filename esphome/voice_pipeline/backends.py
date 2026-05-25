@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import threading
 import time
 import wave
@@ -26,6 +27,7 @@ def _vp():
 
 _LOCAL_STT_TRANSCRIBE_LOCK = asyncio.Lock()
 _FASTER_WHISPER_MODEL_TRANSCRIBE_LOCK = threading.RLock()
+_MLX_WHISPER_TRANSCRIBE_LOCK = threading.RLock()
 
 
 def huggingface_environment(overrides: Optional[Dict[str, Any]] = None, client: Any = None) -> Dict[str, Any]:
@@ -142,6 +144,11 @@ def _tts_backend_available(backend: str) -> Tuple[bool, str]:
         base_url = vp._text((cfg.get("openai_compatible") or {}).get("base_url"))
         return bool(base_url), "OpenAI-compatible TTS base URL is not configured."
     if token == "kokoro":
+        if vp._kokoro_engine() == "torch":
+            return (
+                vp.KokoroTorchPipeline is not None,
+                vp._text(vp.KOKORO_TORCH_IMPORT_ERROR) or "kokoro torch dependency unavailable",
+            )
         return (
             vp.build_kokoro_pipeline is not None and vp.KokoroPipelineConfig is not None,
             vp._text(vp.KOKORO_IMPORT_ERROR) or "kokoro dependency unavailable",
@@ -266,6 +273,64 @@ def _transcribe_faster_whisper_sync(
     finally:
         _FASTER_WHISPER_MODEL_TRANSCRIBE_LOCK.release()
     return re.sub(r"\s+", " ", " ".join(parts)).strip()
+
+
+def _write_pcm16_mono_wav(path: str, pcm16: bytes, *, rate: int = 16000) -> None:
+    with wave.open(path, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(int(rate))
+        wav_file.writeframes(bytes(pcm16 or b""))
+
+
+def _transcribe_mlx_whisper_sync(
+    audio_bytes: bytes,
+    audio_format: Dict[str, int],
+    language: Optional[str],
+    partial: bool = False,
+) -> str:
+    vp = _vp()
+    if vp.MLXWhisper is None:
+        raise RuntimeError(f"mlx-whisper dependency unavailable: {vp.MLX_WHISPER_IMPORT_ERROR or 'unknown import error'}")
+
+    pcm16, _state = vp._pcm_to_pcm16_mono_16k(audio_bytes, audio_format)
+    if not pcm16:
+        return ""
+
+    temp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(prefix="tater-mlx-whisper-", suffix=".wav", delete=False) as tmp:
+            temp_path = tmp.name
+        _write_pcm16_mono_wav(temp_path, pcm16, rate=16000)
+        kwargs: Dict[str, Any] = {
+            "path_or_hf_repo": vp._mlx_whisper_model(),
+            "verbose": False,
+        }
+        lang = vp._text(language)
+        if lang:
+            kwargs["language"] = lang
+        with _MLX_WHISPER_TRANSCRIBE_LOCK:
+            root = vp._ensure_stt_backend_model_root("mlx_whisper")
+            with _temporary_env(
+                huggingface_environment(
+                    {
+                        "HF_HOME": root,
+                        "HF_HUB_CACHE": os.path.join(root, "hub"),
+                        "HUGGINGFACE_HUB_CACHE": os.path.join(root, "hub"),
+                    }
+                )
+            ):
+                try:
+                    result = vp.MLXWhisper.transcribe(temp_path, **kwargs)
+                except TypeError:
+                    result = vp.MLXWhisper.transcribe(temp_path, path_or_hf_repo=vp._mlx_whisper_model())
+        if isinstance(result, dict):
+            return re.sub(r"\s+", " ", vp._text(result.get("text"))).strip()
+        return re.sub(r"\s+", " ", vp._text(result)).strip()
+    finally:
+        if temp_path:
+            with contextlib.suppress(Exception):
+                os.unlink(temp_path)
 
 
 def _vosk_result_text(payload: Any) -> str:
@@ -596,7 +661,7 @@ def _buffered_stt_fallback_backend() -> str:
     default_backend = vp._normalize_stt_backend(vp.DEFAULT_STT_BACKEND)
     if default_backend != "wyoming":
         candidates.append(default_backend)
-    candidates.extend(["faster_whisper", "vosk"])
+    candidates.extend(["mlx_whisper", "faster_whisper", "vosk"])
 
     seen = set()
     for candidate in candidates:
@@ -723,6 +788,18 @@ async def _native_transcribe_local_audio_bytes(
             )
             transcript = await _run_local_stt_thread(
                 _transcribe_faster_whisper_sync,
+                data,
+                audio_format,
+                language,
+                bool(partial),
+            )
+        elif token == "mlx_whisper":
+            vp._native_debug(
+                f"STT ({mode_label} mlx-whisper) local selector={selector} session_id={session_id} "
+                f"bytes={len(data)} model={vp._mlx_whisper_model()}"
+            )
+            transcript = await _run_local_stt_thread(
+                _transcribe_mlx_whisper_sync,
                 data,
                 audio_format,
                 language,
@@ -991,16 +1068,45 @@ def _temporary_env(overrides: Dict[str, Any]):
                 os.environ[key] = value
 
 
-def _load_kokoro_pipeline(model_id: str) -> Any:
+def _load_kokoro_pipeline(model_id: str, voice: Optional[str] = None) -> Any:
     vp = _vp()
-    if vp.build_kokoro_pipeline is None or vp.KokoroPipelineConfig is None:
-        raise RuntimeError(f"kokoro dependency unavailable: {vp.KOKORO_IMPORT_ERROR or 'unknown import error'}")
-
     spec = vp._kokoro_model_spec(model_id)
     variant = vp._text(spec.get("variant")) or "v1.0"
     quality = vp._text(spec.get("quality")) or "q8"
+    engine = vp._kokoro_engine()
+    if engine == "torch":
+        if vp.KokoroTorchPipeline is None:
+            raise RuntimeError(f"kokoro torch dependency unavailable: {vp.KOKORO_TORCH_IMPORT_ERROR or 'unknown import error'}")
+        selected_voice = vp._text(voice) or vp.DEFAULT_KOKORO_VOICE
+        lang_code = selected_voice[0:1].lower() or "a"
+        device = vp._kokoro_torch_device()
+        repo_id = vp.DEFAULT_KOKORO_TORCH_ZH_REPO_ID if variant.startswith("v1.1-zh") else vp.DEFAULT_KOKORO_TORCH_REPO_ID
+        key = ("torch", repo_id, lang_code, device)
+
+        with vp._kokoro_pipeline_lock:
+            pipeline = vp._kokoro_pipeline_cache.get(key)
+            if pipeline is None:
+                root = vp._ensure_tts_backend_model_root("kokoro_torch")
+                vp.logger.info("[native-voice] kokoro model source=%s model=%s engine=torch device=%s repo=%s", root, model_id, device, repo_id)
+                env = huggingface_environment(
+                    {
+                        "HF_HOME": root,
+                        "HF_HUB_CACHE": os.path.join(root, "hub"),
+                        "HUGGINGFACE_HUB_CACHE": os.path.join(root, "hub"),
+                    }
+                )
+                if device == "mps":
+                    env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+                with _temporary_env(env):
+                    pipeline = vp.KokoroTorchPipeline(lang_code=lang_code, repo_id=repo_id, device=device)
+                vp._kokoro_pipeline_cache[key] = pipeline
+            return pipeline
+
+    if vp.build_kokoro_pipeline is None or vp.KokoroPipelineConfig is None:
+        raise RuntimeError(f"kokoro dependency unavailable: {vp.KOKORO_IMPORT_ERROR or 'unknown import error'}")
+
     provider = vp._kokoro_provider()
-    key = (variant, quality, provider)
+    key = ("onnx", variant, quality, provider)
 
     with vp._kokoro_pipeline_lock:
         pipeline = vp._kokoro_pipeline_cache.get(key)
@@ -1117,7 +1223,27 @@ def _load_piper_voice_model(model_id: str) -> Any:
 
 def _synthesize_kokoro_sync(text: str, model_id: str, voice: str) -> Tuple[bytes, Dict[str, Any]]:
     vp = _vp()
-    pipeline = _load_kokoro_pipeline(model_id)
+    engine = vp._kokoro_engine()
+    pipeline = _load_kokoro_pipeline(model_id, voice=voice)
+    if engine == "torch":
+        chunks: List[Any] = []
+        prompt = vp._text(text)
+        selected_voice = vp._text(voice) or vp.DEFAULT_KOKORO_VOICE
+        env = {}
+        if vp._kokoro_torch_device() == "mps":
+            env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+        with _temporary_env(env):
+            for result in pipeline(prompt, voice=selected_voice, speed=1, split_pattern=r"\n+"):
+                audio = getattr(result, "audio", None)
+                if audio is not None:
+                    chunks.append(audio)
+        if not chunks:
+            return b"", {"rate": 24000, "width": 2, "channels": 1}
+        np_mod = importlib.import_module("numpy")
+        audio = np_mod.concatenate([np_mod.asarray(chunk, dtype=np_mod.float32).reshape(-1) for chunk in chunks])
+        audio_bytes = _float_audio_to_pcm16_bytes(audio, gain=_kokoro_output_gain())
+        return audio_bytes, {"rate": 24000, "width": 2, "channels": 1}
+
     result = pipeline.run(vp._text(text), voice=vp._text(voice) or vp.DEFAULT_KOKORO_VOICE)
     audio_bytes = _float_audio_to_pcm16_bytes(getattr(result, "audio", None), gain=_kokoro_output_gain())
     sample_rate = int(getattr(result, "sample_rate", 24000) or 24000)

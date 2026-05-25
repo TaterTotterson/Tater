@@ -144,67 +144,27 @@ Some Portals are paired with companion repos/apps that complete the end-user int
 > **Note**:
 > - Tater currently recommends using gemma-4-26b-a4b (disable thinking), qwen/qwen3.5-35b-a3b (disable thinking), qwen3-coder-next, qwen3-next-80b, or gpt-oss-120b (disable thinking)
 
-<img width="100" height="44" alt="unraid_logo_black-339076895" src="https://github.com/user-attachments/assets/87351bed-3321-4a43-924f-fecf2e4e700f" />
-
-Tater is available in the **Unraid Community Apps** store.
-
-You can install both:
-- **Tater**
-- **Redis Stack**
-
-directly from the Unraid App Store with a one-click template.
-
-Unraid note:
-- Add container path mappings for `/app/agent_lab` and `/app/.runtime` to persistent shares (for example `/mnt/user/appdata/tater/agent_lab` and `/mnt/user/appdata/tater/runtime`) so you don’t lose Agent Lab data or Redis setup config during container updates.
-- Also set `TZ` and map `/etc/localtime` + `/etc/timezone` if you want local time inside the container.
-
-Once the Unraid containers are installed and running, continue to **Post-Install Setup** below.
-
-## 🏠 Home Assistant
-
-A dedicated Home Assistant add-on repository is available here:
-
-https://github.com/TaterTotterson/hassio-addons-tater
-
-### Add the Tater add-on repository
-
-Click the button below to add the repository to Home Assistant:
-
-[![Add Repository to Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](
-https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https://github.com/TaterTotterson/hassio-addons-tater
-)
-
-Once added, the following add-ons will appear in the Home Assistant Add-on Store:
-
-- **Redis Stack** – required for Tater memory, Verbas, and automations
-- **Tater AI Assistant** – the main Tater service
-
-#### Install order
-
-1. Install and **start Redis Stack**
-2. Install **Tater AI Assistant**
-3. Configure your LLM and Redis settings in the Tater add-on
-4. Start Tater
-
-This is the recommended setup for most users and provides the smoothest experience.
-
-Once the add-ons are running, continue to **Post-Install Setup** below.
-
----
-
 ## Local Installation
 
 ### Prerequisites
 - Python 3.11
 - **[Redis-Stack](https://hub.docker.com/r/redis/redis-stack)**
 - A local LLM runtime (such as **Ollama**, **LocalAI**, **LM Studio**, or **Lemonade**)
-- Docker (optional, for containerized deployment)
+- Docker is optional, but it is the easiest way to run Redis Stack on machines that do not package it natively.
 
 ### Install Redis Stack (Required)
 
-#### Option 1: Ubuntu/Debian with APT
+Redis is required for Tater memory, settings, Verbas, automations, and runtime state.
 
-Install Redis Stack from the official Redis APT repository:
+#### Option 1: Docker
+
+```bash
+docker run -d --name tater_redis \
+  -p 6379:6379 \
+  redis/redis-stack-server:latest
+```
+
+#### Option 2: Ubuntu/Debian with APT
 
 ```bash
 sudo apt-get install -y lsb-release curl gpg
@@ -229,7 +189,7 @@ Expected output:
 PONG
 ```
 
-### Setting Up Locally
+### Set Up Tater
 
 1. **Clone the Repository**
 
@@ -243,35 +203,86 @@ git clone https://github.com/TaterTotterson/Tater.git
 cd Tater
 ```
 
-Note:
-- Run Tater inside a Python virtual environment so dependencies stay isolated and easy to manage (recommended).
-  Quickstart:
-  ```bash
-  python -m venv .venv
-  source .venv/bin/activate
-  ```
+3. **Run Tater Setup**
 
-3. **Install Dependencies**
-
-Using pip, run:
+Use the interactive setup menu to choose the right local runtime profile:
 
 ```bash
-pip install -r requirements.txt
+sh setup_tater.sh
 ```
 
-4. **Run the Web UI**
+The setup menu creates `.venv`, installs Tater's Python dependencies, and writes the selected runtime profile to `.runtime/tater_profile.env`.
 
-Run the TaterOS backend/frontend (FastAPI + static HTML/CSS/JS):
+Available local profiles:
+- **CPU**: safe default for most local Linux installs and generic ARM hosts.
+- **macOS Apple Silicon**: native Mac setup with Apple Metal/MPS for PyTorch-backed SpeechBrain and Kokoro when available, plus MLX Whisper for local STT.
+- **NVIDIA desktop/server**: native amd64 CUDA setup for RTX/GTX machines.
+- **AMD ROCm / Strix Halo**: native Linux setup for ROCm-capable Radeon and Ryzen AI Max / Strix Halo systems.
+- **Jetson**: native ARM64 setup that uses JetPack/system AI packages and CUDA when compatible Python runtimes are installed.
+- **Jetson Thor**: native ARM64 setup for Thor / JetPack 7 systems and CUDA 13-compatible JetPack runtimes.
+
+Non-interactive setup is also available:
 
 ```bash
-uvicorn tateros_app:app --host 0.0.0.0 --port 8501 --reload --no-access-log
+sh setup_tater.sh cpu
+sh setup_tater.sh macos
+sh setup_tater.sh nvidia
+sh setup_tater.sh rocm
+sh setup_tater.sh jetson
+sh setup_tater.sh thor
 ```
 
-Docker-style launcher (also disables access logs by default):
+### Local Voice Acceleration Notes
+
+The setup profile only prepares the runtime. Actual voice model choices are managed in TaterOS under **Settings -> Models** and **Settings -> ESPHome -> Voice Pipeline**.
+
+macOS Apple Silicon:
+- The macOS profile writes `PYTORCH_ENABLE_MPS_FALLBACK=1` so PyTorch can fall back to CPU for unsupported MPS operations.
+- It attempts to install `mlx-whisper` and the official PyTorch `kokoro` package.
+- Select **Settings -> Models -> STT Backend -> MLX Whisper** for Apple-native Whisper STT.
+- MLX Whisper defaults to `mlx-community/whisper-base.en-mlx`; set `TATER_MLX_WHISPER_MODEL` to use another MLX Whisper model.
+- Kokoro automatically uses the PyTorch engine on Apple Metal/MPS when available. Set `TATER_KOKORO_ENGINE=onnx` to force the existing ONNX path or `TATER_KOKORO_ENGINE=torch` to force PyTorch.
+
+If native macOS dependency builds fail, install these Homebrew packages and rerun setup:
+
+```bash
+brew install ffmpeg libolm pkg-config
+```
+
+NVIDIA desktop/server:
+- The `nvidia` profile installs CUDA PyTorch wheels, CUDA/cuDNN runtime packages, and the GPU ONNX Runtime build.
+- In TaterOS, use **Settings -> Models -> Voice Acceleration** to select Auto, CPU, NVIDIA CUDA, AMD ROCm, or Apple Metal/MPS where supported.
+- Faster Whisper compute type defaults to Auto. Auto uses `float16` on newer CUDA GPUs and switches to `int8` on older CUDA cards such as Pascal / GTX 10-series, where `float16` can fail.
+- To override Faster Whisper compute type, use **Settings -> ESPHome -> Voice Pipeline -> Speech Recognition -> Faster Whisper Compute Type** or set `TATER_FASTER_WHISPER_COMPUTE_TYPE` to `auto`, `int8`, `float32`, `float16`, `int8_float32`, or `int8_float16`.
+- To restrict which GPUs native Tater can see, start it with `CUDA_VISIBLE_DEVICES=0 sh run_ui.sh` or use a GPU UUID.
+
+AMD ROCm / Strix Halo:
+- The `rocm` profile installs PyTorch from the ROCm wheel index, then installs Tater dependencies and the official PyTorch Kokoro package.
+- AMD ROCm support is Linux-only and depends on the ROCm runtime installed for the GPU/APU.
+- Tater uses ROCm for PyTorch-backed models such as Kokoro Torch and SpeechBrain Speaker ID / Emotion ID. PyTorch ROCm exposes devices through the `cuda` API internally, but Tater labels it separately as AMD ROCm in settings and logs.
+- Faster Whisper still falls back to CPU unless its CTranslate2 backend reports CUDA support; ROCm acceleration is not assumed for Faster Whisper.
+- Strix Halo may require newer AMD ROCm wheels than the default PyTorch index. Override the PyTorch ROCm wheel source with `TATER_ROCM_PYTORCH_INDEX_URL` before running setup if needed.
+
+Jetson and Thor:
+- The `jetson` and `thor` profiles create a venv with `--system-site-packages` so NVIDIA JetPack-provided Python AI packages can be reused.
+- Setup intentionally avoids replacing JetPack PyTorch with generic pip wheels.
+- CUDA support depends on the JetPack / Thor runtime installed on the device.
+
+General voice notes:
+- Tater warms selected local STT/TTS models at startup and after saving voice model settings. Set `TATER_SPEECH_WARMUP_ON_STARTUP=false` to disable startup warmup.
+- Kokoro output is boosted slightly by default for clearer satellite playback. Tune it with `TATER_KOKORO_OUTPUT_GAIN`; the default is `1.5`.
+- Voice activity detection defaults to Silero VAD. Low-power hosts can switch the Voice Pipeline VAD backend to WebRTC, which uses `webrtcvad-wheels`.
+- If Speaker ID or Emotion ID is enabled, SpeechBrain can use CUDA or MPS when supported, with CPU fallback.
+
+### Run the Web UI
+
+Start the TaterOS backend/frontend:
 
 ```bash
 sh run_ui.sh
 ```
+
+If `.venv` exists, `run_ui.sh` uses it automatically. It also loads `.runtime/tater_profile.env` when present.
 
 The launcher listens on `0.0.0.0:8501` by default. To change it, set `HTMLUI_PORT`:
 
@@ -287,7 +298,7 @@ http://127.0.0.1:8501
 
 Once the WebUI is up, continue to **Post-Install Setup** below.
 
-## Docker
+## Docker Installation
 
 ### 1. Pull the Image
 
@@ -329,7 +340,17 @@ docker run -d --name tater_webui \
   ghcr.io/tatertotterson/tater:latest
 ```
 
+### NVIDIA Docker
+
+The NVIDIA image is amd64-only. Use the default `latest` image for CPU-first installs and ARM hosts.
+The NVIDIA image uses CUDA 12.8 PyTorch wheels plus CUDA/cuDNN runtime packages for RTX 30, 40, and 50 series cards. Voice model tuning, Faster Whisper compute type, warmup, VAD, and SpeechBrain acceleration use the same TaterOS settings described in **Local Voice Acceleration Notes**.
+
+Host requirements:
+- Install the NVIDIA driver.
+- Install NVIDIA Container Toolkit before starting the compose override.
+
 Optional NVIDIA GPU build for Faster Whisper STT plus Kokoro TTS:
+
 ```
 docker compose -f docker-compose.yml -f docker-compose.nvidia.yml up --build
 ```
@@ -339,7 +360,10 @@ Prebuilt NVIDIA image:
 docker pull ghcr.io/tatertotterson/tater:nvidia
 ```
 
+To restrict which GPUs Tater can see in the NVIDIA compose setup, set `NVIDIA_VISIBLE_DEVICES` before launching, for example `NVIDIA_VISIBLE_DEVICES=0` or a GPU UUID. Inside the container, CUDA device `0` maps to the first visible GPU.
+
 Build and push the NVIDIA image:
+
 ```bash
 docker buildx build \
   --platform linux/amd64 \
@@ -347,22 +371,6 @@ docker buildx build \
   -t ghcr.io/tatertotterson/tater:nvidia \
   --push .
 ```
-
-The NVIDIA image is amd64-only. Use the default `latest` image for CPU-first installs and ARM hosts.
-
-The NVIDIA build uses CUDA 12.8 PyTorch wheels plus CUDA/cuDNN runtime packages for RTX 30, 40, and 50 series cards. Piper and Pocket TTS remain CPU-backed. In TaterOS, use **Settings → Models → Voice Acceleration** to select Auto, CPU, or NVIDIA CUDA for STT/TTS models. Tater starts a background warmup for the selected local STT and TTS models during app startup and after saving voice model settings so the first real voice turn is less likely to pause on model loading. If Speaker ID or Emotion ID is enabled, the warmup also loads the matching SpeechBrain model; use **Settings → ESPHome → Voice Pipeline → SpeechBrain Models** to let those models use CUDA in the NVIDIA image, with CPU fallback if CUDA load fails. Emotion ID uses a SpeechBrain wav2vec2 model and requires Hugging Face `transformers`, which is included in current Tater images. Set `TATER_SPEECH_WARMUP_ON_STARTUP=false` to disable startup warmup.
-
-Faster Whisper compute type defaults to Auto. Auto uses `float16` on newer CUDA GPUs and switches to `int8` on older CUDA cards such as Pascal / GTX 10-series, where `float16` can fail with an unsupported compute type error. To override it, set **Settings → ESPHome → Voice Pipeline → Speech Recognition → Faster Whisper Compute Type** or set `TATER_FASTER_WHISPER_COMPUTE_TYPE` to `auto`, `int8`, `float32`, `float16`, `int8_float32`, or `int8_float16`.
-
-To restrict which GPUs Tater can see in the NVIDIA compose setup, set `NVIDIA_VISIBLE_DEVICES` before launching, for example `NVIDIA_VISIBLE_DEVICES=0` or a GPU UUID. Inside the container, CUDA device `0` maps to the first visible GPU.
-
-Kokoro output is boosted slightly by default for clearer satellite playback. Tune it with `TATER_KOKORO_OUTPUT_GAIN` if needed; the default is `1.5`.
-
-Voice activity detection defaults to Silero VAD. Low-power hosts can switch the Voice Pipeline Settings VAD backend to WebRTC, which uses the lightweight `webrtcvad-wheels` package.
-
-Host requirement: install the NVIDIA driver and NVIDIA Container Toolkit before starting the compose override.
-
----
 
 ### 3. Access the Web UI
 
@@ -374,6 +382,54 @@ Once the container is running with host networking, open your browser and naviga
 If you changed `HTMLUI_PORT`, use that port in the URL.
 
 Once the WebUI is up, continue to **Post-Install Setup** below.
+
+---
+
+## Unraid Installation
+
+<img width="100" height="44" alt="unraid_logo_black-339076895" src="https://github.com/user-attachments/assets/87351bed-3321-4a43-924f-fecf2e4e700f" />
+
+Tater is available in the **Unraid Community Apps** store.
+
+You can install both:
+- **Tater**
+- **Redis Stack**
+
+directly from the Unraid App Store with a one-click template.
+
+Unraid note:
+- Add container path mappings for `/app/agent_lab` and `/app/.runtime` to persistent shares, for example `/mnt/user/appdata/tater/agent_lab` and `/mnt/user/appdata/tater/runtime`.
+- Also set `TZ` and map `/etc/localtime` plus `/etc/timezone` if you want local time inside the container.
+
+Once the Unraid containers are installed and running, continue to **Post-Install Setup** below.
+
+---
+
+## Home Assistant Installation
+
+A dedicated Home Assistant add-on repository is available here:
+
+https://github.com/TaterTotterson/hassio-addons-tater
+
+Click the button below to add the repository to Home Assistant:
+
+[![Add Repository to Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](
+https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https://github.com/TaterTotterson/hassio-addons-tater
+)
+
+Once added, the following add-ons will appear in the Home Assistant Add-on Store:
+
+- **Redis Stack**: required for Tater memory, Verbas, and automations
+- **Tater AI Assistant**: the main Tater service
+
+Install order:
+
+1. Install and start Redis Stack.
+2. Install Tater AI Assistant.
+3. Configure your LLM and Redis settings in the Tater add-on.
+4. Start Tater.
+
+Once the add-ons are running, continue to **Post-Install Setup** below.
 
 ---
 

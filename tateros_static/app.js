@@ -15186,7 +15186,7 @@ async function loadSettingsView() {
               <div class="hydra-model-panel is-active">
                 <div class="hydra-model-panel-title">Voice Acceleration</div>
                 <div class="small hydra-model-panel-note">
-                  Shared by local STT and GPU-capable TTS backends.
+                  Shared by local voice models where supported. Unsupported backends stay CPU-backed.
                 </div>
                 <label>Local Voice Acceleration
                   <select id="set_speech_acceleration">

@@ -124,6 +124,13 @@ except Exception as exc:  # pragma: no cover - runtime dependency guard
     KOKORO_IMPORT_ERROR = str(exc)
 
 try:
+    from kokoro import KPipeline as KokoroTorchPipeline
+    KOKORO_TORCH_IMPORT_ERROR: Optional[str] = None
+except Exception as exc:  # pragma: no cover - runtime dependency guard
+    KokoroTorchPipeline = None
+    KOKORO_TORCH_IMPORT_ERROR = str(exc)
+
+try:
     from pocket_tts import TTSModel as PocketTTSModel
     POCKET_TTS_IMPORT_ERROR: Optional[str] = None
 except Exception as exc:  # pragma: no cover - runtime dependency guard
@@ -145,8 +152,11 @@ except Exception as exc:  # pragma: no cover - runtime dependency guard
 DEFAULT_TTS_MODEL_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "agent_lab", "models", "tts")
 )
+DEFAULT_KOKORO_ENGINE = "auto"
 DEFAULT_KOKORO_PROVIDER = "cpu"
 DEFAULT_KOKORO_OUTPUT_GAIN = 1.5
+DEFAULT_KOKORO_TORCH_REPO_ID = "hexgrad/Kokoro-82M"
+DEFAULT_KOKORO_TORCH_ZH_REPO_ID = "hexgrad/Kokoro-82M-v1.1-zh"
 DEFAULT_OPENAI_COMPATIBLE_TTS_TIMEOUT_SECONDS = 90.0
 DEFAULT_WYOMING_TIMEOUT_SECONDS = 45.0
 DEFAULT_PIPER_SENTENCE_PAUSE_SECONDS = 0.24
@@ -168,7 +178,7 @@ _PIPER_ABBREVIATIONS = {
     "i.e",
 }
 
-_kokoro_pipeline_cache: Dict[Tuple[str, str], Any] = {}
+_kokoro_pipeline_cache: Dict[Tuple[str, ...], Any] = {}
 _kokoro_pipeline_lock = threading.Lock()
 _pocket_tts_model_cache: Dict[str, Any] = {}
 _pocket_tts_model_lock = threading.Lock()
@@ -189,7 +199,46 @@ def _cuda_runtime_available() -> bool:
     with contextlib.suppress(Exception):
         torch_mod = importlib.import_module("torch")
         cuda_mod = getattr(torch_mod, "cuda", None)
-        if cuda_mod is not None and bool(cuda_mod.is_available()):
+        if cuda_mod is not None and bool(cuda_mod.is_available()) and not _torch_has_rocm(torch_mod):
+            return True
+    return False
+
+
+def _torch_has_rocm(torch_mod: Any) -> bool:
+    version = getattr(torch_mod, "version", None)
+    return bool(getattr(version, "hip", None))
+
+
+def _onnx_cuda_available() -> bool:
+    with contextlib.suppress(Exception):
+        ort_mod = importlib.import_module("onnxruntime")
+        providers = set(getattr(ort_mod, "get_available_providers")() or [])
+        return "CUDAExecutionProvider" in providers
+    return False
+
+
+def _torch_cuda_available() -> bool:
+    with contextlib.suppress(Exception):
+        torch_mod = importlib.import_module("torch")
+        cuda_mod = getattr(torch_mod, "cuda", None)
+        return cuda_mod is not None and bool(cuda_mod.is_available()) and not _torch_has_rocm(torch_mod)
+    return False
+
+
+def _torch_rocm_available() -> bool:
+    with contextlib.suppress(Exception):
+        torch_mod = importlib.import_module("torch")
+        cuda_mod = getattr(torch_mod, "cuda", None)
+        return cuda_mod is not None and bool(cuda_mod.is_available()) and _torch_has_rocm(torch_mod)
+    return False
+
+
+def _mps_runtime_available() -> bool:
+    with contextlib.suppress(Exception):
+        torch_mod = importlib.import_module("torch")
+        backends = getattr(torch_mod, "backends", None)
+        mps = getattr(backends, "mps", None)
+        if mps is not None and bool(mps.is_available()):
             return True
     return False
 
@@ -200,23 +249,73 @@ def _effective_speech_acceleration(override: Any = None) -> str:
         with contextlib.suppress(Exception):
             selected = normalize_speech_acceleration(get_speech_settings().get("acceleration"))
     if selected != "auto":
+        if selected == "cuda":
+            return "cuda" if _cuda_runtime_available() else "cpu"
+        if selected == "rocm":
+            return "rocm" if _torch_rocm_available() else "cpu"
+        if selected == "mps":
+            return "mps" if _mps_runtime_available() else "cpu"
         return selected
 
     env_selected = normalize_speech_acceleration(
         os.getenv("TATER_SPEECH_ACCELERATION") or os.getenv("TATER_VOICE_ACCELERATION")
     )
     if env_selected != "auto":
+        if env_selected == "cuda":
+            return "cuda" if _cuda_runtime_available() else "cpu"
+        if env_selected == "rocm":
+            return "rocm" if _torch_rocm_available() else "cpu"
+        if env_selected == "mps":
+            return "mps" if _mps_runtime_available() else "cpu"
         return env_selected
-    return "cuda" if _cuda_runtime_available() else "cpu"
+    if _cuda_runtime_available():
+        return "cuda"
+    if _torch_rocm_available():
+        return "rocm"
+    if _mps_runtime_available():
+        return "mps"
+    return "cpu"
+
+
+def _kokoro_engine(acceleration: Any = None) -> str:
+    env_engine = _text(os.getenv("TATER_KOKORO_ENGINE") or os.getenv("TATER_KOKORO_RUNTIME")).lower().replace("-", "_")
+    env_provider = _text(os.getenv("TATER_KOKORO_PROVIDER")).lower().replace("-", "_")
+    token = env_engine or env_provider
+    if token in {"torch", "pytorch"}:
+        return "torch"
+    if token in {"rocm", "amd", "amd_rocm"}:
+        return "torch"
+    if token in {"onnx", "pykokoro", "onnxruntime", "cpu", "cuda", "gpu", "nvidia", "nvidia_cuda"}:
+        return "onnx"
+
+    effective = _effective_speech_acceleration(acceleration)
+    if effective in {"mps", "rocm"} and KokoroTorchPipeline is not None:
+        return "torch"
+    return "onnx"
+
+
+def _kokoro_torch_device(acceleration: Any = None) -> str:
+    effective = _effective_speech_acceleration(acceleration)
+    if effective == "cuda" and _torch_cuda_available():
+        return "cuda"
+    if effective == "rocm" and _torch_rocm_available():
+        return "cuda"
+    if effective == "mps" and _mps_runtime_available():
+        return "mps"
+    return "cpu"
 
 
 def _kokoro_provider(acceleration: Any = None) -> str:
+    if _kokoro_engine(acceleration) == "torch":
+        return f"torch:{_kokoro_torch_device(acceleration)}"
     env_provider = _text(os.getenv("TATER_KOKORO_PROVIDER")).lower().replace("-", "_")
     if env_provider in {"cuda", "gpu", "nvidia", "nvidia_cuda"}:
         return "cuda"
     if env_provider in {"cpu", "none", "off"}:
         return "cpu"
-    return "cuda" if _effective_speech_acceleration(acceleration) == "cuda" else DEFAULT_KOKORO_PROVIDER
+    return "cuda" if _effective_speech_acceleration(acceleration) == "cuda" and _onnx_cuda_available() else DEFAULT_KOKORO_PROVIDER
+
+
 HOMEASSISTANT_MEDIA_SOURCE_TARGET = "media-source://media_source/local/tater_announcements"
 HOMEASSISTANT_MEDIA_SOURCE_CLEANUP_SECONDS = 15 * 60.0
 
@@ -1494,16 +1593,45 @@ def _synthesize_openai_compatible_tts_wav_sync(
     return wav_bytes
 
 
-def _load_kokoro_pipeline(model_id: str, acceleration: Any = None) -> Any:
-    if build_kokoro_pipeline is None or KokoroPipelineConfig is None:
-        raise RuntimeError(f"kokoro dependency unavailable: {KOKORO_IMPORT_ERROR or 'unknown import error'}")
-
+def _load_kokoro_pipeline(model_id: str, acceleration: Any = None, voice: Optional[str] = None) -> Any:
     model_token = _text(model_id) or DEFAULT_KOKORO_MODEL
     variant, _, quality = model_token.partition(":")
     variant = variant or "v1.0"
     quality = quality or "q8"
+    engine = _kokoro_engine(acceleration)
+    if engine == "torch":
+        if KokoroTorchPipeline is None:
+            raise RuntimeError(f"kokoro torch dependency unavailable: {KOKORO_TORCH_IMPORT_ERROR or 'unknown import error'}")
+        selected_voice = _text(voice) or DEFAULT_KOKORO_VOICE
+        lang_code = selected_voice[0:1].lower() or "a"
+        device = _kokoro_torch_device(acceleration)
+        repo_id = DEFAULT_KOKORO_TORCH_ZH_REPO_ID if variant.startswith("v1.1-zh") else DEFAULT_KOKORO_TORCH_REPO_ID
+        key = ("torch", repo_id, lang_code, device)
+
+        with _kokoro_pipeline_lock:
+            pipeline = _kokoro_pipeline_cache.get(key)
+            if pipeline is None:
+                root = _ensure_tts_backend_model_root("kokoro_torch")
+                logger.info("[speech_tts] kokoro model source=%s model=%s engine=torch device=%s repo=%s", root, model_token, device, repo_id)
+                env = huggingface_environment(
+                    {
+                        "HF_HOME": root,
+                        "HF_HUB_CACHE": os.path.join(root, "hub"),
+                        "HUGGINGFACE_HUB_CACHE": os.path.join(root, "hub"),
+                    }
+                )
+                if device == "mps":
+                    env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+                with _temporary_env(env):
+                    pipeline = KokoroTorchPipeline(lang_code=lang_code, repo_id=repo_id, device=device)
+                _kokoro_pipeline_cache[key] = pipeline
+            return pipeline
+
+    if build_kokoro_pipeline is None or KokoroPipelineConfig is None:
+        raise RuntimeError(f"kokoro dependency unavailable: {KOKORO_IMPORT_ERROR or 'unknown import error'}")
+
     provider = _kokoro_provider(acceleration)
-    key = (variant, quality, provider)
+    key = ("onnx", variant, quality, provider)
 
     with _kokoro_pipeline_lock:
         pipeline = _kokoro_pipeline_cache.get(key)
@@ -1609,7 +1737,27 @@ def _load_piper_voice_model(model_id: str) -> Any:
 
 
 def _synthesize_kokoro_sync(text: str, model_id: str, voice: str, acceleration: Any = None) -> Tuple[bytes, Dict[str, Any]]:
-    pipeline = _load_kokoro_pipeline(model_id, acceleration=acceleration)
+    engine = _kokoro_engine(acceleration)
+    pipeline = _load_kokoro_pipeline(model_id, acceleration=acceleration, voice=voice)
+    if engine == "torch":
+        chunks: List[Any] = []
+        prompt = _text(text)
+        selected_voice = _text(voice) or DEFAULT_KOKORO_VOICE
+        env = {}
+        if _kokoro_torch_device(acceleration) == "mps":
+            env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+        with _temporary_env(env):
+            for result in pipeline(prompt, voice=selected_voice, speed=1, split_pattern=r"\n+"):
+                audio = getattr(result, "audio", None)
+                if audio is not None:
+                    chunks.append(audio)
+        if not chunks:
+            return b"", {"rate": 24000, "width": 2, "channels": 1}
+        np_mod = importlib.import_module("numpy")
+        audio = np_mod.concatenate([np_mod.asarray(chunk, dtype=np_mod.float32).reshape(-1) for chunk in chunks])
+        audio_bytes = _float_audio_to_pcm16_bytes(audio, gain=_kokoro_output_gain())
+        return audio_bytes, {"rate": 24000, "width": 2, "channels": 1}
+
     result = pipeline.run(_text(text), voice=_text(voice) or DEFAULT_KOKORO_VOICE)
     audio_bytes = _float_audio_to_pcm16_bytes(getattr(result, "audio", None), gain=_kokoro_output_gain())
     sample_rate = int(getattr(result, "sample_rate", 24000) or 24000)
