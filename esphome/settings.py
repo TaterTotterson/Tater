@@ -418,8 +418,10 @@ def voice_ui_setting_specs() -> List[Dict[str, Any]]:
                 {"value": "auto", "label": "Auto"},
                 {"value": "cpu", "label": "CPU"},
                 {"value": "cuda", "label": "NVIDIA CUDA"},
+                {"value": "rocm", "label": "AMD ROCm"},
+                {"value": "mps", "label": "Apple Metal / MPS"},
             ],
-            "description": "Controls SpeechBrain models used by Speaker ID and Emotion ID. Auto uses CUDA when available and falls back to CPU if CUDA load fails.",
+            "description": "Controls SpeechBrain models used by Speaker ID and Emotion ID. Auto uses NVIDIA CUDA, AMD ROCm, then Apple MPS when available, with CPU fallback if accelerated load fails.",
         },
         {
             "key": "VOICE_OPENWAKEWORD_ENABLED",

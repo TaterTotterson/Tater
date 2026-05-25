@@ -623,6 +623,17 @@ def _speechbrain_run_device(device: str) -> str:
     return "cuda:0" if device == "cuda" else device
 
 
+def _accelerated_device_label(device: str) -> str:
+    if device == "cuda":
+        with contextlib.suppress(Exception):
+            if _vp()._speechbrain_acceleration_setting() == "rocm" or _vp()._torch_rocm_available():
+                return "AMD ROCm"
+        return "CUDA"
+    if device == "mps":
+        return "MPS"
+    return device.upper()
+
+
 def _apply_speechbrain_yaml_compat_shim() -> None:
     # SpeechBrain/HyperPyYAML still assumes a max_depth attribute exists on the
     # ruamel loader object, but ESPHome 2026.4.0 brings in ruamel.yaml 0.19.1.
@@ -688,7 +699,7 @@ def _speechbrain_state() -> Tuple[bool, str]:
             savedir.mkdir(parents=True, exist_ok=True)
             hf_cache_dir = savedir / "huggingface"
             devices = [requested_device]
-            if requested_device == "cuda":
+            if requested_device in {"cuda", "mps"}:
                 devices.append("cpu")
             for device in devices:
                 run_device = _speechbrain_run_device(device)
@@ -725,8 +736,13 @@ def _speechbrain_state() -> Tuple[bool, str]:
                     return True, ""
                 except Exception as exc:
                     load_errors.append(f"{run_device}: {exc.__class__.__name__}: {str(exc) or 'unknown error'}")
-                    if device == "cuda":
-                        _log_warning("CUDA model load failed source=%s detail=%s; retrying on CPU", source, load_errors[-1])
+                    if device in {"cuda", "mps"}:
+                        _log_warning(
+                            "%s model load failed source=%s detail=%s; retrying on CPU",
+                            _accelerated_device_label(device),
+                            source,
+                            load_errors[-1],
+                        )
                         continue
                     raise
         except Exception as exc:

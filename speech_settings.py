@@ -92,6 +92,8 @@ def _normalize_stt_backend(value: Any) -> str:
         return DEFAULT_STT_BACKEND
     if token in {"faster_whisper", "fasterwhisper", "whisper"}:
         return "faster_whisper"
+    if token in {"mlx_whisper", "mlxwhisper", "mlx"}:
+        return "mlx_whisper"
     if token == "vosk":
         return "vosk"
     if token == "wyoming":
@@ -126,9 +128,18 @@ def normalize_speech_acceleration(value: Any, *, default: str = DEFAULT_SPEECH_A
         return default
     if token in {"cpu", "none", "off"}:
         return "cpu"
+    if token in {"mps", "metal", "apple", "apple_mps", "apple_metal"}:
+        return "mps"
+    if token in {"rocm", "amd", "amd_gpu", "amd_rocm", "radeon", "strix", "strix_halo"}:
+        return "rocm"
     if token in {"cuda", "gpu", "nvidia", "nvidia_cuda"}:
         return "cuda"
     return default
+
+
+def _torch_has_rocm(torch_mod: Any) -> bool:
+    version = getattr(torch_mod, "version", None)
+    return bool(getattr(version, "hip", None))
 
 
 def _option_rows_from_values(
@@ -160,7 +171,56 @@ def _cuda_runtime_available() -> bool:
     with contextlib.suppress(Exception):
         torch_mod = importlib.import_module("torch")
         cuda_mod = getattr(torch_mod, "cuda", None)
-        if cuda_mod is not None and bool(cuda_mod.is_available()):
+        if cuda_mod is not None and bool(cuda_mod.is_available()) and not _torch_has_rocm(torch_mod):
+            return True
+    return False
+
+
+def _ctranslate2_cuda_available() -> bool:
+    with contextlib.suppress(Exception):
+        ctranslate2_mod = importlib.import_module("ctranslate2")
+        return int(getattr(ctranslate2_mod, "get_cuda_device_count")()) > 0
+    return False
+
+
+def _onnx_cuda_available() -> bool:
+    with contextlib.suppress(Exception):
+        ort_mod = importlib.import_module("onnxruntime")
+        providers = set(getattr(ort_mod, "get_available_providers")() or [])
+        return "CUDAExecutionProvider" in providers
+    return False
+
+
+def _onnx_rocm_available() -> bool:
+    with contextlib.suppress(Exception):
+        ort_mod = importlib.import_module("onnxruntime")
+        providers = set(getattr(ort_mod, "get_available_providers")() or [])
+        return "ROCMExecutionProvider" in providers or "MIGraphXExecutionProvider" in providers
+    return False
+
+
+def _torch_cuda_available() -> bool:
+    with contextlib.suppress(Exception):
+        torch_mod = importlib.import_module("torch")
+        cuda_mod = getattr(torch_mod, "cuda", None)
+        return cuda_mod is not None and bool(cuda_mod.is_available()) and not _torch_has_rocm(torch_mod)
+    return False
+
+
+def _torch_rocm_available() -> bool:
+    with contextlib.suppress(Exception):
+        torch_mod = importlib.import_module("torch")
+        cuda_mod = getattr(torch_mod, "cuda", None)
+        return cuda_mod is not None and bool(cuda_mod.is_available()) and _torch_has_rocm(torch_mod)
+    return False
+
+
+def _mps_runtime_available() -> bool:
+    with contextlib.suppress(Exception):
+        torch_mod = importlib.import_module("torch")
+        backends = getattr(torch_mod, "backends", None)
+        mps = getattr(backends, "mps", None)
+        if mps is not None and bool(mps.is_available()):
             return True
     return False
 
@@ -168,6 +228,7 @@ def _cuda_runtime_available() -> bool:
 def _stt_backend_option_rows() -> List[Dict[str, Any]]:
     return [
         {"value": "faster_whisper", "label": "Faster Whisper"},
+        {"value": "mlx_whisper", "label": "MLX Whisper"},
         {"value": "wyoming", "label": "Wyoming"},
         {"value": "vosk", "label": "Vosk"},
     ]
@@ -517,11 +578,22 @@ def get_speech_ui_payload(settings: Optional[Dict[str, Any]] = None) -> Dict[str
         "stt_backend_options": _stt_backend_option_rows(),
         "capabilities": {
             "cuda_available": _cuda_runtime_available(),
+            "ctranslate2_cuda_available": _ctranslate2_cuda_available(),
+            "onnx_cuda_available": _onnx_cuda_available(),
+            "onnx_rocm_available": _onnx_rocm_available(),
+            "torch_cuda_available": _torch_cuda_available(),
+            "torch_rocm_available": _torch_rocm_available(),
+            "mps_available": _mps_runtime_available(),
+            "mlx_whisper_available": _module_available("mlx_whisper"),
+            "kokoro_torch_available": _module_available("kokoro"),
+            "kokoro_mlx_available": _module_available("kokoro_mlx"),
         },
         "acceleration_options": [
             {"value": "auto", "label": "Auto"},
             {"value": "cpu", "label": "CPU"},
             {"value": "cuda", "label": "NVIDIA CUDA"},
+            {"value": "rocm", "label": "AMD ROCm"},
+            {"value": "mps", "label": "Apple Metal / MPS"},
         ],
         "tts_backend_options": [
             {"value": "wyoming", "label": "Wyoming"},
