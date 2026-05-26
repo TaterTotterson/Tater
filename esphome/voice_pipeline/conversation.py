@@ -32,6 +32,7 @@ class VoiceSessionRuntime:
     audio_chunks: int = 0
     audio_bytes: int = 0
     dropped_startup_chunks: int = 0
+    vad_startup_ignored_chunks: int = 0
     capture_started: bool = False
     first_audio_ts: float = 0.0
     first_vad_speech_ts: float = 0.0
@@ -41,6 +42,8 @@ class VoiceSessionRuntime:
     continued_chat_reopen: bool = False
     max_audio_bytes: int = field(default_factory=lambda: _vp().DEFAULT_MAX_AUDIO_BYTES)
     startup_gate_s: float = 0.0
+    vad_startup_ignore_s: float = 0.0
+    vad_startup_ignore_until_ts: float = 0.0
     startup_preroll_s: float = 0.0
     startup_preroll_max_bytes: int = 0
     startup_preroll_buffer: bytearray = field(default_factory=bytearray)

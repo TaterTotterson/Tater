@@ -364,6 +364,7 @@ DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_FRAMES = 4
 DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_SHORT_S = 0.66
 DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_LONG_S = 0.82
 DEFAULT_CONTINUED_CHAT_REOPEN_STARTUP_GATE_S = 0.40
+DEFAULT_CONTINUED_CHAT_REOPEN_VAD_STARTUP_IGNORE_S = 0.55
 DEFAULT_CONTINUED_CHAT_REOPEN_PREROLL_S = 0.30
 DEFAULT_EXPERIMENTAL_LIVE_TOOL_PROGRESS_ENABLED = False
 DEFAULT_EXPERIMENTAL_PARTIAL_STT_ENABLED = False
@@ -380,6 +381,7 @@ DEFAULT_WAKE_ARBITRATION_BUSY_TIMEOUT_S = 120.0
 DEFAULT_WAKE_ARBITRATION_RELEASE_GRACE_S = 1.5
 DEFAULT_SPEECHBRAIN_ACCELERATION = "auto"
 DEFAULT_STARTUP_GATE_S = 0.0
+DEFAULT_WAKE_VAD_STARTUP_IGNORE_S = 0.30
 DEFAULT_TTS_URL_TTL_S = 180
 DEFAULT_TTS_ANNOUNCEMENT_TIMEOUT_MAX_S = 170.0
 
@@ -2643,6 +2645,7 @@ def _voice_config_snapshot() -> Dict[str, Any]:
             "silence_s": _get_float_setting("VOICE_VAD_SILENCE_SECONDS", DEFAULT_VAD_SILENCE_SECONDS, minimum=0.2, maximum=5.0),
             "timeout_s": _get_float_setting("VOICE_VAD_TIMEOUT_SECONDS", DEFAULT_VAD_TIMEOUT_SECONDS, minimum=2.0, maximum=60.0),
             "startup_gate_s": _get_float_setting("VOICE_STARTUP_GATE_S", DEFAULT_STARTUP_GATE_S, minimum=0.0, maximum=2.0),
+            "wake_vad_startup_ignore_s": _get_float_setting("VOICE_WAKE_VAD_STARTUP_IGNORE_S", DEFAULT_WAKE_VAD_STARTUP_IGNORE_S, minimum=0.0, maximum=2.0),
             "no_speech_timeout_s": _get_float_setting("VOICE_VAD_NO_SPEECH_TIMEOUT_S", DEFAULT_VAD_NO_SPEECH_TIMEOUT_S, minimum=1.0, maximum=20.0),
             "silero_threshold": _get_float_setting("VOICE_SILERO_THRESHOLD", DEFAULT_SILERO_THRESHOLD, minimum=0.01, maximum=0.99),
             "silero_neg_threshold": _get_float_setting("VOICE_SILERO_NEG_THRESHOLD", DEFAULT_SILERO_NEG_THRESHOLD, minimum=0.0, maximum=0.99),
@@ -2651,6 +2654,7 @@ def _voice_config_snapshot() -> Dict[str, Any]:
             "min_silence_short_s": _get_float_setting("VOICE_VAD_MIN_SILENCE_SHORT_S", DEFAULT_VAD_MIN_SILENCE_SHORT_S, minimum=0.1, maximum=5.0),
             "min_silence_long_s": _get_float_setting("VOICE_VAD_MIN_SILENCE_LONG_S", DEFAULT_VAD_MIN_SILENCE_LONG_S, minimum=0.1, maximum=5.0),
             "continued_chat_reopen_startup_gate_s": _get_float_setting("VOICE_CONTINUED_CHAT_REOPEN_STARTUP_GATE_S", DEFAULT_CONTINUED_CHAT_REOPEN_STARTUP_GATE_S, minimum=0.0, maximum=2.0),
+            "continued_chat_reopen_vad_startup_ignore_s": _get_float_setting("VOICE_CONTINUED_CHAT_REOPEN_VAD_STARTUP_IGNORE_S", DEFAULT_CONTINUED_CHAT_REOPEN_VAD_STARTUP_IGNORE_S, minimum=0.0, maximum=2.0),
             "continued_chat_reopen_preroll_s": _get_float_setting("VOICE_CONTINUED_CHAT_REOPEN_PREROLL_S", DEFAULT_CONTINUED_CHAT_REOPEN_PREROLL_S, minimum=0.0, maximum=1.0),
             "continued_chat_reopen_silence_s": _get_float_setting("VOICE_CONTINUED_CHAT_REOPEN_SILENCE_SECONDS", DEFAULT_CONTINUED_CHAT_REOPEN_SILENCE_SECONDS, minimum=0.2, maximum=5.0),
             "continued_chat_reopen_timeout_s": _get_float_setting("VOICE_CONTINUED_CHAT_REOPEN_TIMEOUT_SECONDS", DEFAULT_CONTINUED_CHAT_REOPEN_TIMEOUT_SECONDS, minimum=2.0, maximum=60.0),
@@ -5734,6 +5738,27 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             )
         elif wake_word_session:
             startup_gate_s = min(startup_gate_s, 0.05)
+        vad_startup_ignore_s = 0.0
+        if continued_chat_reopen:
+            vad_startup_ignore_s = max(
+                startup_gate_s,
+                _as_float(
+                    eou_cfg.get("continued_chat_reopen_vad_startup_ignore_s"),
+                    DEFAULT_CONTINUED_CHAT_REOPEN_VAD_STARTUP_IGNORE_S,
+                    minimum=0.0,
+                    maximum=2.0,
+                ),
+            )
+        elif wake_word_session:
+            vad_startup_ignore_s = max(
+                startup_gate_s,
+                _as_float(
+                    eou_cfg.get("wake_vad_startup_ignore_s"),
+                    DEFAULT_WAKE_VAD_STARTUP_IGNORE_S,
+                    minimum=0.0,
+                    maximum=2.0,
+                ),
+            )
         max_audio_bytes = int(limits_cfg.get("max_audio_bytes") or DEFAULT_MAX_AUDIO_BYTES)
         if capture_reopen_profile:
             startup_preroll_s = _as_float(
@@ -5842,6 +5867,8 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             continued_chat_reopen=continued_chat_reopen,
             max_audio_bytes=max_audio_bytes,
             startup_gate_s=startup_gate_s,
+            vad_startup_ignore_s=vad_startup_ignore_s,
+            vad_startup_ignore_until_ts=start_ts + max(0.0, vad_startup_ignore_s),
             startup_preroll_s=startup_preroll_s,
             startup_preroll_max_bytes=startup_preroll_max_bytes,
             audio_stall_timeout_s=audio_stall_timeout_s,
@@ -5886,7 +5913,7 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
 
         log_ts = _now()
         logger.info(
-            "[native-voice] session start selector=%s conversation_id=%s session_id=%s wake_word=%s followup=%s capture_profile=%s area=%s stt=%s tts=%s vad=%s wake_engine=%s rate=%s width=%s ch=%s input_gain=%.2f gate_s=%.2f preroll_s=%.2f setup_ms=%.1f ready_ms=%.1f",
+            "[native-voice] session start selector=%s conversation_id=%s session_id=%s wake_word=%s followup=%s capture_profile=%s area=%s stt=%s tts=%s vad=%s wake_engine=%s rate=%s width=%s ch=%s input_gain=%.2f gate_s=%.2f vad_ignore_s=%.2f preroll_s=%.2f setup_ms=%.1f ready_ms=%.1f",
             token,
             conv,
             sid,
@@ -5903,6 +5930,7 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             int(fmt.get("channels") or 0),
             float(session.audio_input_gain or DEFAULT_AUDIO_INPUT_GAIN),
             float(session.startup_gate_s or 0.0),
+            float(session.vad_startup_ignore_s or 0.0),
             float(session.startup_preroll_s or 0.0),
             max(0.0, (log_ts - handler_started_ts) * 1000.0),
             max(0.0, (log_ts - start_ts) * 1000.0),
@@ -5937,6 +5965,7 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                 f"silero_threshold={float(getattr(eou_engine.backend, 'threshold', DEFAULT_SILERO_THRESHOLD)):.2f} "
                 f"webrtc_aggressiveness={int(getattr(eou_engine.backend, 'mode', DEFAULT_WEBRTC_VAD_AGGRESSIVENESS))} "
                 f"startup_gate_s={float(session.startup_gate_s or 0.0):.2f} "
+                f"vad_startup_ignore_s={float(session.vad_startup_ignore_s or 0.0):.2f} "
                 f"input_gain={float(session.audio_input_gain or DEFAULT_AUDIO_INPUT_GAIN):.2f} "
                 f"preroll_s={float(session.startup_preroll_s or 0.0):.2f} "
                 f"stall_after_speech_s={float(session.audio_stall_timeout_s or 0.0):.2f} "
@@ -5962,6 +5991,7 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             audio_format = session.audio_format
             eou_engine = session.eou_engine
             gate_ts = float(session.startup_gate_until_ts)
+            vad_ignore_ts = float(session.vad_startup_ignore_until_ts or 0.0)
             input_gain = float(session.audio_input_gain or DEFAULT_AUDIO_INPUT_GAIN)
 
         width = int(audio_format.get("width") or DEFAULT_VOICE_SAMPLE_WIDTH)
@@ -5997,9 +6027,29 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
 
         metrics: Dict[str, Any] = {}
         should_finalize = False
+        vad_startup_ignored = False
         if isinstance(eou_engine, EouEngine):
-            metrics = eou_engine.process(audio_bytes, audio_format, now_ts)
-            should_finalize = bool(metrics.get("should_finalize"))
+            vad_startup_ignored = vad_ignore_ts > 0.0 and now_ts < vad_ignore_ts
+            if vad_startup_ignored:
+                metrics = {
+                    "backend": eou_engine.backend_name,
+                    "binary_active": False,
+                    "score": 0.0,
+                    "chunk_score": 0.0,
+                    "probability": 0.0,
+                    "max_probability": 0.0,
+                    "should_finalize": False,
+                    "voice_seen": False,
+                    "speech_chunks": 0,
+                    "speech_s": 0.0,
+                    "silence_s": 0.0,
+                    "timed_out": False,
+                    "in_command": False,
+                    "vad_startup_ignored": True,
+                }
+            else:
+                metrics = eou_engine.process(audio_bytes, audio_format, now_ts)
+                should_finalize = bool(metrics.get("should_finalize"))
 
         async with lock:
             session = runtime.get("session")
@@ -6009,15 +6059,24 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                 return
 
             session.last_audio_ts = now_ts
+            if vad_startup_ignored:
+                session.vad_startup_ignored_chunks += 1
+                if session.vad_startup_ignored_chunks == 1:
+                    _native_debug(
+                        f"esphome startup vad ignore selector={token} session_id={sid} "
+                        f"ignore_s={float(session.vad_startup_ignore_s or 0.0):.2f} "
+                        f"remaining_s={max(0.0, float(session.vad_startup_ignore_until_ts or now_ts) - now_ts):.2f}"
+                    )
             if float(session.first_audio_ts or 0.0) <= 0.0:
                 session.first_audio_ts = now_ts
                 logger.info(
-                    "[native-voice] capture first audio selector=%s session_id=%s delay_ms=%.1f dropped_startup_chunks=%s gate_s=%.2f preroll_s=%.2f chunk_dbfs=%s",
+                    "[native-voice] capture first audio selector=%s session_id=%s delay_ms=%.1f dropped_startup_chunks=%s gate_s=%.2f vad_ignore_s=%.2f preroll_s=%.2f chunk_dbfs=%s",
                     token,
                     sid,
                     max(0.0, (now_ts - float(session.started_ts or now_ts)) * 1000.0),
                     int(session.dropped_startup_chunks or 0),
                     float(session.startup_gate_s or 0.0),
+                    float(session.vad_startup_ignore_s or 0.0),
                     float(session.startup_preroll_s or 0.0),
                     f"{float(chunk_dbfs):.1f}" if chunk_dbfs is not None else "-",
                 )
@@ -6103,6 +6162,7 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                     f"probability={prob} peak_probability={peak_prob} voice_seen={bool(metrics.get('voice_seen'))} "
                     f"in_command={bool(metrics.get('in_command'))} speech_s={metrics.get('speech_s', '-')} "
                     f"silence_s={metrics.get('silence_s', '-')} timed_out={bool(metrics.get('timed_out'))} "
+                    f"vad_ignored={bool(metrics.get('vad_startup_ignored'))} "
                     f"chunk_dbfs={chunk_dbfs if chunk_dbfs is not None else '-'} "
                     f"peak_dbfs={float(session.audio_peak_dbfs or -120.0):.1f}"
                 )
