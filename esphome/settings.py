@@ -108,6 +108,16 @@ def voice_ui_setting_specs() -> List[Dict[str, Any]]:
             "description": "Ignored audio window at the start of a listening turn. Leave at 0 unless a device sends a click/pop at session start.",
         },
         {
+            "key": "VOICE_WAKE_VAD_STARTUP_IGNORE_S",
+            "label": "Wake VAD Ignore (sec)",
+            "type": "number",
+            "default": vp.DEFAULT_WAKE_VAD_STARTUP_IGNORE_S,
+            "min": 0.0,
+            "max": 2.0,
+            "step": 0.05,
+            "description": "Wake-start audio window that is still buffered for STT but ignored by VAD so wake sounds do not count as speech.",
+        },
+        {
             "key": "VOICE_CONTINUED_CHAT_REOPEN_STARTUP_GATE_S",
             "label": "Reopen Startup Gate (sec)",
             "type": "number",
@@ -116,6 +126,16 @@ def voice_ui_setting_specs() -> List[Dict[str, Any]]:
             "max": 2.0,
             "step": 0.05,
             "description": "Ignored audio window after continued-chat mic reopen. First wake listens use a near-zero gate so early words are not clipped.",
+        },
+        {
+            "key": "VOICE_CONTINUED_CHAT_REOPEN_VAD_STARTUP_IGNORE_S",
+            "label": "Reopen VAD Ignore (sec)",
+            "type": "number",
+            "default": vp.DEFAULT_CONTINUED_CHAT_REOPEN_VAD_STARTUP_IGNORE_S,
+            "min": 0.0,
+            "max": 2.0,
+            "step": 0.05,
+            "description": "Reopen-start audio window that is still buffered for STT but ignored by VAD so follow-up cue audio does not count as speech.",
         },
         {
             "key": "VOICE_CONTINUED_CHAT_REOPEN_PREROLL_S",
@@ -880,7 +900,9 @@ def settings_sections() -> List[Dict[str, Any]]:
             "Listening",
             [
                 "VOICE_STARTUP_GATE_S",
+                "VOICE_WAKE_VAD_STARTUP_IGNORE_S",
                 "VOICE_CONTINUED_CHAT_REOPEN_STARTUP_GATE_S",
+                "VOICE_CONTINUED_CHAT_REOPEN_VAD_STARTUP_IGNORE_S",
                 "VOICE_CONTINUED_CHAT_REOPEN_PREROLL_S",
                 "VOICE_CONTINUED_CHAT_REOPEN_SILENCE_SECONDS",
                 "VOICE_CONTINUED_CHAT_REOPEN_TIMEOUT_SECONDS",
