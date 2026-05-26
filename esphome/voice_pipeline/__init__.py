@@ -329,6 +329,7 @@ DEFAULT_KOKORO_VOICE = "af_bella"
 DEFAULT_KOKORO_ENGINE = "auto"
 DEFAULT_KOKORO_PROVIDER = "cpu"
 DEFAULT_KOKORO_OUTPUT_GAIN = 1.5
+DEFAULT_POCKET_TTS_OUTPUT_GAIN = 1.5
 DEFAULT_KOKORO_TORCH_REPO_ID = "hexgrad/Kokoro-82M"
 DEFAULT_KOKORO_TORCH_ZH_REPO_ID = "hexgrad/Kokoro-82M-v1.1-zh"
 DEFAULT_OPENAI_COMPATIBLE_TTS_BASE_URL = ""
@@ -1848,6 +1849,8 @@ def _shared_speech_voice_settings() -> Dict[str, Any]:
         "VOICE_TTS_BACKEND": shared.get("tts_backend"),
         "VOICE_TTS_MODEL": shared.get("tts_model"),
         "VOICE_TTS_VOICE": shared.get("tts_voice"),
+        "VOICE_KOKORO_OUTPUT_GAIN": shared.get("kokoro_output_gain"),
+        "VOICE_POCKET_TTS_OUTPUT_GAIN": shared.get("pocket_tts_output_gain"),
         "VOICE_WYOMING_TTS_HOST": shared.get("wyoming_tts_host"),
         "VOICE_WYOMING_TTS_PORT": shared.get("wyoming_tts_port"),
         "VOICE_WYOMING_TTS_VOICE": shared.get("wyoming_tts_voice"),
@@ -2591,12 +2594,24 @@ def _voice_config_snapshot() -> Dict[str, Any]:
             "kokoro": {
                 "model": _text(settings.get("VOICE_TTS_MODEL")) or DEFAULT_KOKORO_MODEL,
                 "voice": _text(settings.get("VOICE_TTS_VOICE")) or DEFAULT_KOKORO_VOICE,
+                "output_gain": _as_float(
+                    settings.get("VOICE_KOKORO_OUTPUT_GAIN"),
+                    DEFAULT_KOKORO_OUTPUT_GAIN,
+                    minimum=0.1,
+                    maximum=4.0,
+                ),
                 "provider": _kokoro_provider(),
                 "model_root": _tts_backend_model_root("kokoro"),
             },
             "pocket_tts": {
                 "model": _text(settings.get("VOICE_TTS_MODEL")) or DEFAULT_POCKET_TTS_MODEL,
                 "voice": _text(settings.get("VOICE_TTS_VOICE")) or DEFAULT_POCKET_TTS_VOICE,
+                "output_gain": _as_float(
+                    settings.get("VOICE_POCKET_TTS_OUTPUT_GAIN"),
+                    DEFAULT_POCKET_TTS_OUTPUT_GAIN,
+                    minimum=0.1,
+                    maximum=4.0,
+                ),
                 "model_root": _tts_backend_model_root("pocket_tts"),
             },
             "piper": {

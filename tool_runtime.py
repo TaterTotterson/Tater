@@ -27,6 +27,12 @@ from kernel_tools import (
 from verba_result import action_failure, action_success, normalize_verba_result
 from web_research import research_web
 from helpers import redis_client as default_redis
+from admin_gate import (
+    admin_denial_message,
+    admin_gate_enabled,
+    is_admin_only_plugin,
+    origin_is_admin,
+)
 from hydra_core_extensions import (
     get_hydra_kernel_tools,
     has_hydra_kernel_tool,
@@ -235,6 +241,39 @@ def _effective_enabled_predicate(
     if callable(enabled_predicate):
         return enabled_predicate
     return _verba_enabled_from_settings
+
+
+def _origin_payload(args: Optional[Dict[str, Any]], origin: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if isinstance(args, dict) and isinstance(args.get("origin"), dict):
+        return dict(args.get("origin") or {})
+    return dict(origin or {})
+
+
+def _admin_only_failure(*, platform: str, origin: Optional[Dict[str, Any]], tool_kind: str) -> Dict[str, Any]:
+    label = str(tool_kind or "tool").strip() or "tool"
+    return action_failure(
+        code="admin_only_tool",
+        message=admin_denial_message(platform, origin, default_redis),
+        say_hint=f"Explain that this {label} is restricted to People marked as admin.",
+    )
+
+
+def _admin_gate_blocks_verba(*, plugin_id: str, platform: str, origin: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not admin_gate_enabled(default_redis):
+        return None
+    if not is_admin_only_plugin(plugin_id):
+        return None
+    if origin_is_admin(platform, origin, default_redis):
+        return None
+    return _admin_only_failure(platform=platform, origin=origin, tool_kind="Verba")
+
+
+def _admin_gate_blocks_kernel(*, platform: str, origin: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not admin_gate_enabled(default_redis):
+        return None
+    if origin_is_admin(platform, origin, default_redis):
+        return None
+    return _admin_only_failure(platform=platform, origin=origin, tool_kind="kernel tool")
 
 
 def is_meta_tool(name: Optional[str]) -> bool:
@@ -505,6 +544,11 @@ async def run_meta_tool(
     origin: Optional[Dict[str, Any]] = None,
     llm_client: Any = None,
 ) -> Dict[str, Any]:
+    effective_origin = _origin_payload(args, origin)
+    gate_result = _admin_gate_blocks_kernel(platform=platform, origin=effective_origin)
+    if gate_result:
+        return gate_result
+
     if func == "list_tools":
         return list_tools(
             platform=args.get("platform") or platform,
@@ -1033,6 +1077,16 @@ async def execute_plugin_call(
                 message=f"Plugin `{func}` is currently disabled.",
                 say_hint="Explain that this plugin is disabled and ask if the user wants an alternative.",
             ),
+            "raw": None,
+        }
+
+    origin_payload = _origin_payload(args, context.get("origin") if isinstance(context, dict) else None)
+    gate_result = _admin_gate_blocks_verba(plugin_id=func, platform=platform, origin=origin_payload)
+    if gate_result:
+        return {
+            "plugin_id": func,
+            "plugin_name": verba_display_name(plugin),
+            "result": gate_result,
             "raw": None,
         }
 

@@ -27,8 +27,10 @@ DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE = "alloy"
 DEFAULT_SPEECH_ACCELERATION = "auto"
 DEFAULT_KOKORO_MODEL = "v1.0:q8"
 DEFAULT_KOKORO_VOICE = "af_bella"
+DEFAULT_KOKORO_OUTPUT_GAIN = 1.5
 DEFAULT_POCKET_TTS_MODEL = "b6369a24"
 DEFAULT_POCKET_TTS_VOICE = "alba"
+DEFAULT_POCKET_TTS_OUTPUT_GAIN = 1.5
 DEFAULT_PIPER_MODEL = "en_US-lessac-medium"
 DEFAULT_ANNOUNCEMENT_TTS_BACKEND = DEFAULT_TTS_BACKEND
 
@@ -84,6 +86,14 @@ def _as_int(value: Any, default: int) -> int:
     if parsed < 1 or parsed > 65535:
         return int(default)
     return int(parsed)
+
+
+def normalize_tts_output_gain(value: Any, default: float = 1.5) -> float:
+    try:
+        parsed = float(value)
+    except Exception:
+        parsed = float(default)
+    return min(4.0, max(0.1, parsed))
 
 
 def _normalize_stt_backend(value: Any) -> str:
@@ -425,6 +435,14 @@ def get_speech_settings() -> Dict[str, Any]:
         "tts_backend": current_tts_backend,
         "tts_model": _clean(shared.get("tts_model")),
         "tts_voice": _clean(shared.get("tts_voice")),
+        "kokoro_output_gain": normalize_tts_output_gain(
+            shared.get("kokoro_output_gain"),
+            DEFAULT_KOKORO_OUTPUT_GAIN,
+        ),
+        "pocket_tts_output_gain": normalize_tts_output_gain(
+            shared.get("pocket_tts_output_gain"),
+            DEFAULT_POCKET_TTS_OUTPUT_GAIN,
+        ),
         "wyoming_tts_host": _clean(shared.get("wyoming_tts_host")) or DEFAULT_WYOMING_TTS_HOST,
         "wyoming_tts_port": _as_int(shared.get("wyoming_tts_port"), DEFAULT_WYOMING_TTS_PORT),
         "wyoming_tts_voice": _clean(shared.get("wyoming_tts_voice")) or DEFAULT_WYOMING_TTS_VOICE,
@@ -481,6 +499,8 @@ def save_speech_settings(
     announcement_tts_backend: Any,
     announcement_tts_model: Any,
     announcement_tts_voice: Any,
+    kokoro_output_gain: Any = DEFAULT_KOKORO_OUTPUT_GAIN,
+    pocket_tts_output_gain: Any = DEFAULT_POCKET_TTS_OUTPUT_GAIN,
     announcement_wyoming_tts_host: Any = None,
     announcement_wyoming_tts_port: Any = None,
     announcement_wyoming_tts_voice: Any = None,
@@ -499,6 +519,10 @@ def save_speech_settings(
             "tts_backend": direct_tts_backend,
             "tts_model": _clean(tts_model),
             "tts_voice": _clean(tts_voice),
+            "kokoro_output_gain": str(normalize_tts_output_gain(kokoro_output_gain, DEFAULT_KOKORO_OUTPUT_GAIN)),
+            "pocket_tts_output_gain": str(
+                normalize_tts_output_gain(pocket_tts_output_gain, DEFAULT_POCKET_TTS_OUTPUT_GAIN)
+            ),
             "wyoming_tts_host": _clean(wyoming_tts_host) or DEFAULT_WYOMING_TTS_HOST,
             "wyoming_tts_port": str(_as_int(wyoming_tts_port, DEFAULT_WYOMING_TTS_PORT)),
             "wyoming_tts_voice": _clean(wyoming_tts_voice),

@@ -3176,6 +3176,8 @@ class AppSettingsRequest(BaseModel):
     speech_tts_backend: Optional[str] = None
     speech_tts_model: Optional[str] = None
     speech_tts_voice: Optional[str] = None
+    speech_kokoro_output_gain: Optional[float] = None
+    speech_pocket_tts_output_gain: Optional[float] = None
     speech_wyoming_tts_host: Optional[str] = None
     speech_wyoming_tts_port: Optional[str] = None
     speech_wyoming_tts_voice: Optional[str] = None
@@ -3259,6 +3261,8 @@ class SpeechTtsPreviewRequest(BaseModel):
     backend: Optional[str] = None
     model: Optional[str] = None
     voice: Optional[str] = None
+    kokoro_output_gain: Optional[float] = None
+    pocket_tts_output_gain: Optional[float] = None
     acceleration: Optional[str] = None
     wyoming_host: Optional[str] = None
     wyoming_port: Optional[str] = None
@@ -8504,6 +8508,8 @@ def get_settings() -> Dict[str, Any]:
         "speech_tts_backend": str(speech_settings.get("tts_backend") or ""),
         "speech_tts_model": str(speech_settings.get("tts_model") or ""),
         "speech_tts_voice": str(speech_settings.get("tts_voice") or ""),
+        "speech_kokoro_output_gain": str(speech_settings.get("kokoro_output_gain") or ""),
+        "speech_pocket_tts_output_gain": str(speech_settings.get("pocket_tts_output_gain") or ""),
         "speech_wyoming_tts_host": str(speech_settings.get("wyoming_tts_host") or ""),
         "speech_wyoming_tts_port": str(speech_settings.get("wyoming_tts_port") or ""),
         "speech_wyoming_tts_voice": str(speech_settings.get("wyoming_tts_voice") or ""),
@@ -8565,6 +8571,16 @@ async def preview_speech_tts(payload: SpeechTtsPreviewRequest) -> Response:
             backend=str(payload.backend or current_speech.get("tts_backend") or "").strip(),
             model=str(payload.model or current_speech.get("tts_model") or "").strip(),
             voice=str(payload.voice or current_speech.get("tts_voice") or "").strip(),
+            kokoro_output_gain=(
+                payload.kokoro_output_gain
+                if payload.kokoro_output_gain is not None
+                else current_speech.get("kokoro_output_gain")
+            ),
+            pocket_tts_output_gain=(
+                payload.pocket_tts_output_gain
+                if payload.pocket_tts_output_gain is not None
+                else current_speech.get("pocket_tts_output_gain")
+            ),
             acceleration=str(payload.acceleration or current_speech.get("acceleration") or "").strip(),
             wyoming_host=str(payload.wyoming_host or current_speech.get("wyoming_tts_host") or "").strip(),
             wyoming_port=str(payload.wyoming_port or current_speech.get("wyoming_tts_port") or "").strip(),
@@ -9585,6 +9601,8 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "speech_tts_backend",
         "speech_tts_model",
         "speech_tts_voice",
+        "speech_kokoro_output_gain",
+        "speech_pocket_tts_output_gain",
         "speech_wyoming_tts_host",
         "speech_wyoming_tts_port",
         "speech_wyoming_tts_voice",
@@ -9613,6 +9631,11 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
             tts_backend=str(updates.get("speech_tts_backend", current_speech.get("tts_backend") or "")).strip(),
             tts_model=str(updates.get("speech_tts_model", current_speech.get("tts_model") or "")).strip(),
             tts_voice=str(updates.get("speech_tts_voice", current_speech.get("tts_voice") or "")).strip(),
+            kokoro_output_gain=updates.get("speech_kokoro_output_gain", current_speech.get("kokoro_output_gain")),
+            pocket_tts_output_gain=updates.get(
+                "speech_pocket_tts_output_gain",
+                current_speech.get("pocket_tts_output_gain"),
+            ),
             wyoming_tts_host=str(
                 updates.get("speech_wyoming_tts_host", current_speech.get("wyoming_tts_host") or "")
             ).strip(),

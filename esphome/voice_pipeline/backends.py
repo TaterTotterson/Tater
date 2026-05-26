@@ -1032,7 +1032,25 @@ def _native_openai_compatible_synthesize_sync(
 
 def _kokoro_output_gain() -> float:
     vp = _vp()
-    return vp._as_float(os.getenv("TATER_KOKORO_OUTPUT_GAIN"), vp.DEFAULT_KOKORO_OUTPUT_GAIN, minimum=0.1, maximum=4.0)
+    env_value = os.getenv("TATER_KOKORO_OUTPUT_GAIN")
+    if env_value is not None and vp._text(env_value):
+        return vp._as_float(env_value, vp.DEFAULT_KOKORO_OUTPUT_GAIN, minimum=0.1, maximum=4.0)
+    settings = vp._voice_settings_with_shared_speech()
+    return vp._as_float(settings.get("VOICE_KOKORO_OUTPUT_GAIN"), vp.DEFAULT_KOKORO_OUTPUT_GAIN, minimum=0.1, maximum=4.0)
+
+
+def _pocket_tts_output_gain() -> float:
+    vp = _vp()
+    env_value = os.getenv("TATER_POCKET_TTS_OUTPUT_GAIN")
+    if env_value is not None and vp._text(env_value):
+        return vp._as_float(env_value, vp.DEFAULT_POCKET_TTS_OUTPUT_GAIN, minimum=0.1, maximum=4.0)
+    settings = vp._voice_settings_with_shared_speech()
+    return vp._as_float(
+        settings.get("VOICE_POCKET_TTS_OUTPUT_GAIN"),
+        vp.DEFAULT_POCKET_TTS_OUTPUT_GAIN,
+        minimum=0.1,
+        maximum=4.0,
+    )
 
 
 def _float_audio_to_pcm16_bytes(audio: Any, *, gain: float = 1.0) -> bytes:
@@ -1275,7 +1293,7 @@ def _synthesize_pocket_tts_sync(text: str, model_id: str, voice: str) -> Tuple[b
         model_state = model.get_state_for_audio_prompt(vp._text(voice) or vp.DEFAULT_POCKET_TTS_VOICE)
         audio_tensor = model.generate_audio(model_state, prompt)
     tensor = audio_tensor.detach().cpu().squeeze()
-    audio_bytes = _float_audio_to_pcm16_bytes(tensor.numpy())
+    audio_bytes = _float_audio_to_pcm16_bytes(tensor.numpy(), gain=_pocket_tts_output_gain())
     return audio_bytes, {"rate": int(getattr(model, "sample_rate", 24000) or 24000), "width": 2, "channels": 1}
 
 

@@ -15389,6 +15389,28 @@ async function loadSettingsView() {
                     ${renderSettingsSelectOptions(initialSpeechTtsVoiceOptions, settings.speech_tts_voice || "")}
                   </select>
                 </label>
+                <label id="speech-kokoro-output-gain-wrap">Kokoro Output Gain
+                  <input
+                    id="set_speech_kokoro_output_gain"
+                    type="number"
+                    min="0.1"
+                    max="4"
+                    step="0.1"
+                    value="${escapeHtml(settings.speech_kokoro_output_gain || "1.5")}"
+                  />
+                  <div class="small">1.0 is raw model volume. Applies to Direct and Announcement Kokoro output.</div>
+                </label>
+                <label id="speech-pocket-tts-output-gain-wrap">Pocket TTS Output Gain
+                  <input
+                    id="set_speech_pocket_tts_output_gain"
+                    type="number"
+                    min="0.1"
+                    max="4"
+                    step="0.1"
+                    value="${escapeHtml(settings.speech_pocket_tts_output_gain || "1.5")}"
+                  />
+                  <div class="small">1.0 is raw model volume. Applies to Direct and Announcement Pocket TTS output.</div>
+                </label>
                 <label id="speech-openai-tts-voice-wrap">OpenAI-Compatible Voice
                   <select id="set_speech_openai_tts_voice">
                     ${renderSettingsSelectOptions(
@@ -16091,7 +16113,10 @@ async function loadSettingsView() {
                   <select id="set_admin_only_plugins" class="settings-multiselect" multiple size="14">
                     ${adminOptionHtml}
                   </select>
-                  <div class="small">Selected plugins can only run for linked People marked as admin.</div>
+                  <div class="small">
+                    Selected Verbas can only run for linked People marked as admin. Kernel tools are always admin-only
+                    when at least one Person is marked admin; if no admins exist, admin blocking is inactive.
+                  </div>
                 </label>
                 <div class="inline-row">
                   <button type="button" id="settings-admin-defaults" class="inline-btn">Reset To Defaults</button>
@@ -16437,6 +16462,10 @@ async function loadSettingsView() {
   const speechOpenAiTtsManualModelEl = document.getElementById("set_speech_openai_tts_manual_model");
   const speechTtsVoiceWrapEl = document.getElementById("speech-tts-voice-wrap");
   const speechTtsVoiceEl = document.getElementById("set_speech_tts_voice");
+  const speechKokoroOutputGainWrapEl = document.getElementById("speech-kokoro-output-gain-wrap");
+  const speechKokoroOutputGainEl = document.getElementById("set_speech_kokoro_output_gain");
+  const speechPocketTtsOutputGainWrapEl = document.getElementById("speech-pocket-tts-output-gain-wrap");
+  const speechPocketTtsOutputGainEl = document.getElementById("set_speech_pocket_tts_output_gain");
   const speechOpenAiTtsVoiceWrapEl = document.getElementById("speech-openai-tts-voice-wrap");
   const speechOpenAiTtsVoiceEl = document.getElementById("set_speech_openai_tts_voice");
   const speechOpenAiTtsManualVoiceWrapEl = document.getElementById("speech-openai-tts-manual-voice-wrap");
@@ -16703,12 +16732,16 @@ async function loadSettingsView() {
     const showsOpenAiCompatible = isOpenAiCompatibleTtsBackend(ttsBackend);
     const showsWyoming = ttsBackend === "wyoming";
     const showsSharedOpenAiConfig = showsOpenAiCompatible || isOpenAiCompatibleTtsBackend(announcementTtsBackend);
+    const showsKokoroOutputGain = ttsBackend === "kokoro" || announcementTtsBackend === "kokoro";
+    const showsPocketTtsOutputGain = ttsBackend === "pocket_tts" || announcementTtsBackend === "pocket_tts";
 
     syncSpeechTtsModelOptions({ forceReset: resetTtsSelection });
     syncSpeechTtsVoiceOptions({ forceReset: resetTtsSelection });
 
     setElementVisible(speechTtsModelWrapEl, showsLocalModel);
     setElementVisible(speechTtsVoiceWrapEl, showsVoiceSelect);
+    setElementVisible(speechKokoroOutputGainWrapEl, showsKokoroOutputGain);
+    setElementVisible(speechPocketTtsOutputGainWrapEl, showsPocketTtsOutputGain);
     setElementVisible(speechOpenAiTtsModelWrapEl, showsOpenAiCompatible);
     setElementVisible(speechOpenAiTtsManualModelWrapEl, showsOpenAiCompatible);
     setElementVisible(speechOpenAiTtsVoiceWrapEl, showsOpenAiCompatible);
@@ -17269,10 +17302,21 @@ async function loadSettingsView() {
     setSpeechTtsDownloadEnabled(false);
   };
 
+  const readTtsOutputGainValue = (element) => {
+    const raw = String(element?.value || "").trim();
+    if (!raw) {
+      return null;
+    }
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+
   const buildSpeechTtsPreviewPayload = () => ({
     backend: String(speechTtsBackendEl?.value || "").trim(),
     model: getSpeechTtsModelValue(),
     voice: getSpeechTtsVoiceValue(),
+    kokoro_output_gain: readTtsOutputGainValue(speechKokoroOutputGainEl),
+    pocket_tts_output_gain: readTtsOutputGainValue(speechPocketTtsOutputGainEl),
     acceleration: String(speechAccelerationEl?.value || "").trim(),
     wyoming_host: String(document.getElementById("set_speech_wyoming_tts_host")?.value || "").trim(),
     wyoming_port: String(document.getElementById("set_speech_wyoming_tts_port")?.value || "").trim(),
@@ -17785,6 +17829,8 @@ async function loadSettingsView() {
     const speechTtsBackend = String(document.getElementById("set_speech_tts_backend")?.value || "").trim();
     const speechTtsModel = getSpeechTtsModelValue();
     const speechTtsVoice = getSpeechTtsVoiceValue();
+    const speechKokoroOutputGain = readTtsOutputGainValue(speechKokoroOutputGainEl);
+    const speechPocketTtsOutputGain = readTtsOutputGainValue(speechPocketTtsOutputGainEl);
     const speechWyomingTtsHost = String(document.getElementById("set_speech_wyoming_tts_host")?.value || "").trim();
     const speechWyomingTtsPort = String(document.getElementById("set_speech_wyoming_tts_port")?.value || "").trim();
     const speechWyomingTtsVoice = String(speechWyomingTtsVoiceEl?.value || "").trim();
@@ -17823,6 +17869,8 @@ async function loadSettingsView() {
       speech_tts_backend: speechTtsBackend,
       speech_tts_model: speechTtsModel,
       speech_tts_voice: speechTtsVoice,
+      speech_kokoro_output_gain: speechKokoroOutputGain,
+      speech_pocket_tts_output_gain: speechPocketTtsOutputGain,
       speech_wyoming_tts_host: speechWyomingTtsHost,
       speech_wyoming_tts_port: speechWyomingTtsPort,
       speech_wyoming_tts_voice: speechWyomingTtsVoice,

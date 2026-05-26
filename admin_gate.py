@@ -55,6 +55,16 @@ def is_admin_only_plugin(plugin_id: str) -> bool:
     return (plugin_id or "").strip().lower() in get_admin_only_plugins()
 
 
+def admin_gate_enabled(redis_client=None) -> bool:
+    people_module = _load_people_module()
+    if people_module is None:
+        return False
+    try:
+        return bool(people_module.admin_people(redis_client or _redis_client))
+    except Exception:
+        return False
+
+
 def _text(value: Any) -> str:
     if isinstance(value, (bytes, bytearray)):
         try:
