@@ -79,6 +79,7 @@ from .conversation import (
 )
 from .backends import (
     _build_experimental_tts_chunks,
+    clear_tts_model_caches,
     _load_faster_whisper_model,
     _load_kokoro_pipeline,
     _load_piper_voice_model,

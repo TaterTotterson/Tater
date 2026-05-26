@@ -192,6 +192,21 @@ logger = logging.getLogger("speech_tts")
 RUNTIME_TTS_ASSET_TTL_SECONDS = 15 * 60.0
 
 
+def clear_tts_model_caches(*, include_piper: bool = True) -> Dict[str, int]:
+    cleared: Dict[str, int] = {}
+    with _kokoro_pipeline_lock:
+        cleared["kokoro"] = len(_kokoro_pipeline_cache)
+        _kokoro_pipeline_cache.clear()
+    with _pocket_tts_model_lock:
+        cleared["pocket_tts"] = len(_pocket_tts_model_cache)
+        _pocket_tts_model_cache.clear()
+    if include_piper:
+        with _piper_voice_lock:
+            cleared["piper"] = len(_piper_voice_cache)
+            _piper_voice_cache.clear()
+    return cleared
+
+
 def _cuda_runtime_available() -> bool:
     with contextlib.suppress(Exception):
         ctranslate2_mod = importlib.import_module("ctranslate2")
