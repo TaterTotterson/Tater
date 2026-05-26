@@ -1210,6 +1210,22 @@ def _load_pocket_tts_model(model_id: str) -> Any:
         return model
 
 
+def clear_tts_model_caches(*, include_piper: bool = True) -> Dict[str, int]:
+    vp = _vp()
+    cleared: Dict[str, int] = {}
+    with vp._kokoro_pipeline_lock:
+        cleared["kokoro"] = len(vp._kokoro_pipeline_cache)
+        vp._kokoro_pipeline_cache.clear()
+    with vp._pocket_tts_model_lock:
+        cleared["pocket_tts"] = len(vp._pocket_tts_model_cache)
+        vp._pocket_tts_model_cache.clear()
+    if include_piper:
+        with vp._piper_voice_lock:
+            cleared["piper"] = len(vp._piper_voice_cache)
+            vp._piper_voice_cache.clear()
+    return cleared
+
+
 def _piper_model_paths(model_id: str) -> Tuple[str, str]:
     vp = _vp()
     root = vp._ensure_tts_backend_model_root("piper")

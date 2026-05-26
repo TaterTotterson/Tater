@@ -92,6 +92,7 @@ from speech_settings import (
     save_speech_settings as save_shared_speech_settings,
 )
 from speech_tts import (
+    clear_tts_model_caches as clear_announcement_tts_model_caches,
     fetch_openai_compatible_tts_model_options,
     fetch_openai_compatible_tts_voice_options,
     fetch_wyoming_tts_voice_options,
@@ -785,6 +786,41 @@ def _start_speech_model_warmup(settings: Dict[str, Any], *, reason: str = "setti
     snapshot["started"] = True
     snapshot["already_running"] = False
     return snapshot
+
+
+def _reload_local_tts_model_caches(*, reason: str) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "ok": True,
+        "reason": reason,
+        "voice_pipeline": {},
+        "announcement_tts": {},
+        "errors": [],
+    }
+    try:
+        from esphome import voice_pipeline
+
+        result["voice_pipeline"] = voice_pipeline.clear_tts_model_caches()
+    except Exception as exc:
+        message = str(exc) or type(exc).__name__
+        result["errors"].append(f"voice_pipeline: {message}")
+        logger.warning("[speech-warmup] native TTS cache clear failed: %s", message)
+
+    try:
+        result["announcement_tts"] = clear_announcement_tts_model_caches()
+    except Exception as exc:
+        message = str(exc) or type(exc).__name__
+        result["errors"].append(f"announcement_tts: {message}")
+        logger.warning("[speech-warmup] announcement TTS cache clear failed: %s", message)
+
+    result["ok"] = not bool(result["errors"])
+    if result["ok"]:
+        logger.info(
+            "[speech-warmup] cleared TTS model caches reason=%s voice_pipeline=%s announcement_tts=%s",
+            reason,
+            result["voice_pipeline"],
+            result["announcement_tts"],
+        )
+    return result
 
 
 def _build_hydra_llm_endpoint(host: Any, port: Any) -> str:
@@ -9415,6 +9451,7 @@ def test_aladdin_settings(payload: AladdinTestRequest) -> Dict[str, Any]:
 def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str, Any]:
     updates = payload.model_dump(exclude_none=True)
     speech_warmup_result: Dict[str, Any] = {}
+    tts_reload_result: Dict[str, Any] = {}
 
     def _bounded_int(
         value: Any,
@@ -9617,6 +9654,19 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "speech_announcement_openai_tts_base_url",
         "speech_announcement_openai_tts_api_key",
     }
+    tts_reload_keys = {
+        "speech_acceleration",
+        "speech_tts_backend",
+        "speech_tts_model",
+        "speech_tts_voice",
+        "speech_announcement_tts_backend",
+        "speech_announcement_tts_model",
+        "speech_announcement_tts_voice",
+    }
+    speech_warmup_keys = set(speech_keys) - {
+        "speech_kokoro_output_gain",
+        "speech_pocket_tts_output_gain",
+    }
     if any(key in updates for key in speech_keys):
         current_speech = get_shared_speech_settings()
         save_shared_speech_settings(
@@ -9691,7 +9741,10 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
                 )
             ).strip(),
         )
-        speech_warmup_result = _start_speech_model_warmup(get_shared_speech_settings(), reason="settings-save")
+        if any(key in updates for key in tts_reload_keys):
+            tts_reload_result = _reload_local_tts_model_caches(reason="settings-save")
+        if any(key in updates for key in speech_warmup_keys):
+            speech_warmup_result = _start_speech_model_warmup(get_shared_speech_settings(), reason="settings-save")
 
     spudex_model_keys = {"spudex_llm_host", "spudex_llm_model"}
     if any(key in updates for key in spudex_model_keys):
@@ -9947,5 +10000,6 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "ok": True,
         "updated": sorted(updates.keys()),
         "esphome": esphome_result,
+        "tts_reload": tts_reload_result,
         "speech_warmup": speech_warmup_result or _speech_model_warmup_snapshot(),
     }
