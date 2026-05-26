@@ -79,6 +79,21 @@ def device_image_src(*name_candidates: Any) -> str:
         if any(
             part in token
             for part in (
+                "taterreachy",
+                "tater-reachy",
+                "tater reachy",
+                "tater voice sat",
+                "tatervoicesat",
+                "reachy-mini",
+                "reachy_mini",
+                "reachy mini",
+                "reachymini",
+            )
+        ):
+            return _named_satellite_image_src("reachy-mini.png")
+        if any(
+            part in token
+            for part in (
                 "respeaker-lite",
                 "respeaker_lite",
                 "respeaker lite",
