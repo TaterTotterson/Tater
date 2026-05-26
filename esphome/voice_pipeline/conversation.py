@@ -84,6 +84,8 @@ class VoiceSessionRuntime:
     max_probability: float = 0.0
     audio_peak_dbfs: float = -120.0
     audio_level_chunks: int = 0
+    vad_audio_peak_dbfs: float = -120.0
+    vad_audio_level_chunks: int = 0
     no_speech_recovered_transcript: bool = False
     no_speech_recovered_partial: bool = False
     stt_end_sent: bool = False

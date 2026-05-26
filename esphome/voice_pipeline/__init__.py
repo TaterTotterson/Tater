@@ -4764,6 +4764,38 @@ def _transcript_is_low_signal(transcript: str) -> bool:
     return len(compact) < 3
 
 
+def _voice_turn_has_low_speech_evidence(session: VoiceSessionRuntime, transcript: str) -> bool:
+    if not isinstance(session, VoiceSessionRuntime):
+        return False
+
+    words = re.findall(r"[a-z0-9']+", _text(transcript).lower())
+    if not words:
+        return True
+
+    is_brief_command = len(words) == 1 and words[0] in {"yes", "no", "stop", "cancel", "play", "pause", "next", "back"}
+    speech_s = max(0.0, float(getattr(session, "speech_duration_s", 0.0) or 0.0))
+    max_prob = max(0.0, float(getattr(session, "max_probability", 0.0) or 0.0))
+    vad_peak = (
+        float(getattr(session, "vad_audio_peak_dbfs", -120.0) or -120.0)
+        if int(getattr(session, "vad_audio_level_chunks", 0) or 0) > 0
+        else -120.0
+    )
+
+    if speech_s >= 0.35:
+        return False
+    if max_prob >= 0.50:
+        return False
+    if len(words) >= 7 and vad_peak >= -36.0:
+        return False
+    if is_brief_command and (max_prob >= 0.12 or vad_peak >= -34.0):
+        return False
+    if len(words) <= 6 and speech_s < 0.22 and max_prob < 0.32 and vad_peak < -34.0:
+        return True
+    if speech_s < 0.10 and max_prob < 0.45 and vad_peak < -28.0:
+        return True
+    return False
+
+
 def _apply_startup_preroll(session: VoiceSessionRuntime) -> int:
     if not isinstance(session, VoiceSessionRuntime):
         return 0
@@ -4921,6 +4953,19 @@ async def _process_voice_turn(session: VoiceSessionRuntime) -> Dict[str, Any]:
             "transcript": "",
             "no_op": True,
             "no_op_reason": "empty_transcript",
+        }
+
+    if _voice_turn_has_low_speech_evidence(session, transcript):
+        _native_debug(
+            f"low-evidence transcript bypass selector={session.selector} session_id={session.session_id} "
+            f"transcript={transcript!r} speech_s={float(session.speech_duration_s or 0.0):.2f} "
+            f"max_prob={float(session.max_probability or 0.0):.3f} "
+            f"vad_peak_dbfs={float(session.vad_audio_peak_dbfs or -120.0):.1f}"
+        )
+        return {
+            "transcript": transcript,
+            "no_op": True,
+            "no_op_reason": "low_signal_transcript",
         }
 
     if _transcript_is_low_signal(transcript):
@@ -5143,9 +5188,15 @@ async def _finalize_session(
             )
             recovery_low_prob_threshold = max(0.10, min(0.24, seg_threshold * 0.5))
             recovery_prob = float(session.max_probability or 0.0)
+            recovery_audio_peak = (
+                float(session.vad_audio_peak_dbfs or -120.0)
+                if int(session.vad_audio_level_chunks or 0) > 0
+                else -120.0
+            )
+            recovery_audio_evidence = recovery_audio_peak >= -38.0
             recovery_by_transcript = (
-                len(recovered_words) >= 3
-                or (len(recovered_words) >= 2 and recovery_prob >= recovery_low_prob_threshold)
+                (len(recovered_words) >= 2 and recovery_prob >= recovery_low_prob_threshold)
+                or (len(recovered_words) >= 5 and recovery_audio_evidence)
                 or (is_brief_command and recovery_prob >= 0.08)
             )
             partial_recovery = (
@@ -5154,8 +5205,8 @@ async def _finalize_session(
                 and (not recovered_complete)
                 and 2 <= len(recovered_words) <= 6
                 and (
-                    recovery_prob >= 0.05
-                    or float(session.audio_peak_dbfs or -120.0) >= -42.0
+                    recovery_prob >= recovery_low_prob_threshold
+                    or (len(recovered_words) >= 5 and recovery_audio_evidence)
                 )
             )
             recovery_ok = (
@@ -5175,6 +5226,7 @@ async def _finalize_session(
                     f"no-speech guard recovered transcript selector={token} session_id={session.session_id} "
                     f"reason={no_speech_reason} transcript_len={len(recovered_transcript)} words={len(recovered_words)} "
                     f"max_prob={session.max_probability:.3f} threshold={recovery_prob_threshold:.3f} "
+                    f"vad_peak_dbfs={recovery_audio_peak:.1f} "
                     f"transcript_recovery={bool(recovery_by_transcript)} partial={bool(partial_recovery)} "
                     f"complete={recovered_complete} complete_reason={_text(recovered_assessment.get('reason')) or '-'}"
                 )
@@ -5186,7 +5238,7 @@ async def _finalize_session(
                 )
                 session.turn_outcome = outcome
                 logger.info(
-                    "[native-voice] no speech finalize selector=%s session_id=%s reason=%s outcome=%s speech_chunks=%s speech_s=%.2f audio_chunks=%s bytes=%s audio_peak_dbfs=%.1f max_prob=%.3f transcript_len=%s transcript_words=%s complete=%s complete_reason=%s",
+                    "[native-voice] no speech finalize selector=%s session_id=%s reason=%s outcome=%s speech_chunks=%s speech_s=%.2f audio_chunks=%s bytes=%s audio_peak_dbfs=%.1f vad_peak_dbfs=%.1f max_prob=%.3f transcript_len=%s transcript_words=%s complete=%s complete_reason=%s",
                     token,
                     _text(session_id),
                     no_speech_reason,
@@ -5196,6 +5248,7 @@ async def _finalize_session(
                     int(session.audio_chunks),
                     int(session.audio_bytes),
                     float(session.audio_peak_dbfs or -120.0),
+                    recovery_audio_peak,
                     float(session.max_probability),
                     len(recovered_transcript),
                     len(recovered_words),
@@ -6093,6 +6146,10 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                 session.audio_level_chunks += 1
                 if float(chunk_dbfs) > float(session.audio_peak_dbfs or -120.0):
                     session.audio_peak_dbfs = float(chunk_dbfs)
+                if not vad_startup_ignored:
+                    session.vad_audio_level_chunks += 1
+                    if float(chunk_dbfs) > float(session.vad_audio_peak_dbfs or -120.0):
+                        session.vad_audio_peak_dbfs = float(chunk_dbfs)
             if bool(metrics.get("voice_seen")) and float(session.first_vad_speech_ts or 0.0) <= 0.0:
                 session.first_vad_speech_ts = now_ts
                 logger.info(
