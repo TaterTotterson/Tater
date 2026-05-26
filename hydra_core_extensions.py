@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from core_registry import get_core_registry
 from helpers import redis_client as default_redis
 from verba_kernel import normalize_platform
+from admin_gate import admin_denial_message, admin_gate_enabled, origin_is_admin
 
 
 def _coerce_text(value: Any) -> str:
@@ -273,6 +274,16 @@ async def run_hydra_kernel_tool(
     if not wanted:
         return None
     normalized_platform = _canonical_platform(platform) or str(platform or "").strip().lower() or "webui"
+    rc = redis_client if redis_client is not None else default_redis
+    if admin_gate_enabled(rc) and not origin_is_admin(normalized_platform, origin, rc):
+        return {
+            "ok": False,
+            "error": {
+                "code": "admin_only_tool",
+                "message": admin_denial_message(normalized_platform, origin, rc),
+            },
+            "say_hint": "Explain that this kernel tool is restricted to People marked as admin.",
+        }
 
     for core_key, _entry, module in _iter_core_modules(redis_client=redis_client):
         tools_provider = getattr(module, "get_hydra_kernel_tools", None)

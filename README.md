@@ -270,7 +270,7 @@ Jetson and Thor:
 
 General voice notes:
 - Tater warms selected local STT/TTS models at startup and after saving voice model settings. Set `TATER_SPEECH_WARMUP_ON_STARTUP=false` to disable startup warmup.
-- Kokoro output is boosted slightly by default for clearer satellite playback. Tune it with `TATER_KOKORO_OUTPUT_GAIN`; the default is `1.5`.
+- Kokoro and Pocket TTS output are boosted slightly by default for clearer satellite playback. Tune them in Settings -> Models -> Speech -> TTS, or override local runs with `TATER_KOKORO_OUTPUT_GAIN` / `TATER_POCKET_TTS_OUTPUT_GAIN`; both default to `1.5`.
 - Voice activity detection defaults to Silero VAD. Low-power hosts can switch the Voice Pipeline VAD backend to WebRTC, which uses `webrtcvad-wheels`.
 - If Speaker ID or Emotion ID is enabled, SpeechBrain can use CUDA or MPS when supported, with CPU fallback.
 

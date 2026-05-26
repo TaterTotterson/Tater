@@ -155,6 +155,7 @@ DEFAULT_TTS_MODEL_ROOT = os.path.abspath(
 DEFAULT_KOKORO_ENGINE = "auto"
 DEFAULT_KOKORO_PROVIDER = "cpu"
 DEFAULT_KOKORO_OUTPUT_GAIN = 1.5
+DEFAULT_POCKET_TTS_OUTPUT_GAIN = 1.5
 DEFAULT_KOKORO_TORCH_REPO_ID = "hexgrad/Kokoro-82M"
 DEFAULT_KOKORO_TORCH_ZH_REPO_ID = "hexgrad/Kokoro-82M-v1.1-zh"
 DEFAULT_OPENAI_COMPATIBLE_TTS_TIMEOUT_SECONDS = 90.0
@@ -497,8 +498,29 @@ def _as_float(value: Any, default: float, *, minimum: Optional[float] = None) ->
     return out
 
 
-def _kokoro_output_gain() -> float:
-    return min(4.0, _as_float(os.getenv("TATER_KOKORO_OUTPUT_GAIN"), DEFAULT_KOKORO_OUTPUT_GAIN, minimum=0.1))
+def _tts_output_gain(env_name: str, settings_key: str, default: float, override: Any = None) -> float:
+    env_value = os.getenv(env_name)
+    if env_value is not None and _text(env_value):
+        return min(4.0, _as_float(env_value, default, minimum=0.1))
+    if override is not None and _text(override):
+        return min(4.0, _as_float(override, default, minimum=0.1))
+    with contextlib.suppress(Exception):
+        settings = get_speech_settings() or {}
+        return min(4.0, _as_float(settings.get(settings_key), default, minimum=0.1))
+    return min(4.0, _as_float(default, default, minimum=0.1))
+
+
+def _kokoro_output_gain(override: Any = None) -> float:
+    return _tts_output_gain("TATER_KOKORO_OUTPUT_GAIN", "kokoro_output_gain", DEFAULT_KOKORO_OUTPUT_GAIN, override)
+
+
+def _pocket_tts_output_gain(override: Any = None) -> float:
+    return _tts_output_gain(
+        "TATER_POCKET_TTS_OUTPUT_GAIN",
+        "pocket_tts_output_gain",
+        DEFAULT_POCKET_TTS_OUTPUT_GAIN,
+        override,
+    )
 
 
 def _append_pcm_silence(audio_bytes: bytes, audio_format: Dict[str, Any], *, seconds: float) -> bytes:
@@ -1736,7 +1758,13 @@ def _load_piper_voice_model(model_id: str) -> Any:
         return voice
 
 
-def _synthesize_kokoro_sync(text: str, model_id: str, voice: str, acceleration: Any = None) -> Tuple[bytes, Dict[str, Any]]:
+def _synthesize_kokoro_sync(
+    text: str,
+    model_id: str,
+    voice: str,
+    acceleration: Any = None,
+    output_gain: Any = None,
+) -> Tuple[bytes, Dict[str, Any]]:
     engine = _kokoro_engine(acceleration)
     pipeline = _load_kokoro_pipeline(model_id, acceleration=acceleration, voice=voice)
     if engine == "torch":
@@ -1755,16 +1783,16 @@ def _synthesize_kokoro_sync(text: str, model_id: str, voice: str, acceleration: 
             return b"", {"rate": 24000, "width": 2, "channels": 1}
         np_mod = importlib.import_module("numpy")
         audio = np_mod.concatenate([np_mod.asarray(chunk, dtype=np_mod.float32).reshape(-1) for chunk in chunks])
-        audio_bytes = _float_audio_to_pcm16_bytes(audio, gain=_kokoro_output_gain())
+        audio_bytes = _float_audio_to_pcm16_bytes(audio, gain=_kokoro_output_gain(output_gain))
         return audio_bytes, {"rate": 24000, "width": 2, "channels": 1}
 
     result = pipeline.run(_text(text), voice=_text(voice) or DEFAULT_KOKORO_VOICE)
-    audio_bytes = _float_audio_to_pcm16_bytes(getattr(result, "audio", None), gain=_kokoro_output_gain())
+    audio_bytes = _float_audio_to_pcm16_bytes(getattr(result, "audio", None), gain=_kokoro_output_gain(output_gain))
     sample_rate = int(getattr(result, "sample_rate", 24000) or 24000)
     return audio_bytes, {"rate": sample_rate, "width": 2, "channels": 1}
 
 
-def _synthesize_pocket_tts_sync(text: str, model_id: str, voice: str) -> Tuple[bytes, Dict[str, Any]]:
+def _synthesize_pocket_tts_sync(text: str, model_id: str, voice: str, output_gain: Any = None) -> Tuple[bytes, Dict[str, Any]]:
     prompt = _text(text)
     if not prompt:
         return b"", {}
@@ -1784,7 +1812,7 @@ def _synthesize_pocket_tts_sync(text: str, model_id: str, voice: str) -> Tuple[b
         model_state = model.get_state_for_audio_prompt(_text(voice) or DEFAULT_POCKET_TTS_VOICE)
         audio_tensor = model.generate_audio(model_state, prompt)
     tensor = audio_tensor.detach().cpu().squeeze()
-    audio_bytes = _float_audio_to_pcm16_bytes(tensor.numpy())
+    audio_bytes = _float_audio_to_pcm16_bytes(tensor.numpy(), gain=_pocket_tts_output_gain(output_gain))
     return audio_bytes, {"rate": int(getattr(model, "sample_rate", 24000) or 24000), "width": 2, "channels": 1}
 
 
@@ -1839,6 +1867,8 @@ async def synthesize_tts_wav(
     openai_base_url: Optional[str] = None,
     openai_api_key: Optional[str] = None,
     acceleration: Any = None,
+    kokoro_output_gain: Any = None,
+    pocket_tts_output_gain: Any = None,
 ) -> bytes:
     selected_backend = normalize_tts_backend(backend)
     prompt = _text(text)
@@ -1852,6 +1882,7 @@ async def synthesize_tts_wav(
             _text(model) or DEFAULT_KOKORO_MODEL,
             _text(voice) or DEFAULT_KOKORO_VOICE,
             acceleration,
+            kokoro_output_gain,
         )
         return pcm_to_wav(audio_bytes, audio_format)
 
@@ -1861,6 +1892,7 @@ async def synthesize_tts_wav(
             prompt,
             _text(model) or DEFAULT_POCKET_TTS_MODEL,
             _text(voice) or DEFAULT_POCKET_TTS_VOICE,
+            pocket_tts_output_gain,
         )
         return pcm_to_wav(audio_bytes, audio_format)
 
@@ -1907,6 +1939,8 @@ async def synthesize_preview_wav(
     openai_base_url: Optional[str] = None,
     openai_api_key: Optional[str] = None,
     acceleration: Any = None,
+    kokoro_output_gain: Any = None,
+    pocket_tts_output_gain: Any = None,
 ) -> bytes:
     return await synthesize_tts_wav(
         text=text,
@@ -1919,6 +1953,8 @@ async def synthesize_preview_wav(
         openai_base_url=openai_base_url,
         openai_api_key=openai_api_key,
         acceleration=acceleration,
+        kokoro_output_gain=kokoro_output_gain,
+        pocket_tts_output_gain=pocket_tts_output_gain,
     )
 
 
