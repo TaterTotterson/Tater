@@ -265,8 +265,14 @@ def apply_resolution_to_origin(
         origin["master_user_id"] = _text(resolved.get("master_user_id"))
         origin["person_id"] = _text(resolved.get("person_id") or resolved.get("master_user_id"))
         origin["person_name"] = _text(resolved.get("display_name"))
-        if _text(resolved.get("instructions")):
-            origin["person_instructions"] = _text(resolved.get("instructions"))[:PERSON_INSTRUCTIONS_MAX_CHARS]
+        instructions = _text(resolved.get("instructions"))
+        if instructions:
+            origin["person_instructions"] = instructions[:PERSON_INSTRUCTIONS_MAX_CHARS]
+        else:
+            origin.pop("person_instructions", None)
+    else:
+        for key in ("master_user_id", "person_id", "person_name", "person_instructions"):
+            origin.pop(key, None)
     origin["people_resolution"] = resolved
     return resolved
 
@@ -274,7 +280,7 @@ def apply_resolution_to_origin(
 def person_instruction_prompt_from_origin(origin: Optional[Dict[str, Any]]) -> str:
     source = origin if isinstance(origin, dict) else {}
     resolved = source.get("people_resolution") if isinstance(source.get("people_resolution"), dict) else {}
-    if not bool(resolved.get("matched")) and not _text(source.get("person_id") or source.get("master_user_id")):
+    if not bool(resolved.get("matched")):
         return ""
     instructions = _text(source.get("person_instructions") or resolved.get("instructions"))
     if not instructions:
