@@ -31,6 +31,7 @@ from admin_gate import (
     admin_denial_message,
     admin_gate_enabled,
     is_admin_only_plugin,
+    origin_has_full_tool_access,
     origin_is_admin,
 )
 from hydra_core_extensions import (
@@ -263,6 +264,8 @@ def _admin_gate_blocks_verba(*, plugin_id: str, platform: str, origin: Optional[
         return None
     if not is_admin_only_plugin(plugin_id):
         return None
+    if origin_has_full_tool_access(platform, origin, default_redis):
+        return None
     if origin_is_admin(platform, origin, default_redis):
         return None
     return _admin_only_failure(platform=platform, origin=origin, tool_kind="Verba")
@@ -270,6 +273,8 @@ def _admin_gate_blocks_verba(*, plugin_id: str, platform: str, origin: Optional[
 
 def _admin_gate_blocks_kernel(*, platform: str, origin: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if not admin_gate_enabled(default_redis):
+        return None
+    if origin_has_full_tool_access(platform, origin, default_redis):
         return None
     if origin_is_admin(platform, origin, default_redis):
         return None

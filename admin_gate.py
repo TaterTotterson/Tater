@@ -21,6 +21,18 @@ DEFAULT_ADMIN_ONLY_PLUGINS = {
     "voicepe_remote_timer",
 }
 
+# Hydra attaches scope as trusted runtime metadata; AI Task Core uses this prefix
+# for scheduled runs that should execute with full tool access.
+FULL_ACCESS_SCOPES = (
+    "ai_task:",
+)
+
+FULL_ACCESS_PLATFORMS = {
+    "ai_task",
+    "ai_tasks",
+    "ai_task_core",
+}
+
 
 def normalize_admin_list(raw: str | Iterable[str]) -> set[str]:
     if raw is None:
@@ -161,6 +173,20 @@ def resolve_admin_status(
 
 def origin_is_admin(platform: str, origin: Optional[Dict[str, Any]], redis_client=None) -> bool:
     return bool(resolve_admin_status(platform=platform, origin=origin, redis_client=redis_client).get("is_admin"))
+
+
+def origin_has_full_tool_access(platform: str, origin: Optional[Dict[str, Any]], redis_client=None) -> bool:
+    del redis_client
+    origin_payload = origin if isinstance(origin, dict) else {}
+    resolved_platform = _platform(platform or origin_payload.get("platform"))
+    if resolved_platform in FULL_ACCESS_PLATFORMS:
+        return True
+
+    scope = _text(origin_payload.get("scope")).lower()
+    if scope and any(scope.startswith(prefix) for prefix in FULL_ACCESS_SCOPES):
+        return True
+
+    return False
 
 
 def admin_denial_message(platform: str, origin: Optional[Dict[str, Any]], redis_client=None) -> str:
