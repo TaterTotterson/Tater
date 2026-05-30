@@ -7,7 +7,7 @@
   <a href="https://taterassistant.com">taterassistant.com</a>
 </h3>
 
-**Tater** is a local AI assistant that runs on local LLMs, with **Hydra** handling reasoning, orchestration, and tool use. It includes a built-in voice system that talks directly to ESPHome devices like **VoicePE** and **Sat1**, a WebUI for setup, configuration, and private chats, and integrations across **Discord**, **Home Assistant**, **HomeKit**, **IRC**, **macOS**, **Matrix**, **Telegram**, and even the **OG Xbox via XBMC4Xbox**.
+**Tater** is a local-first AI platform with built-in LLM, vision, voice, memory, automation, and integration systems. **Hydra** handles reasoning, orchestration, and tool use, while Tater can run local models through **llama.cpp**, **Hugging Face Transformers**, and **MLX**, or connect to remote providers through OpenAI-compatible APIs. It includes a built-in voice system that talks directly to ESPHome devices like **VoicePE**, **Sat1**, **S3Box**, and **ReSpeaker XVF3800**, a WebUI for setup, configuration, chats, model management, and system monitoring, plus integrations across **Discord**, **Home Assistant**, **HomeKit**, **IRC**, **macOS**, **Matrix**, **Meshtastic**, **Telegram**, and even the **OG Xbox via XBMC4Xbox**.
 
 ---
 
@@ -46,6 +46,7 @@ Some Portals are paired with companion repos/apps that complete the end-user int
 | [openWakeWord Trainer](https://github.com/TaterTotterson/openWakeWord-Trainer) | Trainer for custom openWakeWord models used by Tater's local or standalone openWakeWord server. |
 | [Tater MacOS](https://github.com/TaterTotterson/Tater-MacOS) | Menu bar companion app and bridge client for desktop chat, quick actions, and uploads. |
 | [Reachy Mini Voice Satellite](https://huggingface.co/spaces/TaterTotterson/tater_voice_sat) | Reachy Mini robot app that turns Reachy Mini into a voice satellite for Tater or Home Assistant. |
+| [Reachy Mini Tater Standalone](https://huggingface.co/spaces/TaterTotterson/tater_reachy_standalone) | Reachy Mini robot app that can run the full Tater app/stack directly on Reachy. |
 | [Tater NWW Server](https://github.com/TaterTotterson/Tater-NWW-Server) | Standalone NanoWakeWord WebSocket server for Tater satellites using remote NanoWakeWord wake detection. |
 | [Tater OWW Server](https://github.com/TaterTotterson/Tater-OWW-Server) | Standalone openWakeWord WebSocket server for Tater satellites that need remote wake detection outside the main Tater app. |
 | [Tater S3Box Display](https://github.com/TaterTotterson/Tater-S3Box-Display) | ESP32-S3-BOX display firmware for Tater voice and dashboard-style device experiences. |
@@ -55,7 +56,7 @@ Some Portals are paired with companion repos/apps that complete the end-user int
 
 # Installation
 > **Note**:
-> - Tater currently recommends using gemma-4-26b-a4b (disable thinking), qwen/qwen3.5-35b-a3b (disable thinking), qwen3-coder-next, qwen3-next-80b, or gpt-oss-120b (disable thinking)
+> - Tater can run any compatible local or OpenAI-compatible model. If you use a thinking model, disable thinking for best Hydra/tool behavior. Tater's built-in local providers try to suppress thinking automatically where supported.
 
 ## Local Installation
 
@@ -312,17 +313,18 @@ After Tater is running, open TaterOS and finish the first-run setup:
    - choose `Hugging Face Transformers` to load a local model directly inside Tater
    - choose `llama.cpp GGUF` to load a GGUF model through llama-cpp-python
    - choose `MLX LM (Apple Silicon)` to load an MLX model directly on an Apple Silicon Mac
-   - set `Hydra LLM Model`; OpenAI-compatible providers also need host/port
+   - for built-in local providers, download models from the Hugging Face mini-tab first, then select the downloaded model from the Settings mini-tab
+   - for OpenAI-compatible providers, set the endpoint host/port and model name
 2. Optional:
    - add more Base servers for round-robin regular AI calls
    - enable `Beast Mode` and set per-head model settings for Chat/Astraeus/Thanatos/Minos/Hermes
 
-Hydra model settings are saved by TaterOS and used at runtime.
+Hydra model settings are saved by TaterOS and used at runtime. Base, Spudex, Beast Mode routing, and Vision can each use the selected built-in local providers or OpenAI-compatible providers.
 Hugging Face Transformers model files are cached under `agent_lab/models/llm/huggingface` by default; override with `TATER_HF_TRANSFORMERS_MODEL_ROOT`.
 llama.cpp GGUF files are cached under `agent_lab/models/llm/llama-cpp` by default; override with `TATER_LLAMA_CPP_MODEL_ROOT`.
 MLX LM files are cached under `agent_lab/models/llm/mlx` by default; override with `TATER_MLX_LM_MODEL_ROOT`.
-For llama.cpp, set `Hydra LLM Model` to `owner/repo::filename.gguf`, `owner/repo/path/to/file.gguf`, a bare GGUF repo id such as `owner/repo` to auto-pick a preferred quant, or a local `.gguf` path.
-For MLX LM, set `Hydra LLM Model` to an MLX-compatible Hugging Face repo such as `mlx-community/Llama-3.2-3B-Instruct-4bit`, or a local MLX model folder.
+For llama.cpp, the model value can be `owner/repo::filename.gguf`, `owner/repo/path/to/file.gguf`, a bare GGUF repo id such as `owner/repo` to auto-pick a preferred quant, or a local `.gguf` path.
+For MLX LM, the model value can be an MLX-compatible Hugging Face repo such as `mlx-community/Llama-3.2-3B-Instruct-4bit`, or a local MLX model folder.
 Download local Hugging Face Transformers, llama.cpp, or MLX LM models from the Hugging Face mini-tab first, then choose the downloaded model from the Settings mini-tab dropdown. The downloaded model registry is stored at `agent_lab/models/llm/downloaded_models.json` by default.
 The Hugging Face mini-tab can switch between text and vision model browsing. For llama.cpp vision GGUF repos, Tater detects `mmproj*.gguf` projector files and downloads the matching projector beside the selected GGUF when one is available.
 The Hugging Face browser and downloader use the token saved in Integration Manager -> Hugging Face for gated/private models and higher Hub rate limits; explicit env overrides like `TATER_HF_MODEL_BROWSER_TOKEN`, `TATER_HF_TRANSFORMERS_TOKEN`, or `TATER_MLX_LM_TOKEN` still take priority.
