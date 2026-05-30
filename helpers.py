@@ -2472,6 +2472,10 @@ def _llama_cpp_disable_thinking_enabled() -> bool:
     return _boolish(os.getenv("TATER_LLAMA_CPP_DISABLE_THINKING"), default=True)
 
 
+def _hf_transformers_disable_thinking_enabled() -> bool:
+    return _boolish(os.getenv("TATER_HF_TRANSFORMERS_DISABLE_THINKING"), default=True)
+
+
 def _llama_cpp_preferred_quants() -> List[str]:
     raw = str(os.getenv("TATER_LLAMA_CPP_PREFERRED_QUANTS") or "Q4_K_M,Q5_K_M,Q4_K_S,Q5_0,Q4_0,Q8_0").strip()
     return [item.strip().upper() for item in raw.split(",") if item.strip()]
@@ -5911,8 +5915,9 @@ class TransformersLLMClientWrapper:
         if block_messages != messages:
             variants.append(block_messages)
         last_exc: Optional[Exception] = None
+        thinking_variants = ({"enable_thinking": False}, {}) if _hf_transformers_disable_thinking_enabled() else ({},)
         for variant in variants:
-            for extra in ({"enable_thinking": False}, {}):
+            for extra in thinking_variants:
                 try:
                     return formatter.apply_chat_template(variant, **base_kwargs, **extra)
                 except TypeError as exc:
@@ -6285,55 +6290,8 @@ def _strip_local_thinking_blocks(text: Any) -> str:
     return content
 
 
-def _append_no_think_to_content(content: Any) -> Any:
-    if isinstance(content, list):
-        out: List[Any] = []
-        appended = False
-        for item in content:
-            if isinstance(item, dict):
-                row = dict(item)
-                if not appended and str(row.get("type") or "").strip().lower() == "text":
-                    text = _coerce_content_to_text(row.get("text") or row.get("content") or row.get("value")).rstrip()
-                    if "/no_think" not in text.lower():
-                        text = f"{text}\n/no_think".strip()
-                    row["text"] = text
-                    appended = True
-                out.append(row)
-            else:
-                text = _coerce_content_to_text(item).rstrip()
-                if not appended:
-                    if "/no_think" not in text.lower():
-                        text = f"{text}\n/no_think".strip()
-                    appended = True
-                out.append(text)
-        if not appended:
-            out.append({"type": "text", "text": "/no_think"})
-        return out
-
-    text = _coerce_content_to_text(content).rstrip()
-    if "/no_think" not in text.lower():
-        text = f"{text}\n/no_think".strip()
-    return text
-
-
 def _llama_cpp_disable_thinking_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    if not _llama_cpp_disable_thinking_enabled():
-        return list(messages if isinstance(messages, list) else [])
-    out = [dict(item) for item in (messages if isinstance(messages, list) else []) if isinstance(item, dict)]
-    control = (
-        "Answer directly and concisely. Do not include chain-of-thought, hidden reasoning, "
-        "scratchpad text, or <think> blocks."
-    )
-    if out and out[0].get("role") == "system":
-        out[0]["content"] = f"{_coerce_content_to_text(out[0].get('content')).strip()}\n\n{control}".strip()
-    else:
-        out.insert(0, {"role": "system", "content": control})
-    for index in range(len(out) - 1, -1, -1):
-        if out[index].get("role") != "user":
-            continue
-        out[index]["content"] = _append_no_think_to_content(out[index].get("content"))
-        break
-    return out
+    return [dict(item) for item in (messages if isinstance(messages, list) else []) if isinstance(item, dict)]
 
 
 class LlamaCppLLMClientWrapper:
@@ -6559,26 +6517,7 @@ class LlamaCppLLMClientWrapper:
 
 
 def _mlx_lm_disable_thinking_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    if not _mlx_lm_disable_thinking_enabled():
-        return list(messages if isinstance(messages, list) else [])
-    out = [dict(item) for item in (messages if isinstance(messages, list) else []) if isinstance(item, dict)]
-    control = (
-        "Answer directly and concisely. Do not include chain-of-thought, hidden reasoning, "
-        "scratchpad text, or <think> blocks."
-    )
-    if out and out[0].get("role") == "system":
-        out[0]["content"] = f"{_coerce_content_to_text(out[0].get('content')).strip()}\n\n{control}".strip()
-    else:
-        out.insert(0, {"role": "system", "content": control})
-    for index in range(len(out) - 1, -1, -1):
-        if out[index].get("role") != "user":
-            continue
-        text = _coerce_content_to_text(out[index].get("content")).rstrip()
-        if "/no_think" not in text.lower():
-            text = f"{text}\n/no_think".strip()
-        out[index]["content"] = text
-        break
-    return out
+    return [dict(item) for item in (messages if isinstance(messages, list) else []) if isinstance(item, dict)]
 
 
 def _apply_local_stop_sequences(text: Any, stop: Any) -> str:
@@ -6674,7 +6613,8 @@ class MlxLmLLMClientWrapper:
         template = getattr(tokenizer, "apply_chat_template", None)
         if callable(template):
             last_exc: Optional[Exception] = None
-            for extra in ({"enable_thinking": False}, {}):
+            thinking_variants = ({"enable_thinking": False}, {}) if _mlx_lm_disable_thinking_enabled() else ({},)
+            for extra in thinking_variants:
                 try:
                     prompt = template(local_messages, tokenize=False, add_generation_prompt=True, **extra)
                     return _coerce_content_to_text(prompt)
