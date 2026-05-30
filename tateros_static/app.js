@@ -21678,7 +21678,6 @@ function normalizeSpudexSettings(settings = {}) {
     allowed_platforms: Array.isArray(value.allowed_platforms) ? value.allowed_platforms : ["webui"],
     max_task_steps: Number(value.max_task_steps || 6),
     command_timeout_sec: Number(value.command_timeout_sec || 45),
-    max_output_chars: Number(value.max_output_chars || 12000),
     max_log_entries: Number(value.max_log_entries || 4000),
     max_sessions: Number(value.max_sessions || 80),
     default_cwd: String(value.default_cwd || "workspace"),
@@ -21868,15 +21867,11 @@ function renderSpudexSettingsCard(settings, payload = state.spudexPayload || {})
         </label>
         <label>
           <span>Max task steps</span>
-          <input id="spudex-max-steps" type="number" min="1" max="30" value="${escapeHtml(settings.max_task_steps)}" />
+          <input id="spudex-max-steps" type="number" min="1" value="${escapeHtml(settings.max_task_steps)}" />
         </label>
         <label>
           <span>Command timeout</span>
           <input id="spudex-timeout" type="number" min="5" max="3600" value="${escapeHtml(settings.command_timeout_sec)}" />
-        </label>
-        <label>
-          <span>Output cap</span>
-          <input id="spudex-output-cap" type="number" min="1000" max="500000" value="${escapeHtml(settings.max_output_chars)}" />
         </label>
       </div>
     </section>
@@ -23107,7 +23102,6 @@ function bindSpudexView() {
       default_cwd: stringValue("spudex-default-cwd", current.default_cwd || "workspace"),
       max_task_steps: numberValue("spudex-max-steps", current.max_task_steps || 6),
       command_timeout_sec: numberValue("spudex-timeout", current.command_timeout_sec || 45),
-      max_output_chars: numberValue("spudex-output-cap", current.max_output_chars || 12000),
     };
     try {
       if (statusEl) {
