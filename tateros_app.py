@@ -8506,18 +8506,156 @@ def _dashboard_fallback_brief(context: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _dashboard_extract_json_object(text: str) -> Dict[str, Any]:
+def _dashboard_json_candidate(text: str) -> str:
     raw = str(text or "").strip()
-    if raw.startswith("```"):
-        raw = raw.strip("`").strip()
-        if raw.lower().startswith("json"):
-            raw = raw[4:].strip()
+    fenced = re.match(r"^```(?:json)?\s*(.*?)\s*```$", raw, flags=re.IGNORECASE | re.DOTALL)
+    if fenced:
+        raw = fenced.group(1).strip()
     start = raw.find("{")
     end = raw.rfind("}")
     if start >= 0 and end > start:
         raw = raw[start : end + 1]
-    parsed = json.loads(raw)
-    return parsed if isinstance(parsed, dict) else {}
+    return raw.strip()
+
+
+def _dashboard_relaxed_json_candidates(raw: str) -> List[str]:
+    candidates = [raw]
+    repaired = re.sub(r",(\s*[}\]])", r"\1", raw)
+    repaired = re.sub(r"}\s*{", "},{", repaired)
+    repaired = re.sub(r'(?<=[}\]"0-9])\s+(?="(?:id|title|text|briefs)"\s*:)', ", ", repaired)
+    if repaired != raw:
+        candidates.append(repaired)
+    return candidates
+
+
+def _dashboard_extract_array_body(raw: str, key: str) -> str:
+    match = re.search(rf'"{re.escape(key)}"\s*:\s*\[', raw)
+    if not match:
+        return ""
+    start = raw.find("[", match.start())
+    if start < 0:
+        return ""
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(raw)):
+        char = raw[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+            if depth == 0:
+                return raw[start + 1 : index]
+    return raw[start + 1 :]
+
+
+def _dashboard_iter_jsonish_objects(raw: str) -> List[str]:
+    objects: List[str] = []
+    start: Optional[int] = None
+    depth = 0
+    in_string = False
+    escaped = False
+    for index, char in enumerate(raw):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif char == "}" and depth:
+            depth -= 1
+            if depth == 0 and start is not None:
+                objects.append(raw[start : index + 1])
+                start = None
+    return objects
+
+
+def _dashboard_decode_json_fragment(value: str) -> str:
+    try:
+        decoded = json.loads(f'"{value}"')
+        return str(decoded)
+    except Exception:
+        return value.replace('\\"', '"').replace("\\n", " ").replace("\\r", " ").strip()
+
+
+def _dashboard_extract_string_field(raw: str, key: str) -> str:
+    match = re.search(rf'"{re.escape(key)}"\s*:\s*"((?:\\.|[^"\\])*)"', raw, flags=re.DOTALL)
+    if match:
+        return _dashboard_decode_json_fragment(match.group(1)).strip()
+    match = re.search(rf"'{re.escape(key)}'\s*:\s*'((?:\\.|[^'\\])*)'", raw, flags=re.DOTALL)
+    if match:
+        return match.group(1).replace("\\'", "'").replace("\\n", " ").replace("\\r", " ").strip()
+    return ""
+
+
+def _dashboard_salvage_briefs(raw: str) -> Dict[str, Any]:
+    body = _dashboard_extract_array_body(raw, "briefs") or raw
+    briefs: List[Dict[str, str]] = []
+    for fragment in _dashboard_iter_jsonish_objects(body):
+        parsed_fragment: Dict[str, Any] = {}
+        for candidate in _dashboard_relaxed_json_candidates(fragment):
+            try:
+                maybe = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(maybe, dict):
+                parsed_fragment = maybe
+                break
+        if not parsed_fragment:
+            row_id = _dashboard_extract_string_field(fragment, "id")
+            text = _dashboard_extract_string_field(fragment, "text")
+            title = _dashboard_extract_string_field(fragment, "title")
+            if row_id or text:
+                parsed_fragment = {"id": row_id, "text": text}
+                if title:
+                    parsed_fragment["title"] = title
+        row_id = str(parsed_fragment.get("id") or "").strip()
+        text = str(parsed_fragment.get("text") or "").strip()
+        if row_id and text:
+            row = {"id": row_id, "text": text}
+            title = str(parsed_fragment.get("title") or "").strip()
+            if title:
+                row["title"] = title
+            briefs.append(row)
+    return {"briefs": briefs} if briefs else {}
+
+
+def _dashboard_extract_json_object(text: str) -> Dict[str, Any]:
+    raw = _dashboard_json_candidate(text)
+    if not raw:
+        return {}
+    last_error = ""
+    for candidate in _dashboard_relaxed_json_candidates(raw):
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            last_error = str(exc)
+            continue
+        return parsed if isinstance(parsed, dict) else {}
+    salvaged = _dashboard_salvage_briefs(raw)
+    if salvaged:
+        logger.debug("[dashboard] salvaged brief rows from malformed JSON: %s", last_error)
+    elif last_error:
+        logger.debug("[dashboard] ignored malformed brief JSON: %s", last_error)
+    return salvaged
 
 
 def _dashboard_primary_llm_client_kwargs() -> Dict[str, Any]:
@@ -8670,6 +8808,7 @@ async def _dashboard_generate_briefs(
                             "You write short operational dashboard briefs for Tater. "
                             "Use only the provided data and follow each brief's instructions. Return strict JSON as "
                             "{\"briefs\":[{\"id\":\"...\",\"text\":\"...\"}]}. "
+                            "Do not wrap the JSON in markdown fences, and escape quotation marks inside JSON strings. "
                             "Most texts should be one or two natural sentences. Awareness may be a richer two to four sentence activity digest "
                             "that names what happened, where it happened, and what seems notable or quiet. "
                             "Use no markdown, no bullet lists, and no invented sensor values."
