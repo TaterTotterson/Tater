@@ -19,7 +19,6 @@ DEFAULT_SPUDEX_SETTINGS: Dict[str, Any] = {
     "allow_inline_eval": False,
     "max_task_steps": 6,
     "command_timeout_sec": 45,
-    "max_output_chars": 12000,
     "max_log_entries": 4000,
     "max_sessions": 80,
     "allow_network": False,
@@ -48,9 +47,8 @@ _BOOL_KEYS = {
 }
 
 _INT_LIMITS = {
-    "max_task_steps": (1, 30),
+    "max_task_steps": (1, 1000000),
     "command_timeout_sec": (5, 3600),
-    "max_output_chars": (1000, 500000),
     "max_log_entries": (100, 50000),
     "max_sessions": (10, 500),
 }

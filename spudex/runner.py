@@ -630,7 +630,6 @@ async def run_argv_in_session(
         )
 
     timeout_sec = max(5, int(settings.get("command_timeout_sec") or 45))
-    max_output_chars = max(1000, int(settings.get("max_output_chars") or 12000))
     meta = _load_meta(session_id)
     meta.update(
         {
@@ -647,7 +646,6 @@ async def run_argv_in_session(
     append_session_log(session_id, stream="command", text=f"$ {' '.join(argv)}", level="info")
     _detect_previews(session_id, " ".join(str(item) for item in argv))
 
-    output_chars = {"value": 0, "truncated": False}
     captured_output: dict[str, list[str]] = {"stdout": [], "stderr": []}
     try:
         process = await asyncio.create_subprocess_exec(
@@ -681,18 +679,10 @@ async def run_argv_in_session(
             text = chunk.decode("utf-8", errors="replace").rstrip("\n")
             if not text:
                 continue
-            if output_chars["value"] >= max_output_chars:
-                if not output_chars["truncated"]:
-                    append_session_log(session_id, stream="system", text="Output limit reached; further output hidden.", level="warning")
-                    output_chars["truncated"] = True
-                continue
-            remaining = max_output_chars - output_chars["value"]
-            clipped = text[:remaining]
-            output_chars["value"] += len(clipped)
             if capture_output:
-                captured_output[name].append(clipped)
-            append_session_log(session_id, stream=name, text=clipped, level="info" if name == "stdout" else "error")
-            _detect_previews(session_id, clipped)
+                captured_output[name].append(text)
+            append_session_log(session_id, stream=name, text=text, level="info" if name == "stdout" else "error")
+            _detect_previews(session_id, text)
 
     if background:
         async def _watch_background() -> None:
@@ -760,7 +750,7 @@ async def run_argv_in_session(
             {
                 "stdout": "\n".join(captured_output["stdout"]),
                 "stderr": "\n".join(captured_output["stderr"]),
-                "output_truncated": bool(output_chars["truncated"]),
+                "output_truncated": False,
             }
         )
     return result
