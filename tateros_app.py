@@ -95,7 +95,6 @@ from helpers import (
     get_llm_call_runtime_summary,
     get_vision_call_runtime_summary,
     get_llm_client_from_env,
-    get_primary_llm_client_from_env,
     preload_hf_transformers_llm_model,
     preload_llama_cpp_llm_model,
     preload_mlx_lm_llm_model,
@@ -8521,6 +8520,47 @@ def _dashboard_extract_json_object(text: str) -> Dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _dashboard_primary_llm_client_kwargs() -> Dict[str, Any]:
+    legacy_provider = _normalize_hydra_llm_provider(redis_client.get(HYDRA_LLM_PROVIDER_KEY))
+    legacy_model = str(redis_client.get(HYDRA_LLM_MODEL_KEY) or "").strip()
+    if _is_local_hydra_llm_provider(legacy_provider) and legacy_model:
+        logger.info(
+            "[dashboard] brief LLM using legacy primary local provider=%s model=%s",
+            legacy_provider,
+            legacy_model,
+        )
+        return {
+            "redis_conn": redis_client,
+            "provider": legacy_provider,
+            "model": legacy_model,
+        }
+
+    try:
+        rows = resolve_hydra_base_servers(redis_conn=redis_client, include_legacy=True)
+    except Exception:
+        rows = []
+    primary = rows[0] if rows and isinstance(rows[0], dict) else {}
+    provider = _normalize_hydra_llm_provider(primary.get("provider") if isinstance(primary, dict) else "")
+    model = str(primary.get("model") or "").strip() if isinstance(primary, dict) else ""
+    kwargs: Dict[str, Any] = {"redis_conn": redis_client}
+    if provider and model:
+        kwargs.update({"provider": provider, "model": model})
+        if not _is_local_hydra_llm_provider(provider):
+            kwargs["host"] = str(primary.get("endpoint") or "").strip()
+            api_key = str(primary.get("api_key") or "").strip()
+            if api_key:
+                kwargs["api_key"] = api_key
+        logger.info(
+            "[dashboard] brief LLM using base row provider=%s model=%s host=%s",
+            provider,
+            model,
+            str(kwargs.get("host") or ""),
+        )
+    else:
+        logger.info("[dashboard] brief LLM using default primary resolver")
+    return kwargs
+
+
 async def _dashboard_awareness_camera_brief(llm_client: Any, context: Dict[str, Any]) -> str:
     data = context.get("data") if isinstance(context.get("data"), dict) else {}
     event_summary = data.get("event_summary") if isinstance(data.get("event_summary"), dict) else {}
@@ -8595,7 +8635,7 @@ async def _dashboard_generate_briefs(
     generated: Dict[str, str] = {}
     error_text = ""
     try:
-        async with get_primary_llm_client_from_env(redis_conn=redis_client) as llm_client:
+        async with get_llm_client_from_env(**_dashboard_primary_llm_client_kwargs()) as llm_client:
             for context in selected_contexts:
                 row_id = str(context.get("id") or "").strip()
                 if row_id != "awareness":
